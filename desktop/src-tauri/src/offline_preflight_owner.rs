@@ -87,7 +87,7 @@ mod tests {
         crate::saved_command_owner::offline_tests::repeated_unknown_polling_does_not_publish_new_results_or_extend_clocks();
     }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     mod hosted {
         #[test]
         #[ignore = "source-bound offline Linux/macOS native fixture; not local or production qualification"]
@@ -97,7 +97,7 @@ mod tests {
     }
 }
 #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 pub(crate) use crate::saved_command_owner::offline_tests::hosted::RegistrationPermit as OfflineRegistrationPermit;
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

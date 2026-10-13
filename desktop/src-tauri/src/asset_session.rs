@@ -22,6 +22,9 @@ pub(crate) use saved_observation::{SavedObservationCompletion, ValidatedSavedInp
 mod android_registration;
 #[path = "asset_session_macos_maintenance.rs"]
 mod macos_maintenance;
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+#[path = "asset_session_macos_removal.rs"]
+pub(crate) mod macos_removal;
 use crate::saved_command_owner::{AndroidRegistrationPublisher as RegistrationPublisher,
     AndroidRegistrationPublisherKind as RegistrationPublisherKind};
 fn finish_registration_publisher(publisher: RegistrationPublisher) {
@@ -41,17 +44,17 @@ const RECORD_METADATA_BYTES: usize = 1024 * 1024;
 // Never inferred from crate presence, a renderer boolean, or R1 DTO passes.
 const NATIVE_QUALIFIED: bool = false;
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 #[path = "asset_session_vault.rs"]
 mod vault;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 use crate::vault_keyring_linux as keyring;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 use crate::vault_keyring_macos as keyring;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[path = "asset_session_keyring_macos.rs"]
 mod keyring_macos;
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(crate) use vault::KeyringInitializationAdmission;
 
 // A borrowed original session record is not a serialized credential or a new
@@ -59,6 +62,13 @@ pub(crate) use vault::KeyringInitializationAdmission;
 #[path = "asset_session_ios_signing.rs"]
 mod ios_signing;
 pub(crate) use ios_signing::{IOSSigningMaterial, MATERIAL_PREFIX as IOS_MATERIAL_PREFIX, MATERIAL_SUFFIX as IOS_MATERIAL_SUFFIX};
+#[path = "asset_session_github_secret.rs"]
+mod github_secret;
+pub(crate) use github_secret::{GitHubSecretMaterial, GitHubSecretFrame};
+#[path = "asset_session_github_variable.rs"]
+mod github_variable;
+pub(crate) use github_variable::GitHubVariableMaterial;
+
 #[path = "asset_session_android_signing.rs"]
 mod android_signing;
 pub(crate) use android_signing::{AndroidSigningMaterial, MATERIAL_PREFIX as ANDROID_MATERIAL_PREFIX, MATERIAL_SUFFIX as ANDROID_MATERIAL_SUFFIX};
@@ -72,9 +82,9 @@ mod installation;
 #[path = "asset_session_installation_memory.rs"]
 mod installation_memory;
 pub(crate) use installation_memory::{AndroidRegistrationCensus,AndroidServiceSetupCensus};
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 pub(crate) use installation_memory::MacosMaintenanceCensus;
-#[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 pub(crate) use installation_memory::catalogue_census_data;
 
 // Explicitly ignored component fixture only: no installed window, persistent
@@ -144,34 +154,35 @@ impl ProjectPathBinding {
         self.generation == generation && self.root == *root
     }
 }
+struct ArtifactBinding {project_id:String,generation:u32,root:asset_source::RegisteredRoot,format:crate::artifact_inspection_protocol::Format,role:crate::artifact_inspection_protocol::Role}
 struct AndroidSourceBinding {
     project_id: String, generation: u32, root: asset_source::RegisteredRoot, role: crate::android_tool_sources::Role,
 }
 enum MaterialOrigin {
     Selected(asset_source::CapturedSource),
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     Stored(vault::StoredMaterial),
 }
 struct Material { origin: MaterialOrigin, observation: FileObservation }
 impl Material {
     fn bytes(&self) -> &[u8] { match &self.origin {
         MaterialOrigin::Selected(source) => &source.bytes,
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         MaterialOrigin::Stored(source) => source.bytes.bytes(),
     } }
     fn retained_bytes(&self) -> Option<usize> { match &self.origin {
         MaterialOrigin::Selected(source) => {
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             { source.bytes.capacity().checked_add(source.origin.retained_bytes()?) }
-            #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+            #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
             { Some(source.bytes.capacity()) }
         },
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         MaterialOrigin::Stored(source) => source.bytes.retained_bytes().ok()?.checked_add(std::mem::size_of::<vault::StoredRef>()),
     } }
     fn selected_origin(&self) -> Option<&Arc<OriginWitness>> { match &self.origin {
         MaterialOrigin::Selected(source) => Some(&source.origin),
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         MaterialOrigin::Stored(_) => None,
     } }
 }
@@ -195,15 +206,16 @@ impl SafeAssessment { fn permits(&self) -> bool { self.0.permits_session_preview
 pub(crate) enum Phase { Idle, Admitting, Picking, Capturing, Selected, Assessing, Preview, Mutating, Stopping, Unknown }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseAndroidSource, ChooseImages, InspectInstallation, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
+enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseAndroidSource, ChooseArtifact, ChooseImages, InspectInstallation, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
     OpenVault, PrepareInitialize, Initialize, Unlock }
 impl Operation {
     fn evidence(self) -> bool { matches!(self, Self::ChooseEvidenceFolder | Self::InspectEvidence) }
     fn project_path(self) -> bool { self == Self::ChooseProjectPath }
     fn android_source(self) -> bool { self == Self::ChooseAndroidSource }
+    fn artifact(self)->bool{self==Self::ChooseArtifact}
     fn images(self) -> bool { self == Self::ChooseImages }
     fn installation(self) -> bool { self == Self::InspectInstallation }
-    fn blocks_context(self) -> bool { self == Self::ChooseProject || self.project_path() || self.android_source() || self.images() || self.installation() || self.evidence() }
+    fn blocks_context(self) -> bool { self == Self::ChooseProject || self.project_path() || self.android_source() || self.artifact() || self.images() || self.installation() || self.evidence() }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -309,7 +321,7 @@ struct Retirement {
     payload: Option<Arc<Payload>>, context: Option<Arc<NativeContext>>, slot_context: Option<Arc<NativeContext>>,
     assessment: Option<SafeAssessment>, records: Vec<Record>, assignments: Vec<Assignment>,
     image_batch: Option<asset_source::CapturedPublicImageBatch>, image_paths: Option<Vec<std::path::PathBuf>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     vault: vault::Retired,
 }
 
@@ -321,11 +333,11 @@ pub(crate) struct OriginalWork {
     pub(crate) wake: Notify, coordinator: Mutex<CoordinatorBook>, child: AsyncMutex<ChildBook>,
     source: Arc<Mutex<SourceBook>>, pub(crate) gui: Arc<GuiCall>,
     retirement: Mutex<Retirement>, retired: AtomicBool,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     keyring: Mutex<keyring::LookupBook>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     large_work_started: AtomicBool,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     vault: Mutex<vault::Work>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     installed_capture: Mutex<Option<Arc<asset_source::InstalledCaptureCheckpoint>>>,
@@ -333,6 +345,10 @@ pub(crate) struct OriginalWork {
     gnome_transport_gate: Mutex<Option<Arc<gnome_transport_fixture::BoundaryGate>>>,
 }
 impl OriginalWork {
+    /// Inert test DATA: no coordinator, GUI, native or source operation entered;
+    /// no returned/settled receipt is written by this constructor.
+    #[cfg(test)]
+    pub(crate) fn artifact_unentered_original_data()->Arc<Self>{Self::new(1,false,Weak::new())}
     fn new(id: u32, gui_needed: bool, document: Weak<Inner>) -> Arc<Self> {
         Self::construct(id, gui_needed, document, false)
     }
@@ -351,11 +367,11 @@ impl OriginalWork {
             wake: Notify::new(), coordinator: Mutex::new(CoordinatorBook { handle: None, receipt: JoinReceipt::New }),
             child: AsyncMutex::new(ChildBook { handle: None, receipt: JoinReceipt::New }), source: Arc::new(Mutex::new(SourceBook::new())),
             retirement: Mutex::new(Retirement::default()), retired: AtomicBool::new(true),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             keyring: Mutex::new(keyring::LookupBook::new()),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             large_work_started: AtomicBool::new(false),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: Mutex::new(vault::Work::default()),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             installed_capture: Mutex::new(None),
@@ -367,11 +383,16 @@ impl OriginalWork {
                 selected: None, refusal: None }), selected_images: Mutex::new(None), wake: Notify::new(),
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
                     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-                    target_os = "macos", target_arch = "aarch64"))]
+                    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 installed_native_response_witness: Mutex::new(None),
             }) })
     }
     pub(crate) fn request_android_source_stop(&self) { self.stop(); }
+    pub(crate) fn request_artifact_stop(&self) { self.stop(); }
+    pub(crate) fn artifact_selected_settled(&self)->bool { self.project_path_settled(true) }
+    pub(crate) fn artifact_cancel_settled(&self)->bool { self.project_path_settled(false) }
+    pub(crate) fn artifact_refusal_settled(&self)->bool { self.android_source_refusal_settled() }
+
     pub(crate) fn android_source_selected_settled(&self) -> bool { self.project_path_settled(true) }
     pub(crate) fn android_source_cancel_settled(&self) -> bool { self.project_path_settled(false) }
     pub(crate) fn android_source_refusal_settled(&self) -> bool {
@@ -423,34 +444,34 @@ impl OriginalWork {
         let coordinator = self.coordinator.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::Returned | JoinReceipt::Failed) && book.handle.is_none());
         let child = self.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned | JoinReceipt::Failed) && book.handle.is_none());
         let source = self.source.try_lock().is_ok_and(|book| book.not_started() || book.settled());
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let keyring = self.keyring.try_lock().is_ok_and(|book| book.resources_settled());
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let keyring = true;
         coordinator && child && source && self.gui.settled() && keyring
             && self.installation.as_ref().is_none_or(installation::Work::settled)
     }
     fn original_resources_settled(&self) -> bool {
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if !self.vault.try_lock().is_ok_and(|work| work.settled()) { return false; }
         self.control_resources_settled()
     }
     fn resources_settled(&self) -> bool {
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let allocations = self.keyring.try_lock().is_ok_and(|book| book.allocations_released());
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let allocations = true;
         self.original_resources_settled() && self.retired.load(Ordering::SeqCst) && allocations
             && self.gui.selected_images.try_lock().is_ok_and(|paths| paths.is_none())
     }
     fn lookup_allocations_allowed(&self) -> bool {
         if self.installation.as_ref().is_some_and(|work| !work.settled()) { return false; }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { self.keyring.try_lock().is_ok_and(|book| !book.memory_held()) }
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         { true }
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     fn dispose_keyring_storage(&self) -> bool {
         let Ok(retirement) = self.retirement.try_lock() else { return false; };
         if !self.retired.load(Ordering::SeqCst) || !lookup_memory::retirement_empty(&retirement)
@@ -508,12 +529,12 @@ pub(crate) struct GuiCall {
     selected_images: Mutex<Option<Vec<std::path::PathBuf>>>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     installed_native_response_witness: Mutex<Option<InstalledNativeResponseWitness>>,
 }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[derive(Clone)]
 pub(crate) struct InstalledNativeResponseWitness {
     pub(crate) operation_id: u32,
@@ -539,7 +560,7 @@ fn project_path_gui_settled(facts: &GuiFacts, selected: bool) -> bool {
 impl GuiCall {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub(crate) fn record_installed_native_response(self: &Arc<Self>, id: u32, response: NativeResponse,
         selected: Option<&std::path::Path>) -> Result<(), ()> {
         let owner = self.owner().ok_or(())?;
@@ -556,7 +577,7 @@ impl GuiCall {
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub(crate) fn installed_native_response(&self) -> Result<Option<InstalledNativeResponseWitness>, ()> {
         // This data stays with the same original call, not a global panel
         // history. Read before replacing its slot; it grants no settlement.
@@ -646,10 +667,10 @@ struct Slot {
     staged: Option<Staged>, error: Option<CommandError>, project: Option<Project>, discard: bool,
     kind: Option<Kind>, result_record: Option<RecordKey>, retired_payload: Option<Arc<Payload>>,
     evidence: Option<EvidenceBinding>, project_path: Option<Arc<ProjectPathBinding>>, path_result: Option<commands::ProjectPathResult>,
-    android_source: Option<Arc<AndroidSourceBinding>>,
+    android_source: Option<Arc<AndroidSourceBinding>>, artifact:Option<Arc<ArtifactBinding>>,
     images: Option<Arc<images::Binding>>, image_batch: Option<asset_source::CapturedPublicImageBatch>,
     installation_result: Option<crate::installation::Matching>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     vault: vault::SlotData,
 }
 impl Slot {
@@ -683,15 +704,15 @@ struct DocumentState {
     evidence: EvidenceRegistry,
     images: images::Registry,
     installation: installation::Registry,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     vault: Option<vault::Session>,
 }
 fn project_path_pending(state: &DocumentState) -> bool {
-    state.slot.as_ref().is_some_and(|slot| (slot.operation.project_path() || slot.operation.android_source())
+    state.slot.as_ref().is_some_and(|slot| (slot.operation.project_path() || slot.operation.android_source() || slot.operation.artifact())
         && (slot.phase != Phase::Idle || !slot.owner.resources_settled()))
 }
 fn credential_discard_operation(operation: Operation) -> bool {
-    !operation.evidence() && !operation.project_path() && !operation.android_source() && !operation.images() && !operation.installation()
+    !operation.evidence() && !operation.project_path() && !operation.android_source() && !operation.artifact() && !operation.images() && !operation.installation()
 }
 fn credential_lock_gate(state: &DocumentState) -> Result<(), AssetError> {
     if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
@@ -886,23 +907,25 @@ fn stop_quit(state: &mut DocumentState, at: Instant) {
         quit.stop();
     }
 }
-#[cfg(any(test, all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[cfg(any(test, all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+    all(feature = "desktop-shell", target_os = "macos", target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper"))))]
 fn accepted_quit_cleanup_end(state: &DocumentState) -> Option<Instant> {
     if state.stopping && state.quit_accepted && state.quit.as_ref().is_some_and(|quit| quit.stopped()) {
         state.quit_cleanup_end
     } else { None }
 }
 fn session_data_empty(state: &DocumentState) -> bool {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if state.vault.is_some() { return false; }
     state.records.is_empty() && state.assignments.is_empty() && state.context.is_none()
         && state.slot.as_ref().is_none_or(|slot| slot.candidate.is_none() && slot.staged.is_none() && slot.context.is_none()
             && slot.retired_payload.is_none() && slot.selection.is_none() && slot.preview.is_none() && slot.image_batch.is_none() && slot_private_data_empty(slot))
 }
 fn slot_private_data_empty(_slot: &Slot) -> bool {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { _slot.vault.loaded.is_none() }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { true }
 }
 fn assets_can_exit_locked(state: &DocumentState) -> bool {
@@ -932,7 +955,7 @@ struct Inner {
     android_registration_control: Arc<crate::saved_command_owner::AndroidRegistrationControl>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     installed_session: Mutex<Option<installed_session_observation::Book>>,
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     installed_macos_session: Mutex<Option<installed_macos_observation::SessionBook>>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fixture: Option<Weak<Qualification>>,
@@ -994,6 +1017,187 @@ impl GitHubReleaseGoGate {
         // one-use owner claim and private-buffer transfer. No post-send check.
         state.github.release_go(id, digest, request, Instant::now(), claim)
     }
+}
+
+/// The existing original writer calls this document-bound gate only after the
+/// exact Setup READY. No URL, token, project root or edit witness comes from UI.
+pub(crate) struct GitHubSetupGoGate { inner: Weak<Inner> }
+impl GitHubSetupGoGate {
+    pub(crate) fn claim(&self, id: &str, digest: &str, request: &crate::github_setup_protocol::Request,
+        claim: impl FnOnce() -> bool) -> Result<Vec<u8>, BridgeError> {
+        use crate::{github_setup_protocol as p, github_setup_session as s};
+        let document = DocumentBinding { inner: self.inner.upgrade().ok_or_else(|| s::refused(p::Reason::Cancelled))? };
+        let mut state = document.lock(); document.expire(&mut state, Instant::now());
+        let external = document.github_gate(&state);
+        if external != GitHubReason::None { return Err(s::refused(s::connection_reason(external))); }
+        if !document.inner.bridge.supervisor.github_setup_profile_available() { return Err(s::refused(p::Reason::Unqualified)); }
+        let project = state.github.setup_registered_project().map(str::to_owned)
+            .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+        let (generation, root) = document.registry_result(&mut state, document.inner.bridge.native_project(&project), None)
+            .map_err(|error| s::refused(if error.reason == Reason::CleanupUnknown { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
+        let edit = document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity)
+            .map_err(|error| s::refused(if error.code == "cleanup_unknown" { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
+        // The SAME document and actual edit registry stay borrowed through all
+        // target/stamp/expiry checks, one-use original claim and token transfer.
+        if let Some(material)=state.github.setup_secret_material(){
+            if !material.current(&state,&project,generation,&root){return Err(s::refused(p::Reason::MaterialChanged))}
+        }
+        if let Some(material)=state.github.setup_variable_material(){
+            if !material.current(&state,&project,generation,&root){return Err(s::refused(p::Reason::MaterialChanged))}
+        }
+        state.github.setup_go(id, digest, request, generation, &root, &edit, Instant::now(), claim)
+    }
+}
+impl GitHubSetupGoGate {
+    // The first GO remains consumed. This checks the SAME current document,
+    // assignment, registry and edit stamp while the fixed helper is spawned.
+    pub(crate) fn claim_secret<T>(&self,id:&str,request:&crate::github_setup_protocol::Request,
+        material:&Arc<GitHubSecretMaterial>,claim:impl FnOnce()->Result<T,BridgeError>)->Result<T,BridgeError>{
+        use crate::{github_setup_protocol as p,github_setup_session as s};
+        let document=DocumentBinding{inner:self.inner.upgrade().ok_or_else(||s::refused(p::Reason::Cancelled))?};
+        let mut state=document.lock();document.expire(&mut state,Instant::now());
+        let external=document.github_gate(&state);
+        if external!=GitHubReason::None{return Err(s::refused(s::connection_reason(external)))}
+        let project=state.github.setup_registered_project().map(str::to_owned).ok_or_else(||s::refused(p::Reason::TargetChanged))?;
+        let(generation,root)=document.registry_result(&mut state,document.inner.bridge.native_project(&project),None)
+            .map_err(|e|s::refused(if e.reason==Reason::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}))?;
+        let edit=document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity)
+            .map_err(|e|s::refused(if e.code=="cleanup_unknown"{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}))?;
+        if !material.current(&state,&project,generation,&root){return Err(s::refused(p::Reason::MaterialChanged))}
+        state.github.setup_secret_current(id,request,material,generation,&root,&edit,Instant::now())?;
+        claim()
+    }
+}
+/// Same document claim after the original History slot's source POST. This
+/// weak reference contains no credential, renderer path or alternate clock.
+pub(crate) struct GitHubHistoryGoGate { inner: Weak<Inner> }
+impl GitHubHistoryGoGate {
+    pub(crate) fn claim(&self,id:&str,digest:&str,nomination:&Arc<crate::github_history_session::Nomination>,
+        claim:impl FnOnce()->bool)->Result<Vec<u8>,BridgeError>{
+        use crate::{github_history_protocol as p,github_history_session as s};
+        let document=DocumentBinding{inner:self.inner.upgrade().ok_or_else(||s::refused(p::Reason::Cancelled))?};
+        let mut state=document.lock();document.expire(&mut state,Instant::now());
+        let external=document.github_gate(&state);
+        if external!=GitHubReason::None{return Err(s::refused(s::connection_reason(external)));}
+        let profile=document.inner.bridge.supervisor.github_history_profile_reason();
+        if profile!=p::Reason::None{return Err(s::refused(profile));}
+        let current=document.registry_result(&mut state,document.inner.bridge.native_project(&nomination.project_id),None);
+        let(generation,root)=match current{
+            Ok(v)=>v,Err(error)=>{
+                if error.reason==Reason::CleanupUnknown{state.github.unknown();}
+                return Err(s::refused(if error.reason==Reason::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}));
+            },
+        };
+        let edit=match document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity){
+            Ok(v)=>v,Err(error)=>{
+                if error.code=="cleanup_unknown"{state.github.unknown();}
+                return Err(s::refused(if error.code=="cleanup_unknown"{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}));
+            },
+        };
+        // The actual document and edit registry remain held through the one-use
+        // original claim and bounded private token encoding; no await/callback
+        // acquires a second document or substitutes a public revision for IO.
+        state.github.history_go(id,digest,nomination,generation,&root,&edit,Instant::now(),claim)
+    }
+}
+fn github_history_project_binding(root:&asset_source::RegisteredRoot)->Result<String,BridgeError>{
+    use sha2::{Digest,Sha256};
+    let identity=root.identity.posix().map_err(|_|BridgeError::invalid())?.preflight_identity();
+    let encoded=serde_json::to_vec(&identity).map_err(|_|BridgeError::invalid())?;
+    let mut hash=Sha256::new();hash.update(b"mrk-github-history-project/1\0");
+    hash.update(root.path.as_os_str().as_encoded_bytes());hash.update(b"\0");hash.update(encoded);
+    Ok(format!("{:x}",hash.finalize()))
+}
+impl DocumentBinding {
+    fn github_history_observe_locked(&self,state:&mut DocumentState,now:Instant,external:GitHubReason){
+        let project=state.github.history_registered_project().map(str::to_owned);
+        let original=project.as_deref().and_then(|project|{
+            // SAME classifier as Setup: a newly failed second registry lookup
+            // must latch containing unknown before receipt acceptance.
+            self.github_setup_registry_result(state,self.inner.bridge.native_project(project))
+        });
+        if let Some((generation,root))=original{
+            match self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity){
+                Ok(edit)=>state.github.reconcile_history(now,external,Some((generation,&root,&edit))),
+                Err(error)=>{
+                    if error.code=="cleanup_unknown"{state.github.unknown();}
+                    state.github.reconcile_history(now,external,None);
+                },
+            }
+        }else{state.github.reconcile_history(now,external,None);}
+    }
+    pub(crate) fn github_history_status(&self)->crate::github_history_protocol::Status{
+        let mut state=self.lock();let now=Instant::now();self.expire(&mut state,now);
+        let external=self.github_gate(&state);
+        state.github.history_status(self.inner.bridge.supervisor.github_history_profile_reason(),now,external)
+    }
+    pub(crate) fn github_history_command(&self,name:&str,value:&Value)->Result<crate::github_history_protocol::Status,BridgeError>{
+        use crate::{github_history_protocol as p,github_history_session as s};
+        let command=p::decode_command(name,value).map_err(|_|s::refused(p::Reason::InvalidInput))?;
+        if matches!(command,p::Command::Status){return Ok(self.github_history_status());}
+        // Bounded private metadata only. The native source/work originals are
+        // not opened until the containing Supervisor registers the real owner.
+        let nonces=if matches!(command,p::Command::Start(_)){
+            let mut raw=[0u8;32];getrandom::fill(&mut raw).map_err(|_|s::refused(p::Reason::RuntimeUnavailable))?;
+            Some((raw[..16].iter().map(|b|format!("{b:02x}")).collect::<String>(),
+                raw[16..].iter().map(|b|format!("{b:02x}")).collect::<String>()))
+        }else{None};
+        let mut state=self.lock();self.expire(&mut state,Instant::now());
+        if let p::Command::Cancel(args)=&command{return state.github.history_cancel(&args.operation_id);}
+        let p::Command::Start(args)=command else{return Err(s::refused(p::Reason::InvalidInput));};
+        let external=self.github_gate(&state);
+        let available=state.github.history_status(self.inner.bridge.supervisor.github_history_profile_reason(),Instant::now(),external);
+        if !available.available{return Err(s::refused(available.reason));}
+        let(project_id,original_generation)=state.github.registration().map(|(id,generation)|(id.to_owned(),generation))
+            .ok_or_else(||s::refused(p::Reason::NotConnected))?;
+        let current=self.registry_result(&mut state,self.inner.bridge.native_project(&project_id),None);
+        let(generation,root)=match current{
+            Ok(v)=>v,Err(error)=>{
+                if error.reason==Reason::CleanupUnknown{state.github.unknown();}
+                return Err(s::refused(if error.reason==Reason::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}));
+            },
+        };
+        if generation!=original_generation{return Err(s::refused(p::Reason::TargetChanged));}
+        let binding=github_history_project_binding(&root).map_err(|_|s::refused(p::Reason::TargetChanged))?;
+        let edit=match self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity){
+            Ok(v)=>v,Err(error)=>{
+                if error.code=="cleanup_unknown"{state.github.unknown();}
+                return Err(s::refused(if error.code=="cleanup_unknown"{p::Reason::CleanupUnknown}else{p::Reason::Busy}));
+            },
+        };
+        let stamp=edit.stamp().map_err(|_|s::refused(p::Reason::Busy))?;
+        let(owner_generation,work_nonce)=nonces.ok_or_else(||s::refused(p::Reason::InvalidInput))?;
+        let(nomination,credential_end)=state.github.history_nomination(args,generation,root,stamp,binding,owner_generation,work_nonce,Instant::now())?;
+        let gate=GitHubHistoryGoGate{inner:Arc::downgrade(&self.inner)};
+        let admission=crate::supervisor::GitHubHistoryAdmission::reserve(nomination.clone(),gate,credential_end)
+            .map_err(crate::github_connection_session::history_admission_error)?;
+        #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        lookup_memory::history_admission_bytes(&self.inner,&state,admission.bytes()).map_err(|error|
+            s::refused(if error==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+        #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+        return Err(s::refused(p::Reason::Unqualified));
+        // Document+EditGuard remain borrowed from actual source nomination,
+        // through complete capacity admission and synchronous owner install.
+        state.github.history_start(nomination,admission,&self.inner.bridge.supervisor,Instant::now())
+    }
+}
+#[cfg(test)]
+pub(crate) fn github_history_document_data_checks(){
+    // The production reciprocal predicate is used by all large asset/copy
+    // admissions; History participates without blocking stop/status/lock.
+    assert!(allocation_conflict_gate(false,false).is_ok());
+    assert!(allocation_conflict_gate(false,true).is_err());
+    assert!(allocation_conflict_gate(true,false).is_err());
+    assert!(allocation_conflict_gate(true,true).is_err());
+}
+
+fn github_setup_project_binding(root: &asset_source::RegisteredRoot) -> Result<String, BridgeError> {
+    use sha2::{Digest, Sha256};
+    let identity = root.identity.posix().map_err(|_| BridgeError::invalid())?.preflight_identity();
+    let encoded = serde_json::to_vec(&identity).map_err(|_| BridgeError::invalid())?;
+    let mut hash = Sha256::new(); hash.update(b"mrk-github-setup-project/1\0");
+    hash.update(root.path.as_os_str().as_encoded_bytes()); hash.update(b"\0"); hash.update(encoded);
+    Ok(format!("{:x}", hash.finalize())) // Actual registered target correlation, not saved-config authority.
 }
 
 fn github_preflight_project_binding(root: &asset_source::RegisteredRoot) -> Result<String, BridgeError> {
@@ -1070,7 +1274,7 @@ fn keyring_poll_gate(state: &DocumentState, owner: &Arc<OriginalWork>, book: &cr
     keyring_slot_gate(state, owner, book.current_step(), now)
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn keyring_problem_stop(state: &mut DocumentState, owner: &Arc<OriginalWork>,
     problem: Option<(keyring::Problem, Instant)>) -> bool {
     use keyring::Problem;
@@ -1094,7 +1298,7 @@ fn keyring_problem_stop(state: &mut DocumentState, owner: &Arc<OriginalWork>,
     false
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn keyring_constrain_cleanup(state: &DocumentState, owner: &Arc<OriginalWork>, book: &mut keyring::LookupBook) {
     if let Some(end) = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner)).and_then(|slot| slot.cleanup_end) {
         // Slot::stop is the sole writer: first_cleanup_end always adds CLEANUP
@@ -1317,7 +1521,7 @@ impl DocumentBinding {
 }
 
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 mod lookup_memory {
     use super::*;
     use keyring::Problem;
@@ -1333,15 +1537,15 @@ mod lookup_memory {
     // <=16KiB, not another control allowance on top of the fixed 64KiB row.
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     const _: () = assert!(FIXED_CONTROL_BYTES <= 16 * 1024);
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     const _: () = assert!(FIXED_CONTROL_BYTES <= 128 * 1024);
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     const WIRE_BYTES: usize = zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES;
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     const CRYPTO_BYTES: usize = secret_service::checked_lookup::RETRIEVAL_CRYPTO_BYTES;
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     const WIRE_BYTES: usize = keyring::LOOKUP_WIRE_BYTES;
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     const CRYPTO_BYTES: usize = crate::vault_crypto::CONTROL_BYTES;
 
     // Constructible only by this document's locked census. It is not Clone,
@@ -1389,15 +1593,15 @@ mod lookup_memory {
     }
 
     struct Census<'a> {
-        current: &'a Arc<OriginalWork>, current_source: &'a SourceBook, current_retirement: &'a Retirement,
-        bytes: usize, payloads: Seen, materials: Seen, contexts: Seen, sources: Seen, owners: Seen, assessments: Seen,
+        current: Option<(&'a Arc<OriginalWork>, &'a SourceBook, &'a Retirement)>,
+        bytes: usize, payloads: Seen, materials: Seen, contexts: Seen, sources: Seen, owners: Seen, assessments: Seen, secret_loans: Seen,
         vault_stores: Seen, vault_keys: Seen,
     }
     impl<'a> Census<'a> {
         fn new(current: &'a Arc<OriginalWork>, source: &'a SourceBook, retirement: &'a Retirement) -> Self {
-            Self { current, current_source: source, current_retirement: retirement, bytes: 0,
+            Self { current: Some((current, source, retirement)), bytes: 0,
                 payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(), sources: Seen::new(), owners: Seen::new(),
-                assessments: Seen::new(), vault_stores: Seen::new(), vault_keys: Seen::new() }
+                assessments: Seen::new(), secret_loans: Seen::new(), vault_stores: Seen::new(), vault_keys: Seen::new() }
         }
         fn add(&mut self, bytes: usize) -> Result<(), Problem> {
             self.bytes = self.bytes.checked_add(bytes).ok_or(Problem::Capacity)?; Ok(())
@@ -1477,8 +1681,27 @@ mod lookup_memory {
             if let Some(key) = value.key() { self.vault_key(key)?; }
             for loan in value.bound.iter().flatten() { self.vault_loan(loan)?; } Ok(())
         }
+        fn artifact_inputs(&mut self)->Result<(),Problem>{
+            let Some((current,_,_))=self.current else{return Err(Problem::CleanupUnknown)};
+            let Some(document)=current.gui.document.upgrade()else{return Ok(());};
+            // DATA-only snapshots may have no containing Document. The real
+            // enter below separately requires its live, bound original slot.
+            self.artifact_document(&document)
+        }
+        fn artifact_document(&mut self,document:&Arc<Inner>)->Result<(),Problem>{
+            let snapshot=document.bridge.artifact_inspection.artifact_census().map_err(|_|Problem::Capacity)?;
+            self.add(snapshot.data_bytes().ok_or(Problem::Capacity)?)?;
+            for (original,proof) in snapshot.members(){
+                self.owner(original)?;
+                if self.materials.insert(proof)?{self.arc_cells::<asset_source::ArtifactProbe>()?;self.add(proof.path.capacity())?;self.add(proof.label.capacity())?;self.add(proof.identity.retained_bytes().ok_or(Problem::Capacity)?)?;}
+            }Ok(())
+        }
+        fn artifact_binding(&mut self,value:&Arc<ArtifactBinding>)->Result<(),Problem>{
+            if self.contexts.insert(value)?{self.arc_cells::<ArtifactBinding>()?;self.add(value.project_id.capacity())?;self.add(value.root.path.capacity())?;}Ok(())
+        }
         fn staged(&mut self, staged: &Staged) -> Result<(), Problem> {
             match staged {
+                Staged::Artifact{proof,binding}=>{self.artifact_binding(binding)?;self.add(proof.path.capacity())?;self.add(proof.label.capacity())?;self.add(proof.identity.retained_bytes().ok_or(Problem::Capacity)?)},
                 Staged::Selected { payload, tokens } => { self.payload(payload)?; self.tokens(tokens) },
                 Staged::Prepared { result: Err(_), tokens } => { self.command_error()?; self.tokens(tokens) },
                 Staged::Prepared { result: Ok(result), tokens } => { self.assessment(result)?; self.tokens(tokens) },
@@ -1517,6 +1740,7 @@ mod lookup_memory {
                 if let Some(key) = &preview.record { self.key(key)?; }
                 if let PreviewSubject::Record { record_id: Some(token), .. } = &preview.subject { self.token(token)?; }
             }
+            if let Some(binding)=&slot.artifact{self.artifact_binding(binding)?;}
             if let Some(staged) = &slot.staged { self.staged(staged)?; }
             if slot.error.is_some() { self.command_error()?; }
             if let Some(key) = &slot.result_record { self.key(key)?; }
@@ -1562,9 +1786,9 @@ mod lookup_memory {
                 self.cells::<std::path::PathBuf>(paths.capacity())?;
                 for path in paths { self.add(path.capacity())?; }
             }
-            if Arc::ptr_eq(owner, self.current) {
-                retirement_known(owner, self.current_retirement)?;
-                self.source(&owner.source, self.current_source)?; self.retirement(self.current_retirement)
+            if let Some((_, source, retirement)) = self.current.filter(|(current, _, _)| Arc::ptr_eq(owner, current)) {
+                retirement_known(owner, retirement)?;
+                self.source(&owner.source, source)?; self.retirement(retirement)
             } else {
                 // A retained old/quit owner has no remaining original which may
                 // allocate after this snapshot. Busy/failed/ambiguous is refusal.
@@ -1580,6 +1804,18 @@ mod lookup_memory {
                 self.source(&owner.source, &source)?; self.retirement(&retirement)
             }
         }
+        fn secret_loan(&mut self,loan:&Arc<GitHubSecretMaterial>)->Result<(),Problem>{
+            if !self.secret_loans.insert(loan)?{return Ok(())}
+            let(context,payload)=loan.census_parts();self.context(context)?;self.payload(payload)?;
+            self.arc_cells::<GitHubSecretMaterial>()?;self.add(loan.own_retained_heap_bytes().ok_or(Problem::Capacity)?)
+        }
+        fn variable_loan(&mut self,loan:&Arc<GitHubVariableMaterial>)->Result<(),Problem>{
+            // Same finite set for the mutually exclusive Setup material kinds.
+            // Live distinct Arc allocations cannot share a data address.
+            if !self.secret_loans.insert(loan)?{return Ok(())}
+            let(context,payload)=loan.census_parts();self.context(context)?;self.payload(payload)?;
+            self.arc_cells::<GitHubVariableMaterial>()?;self.add(loan.own_retained_heap_bytes().ok_or(Problem::Capacity)?)
+        }
         fn document(&mut self, state: &DocumentState) -> Result<(), Problem> {
             if state.retiring { return Err(Problem::CleanupUnknown); }
             self.add(std::mem::size_of::<DocumentState>())?;
@@ -1587,19 +1823,81 @@ mod lookup_memory {
             if let Some(vault) = &state.vault { self.vault_session(vault)?; }
             self.records(&state.records)?; self.assignments(&state.assignments)?;
             if let Some(context) = &state.context { self.context(context)?; }
+            if let Some(loan)=state.github.setup_secret_material(){self.secret_loan(loan)?;}
+            if let Some(loan)=state.github.setup_variable_material(){self.variable_loan(loan)?;}
+            if state.github.setup_has_material() || state.github.history_has_retained_data() {
+                // One containing Connection projection, even when an idle
+                // Setup consent and a prior History result are both retained.
+                self.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
+            }
             if let Some(slot) = &state.slot { self.slot(slot)?; }
             if let Some(quit) = &state.quit { self.owner(quit)?; } Ok(())
         }
     }
 
+    // There is no fabricated current keyring owner for Setup. With None every
+    // retained asset owner must satisfy the same positive settled branch above.
+    pub(super) fn secret_admission_bytes(document:&Arc<Inner>,state:&DocumentState, loan:&Arc<GitHubSecretMaterial>,
+        helper_bytes:usize,applying:bool)->Result<usize,Problem>{
+        let mut census=Census {current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
+            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        census.secret_loan(loan)?;
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data(){
+            // Otherwise document() already charged the same complete buffers.
+            census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
+        }
+        // All capacities above are from original buffers, shared Arcs visited
+        // once. Below are distinct future child-work and framing reservations.
+        census.add(std::mem::size_of::<Census<'_>>())?;
+        census.add(helper_bytes)?;
+        census.add(crate::github_setup_protocol::SECRET_CONFIGURATION_WORK_BYTES)?;
+        census.add(if applying {crate::github_setup_protocol::SECRET_APPLY_BUFFERS}
+            else{crate::github_setup_protocol::SECRET_PREPARE_BUFFERS})?;
+        // The same existing committed-session cap, not the larger keyring
+        // allowance, bounds this operation's complete retained working set.
+        if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}
+        Ok(census.bytes)
+    }
+
+    // No fabricated current OriginalWork. All previously retained asset
+    // owners must be positively quiescent before this independent readonly IO.
+    pub(super) fn history_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
+        let mut census=Census{current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
+            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data(){
+            census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
+        }
+        census.add(std::mem::size_of::<Census<'_>>())?;
+        // Includes native source reservation, raw saved config and the fixed
+        // simultaneous framing/receipt/Status-copy term. Not a process RSS claim.
+        census.add(future)?;
+        if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes)
+    }
+
+    pub(super) fn variable_admission_bytes(document:&Arc<Inner>,state:&DocumentState,loan:&Arc<GitHubVariableMaterial>,
+        original_bytes:usize)->Result<usize,Problem>{
+        let mut census=Census {current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
+            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;census.variable_loan(loan)?;
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
+        census.add(std::mem::size_of::<Census<'_>>())?;census.add(original_bytes)?;
+        // Same original Config wrapper and explicitly distinct wire buffers.
+        // No secret helper allocation, second native original or renewed quota.
+        census.add(crate::github_setup_protocol::SECRET_CONFIGURATION_WORK_BYTES)?;
+        census.add(crate::github_setup_protocol::VARIABLE_WIRE_BUFFERS)?;
+        if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes)
+    }
+
     pub(super) fn live_bytes(state: &DocumentState, owner: &Arc<OriginalWork>, source: &SourceBook, retirement: &Retirement) -> Result<usize, Problem> {
-        let mut census = Census::new(owner, source, retirement); census.document(state)?; Ok(census.bytes)
+        let mut census = Census::new(owner, source, retirement); census.artifact_inputs()?; census.document(state)?; Ok(census.bytes)
     }
     pub(super) fn pending_slot_bytes(state: &DocumentState, slot: &Slot) -> Result<usize, Problem> {
         let source = slot.owner.source.try_lock().map_err(|_| Problem::CleanupUnknown)?;
         let retirement = slot.owner.retirement.try_lock().map_err(|_| Problem::CleanupUnknown)?;
         let mut census = Census::new(&slot.owner, &source, &retirement);
-        census.document(state)?; census.slot(slot)?; Ok(census.bytes)
+        census.artifact_inputs()?; census.document(state)?; census.slot(slot)?; Ok(census.bytes)
     }
     pub(super) fn enter(state: &DocumentState, owner: &Arc<OriginalWork>,
         input: keyring::LookupInput, end: Instant) -> Result<(), Problem> {
@@ -1611,6 +1909,10 @@ mod lookup_memory {
         if coordinator.receipt != JoinReceipt::Pending || coordinator.handle.is_none() || !child_joined(&child)
             || !(source.not_started() || source.settled()) || owner.large_work_started.load(Ordering::SeqCst)
             || owner.installation.is_some() || !book.can_begin() { return Err(Problem::CleanupUnknown); }
+        let _document=owner.gui.document.upgrade().ok_or(Problem::Unavailable)?;
+        if !state.lifetime.original_bound()||state.slot.as_ref().is_none_or(|slot|!Arc::ptr_eq(&slot.owner,owner)){
+            return Err(Problem::Unavailable);
+        }
         let live = live_bytes(state, owner, &source, &retirement)?;
         // Child/parser originals are positively joined; credential_format drops
         // arenas before ChildEnd. Non-Token child/R1/Value work has NEVER
@@ -1655,6 +1957,88 @@ mod lookup_memory {
         }
         #[test]
         fn lookup_allowance_checks_boundary_overflow_and_capture_overlap() {
+            // No fabricated current owner exemption in the Setup census.
+            let old=OriginalWork::new(3,false,Weak::new());let source=SourceBook::new();let retirement=Retirement::default();
+            let mut none=Census::new(&old,&source,&retirement);none.current=None;
+            assert_eq!(none.owner(&old),Err(Problem::CleanupUnknown));
+            old.coordinator.lock().unwrap().receipt=JoinReceipt::Returned;
+            let mut none=Census::new(&old,&source,&retirement);none.current=None;
+            let busy=old.source.lock().unwrap();assert_eq!(none.owner(&old),Err(Problem::CleanupUnknown));drop(busy);
+            let mut none=Census::new(&old,&source,&retirement);none.current=None;
+            assert!(none.owner(&old).is_ok());
+            let native=data_context();let payload=Arc::new(Payload{kind:Kind::AndroidKeystore,material:None,
+                fields:Some(commands::own_fields(Kind::AndroidKeystore,&serde_json::json!({"storePassword":"test","keyPassword":null,"keyAlias":null})).ok().unwrap())});
+            let loan=github_secret::data_loan(native.clone(),payload.clone());
+            let mut census=Census::new(&old,&source,&retirement);census.current=None;
+            census.context(&native).unwrap();census.payload(&payload).unwrap();let before=census.bytes;
+            census.secret_loan(&loan).unwrap();let once=census.bytes;
+            assert_eq!(once-before,std::mem::size_of::<GitHubSecretMaterial>()+ARC_CELLS+loan.own_retained_heap_bytes().unwrap());
+            census.secret_loan(&loan.clone()).unwrap();assert_eq!(census.bytes,once);
+            let cipher=crate::supervisor::SecretSealed::retained_data(loan.clone());
+            let cipher_bytes=cipher.retained_heap_bytes().unwrap();
+            assert_eq!(cipher_bytes,crate::github_setup_protocol::RESPONSE_LIMIT+31+71);
+            census.add(cipher_bytes).unwrap();let idle=census.bytes;
+            census.secret_loan(&cipher.material).unwrap();assert_eq!(census.bytes,idle);
+            let mut boundary=Census::new(&old,&source,&retirement);boundary.bytes=SESSION_BYTES-cipher_bytes;
+            boundary.add(cipher_bytes).unwrap();assert_eq!(boundary.bytes,SESSION_BYTES);
+            assert_eq!(boundary.bytes.checked_add(1).is_some_and(|v|v<=SESSION_BYTES),false);
+            drop(cipher);
+            // Real nonsecret borrowed-field and original Arc census, not a
+            // fake SecretSealed. Same backing is charged once across clones.
+            let variable_payload=Arc::new(Payload{kind:Kind::GoogleWif,material:None,fields:Some(commands::own_fields(
+                Kind::GoogleWif,&serde_json::json!({"provider":"projects/123/locations/global/workloadIdentityPools/release/providers/github","serviceAccount":"release@example-project.iam.gserviceaccount.com"})).ok().unwrap())});
+            let variable=github_variable::data_loan(native.clone(),variable_payload.clone(),crate::github_setup_protocol::VariableRequirement::GoogleWifProvider);
+            census.context(&native).unwrap();census.payload(&variable_payload).unwrap();let before_variable=census.bytes;
+            census.variable_loan(&variable).unwrap();let variable_bytes=census.bytes;
+            assert_eq!(variable_bytes-before_variable,std::mem::size_of::<GitHubVariableMaterial>()+ARC_CELLS+variable.own_retained_heap_bytes().unwrap());
+            census.variable_loan(&variable.clone()).unwrap();assert_eq!(census.bytes,variable_bytes);
+            assert_eq!(variable.value().unwrap(),"projects/123/locations/global/workloadIdentityPools/release/providers/github");
+            // Actual lookup/current predicates against the existing inert
+            // DocumentState fixture. No GUI/provider/runtime is constructed.
+            let mut current=crate::asset_session::tests::empty_state();
+            current.lifetime.crash_hook_installed();current.lifetime.started(true);current.lifetime.finished(true);
+            current.context=Some(native.clone());
+            current.records.push(Record{key:RecordKey{id:Token("1".repeat(32)),revision:2},payload:variable_payload.clone(),mutation_pending:false});
+            current.assignments.push(Assignment{kind:Kind::GoogleWif,record_id:Token("1".repeat(32)),record_revision:2,
+                context_revision:1,availability:AssignmentAvailability::Available});
+            assert!(variable.current(&current,&native.project_id,native.registry_generation,&native.project));
+            assert!(!variable.current(&current,"changed-project",native.registry_generation,&native.project));
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation+1,&native.project));
+            current.records[0].payload=Arc::new(Payload{kind:Kind::GoogleWif,material:None,fields:Some(commands::own_fields(
+                Kind::GoogleWif,&serde_json::json!({"provider":"projects/123/locations/global/workloadIdentityPools/release/providers/github","serviceAccount":"release@example-project.iam.gserviceaccount.com"})).ok().unwrap())});
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));
+            current.records[0].payload=variable_payload.clone();current.records[0].mutation_pending=true;
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.records[0].mutation_pending=false;
+            current.assignments[0].record_revision=3;
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.assignments[0].record_revision=2;
+            current.assignments[0].availability=AssignmentAvailability::Unavailable;
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.assignments[0].availability=AssignmentAvailability::Available;
+            current.lock_pending=true;assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.lock_pending=false;
+            current.unknown=true;assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.unknown=false;
+            current.stopping=true;assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.stopping=false;
+            current.retiring=true;assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.retiring=false;
+            assert!(variable.current(&current,&native.project_id,native.registry_generation,&native.project));
+            current.lifetime.invalidate();assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));
+            let consent=crate::github_setup_session::ConsentMaterial::Variable(variable.clone());
+            assert!(consent.secret().is_none()&&consent.variable().is_some_and(|v|Arc::ptr_eq(v,&variable)));
+            // A child cannot turn another fingerprint into current NoChange.
+            let wire=crate::github_setup_protocol::Request{kind:crate::github_setup_protocol::Kind::Prepare,
+                target:crate::github_setup_protocol::Target{project_binding:"a".repeat(64),repository:"Owner/Repo".into(),account_id:"11".into(),
+                    repository_id:"22".into(),selection:crate::github_setup_protocol::Selection::Variable(variable.selection().clone())},prepared:None};
+            let hash=variable.source().material.sha256.clone();
+            let mut value=serde_json::json!({"schemaVersion":1,"action":"prepare","reason":"no-change","effect":"not-started",
+                "writeClaimed":false,"writeAcknowledged":false,"prepared":null,
+                "observed":{"environmentName":"mobile-candidate","environmentId":"33","name":"MOBILE_RELEASE_GOOGLE_WIF_PROVIDER",
+                    "value":{"bytes":variable.value().unwrap().len(),"sha256":hash},"metadata":{"createdAt":"2026-10-09T00:00:00Z","updatedAt":"2026-10-09T00:00:00Z"}},
+                "control":{"reason":"none","credentialExpiresAt":null,"cooldownSeconds":null,"cooldownBlocked":false}});
+            let observed=serde_json::from_value(value.clone()).unwrap();assert!(variable.outcome_matches(&wire,&observed));
+            value["observed"]["value"]["sha256"]=serde_json::json!("e".repeat(64));
+            assert!(!variable.outcome_matches(&wire,&serde_json::from_value(value).unwrap()));
+            let input=variable.go_frame("setup-1",&"a".repeat(64),"inert-token").unwrap();
+            let decoded:serde_json::Value=serde_json::from_slice(&input).unwrap();assert_eq!(decoded["go"]["value"],"projects/123/locations/global/workloadIdentityPools/release/providers/github");
+            assert!(decoded["go"].get("sealed").is_none());
+            let frame=loan.frame(&[0;32]).unwrap();assert_eq!(frame.retained_heap_bytes(),crate::github_setup_protocol::SECRET_REQUEST_LIMIT);
+            assert_eq!(&frame.bytes()[44..],b"test");assert_eq!(&frame.bytes()[..8],b"MRKSEAL1");
             let reserved = zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES
                 + secret_service::checked_lookup::RETRIEVAL_CRYPTO_BYTES;
             assert_eq!(secret_service::checked_lookup::RETRIEVAL_CRYPTO_BYTES, 32 * 1024);
@@ -1746,19 +2130,27 @@ mod lookup_memory {
         }
     }
 }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(crate) use lookup_memory::Admission as KeyringMemoryAdmission;
 
 fn lookup_allocation_gate(state: &DocumentState) -> Result<(), AssetError> {
     // All large/copy admissions share the current document mutex. STOP, status,
     // lock/loss and reconciliation intentionally do not call this predicate.
-    if state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()) {
-        return Err(AssetError::new(Reason::Busy));
-    }
+    allocation_conflict_gate(
+        state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()),
+        state.github.setup_secret_work_pending() || state.github.history_work_pending())
+}
+fn allocation_conflict_gate(lookup_held:bool,secret_original_pending:bool)->Result<(),AssetError>{
+    if lookup_held||secret_original_pending{return Err(AssetError::new(Reason::Busy))}
     Ok(())
 }
 fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
     if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
+    passive_document_state_gate(state)
+}
+// Same passive checks; only the private matching removal peer uses this
+// companion while its own new-work closure remains continuously installed.
+fn passive_document_state_gate(state: &DocumentState) -> Result<(), BridgeError> {
     // Existing passive services do not require editing/crash-hook qualification.
     // The caller still holds this same document mutex through Supervisor claim.
     if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
@@ -1788,7 +2180,7 @@ fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl F
     if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
     owner_gate()?;
     if state.compatibility_picker_pending || installation::pending(state) { return Err(AssetError::new(Reason::Busy)); }
-    if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path() || slot.operation.android_source() || slot.operation.images())
+    if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path() || slot.operation.android_source() || slot.operation.artifact() || slot.operation.images())
         && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
     if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
     lookup_allocation_gate(state)
@@ -1805,7 +2197,7 @@ fn ordinary_asset_platform_gate() -> Result<(), AssetError> {
     // Private asset custody is separate from the installed project-only
     // profile. Sharing document checks must not qualify either native route.
     if !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")),
         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))) { return Err(AssetError::new(Reason::UnsupportedPlatform)); }
     Ok(())
 }
@@ -1830,7 +2222,7 @@ fn macos_session_kind(platform: Platform, stage: Stage, purpose: Purpose, kind: 
     }
 }
 fn session_kind_gate(context: &NativeContext, kind: Kind) -> Result<(), AssetError> {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+    if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
         && !macos_session_kind(context.platform, context.stage, context.purpose, kind) {
         return Err(AssetError::new(Reason::UnsupportedFormat));
     }
@@ -1840,7 +2232,7 @@ fn session_kind_gate(context: &NativeContext, kind: Kind) -> Result<(), AssetErr
 // a retained kind, numeric revision, cached assessment or old signing context.
 // Explicit deletion is deliberately excluded by each positive-use caller.
 fn session_slot_kind_gate(state: &DocumentState, slot: &Slot, kind: Kind) -> Result<(), AssetError> {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+    if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) {
         let context = slot.context.as_ref().ok_or_else(|| AssetError::new(Reason::ContextStale))?;
         if !state.context.as_ref().is_some_and(|current| Arc::ptr_eq(current, context) && current.revision == context.revision) {
             return Err(AssetError::new(Reason::ContextStale));
@@ -1850,7 +2242,7 @@ fn session_slot_kind_gate(state: &DocumentState, slot: &Slot, kind: Kind) -> Res
     Ok(())
 }
 fn session_staged_kind_gate(state: &DocumentState, slot: &Slot, staged: &Staged) -> Result<(), AssetError> {
-    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) { return Ok(()); }
+    if !cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) { return Ok(()); }
     let kind = match staged {
         Staged::Selected { payload, .. } => Some(Some(payload.kind)),
         Staged::Prepared { .. } | Staged::Committed { bind: Some(_) } => Some(slot.kind),
@@ -1912,7 +2304,7 @@ impl DocumentBinding {
         let document = Self { inner: Arc::new(Inner { bridge, changes, session_identity: Arc::new(()), android_registration_control,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             installed_session: Mutex::new(None),
-            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             installed_macos_session: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             fixture: None,
@@ -1923,7 +2315,7 @@ impl DocumentBinding {
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             first_origin: None }) }) };
@@ -1963,9 +2355,9 @@ impl DocumentBinding {
         false
     }
     fn persistence_qualified(&self) -> bool {
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { vault::qualified(self) }
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         { false }
     }
     fn native_qualified(&self) -> bool {
@@ -2035,11 +2427,11 @@ impl DocumentBinding {
             || !token.document_matches(&self.inner.session_identity) { return Err(BridgeError::invalid()); }
         self.inner.bridge.android_build.admit_installed_observation(&self.inner.session_identity, token)
     }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn installed_recovery_identities(&self) -> (Weak<()>, Weak<()>) {
         (Arc::downgrade(&self.inner.session_identity), self.inner.bridge.project_recovery.installed_recovery_identity())
     }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn admit_installed_recovery(&self, token: crate::shell::installed_observation::recovery::Admission) -> Result<(), BridgeError> {
         let state = self.lock();
         if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some() || state.context.is_some()
@@ -2047,11 +2439,11 @@ impl DocumentBinding {
             || !token.document_matches(&self.inner.session_identity) { return Err(BridgeError::invalid()); }
         self.inner.bridge.project_recovery.admit_installed_observation(token)
     }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub(crate) fn installed_ios_identities(&self) -> (Weak<()>, Weak<()>) {
         (Arc::downgrade(&self.inner.session_identity), self.inner.bridge.ios_archive.installed_ios_identity())
     }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub(crate) fn admit_installed_ios(&self, token: crate::shell::installed_observation::ios::Admission) -> Result<(), BridgeError> {
         // Original setup only, under the same real document lock used by
         // Start/loss/selection. A Mac token cannot admit another document or
@@ -2087,12 +2479,12 @@ impl DocumentBinding {
             return Err(BridgeError::shutdown());
         }
         if !self.installation_reveal_available() { return Err(crate::installation::unavailable()); }
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             mrk_macos_installed_native::reveal_installation().map_err(|_| crate::installation::unconfirmed())?;
             Ok(crate::installation::request_sent())
         }
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { Err(crate::installation::unavailable()) }
     }
     pub(crate) fn project_selection_available(&self) -> bool {
@@ -2105,7 +2497,7 @@ impl DocumentBinding {
         // Exact installed-profile DATA only. Neither the compatibility picker
         // nor SG1 nor the still-false asset capability qualifies this purpose.
         if self.inner.bridge.installed_project_path_selection_available() { return true; }
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         if self.inner.installed_macos_session.try_lock().is_ok_and(|book| book.as_ref()
             .and_then(|book| book.project_fields.as_ref()).is_some_and(|control| control.permits(&self.inner.session_identity))) { return true; }
         false
@@ -2132,7 +2524,7 @@ impl DocumentBinding {
         images::observe_failure(state);
         installation::observe_failure(state);
         installation::remember(state);
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         vault::observe_stop(state, Instant::now());
         if state.exhausted { return; }
         if state.unknown { self.inner.android_registration_control.poisoned(); state.saved_input = None; state.github.unknown(); state.evidence.revoke(true); }
@@ -2151,7 +2543,7 @@ impl DocumentBinding {
         state.github.exhaust();
         state.evidence.revision = u64::MAX; state.evidence.revoke(true);
         state.lifetime.invalidate(); invalidate_all(state);
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         vault::revoke_all(state);
         if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::CleanupUnknown, Instant::now()); slot.phase = Phase::Unknown; }
         images::refresh(state);
@@ -2159,7 +2551,7 @@ impl DocumentBinding {
         self.inner.bridge.edits.document_lost(MAIN);
         self.inner.bridge.diagnostics.document_lost();
         self.inner.bridge.preflight.document_lost();
-        self.inner.bridge.android_build.document_lost_published(None); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost();
+        self.inner.bridge.android_build.document_lost_published(None); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost(); self.inner.bridge.artifact_inspection.document_lost();
         state.revision = u32::MAX; self.inner.changes.send_replace(u32::MAX);
     }
     fn next_operation(&self, state: &mut DocumentState) -> Result<u32, AssetError> {
@@ -2180,7 +2572,7 @@ impl DocumentBinding {
         // EditOwner's first-loss tombstone was preallocated, with no loss RNG.
         self.inner.bridge.edits.document_lost_published(MAIN, publisher);
         self.inner.bridge.diagnostics.document_lost(); self.inner.bridge.preflight.document_lost();
-        self.inner.bridge.android_build.document_lost_published(publisher); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost(); self.bump(state);
+        self.inner.bridge.android_build.document_lost_published(publisher); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost(); self.inner.bridge.artifact_inspection.document_lost(); self.bump(state);
     }
     fn apply(&self, state: &mut DocumentState, action: DocumentAction, publisher: Option<&RegistrationPublisher>) {
         match action {
@@ -2229,16 +2621,16 @@ impl DocumentBinding {
     fn environment_gate(&self, state: &DocumentState) -> crate::environment_diagnostics_protocol::Availability {
         use crate::environment_diagnostics_protocol::Availability;
         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
-            || self.inner.bridge.preflight.disabled() || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || self.inner.bridge.ios_archive.disabled())) { return Availability::CleanupUnknown; }
+            || self.inner.bridge.preflight.disabled() || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()))) { return Availability::CleanupUnknown; }
         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
-            || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || self.inner.bridge.ios_archive.stopping())) { return Availability::Shutdown; }
+            || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()))) { return Availability::Shutdown; }
         if !state.lifetime.original_bound() || state.lost_observed
             || !self.inner.bridge.diagnostics.original_document_matches(&self.inner.session_identity) { return Availability::DocumentLost; }
         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed()
             || state.slot.as_ref().is_some_and(|slot| !slot.owner.resources_settled())
             || state.github.native_work_pending() || !self.inner.bridge.edits.can_exit()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.preflight.busy()
-            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || self.inner.bridge.ios_archive.busy())) { return Availability::Busy; }
+            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy()))) { return Availability::Busy; }
         Availability::Available
     }
     pub(crate) fn environment_diagnostics_status(&self) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
@@ -2253,9 +2645,9 @@ impl DocumentBinding {
         use crate::offline_preflight_protocol::Availability;
         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
-            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || self.inner.bridge.ios_archive.disabled())) { return Availability::CleanupUnknown; }
+            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()))) { return Availability::CleanupUnknown; }
         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
-            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || self.inner.bridge.ios_archive.stopping())) { return Availability::Shutdown; }
+            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()))) { return Availability::Shutdown; }
         if let Some(reason) = preflight_document_gate(state, crate::offline_preflight_protocol::Profile::current()) { return reason; }
         // Saved checks require Disconnect, not merely an idle GitHub ticket.
         // Observe the actual retained private session, never a public tombstone.
@@ -2264,9 +2656,86 @@ impl DocumentBinding {
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
-            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || self.inner.bridge.ios_archive.busy())) { return Availability::Busy; }
+            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy()))) { return Availability::Busy; }
         Availability::Available
     }
+    fn artifact_gate(&self, state: &DocumentState) -> crate::artifact_inspection_protocol::Availability {
+        use crate::artifact_inspection_protocol::Availability;
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+            || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
+            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.preflight.disabled()))) { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.preflight.stopping()))) { return Availability::Shutdown; }
+        if crate::artifact_inspection_protocol::Profile::current().is_none(){return Availability::UnsupportedPlatform;}
+        if state.lost_observed{return Availability::DocumentLost;}if !state.lifetime.original_bound(){return Availability::Busy;}
+        // Saved checks require Disconnect, not merely an idle GitHub ticket.
+        // Observe the actual retained private session, never a public tombstone.
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed()
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+            || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+            || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
+            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.preflight.busy()))) { return Availability::Busy; }
+        Availability::Available
+    }
+
+    pub(crate) fn artifact_inspection_subscribe(&self)->watch::Receiver<u32>{self.inner.bridge.artifact_inspection.subscribe()}
+    pub(crate) fn artifact_inspection_relay_lost(&self){let _state=self.lock();self.inner.bridge.artifact_inspection.document_lost();}
+    pub(crate) fn artifact_inspection_status(&self)->Result<crate::artifact_inspection_protocol::Status,BridgeError>{
+        self.reconcile();let state=self.lock();
+        if !self.inner.bridge.artifact_inspection.registration_matches(self.inner.bridge.registry_generation()){self.inner.bridge.artifact_inspection.context_changed();}
+        self.inner.bridge.artifact_inspection.artifact_status(self.artifact_gate(&state))
+    }
+    pub(crate) fn artifact_inspection_prepare(&self,args:crate::artifact_inspection_protocol::Prepare)->Result<crate::artifact_inspection_protocol::Status,BridgeError>{
+        use crate::artifact_inspection_protocol as wire;
+        let (generation,root,checked,tools)={
+            let mut state=self.lock();let gate=self.artifact_gate(&state);
+            if gate!=wire::Availability::Available{return Err(if gate==wire::Availability::Busy{BridgeError::new("artifact_inspection_busy","Finish the original operation first.")}else{BridgeError::new("artifact_inspection_unavailable","Artifact inspection is unavailable.")});}
+            let (generation,root)=self.registry_result(&mut state,self.inner.bridge.native_project(&args.project_id),None).map_err(|_|wire::invalid())?;
+            let checked=self.inner.bridge.artifact_inspection.artifact_snapshot(&args,generation,&root)?;
+            let tools=if args.format==wire::Format::Aab{self.inner.bridge.android_build.artifact_tool_loan(&self.inner.session_identity)?}else{None};
+            (generation,root,checked,tools)
+        };
+        // Original GUI/probe/task proof outside Document AND registry. Then
+        // recheck exact registered root/loan identity under the unchanged gate.
+        if !checked.originals_settled(){return Err(BridgeError::cleanup_unknown());}
+        let mut state=self.lock();let current=self.registry_result(&mut state,self.inner.bridge.native_project(&args.project_id),None).map_err(|_|wire::invalid())?;
+        if current!=(generation,root.clone()){return Err(wire::invalid());}
+        self.inner.bridge.artifact_inspection.artifact_prepare(args,generation,root,&checked,tools,self.artifact_gate(&state))
+    }
+    pub(crate) fn artifact_inspection_start(&self,args:crate::artifact_inspection_protocol::Start)->Result<crate::artifact_inspection_protocol::Status,BridgeError>{
+        let at=Instant::now();let mut state=self.lock();
+        let project=self.inner.bridge.artifact_inspection.prepared_project(&args.operation_id,&args.owner_generation)?;
+        let selected=self.registry_result(&mut state,self.inner.bridge.native_project(&project),None).ok();
+        let admitted=self.inner.bridge.artifact_inspection.artifact_start(args,at,selected,self.artifact_gate(&state))?;
+        drop(state);Ok(admitted.release())
+    }
+    pub(crate) fn artifact_inspection_cancel(&self,args:crate::artifact_inspection_protocol::Cancel)->Result<crate::artifact_inspection_protocol::Status,BridgeError>{
+        let state=self.lock();self.inner.bridge.artifact_inspection.artifact_cancel(args,self.artifact_gate(&state))
+    }
+    pub(crate) fn artifact_inspection_discard(&self,args:crate::artifact_inspection_protocol::Discard)->Result<crate::artifact_inspection_protocol::Status,BridgeError>{
+        let state=self.lock();self.inner.bridge.artifact_inspection.artifact_discard(args,self.artifact_gate(&state))
+    }
+    #[cfg(feature="desktop-shell")]
+    pub(crate) fn artifact_inspection_pick(&self,app:tauri::AppHandle,input:crate::artifact_inspection_protocol::Pick)->Result<crate::artifact_inspection_protocol::Status,BridgeError>{
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]{let _=(app,input);return Err(BridgeError::new("artifact_inspection_unavailable","Artifact inspection requires the installed Mac runtime."));}
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]{
+            self.reconcile();let mut state=self.lock();self.expire(&mut state,Instant::now());
+            let gate=self.artifact_gate(&state);
+            if gate!=crate::artifact_inspection_protocol::Availability::Available{return Err(BridgeError::new("artifact_inspection_unavailable","Artifact selection is unavailable."));}
+            idle(&state).map_err(|_|BridgeError::new("artifact_inspection_busy","Finish the original operation first."))?;
+            let (generation,root)=self.registry_result(&mut state,self.inner.bridge.native_project(&input.project_id),None).map_err(|_|crate::artifact_inspection_protocol::invalid())?;
+            let id=self.next_operation(&mut state).map_err(|_|BridgeError::cleanup_unknown())?;
+            if id==u32::MAX{self.exhaust(&mut state,UnknownOrigin::Exhausted);return Err(BridgeError::cleanup_unknown());}
+            let binding=Arc::new(ArtifactBinding{project_id:input.project_id.clone(),generation,root:root.clone(),format:input.format,role:input.role});
+            let owner=OriginalWork::new(id,true,Arc::downgrade(&self.inner));let mut slot=Slot::new(owner.clone(),Operation::ChooseArtifact,None,None,None);slot.artifact=Some(binding.clone());
+            let start=self.install(&mut state,slot,Job::Artifact{app,binding}).map_err(|_|BridgeError::cleanup_unknown())?;
+            if let Err(error)=self.inner.bridge.artifact_inspection.artifact_admit_pick(&input,generation,root,owner,gate){drop(state);drop(start);return Err(error);}
+            let result=self.inner.bridge.artifact_inspection.artifact_status(gate);drop(state);
+            match result{Ok(status)=>{if start.send(()).is_err(){return Err(BridgeError::cleanup_unknown());}Ok(status)},Err(error)=>{drop(start);Err(error)}}
+        }
+    }
+
     pub(crate) fn offline_preflight_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.preflight.subscribe() }
     pub(crate) fn offline_preflight_relay_lost(&self) {
         // A lost status channel retires consent/sends original STOP; it never
@@ -2309,9 +2778,9 @@ impl DocumentBinding {
         use crate::android_build_protocol::Availability;
         if state.unknown || state.exhausted || self.inner.android_registration_control.is_unknown() || self.inner.bridge.supervisor.disabled()
             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
-            || self.inner.bridge.preflight.disabled() || (self.inner.bridge.project_recovery.disabled() || self.inner.bridge.ios_archive.disabled()) { return Availability::CleanupUnknown; }
+            || self.inner.bridge.preflight.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled())) { return Availability::CleanupUnknown; }
         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
-            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.project_recovery.stopping() || self.inner.bridge.ios_archive.stopping()) { return Availability::Shutdown; }
+            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping())) { return Availability::Shutdown; }
         if let Some(reason) = android_build_document_gate(state, crate::android_build_protocol::Profile::current()) { return reason; }
         if !self.inner.bridge.android_build.original_document_matches(&self.inner.session_identity) { return Availability::DocumentLost; }
         // Require actual Disconnect, not an idle/retired public GitHub ticket.
@@ -2322,7 +2791,7 @@ impl DocumentBinding {
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
-            || self.inner.bridge.preflight.busy() || (self.inner.bridge.project_recovery.busy() || self.inner.bridge.ios_archive.busy()) { return Availability::Busy; }
+            || self.inner.bridge.preflight.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy())) { return Availability::Busy; }
         Availability::Available
     }
 
@@ -2345,6 +2814,8 @@ impl DocumentBinding {
             let gate = if publisher.is_none() && !self.inner.android_registration_control.is_unknown() {
                 crate::android_build_protocol::Availability::Busy
             } else { self.android_build_gate(&state) };
+            let gate = crate::android_tool_sources::status_availability(
+                gate, self.inner.bridge.installed_android_source_selection_available());
             self.inner.bridge.android_build.sources_status(gate)
         })();
         if let Some(publisher) = publisher { finish_registration_publisher(publisher); } result
@@ -2358,6 +2829,10 @@ impl DocumentBinding {
         Ok(status)
     }
     fn observe_android_source_slot(&self, state: &DocumentState) {
+        if let Some(slot)=state.slot.as_ref().filter(|slot|slot.operation.artifact()){
+            self.inner.bridge.artifact_inspection.artifact_observe_pick(&slot.owner,slot.phase,slot.reason,state.unknown);
+        }
+
         if let Some(slot) = state.slot.as_ref().filter(|slot| slot.operation.android_source()) {
             self.inner.bridge.android_build.observe_source(&slot.owner, slot.phase, slot.reason, state.unknown);
         }
@@ -2446,9 +2921,9 @@ impl DocumentBinding {
         use crate::project_recovery_protocol::Availability;
         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
-            || self.inner.bridge.preflight.disabled() || self.inner.bridge.android_build.disabled() || self.inner.bridge.ios_archive.disabled() { return Availability::CleanupUnknown; }
+            || self.inner.bridge.preflight.disabled() || self.inner.bridge.android_build.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()) { return Availability::CleanupUnknown; }
         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
-            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || self.inner.bridge.android_build.stopping() || self.inner.bridge.ios_archive.stopping() { return Availability::Shutdown; }
+            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || self.inner.bridge.android_build.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()) { return Availability::Shutdown; }
         if let Some(reason) = project_recovery_document_gate(state, crate::project_recovery_protocol::Profile::current()) { return reason; }
         // Require actual Disconnect, not an idle/retired public GitHub ticket.
         // Asset phase AND original resources must settle, as must all edits,
@@ -2458,7 +2933,7 @@ impl DocumentBinding {
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
-            || self.inner.bridge.preflight.busy() || self.inner.bridge.android_build.busy() || self.inner.bridge.ios_archive.busy() { return Availability::Busy; }
+            || self.inner.bridge.preflight.busy() || self.inner.bridge.android_build.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy()) { return Availability::Busy; }
         Availability::Available
     }
     pub(crate) fn project_recovery_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.project_recovery.subscribe() }
@@ -2506,9 +2981,9 @@ impl DocumentBinding {
         use crate::ios_archive_protocol::Availability;
         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
-            || self.inner.bridge.preflight.disabled() || self.inner.bridge.android_build.disabled() || self.inner.bridge.project_recovery.disabled() { return Availability::CleanupUnknown; }
+            || self.inner.bridge.preflight.disabled() || self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || self.inner.bridge.artifact_inspection.disabled()) { return Availability::CleanupUnknown; }
         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
-            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || self.inner.bridge.android_build.stopping() || self.inner.bridge.project_recovery.stopping() { return Availability::Shutdown; }
+            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || self.inner.bridge.artifact_inspection.stopping()) { return Availability::Shutdown; }
         if let Some(reason) = ios_archive_document_gate(state, crate::ios_archive_protocol::Profile::current()) { return reason; }
         // Require actual Disconnect, not an idle/retired public GitHub ticket.
         // Asset phase AND original resources must settle, as must all edits,
@@ -2518,18 +2993,18 @@ impl DocumentBinding {
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
-            || self.inner.bridge.preflight.busy() || self.inner.bridge.android_build.busy() || self.inner.bridge.project_recovery.busy() { return Availability::Busy; }
+            || self.inner.bridge.preflight.busy() || self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || self.inner.bridge.artifact_inspection.busy()) { return Availability::Busy; }
         Availability::Available
     }
     pub(crate) fn ios_archive_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.ios_archive.subscribe() }
     pub(crate) fn ios_archive_relay_lost(&self) {
         // Loss retires consent/STOP under the same gate. It is not settlement,
         // owner deletion, a replacement run or permission to reopen the slot.
-        let _state = self.lock(); self.inner.bridge.ios_archive.document_lost();
+        let _state = self.lock(); self.inner.bridge.ios_archive.document_lost(); self.inner.bridge.artifact_inspection.document_lost();
     }
     pub(crate) fn ios_archive_status(&self) -> Result<crate::ios_archive_protocol::Status, BridgeError> {
         let state = self.lock();
-        if !self.inner.bridge.ios_archive.registration_matches(self.inner.bridge.registry_generation()) { self.inner.bridge.ios_archive.context_changed(); }
+        if !self.inner.bridge.ios_archive.registration_matches(self.inner.bridge.registry_generation()) { self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); }
         self.inner.bridge.ios_archive.status(self.ios_archive_gate(&state))
     }
     pub(crate) fn prepare_ios_archive(&self, args: crate::ios_archive_protocol::Prepare) -> Result<crate::ios_archive_protocol::Status, BridgeError> {
@@ -2580,26 +3055,26 @@ impl DocumentBinding {
         self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.android_build.ensure_idle()?;
         self.inner.bridge.project_recovery.ensure_idle()?;
-        self.inner.bridge.ios_archive.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
         self.inner.bridge.diagnostics.ensure_idle()?;
         self.inner.bridge.supervisor.start_passive(method, params)
     }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     pub(crate) fn environment_fixture_registration(&self,
         permit: &crate::environment_diagnostics_owner::EnvironmentRegistrationPermit, change: bool) -> Result<(), BridgeError> {
         let state = self.lock();
         if state.unknown || state.exhausted || !state.lifetime.original_bound() || state.lost_observed || state.stopping { return Err(BridgeError::cleanup_unknown()); }
         self.inner.bridge.preflight.context_changed();
-        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
+        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
         self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.android_build.ensure_idle()?;
         self.inner.bridge.project_recovery.ensure_idle()?;
-        self.inner.bridge.ios_archive.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
         self.inner.bridge.environment_fixture_registration(permit, change)
     }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     pub(crate) fn offline_fixture_registration(&self,
         permit: &crate::offline_preflight_owner::OfflineRegistrationPermit) -> Result<(), BridgeError> {
         let state = self.lock();
@@ -2610,7 +3085,7 @@ impl DocumentBinding {
         self.inner.bridge.offline_fixture_registration(permit)
     }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     pub(crate) fn offline_fixture_gate(&self, permit: &crate::offline_preflight_owner::OfflineRegistrationPermit,
         gate: &str, present: bool) -> Result<(), BridgeError> {
         let (id, _, generation) = permit.validate(&self.inner.bridge.preflight)?;
@@ -2638,8 +3113,8 @@ impl DocumentBinding {
                     source: SourceState::NotRun, settlement: Settlement::Pending, context: None, target: None,
                     review_end: None, cleanup_end: None, candidate: None, selection: None, assessment: None,
                     preview: None, assessment_context_revision: None, staged: None, error: None, project: None,
-                    discard: false, kind: None, result_record: None, retired_payload: None, evidence: None, project_path: None, path_result: None, android_source: None, images: None, image_batch: None,
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                    discard: false, kind: None, result_record: None, retired_payload: None, evidence: None, project_path: None, path_result: None, android_source: None, artifact:None, images: None, image_batch: None, installation_result: None,
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: vault::SlotData::default() });
             },
             ("existing-work", false) if state.slot.as_ref().is_some_and(|slot|
@@ -2701,11 +3176,13 @@ impl DocumentBinding {
         publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?;
         state.saved_input = None;
         self.inner.bridge.preflight.context_changed();
-        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
+        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
+        state.github.setup_context_changed();
+        state.github.setup_ensure_idle()?;
         self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.android_build.ensure_idle()?;
         self.inner.bridge.project_recovery.ensure_idle()?;
-        self.inner.bridge.ios_archive.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
         self.inner.bridge.diagnostics.ensure_idle()?;
         action(&self.inner.bridge, &publisher)
         })();
@@ -2721,11 +3198,11 @@ impl DocumentBinding {
         state.saved_input = None;
         self.inner.bridge.diagnostics.context_changed();
         self.inner.bridge.preflight.context_changed();
-        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
+        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
         self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.android_build.ensure_idle()?;
         self.inner.bridge.project_recovery.ensure_idle()?;
-        self.inner.bridge.ios_archive.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
         self.inner.bridge.diagnostics.ensure_idle()?;
         if state.stopping { return Err(BridgeError::shutdown()); }
         if state.compatibility_picker_pending { return Err(BridgeError::new("busy", "A native project picker is already open.")); }
@@ -2748,7 +3225,7 @@ impl DocumentBinding {
         self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.android_build.ensure_idle()?;
         self.inner.bridge.project_recovery.ensure_idle()?;
-        self.inner.bridge.ios_archive.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
         self.inner.bridge.diagnostics.ensure_idle()?;
         self.inner.bridge.register_picked_project(path)
     }
@@ -2767,7 +3244,7 @@ impl DocumentBinding {
             if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::Shutdown); }
             state.saved_input = None;
             state.stopping = true; self.inner.bridge.diagnostics.request_shutdown();
-            self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref().filter(|publisher| publisher.accepted())); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown();
+            self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref().filter(|publisher| publisher.accepted())); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown();
         }
         self.bump(&mut state);
         }
@@ -2777,11 +3254,11 @@ impl DocumentBinding {
         common_document_gate(state, session, || {
             if self.inner.bridge.diagnostics.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
             if self.inner.bridge.preflight.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
-            if (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || self.inner.bridge.ios_archive.disabled())) { return Err(AssetError::new(Reason::CleanupUnknown)); }
+            if (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()))) { return Err(AssetError::new(Reason::CleanupUnknown)); }
             if self.inner.bridge.diagnostics.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
             if self.inner.bridge.preflight.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
-            if (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || self.inner.bridge.ios_archive.stopping())) { return Err(AssetError::new(Reason::Shutdown)); }
-            if self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy() || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || self.inner.bridge.ios_archive.busy())) {
+            if (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()))) { return Err(AssetError::new(Reason::Shutdown)); }
+            if self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy() || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy()))) {
                 return Err(AssetError::new(Reason::Busy));
             }
             Ok(())
@@ -2878,12 +3355,12 @@ impl DocumentBinding {
         if state.maintenance.closed() { return GitHubReason::Busy; }
         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
             || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled()
-            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || self.inner.bridge.ios_archive.disabled())) { return GitHubReason::CleanupUnknown; }
+            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()))) { return GitHubReason::CleanupUnknown; }
         if !self.github_qualified() { return GitHubReason::Unqualified; }
         if !state.lifetime.original_bound() || state.lost_observed || state.stopping
             || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() || self.inner.bridge.diagnostics.stopping()
-            || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || self.inner.bridge.ios_archive.stopping())) { return GitHubReason::Cancelled; }
-        if self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy() || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || self.inner.bridge.ios_archive.busy()))
+            || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()))) { return GitHubReason::Cancelled; }
+        if self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy() || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy())))
             || state.compatibility_picker_pending { return GitHubReason::Busy; }
         if state.quit_pending || state.retiring || state.lock_pending || state.slot.as_ref().is_some_and(|slot|
             slot.operation.blocks_context() && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return GitHubReason::Busy; }
@@ -2907,6 +3384,147 @@ impl DocumentBinding {
         }
         let gate = self.github_gate(state);
         state.github.reconcile(now, gate);
+        self.github_setup_observe_locked(state, now, gate);
+        self.github_history_observe_locked(state, now, gate);
+    }
+    fn github_setup_registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Option<T> {
+        match self.registry_result(state, result, None) {
+            Ok(original) => Some(original),
+            Err(error) => {
+                // This second lookup may have newly failed after the caller
+                // sampled its external gate. Latch containing uncertainty
+                // before the same pending Setup receipt can be reconciled.
+                if error.reason == Reason::CleanupUnknown { state.github.unknown(); }
+                None
+            },
+        }
+    }
+    fn github_setup_observe_locked(&self, state: &mut DocumentState, now: Instant, external: GitHubReason) {
+        let project = state.github.setup_registered_project().map(str::to_owned);
+        let original = project.as_deref().and_then(|project| {
+            self.github_setup_registry_result(state, self.inner.bridge.native_project(project))
+        });
+        // A real fresh Edit registry guard is held until this same original
+        // receipt is correlated. No boolean status or cloned stamp substitutes.
+        if let Some((generation, root)) = original {
+            let material_current=state.github.setup_secret_material().is_none_or(|material|
+                state.github.setup_registered_project().is_some_and(|project|material.current(state,project,generation,&root)))
+                &&state.github.setup_variable_material().is_none_or(|material|
+                    state.github.setup_registered_project().is_some_and(|project|material.current(state,project,generation,&root)));
+            if !material_current{state.github.setup_context_changed();}
+            match self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity) {
+                Ok(edit) => state.github.reconcile_setup(now, external, Some((generation, &root, &edit))),
+                Err(error) => {
+                    if error.code == "cleanup_unknown" { state.github.unknown(); }
+                    state.github.reconcile_setup(now, external, None);
+                },
+            }
+        } else { state.github.reconcile_setup(now, external, None); }
+    }
+    pub(crate) fn github_remote_setup_status(&self) -> crate::github_setup_protocol::Status {
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let external = self.github_gate(&state);
+        state.github.setup_status(self.inner.bridge.supervisor.github_setup_profile_available(), now, external)
+    }
+    pub(crate) fn github_remote_setup_command(&self, name: &str, value: &Value) -> Result<crate::github_setup_protocol::Status, BridgeError> {
+        use crate::{github_setup_protocol as p, github_setup_session as s};
+        let command = p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
+        if matches!(command, p::Command::Status) { return Ok(self.github_remote_setup_status()); }
+        // One bounded native nonce, before original admission. No credential,
+        // filesystem inspection or network exchange is performed by this step.
+        let nonce = if matches!(command, p::Command::Prepare(_)) {
+            let mut bytes = [0u8; 16]; getrandom::fill(&mut bytes).map_err(|_| s::refused(p::Reason::RuntimeUnavailable))?;
+            Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+        } else { None };
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        match &command {
+            p::Command::Cancel(args) => return state.github.setup_cancel(&args.operation_id),
+            p::Command::Discard(args) => return state.github.setup_discard(args),
+            _ => {},
+        }
+        let external = self.github_gate(&state);
+        let available = state.github.setup_status(self.inner.bridge.supervisor.github_setup_profile_available(), Instant::now(), external);
+        if !available.available { return Err(s::refused(available.reason)); }
+        let (project_id, original_generation) = state.github.registration().map(|(id, generation)| (id.to_owned(), generation))
+            .ok_or_else(|| s::refused(p::Reason::NotConnected))?;
+        let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(&project_id), None)
+            .map_err(|error| s::refused(if error.reason == Reason::CleanupUnknown { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
+        if generation != original_generation { return Err(s::refused(p::Reason::TargetChanged)); }
+        let binding = github_setup_project_binding(&root).map_err(|_| s::refused(p::Reason::TargetChanged))?;
+        let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)
+            .map_err(|error| s::refused(if error.code == "cleanup_unknown" { p::Reason::CleanupUnknown } else { p::Reason::Busy }))?;
+        let setup_material=if let p::Command::Prepare(args)=&command {
+            if let p::Selection::Secret(selected)=&args.selection {
+                let material=self.review_github_secret_material(&state,selected,&project_id,generation,&root)?;
+                let admission=crate::supervisor::SecretNativeAdmission::reserve(material.clone())?;
+                #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                lookup_memory::secret_admission_bytes(&self.inner,&state,&material,admission.bytes(),false).map_err(|e|
+                    s::refused(if e==keyring::Problem::CleanupUnknown {p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+                #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+                return Err(s::refused(p::Reason::Unqualified));
+                Some(crate::supervisor::SetupNativeAdmission::Secret(admission))
+            }else if let p::Selection::Variable(selected)=&args.selection{
+                let material=self.review_github_variable_material(&state,selected,&project_id,generation,&root)?;
+                let admission=crate::supervisor::VariableNativeAdmission::reserve(material.clone(),p::Kind::Prepare)?;
+                #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                lookup_memory::variable_admission_bytes(&self.inner,&state,&material,admission.bytes()).map_err(|e|
+                    s::refused(if e==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+                #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+                return Err(s::refused(p::Reason::Unqualified));
+                Some(crate::supervisor::SetupNativeAdmission::Variable(admission))
+            }else{None}
+        }else{None};
+        let gate = GitHubSetupGoGate { inner: Arc::downgrade(&self.inner) };
+        let supervisor = &self.inner.bridge.supervisor; let now = Instant::now();
+        match command {
+            p::Command::Prepare(args) => {
+                let stamp=edit.stamp().map_err(|_|s::refused(p::Reason::Busy))?;
+                let nonce=nonce.ok_or_else(||s::refused(p::Reason::InvalidInput))?;
+                match setup_material {
+                    Some(crate::supervisor::SetupNativeAdmission::Secret(admission))=>state.github.setup_secret_prepare(args,generation,root,&binding,stamp,nonce,admission,gate,supervisor,now),
+                    Some(crate::supervisor::SetupNativeAdmission::Variable(admission))=>state.github.setup_variable_prepare(args,generation,root,&binding,stamp,nonce,admission,gate,supervisor,now),
+                    None=>state.github.setup_prepare(args,generation,root,&binding,stamp,nonce,gate,supervisor,now)}
+            },
+            p::Command::Apply(args) => {
+                if state.github.setup_has_material(){
+                    let(target,mut consent)=state.github.setup_take_apply(args,generation,&root,&binding,&edit,now)?;
+                    // Consume exactly once before later admission. No relookup or
+                    // replacement Arc is allowed to renew this reviewed field.
+                    let retained=consent.retained_heap_bytes().ok_or_else(||s::refused(p::Reason::ResourcesUnavailable))?;
+                    match consent.material.take().ok_or_else(||s::refused(p::Reason::MaterialChanged))?{
+                    s::ConsentMaterial::Secret(sealed)=>{
+                    let material=sealed.material.clone();
+                    if !self.native_qualified()||!material.current(&state,&project_id,generation,&root){return Err(s::refused(p::Reason::MaterialChanged))}
+                    let admission=crate::supervisor::SecretNativeAdmission::reserve_apply(sealed)?;
+                    let future=admission.bytes().checked_add(retained).and_then(|v|v.checked_add(target.retained_heap_bytes()?))
+                        .ok_or_else(||s::refused(p::Reason::ResourcesUnavailable))?;
+                    #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                    lookup_memory::secret_admission_bytes(&self.inner,&state,&material,future,true).map_err(|e|
+                        s::refused(if e==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+                    #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+                    return Err(s::refused(p::Reason::Unqualified));
+                    state.github.setup_secret_apply(target,consent,root,admission,gate,supervisor,Instant::now())
+                    },
+                    s::ConsentMaterial::Variable(material)=>{
+                        if !self.native_qualified()||!material.current(&state,&project_id,generation,&root)
+                            ||!matches!(&consent.prepared,p::Prepared::Variable(v) if material.prepared_matches(v)){
+                            return Err(s::refused(p::Reason::MaterialChanged))
+                        }
+                        let admission=crate::supervisor::VariableNativeAdmission::reserve(material.clone(),p::Kind::Apply)?;
+                        let future=admission.bytes().checked_add(retained).and_then(|v|v.checked_add(target.retained_heap_bytes()?))
+                            .ok_or_else(||s::refused(p::Reason::ResourcesUnavailable))?;
+                        #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                        lookup_memory::variable_admission_bytes(&self.inner,&state,&material,future).map_err(|e|
+                            s::refused(if e==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+                        #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+                        return Err(s::refused(p::Reason::Unqualified));
+                        state.github.setup_variable_apply(target,consent,root,admission,gate,supervisor,Instant::now())
+                    },
+                    }
+                }else{state.github.setup_apply(args,generation,root,&binding,&edit,gate,supervisor,now)}
+            },
+            p::Command::Status | p::Command::Discard(_) | p::Command::Cancel(_) => Err(s::refused(p::Reason::InvalidInput)),
+        }
     }
     pub(crate) fn github_connection_status(&self) -> github_wire::Status {
         let mut state = self.lock(); self.expire(&mut state, Instant::now()); state.github.snapshot()
@@ -3051,7 +3669,7 @@ impl DocumentBinding {
         // Do not consume a ready G1 receipt before this registration change.
         // The next actual status/reconciliation rechecks this registry first.
         // This supplied event is not native picker-admission/callback evidence.
-        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
+        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
         self.inner.bridge.android_build.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
         self.inner.bridge.project_recovery.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
         self.inner.bridge.ios_archive.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
@@ -3105,12 +3723,35 @@ impl DocumentBinding {
     ) -> Result<T, BridgeError> {
         self.registered_edit_admit_published(domain, project_id, |bridge, registered, _publisher| enqueue(bridge, registered))
     }
+    // Fixed recovery entry only. Normal configuration keeps its original path
+    // gate; it cannot obtain this registered-root authority through that API.
+    pub(crate) fn configuration_recovery_admit_published<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
+        let result = (|| {
+            let mut state = self.lock();
+            let registered = self.registered_edit_root_locked_published(&mut state, crate::edit_protocol::EditDomain::Configuration,
+                project_id, None, &mut publisher)?;
+            enqueue(&self.inner.bridge, registered, &publisher)
+        })();
+        finish_registration_publisher(publisher); result
+    }
     pub(crate) fn workflow_edit_admit_published<T>(
         &self,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
         enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::WorkflowRegistration, &RegistrationPublisher) -> Result<T, BridgeError>,
     ) -> Result<T, BridgeError> {
         self.registered_edit_admit_published(crate::edit_protocol::EditDomain::GitHubWorkflows, project_id, enqueue)
+    }
+    pub(crate) fn initialization_edit_admit_published<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit_published(crate::edit_protocol::EditDomain::ProjectInitialization, project_id, enqueue)
     }
     pub(crate) fn metadata_text_edit_admit_published<T>(
         &self,
@@ -3126,13 +3767,14 @@ impl DocumentBinding {
     ) -> Result<T, BridgeError> {
         self.registered_edit_admit_published(crate::edit_protocol::EditDomain::ReleaseVersion, project_id, enqueue)
     }
-    // Only the four explicitly registered-root domains use this same mutex and
-    // proof. A proof never qualifies a writer or changes configuration custody.
+    // The normal registered domains remain closed. Configuration recovery has
+    // its separate fixed wrapper above, using this same original mutex/proof.
     fn registered_edit_admit_published<T>(
         &self, domain: crate::edit_protocol::EditDomain,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
         enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
     ) -> Result<T, BridgeError> {
+        if domain == crate::edit_protocol::EditDomain::Configuration { return Err(BridgeError::invalid()); }
         let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
         let result = (|| {
             let mut state = self.lock();
@@ -3146,8 +3788,8 @@ impl DocumentBinding {
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
         selected_images: Option<&Arc<images::Binding>>, publisher: &mut RegistrationPublisher,
     ) -> Result<crate::edit_owner::RegisteredEditRoot, BridgeError> {
-        if !matches!(domain, crate::edit_protocol::EditDomain::GitHubWorkflows | crate::edit_protocol::EditDomain::MetadataText
-            | crate::edit_protocol::EditDomain::ReleaseVersion | crate::edit_protocol::EditDomain::MetadataImages)
+        if !matches!(domain, crate::edit_protocol::EditDomain::Configuration | crate::edit_protocol::EditDomain::GitHubWorkflows
+            | crate::edit_protocol::EditDomain::MetadataText | crate::edit_protocol::EditDomain::ReleaseVersion | crate::edit_protocol::EditDomain::MetadataImages | crate::edit_protocol::EditDomain::ProjectInitialization)
             || selected_images.is_some() && domain != crate::edit_protocol::EditDomain::MetadataImages { return Err(BridgeError::invalid()); }
         self.expire(state, Instant::now());
         if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
@@ -3160,11 +3802,11 @@ impl DocumentBinding {
         if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?; }
         state.saved_input = None;
         self.inner.bridge.preflight.context_changed();
-        self.inner.bridge.android_build.context_changed_published(Some(&*publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
+        self.inner.bridge.android_build.context_changed_published(Some(&*publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
         self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.android_build.ensure_idle()?;
         self.inner.bridge.project_recovery.ensure_idle()?;
-        self.inner.bridge.ios_archive.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
         self.inner.bridge.diagnostics.ensure_idle()?;
         if state.quit_pending { return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action.")); }
         if state.retiring || state.lock_pending || state.compatibility_picker_pending || state.slot.as_ref().is_some_and(|slot|
@@ -3223,7 +3865,7 @@ impl DocumentBinding {
             || !permitted {
             return Err(AssetError::new(Reason::Unqualified));
         }
-        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
+        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
         self.inner.bridge.android_build.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
         self.inner.bridge.project_recovery.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
         self.inner.bridge.ios_archive.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
@@ -3238,7 +3880,7 @@ impl DocumentBinding {
     }
     fn context_matches(&self, state: &DocumentState, context: &Arc<NativeContext>) -> Result<bool, AssetError> {
         if !state.lifetime.original_bound() || state.stopping || state.unknown { return Ok(false); }
-        if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
             && !macos_session_context(context.platform, context.stage, context.purpose) { return Ok(false); }
         let Some(current) = &state.context else { return Ok(false); };
         if !Arc::ptr_eq(current, context) || current.revision != context.revision || self.inner.bridge.registry_generation() != context.registry_generation { return Ok(false); }
@@ -3251,6 +3893,9 @@ impl DocumentBinding {
         // capability DATA, not a fabricated asset cleanup result, and does
         // not block original discard/retirement/quit behind new admission.
         let mut changed = images::observe_failure(state) | installation::observe_failure(state) | observe_session_owner_reason(state, owner_reason);
+        if let Some(slot)=state.slot.as_mut().filter(|slot|slot.operation.artifact()){
+            if let Some((reason,at))=self.inner.bridge.artifact_inspection.artifact_pick_stop(&slot.owner){let before=slot.cleanup_end;slot.stop(reason,at);changed|=before!=slot.cleanup_end;}
+        }
         if let Some(slot) = state.slot.as_mut().filter(|slot| slot.operation.android_source()) {
             if let Some((reason, at)) = self.inner.bridge.android_build.source_stop(&slot.owner) {
                 let before = slot.cleanup_end; slot.stop(reason, at); changed |= before != slot.cleanup_end;
@@ -3289,7 +3934,7 @@ impl DocumentBinding {
                 if slot.cleanup_end.is_none() && slot.phase != Phase::Idle { slot.stop(Reason::CleanupUnknown, now); changed = true; }
             }
         }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { changed |= vault::observe_stop(state, now); }
         self.github_observe_locked(state, now);
         if changed { self.bump(state); }
@@ -3353,7 +3998,7 @@ impl DocumentBinding {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, false)?;
         idle(&state)?;
         if state.session { return Ok(self.snapshot(&state)); }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if state.vault.is_some() { return Err(AssetError::new(Reason::Busy)); }
         let remaining_records = RECORD_LIMIT.saturating_sub(state.records.len());
         let remaining_assignments = 8usize.saturating_sub(state.assignments.len());
@@ -3362,9 +4007,9 @@ impl DocumentBinding {
         // Keep a closed encrypted operation's actual receipt until explicit
         // new-mode admission. It is not a session operation and must not be
         // relabelled. Only already-settled DATA is removed off this real gate.
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let old = if state.slot.as_ref().is_some_and(vault::operation_attached) { state.slot.take() } else { None };
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let old: Option<Slot> = None;
         state.session = true; state.retiring = old.is_some(); self.bump(&mut state);
         if old.is_some() {
@@ -3374,7 +4019,7 @@ impl DocumentBinding {
         } else { Ok(self.snapshot(&state)) }
     }
     pub(crate) fn context(&self, args: commands::Context<'_>) -> Result<AssetStatus, AssetError> {
-        if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
             && !macos_session_context(args.platform, args.stage, args.purpose) {
             return Err(AssetError::new(Reason::UnsupportedFormat));
         }
@@ -3394,9 +4039,9 @@ impl DocumentBinding {
         publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged).map_err(|_|AssetError::new(Reason::CleanupUnknown))?;
         state.saved_input=None;
         self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed();
-        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.gate(&state, true)?;
+        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.gate(&state, true)?;
         let (registry_generation, project) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id), None)?;
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         vault::context_gate(&state, registry_generation)?;
         let Some(revision) = state.next_context.checked_add(1) else { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(AssetError::new(Reason::CleanupUnknown)); };
         // Bounded, already-admitted Value serialization, not source parsing or
@@ -3423,7 +4068,7 @@ impl DocumentBinding {
         let slot = state.slot.as_mut().filter(|slot| slot.owner.id == id && credential_discard_operation(slot.operation)).ok_or_else(AssetError::invalid)?;
         if !preserve_storage_operation(slot) { slot.operation = Operation::Discard; }
         slot.stop(Reason::UserCancelled, Instant::now());
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         vault::observe_stop(&mut state, Instant::now());
         self.bump(&mut state);
         drop(state); Ok(self.status())
@@ -3441,12 +4086,12 @@ impl DocumentBinding {
         state.saved_input = None;
         // Lock retires context DATA; STOP does not claim either saved-command
         // owner's resources settled or turn vault lock into GitHub Disconnect.
-        self.inner.bridge.preflight.context_changed(); self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
+        self.inner.bridge.preflight.context_changed(); self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
         invalidate_all(&mut state); state.lock_pending = true;
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         vault::revoke_all(&mut state);
         if let Some(slot) = state.slot.as_mut() {
-            if !slot.operation.evidence() && !slot.operation.project_path() && !slot.operation.android_source() && !slot.operation.images() && !slot.operation.installation() && !preserve_storage_operation(slot) { slot.operation = Operation::Lock; }
+            if !slot.operation.evidence() && !slot.operation.project_path() && !slot.operation.android_source() && !slot.operation.artifact() && !slot.operation.images() && !slot.operation.installation() && !preserve_storage_operation(slot) { slot.operation = Operation::Lock; }
             slot.stop(Reason::UserCancelled, Instant::now());
         }
         self.bump(&mut state); drop(state); Ok(self.status())
@@ -3459,34 +4104,34 @@ fn idle(state: &DocumentState) -> Result<(), AssetError> {
     if state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled()) { return Err(AssetError::new(Reason::Busy)); } Ok(())
 }
 fn encrypted_mode(_state: &DocumentState) -> bool {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { vault::mode(_state) }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { false }
 }
 fn encrypted_authority_visible(_state: &DocumentState) -> bool {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { vault::authority_visible(_state) }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { true }
 }
 fn preserve_storage_operation(_slot: &Slot) -> bool {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { vault::preserve_operation(_slot) }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { false }
 }
 fn vault_retirement_data(_value: &Retirement) -> bool {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { !_value.vault.empty() }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { false }
 }
 fn assignment_available(state: &DocumentState, assignment: &Assignment) -> bool {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if encrypted_mode(state) && !vault::assignment_current(state, assignment) { return false; }
     assignment.availability == AssignmentAvailability::Available
-        && (!cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        && (!cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
             || state.context.as_ref().is_some_and(|context| context.revision == assignment.context_revision
                 && session_kind_gate(context, assignment.kind).is_ok()))
 }
@@ -3497,54 +4142,54 @@ fn record_assessed(state: &DocumentState, key: &RecordKey) -> bool {
         && assignment_available(state, assignment) && assignment.context_revision == context.revision)
         || state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::None && slot.cleanup_end.is_none()
             && slot.assessment.is_some() && slot.assessment_context_revision == Some(context.revision)
-            && (!cfg!(all(target_os = "macos", target_arch = "aarch64"))
+            && (!cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
                 || slot.kind.is_some_and(|kind| session_slot_kind_gate(state, slot, kind).is_ok()))
             && slot.candidate.is_none() && (slot.target.as_ref() == Some(key) || slot.result_record.as_ref() == Some(key)))
 }
 fn session_writable(state: &DocumentState) -> bool {
     if state.session { return true; }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { vault::writable(state) }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { false }
 }
 fn asset_mode(state: &DocumentState) -> &'static str { if encrypted_mode(state) { "encrypted" } else if state.session { "session" } else { "closed" } }
 fn persistence_status(_state: &DocumentState) -> Option<PersistenceStatus> {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { vault::projection(_state) }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { None }
 }
 fn storage_status(_slot: &Slot) -> Option<StorageStatus> {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { vault::outcome(_slot) }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { None }
 }
 fn encrypted_summaries(_state: &DocumentState) -> Vec<RecordStatus> {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { vault::summaries(_state) }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { Vec::new() }
 }
 fn has_record(state: &DocumentState, key: &RecordKey, kind: Kind) -> bool {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if encrypted_mode(state) { return vault::has_record(state, key, kind); }
     state.records.iter().any(|record| record.key == *key && record.payload.kind == kind)
 }
 fn record_pending(state: &DocumentState, key: &RecordKey) -> bool {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if encrypted_mode(state) { return vault::pending(state, key); }
     state.records.iter().any(|record| record.key == *key && record.mutation_pending)
 }
 fn record_usable(state: &DocumentState, slot: &Slot, key: &RecordKey, kind: Kind) -> bool {
     if session_slot_kind_gate(state, slot, kind).is_err() { return false; }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if encrypted_mode(state) { return vault::usable(state, slot, key, kind); }
     state.records.iter().any(|record| record.key == *key && record.payload.kind == kind && !record.mutation_pending && record.payload.usable_source())
 }
 fn slot_payload<'a>(state: &'a DocumentState, slot: &'a Slot) -> Option<&'a Arc<Payload>> {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if let Some(payload) = &slot.vault.loaded { return Some(payload); }
     slot.candidate.as_ref().map(|candidate| &candidate.payload).or_else(||
         slot.target.as_ref().and_then(|target| state.records.iter().find(|record| &record.key == target).map(|record| &record.payload)))
@@ -3554,13 +4199,14 @@ fn project_path_idle_gate(state: &DocumentState, installed_profile: bool) -> Res
     idle(state)
 }
 fn invalidate_all(state: &mut DocumentState) {
+    if state.github.setup_has_material(){state.github.setup_context_changed();}
     for assignment in &mut state.assignments { assignment.availability = AssignmentAvailability::Unavailable; }
     if let Some(slot) = state.slot.as_mut() { slot.selection = None; slot.preview = None; }
 }
 fn retire_context_authority(state: &mut DocumentState, at: Instant) -> Option<Arc<NativeContext>> {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let completed_receipt = vault::completed_context_receipt(state);
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     let completed_receipt = false;
     invalidate_all(state);
     let slot = state.slot.as_mut()?;
@@ -3577,7 +4223,7 @@ fn retire_context_authority(state: &mut DocumentState, at: Instant) -> Option<Ar
     None
 }
 fn revoke_record(state: &mut DocumentState, key: &RecordKey) {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     vault::revoke(state, key);
     for assignment in &mut state.assignments { if assignment.record_id == key.id && assignment.record_revision == key.revision { assignment.availability = AssignmentAvailability::Unavailable; } }
     if let Some(record) = state.records.iter_mut().find(|record| record.key == *key) { record.mutation_pending = true; }
@@ -3585,7 +4231,7 @@ fn revoke_record(state: &mut DocumentState, key: &RecordKey) {
 }
 fn own_record(reference: commands::RecordRef<'_>) -> Result<RecordKey, AssetError> { Ok(RecordKey { id: Token(commands::copy_text(reference.record_id)?), revision: reference.expected_revision }) }
 fn target(state: &DocumentState, reference: Option<commands::RecordRef<'_>>, kind: Kind) -> Result<Option<RecordKey>, AssetError> {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if vault::mode(state) { return vault::target(state, reference, kind); }
     let Some(reference) = reference else { if state.records.len() >= RECORD_LIMIT { return Err(AssetError::new(Reason::Capacity)); } return Ok(None); };
     let key = own_record(reference)?;
@@ -3593,29 +4239,33 @@ fn target(state: &DocumentState, reference: Option<commands::RecordRef<'_>>, kin
 }
 
 enum ChildJob {
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    Artifact{path:std::path::PathBuf,binding:Arc<ArtifactBinding>},
     Installation,
     Tokens, Capture { path: std::path::PathBuf, roots: Vec<asset_source::RegisteredRoot>, kind: credential_format::FileKind },
     Probe { path: std::path::PathBuf, origins: Vec<Arc<OriginWitness>>, vault: Option<asset_source::RegisteredRoot> },
     ProjectPath { path: std::path::PathBuf, binding: Arc<ProjectPathBinding> },
     Images { paths: Vec<std::path::PathBuf>, binding: Arc<images::Binding> },
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     Vault(vault::Child),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     KeyringProvider { step: crate::vault_keyring_linux::ProviderStep },
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     KeyringHelper(DocumentBinding),
 }
-enum ChildEnd { Tokens(TokenBatch), Captured(Material), Probed(asset_source::ProjectProbe), ProjectPath(asset_source::ProjectPathProbe), Refused(Reason),
+enum ChildEnd {
+    Artifact(asset_source::ArtifactProbe), Tokens(TokenBatch), Captured(Material), Probed(asset_source::ProjectProbe), ProjectPath(asset_source::ProjectPathProbe), Refused(Reason),
     Images(asset_source::CapturedPublicImageBatch),
     Installation(Result<crate::installation::Matching, crate::installation::CheckReason>),
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     Vault(vault::ChildResult),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     KeyringProvider { step: crate::vault_keyring_linux::ProviderStep, result: Result<(), crate::vault_keyring_linux::Problem> },
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     KeyringHelper(Result<(), keyring::Problem>),
 }
 enum Staged {
+    Artifact{proof:asset_source::ArtifactProbe,binding:Arc<ArtifactBinding>},
     Installation(crate::installation::Matching),
     Selected { payload: Arc<Payload>, tokens: TokenBatch }, Prepared { result: Result<SafeAssessment, CommandError>, tokens: TokenBatch },
     Delete(TokenBatch), Project { proof: asset_source::ProjectProbe, generation: u32 },
@@ -3624,21 +4274,23 @@ enum Staged {
     Images { batch: asset_source::CapturedPublicImageBatch, binding: Arc<images::Binding> },
     EvidenceFolder { proof: asset_source::ProjectProbe, tokens: TokenBatch, purpose: EvidencePurpose }, EvidenceObserved(EvidenceResult),
     Committed { bind: Option<Token> }, Bound(Assignment), Refused(Reason),
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     Vault(vault::Staged),
 }
 #[cfg(feature = "desktop-shell")]
 enum Job {
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    Artifact{app:tauri::AppHandle,binding:Arc<ArtifactBinding>},
     Installation,
     Choose { app: tauri::AppHandle, kind: Kind, roster: ProjectRoster },
     Project { app: tauri::AppHandle, generation: u32, origins: Vec<Arc<OriginWitness>>, vault: Option<asset_source::RegisteredRoot> },
     ProjectPath { app: tauri::AppHandle, binding: Arc<ProjectPathBinding> },
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     AndroidSource { app: tauri::AppHandle, binding: Arc<AndroidSourceBinding> },
     Images { app: tauri::AppHandle, binding: Arc<images::Binding> },
     ChooseEvidenceFolder { app: tauri::AppHandle, purpose: EvidencePurpose }, InspectEvidence { root: asset_source::RegisteredRoot, purpose: EvidencePurpose },
     Prepare { payload: Arc<Payload>, context: Arc<NativeContext> }, Delete, Retire { bind: Option<Token> }, Bind(Assignment),
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     Vault(vault::Job),
 }
 
@@ -3647,7 +4299,7 @@ async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Rea
     let fixture_kind = match &job { ChildJob::Probe { .. } => 1, ChildJob::Tokens => 2, ChildJob::Capture { .. } => 3, ChildJob::ProjectPath { .. } => 4, ChildJob::Vault(_) => 5, ChildJob::KeyringProvider { .. } => 6, ChildJob::Images { .. } => 7, ChildJob::Installation => 8 };
     let mut book = owner.child.lock().await;
     let mut failed_cleanup = false;
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if book.handle.is_none() && book.receipt == JoinReceipt::Failed && matches!(&job, ChildJob::Vault(vault::Child::Release)) {
         failed_cleanup = vault::retain_failed_child_for_release(owner);
     }
@@ -3663,7 +4315,7 @@ async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Rea
         // presume that Returned means the result was published/disposed.
         owner.large_work_started.store(true, Ordering::SeqCst);
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     if !matches!(&job, ChildJob::Tokens | ChildJob::KeyringHelper(_)) && !matches!(&job, ChildJob::Vault(job) if !job.large()) {
         owner.large_work_started.store(true, Ordering::SeqCst);
     }
@@ -3687,8 +4339,13 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
     let mut stop = || owner.interrupted();
     if stop() && !cleanup_child(&job) { return ChildEnd::Refused(Reason::UserCancelled); }
     match job {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        ChildJob::Artifact{path,binding}=>match owner.source.lock(){
+            Ok(mut book)=>match asset_source::probe_artifact(&mut book,&binding.root,path,binding.role,&mut stop){Ok(proof)=>ChildEnd::Artifact(proof),Err(reason)=>ChildEnd::Refused(reason)},
+            Err(_)=>ChildEnd::Refused(Reason::CleanupUnknown),
+        },
         ChildJob::Installation => ChildEnd::Installation(installation::execute(owner)),
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         ChildJob::KeyringHelper(document) => ChildEnd::KeyringHelper(keyring_macos::execute(&document, owner)),
         ChildJob::Tokens => match random_tokens(&mut stop) { Ok(tokens) => ChildEnd::Tokens(tokens), Err(reason) => ChildEnd::Refused(reason) },
         ChildJob::Capture { path, roots, kind } => {
@@ -3706,9 +4363,9 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
         }
         ChildJob::Probe { path, origins, vault } => match owner.source.lock() {
             Ok(mut book) => {
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 let result = asset_source::probe_project_excluding_vault(&mut book, path, &origins, vault.as_ref(), &mut stop);
-                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
                 let result = if vault.is_some() { Err(Reason::UnsupportedPlatform) } else { asset_source::probe_project(&mut book, path, &origins, &mut stop) };
                 match result { Ok(probe) => ChildEnd::Probed(probe), Err(reason) => ChildEnd::Refused(reason) }
             },
@@ -3731,7 +4388,7 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
                 Err(reason) => { images::source_failure(owner, reason); ChildEnd::Refused(reason) },
             }
         },
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         ChildJob::Vault(job) => match vault::execute(owner, job) { Ok(result) => ChildEnd::Vault(result), Err(reason) => ChildEnd::Refused(reason) },
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         ChildJob::KeyringProvider { step } => {
@@ -3752,21 +4409,21 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
     }
 }
 fn cleanup_child(_job: &ChildJob) -> bool {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     { return matches!(_job, ChildJob::KeyringHelper(_)) || matches!(_job, ChildJob::Vault(job) if job.cleanup()); }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     { matches!(_job, ChildJob::Vault(job) if job.cleanup()) || matches!(_job, ChildJob::KeyringProvider { step: crate::vault_keyring_linux::ProviderStep::Release }) }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { false }
 }
 fn child_allocation_admitted(_owner: &OriginalWork, _job: &ChildJob) -> bool {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if matches!(_job, ChildJob::Vault(vault::Child::Release)) { return vault::release_child_admitted(_owner); }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if let ChildJob::KeyringProvider { step } = _job {
         return _owner.keyring.try_lock().is_ok_and(|book| book.provider_step_ready(*step));
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     if matches!(_job, ChildJob::KeyringHelper(_)) {
         return _owner.keyring.try_lock().is_ok_and(|book| book.dispatch_ready());
     }
@@ -3794,7 +4451,7 @@ fn prepare_copy_start(state: &mut DocumentState, owner: &Arc<OriginalWork>) -> R
     // Sticky, conservative boundary: this slice refuses lookup after ANY R1
     // request/Value or non-Token child work started in this owner, even after a later phase change.
     // Its memory is not the native parser's 6MiB arena and is not in the census.
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     owner.large_work_started.store(true, Ordering::SeqCst);
     let changed = slot.phase != Phase::Assessing; slot.phase = Phase::Assessing; Ok(changed)
 }
@@ -3823,8 +4480,8 @@ impl Slot {
         Self { owner, operation, phase: Phase::Admitting, reason: Reason::None, source: SourceState::NotRun, settlement: Settlement::Pending,
             context, target, review_end, cleanup_end: None, candidate: None, selection: None, assessment: None, preview: None,
             assessment_context_revision, staged: None, error: None, project: None, discard: false, kind: None, result_record: None, retired_payload: None,
-            evidence: None, project_path: None, path_result: None, android_source: None, images: None, image_batch: None, installation_result: None,
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            evidence: None, project_path: None, path_result: None, android_source: None, artifact:None, images: None, image_batch: None, installation_result: None,
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: vault::SlotData::default() }
     }
 }
@@ -3850,7 +4507,7 @@ impl DocumentBinding {
             else { state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner)) && state.lifetime.original_bound() && !state.stopping && !state.unknown };
         // Remember the actual native decline before stop_quit changes STOP.
         // A programmatic post-STOP close or rejected late OK is never Cancel.
-        let path_choice = !quit && state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner) && (slot.operation.project_path() || slot.operation.android_source() || slot.operation.images()));
+        let path_choice = !quit && state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner) && (slot.operation.project_path() || slot.operation.android_source() || slot.operation.artifact() || slot.operation.images()));
         // Preserve the existing Project/File/Evidence receipt semantics. This
         // new purpose separately records genuine native Cancel, never Other or
         // a programmatic/late post-STOP close, for its null-only cancellation.
@@ -3870,7 +4527,7 @@ impl DocumentBinding {
                 state.github.retire(GitHubReason::Cancelled);
                 self.inner.bridge.diagnostics.request_shutdown();
                 self.inner.bridge.preflight.request_shutdown();
-                self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref()); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown();
+                self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref()); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown();
                 if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::Shutdown, now); }
                 stop_quit(&mut state, now);
                 fixture_event!(owner, QuitStop, 1);
@@ -3879,7 +4536,7 @@ impl DocumentBinding {
             if read_one_path {
                 slot.phase = Phase::Capturing;
                 slot.source = if slot.operation == Operation::ChooseFile || slot.operation.images() { SourceState::Pending } else { SourceState::NotRun };
-                if !slot.operation.project_path() && !slot.operation.android_source() && slot.review_end.is_none() { slot.review_end = Some(now + REVIEW); }
+                if !slot.operation.project_path() && !slot.operation.android_source() && !slot.operation.artifact() && slot.review_end.is_none() { slot.review_end = Some(now + REVIEW); }
             } else { slot.stop(Reason::UserCancelled, now); }
         }
         drop(facts); self.bump(&mut state); owner.gui.changed(); Some(read_one_path)
@@ -3940,8 +4597,8 @@ impl DocumentBinding {
         if let Some(publisher)=publisher{finish_registration_publisher(publisher);}
         if evidence_family.is_none() && installation_id.is_none(){
             let mut state=self.lock();self.reconcile_android_registration_locked(&state);
-            #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
-            self.reconcile_macos_maintenance_locked(&mut state);
+            #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+            {self.reconcile_macos_removal_locked(&mut state);self.reconcile_macos_maintenance_locked(&mut state);}
         }
     }
     fn reconcile_checked_published(&self,evidence_family:Option<bool>,installation_id:Option<u32>,
@@ -3958,7 +4615,7 @@ impl DocumentBinding {
         if evidence_family.is_some_and(|family| evidence_route_gate(&state, family).is_err()) { return; }
         self.expire(&mut state, Instant::now());
         if state.retiring { return; }
-        #[cfg(all(feature = "desktop-shell", any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(all(feature = "desktop-shell", any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         match vault::start_cleanup(self, &mut state) {
             Ok(Some(start)) => { drop(state); let _ = start.send(()); return; },
             Ok(None) => {},
@@ -3985,9 +4642,9 @@ impl DocumentBinding {
                 let records = std::mem::take(&mut state.records);
                 let assignments = std::mem::take(&mut state.assignments);
                 let context = state.context.take();
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 let vault = vault::take_empty_session(&mut state);
-                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
                 let vault: Option<()> = None;
                 let changed = state.session || state.lock_pending || context.is_some() || !records.is_empty() || !assignments.is_empty() || vault.is_some();
                 state.retiring = true; drop(state); drop((records, assignments, context, vault));
@@ -4072,7 +4729,7 @@ impl DocumentBinding {
             }
         }
 
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         if let Some(ChildEnd::KeyringHelper(result)) = &orphan_result {
             let at = if let Ok(mut book) = slot.owner.keyring.try_lock() {
                 book.interrupt(); book.child_joined(*result);
@@ -4099,7 +4756,7 @@ impl DocumentBinding {
             self.bump(&mut state);
         }
 
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if slot.owner.control_resources_settled() && slot.owner.retired.load(Ordering::SeqCst)
             && slot.owner.keyring.try_lock().is_ok_and(|book| book.memory_held()) {
             // A settled SDK/book still owns its charged backing. Register this
@@ -4142,16 +4799,16 @@ impl DocumentBinding {
                 }
             }
         }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let cleanup_data_ready = vault::retirement_ready(&state, &slot);
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let cleanup_data_ready = false;
         if (resources || cleanup_data_ready) && (slot.discard || slot.phase == Phase::Idle || state.lock_pending || state.stopping || state.unknown || cleanup_data_ready) {
             let retire_context = slot.cleanup_end.is_some() || slot.candidate.is_some() || state.lock_pending || state.stopping || state.unknown || !state.lifetime.original_bound();
             let mut retirement = Retirement { candidate: slot.candidate.take(), staged: slot.staged.take(),
                 payload: slot.retired_payload.take(), image_batch: slot.image_batch.take(),
                 slot_context: if retire_context { slot.context.take() } else { None }, ..Retirement::default() };
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             { retirement.vault = vault::take_retirement(&mut state, &mut slot); }
             // Keep the sanitized explanation for the terminal idle receipt, but
             // release all native candidate leases before known settlement.
@@ -4185,7 +4842,7 @@ impl DocumentBinding {
                         if !retirement.records.is_empty() { state.records = retirement.records; }
                         if !retirement.assignments.is_empty() { state.assignments = retirement.assignments; }
                         if retirement.context.is_some() { state.context = retirement.context; }
-                        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                         vault::restore_retirement(&mut state, &mut slot, retirement.vault);
                         first_unknown_origin!(state, UnknownOrigin::RetirementRetain, Some(&slot.owner));
                         state.unknown = true; slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
@@ -4194,7 +4851,7 @@ impl DocumentBinding {
                 }
             }
         }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         vault::observe_detached_stop(&mut state, &slot, Instant::now());
         state.slot = Some(slot);
         self.observe_android_source_slot(&state);
@@ -4235,7 +4892,7 @@ impl DocumentBinding {
             self.observe_android_source_slot(&state);
             self.bump(&mut state);
         }
-        #[cfg(all(feature = "desktop-shell", any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(all(feature = "desktop-shell", any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         {
             let mut state = self.lock();
             match vault::start_cleanup(self, &mut state) {
@@ -4276,9 +4933,17 @@ impl DocumentBinding {
             state.saved_input=None;
         }
         match staged {
+            Staged::Artifact{proof,binding}=>{
+                if !slot.operation.artifact()||!slot.artifact.as_ref().is_some_and(|v|Arc::ptr_eq(v,&binding))||!slot.owner.artifact_selected_settled(){
+                    slot.stop(Reason::CleanupUnknown,Instant::now());state.unknown=true;return;}
+                let current=self.registry_result(state,self.inner.bridge.native_project(&binding.project_id),Some(&slot.owner));
+                if !current.is_ok_and(|(generation,root)|generation==binding.generation&&root==binding.root){slot.stop(Reason::ContextStale,Instant::now());return;}
+                if self.inner.bridge.artifact_inspection.artifact_publish_pick(&slot.owner,proof).is_err(){slot.stop(Reason::CleanupUnknown,Instant::now());state.unknown=true;return;}
+                slot.phase=Phase::Idle;slot.settlement=Settlement::Known;
+            }
             Staged::Installation(matching) => installation::publish(state, slot, matching),
             Staged::Images { batch, binding } => images::publish(self, state, slot, batch, binding),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Staged::Vault(result) => vault::publish(self, state, slot, result),
             Staged::AndroidSource { proof, binding } => {
                 if !slot.operation.android_source() || !slot.android_source.as_ref().is_some_and(|original| Arc::ptr_eq(original, &binding))
@@ -4392,7 +5057,7 @@ impl DocumentBinding {
             Staged::Project { proof, generation } => match self.inner.bridge.publish_checked_project(proof, generation) {
                 Ok(project) => {
                     invalidate_all(state);
-                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                     match self.inner.bridge.native_generation() {
                         Ok(actual) => vault::registered_generation(state, actual),
                         Err(error) => {
@@ -4439,7 +5104,7 @@ impl DocumentBinding {
                 if existing.is_none() && (state.assignments.len() >= 8 || state.assignments.try_reserve_exact(1).is_err()) {
                     slot.stop(Reason::Capacity, Instant::now()); return;
                 }
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 if encrypted_mode(state) {
                     if let Err(reason) = vault::bind_payload(state, slot, &assignment) {
                         slot.stop(reason, Instant::now()); slot.error = Some(AssetError::new(reason).into()); return;
@@ -4472,9 +5137,9 @@ fn tokens_distinct(tokens: &TokenBatch) -> bool {
 
 fn preview_subject_valid(state: &DocumentState, slot: &Slot, preview: &Preview) -> bool {
     let PreviewSubject::Record { kind, change, record_id, record_revision } = &preview.subject else {
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { return vault::initialize_preview_valid(state, slot, preview); }
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         { return false; }
     };
     if !kind.enabled() || slot.kind != Some(*kind) { return false; }
@@ -4519,13 +5184,13 @@ impl DocumentBinding {
         // Every caller also has its real reciprocal admission check. Keep the
         // path original nonreplaceable here even if a future caller omits one;
         // an absent path slot in its invoke waiter then implies known settlement.
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let retired_cleanup = matches!(&job, Job::Vault(vault::Job::Release)) && vault::late_cleanup_install(state, &slot);
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let retired_cleanup = false;
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let cleanup_only = matches!(&job, Job::Vault(vault::Job::Release));
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let cleanup_only = false;
         if state.maintenance.closed() && !cleanup_only { return Err(AssetError::new(Reason::Busy)); }
         // An already-late-settled unrelated path remains Unknown. Only the
@@ -4536,14 +5201,14 @@ impl DocumentBinding {
         // Public images share lifecycle custody, not a private credential
         // session/lease. Their raw allowance already charges retained vault
         // DATA without attaching or consuming the vault's use authority.
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if !slot.operation.images() && !slot.operation.installation() { vault::attach_asset_slot(state, &mut slot)?; }
         settle_evidence_status(state);
         installation::remember(state);
         let owner = slot.owner.clone();
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         self.installed_record_original(&owner, Some(slot.operation))?;
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         self.installed_macos_record_original(&owner, Some(slot.operation))?;
         let old_slot = state.slot.take().map(Box::new);
         if let Err(retirement) = owner.retain_retirement(Retirement { old_slot, ..Retirement::default() }) {
@@ -4585,7 +5250,7 @@ impl DocumentBinding {
         let target = target(&state, args.replacement, args.kind)?;
         let mut roster = self.registry_result(&mut state, self.inner.bridge.native_roster(), None)?;
         if roster.generation != context.registry_generation { return Err(AssetError::new(Reason::ContextStale)); }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if let Some(vault) = vault::physical_root(&state) { roster.roots.push(vault); }
         let id = self.next_operation(&mut state)?;
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
@@ -4601,7 +5266,7 @@ impl DocumentBinding {
         let context = self.current_context(&mut state, args.context_revision)?;
         let durable = encrypted_mode(&state);
         if args.label.is_some() != (durable && !matches!(args.source, commands::Source::Record(_))) { return Err(AssetError::invalid()); }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if durable {
             if let commands::Source::Record(reference) = &args.source {
                 let key = own_record(commands::RecordRef { record_id: reference.record_id, expected_revision: reference.expected_revision })?;
@@ -4642,7 +5307,7 @@ impl DocumentBinding {
         let id = self.next_operation(&mut state)?;
         let owner = OriginalWork::new(id, false, Arc::downgrade(&self.inner));
         let mut slot = Slot::new(owner, Operation::Prepare, Some(context.clone()), target.clone(), review_end);
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { slot.vault.label = args.label.flatten().map(commands::copy_text).transpose()?; }
         slot.kind = Some(payload.kind); slot.source = if payload.material.is_some() { SourceState::Captured } else { SourceState::NotRun };
         let is_mutation = candidate.is_some(); slot.candidate = candidate;
@@ -4655,7 +5320,7 @@ impl DocumentBinding {
     }
 
     pub(crate) fn prepare_delete(&self, reference: commands::RecordRef<'_>) -> Result<AssetStatus, AssetError> {
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if encrypted_mode(&self.lock()) { return self.prepare_vault_delete(reference); }
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?; idle(&state)?;
         let key = own_record(reference)?;
@@ -4708,20 +5373,20 @@ async fn run_job(document: DocumentBinding, owner: Arc<OriginalWork>, job: Job) 
             _ = tokio::time::sleep(Duration::from_millis(25)) => document.tick(),
         }
     };
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if owner.installation.is_none() { vault::after_job(&document, &owner, &staged).await; }
     document.stage(&owner, staged);
 }
 
 #[cfg(feature = "desktop-shell")]
 async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job: Job) -> Staged {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if matches!(&job, Job::Vault(vault::Job::Release)) { return vault::run(document, owner, vault::Job::Release).await; }
     if owner.interrupted() { owner.gui.not_created(Reason::UserCancelled); return Staged::Refused(Reason::UserCancelled); }
     match job {
         Job::Installation => installation::run(owner).await,
         Job::Images { app, binding } => images::run(document, owner, app, binding).await,
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Job::Vault(job) => vault::run(document, owner, job).await,
         Job::Retire { bind } => Staged::Committed { bind },
         Job::Bind(assignment) => Staged::Bound(assignment),
@@ -4792,7 +5457,15 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
                 Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
             }
         }
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        Job::Artifact{app,binding}=>{
+            let path=match crate::shell::run_owned_dialog(&app,owner,crate::shell::DialogChoice::ArtifactInput{format:binding.format,role:binding.role},None).await{
+                Ok(Some(path))=>path,Ok(None)=>return Staged::Refused(Reason::UserCancelled),Err(reason)=>return Staged::Refused(reason)};
+            if let Err(reason)=document.phase(owner,Phase::Capturing){return Staged::Refused(reason);}
+            match child(owner,ChildJob::Artifact{path,binding:binding.clone()}).await{
+                Ok(ChildEnd::Artifact(proof))=>Staged::Artifact{proof,binding},Ok(ChildEnd::Refused(reason))|Err(reason)=>Staged::Refused(reason),_=>Staged::Refused(Reason::CleanupUnknown)}
+        }
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         Job::AndroidSource { app, binding } => {
             let path = match crate::shell::run_owned_dialog(&app, owner, crate::shell::DialogChoice::AndroidToolSource(binding.role), None).await {
                 Ok(Some(path)) => path, Ok(None) => return Staged::Refused(Reason::UserCancelled), Err(reason) => return Staged::Refused(reason),
@@ -4814,7 +5487,7 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
             if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-                target_os = "macos", target_arch = "aarch64"))]
+                target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             {
                 use tauri::Manager;
                 if let Some(q) = app.try_state::<Arc<crate::shell::installed_observation::Observation>>() {
@@ -4937,7 +5610,7 @@ impl DocumentBinding {
     }
 
     pub(crate) fn commit(&self, token: &str) -> Result<AssetStatus, AssetError> {
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if encrypted_mode(&self.lock()) { return self.commit_vault(token); }
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?;
         let preview = self.consume_preview(&mut state, token, false)?;
@@ -5014,7 +5687,7 @@ impl DocumentBinding {
     }
 
     pub(crate) fn bind(&self, token: &str) -> Result<AssetStatus, AssetError> {
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if encrypted_mode(&self.lock()) { return self.bind_vault(token); }
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?;
         let preview = self.consume_preview(&mut state, token, true)?;
@@ -5049,7 +5722,7 @@ impl DocumentBinding {
         if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged).map_err(|_|AssetError::new(Reason::CleanupUnknown))?; }
         state.saved_input=None;
         self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed();
-        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.common_gate(&state, false)?;
+        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.common_gate(&state, false)?;
         if !self.project_selection_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
         idle(&state)?;
         // Acquire the registry's checked generation before any native work;
@@ -5064,9 +5737,9 @@ impl DocumentBinding {
         // not only success, revokes old use; cancel/refusal never restores it.
         invalidate_all(&mut state);
         state.github.retire(GitHubReason::TargetChanged);
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let vault = vault::physical_root(&state);
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let vault = None;
         let start = self.install(&mut state, slot, Job::Project { app, generation, origins, vault })?;
         drop(state); let _ = start.send(()); Ok(id)
@@ -5076,17 +5749,17 @@ impl DocumentBinding {
     pub(crate) async fn project_result(&self, id: u32) -> Result<Option<Project>, AssetError> {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-            target_os = "macos", target_arch = "aarch64"))]
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         { self.project_result_original(id, None).await }
         #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-            target_os = "macos", target_arch = "aarch64")))]
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { self.project_result_original(id).await }
     }
     async fn project_result_original(&self, id: u32,
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-            target_os = "macos", target_arch = "aarch64"))]
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         mut selection: Option<&mut Option<InstalledMacProjectSelectionData>>,
     ) -> Result<Option<Project>, AssetError> {
         loop {
@@ -5099,7 +5772,7 @@ impl DocumentBinding {
                     if slot.reason == Reason::None || slot.reason == Reason::UserCancelled {
                         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
                             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-                            target_os = "macos", target_arch = "aarch64"))]
+                            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                         if let (Some(companion), Some(project)) = (selection.as_deref_mut(), slot.project.as_ref()) {
                             // This guard still binds the original id/slot. Only
                             // saved DATA crosses the return, never an observer
@@ -5118,9 +5791,9 @@ impl DocumentBinding {
 
     pub(crate) fn choose_android_tool_source(&self, app: tauri::AppHandle, input: crate::android_tool_sources::Choose)
         -> Result<crate::android_tool_sources::Status, BridgeError> {
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { let _ = (app, input); return Err(crate::android_tool_sources::unavailable()); }
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,false)?;
             let result=(|| {
@@ -5224,7 +5897,7 @@ impl DocumentBinding {
         self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.android_build.ensure_idle()?;
         self.inner.bridge.project_recovery.ensure_idle()?;
-        self.inner.bridge.ios_archive.ensure_idle()?;
+        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
         self.inner.bridge.diagnostics.ensure_idle()?;
         Ok(())
     }
@@ -5259,9 +5932,10 @@ impl DocumentBinding {
         // Only this already-ended quit original is joined here.
         ready && quit.is_some_and(|quit| quit.join_if_ended() == Some(true) && quit.resources_settled())
             && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
-            && self.inner.bridge.preflight.can_exit() && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit()))
+            && self.inner.bridge.preflight.can_exit() && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && self.inner.bridge.artifact_inspection.can_exit()))
     }
-    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    #[cfg(any(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
     pub(crate) fn exit_cleanup_end(&self) -> Option<Instant> {
         // Observe only the retained accepted Quit's first STOP; never reconcile,
         // start another owner, or create a timestamp in the exit observer.
@@ -5279,7 +5953,7 @@ impl DocumentBinding {
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if self.installed_record_original(&owner, None).is_err() { state.unknown = true; self.bump(&mut state); return; }
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         if self.installed_macos_record_original(&owner, None).is_err() { state.unknown = true; self.bump(&mut state); return; }
         let previous = state.quit.replace(owner.clone());
         state.quit_pending = true; state.quit_accepted = false; state.quit_cleanup_end = None;
@@ -5323,7 +5997,7 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     // join! does not short-circuit an error or abandon any original future.
     let settlement = async {
         let gui = async { if !dialog_ended { let _ = dialog.as_mut().await; } };
-        let _ = tokio::join!(gui, document.shutdown_assets(), document.inner.bridge.supervisor.shutdown(), document.inner.bridge.edits.shutdown(), document.inner.bridge.diagnostics.shutdown(), document.inner.bridge.preflight.shutdown(), document.inner.bridge.android_build.shutdown(), document.inner.bridge.project_recovery.shutdown(), document.inner.bridge.ios_archive.shutdown());
+        let _ = tokio::join!(gui, document.shutdown_assets(), document.inner.bridge.supervisor.shutdown(), document.inner.bridge.edits.shutdown(), document.inner.bridge.diagnostics.shutdown(), document.inner.bridge.preflight.shutdown(), document.inner.bridge.android_build.shutdown(), document.inner.bridge.project_recovery.shutdown(), document.inner.bridge.ios_archive.shutdown(), document.inner.bridge.artifact_inspection.shutdown());
     };
     tokio::pin!(settlement);
     loop {
@@ -5335,7 +6009,7 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     }
     // Late all-positive settlement may permit exit, never a successful import,
     // new owner, reassignment or reuse of this unknown session.
-    while !(document.retained_material_can_exit() && document.inner.bridge.supervisor.can_exit() && document.inner.bridge.edits.can_exit() && document.inner.bridge.diagnostics.can_exit() && document.inner.bridge.preflight.can_exit() && (document.inner.bridge.android_build.can_exit() && (document.inner.bridge.project_recovery.can_exit() && document.inner.bridge.ios_archive.can_exit()))) {
+    while !(document.retained_material_can_exit() && document.inner.bridge.supervisor.can_exit() && document.inner.bridge.edits.can_exit() && document.inner.bridge.diagnostics.can_exit() && document.inner.bridge.preflight.can_exit() && (document.inner.bridge.android_build.can_exit() && (document.inner.bridge.project_recovery.can_exit() && document.inner.bridge.ios_archive.can_exit() && document.inner.bridge.artifact_inspection.can_exit()))) {
         tokio::select! {
             _ = owner.wake.notified() => document.tick(),
             _ = tokio::time::sleep(Duration::from_millis(50)) => document.tick(),
@@ -5348,7 +6022,7 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 mod installed_macos_observation {
     use super::*;
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6074,10 +6748,10 @@ mod installed_macos_observation {
             self.inner.bridge.edits.installed_macos_document_live(&witness.edit)
                 && !self.inner.bridge.supervisor.disabled() && !self.inner.bridge.edits.disabled()
                 && !self.inner.bridge.diagnostics.disabled() && !self.inner.bridge.preflight.disabled()
-                && !self.inner.bridge.android_build.disabled() && !self.inner.bridge.project_recovery.disabled() && !self.inner.bridge.ios_archive.disabled()
+                && !self.inner.bridge.android_build.disabled() && !self.inner.bridge.project_recovery.disabled() && !(self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled())
                 && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
                 && self.inner.bridge.preflight.can_exit() && self.inner.bridge.android_build.can_exit()
-                && self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit()
+                && self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && self.inner.bridge.artifact_inspection.can_exit()
         }
         pub(crate) fn installed_macos_final(&self, id: u32, project: Option<&ProjectWitness>, picker: Option<&PickerWitness>, lost: bool) -> bool {
             let Ok(state) = self.inner.state.try_lock() else { return false; }; let Some(quit) = &state.quit else { return false; };
@@ -6102,9 +6776,9 @@ mod installed_macos_observation {
                 _ => false,
             };
             original && !self.inner.bridge.supervisor.disabled() && !self.inner.bridge.edits.disabled()
-                && !self.inner.bridge.diagnostics.disabled() && !self.inner.bridge.preflight.disabled() && !(self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || self.inner.bridge.ios_archive.disabled()))
+                && !self.inner.bridge.diagnostics.disabled() && !self.inner.bridge.preflight.disabled() && !(self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled())))
                 && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
-                && self.inner.bridge.preflight.can_exit() && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit()))
+                && self.inner.bridge.preflight.can_exit() && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && self.inner.bridge.artifact_inspection.can_exit()))
         }
         pub(crate) fn installed_macos_safe_quit(&self) -> bool {
             // Existing ordinary admission only; never reset Unknown/STOP,
@@ -6115,7 +6789,7 @@ mod installed_macos_observation {
 }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProjectWitness, PickerWitness as InstalledMacPickerWitness,
     InstallationWitness as InstalledMacInstallationWitness,
     SessionSnapshot as InstalledMacSessionSnapshot, VaultSnapshot as InstalledMacVaultSnapshot,
@@ -6816,7 +7490,7 @@ pub(crate) fn assert_project_path_document_contracts() {
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             first_origin: None }
@@ -6949,7 +7623,7 @@ pub(crate) fn assert_project_selection_gate_contract() {
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             first_origin: None }
@@ -6978,7 +7652,7 @@ pub(crate) fn assert_project_selection_gate_contract() {
     }
     assert_eq!(reason(&ready), None);
     let platform = if cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")),
         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))) { None } else { Some(Reason::UnsupportedPlatform) };
     assert_eq!(ordinary_asset_platform_gate().err().map(|error| error.reason), platform);
     assert!(!ready.session && ready.context.is_none() && ready.records.is_empty() && ready.assignments.is_empty());
@@ -7039,6 +7713,39 @@ mod tests {
     use super::*;
     #[test]
     fn project_path_shares_exclusions_but_not_asset_authority_or_synthetic_finality() { assert_project_path_document_contracts(); }
+    #[test]
+    fn configuration_recovery_reuses_registered_gate_and_excludes_normal_save_observations() {
+        // SOURCE wiring only: these assertions do not construct a document,
+        // register a root, grant an SDK permission or claim a native result.
+        let source=include_str!("asset_session.rs");
+        let body=|start,end| source.split_once(start).unwrap().1.split_once(end).unwrap().0;
+        let recovery=body("pub(crate) fn configuration_recovery_admit_published<T>(", "pub(crate) fn workflow_edit_admit_published<T>(");
+        assert!(recovery.contains("self.lock()"));assert!(recovery.contains("self.registered_edit_root_locked_published(&mut state, crate::edit_protocol::EditDomain::Configuration,"));
+        assert!(recovery.find("registered_edit_root_locked_published").unwrap()<recovery.find("enqueue(&self.inner.bridge").unwrap());
+        assert!(recovery.contains("finish_registration_publisher(publisher)"));assert!(!recovery.contains("drop(state)") && !recovery.contains(".await"));
+        let normal=body("fn registered_edit_admit_published<T>(", "fn registered_edit_root_locked_published(");
+        assert!(normal.find("if domain == crate::edit_protocol::EditDomain::Configuration { return Err(BridgeError::invalid()); }").unwrap()<normal.find(".reserve(").unwrap());
+        let gate=body("fn registered_edit_root_locked_published(", "pub(crate) fn workflow_fixture_publish(");
+        for required in ["state.lifetime.original_bound()","state.lost_observed","state.unknown || state.exhausted","state.stopping",
+            "state.maintenance.closed()","state.quit_pending","self.inner.bridge.android_build.ensure_idle()?",
+            "self.inner.bridge.project_recovery.ensure_idle()?","self.inner.bridge.diagnostics.ensure_idle()?",
+            "self.inner.bridge.native_project(&id)","document_lost_published(MAIN, Some(&*publisher))"] { assert!(gate.contains(required),"{required}"); }
+        assert!(gate.find("publisher.accept(").unwrap()<gate.find("native_project(&id)").unwrap());
+        let shell=include_str!("shell.rs");
+        for (start,end,branch,hook) in [("async fn open_config_edit(","async fn prepare_config_edit(","return state.bridge.open_configuration_recovery","q.open_request"),
+            ("async fn prepare_config_edit(","async fn apply_config_edit(","return state.bridge.prepare_configuration_recovery","q.prepare_request"),
+            ("async fn apply_config_edit(","async fn close_config_edit(","return state.bridge.apply_configuration_recovery","q.apply_request")] {
+            let body=shell.split_once(start).unwrap().1.split_once(end).unwrap().0;
+            assert!(body.find(branch).unwrap()<body.find(hook).unwrap());
+            assert!(body.contains("configuration_edit_admit_published("));
+        }
+        assert!(shell.contains("normal_configuration_session(window, &args.session_id) { q.close_request(); }"));
+        assert!(shell.contains(".all(|projection| projection.recovery.is_none())"));
+        let bridge=include_str!("bridge.rs");
+        let open=bridge.split_once("pub(crate) fn open_configuration_recovery(").unwrap().1.split_once("pub(crate) fn prepare_configuration_recovery(").unwrap().0;
+        assert!(open.find("configuration_recovery_open_ticket(window)?").unwrap()<open.find("configuration_recovery_admit_published(").unwrap());
+        assert!(open.contains("registration, ticket)"));assert!(!open.contains("project_root("));
+    }
     fn token(byte: char) -> Token { Token(byte.to_string().repeat(32)) }
     pub(super) fn empty_state() -> DocumentState {
         DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
@@ -7046,7 +7753,7 @@ mod tests {
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             first_origin: None }
@@ -7392,6 +8099,33 @@ mod tests {
         assert_eq!(accepted_quit_cleanup_end(&state), Some(at + CLEANUP));
         state.quit = None;
         assert_eq!(accepted_quit_cleanup_end(&state), None);
+
+        // SOURCE fanout, not a dialog/worker settlement receipt. The real
+        // owner shutdown semantics are exercised by the existing artifact
+        // clock/decoder group; this catches omissions in its native callers.
+        let source = include_str!("asset_session.rs");
+        let response = source.split_once("fn gui_response(").unwrap().1.split_once("fn phase(").unwrap().0;
+        let accepted = response.split_once("if quit {\n            if facts.accepted {").unwrap().1
+            .split_once("} else { stop_quit(").unwrap().0;
+        let request = "self.inner.bridge.artifact_inspection.request_shutdown();";
+        assert_eq!(response.matches(request).count(), 1);
+        assert!(response.find("let mut state = self.lock()").unwrap() < response.find(request).unwrap());
+        assert!(accepted.find("state.stopping = true").unwrap() < accepted.find(request).unwrap());
+        assert!(accepted.find(request).unwrap() < accepted.find("stop_quit(").unwrap());
+        let compatibility = source.split_once("pub(crate) fn compatibility_quit_result(").unwrap().1
+            .split_once("fn common_gate(").unwrap().0;
+        assert_eq!(compatibility.matches(request).count(), 1);
+        let compatibility_accepted = compatibility.split_once("if accepted {").unwrap().1.split_once("\n        }").unwrap().0;
+        assert!(compatibility_accepted.contains(request));
+        let quit = source.split_once("async fn run_quit(").unwrap().1
+            .split_once("// The fixed data-only exit observer").unwrap().0;
+        let join = quit.split_once("tokio::join!(").unwrap().1.split_once(");").unwrap().0;
+        assert_eq!(join.matches("document.inner.bridge.artifact_inspection.shutdown()").count(), 1);
+        let late = quit.split_once("while !(").unwrap().1.split_once(" {\n").unwrap().0;
+        assert_eq!(late.matches("document.inner.bridge.artifact_inspection.can_exit()").count(), 1);
+        let exit = source.split_once("pub(crate) fn can_exit(&self) -> bool {").unwrap().1
+            .split_once("pub(crate) fn exit_cleanup_end(").unwrap().0;
+        assert!(exit.contains("self.inner.bridge.artifact_inspection.can_exit()"));
     }
 
     #[test]
@@ -7426,7 +8160,7 @@ mod tests {
                 for kind in kinds {
                     assert_eq!(macos_session_kind(Platform::Ios, stage, purpose, kind), kind == Kind::AscP8);
                     assert_eq!(session_kind_gate(&context, kind).is_ok(),
-                        !cfg!(all(target_os = "macos", target_arch = "aarch64")) || kind == Kind::AscP8);
+                        !cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) || kind == Kind::AscP8);
                 }
             }
             assert_eq!(macos_session_context(Platform::Ios, stage, Purpose::Signing), stage == Stage::Candidate);
@@ -7447,13 +8181,13 @@ mod tests {
                         };
                         assert_eq!(macos_session_kind(platform, stage, purpose, kind), allowed);
                         assert_eq!(session_kind_gate(&context, kind).is_ok(),
-                            !cfg!(all(target_os = "macos", target_arch = "aarch64")) || allowed);
+                            !cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) || allowed);
                     }
                 }
             }
         }
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
     fn macos_cached_record_preview_publication_and_old_context_cannot_bypass_kind_gate() {
         for (platform, kind, purpose, rejected) in [
@@ -7704,6 +8438,14 @@ mod tests {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     #[test]
     fn lookup_charge_blocks_context_copy_and_same_owner_child_before_dispatch() {
+        // Same production reciprocal decision: an original secret worker's
+        // debit blocks fresh copies, while idle consent/ordinary Setup does not.
+        for (lookup,secret,blocked) in [(false,false,false),(true,false,true),(false,true,true),(true,true,true)]{
+            assert_eq!(allocation_conflict_gate(lookup,secret).err().map(|v|v.reason),blocked.then_some(Reason::Busy));
+        }
+        let mut unknown=empty_state();unknown.lifetime.crash_hook_installed();unknown.lifetime.started(true);unknown.lifetime.finished(true);
+        unknown.unknown=true;
+        assert_eq!(common_document_gate(&unknown,true,||Ok(())).err().map(|v|v.reason),Some(Reason::CleanupUnknown));
         let (mut state, owner) = keyring_memory_model();
         *owner.keyring.lock().unwrap() = crate::vault_keyring_linux::LookupBook::constructor_refusal_data();
         let copied = std::cell::Cell::new(false);
@@ -8101,7 +8843,7 @@ fn installation_reveal_requires_original_document_and_blocks_pending_lifecycle()
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     feature = "macos-installed-observation", not(feature = "development-runtime"),
     not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use installation::{ReadObservation as InstallationReadObservation, OriginalFacts as InstallationOriginalFacts};
 
 #[cfg(test)]
@@ -8110,3 +8852,35 @@ pub(crate) fn assert_installation_owner_contracts() { installation::assert_owner
 #[cfg(test)]
 #[test]
 fn installation_original_clock_routing_and_finality_contract() { assert_installation_owner_contracts(); }
+
+#[cfg(test)]
+pub(crate) fn github_setup_consent_data_checks() {
+    // Existing native DATA selection only: actual empty document/edit registry,
+    // no registered root, process, filesystem operation, token or remote call.
+    let bridge=Arc::new(DesktopBridge::new(std::path::PathBuf::from("/never-opened-setup-data")));
+    let document=DocumentBinding::new(bridge.clone());bridge.edits.initial_document("main").unwrap();
+    let edit=bridge.edits.saved_registration_guard(&document.inner.session_identity).unwrap();
+    let stamp=edit.stamp().unwrap();let expiry_stamp=edit.stamp().unwrap();
+    assert!(edit.matches(&stamp) && edit.matches(&expiry_stamp));drop(edit);
+    crate::github_setup_session::consent_data_checks(stamp,expiry_stamp);
+    // Exercise the production second-registry result boundary on the same
+    // real empty document. The earlier external gate is deliberately stale.
+    let mut state=document.lock();let now=Instant::now();
+    assert_eq!(document.github_setup_registry_result(&mut state, Ok(7u8)),Some(7));
+    assert!(!state.unknown);
+    assert!(document.github_setup_registry_result::<u8>(&mut state, Err(AssetError::new(Reason::ContextStale))).is_none());
+    assert!(!state.unknown);
+    state.github.reconcile_setup(now,GitHubReason::None,None);
+    assert_ne!(state.github.setup_status(false,now,GitHubReason::None).reason,crate::github_setup_protocol::Reason::CleanupUnknown);
+    assert!(document.github_setup_registry_result::<u8>(&mut state, Err(AssetError::new(Reason::CleanupUnknown))).is_none());
+    assert!(state.unknown);
+    state.github.reconcile_setup(now,GitHubReason::None,None);
+    let unknown=state.github.setup_status(false,now,GitHubReason::None);
+    assert_eq!(unknown.reason,crate::github_setup_protocol::Reason::CleanupUnknown);
+    assert!(!unknown.available && unknown.consent.is_none() && unknown.operation.is_none());
+    // A later ordinary absence cannot erase the newly latched containing
+    // failure, grant consent, or invent an original/settlement receipt.
+    assert!(document.github_setup_registry_result::<u8>(&mut state, Err(AssetError::new(Reason::ContextStale))).is_none());
+    state.github.reconcile_setup(now,GitHubReason::None,None);
+    assert_eq!(state.github.setup_status(false,now,GitHubReason::None).reason,crate::github_setup_protocol::Reason::CleanupUnknown);
+}

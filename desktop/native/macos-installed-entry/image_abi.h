@@ -6,8 +6,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#if !defined(__APPLE__) || !defined(__arm64__) || !defined(__LP64__)
-#error "the installed image ABI requires native macOS ARM64 LP64"
+#if !defined(__APPLE__) || !defined(__LP64__) || !defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__)
+#error "the installed image ABI requires macOS LP64"
 #endif
 #ifndef MRK_IMAGE_SOURCE_COMMIT
 #error "the admitted image build must supply the exact SOURCE commit projection"
@@ -30,7 +30,13 @@ enum {
     MRK_MAINTENANCE_KIND_TAIL = 8,
     MRK_IMAGE_PRODUCT_QUIESCED = 1,
 };
+#if defined(__arm64__) && !defined(__x86_64__)
 #define MRK_IMAGE_TARGET "aarch64-apple-darwin"
+#elif defined(__x86_64__) && !defined(__arm64__)
+#define MRK_IMAGE_TARGET "x86_64-apple-darwin"
+#else
+#error "the installed image ABI requires exactly one supported Mac architecture"
+#endif
 #define MRK_MAINTENANCE_WIRE_MAGIC "MRKMNT01"
 #define MRK_IMAGE_WORK_NS UINT64_C(300000000000)
 #define MRK_IMAGE_HARD_NS UINT64_C(310000000000)
@@ -103,6 +109,11 @@ typedef int32_t (*mrk_desktop_image_entry_v1_fn)(void);
 typedef int32_t (*mrk_resident_image_entry_v1_fn)(
     const mrk_resident_host_v1 *, mrk_resident_return_v1 *);
 
+/* These are LP64 scalars and our private schema, not guessed SDK layouts. */
+_Static_assert(sizeof(void *) == 8 && sizeof(uintptr_t) == 8
+    && sizeof(size_t) == 8 && sizeof(long) == 8, "fixed Mac LP64 scalar widths");
+_Static_assert(sizeof(MRK_IMAGE_TARGET) > 1 && sizeof(MRK_IMAGE_TARGET) <= MRK_IMAGE_TARGET_BYTES,
+    "complete bounded literal target projection");
 _Static_assert(sizeof(MRK_IMAGE_SOURCE_COMMIT) == MRK_IMAGE_SOURCE_BYTES + 1,
     "complete literal SOURCE commit projection");
 _Static_assert(sizeof(MRK_IMAGE_RELEASE_ID) > 1 && sizeof(MRK_IMAGE_RELEASE_ID) <= MRK_IMAGE_RELEASE_BYTES,

@@ -156,9 +156,12 @@ class WorkflowEditProtocolTests(unittest.TestCase):
                 parsed = decode(seq, op, params)
                 self.assertEqual(parsed.params, params)
                 self.assertEqual(parsed.protocol, wire.WORKFLOW_PROTOCOL)
-                with self.assertRaises(wire.ProtocolError):
-                    wire.parse_request(frame(seq, op, params, protocol=wire.PROTOCOL),
-                                       sequence=seq, session=None if seq == 0 else SESSION)
+                # The same fixed intent now also exists under configuration's
+                # own protocol; it does not cross the outer protocol binding.
+                config = wire.parse_request(frame(seq, op, params, protocol=wire.PROTOCOL),
+                                            sequence=seq, session=None if seq == 0 else SESSION)
+                self.assertEqual(config.protocol, wire.PROTOCOL)
+                self.assertEqual(config.params, params)
         for seq in (1, 2):
             self.assertEqual(decode(seq, "discard", {}).params, {})
             with self.assertRaises(wire.ProtocolError):
@@ -180,6 +183,67 @@ class WorkflowEditProtocolTests(unittest.TestCase):
         with self.assertRaises(wire.ProtocolError):
             decode(1, "prepare", {"revision": REVISION})
 
+
+
+class ConfigurationRecoveryProtocolTests(unittest.TestCase):
+    def test_configuration_recovery_has_only_three_fixed_intent_shapes(self):
+        cases = [(0, "open", {"root": "/inert/project", "registeredIdentity": identity(), "intent": "recover"}),
+                 (1, "prepare", {"revision": REVISION, "intent": "recover"}),
+                 (2, "apply", {"planToken": REVISION, "intent": "recover"})]
+        for seq, op, params in cases:
+            def parse(value):
+                return wire.parse_request(frame(seq, op, value, protocol=wire.PROTOCOL),
+                                          sequence=seq, session=None if seq == 0 else SESSION)
+            with self.subTest(op=op):
+                self.assertEqual(parse(params).params, params)
+                for key in ("draft", "expectedBase", "files", "path", "force", "toolingRepository", "transactionId"):
+                    with self.subTest(extra=key), self.assertRaises(wire.ProtocolError):
+                        parse({**params, key: None})
+                for intent in (None, False, "edit", "rollback", "Recover", []):
+                    with self.subTest(intent=intent), self.assertRaises(wire.ProtocolError):
+                        parse({**params, "intent": intent})
+                for missing in params:
+                    # A normal Apply token has its original distinct shape;
+                    # retained intent, not the frame parser, rejects that switch.
+                    if seq == 2 and missing == "intent":
+                        continue
+                    with self.subTest(missing=missing), self.assertRaises(wire.ProtocolError):
+                        parse({key: value for key, value in params.items() if key != missing})
+        for seq in (1, 2):
+            self.assertEqual(wire.parse_request(frame(seq, "discard", {}, protocol=wire.PROTOCOL),
+                                               sequence=seq, session=SESSION).params, {})
+        with self.assertRaises(wire.ProtocolError):
+            wire.parse_request(frame(0, "open", {"root": "/inert/project", "registeredIdentity": identity()},
+                                     protocol=wire.PROTOCOL), sequence=0, session=None)
+        # Normal JSON still has no identity/intent and retains exact parameters.
+        normal = {"revision": REVISION, "expectedBase": None, "draft": {}}
+        self.assertEqual(wire.parse_request(frame(1, "prepare", normal, protocol=wire.PROTOCOL),
+                                           sequence=1, session=SESSION).params, normal)
+
+    def test_configuration_recovery_response_refuses_malformed_private_cleanup_without_attribute_error(self):
+        request = wire.parse_request(frame(0, "open", {"root": "/inert/project", "registeredIdentity": identity(),
+                                                        "intent": "recover"}, protocol=wire.PROTOCOL),
+                                     sequence=0, session=None)
+        view = {"schemaVersion": 1, "kind": "recovery", "state": "idle", "action": None,
+                "transactionId": None, "files": [], "privateCleanup": {"fileCount": 0,
+                    "directoryCount": 0, "scope": "inspected-configuration-journal-only"}}
+        for kind in ("opened", "prepared"):
+            result = {"revision": REVISION, "recovery": view, "scopeResources": "settled"}
+            if kind == "prepared":
+                result["planToken"] = "a" * 32
+            self.assertEqual(json.loads(wire.response(request, kind, result))["result"], result)
+            for malformed in (None, [], "scope", 1, False, {"scope": "inspected-workflow-journal-only"}):
+                with self.subTest(kind=kind, malformed=malformed), self.assertRaises(wire.ProtocolError):
+                    wire.response(request, kind, {**result, "recovery": {**view, "privateCleanup": malformed}})
+            for malformed in (None, [], "recovery"):
+                with self.subTest(kind=kind, malformed=malformed), self.assertRaises(wire.ProtocolError):
+                    wire.response(request, kind, {**result, "recovery": malformed})
+            with self.assertRaises(wire.ProtocolError):
+                wire.response(request, kind, {**result, "recovery": {**view, "oversize": "x" * 4096}})
+        terminal = {"planToken": None, "effect": "committed", "journal": "recovery_required",
+                    "resources": "settled", "reason": "pending_state"}
+        self.assertEqual(json.loads(wire.response(request, "terminal", terminal))["result"], terminal)
+        self.assertNotIn("kind", terminal)
 
 if __name__ == "__main__":
     unittest.main()

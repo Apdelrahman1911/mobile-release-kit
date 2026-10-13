@@ -4,13 +4,17 @@ use sha2::{Digest, Sha256};
 #[path = "src/macos_build_release.rs"]
 mod macos_build_release;
 
-fn macos_build_release_data() {
-    // Every app-crate target needs the same facade, including headless and
-    // actual-main observer builds. This is deliberately not feature/OS gated.
+fn macos_build_release_data(target: &str, target_os: &str) {
+    // Every app-crate target needs this facade, including headless and
+    // actual-main observer builds. Non-Mac declarations stay byte-identical;
+    // selecting Intel build DATA does not enable any Intel runtime/native gate.
+    println!("cargo:rerun-if-changed=../macos-installed-inputs/platforms-v1.json");
     println!("cargo:rerun-if-changed=../macos-installed-inputs/build-release.json");
+    println!("cargo:rerun-if-changed=../macos-installed-inputs/build-release-intel.json");
+    println!("cargo:rerun-if-changed=src/macos_build_profile.rs");
     println!("cargo:rerun-if-changed=src/macos_build_release.rs");
     println!("cargo:rerun-if-changed=tauri.conf.json");
-    let release = macos_build_release::BuildRelease::parse(include_bytes!("../macos-installed-inputs/build-release.json"))
+    let release = macos_build_release::BuildRelease::from_source(target, target_os)
         .expect("fixed macOS build-release DATA refused");
     release.check_projections(&env::var("CARGO_PKG_VERSION").expect("Cargo package version required"),
         include_bytes!("tauri.conf.json")).expect("fixed macOS build-release version projections differ");
@@ -173,8 +177,37 @@ fn github_release_tooling() {
     }
 }
 
+fn app_absence_fixture_data(target: &str, target_os: &str) {
+    const NAMES: [&str; 3] = ["MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT",
+        "MRK_APP_ABSENCE_FIXTURE_RUN_ID", "MRK_APP_ABSENCE_FIXTURE_RUN_ATTEMPT"];
+    for name in NAMES { println!("cargo:rerun-if-env-changed={name}"); }
+    let values = NAMES.map(env::var_os);
+    if !cfg!(feature = "macos-installed-app-absence-fixture") {
+        assert!(values.iter().all(Option::is_none), "fixture compile tuple on ordinary graph");
+        return;
+    }
+    assert!(target_os == "macos" && matches!(target, "aarch64-apple-darwin" | "x86_64-apple-darwin")
+        && env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() == Ok("64"), "fixture target differs");
+    let values = values.map(|v| v.expect("complete fixture compile tuple required")
+        .into_string().expect("fixture compile tuple must be UTF-8"));
+    assert!(values[0].len() == 40 && values[0].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && values[0].bytes().any(|b| b != b'0')
+        && env::var("MRK_MACOS_INSTALL_SOURCE_COMMIT").as_deref() == Ok(values[0].as_str()), "fixture same source differs");
+    for (value, limit) in [(&values[1], 20usize), (&values[2], 10usize)] {
+        assert!(!value.is_empty() && value.len() <= limit && !value.starts_with('0')
+            && value.bytes().all(|b| b.is_ascii_digit()), "fixture run tuple differs");
+    }
+    for (name, value) in NAMES.into_iter().zip(values) { println!("cargo:rustc-env={name}={value}"); }
+}
+
 fn main() {
-    macos_build_release_data();
+    println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification)");
+    println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification_native)");
+    // Cargo's target, not the host running this build script, selects DATA.
+    let target = env::var("TARGET").expect("Cargo target required");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Cargo target OS required");
+    macos_build_release_data(&target, &target_os);
+    app_absence_fixture_data(&target, &target_os);
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DEVELOPMENT_RUNTIME");
     println!("cargo:rerun-if-env-changed=PROFILE");
     if env::var_os("CARGO_FEATURE_DEVELOPMENT_RUNTIME").is_some()
@@ -186,7 +219,25 @@ fn main() {
     anchor("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256");
     anchor("MRK_BUNDLED_PROTOCOL_SHA256");
     anchor("MRK_MACOS_INSTALL_INVENTORY_SHA256");
-    if env::var("TARGET").as_deref() == Ok("aarch64-apple-darwin") {
+    if target_os == "macos" && matches!(target.as_str(), "aarch64-apple-darwin" | "x86_64-apple-darwin")
+        && env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() == Ok("64") {
+        // Fixed signed helper supplied only by the source-nominated packaging
+        // caller. Absence keeps secret preparation unavailable; half-pairs fail.
+        println!("cargo:rerun-if-env-changed=MRK_MACOS_GITHUB_SEAL_SHA256");
+        println!("cargo:rerun-if-env-changed=MRK_MACOS_GITHUB_SEAL_BYTES");
+        match (env::var_os("MRK_MACOS_GITHUB_SEAL_SHA256"), env::var_os("MRK_MACOS_GITHUB_SEAL_BYTES")) {
+            (None, None) => (),
+            (Some(hash), Some(bytes)) => {
+                let hash = hash.to_str().expect("invalid fixed seal digest encoding");
+                let bytes = bytes.to_str().expect("invalid fixed seal size encoding");
+                assert!(digest(hash) && hash != "0".repeat(64), "invalid fixed seal digest");
+                assert!(bytes.parse::<u64>().is_ok_and(|n| n > 0 && n <= 16 * 1024 * 1024 && n.to_string() == bytes),
+                        "invalid fixed seal size");
+                println!("cargo:rustc-env=MRK_MACOS_GITHUB_SEAL_SHA256={hash}");
+                println!("cargo:rustc-env=MRK_MACOS_GITHUB_SEAL_BYTES={bytes}");
+            }
+            _ => panic!("fixed seal binding requires both digest and size"),
+        }
         anchor("MRK_MACOS_VAULT_HELPER_SHA256");
         println!("cargo:rerun-if-env-changed=MRK_MACOS_VAULT_HELPER_BYTES");
         if let Ok(value) = env::var("MRK_MACOS_VAULT_HELPER_BYTES") {
@@ -203,7 +254,8 @@ fn main() {
             }
             println!("cargo:rustc-env=MRK_MACOS_INSTALL_SOURCE_COMMIT={value}");
         }
-        Err(_) if cfg!(feature = "macos-installed-installer") => panic!("Installer builds require the explicit source commit"),
+        Err(_) if cfg!(feature = "macos-installed-installer") || cfg!(feature = "macos-installed-remover")
+            => panic!("Installed installer/remover builds require the explicit source commit"),
         Err(_) => {},
     }
     if cfg!(feature = "macos-installed-installer-fixture") && cfg!(feature = "desktop-shell") {
@@ -215,7 +267,6 @@ fn main() {
     anchor("MRK_GITHUB_TLS_DEADLINE_INPUTS_SHA256");
     // A closed hosted diagnostics fixture input, never runtime qualification.
     anchor("MRK_ENVIRONMENT_NATIVE_INPUTS_SHA256");
-    let target = env::var("TARGET").unwrap_or_default();
     android_compile_data(&target);
     github_preflight_tooling();
     github_release_tooling();
@@ -223,12 +274,16 @@ fn main() {
     #[cfg(feature = "desktop-shell")]
     {
         const COMMANDS: &[&str] = &[
-            "app_info", "reveal_installation", "installation_status", "inspect_installation", "cancel_installation", "choose_project", "choose_project_path", "project_snapshot", "catalog",
+            "app_info", "reveal_installation", "installation_status", "inspect_installation", "cancel_installation",
+            "installation_preparation_status", "prepare_installation_quit",
+            "choose_project", "choose_project_path", "project_snapshot", "catalog",
             "environment_requirements", "release_version_observe",
             "artifact_evidence_choose", "artifact_evidence_status", "artifact_evidence_observe", "artifact_evidence_cancel",
             "release_evidence_choose", "release_evidence_status", "release_evidence_observe", "release_evidence_cancel",
             "start_environment_diagnostics", "environment_diagnostics_status", "cancel_environment_diagnostics",
             "prepare_offline_preflight", "start_offline_preflight", "offline_preflight_status", "cancel_offline_preflight",
+            "artifact_inspection_pick", "artifact_inspection_prepare", "artifact_inspection_start",
+            "artifact_inspection_cancel", "artifact_inspection_status", "artifact_inspection_discard",
             "prepare_android_build", "start_android_build", "android_build_status", "cancel_android_build",
             "android_toolchain_catalog_status", "refresh_android_toolchain_catalog", "select_android_toolchain", "cancel_android_toolchain_catalog",
             "android_tool_sources_status", "choose_android_tool_source", "cancel_android_tool_source",
@@ -241,6 +296,8 @@ fn main() {
             "close_config_edit", "config_edit_status",
             "github_workflow_edit_open", "github_workflow_edit_prepare", "github_workflow_edit_apply",
             "github_workflow_edit_close", "github_workflow_edit_status",
+            "project_initialization_open", "project_initialization_prepare", "project_initialization_apply",
+            "project_initialization_discard", "project_initialization_status",
             "metadata_text_observe", "metadata_text_validate", "metadata_text_edit_open", "metadata_text_edit_prepare",
             "metadata_text_edit_apply", "metadata_text_edit_close", "metadata_text_edit_status",
             "metadata_images_catalog", "metadata_images_choose", "metadata_images_selection_status", "metadata_images_selection_cancel",
@@ -253,6 +310,8 @@ fn main() {
             "github_preflight_reconcile", "github_preflight_pending", "github_preflight_cancel",
             "github_release_status", "github_release_prepare", "github_release_dispatch", "github_release_track",
             "github_release_reconcile", "github_release_pending", "github_release_cancel",
+            "github_remote_setup_status", "github_remote_setup_prepare", "github_remote_setup_apply", "github_remote_setup_discard", "github_remote_setup_cancel",
+            "github_history_status", "github_history_start", "github_history_cancel",
             "vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "asset_context", "asset_choose", "credential_prepare",
             "vault_prepare_delete", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
         ];

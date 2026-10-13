@@ -120,8 +120,10 @@ cleanup, **not remote cancellation, rollback or permission to resend**.
 
 - Authenticated remote history, secure artifact downloads and attestation
   verification are not provided by ordinary run/job observation.
-- Exceptional Apple ambiguous-operation attribution/retry grants are not
-  exposed by this form. They require the separate exact-evidence owner workflow.
+- The form exposes the three exact additional Apple recovery confirmations
+  for candidate adoption, original-IPA upload retry and missing-create retry.
+  Desktop validates their format only; the protected core still authenticates
+  original authority, evidence and current state before permitting any effect.
 - Remote GitHub secret/environment administration, local signed iOS export,
   complete signing-account recovery and private Store data editing are separate
   feature obligations; this dispatch slice does not count them as complete.
@@ -131,6 +133,9 @@ cleanup, **not remote cancellation, rollback or permission to resend**.
 The normal Linux installed action profile is selectable only in the supported
 desktop-shell/custom-protocol build, excluding development/runtime-publisher
 builds, with its exact installed payload and R's own publisher binding.
+A separate paired macOS ARM64/Intel installed profile is also implemented; it
+requires the exact Mac installed bindings, bundled runtime and release publisher
+binding. Neither platform selection alone proves installed/native qualification.
 `build.rs` derives the three canonical caller digests from the immutable
 `MRK_GITHUB_RELEASE_TOOLING_SHA`; missing bindings still refuse before native
 inspection. Passive, read-only and GitHub-preflight selection cannot supply
@@ -138,9 +143,10 @@ release authority, and G's synthetic observations cannot qualify R.
 
 An R-specific installed/native three-journey route is now authored, but source
 authoring is not native execution, implementation acceptance or delivery.
-Reviewed production delivery bindings remain required. macOS/Windows native
-action integration and qualification are not implied by cross-platform renderer
-code. Existing iOS workflow build/signing
+Reviewed production delivery bindings remain required. The implemented Mac
+UI-to-native-to-core dispatch route still needs genuine installed-Mac journey
+verification; renderer tests and compilation do not provide it. Windows native
+action integration and qualification remain separate. Existing iOS workflow build/signing
 requires its genuine supported macOS runner. No physical-Mac-only prerequisite
 was identified for the remote dispatch slice; no Store mutation is needed merely
 to test it.

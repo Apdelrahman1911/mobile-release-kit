@@ -471,6 +471,13 @@ def _negative_lifecycle(kind, guard, scope, begin, invoke, process_error, sent, 
     return observed, verdict
 
 
+def _invoke_lifecycle_original(owner, executable, ready, environment, scratch, guard):
+    """One fixed negative original; its startup and target share the same endpoint."""
+    return owner.run_owned([executable, "-I", "-S", "-B", "-c", CHILD, str(ready)],
+        environ=environment, cwd=scratch, timeout=12,
+        capture=True, text=False, output_limit=4096, cancellation=guard)
+
+
 def cancellation(context):
     import importlib.util
     import signal
@@ -536,9 +543,7 @@ def cancellation(context):
                 watch.start()
 
         def invoke_original():
-            return owner.run_owned([executable, "-I", "-S", "-B", "-c", CHILD, str(ready)],
-                environ=environment, cwd=scratch, timeout=3 if kind == "timeout" else 12,
-                capture=True, text=False, output_limit=4096, cancellation=guard)
+            return _invoke_lifecycle_original(owner, executable, ready, environment, scratch, guard)
 
         scope = control.CleanupScope(guard, settle_watch, owns_cancellation=True, first_primary=True)
         try:

@@ -1,0 +1,6 @@
+# Fixed source-authored lock for this dependency-free, isolated package.
+version = 4
+
+[[package]]
+name = "mrk-github-seal"
+version = "0.1.0"

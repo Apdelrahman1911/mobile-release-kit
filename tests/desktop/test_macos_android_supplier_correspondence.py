@@ -140,14 +140,277 @@ class CorrespondenceDataTests(unittest.TestCase):
         with self.assertRaisesRegex(M.Refused, "report_finality"):
             report.publish(lambda _: self.fail("second publication"))
 
+        # The observed legacy sentinel stays raw inert directory DATA. No mode
+        # is normalized or granted to a path, and ordinary Pin stays strict.
+        def directory_sentinel(rows, method=zipfile.ZIP_STORED):
+            body = bytearray(zip_bytes(rows, method=method))
+            at = struct.unpack_from("<I", body, len(body) - 6)[0]
+            for _ in rows:
+                self.assertEqual(body[at:at + 4], b"PK\x01\x02")
+                name_len, extra_len, comment_len = struct.unpack_from("<3H", body, at + 28)
+                name = body[at + 46:at + 46 + name_len]
+                if name.endswith(b"/"):
+                    struct.pack_into("<I", body, at + 38, 0xffff0010)
+                at += 46 + name_len + extra_len + comment_len
+            self.assertEqual(at, len(body) - 22)
+            return bytes(body)
+
+        sentinel = directory_sentinel([("META-INF/maven/", b"", stat.S_IFDIR | 0o755)])
+        owner = Original(sentinel)
+        report = M.compile_opaque_zip(owner, M.OpaqueZipPin(len(sentinel), hashlib.sha256(sentinel).hexdigest()))
+        output = []
+        receipt = report.publish(output.append)
+        self.assertEqual(len(output), 1)
+        data = json.loads(output[0])
+        self.assertEqual(data["kind"], "offline-opaque-zip-correspondence-data")
+        self.assertIsNone(data["label"])
+        self.assertFalse(data["supplierAuthority"])
+        self.assertFalse(data["nativeClosure"])
+        self.assertTrue(data["completeMemberHashes"])
+        self.assertEqual((data["members"], data["files"], data["aliases"], data["expandedBytes"]), (1, 0, 0, 0))
+        self.assertEqual(tuple(data["columns"]), M.COLUMNS)
+        row = dict(zip(data["columns"], data["rows"][0]))
+        self.assertEqual((row["name"], row["kind"], row["mode"], row["creatorSystem"]),
+                         ("META-INF/maven", "directory", 65535, 3))
+        self.assertEqual((row["size"], row["compressedSize"], row["crc32"], row["flags"], row["method"]),
+                         (0, 0, 0, 0, 0))
+        self.assertIsNone(row["sha256"])
+        self.assertIsNone(row["formatHint"])
+        self.assertEqual((receipt["bytes"], receipt["sha256"]),
+                         (len(output[0]), hashlib.sha256(output[0]).hexdigest()))
+        self.assertEqual(receipt["issuedReadBytes"], sum(n for _, n in owner.calls))
+        self.assertTrue(all(n <= M.WINDOW for _, n in owner.calls))
+        self.assertGreaterEqual(owner.bindings, 6)
+        with self.assertRaisesRegex(M.Refused, "report_finality"):
+            report.publish(lambda _: self.fail("second opaque publication"))
+        for label in ("gradle", "bundletool"):
+            with self.subTest(sentinel_strict_label=label), self.assertRaisesRegex(M.Refused, "zip_member_mode_or_creator"):
+                publish(sentinel, label)
+
+        def refuse_sentinel(body, reason):
+            with self.assertRaisesRegex(M.Refused, reason):
+                M.compile_opaque_zip(Original(body), M.OpaqueZipPin(len(body), hashlib.sha256(body).hexdigest()))
+
+        central = struct.unpack_from("<I", sentinel, len(sentinel) - 6)[0]
+        for field, value, format_ in (
+            (38, 0xffff0000, "<I"), (38, 0xfffe0010, "<I"), (38, 0xffff0011, "<I"),
+            (4, 20, "<H"), (4, (19 << 8) | 20, "<H"),
+            (8, 0x800, "<H"), (8, 8, "<H"), (10, 8, "<H"), (16, 1, "<I"),
+        ):
+            damaged = bytearray(sentinel)
+            struct.pack_into(format_, damaged, central + field, value)
+            with self.subTest(sentinel_field=field, value=value):
+                refuse_sentinel(bytes(damaged), "zip_member_mode_or_creator")
+        refuse_sentinel(sentinel.replace(b"META-INF/maven/", b"META-INF/mavenX"),
+                        "zip_member_mode_or_creator")
+        refuse_sentinel(directory_sentinel([("META-INF/maven/", b"x", stat.S_IFDIR | 0o755)]),
+                        "zip_member_mode_or_creator")
+        refuse_sentinel(directory_sentinel([("META-INF/maven/", b"", stat.S_IFDIR | 0o755)],
+                                           method=zipfile.ZIP_DEFLATED), "zip_member_mode_or_creator")
+        for offset in (14, 18, 22):
+            damaged = bytearray(sentinel)
+            struct.pack_into("<I", damaged, offset, 1)
+            with self.subTest(sentinel_local_field=offset):
+                refuse_sentinel(bytes(damaged), "zip_local_sizes_or_extent")
+        for name in ("../maven/", "/META-INF/maven/", "META-INF/../maven/"):
+            with self.subTest(sentinel_path=name):
+                refuse_sentinel(directory_sentinel([(name, b"", stat.S_IFDIR | 0o755)]),
+                                "opaque_zip_name_structure")
+        duplicate = directory_sentinel([("META-INF/maven/", b"", stat.S_IFDIR | 0o755),
+                                        ("META-INF/mavez/", b"", stat.S_IFDIR | 0o755)])
+        self.assertEqual(duplicate.count(b"META-INF/mavez/"), 2)
+        refuse_sentinel(duplicate.replace(b"META-INF/mavez/", b"META-INF/maven/"),
+                        "duplicate_or_case_colliding_member")
+        refuse_sentinel(directory_sentinel([("META-INF", b"file", stat.S_IFREG | 0o644),
+                                            ("META-INF/maven/", b"", stat.S_IFDIR | 0o755)]),
+                        "non_directory_member_parent")
+        refuse_sentinel(sentinel.replace(b"META-INF/maven/", b"META-INF/mavez/", 1),
+                        "zip_local_name_disagreement")
+
     def test_descriptor_and_stored_archives_use_the_same_member_hash(self):
         for descriptor in (False, True):
             for method in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
                 with self.subTest(descriptor=descriptor, method=method):
-                    raw = zip_bytes([("a", b"payload" * 12000, stat.S_IFREG | 0o644)],
+                    raw = zip_bytes([("a", b"payload" * 12000, stat.S_IFREG | 0o644),
+                                     ("empty/", b"", stat.S_IFDIR | 0o755)],
                                     descriptor=descriptor, method=method)
                     _, _, data, _ = publish(raw)
                     self.assertEqual(data["rows"][0][4], hashlib.sha256(b"payload" * 12000).hexdigest())
+                    directory = dict(zip(data["columns"], data["rows"][1]))
+                    self.assertEqual((directory["kind"], directory["size"], directory["sha256"]),
+                                     ("directory", 0, None))
+                    self.assertEqual(bool(directory["flags"] & 8), descriptor)
+
+        def inspect_inner(raw):
+            report = M.compile_opaque_zip(Original(raw), M.OpaqueZipPin(
+                len(raw), hashlib.sha256(raw).hexdigest()))
+            rows = []
+            summary = report.consume_rows(rows.append)
+            return {**summary, "rows": rows, "columns": M.COLUMNS}
+
+        # Java's empty META-INF directory: DOS creator, no mode, UTF-8 plus
+        # descriptor, and the two-byte empty DEFLATE framing. No vendor code.
+        java = bytearray(zip_bytes([("META-INF/", b"", stat.S_IFDIR | 0o755)], descriptor=True))
+        central = java.index(b"PK\x01\x02")
+        descriptor_at = java.index(b"PK\x07\x08")
+        struct.pack_into("<H", java, 6, 0x0808)
+        struct.pack_into("<H", java, central + 4, 20)
+        struct.pack_into("<H", java, central + 8, 0x0808)
+        struct.pack_into("<I", java, central + 38, 0)
+        for signed in (True, False):
+            body = bytearray(java)
+            if not signed:
+                del body[descriptor_at:descriptor_at + 4]
+                struct.pack_into("<I", body, len(body) - 6, central - 4)
+            data = inspect_inner(bytes(body))
+            row = dict(zip(data["columns"], data["rows"][0]))
+            self.assertEqual((data["files"], row["kind"], row["size"], row["sha256"]),
+                             (0, "directory", 0, None))
+            self.assertEqual((row["flags"], row["compressedSize"], row["creatorSystem"]),
+                             (0x0808, 2, 0))
+
+        bad_descriptor = bytearray(java)
+        struct.pack_into("<I", bad_descriptor, descriptor_at + 4, 1)
+        nonempty = bytearray(java)
+        struct.pack_into("<I", nonempty, central + 24, 1)
+        struct.pack_into("<I", nonempty, descriptor_at + 12, 1)
+        bad_crc = bytearray(java)
+        struct.pack_into("<I", bad_crc, central + 16, 1)
+        struct.pack_into("<I", bad_crc, descriptor_at + 4, 1)
+        trailing = bytearray(java[:descriptor_at] + b"\0" + java[descriptor_at:])
+        struct.pack_into("<I", trailing, descriptor_at + 1 + 8, 3)
+        struct.pack_into("<I", trailing, central + 1 + 20, 3)
+        struct.pack_into("<I", trailing, len(trailing) - 6, central + 1)
+        for body, reason in ((bad_descriptor, "zip_descriptor_disagreement"),
+                             (nonempty, "zip_non_regular_member"),
+                             (bad_crc, "zip_member_crc_or_length"),
+                             (trailing, "zip_deflate_trailing_data")):
+            with self.subTest(reason=reason), self.assertRaisesRegex(M.Refused, reason):
+                inspect_inner(bytes(body))
+
+        # The authenticated ct.sym observation has exactly two terminal slashes.
+        # Opaque names retain the one remaining slash after the existing marker
+        # removal; neither names nor raw local/CD agreement are normalized.
+        for descriptor in (False, True):
+            for method in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                with self.subTest(opaque_directory_descriptor=descriptor, method=method):
+                    doubled = zip_bytes([
+                        ("8/java.base/", b"", stat.S_IFDIR | 0o755),
+                        ("8/java.base//", b"", stat.S_IFDIR | 0o755),
+                        ("8/java.base/lang/Number.sig", b"opaque DATA", stat.S_IFREG | 0o644),
+                    ], descriptor=descriptor, method=method)
+                    data = inspect_inner(doubled)
+                    by_name = {row[0]: dict(zip(data["columns"], row)) for row in data["rows"]}
+                    self.assertEqual(set(by_name), {"8/java.base", "8/java.base/",
+                                                   "8/java.base/lang/Number.sig"})
+                    self.assertEqual((data["members"], data["files"]), (3, 1))
+                    directory = by_name["8/java.base/"]
+                    self.assertEqual((directory["kind"], directory["size"], directory["sha256"]),
+                                     ("directory", 0, None))
+                    self.assertEqual(bool(directory["flags"] & 8), descriptor)
+                    self.assertEqual(by_name["8/java.base/lang/Number.sig"]["sha256"],
+                                     hashlib.sha256(b"opaque DATA").hexdigest())
+        # Ordinary supplier/bundletool path grammar and non-directory calls
+        # must not borrow the inert opaque-directory exception.
+        for label in ("gradle", "bundletool"):
+            with self.subTest(strict_label=label), self.assertRaisesRegex(M.Refused, "archive_name_grammar"):
+                publish(doubled, label)
+        with self.assertRaisesRegex(M.Refused, "opaque_zip_name_structure"):
+            M._opaque_name(b"8/java.base//", directory=False)
+        for name, payload, mode, reason in (
+            ("8/java.base///", b"", stat.S_IFDIR | 0o755, "opaque_zip_name_structure"),
+            ("8//java.base/", b"", stat.S_IFDIR | 0o755, "opaque_zip_name_structure"),
+            ("/8/java.base//", b"", stat.S_IFDIR | 0o755, "opaque_zip_name_structure"),
+            ("8/../java.base//", b"", stat.S_IFDIR | 0o755, "opaque_zip_name_structure"),
+            ("8/./java.base//", b"", stat.S_IFDIR | 0o755, "opaque_zip_name_structure"),
+            ("8/java.base//", b"", stat.S_IFREG | 0o644, "zip_non_regular_member"),
+            ("8/java.base//", b"nonempty", stat.S_IFDIR | 0o755, "zip_non_regular_member"),
+        ):
+            with self.subTest(opaque_name=name, reason=reason), self.assertRaisesRegex(M.Refused, reason):
+                inspect_inner(zip_bytes([(name, payload, mode)], descriptor=True))
+        duplicate = zip_bytes([("8/java.base//", b"", stat.S_IFDIR | 0o755),
+                               ("8/java.basz//", b"", stat.S_IFDIR | 0o755)])
+        self.assertEqual(duplicate.count(b"8/java.basz//"), 2)
+        duplicate = duplicate.replace(b"8/java.basz//", b"8/java.base//")
+        with self.assertRaisesRegex(M.Refused, "duplicate_or_case_colliding_member"):
+            inspect_inner(duplicate)
+        with self.assertRaisesRegex(M.Refused, "non_directory_member_parent"):
+            inspect_inner(zip_bytes([("8/java.base", b"file", stat.S_IFREG | 0o644),
+                                     ("8/java.base//", b"", stat.S_IFDIR | 0o755)]))
+        # A local name cannot disagree even when both spellings would now be
+        # valid DATA: change only the first, fixed-length local name occurrence.
+        mismatch = doubled.replace(b"8/java.base//", b"8/java.basz//", 1)
+        with self.assertRaisesRegex(M.Refused, "zip_local_name_disagreement"):
+            inspect_inner(mismatch)
+
+        # A stored manifest's exact local (0, 0, N) placeholder is opaque-only.
+        # Central size/CRC and every payload byte still determine the full row.
+        manifest_body = b"Manifest-Version: 1.0\nCreated-By: inert test\n\n"
+        manifest_name = "META-INF/MANIFEST.MF"
+        strict = zip_bytes([(manifest_name, manifest_body, stat.S_IFREG | 0o644)], method=zipfile.ZIP_STORED)
+        strict_rows = inspect_inner(strict)["rows"]
+        def manifest_placeholder(raw):
+            body = bytearray(raw)
+            self.assertEqual(body[:4], b"PK\x03\x04")
+            struct.pack_into("<2I", body, 14, 0, 0)
+            return bytes(body)
+        placeholder = manifest_placeholder(strict)
+        owner = Original(placeholder)
+        report = M.compile_opaque_zip(owner, M.OpaqueZipPin(len(placeholder), hashlib.sha256(placeholder).hexdigest()))
+        rows = []
+        summary = report.consume_rows(rows.append)
+        self.assertEqual(rows, strict_rows)
+        self.assertEqual((summary["members"], summary["files"], summary["expandedBytes"]),
+                         (1, 1, len(manifest_body)))
+        row = dict(zip(M.COLUMNS, rows[0]))
+        crc = zlib.crc32(manifest_body) & 0xffffffff
+        self.assertEqual((row["name"], row["kind"], row["size"], row["compressedSize"],
+                          row["method"], row["flags"], row["crc32"]),
+                         (manifest_name, "file", len(manifest_body), len(manifest_body), 0, 0, crc))
+        self.assertEqual(row["sha256"], hashlib.sha256(manifest_body).hexdigest())
+        self.assertEqual(summary["issuedReadBytes"], sum(n for _, n in owner.calls))
+        self.assertTrue(all(n <= M.WINDOW for _, n in owner.calls))
+        self.assertGreaterEqual(owner.bindings, 5)
+        with self.assertRaisesRegex(M.Refused, "report_finality"):
+            report.consume_rows(lambda _: self.fail("second manifest drain"))
+        for label in ("gradle", "bundletool"):
+            with self.subTest(manifest_strict_label=label), self.assertRaisesRegex(M.Refused, "zip_local_sizes_or_extent"):
+                publish(placeholder, label)
+
+        central = struct.unpack_from("<I", placeholder, len(placeholder) - 6)[0]
+        for offset, value in ((14, 1 if crc != 1 else 2), (18, 1), (22, len(manifest_body) + 1)):
+            damaged = bytearray(placeholder)
+            struct.pack_into("<I", damaged, offset, value)
+            with self.subTest(manifest_local_field=offset), self.assertRaisesRegex(M.Refused, "zip_local_sizes_or_extent"):
+                inspect_inner(bytes(damaged))
+        for raw in (
+            zip_bytes([("META-INF/MANIFEST.MX", manifest_body, stat.S_IFREG | 0o644)], method=zipfile.ZIP_STORED),
+            zip_bytes([(manifest_name, manifest_body, stat.S_IFREG | 0o644)], method=zipfile.ZIP_DEFLATED),
+        ):
+            with self.subTest(manifest_other_encoding=hashlib.sha256(raw).hexdigest()), \
+                    self.assertRaisesRegex(M.Refused, "zip_local_sizes_or_extent"):
+                inspect_inner(manifest_placeholder(raw))
+        for flags, reason in ((0x800, "zip_local_sizes_or_extent"), (8, "zip_descriptor_local_disagreement")):
+            damaged = bytearray(placeholder)
+            struct.pack_into("<H", damaged, 6, flags)
+            struct.pack_into("<H", damaged, central + 8, flags)
+            with self.subTest(manifest_flags=flags), self.assertRaisesRegex(M.Refused, reason):
+                inspect_inner(bytes(damaged))
+        bad_crc = bytearray(placeholder)
+        struct.pack_into("<I", bad_crc, central + 16, crc ^ 1)
+        bad_payload = bytearray(placeholder)
+        bad_payload[row["dataOffset"]] ^= 1
+        for damaged in (bad_crc, bad_payload):
+            with self.assertRaisesRegex(M.Refused, "zip_member_crc_or_length"):
+                inspect_inner(bytes(damaged))
+        gap = bytearray(placeholder[:central] + b"\0" + placeholder[central:])
+        struct.pack_into("<I", gap, len(gap) - 6, central + 1)
+        with self.assertRaisesRegex(M.Refused, "zip_local_sizes_or_extent"):
+            inspect_inner(bytes(gap))
+        overlap = bytearray(placeholder)
+        struct.pack_into("<2I", overlap, central + 20, len(manifest_body) + 1, len(manifest_body) + 1)
+        with self.assertRaisesRegex(M.Refused, "zip_overlapping_payload"):
+            inspect_inner(bytes(overlap))
 
     def test_duplicate_case_traversal_and_alias_zip_members_refuse(self):
         for rows in [

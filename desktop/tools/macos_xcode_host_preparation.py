@@ -8,7 +8,8 @@ and returned zero. Unknown command retirement blocks until job/VM disposal.
 
 Public Apple ABI references (read-only documentation, not imported suppliers):
   xnu bsd/sys/cdefs.h blob 8b810050fab1aaf227de97edcfd0e55f6ae3fc2b:
-    Mac ARM64 has ONLY_64_BIT_INO_T=1, hence INODE64 has NO symbol suffix.
+    Mac ARM64 has ONLY_64_BIT_INO_T=1, hence INODE64 has NO symbol suffix;
+    Mac x86_64 uses the fixed $INODE64 suffix for these same LP64 layouts.
   xnu bsd/sys/stat.h SHA256
     dd8154be80f467ba57d4edaa7c6617bd32db54bfebdda892b390f9b0364fe488
   xnu bsd/sys/mount.h SHA256
@@ -52,6 +53,8 @@ INTENT = "xcode-host-preparation-intent.json"
 RESULT = "xcode-host-preparation-result.json"
 CLASSIFICATION_ARG = "--classify-installed"
 CLASSIFICATION_RESULT = "xcode-installed-classification-result.json"
+ARM_TARGET = "aarch64-apple-darwin"
+INTEL_TARGET = "x86_64-apple-darwin"
 COMMAND = ("/usr/bin/sudo", "-n", "--", "/bin/chmod", "-h", "0755", "/Applications")
 SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 MAX_ORIGINALS = 40
@@ -67,7 +70,7 @@ SA_RESTART = 0x0002
 SA_NOCLDSTOP = 0x0008
 SA_NOCLDWAIT = 0x0020
 SAFE_SIGCHLD_FLAGS = SA_RESTART | SA_NOCLDSTOP
-# These are public Darwin fcntl.h constants, only used after the ARM64 gate.
+# Public Darwin fcntl.h constants, only used after the selected Mac LP64 gate.
 O_EXEC = 0x40000000
 O_SYMLINK = 0x00200000
 UF_COMPRESSED = 0x00000020
@@ -102,6 +105,28 @@ class Refused(Exception):
     """A bounded diagnostic code, not an accepted-error capability."""
 
 
+def _target_data(target):
+    # Fixed SOURCE selection, never discovery or a fallback symbol lookup.
+    if type(target) is str and target == ARM_TARGET:
+        return ("arm64", "ARM64", "fstatx_np", "fstatfs")
+    if type(target) is str and target == INTEL_TARGET:
+        return ("x86_64", "X64", "fstatx_np$INODE64", "fstatfs$INODE64")
+    raise Refused("fixed-macos-target-required")
+
+
+def _entry_arguments(arguments):
+    if not isinstance(arguments, tuple) or len(arguments) > 3:
+        raise Refused("fixed-target-mode-arguments-required")
+    classification = arguments[:1] == (CLASSIFICATION_ARG,)
+    selected = arguments[1:] if classification else arguments
+    if not selected:
+        return classification, ARM_TARGET
+    if len(selected) != 2 or selected[0] != "--target":
+        raise Refused("fixed-target-mode-arguments-required")
+    _target_data(selected[1])
+    return classification, selected[1]
+
+
 class Deadline:
     def __init__(self):
         self.end = time.monotonic() + PREPARATION_SECONDS
@@ -134,8 +159,9 @@ def _pairs(pairs):
     return value
 
 
-def _validate_context(environment, identity, uname, version, python_flags):
+def _validate_context(environment, identity, uname, version, python_flags, *, target=ARM_TARGET):
     """Pure validation; no environment value selects an effect path or mode."""
+    machine, runner_arch, _, _ = _target_data(target)
     actual_keys = set(environment)
     if actual_keys != ENVIRONMENT_KEYS:
         # Key names only: never inspect values on a set mismatch. Bound each
@@ -162,12 +188,12 @@ def _validate_context(environment, identity, uname, version, python_flags):
         raise Refused("nonroot-real-user-required")
     if environment["__CF_USER_TEXT_ENCODING"] != f"0x{uid:X}:0:0":
         raise Refused("startup-cf-encoding-not-fixed")
-    if (uname != ("Darwin", "arm64") or tuple(version) != (3, 14, 7)
+    if (uname != ("Darwin", machine) or tuple(version) != (3, 14, 7)
             or tuple(python_flags) != (1, 1, 1)):
         raise Refused("fixed-platform-data-python-required")
     e = environment
     if (e["RUNNER_ENVIRONMENT"] != "github-hosted" or e["RUNNER_OS"] != "macOS"
-            or e["RUNNER_ARCH"] != "ARM64" or e["GITHUB_REPOSITORY"] != REPOSITORY
+            or e["RUNNER_ARCH"] != runner_arch or e["GITHUB_REPOSITORY"] != REPOSITORY
             or e["GITHUB_EVENT_NAME"] != "push" or e["GITHUB_REF"] != REF
             or e["GITHUB_JOB"] != "aqua"):
         raise Refused("dedicated-hosted-route-required")
@@ -189,7 +215,7 @@ def _validate_context(environment, identity, uname, version, python_flags):
             "runId": e["GITHUB_RUN_ID"], "runAttempt": e["GITHUB_RUN_ATTEMPT"],
             "jobKey": "aqua", "repository": REPOSITORY, "ref": REF,
             "workspace": WORKSPACE, "work": work, "uid": uid, "gid": gid,
-            "runnerEnvironment": "github-hosted", "machine": "arm64"}
+            "runnerEnvironment": "github-hosted", "machine": machine}
 
 
 class Timespec(ctypes.Structure):
@@ -252,12 +278,12 @@ def _check_abi():
             or ctypes.sizeof(ctypes.c_long) != 8
             or ctypes.sizeof(ctypes.c_size_t) != 8 or sys.byteorder != "little"
             or ctypes.sizeof(Timespec) != 16):
-        raise Refused("darwin-arm64-widths-required")
+        raise Refused("darwin-lp64-widths-required")
     for structure, (size, offsets) in expected.items():
         if ctypes.sizeof(structure) != size or ctypes.alignment(structure) != 8:
-            raise Refused("darwin-arm64-structure-size")
+            raise Refused("darwin-lp64-structure-size")
         if any(getattr(structure, field).offset != offset for field, offset in offsets.items()):
-            raise Refused("darwin-arm64-structure-offset")
+            raise Refused("darwin-lp64-structure-offset")
 
 
 def _call(function, *arguments):
@@ -376,9 +402,11 @@ def _acl_snapshot(library, descriptor, expected):
 
 
 class DarwinAPI:
-    def __init__(self, deadline):
-        # No fallback to x86 $INODE64 or stat64 names. cdefs.h gives undecorated
-        # 64-bit-inode ABI on the exact ARM64 platform already admitted above.
+    def __init__(self, deadline, target=ARM_TARGET):
+        # Bind only the selected Apple ABI. Missing symbols refuse; no
+        # retry with another architecture, stat64 or another library.
+        _, _, stat_symbol, filesystem_symbol = _target_data(target)
+        symbols = {"fstatx_np": stat_symbol, "fstatfs": filesystem_symbol}
         _check_abi()
         self.deadline = deadline
         self.library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
@@ -403,9 +431,11 @@ class DarwinAPI:
                                           ctypes.c_uint32, integer]),
         }
         for name, (result, arguments) in prototypes.items():
-            function = getattr(self.library, name)
+            function = getattr(self.library, symbols.get(name, name))
             function.restype = result
             function.argtypes = arguments
+            # Same CDLL instance/function, not a second lookup or owner.
+            setattr(self.library, name, function)
         self.deadline.check()
         if self.library.issetugid() != 0:
             raise Refused("issetugid-refused")
@@ -1238,15 +1268,20 @@ def _bind_source(book):
         components = name.split("/")
         parent = book.chain(checkout, components[:-1], "source:" + name, "source-directory")
         node = book.open(parent, components[-1], "file", "source-file", "source:" + name)
-        data = book.read(node, 131072)
+        # Only this exact SOURCE workflow has the larger fixed bound.
+        data = book.read(node, 512 * 1024 if name == WORKFLOW else 131072)
         item = leaves[name]
         if (len(data) != item["size"] or hashlib.sha256(data).hexdigest() != item["sha256"]
                 or hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() != item["blob"]):
             raise Refused("source-helper-workflow-not-original-inventory")
         bindings.append({"path": name, "size": len(data), "sha256": item["sha256"], "blob": item["blob"]})
-    expected_argv = [WORKSPACE + "/" + HELPER] + ([CLASSIFICATION_ARG] if book.classification else [])
-    if (os.getcwd() != WORKSPACE or os.path.abspath(__file__) != WORKSPACE + "/" + HELPER
-            or sys.argv != expected_argv):
+    expected_argv = book.launch_argv
+    classification, target = _entry_arguments(expected_argv[1:])
+    if (not expected_argv or expected_argv[0] != WORKSPACE + "/" + HELPER
+            or classification != book.classification
+            or _target_data(target)[0] != book.context["machine"]
+            or os.getcwd() != WORKSPACE or os.path.abspath(__file__) != WORKSPACE + "/" + HELPER
+            or tuple(sys.argv) != expected_argv):
         raise Refused("fixed-helper-launch-path-required")
     book.source_binding = {"source": value["source"], "tree": value["tree"],
                            "completeInventorySha256": hashlib.sha256(raw).hexdigest(),
@@ -1407,7 +1442,7 @@ def _classify_installed(book, state):
     state["complete"] = True
 
 
-def _classification_main(deadline):
+def _classification_main(deadline, target, launch_argv):
     book = None
     state = {"complete": False, "observations": [], "omittedObservations": 0,
              "rosterEntries": None, "candidateNames": None, "excludedNames": None}
@@ -1418,11 +1453,13 @@ def _classification_main(deadline):
         context = _validate_context(dict(os.environ),
                                     (os.getuid(), os.geteuid(), os.getgid(), os.getegid()),
                                     (u.sysname, u.machine), sys.version_info[:3],
-                                    (sys.flags.isolated, sys.flags.no_site, sys.dont_write_bytecode))
-        api = DarwinAPI(deadline)
+                                    (sys.flags.isolated, sys.flags.no_site, sys.dont_write_bytecode),
+                                    target=target)
+        api = DarwinAPI(deadline, target=target)
         context["macosVersion"] = api.version
         context["dataPython"] = "3.14.7-isolated-no-site-no-bytecode"
         book = Originals(api, context, deadline, classification=True)
+        book.launch_argv = launch_argv  # Private immutable original, not receipt authority.
         _classify_installed(book, state)
         book.receipt(CLASSIFICATION_RESULT, _classification_report(book, state), retain=True)
         result_written = True
@@ -1709,8 +1746,6 @@ def _report(book, context, command, phase, eligible=False):
 
 def main():
     deadline = Deadline()
-    if sys.argv[1:] == [CLASSIFICATION_ARG]:
-        return _classification_main(deadline)
     book = None
     owner = None
     unknown = False
@@ -1720,17 +1755,23 @@ def main():
     context = None
     final_errors = []
     try:
-        if len(sys.argv) != 1:
-            raise Refused("no-cli-arguments")
+        if not 1 <= len(sys.argv) <= 4:
+            raise Refused("fixed-target-mode-arguments-required")
+        launch_argv = tuple(sys.argv)
+        classification, target = _entry_arguments(launch_argv[1:])
+        if classification:
+            return _classification_main(deadline, target, launch_argv)
         u = os.uname()
         context = _validate_context(dict(os.environ),
                                     (os.getuid(), os.geteuid(), os.getgid(), os.getegid()),
                                     (u.sysname, u.machine), sys.version_info[:3],
-                                    (sys.flags.isolated, sys.flags.no_site, sys.dont_write_bytecode))
-        api = DarwinAPI(deadline)
+                                    (sys.flags.isolated, sys.flags.no_site, sys.dont_write_bytecode),
+                                    target=target)
+        api = DarwinAPI(deadline, target=target)
         context["macosVersion"] = api.version
         context["dataPython"] = "3.14.7-isolated-no-site-no-bytecode"
         book = Originals(api, context, deadline)
+        book.launch_argv = launch_argv  # Private immutable original, not receipt authority.
         _collect_prerequisites(book)
         # This same step has not launched any candidate/toolchain worker. The
         # earlier unchanged inventory is SOURCE/DATA and the work roster proves

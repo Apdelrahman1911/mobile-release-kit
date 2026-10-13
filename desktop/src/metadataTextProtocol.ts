@@ -1,5 +1,6 @@
 // Closed transport and display consistency checks only. No renderer paths,
 // content digests or character counts can acquire original filesystem authority.
+import { parseSavedTextRecoveryProjection, savedTextRecoveryDetailsProgress } from './savedTextRecovery.ts';
 import { sameJson } from './catalog.ts';
 import { isU32, U32_MAX } from './configEditProtocol.ts';
 import { METADATA_TEXT_IDS, METADATA_TEXT_FIELD_BYTES, metadataLineEndings, metadataNoOp } from './metadataText.ts';
@@ -123,14 +124,19 @@ export function metadataTextRequestFits(command: MetadataTextCommand, value: unk
   try {
     if (!boundedJson(value, 1024 * 1024)) return false;
     switch (command) {
-      case 'metadata_text_observe': case 'metadata_text_edit_open':
+      case 'metadata_text_edit_open':
+        if (keys(value, ['projectId', 'intent']) && projectId(value.projectId) && value.intent === 'recover') return true;
+        return keys(value, ['projectId', 'platform', 'locale']) && projectId(value.projectId) && platform(value.platform) && locale(value.locale);
+      case 'metadata_text_observe':
         return keys(value, ['projectId', 'platform', 'locale']) && projectId(value.projectId) && platform(value.platform) && locale(value.locale);
       case 'metadata_text_validate':
         return keys(value, ['platform', 'fields']) && platform(value.platform) && textFields(value.fields, value.platform);
       case 'metadata_text_edit_status': return keys(value, []);
       case 'metadata_text_edit_close': return keys(value, ['sessionId']) && token(value.sessionId);
-      case 'metadata_text_edit_apply': return keys(value, ['sessionId', 'planToken']) && token(value.sessionId) && token(value.planToken);
+      case 'metadata_text_edit_apply': return (keys(value, ['sessionId', 'planToken']) ||
+        keys(value, ['sessionId', 'planToken', 'intent']) && value.intent === 'recover') && token(value.sessionId) && token(value.planToken);
       case 'metadata_text_edit_prepare': {
+        if (keys(value, ['sessionId', 'revision', 'intent']) && token(value.sessionId) && token(value.revision) && value.intent === 'recover') return true;
         if (!keys(value, ['sessionId', 'revision', 'expectedBaseline', 'fields', 'draftRevision', 'baselineGeneration']) ||
             !token(value.sessionId) || !token(value.revision) || !isU32(value.draftRevision) || value.draftRevision === U32_MAX ||
             !isU32(value.baselineGeneration) || value.baselineGeneration === U32_MAX) return false;
@@ -237,6 +243,7 @@ function outcome(value: unknown): value is CoreEditOutcome {
   return value.reason !== 'none' || value.resources === 'settled' && value.effect !== 'unknown' && !oneOf(value.journal, ['unknown', 'recovery_required']);
 }
 function projection(value: unknown): value is MetadataTextEditProjection {
+  if (record(value) && Object.hasOwn(value, 'recovery')) return parseSavedTextRecoveryProjection(value, 'metadata_text') !== null;
   if (!keys(value, ['domain', 'projectId', 'sessionId', 'ownerGeneration', 'platform', 'locale', 'phase', 'reviewRemainingMs', 'checkout', 'prepared', 'applySubmitted', 'coreOutcome', 'nativeReason', 'nativeFinality', 'lateSettled']) ||
       value.domain !== 'metadata_text' || !projectId(value.projectId) || !token(value.sessionId) || !token(value.ownerGeneration) || !platform(value.platform) || !locale(value.locale) ||
       !oneOf(value.phase, phases) || !length(value.reviewRemainingMs, 900000) || typeof value.applySubmitted !== 'boolean' || typeof value.lateSettled !== 'boolean' ||
@@ -282,7 +289,7 @@ export function parseMetadataTextEditStatus(value: unknown): MetadataTextEditSta
 }
 export function normalMetadataTextResult(owner: MetadataTextEditProjection): 'saved' | 'unchanged' | null {
   const core = owner.coreOutcome;
-  if (owner.domain !== 'metadata_text' || owner.phase !== 'final' || owner.nativeFinality !== 'settled' || owner.nativeReason !== 'none' || owner.lateSettled ||
+  if (owner.recovery || owner.domain !== 'metadata_text' || owner.phase !== 'final' || owner.nativeFinality !== 'settled' || owner.nativeReason !== 'none' || owner.lateSettled ||
       !core || core.resources !== 'settled' || core.reason !== 'none' || !owner.applySubmitted || !owner.checkout || !owner.prepared || owner.prepared.revision !== owner.checkout.revision) return null;
   if (core.effect === 'committed' && core.journal === 'clean' && !metadataNoOp(owner.prepared.view)) return 'saved';
   if (core.effect === 'unchanged' && core.journal === 'not_created' && metadataNoOp(owner.prepared.view)) return 'unchanged';
@@ -292,6 +299,7 @@ function sameFacts(first: MetadataTextEditProjection, next: MetadataTextEditProj
   return equal({ ...first, reviewRemainingMs: 0 }, { ...next, reviewRemainingMs: 0 });
 }
 export function metadataProjectionProgress(first: MetadataTextEditProjection, next: MetadataTextEditProjection): boolean {
+  if (!savedTextRecoveryDetailsProgress(first.recovery, next.recovery)) return false;
   if (first.domain !== next.domain || first.sessionId !== next.sessionId || first.projectId !== next.projectId || first.ownerGeneration !== next.ownerGeneration ||
       first.platform !== next.platform || first.locale !== next.locale || first.checkout !== null && !equal(first.checkout, next.checkout) ||
       first.prepared !== null && !equal(first.prepared, next.prepared) || first.applySubmitted && !next.applySubmitted || first.lateSettled && !next.lateSettled) return false;

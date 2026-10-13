@@ -48,7 +48,8 @@ class _SavedCommandEngine:
         message = {SavedCommandDomain.OfflinePreflight: "Saved offline preflight custody did not settle",
                    SavedCommandDomain.AndroidBuild: "Saved Android build custody did not settle",
                    SavedCommandDomain.ProjectRecovery: "Project recovery custody did not settle",
-                   SavedCommandDomain.IOSArchive: "Saved build custody did not settle"}[domain]
+                   SavedCommandDomain.IOSArchive: "Saved build custody did not settle",
+                   SavedCommandDomain.ArtifactInspection: "Artifact inspection custody did not settle"}[domain]
         self.guard = DefaultCancellation(ProcessCleanupError, message)
         if domain is SavedCommandDomain.OfflinePreflight:
             from ._desktop_preflight_control import PreflightInput
@@ -62,6 +63,9 @@ class _SavedCommandEngine:
         elif domain is SavedCommandDomain.IOSArchive:
             from ._desktop_ios_archive_control import IOSArchiveInput
             self.input = IOSArchiveInput(started)
+        elif domain is SavedCommandDomain.ArtifactInspection:
+            from ._desktop_artifact_inspection_control import ArtifactInspectionInput
+            self.input = ArtifactInspectionInput(started)
         else:
             raise ValueError("Invalid saved-command domain")
         self.output, self.error_output = _Output(1), _Output(2)
@@ -111,7 +115,7 @@ class _SavedCommandEngine:
             except BaseException as error:
                 first = error
                 self.guard._abort(error)
-        elif (self.domain in {SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive} and self.input.operation is not None
+        elif (self.domain in {SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection} and self.input.operation is not None
               and not self._android_handoff_close_claimed):
             self._android_handoff_close_claimed = True
             try:
@@ -132,7 +136,7 @@ class _SavedCommandEngine:
         wire = _protocol(self.domain)
         self._require(type(raw) is bytes and not self.terminal_claimed
                       and self.output_bytes + len(raw) <= wire.RESPONSE_LIMIT)
-        if self.domain in (SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery):
+        if self.domain in (SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ArtifactInspection):
             self._require(self.frames == (1 if terminal else 0))
         elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):
             # Preserve a slot for the one terminal. Each original build DATA
@@ -169,7 +173,7 @@ class _SavedCommandEngine:
 
     def _response(self, kind: str, payload: dict) -> bytes:
         wire = _protocol(self.domain)
-        if self.domain in (SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery):
+        if self.domain in (SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ArtifactInspection):
             return wire.response(self.request, kind, payload)
         if self.domain is SavedCommandDomain.AndroidBuild:
             self._require(type(self._android_frames) is wire.AndroidBuildFrames)
@@ -203,6 +207,8 @@ class _SavedCommandEngine:
             self.guard._install_project_recovery_source(self.input)
         elif self.domain is SavedCommandDomain.IOSArchive:
             self.guard._install_ios_archive_source(self.input)
+        elif self.domain is SavedCommandDomain.ArtifactInspection:
+            self.guard._install_artifact_inspection_source(self.input)
         else:
             self._require(False)
         self._acquire_output(self.output)
@@ -227,6 +233,9 @@ class _SavedCommandEngine:
             self._require(self._ios_frames is None)
             self._ios_frames = IOSArchiveFrames(self.request)
             self.service = IOSArchiveRun(self.request, self.guard, self.input)
+        elif self.domain is SavedCommandDomain.ArtifactInspection:
+            from .desktop_artifact_inspection import ArtifactInspectionRun
+            self.service = ArtifactInspectionRun(self.request, self.guard, self.input)
         else:
             self._require(False)
         self.write(self._response("accepted", {"schemaVersion": 1, "context": dict(self.request.context)}))
@@ -261,7 +270,7 @@ class _SavedCommandEngine:
             return self.service is None or self.service.budget.closed
         if self.domain is SavedCommandDomain.ProjectRecovery:
             return self.input.resources_closed()
-        self._require(self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive))
+        self._require(self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection))
         if self.service is None and self.input.operation is None:
             # A constructor's lost handoff must not discard an already-bound
             # original operation, even though no terminal can then be emitted.
@@ -293,6 +302,8 @@ def run_engine(engine: _SavedCommandEngine) -> int:
         from ._desktop_project_recovery_engine import _Engine as ExpectedEngine
     elif engine.domain is SavedCommandDomain.IOSArchive:
         from ._desktop_ios_archive_engine import _Engine as ExpectedEngine
+    elif engine.domain is SavedCommandDomain.ArtifactInspection:
+        from ._desktop_artifact_inspection_engine import _Engine as ExpectedEngine
     else:
         raise ValueError("Invalid original saved-command engine")
     if type(engine) is not ExpectedEngine:

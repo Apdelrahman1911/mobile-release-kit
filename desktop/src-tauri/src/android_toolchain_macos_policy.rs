@@ -1,9 +1,9 @@
-//! Closed macOS ARM64 Android tool-registration DATA policy.
+//! Closed paired macOS Android registration DATA; native role graphs remain ARM64-only.
 //! No object parsed here grants native custody, registration or execution.
 use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use crate::{android_build_protocol::{MacToolchainSelection, MAC_TOOLCHAIN_PROFILE},
+use crate::{android_build_protocol::{MacToolchainSelection, Profile, MAC_TOOLCHAIN_PROFILE, MAC_X64_TOOLCHAIN_PROFILE},
     protocol::{strict_android_tool_manifest_json, strict_json}};
 
 pub(crate) const MANIFEST: &str = "android-toolchain.json";
@@ -28,8 +28,29 @@ pub(crate) const OS_FILES: [&str; 11] = ["/System/Library/CoreServices/SystemVer
     "/usr/bin/basename", "/usr/bin/dirname", "/usr/bin/expr", "/usr/bin/sed", "/usr/bin/tr", "/usr/bin/uname", "/usr/bin/xargs"];
 pub(crate) const OS_ROOTS: [&str; 2] = ["/System/Library", "/usr/lib"];
 pub(crate) const OS_PROFILE: &str = "macos26-arm64-sealed-system-v1";
-const BUNDLETOOL_SHA: &str = "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29";
-const BUNDLETOOL_BYTES: u64 = 32_520_401;
+pub(crate) const INTEL_OS_PROFILE: &str = "macos26-x86_64-sealed-system-v1";
+
+// Explicit DATA selection only. No host detection, provider admission or native grant.
+#[derive(Clone, Copy)]
+struct MacFields {
+    toolchain: &'static str, target: &'static str, launch: &'static str, os: &'static str,
+}
+fn mac_fields(profile: Profile) -> Option<MacFields> {
+    match profile {
+        Profile::MacArm64 => Some(MacFields { toolchain: MAC_TOOLCHAIN_PROFILE, target: "macos-arm64",
+            launch: "gradle-macos-private-jvm-arm64-v1", os: OS_PROFILE }),
+        Profile::MacX64 => Some(MacFields { toolchain: MAC_X64_TOOLCHAIN_PROFILE, target: "macos-x86_64",
+            launch: "gradle-macos-private-jvm-x86_64-v1", os: INTEL_OS_PROFILE }),
+        Profile::LinuxX64 => None,
+    }
+}
+/// The finite production JDK/loader catalogue is still ARM-only. Paired
+/// document parsing is not an Intel supplier, lease or native-execution grant.
+pub(crate) fn native_catalog_supports(profile: Profile) -> bool {
+    crate::android_native_macos_profile::authority(profile).is_some()
+}
+const BUNDLETOOL_SHA: &str = "b87fef6d0b3c7a6c43debb7b069639136af549d8b0f0bb7bac452328f0eb5a18";
+const BUNDLETOOL_BYTES: u64 = 32_494_771;
 
 pub(crate) fn digest(raw: &[u8]) -> String { Sha256::digest(raw).iter().map(|b| format!("{b:02x}")).collect() }
 /// Borrowed exact digest comparison for structural checks BEFORE a work charge.
@@ -277,6 +298,11 @@ impl Manifest{
     }
 }
 impl Inventory{
+    /// Validated document identity only, never a platform or supplier qualification.
+    pub(crate) fn matches_profile(&self, profile: Profile) -> bool {
+        mac_fields(profile).is_some_and(|fields| self.data.profile == fields.toolchain
+            && self.data.target == fields.target && self.data.launch_contract == fields.launch)
+    }
     /// Retained first-party backing only; caller also owns the inline value.
     pub(crate) fn dynamic_bytes(&self)->Option<usize>{
         self.data.dynamic_bytes()?.checked_add(self.directories.len().checked_add(1)?.checked_mul(POLICY_NODE_BYTES)?)?
@@ -311,24 +337,37 @@ pub(crate) struct Registration {
 }
 impl Registration {
     pub(crate) fn parse(raw: &[u8], account: u32, instance: &str) -> Option<Self> {
+        Self::parse_for(Profile::MacArm64, raw, account, instance)
+    }
+    pub(crate) fn parse_for(profile: Profile, raw: &[u8], account: u32, instance: &str) -> Option<Self> {
+        let fields = mac_fields(profile)?;
         if raw.is_empty() || raw.len() > RECORD_LIMIT || account == 0 || account == u32::MAX { return None; }
         let value: Self = serde_json::from_value(strict_json(raw).ok()?).ok()?;
-        value.validate(account,instance)
+        value.validate(fields,account,instance)
     }
     pub(crate) fn parse_bounded(raw:&[u8],account:u32,instance:&str,cap:usize)->Option<Self>{
+        Self::parse_bounded_for(Profile::MacArm64,raw,account,instance,cap)
+    }
+    pub(crate) fn parse_bounded_for(profile:Profile,raw:&[u8],account:u32,instance:&str,cap:usize)->Option<Self>{
+        let fields=mac_fields(profile)?;
         if account==0 || account==u32::MAX{return None;}
         let value:Self=bounded_typed(raw,RECORD_LIMIT,0,cap)?;
-        value.validate(account,instance)
+        value.validate(fields,account,instance)
     }
-    fn validate(self,account:u32,instance:&str)->Option<Self>{
+    fn validate(self,fields:MacFields,account:u32,instance:&str)->Option<Self>{
         let value=self;
-        (value.schema_version == 1 && value.profile == MAC_TOOLCHAIN_PROFILE && value.target == "macos-arm64"
+        (value.schema_version == 1 && value.profile == fields.toolchain && value.target == fields.target
             && value.instance == instance && instance.len() == 32 && instance.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             && value.owner_uid == account && sha(&value.inventory_sha256) && sha(&value.os_provider_sha256)
             && value.license_acknowledged).then_some(value)
     }
     pub(crate) fn matches(&self, selected: &MacToolchainSelection) -> bool {
-        selected.valid() && self.instance == selected.instance && self.owner_uid == selected.owner_uid
+        self.matches_for(Profile::MacArm64, selected)
+    }
+    pub(crate) fn matches_for(&self, profile: Profile, selected: &MacToolchainSelection) -> bool {
+        let Some(fields) = mac_fields(profile) else { return false; };
+        self.profile == fields.toolchain && self.target == fields.target
+            && selected.valid() && self.instance == selected.instance && self.owner_uid == selected.owner_uid
             && self.inventory_sha256 == selected.inventory_sha256 && self.os_provider_sha256 == selected.os_provider_sha256
     }
 }
@@ -345,16 +384,24 @@ pub(crate) struct Provider {
 }
 impl Provider {
     pub(crate) fn parse(raw: &[u8], selected: &MacToolchainSelection) -> Option<Self> {
+        Self::parse_for(Profile::MacArm64, raw, selected)
+    }
+    pub(crate) fn parse_for(profile: Profile, raw: &[u8], selected: &MacToolchainSelection) -> Option<Self> {
+        let fields = mac_fields(profile)?;
         if raw.is_empty() || raw.len() > PROVIDER_LIMIT || digest(raw) != selected.os_provider_sha256 { return None; }
         let value: Self = serde_json::from_value(strict_json(raw).ok()?).ok()?;
-        validate_provider(value)
+        validate_provider(value,fields)
     }
     pub(crate) fn parse_bounded(raw:&[u8],selected:&MacToolchainSelection,cap:usize)->Option<Self>{
+        Self::parse_bounded_for(Profile::MacArm64,raw,selected,cap)
+    }
+    pub(crate) fn parse_bounded_for(profile:Profile,raw:&[u8],selected:&MacToolchainSelection,cap:usize)->Option<Self>{
+        let fields=mac_fields(profile)?;
         let cells=OS_FILES.len().checked_mul(std::mem::size_of::<FileSpec>())?
             .checked_add(4*std::mem::size_of::<String>())?;
         let value=bounded_typed(raw,PROVIDER_LIMIT,cells,cap)?;
         if digest(raw)!=selected.os_provider_sha256{return None;}
-        validate_provider(value)
+        validate_provider(value,fields)
     }
     pub(crate) fn dynamic_bytes(&self)->Option<usize>{
         string_space([&self.profile,&self.target,&self.shell])?
@@ -362,8 +409,8 @@ impl Provider {
             .checked_add(string_space(self.executable_path.iter().chain(&self.roots))?)?.checked_add(file_space(&self.files)?)
     }
 }
-fn validate_provider(value: Provider) -> Option<Provider> {
-    if value.schema_version != 1 || value.profile != OS_PROFILE || value.target != "macos-arm64" || value.shell != "/bin/sh"
+fn validate_provider(value: Provider, fields: MacFields) -> Option<Provider> {
+    if value.schema_version != 1 || value.profile != fields.os || value.target != fields.target || value.shell != "/bin/sh"
         || value.executable_path != ["/usr/bin", "/bin"] || value.roots != OS_ROOTS
         || value.files.len() != OS_FILES.len() { return None; }
     for (file, expected) in value.files.iter().zip(OS_FILES) {
@@ -413,30 +460,38 @@ pub(crate) fn alias_target(alias: &Alias) -> Option<String> {
     alias_resolves(&alias.path, &alias.target, &alias.canonical, 2).then(|| alias.canonical.clone())
 }
 pub(crate) fn parse_manifest(raw: &[u8], selected: &MacToolchainSelection) -> Option<Inventory> {
+    parse_manifest_for(Profile::MacArm64, raw, selected)
+}
+pub(crate) fn parse_manifest_for(profile: Profile, raw: &[u8], selected: &MacToolchainSelection) -> Option<Inventory> {
+    let fields = mac_fields(profile)?;
     if !selected.valid() || raw.is_empty() || raw.len() > MANIFEST_LIMIT || digest(raw) != selected.inventory_sha256 { return None; }
     let value: Manifest = serde_json::from_value(strict_android_tool_manifest_json(raw).ok()?).ok()?;
-    validate_manifest(value, &selected.instance, &selected.os_provider_sha256)
+    validate_manifest(value,fields,&selected.instance,&selected.os_provider_sha256)
 }
 /// Helper-only typed parse under the already reserved payload remainder.
 /// Ordinary proposal/parse paths and this path share ONE validation authority.
 pub(crate) fn parse_manifest_bounded(raw:&[u8],selected:&MacToolchainSelection,cap:usize)->Option<Inventory>{
+    parse_manifest_bounded_for(Profile::MacArm64,raw,selected,cap)
+}
+pub(crate) fn parse_manifest_bounded_for(profile:Profile,raw:&[u8],selected:&MacToolchainSelection,cap:usize)->Option<Inventory>{
+    let fields=mac_fields(profile)?;
     if !selected.valid(){return None;}
     let cells=FILE_COUNT.checked_mul(std::mem::size_of::<FileSpec>())?
         .checked_add(ALIAS_COUNT.checked_mul(std::mem::size_of::<Alias>())?)?;
     let value:Manifest=bounded_typed(raw,MANIFEST_LIMIT,cells,cap)?;
     if digest(raw)!=selected.inventory_sha256{return None;}
-    validate_manifest_space(value,&selected.instance,&selected.os_provider_sha256,cap)
+    validate_manifest_space(value,fields,&selected.instance,&selected.os_provider_sha256,cap)
 }
-fn validate_manifest(value:Manifest,instance:&str,provider_sha256:&str)->Option<Inventory>{
-    validate_manifest_space(value,instance,provider_sha256,usize::MAX)
+fn validate_manifest(value:Manifest,fields:MacFields,instance:&str,provider_sha256:&str)->Option<Inventory>{
+    validate_manifest_space(value,fields,instance,provider_sha256,usize::MAX)
 }
-fn validate_manifest_space(value: Manifest, instance: &str, provider_sha256: &str, cap:usize) -> Option<Inventory> {
+fn validate_manifest_space(value: Manifest, fields: MacFields, instance: &str, provider_sha256: &str, cap:usize) -> Option<Inventory> {
     let mut space=value.dynamic_bytes()?.checked_add(std::mem::size_of::<Manifest>())?
         .checked_add(VALIDATE_WORK_BYTES)?.checked_add(policy_nodes_bytes(3)?)?;
     if space>cap{return None;}
-    if value.schema_version != 1 || value.profile != MAC_TOOLCHAIN_PROFILE || value.target != "macos-arm64"
+    if value.schema_version != 1 || value.profile != fields.toolchain || value.target != fields.target
         || value.instance != instance || value.os_provider_sha256 != provider_sha256
-        || value.launch_contract != "gradle-macos-private-jvm-arm64-v1" || !value.roles.valid()
+        || value.launch_contract != fields.launch || !value.roles.valid()
         || value.files.is_empty() || value.files.len() > FILE_COUNT || value.aliases.len() > ALIAS_COUNT { return None; }
     let v = &value.versions;
     if !label(&v.jdk_vendor, false) || !v.jdk_version.starts_with("17.") || !label(&v.jdk_version, true)
@@ -486,7 +541,7 @@ fn validate_manifest_space(value: Manifest, instance: &str, provider_sha256: &st
         .any(|name| exact.get(name.as_str()).is_none_or(|f| f.mode != 0o555 || f.size == 0))
         || exact.get(AAPT2).is_none_or(|f| f.mode != 0o555 || f.size == 0) { return None; }
     let jar = exact.get(value.roles.bundletool.as_str())?;
-    if jar.sha256 != BUNDLETOOL_SHA || jar.size == 0 || jar.size > BUNDLETOOL_BYTES || jar.mode != 0o444
+    if jar.sha256 != BUNDLETOOL_SHA || jar.size != BUNDLETOOL_BYTES || jar.mode != 0o444
         || !value.files.iter().any(|f| f.path.starts_with("sdk/")) { return None; }
     // No second bundle may supply unselected JDK/native files.
     let bundle = value.roles.java.split('/').take(2).collect::<Vec<_>>().join("/") + "/";
@@ -508,21 +563,30 @@ pub(crate) struct ProposalManifestData {
 }
 pub(crate) fn proposal_inventory(fields: ProposalManifestData, instance: &str,
     provider_sha256: &str) -> Option<Inventory> {
+    proposal_inventory_for(Profile::MacArm64, fields, instance, provider_sha256)
+}
+pub(crate) fn proposal_inventory_for(profile: Profile, fields: ProposalManifestData, instance: &str,
+    provider_sha256: &str) -> Option<Inventory> {
+    let expected = mac_fields(profile)?;
     if instance.len() != 32 || !instance.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         || !sha(provider_sha256) { return None; }
     validate_manifest(Manifest {
-        schema_version: 1, profile: MAC_TOOLCHAIN_PROFILE.into(), target: "macos-arm64".into(),
-        instance: instance.into(), launch_contract: "gradle-macos-private-jvm-arm64-v1".into(),
+        schema_version: 1, profile: expected.toolchain.into(), target: expected.target.into(),
+        instance: instance.into(), launch_contract: expected.launch.into(),
         versions: fields.versions, gradle_distribution: fields.gradle_distribution,
         bundletool: Bundletool { version: "1.18.3".into(), sha256: BUNDLETOOL_SHA.into() },
         roles: fields.roles, files: fields.files, aliases: fields.aliases,
         os_provider_sha256: provider_sha256.into(),
-    }, instance, provider_sha256)
+    }, expected, instance, provider_sha256)
 }
 pub(crate) fn proposal_provider(files: Vec<FileSpec>) -> Option<Provider> {
-    validate_provider(Provider { schema_version: 1, profile: OS_PROFILE.into(), target: "macos-arm64".into(),
+    proposal_provider_for(Profile::MacArm64, files)
+}
+pub(crate) fn proposal_provider_for(profile: Profile, files: Vec<FileSpec>) -> Option<Provider> {
+    let expected = mac_fields(profile)?;
+    validate_provider(Provider { schema_version: 1, profile: expected.os.into(), target: expected.target.into(),
         shell: "/bin/sh".into(), executable_path: vec!["/usr/bin".into(), "/bin".into()],
-        roots: OS_ROOTS.iter().map(|s| (*s).into()).collect(), files })
+        roots: OS_ROOTS.iter().map(|s| (*s).into()).collect(), files }, expected)
 }
 pub(crate) struct CanonicalDocument {
     pub(crate) bytes: Vec<u8>,
@@ -586,17 +650,22 @@ pub(crate) fn encode_provider(value: &Provider) -> Option<CanonicalDocument> {
 /// BEFORE service admission/Hello.
 pub(crate) fn encode_registration_proposal(account: u32, instance: &str,
     inventory_sha256: &str, provider_sha256: &str) -> Option<CanonicalDocument> {
+    encode_registration_proposal_for(Profile::MacArm64, account, instance, inventory_sha256, provider_sha256)
+}
+pub(crate) fn encode_registration_proposal_for(profile: Profile, account: u32, instance: &str,
+    inventory_sha256: &str, provider_sha256: &str) -> Option<CanonicalDocument> {
+    let fields = mac_fields(profile)?;
     if account == 0 || account == u32::MAX || instance.len() != 32
         || !instance.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         || !sha(inventory_sha256) || !sha(provider_sha256) { return None; }
-    let value = Registration { schema_version: 1, profile: MAC_TOOLCHAIN_PROFILE.into(),
-        target: "macos-arm64".into(), instance: instance.into(), owner_uid: account,
+    let value = Registration { schema_version: 1, profile: fields.toolchain.into(),
+        target: fields.target.into(), instance: instance.into(), owner_uid: account,
         inventory_sha256: inventory_sha256.into(), os_provider_sha256: provider_sha256.into(),
         license_acknowledged: true };
     let encoded = encode_canonical(&value, RECORD_LIMIT)?;
     // This small closed record has no manifest-sized Value tree. Reuse the
     // original account/instance/license DATA checks, not a duplicate validator.
-    Registration::parse(&encoded.bytes, account, instance)?;
+    Registration::parse_for(profile, &encoded.bytes, account, instance)?;
     Some(encoded)
 }
 
@@ -614,6 +683,38 @@ pub(crate) fn arm64_slice(prefix: &[u8], size: u64) -> Option<MachSlice> {
     native_slice(prefix, size, MachArchitecture::Arm64)
 }
 pub(crate) fn native_slice(prefix: &[u8], size: u64, architecture: MachArchitecture) -> Option<MachSlice> {
+    native_slice_table(prefix, size, architecture, false)
+}
+/// Exact embedded Bundletool JNA DATA selection, never original custody or a
+/// native grant. The caller must separately bind complete same-original archive
+/// and member hashes, then retain the normal header/loader/authority checks.
+/// Raw member mode0 is not the installed archive's0444 mode.
+pub(crate) fn bundletool_jna_slice(profile: Profile,
+    archive: &crate::android_native_macos_profile::ToolArchiveComparison<'_>,
+    member: &crate::android_native_macos_profile::ToolMemberComparison<'_>,
+    prefix: &[u8]) -> Option<MachSlice> {
+    const TABLE: [u8; 48] = [
+        202,254,186,190,0,0,0,2,0,0,0,7,0,0,0,3,
+        0,0,64,0,0,1,162,96,0,0,0,14,1,0,0,7,
+        0,0,0,3,0,2,0,0,0,1,160,96,0,0,0,14,
+    ];
+    if profile != Profile::MacX64
+        || (archive.component, archive.bytes, archive.sha256) != ("bundletool", BUNDLETOOL_BYTES, BUNDLETOOL_SHA)
+        || archive.containing_jar.is_some()
+        || (member.name, member.bytes, member.sha256, member.mode)
+            != ("com/sun/jna/darwin/libjnidispatch.jnilib", 237664,
+                "287f2e19f62834b151a3bc36fbe8bf12e026e314dfa6e8ce5e40bf9f4461359f", 0)
+        || prefix.len() != 4096 || prefix.get(..TABLE.len()) != Some(TABLE.as_slice())
+        || !digest_matches(prefix, "83e1b118811ef01b4228b5f56cd91aca73ce72d99e090b0051b8e3a040d13398") {
+        return None;
+    }
+    // The opaque i386 sibling is neither selected nor rewritten. All ordinary
+    // range/alignment/duplicate checks still run on the original FAT table.
+    let slice = native_slice_table(prefix, member.bytes, MachArchitecture::X86_64, true)?;
+    (slice == MachSlice { offset: 131072, size: 106592 }).then_some(slice)
+}
+fn native_slice_table(prefix: &[u8], size: u64, architecture: MachArchitecture,
+    exact_bundletool_jna: bool) -> Option<MachSlice> {
     const ARM64: u32 = 0x0100000c;
     const X64: u32 = 0x01000007;
     if size < 32 || prefix.len() < 8 { return None; }
@@ -630,7 +731,8 @@ pub(crate) fn native_slice(prefix: &[u8], size: u64, architecture: MachArchitect
     let mut selected = None; let mut ranges = Vec::new(); let mut seen = BTreeSet::new();
     for index in 0..count {
         let at = 8 + index*width; let cpu = be(at)?;
-        if !matches!(cpu, ARM64|X64) || !seen.insert(cpu) { return None; }
+        let exact_i386_sibling = exact_bundletool_jna && index == 0 && cpu == 7 && be(at+4)? == 3;
+        if (!matches!(cpu, ARM64|X64) && !exact_i386_sibling) || !seen.insert(cpu) { return None; }
         let u64be = |at:usize| prefix.get(at..at+8).and_then(|s|s.try_into().ok()).map(u64::from_be_bytes);
         let (offset, length, align) = if wide { (u64be(at+8)?, u64be(at+16)?, be(at+24)?) }
             else { (u64::from(be(at+8)?), u64::from(be(at+12)?), be(at+16)?) };
@@ -707,12 +809,20 @@ fn resolve(base: &str, tail: &str) -> Option<String> {
 /// Every declared loader search root must itself be protected. A missing member
 /// under an admitted immutable root is harmless; a writable/unknown search root
 /// cannot be ignored merely because another candidate happens to exist.
+#[cfg(test)]
 pub(crate) fn local_loads(path: &str, commands: &MachCommands, inventory: &Inventory) -> bool {
+    local_loads_for(Profile::MacArm64, path, commands, inventory)
+}
+pub(crate) fn local_loads_for(profile: Profile, path: &str, commands: &MachCommands, inventory: &Inventory) -> bool {
+    // Authority and documents must select the same target before any role edge.
+    // CPU equality alone never joins the host and the fixed SDK legacy graph.
+    let Some(authority) = crate::android_native_macos_profile::authority(profile) else { return false; };
+    if !inventory.matches_profile(profile) { return false; }
     if commands.loads.len().checked_add(commands.rpaths.len()).is_none_or(|n| n > 1024)
         || commands.loads.iter().chain(&commands.rpaths).any(|s| s.len() > 512) { return false; }
     let legacy = sdk35_reserved(path).is_some_and(|kind| kind.legacy() && !kind.script());
-    if commands.architecture != (if legacy { MachArchitecture::X86_64 } else { MachArchitecture::Arm64 }) { return false; }
-    let loaded_jvm = match crate::android_native_macos_profile::jdk_post_jli_provider(path, commands, inventory) {
+    if commands.architecture != (if legacy { MachArchitecture::X86_64 } else { authority.architecture() }) { return false; }
+    let loaded_jvm = match crate::android_native_macos_profile::jdk_post_jli_provider_for(profile, path, commands, inventory) {
         Ok(value) => value, Err(()) => return false,
     };
     let parent = path.rsplit_once('/').map_or("", |(p,_)| p);
@@ -975,6 +1085,76 @@ mod tests {
         let intel=native_slice(&thin,32,MachArchitecture::X86_64).unwrap();
         assert!(native_commands(&thin,intel,MachArchitecture::X86_64).is_some());
         assert!(macho_commands(&thin,intel).is_none());
+
+        use crate::android_native_macos_profile::{ToolArchiveComparison, ToolMemberComparison};
+        let archive = ToolArchiveComparison { component: "bundletool", bytes: BUNDLETOOL_BYTES,
+            sha256: BUNDLETOOL_SHA, containing_jar: None };
+        let member = ToolMemberComparison { name: "com/sun/jna/darwin/libjnidispatch.jnilib",
+            bytes: 237664, sha256: "287f2e19f62834b151a3bc36fbe8bf12e026e314dfa6e8ce5e40bf9f4461359f", mode: 0 };
+        // Exact signed supplier38109802320: 48-byte table plus zero padding.
+        // This is a bounded DATA fixture, not a fabricated full member/hash.
+        let mut jna = vec![0; 4096];
+        word(&mut jna, 0, 0xcafebabe, true); word(&mut jna, 4, 2, true);
+        for (at, cpu, subtype, offset, size, align) in [
+            (8, 7, 3, 16384, 107104, 14), (28, 0x01000007, 3, 131072, 106592, 14),
+        ] {
+            for (relative, value) in [(0, cpu), (4, subtype), (8, offset), (12, size), (16, align)] {
+                word(&mut jna, at + relative, value, true);
+            }
+        }
+        assert_eq!(digest(&jna), "83e1b118811ef01b4228b5f56cd91aca73ce72d99e090b0051b8e3a040d13398");
+        assert_eq!(bundletool_jna_slice(Profile::MacX64, &archive, &member, &jna),
+            Some(MachSlice { offset: 131072, size: 106592 }));
+        for architecture in [MachArchitecture::Arm64, MachArchitecture::X86_64] {
+            assert!(native_slice(&jna, member.bytes, architecture).is_none());
+        }
+        for profile in [Profile::MacArm64, Profile::LinuxX64] {
+            assert!(bundletool_jna_slice(profile, &archive, &member, &jna).is_none());
+        }
+        let wrong_sha = "0".repeat(64);
+        for changed in [
+            ToolArchiveComparison { component: "gradle", ..archive },
+            ToolArchiveComparison { bytes: archive.bytes + 1, ..archive },
+            ToolArchiveComparison { sha256: &wrong_sha, ..archive },
+            ToolArchiveComparison { containing_jar: Some(member), ..archive },
+        ] {
+            assert!(bundletool_jna_slice(Profile::MacX64, &changed, &member, &jna).is_none());
+        }
+        for changed in [
+            ToolMemberComparison { name: "libjnidispatch.jnilib", ..member },
+            ToolMemberComparison { name: "com/sun/jna/darwin-x86-64/libjnidispatch.jnilib", ..member },
+            ToolMemberComparison { name: "com/sun/jna/darwin/Libjnidispatch.jnilib", ..member },
+            ToolMemberComparison { bytes: member.bytes + 1, ..member },
+            ToolMemberComparison { sha256: &wrong_sha, ..member },
+            ToolMemberComparison { mode: 0o444, ..member },
+            ToolMemberComparison { mode: 0o100755, ..member },
+        ] {
+            assert!(bundletool_jna_slice(Profile::MacX64, &archive, &changed, &jna).is_none());
+        }
+        for length in [0, 7, 47, 48, 4095] {
+            assert!(bundletool_jna_slice(Profile::MacX64, &archive, &member, &jna[..length]).is_none());
+        }
+        let mut extended = jna.clone(); extended.push(0);
+        assert!(bundletool_jna_slice(Profile::MacX64, &archive, &member, &extended).is_none());
+        let mut tail = jna.clone(); tail[4095] = 1;
+        assert!(bundletool_jna_slice(Profile::MacX64, &archive, &member, &tail).is_none());
+        // Even otherwise valid alternative FAT layouts are not this fixed
+        // original. Preserve magic, count, every subtype/extent/alignment and order.
+        for (at, value) in [
+            (0, 0xbebafeca), (0, 0xcafebabf), (4, 0), (4, 1), (4, 3), (4, 5),
+            (8, 0x0100000c), (8, 0x01000007), (8, 18), (12, 4),
+            (16, 32), (16, 16385), (20, 31), (20, u32::MAX), (24, 21),
+            (28, 7), (28, 0x0100000c), (32, 0), (32, 0x80000003),
+            (36, 90112), (36, 131073), (40, 31), (40, 106593), (44, 11), (44, 21),
+        ] {
+            let mut changed = jna.clone(); word(&mut changed, at, value, true);
+            assert!(bundletool_jna_slice(Profile::MacX64, &archive, &member, &changed).is_none(),
+                "changed FAT word {at}/{value}");
+        }
+        let mut reordered = jna.clone();
+        reordered[8..28].copy_from_slice(&jna[28..48]);
+        reordered[28..48].copy_from_slice(&jna[8..28]);
+        assert!(bundletool_jna_slice(Profile::MacX64, &archive, &member, &reordered).is_none());
     }
     pub(super) fn lazy_load_paths_are_parsed_and_loader_environment_commands_refused_data() {
         let path=b"/usr/lib/libSystem.B.dylib";
@@ -1352,12 +1532,228 @@ mod tests {
     #[test]
     fn canonical_encoder_refuses_limits_and_second_pass_drift() { canonical_encoder_refuses_limits_and_second_pass_drift_data(); }
 
+    fn paired_fields() -> ProposalManifestData {
+        let (mut selected, value) = fixture();
+        let old = inventory(&mut selected, &value).unwrap();
+        ProposalManifestData { versions: old.data.versions, gradle_distribution: old.data.gradle_distribution,
+            roles: old.data.roles, files: old.data.files, aliases: old.data.aliases }
+    }
+    fn paired_os_files() -> Vec<FileSpec> {
+        OS_FILES.iter().map(|path| FileSpec { path: (*path).into(), size: 1, sha256: "e".repeat(64),
+            mode: if path.ends_with(".plist") { 0o644 } else { 0o755 } }).collect()
+    }
+    fn paired_documents(profile: Profile) -> (MacToolchainSelection, [CanonicalDocument; 3]) {
+        let (mut selected, _) = fixture();
+        let provider = proposal_provider_for(profile, paired_os_files()).unwrap();
+        let os = encode_provider(&provider).unwrap();
+        selected.os_provider_sha256 = os.digest_hex();
+        let proposed = proposal_inventory_for(profile, paired_fields(), &selected.instance,
+            &selected.os_provider_sha256).unwrap();
+        let manifest = encode_inventory(&proposed).unwrap();
+        selected.inventory_sha256 = manifest.digest_hex();
+        let record = encode_registration_proposal_for(profile, selected.owner_uid, &selected.instance,
+            &selected.inventory_sha256, &selected.os_provider_sha256).unwrap();
+        selected.record_sha256 = record.digest_hex();
+        (selected, [manifest, record, os])
+    }
+    pub(super) fn paired_policy_roundtrips_preserve_arm_defaults_and_bounds_data() {
+        // Independent literal expectations, not mac_fields as the oracle.
+        for (profile, toolchain, target, launch, os_profile) in [
+            (Profile::MacArm64, "android-registered-macos-arm64-v1", "macos-arm64",
+             "gradle-macos-private-jvm-arm64-v1", "macos26-arm64-sealed-system-v1"),
+            (Profile::MacX64, "android-registered-macos-x86_64-v1", "macos-x86_64",
+             "gradle-macos-private-jvm-x86_64-v1", "macos26-x86_64-sealed-system-v1"),
+        ] {
+            let (selected, docs) = paired_documents(profile);
+            let parsed = parse_manifest_for(profile, &docs[0].bytes, &selected).unwrap();
+            assert!(parsed.matches_profile(profile));
+            assert!(!parsed.matches_profile(Profile::LinuxX64));
+            assert_eq!((&parsed.data.profile[..], &parsed.data.target[..], &parsed.data.launch_contract[..]),
+                (toolchain, target, launch));
+            assert_eq!(encode_inventory(&parsed).unwrap().bytes, docs[0].bytes);
+            let bounded = parse_manifest_bounded_for(profile, &docs[0].bytes, &selected, 32*1024*1024).unwrap();
+            assert_eq!(parsed.data.files, bounded.data.files);
+            assert_eq!(parsed.directories, bounded.directories);
+            let provider = Provider::parse_for(profile, &docs[2].bytes, &selected).unwrap();
+            assert_eq!((&provider.profile[..], &provider.target[..]), (os_profile, target));
+            assert_eq!(provider.files, Provider::parse_bounded_for(profile, &docs[2].bytes, &selected, 1024*1024).unwrap().files);
+            let record = Registration::parse_for(profile, &docs[1].bytes, 501, &selected.instance).unwrap();
+            assert_eq!((&record.profile[..], &record.target[..]), (toolchain, target));
+            assert_eq!(Some(record.clone()), Registration::parse_bounded_for(profile, &docs[1].bytes, 501, &selected.instance, 1024*1024));
+            assert!(record.matches_for(profile, &selected));
+            let other = if profile == Profile::MacArm64 { Profile::MacX64 } else { Profile::MacArm64 };
+            assert!(!record.matches_for(other, &selected));
+            assert!(!parsed.matches_profile(other));
+            let arm = profile == Profile::MacArm64;
+            assert_eq!(parse_manifest(&docs[0].bytes, &selected).is_some(), arm);
+            assert_eq!(parse_manifest_bounded(&docs[0].bytes, &selected, 32*1024*1024).is_some(), arm);
+            assert_eq!(Provider::parse(&docs[2].bytes, &selected).is_some(), arm);
+            assert_eq!(Provider::parse_bounded(&docs[2].bytes, &selected, 1024*1024).is_some(), arm);
+            assert_eq!(Registration::parse(&docs[1].bytes, 501, &selected.instance).is_some(), arm);
+            assert_eq!(Registration::parse_bounded(&docs[1].bytes, 501, &selected.instance, 1024*1024).is_some(), arm);
+            assert_eq!(record.matches(&selected), arm);
+            for selector in [profile, Profile::LinuxX64] {
+                assert!(parse_manifest_bounded_for(selector, &docs[0].bytes, &selected, 0).is_none());
+                assert!(Provider::parse_bounded_for(selector, &docs[2].bytes, &selected, 0).is_none());
+                assert!(Registration::parse_bounded_for(selector, &docs[1].bytes, 501, &selected.instance, 0).is_none());
+            }
+            assert!(parse_manifest_for(Profile::LinuxX64, &docs[0].bytes, &selected).is_none());
+            assert!(Provider::parse_for(Profile::LinuxX64, &docs[2].bytes, &selected).is_none());
+            assert!(Registration::parse_for(Profile::LinuxX64, &docs[1].bytes, 501, &selected.instance).is_none());
+            assert!(!record.matches_for(Profile::LinuxX64, &selected));
+            assert!(proposal_inventory_for(Profile::LinuxX64, paired_fields(), &selected.instance, &selected.os_provider_sha256).is_none());
+            assert!(proposal_provider_for(Profile::LinuxX64, paired_os_files()).is_none());
+            assert!(encode_registration_proposal_for(Profile::LinuxX64, 501, &selected.instance,
+                &selected.inventory_sha256, &selected.os_provider_sha256).is_none());
+            let mut appended = docs[0].bytes.clone(); appended.push(b'\n');
+            assert!(parse_manifest_for(profile, &appended, &selected).is_none());
+            assert!(parse_manifest_bounded_for(profile, &appended, &selected, 32*1024*1024).is_none());
+            let mut appended = docs[2].bytes.clone(); appended.push(b'\n');
+            assert!(Provider::parse_for(profile, &appended, &selected).is_none());
+            assert!(Provider::parse_bounded_for(profile, &appended, &selected, 1024*1024).is_none());
+            assert!(Registration::parse_for(profile, &docs[1].bytes, 502, &selected.instance).is_none());
+            assert!(encode_registration_proposal_for(profile, 0, &selected.instance,
+                &selected.inventory_sha256, &selected.os_provider_sha256).is_none());
+            let mut fields = paired_fields(); fields.files[0].mode = 0o777;
+            assert!(proposal_inventory_for(profile, fields, &selected.instance, &selected.os_provider_sha256).is_none());
+        }
+    }
+    pub(super) fn paired_policy_refuses_rehashed_cross_target_and_invalid_documents_data() {
+        for (profile, other, opposite_toolchain, opposite_target, opposite_launch, opposite_os) in [
+            (Profile::MacArm64, Profile::MacX64, "android-registered-macos-x86_64-v1", "macos-x86_64",
+             "gradle-macos-private-jvm-x86_64-v1", "macos26-x86_64-sealed-system-v1"),
+            (Profile::MacX64, Profile::MacArm64, "android-registered-macos-arm64-v1", "macos-arm64",
+             "gradle-macos-private-jvm-arm64-v1", "macos26-arm64-sealed-system-v1"),
+        ] {
+            let (selected, docs) = paired_documents(profile);
+            let values: [Value; 3] = std::array::from_fn(|index| serde_json::from_slice(&docs[index].bytes).unwrap());
+            for (document, key, opposite) in [(0, "profile", opposite_toolchain), (0, "target", opposite_target),
+                (0, "launchContract", opposite_launch), (1, "profile", opposite_toolchain), (1, "target", opposite_target),
+                (2, "profile", opposite_os), (2, "target", opposite_target)] {
+                for replacement in [opposite, "unknown-profile-data"] {
+                    let mut changed = values.clone(); changed[document][key] = json!(replacement);
+                    let provider = serde_json::to_vec(&changed[2]).unwrap();
+                    let mut anchored = selected.clone(); anchored.os_provider_sha256 = digest(&provider);
+                    changed[0]["osProviderSha256"] = json!(anchored.os_provider_sha256);
+                    let manifest = serde_json::to_vec(&changed[0]).unwrap(); anchored.inventory_sha256 = digest(&manifest);
+                    changed[1]["inventorySha256"] = json!(anchored.inventory_sha256);
+                    changed[1]["osProviderSha256"] = json!(anchored.os_provider_sha256);
+                    let record = serde_json::to_vec(&changed[1]).unwrap(); anchored.record_sha256 = digest(&record);
+                    // Every complete raw anchor has been recomputed. Refusal must prove pairing.
+                    assert_eq!(digest(&manifest), anchored.inventory_sha256);
+                    assert_eq!(digest(&provider), anchored.os_provider_sha256);
+                    assert_eq!(digest(&record), anchored.record_sha256);
+                    match document {
+                        0 => {
+                            assert!(parse_manifest_for(profile, &manifest, &anchored).is_none());
+                            assert!(parse_manifest_bounded_for(profile, &manifest, &anchored, 32*1024*1024).is_none());
+                        }
+                        1 => {
+                            assert!(Registration::parse_for(profile, &record, 501, &anchored.instance).is_none());
+                            assert!(Registration::parse_bounded_for(profile, &record, 501, &anchored.instance, 1024*1024).is_none());
+                        }
+                        2 => {
+                            assert!(Provider::parse_for(profile, &provider, &anchored).is_none());
+                            assert!(Provider::parse_bounded_for(profile, &provider, &anchored, 1024*1024).is_none());
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            let (foreign, opposite) = paired_documents(other);
+            assert!(parse_manifest_for(profile, &opposite[0].bytes, &foreign).is_none());
+            assert!(Provider::parse_for(profile, &opposite[2].bytes, &foreign).is_none());
+            assert!(Registration::parse_for(profile, &opposite[1].bytes, 501, &foreign.instance).is_none());
+            let mut schema = values[0].clone(); schema["schemaVersion"] = json!(2);
+            let raw = serde_json::to_vec(&schema).unwrap(); let mut anchored = selected.clone(); anchored.inventory_sha256 = digest(&raw);
+            assert!(parse_manifest_for(profile, &raw, &anchored).is_none());
+            assert!(parse_manifest_bounded_for(profile, &raw, &anchored, 32*1024*1024).is_none());
+            let mut unlicensed = values[1].clone(); unlicensed["licenseAcknowledged"] = json!(false);
+            let raw = serde_json::to_vec(&unlicensed).unwrap();
+            assert!(Registration::parse_for(profile, &raw, 501, &selected.instance).is_none());
+            assert!(Registration::parse_bounded_for(profile, &raw, 501, &selected.instance, 1024*1024).is_none());
+        }
+    }
+    pub(super) fn intel_document_data_never_borrows_arm_native_role_authority_data() {
+        assert!(native_catalog_supports(Profile::MacArm64));
+        assert!(native_catalog_supports(Profile::MacX64));
+        assert!(!native_catalog_supports(Profile::LinuxX64));
+        let (arm, arm_docs) = paired_documents(Profile::MacArm64);
+        let arm_inventory = parse_manifest(&arm_docs[0].bytes, &arm).unwrap();
+        let (intel, intel_docs) = paired_documents(Profile::MacX64);
+        let intel_inventory = parse_manifest_for(Profile::MacX64, &intel_docs[0].bytes, &intel).unwrap();
+        let mut commands = MachCommands { architecture: MachArchitecture::Arm64, file_type: 2,
+            header_sha256: "e".repeat(64), install_name: None, loads: vec![], rpaths: vec![] };
+        assert!(local_loads(AAPT2, &commands, &arm_inventory));
+        assert!(local_loads_for(Profile::MacArm64, AAPT2, &commands, &arm_inventory));
+        for profile in [Profile::MacX64, Profile::LinuxX64] {
+            assert!(!local_loads_for(profile, AAPT2, &commands, &arm_inventory));
+            assert!(!local_loads_for(profile, AAPT2, &commands, &intel_inventory));
+            assert!(crate::android_native_macos_profile::jdk_post_jli_provider_for(profile,
+                "jdk/Test.jdk/Contents/Home/bin/java", &commands, &arm_inventory).is_err());
+        }
+        for architecture in [MachArchitecture::Arm64, MachArchitecture::X86_64] {
+            commands.architecture = architecture;
+            for path in [AAPT2, "jdk/Test.jdk/Contents/Home/bin/java", Sdk35File::LldIntel.pin().path] {
+                assert!(!local_loads(path, &commands, &intel_inventory));
+                assert!(!local_loads_for(Profile::MacArm64, path, &commands, &intel_inventory));
+                // CPU/path selected load-DATA now has an Intel catalogue.
+                // Empty synthetic loads are not a supplier or original receipt.
+                assert_eq!(local_loads_for(Profile::MacX64, path, &commands, &intel_inventory),
+                    architecture == MachArchitecture::X86_64);
+            }
+        }
+        // Even exact existing ARM JDK DATA cannot be relabeled as Intel authority.
+        let (mut selected, mut value) = exact_jdk_value();
+        value["profile"] = json!("android-registered-macos-x86_64-v1");
+        value["target"] = json!("macos-x86_64");
+        value["launchContract"] = json!("gradle-macos-private-jvm-x86_64-v1");
+        let raw = serde_json::to_vec(&value).unwrap(); selected.inventory_sha256 = digest(&raw);
+        let data = parse_manifest_for(Profile::MacX64, &raw, &selected).unwrap();
+        let pin = crate::android_native_macos_profile::jdk_native("Contents/Home/lib/libjava.dylib").unwrap();
+        assert!(!local_loads("jdk/Test.jdk/Contents/Home/lib/libjava.dylib", &expected_jdk_commands(pin), &data));
+
+        let mut relabeled = expected_jdk_commands(pin);
+        relabeled.architecture = MachArchitecture::X86_64;
+        assert!(!local_loads_for(Profile::MacX64,
+            "jdk/Test.jdk/Contents/Home/lib/libjava.dylib", &relabeled, &data));
+        // Same CPU never erases the separate legacy-SDK/native-current roles.
+        // Both exact endpoints are present: these refusals are not missing-file
+        // shortcuts. This copied inventory remains inert load-comparison DATA.
+        let mut role_inventory = parse_manifest_for(Profile::MacX64, &intel_docs[0].bytes, &intel).unwrap();
+        let legacy = Sdk35File::LldIntel.pin();
+        role_inventory.data.files.push(FileSpec { path: legacy.path.into(), size: legacy.bytes,
+            sha256: legacy.sha256.into(), mode: legacy.original_mode & !0o222 });
+        role_inventory.data.files.sort_by(|a, b| a.path.cmp(&b.path));
+        assert!(role_inventory.exact_file(AAPT2).is_some() && role_inventory.exact_file(legacy.path).is_some());
+        commands.architecture = MachArchitecture::X86_64;
+        commands.loads = vec![format!("@loader_path/../../../{}", legacy.path)];
+        assert!(!local_loads_for(Profile::MacX64, AAPT2, &commands, &role_inventory));
+        commands.loads = vec![format!("@loader_path/../../../../{}", AAPT2)];
+        assert!(!local_loads_for(Profile::MacX64, legacy.path, &commands, &role_inventory));
+    }
+    #[test]
+    fn paired_policy_roundtrips_preserve_arm_defaults_and_bounds() {
+        paired_policy_roundtrips_preserve_arm_defaults_and_bounds_data();
+    }
+    #[test]
+    fn paired_policy_refuses_rehashed_cross_target_and_invalid_documents() {
+        paired_policy_refuses_rehashed_cross_target_and_invalid_documents_data();
+    }
+    #[test]
+    fn intel_document_data_never_borrows_arm_native_role_authority() {
+        intel_document_data_never_borrows_arm_native_role_authority_data();
+    }
+
 }
 
 // Explicit harness=false DATA bridge; ordinary libtest wrappers use these same
 // inert bodies. No native custody, task, Prepare/Start or qualification is granted.
 #[cfg(test)]
 pub(crate) fn assert_macos_toolchain_policy_data_contract() {
+    tests::paired_policy_roundtrips_preserve_arm_defaults_and_bounds_data();
+    tests::paired_policy_refuses_rehashed_cross_target_and_invalid_documents_data();
+    tests::intel_document_data_never_borrows_arm_native_role_authority_data();
     tests::proposal_tree_budget_preserves_live_roots_and_overflow_data();
     tests::closed_mac_roles_membership_and_selected_hashes_are_required_data();
     tests::aliases_cannot_escape_change_bundles_or_point_to_another_alias_data();

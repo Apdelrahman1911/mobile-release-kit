@@ -1,0 +1,23 @@
+#!/bin/sh
+# This dedicated package removes the managed app or resumes an interrupted
+# removal. The native entry independently authenticates both modes; shell
+# presence is only a dispatch hint, never permission to delete anything.
+set -eu
+umask 077
+[ "$#" -eq 3 ] || exit 78
+[ "$3" = "/" ] || exit 78
+case "$1" in /*) ;; *) exit 78 ;; esac
+app='/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app'
+if [ -e "$app" ] || [ -L "$app" ]; then
+    # A failed live exec is terminal: never retry through the recovery copy.
+    exec '/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-macos-remove' "$1"
+fi
+case "$0" in
+    ./postinstall) scripts=. ;;
+    /*/postinstall) scripts=${0%/*} ;;
+    *) exit 78 ;;
+esac
+cd -P "$scripts" 2>/dev/null || exit 78
+# The same signed binary is packaged for recovery only. --resume must refuse a
+# present/ambiguous app, absent prior admission or unknown original ownership.
+exec ./mrk-macos-remove --resume "$1"

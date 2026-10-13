@@ -36,7 +36,9 @@ pub struct Client {
 }
 impl Client {
     pub fn new(signal:Arc<Signal>,operation:[u8;16])->Option<Self>{
-        let bounds=signal.bounds()?;let identity=Identity::build()?;
+        let bounds=signal.bounds()?;
+        if signal.removal_cutoff().is_some() && !signal.admitted(false){return None;}
+        let identity=Identity::build()?;
         let request=Binding::request(identity,operation,wire::Bounds{origin:bounds.origin,work:bounds.work,hard:bounds.hard})?;
         Some(Self{book:ClientBook::new_maintenance(signal.clone()),signal:ManuallyDrop::new(signal),
             request,binding:None,tail:None,buffer:[0;wire::BYTES+1],used:0,last:bounds.origin,begun:false,
@@ -56,19 +58,31 @@ impl Client {
         if now<self.last || now>wire::MAX_RAW{self.signal.clock_unknown();return Err(Failure::Unknown);}
         self.last=now;Ok(now)
     }
+    fn removal_cut(&mut self,cleanup:bool)->Result<(),Failure>{
+        if self.signal.removal_cutoff().is_none(){return Ok(());}
+        let now=self.now()?;
+        if self.signal.admitted_at(cleanup,now){Ok(())}
+        else{Err(if self.signal.unknown(){Failure::Unknown}else{Failure::Stopped})}
+    }
     fn failed(&self,kind:Failure)->Failure{
         self.signal.failure_now(matches!(kind,Failure::Unknown|Failure::Native|Failure::Binding|Failure::Sequence));kind
     }
     fn call(&mut self,method:u32,frame:Frame,reply:Kind)->Result<Frame,Failure>{
         let input=frame.encode().ok_or_else(||self.failed(Failure::Binding))?;
+        self.removal_cut(false)?;
         let raw=self.book.maintenance_exchange(method,&input)?;
         let now=self.now()?;
         let value=Frame::decode(&raw).filter(|value|value.kind==reply).ok_or_else(||self.failed(Failure::Binding))?;
         if value.binding.acceptance>now{return Err(self.failed(Failure::Binding));}
+        // ClientBook already retained this real decoded return before its
+        // native/clock POST. This local value grants no binding after a veto;
+        // the owning book keeps the observation without declaring success.
+        self.removal_cut(false)?;
         Ok(value)
     }
     fn challenge_and_watch(&mut self)->Result<Frame,Failure>{
-        if self.begun || self.retired{return Err(self.failed(Failure::Sequence));}self.begun=true;
+        if self.begun || self.retired{return Err(self.failed(Failure::Sequence));}
+        self.removal_cut(false)?;self.begun=true;
         self.book.begin()?;
         let a=self.call(3,Frame{kind:Kind::ChallengeA,code:Code::Accepted,binding:self.request,tail:None},Kind::ChallengeAReply)?;
         if a.code!=Code::Accepted || !a.binding.matches_request(self.request,self.book.maintenance_account()){
@@ -79,6 +93,7 @@ impl Client {
         // Actual SAME connection's processIdentifier and original NOTE_EXIT
         // registration/noninheritance complete before B enters.
         self.book.maintenance_watch()?;
+        self.removal_cut(false)?;
         #[cfg(feature = "e2-native-fixture")]
         { self.fixture.watch_registered=true; }
         Ok(a)
@@ -108,7 +123,9 @@ impl Client {
         let receipt=Frame{kind:Kind::TailReceived,code:Code::Accepted,binding:result.binding,tail:None}
             .encode().ok_or_else(||self.failed(Failure::Binding))?;
         self.receipt_sent=true; // exactly one possibly-entered send, never retry
+        self.removal_cut(false)?;
         self.book.maintenance_exchange(7,&receipt)?;
+        self.removal_cut(false)?;
         Ok(Drain::Started)
     }
     /// Fixed missing-B negative on the same A/watch original. No phase3, B,
@@ -164,9 +181,12 @@ impl Client {
     }
     pub fn step(&mut self)->Result<Progress,Failure>{
         if !self.receipt_sent || self.retired || self.used>wire::BYTES{return Err(self.failed(Failure::Sequence));}
+        self.removal_cut(true)?;
         let (bytes,eof,exited)=self.book.maintenance_step(&mut self.buffer[self.used..])?;
         self.used+=bytes;self.eof|=eof;self.exited|=exited;
         let now=self.now()?;
+        // Preserve actual byte/EOF/exit observations even when returned late.
+        self.removal_cut(true)?;
         if self.used>wire::BYTES{return Err(self.failed(Failure::Binding));}
         if self.tail.is_none(){
             if self.used<wire::BYTES{
@@ -202,7 +222,9 @@ impl Client {
     pub fn final_observed(&self)->bool{self.admission_issued && self.eof && self.exited && self.tail.is_some()}
     pub fn release(&mut self)->bool{
         if self.retired{return true;}
+        if self.removal_cut(true).is_err(){return false;}
         if !self.book.release(){return false;}
+        if self.removal_cut(true).is_err(){return false;}
         self.retired=true;
         // Actual book, handles, request backing AND owning tail capture have
         // all settled before the last local Signal handle is consumed.

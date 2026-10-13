@@ -7,13 +7,13 @@ import time
 def main() -> int:
     started = time.monotonic()
     domain = "configuration" if len(sys.argv) == 2 else sys.argv[2] if len(sys.argv) == 3 else None
-    if (domain not in {"configuration", "github_workflows", "metadata_text", "release_version", "metadata_images"}
+    if (domain not in {"configuration", "github_workflows", "metadata_text", "release_version", "metadata_images", "project_initialization"}
             or len(sys.argv) == 3 and domain == "configuration"
             or not sys.flags.isolated or not sys.flags.no_site
             or not sys.dont_write_bytecode or not os.path.isabs(sys.argv[1])
             or sys.version_info < (3, 11) or not (sys.platform.startswith("linux") or sys.platform == "darwin")
             or (domain == "metadata_images" and sys.platform not in {"linux", "darwin"})
-            or (domain in {"github_workflows", "metadata_text", "release_version"}
+            or (domain in {"github_workflows", "metadata_text", "release_version", "project_initialization"}
                 and sys.platform not in {"linux", "darwin"})):
         return 78
     sys.path.insert(0, sys.argv[1])

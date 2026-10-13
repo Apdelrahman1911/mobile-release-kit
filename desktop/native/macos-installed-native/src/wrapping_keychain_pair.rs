@@ -286,9 +286,16 @@ fn exact_lookup(f: &Facts, status: i32) -> bool {
 }
 fn reader_denied(row: &CaseReturn) -> bool {
     let f = row.facts();
+    // Classic Keychain can deny an unmatched ACL with null UI credentials
+    // as AuthenticationFailed. Preserve its exact status/outcome, not UIFail.
+    let denied = match f.outcome() {
+        Outcome::InteractionRequired => exact_lookup(f, -25308),
+        Outcome::AuthenticationFailed => exact_lookup(f, -25293),
+        _ => false,
+    };
     row.case() == Case::OtherExecutableLookup && peer_settled(row)
-        && f.process_interaction_restored() && f.raw.policy.role == 2 && exact_lookup(f, -25308)
-        && f.outcome() == Outcome::InteractionRequired && f.add_effect() == AddEffect::NotEntered
+        && f.process_interaction_restored() && f.raw.policy.role == 2 && denied
+        && f.add_effect() == AddEffect::NotEntered
         && f.observed_keychain_status().is_some_and(|s| s & 1 == 1) && f.namespace_verified()
         && f.first_refusal_phase() == Some(11) && f.raw.key_bytes == 0 && !row.scoped_value_present()
         && row.comparison().is_none() && f.adapter_frame_retired() && row.retained_native_frame_bytes() == 0

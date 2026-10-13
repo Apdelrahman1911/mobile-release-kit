@@ -15,17 +15,21 @@ fn context(domain: SavedCommandDomain) -> Context { match domain {
     SavedCommandDomain::AndroidBuild => Context::AndroidBuild(android_wire::tests::context()),
     SavedCommandDomain::ProjectRecovery => Context::ProjectRecovery(recovery_wire::tests::context()),
     SavedCommandDomain::IOSArchive => Context::IOSArchive(ios_wire::tests::context()),
+    SavedCommandDomain::ArtifactInspection => Context::ArtifactInspection(artifact_wire::tests::context()),
 } }
 #[test]
 fn ios_mode_gate_keeps_matched_non_ios_pass_through_and_exact_mode_selection() {
     use ios_wire::{ModeCapabilities as Modes, Operation};
-    let unsigned = Modes { unsigned: true, signed: false, recovery: false };
-    let signed = Modes { unsigned: false, signed: true, recovery: false };
-    assert_eq!(ios_mode_selection(true, None), unsigned);
+    let supported = Modes { unsigned: true, signed: true, recovery: true };
+    assert_eq!(ios_mode_selection(true, None), supported);
     assert_eq!(ios_mode_selection(false, None), Modes::NONE);
-    assert_eq!(ios_mode_selection(true, Some(signed)), signed);
-    assert_eq!(ios_mode_selection(true, Some(Modes::NONE)), Modes::NONE);
-    assert_eq!(ios_mode_selection(false, Some(unsigned)), Modes::NONE);
+    // Exhaust the three-mode observer mask. DATA can narrow an installed
+    // provider, never substitute for one; a closed observation has no fallback.
+    for mask in 0..8 {
+        let observed = Modes { unsigned: mask & 1 != 0, signed: mask & 2 != 0, recovery: mask & 4 != 0 };
+        assert_eq!(ios_mode_selection(true, Some(observed)), observed);
+        assert_eq!(ios_mode_selection(false, Some(observed)), Modes::NONE);
+    }
     for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery] {
         let owner = application(domain);
         assert_eq!(owner.inner.ios_mode_capabilities(), Modes::NONE);
@@ -36,12 +40,43 @@ fn ios_mode_gate_keeps_matched_non_ios_pass_through_and_exact_mode_selection() {
     }
     let ios = application(SavedCommandDomain::IOSArchive);
     let modes = ios.inner.ios_mode_capabilities();
-    assert_eq!(ios.inner.ios_mode_qualified(&context(SavedCommandDomain::IOSArchive), None),
-        modes.supports(Operation::IOSUnsignedArchive));
-    assert!(!ios.inner.ios_mode_qualified(&Context::IOSArchive(ios_wire::tests::signed_context()), None));
-    assert!(!ios.inner.ios_mode_qualified(&Context::IOSArchive(ios_wire::tests::recovery_context()), None));
+    assert_eq!(modes, ios_mode_selection(ios.inner.ios_installed_selected(), None));
+    assert_eq!(ios.inner.qualified(None), ios.inner.ios_installed_selected());
+    for (selected, operation) in [
+        (context(SavedCommandDomain::IOSArchive), Operation::IOSUnsignedArchive),
+        (Context::IOSArchive(ios_wire::tests::signed_context()), Operation::IOSSignedExport),
+        (Context::IOSArchive(ios_wire::tests::recovery_context()), Operation::IOSLocalRecovery),
+    ] {
+        assert_eq!(ios.inner.ios_mode_qualified(&selected, None), modes.supports(operation));
+    }
     assert!(!ios.inner.ios_mode_qualified(&context(SavedCommandDomain::OfflinePreflight), None));
-    assert!(!modes.signed && !modes.recovery);
+    // Linux deliberately has no iOS profile. Check the actual native gate's
+    // busy branch in SOURCE, rather than inventing platform qualification.
+    let source = include_str!("asset_session.rs");
+    let gate = source.split_once("    fn ios_archive_gate(").unwrap().1
+        .split_once("    pub(crate) fn ios_archive_subscribe").unwrap().0;
+    let peer_contract = |value: &str| {
+        let calls = ["self.inner.bridge.artifact_inspection.disabled()",
+            "self.inner.bridge.artifact_inspection.stopping()",
+            "self.inner.bridge.artifact_inspection.busy()"];
+        if calls.iter().any(|call| value.matches(*call).count() != 1) { return false; }
+        let disabled = value.find(calls[0]).unwrap();
+        let stopping = value.find(calls[1]).unwrap();
+        let busy = value.find(calls[2]).unwrap();
+        let Some(platform) = value.find("ios_archive_document_gate(state,") else { return false; };
+        disabled < stopping && stopping < platform && platform < busy
+            && value[disabled..stopping].contains("return Availability::CleanupUnknown;")
+            && value[stopping..platform].contains("return Availability::Shutdown;")
+            && value[busy..].contains("return Availability::Busy;")
+    };
+    assert!(peer_contract(gate));
+    for call in ["self.inner.bridge.artifact_inspection.disabled()",
+        "self.inner.bridge.artifact_inspection.stopping()",
+        "self.inner.bridge.artifact_inspection.busy()"] {
+        assert!(!peer_contract(&gate.replacen(call, "false", 1)));
+    }
+    assert_eq!((modes.unsigned, modes.signed, modes.recovery),
+        (ios.inner.ios_installed_selected(), ios.inner.ios_installed_selected(), ios.inner.ios_installed_selected()));
 }
 #[test]
 fn mode_only_status_changes_use_the_original_counter_without_changing_other_domains() {
@@ -92,13 +127,14 @@ fn active_with_context(application: SavedCommandOwner, context: Context) -> (Sav
     let profile = match domain { SavedCommandDomain::OfflinePreflight => Profile::OfflinePreflight(wire::Profile::LinuxX64),
         SavedCommandDomain::AndroidBuild => Profile::AndroidBuild(android_wire::Profile::LinuxX64),
         SavedCommandDomain::ProjectRecovery => Profile::ProjectRecovery(recovery_wire::Profile::LinuxX64),
-        SavedCommandDomain::IOSArchive => Profile::IOSArchive(ios_wire::Profile::MacArm64) };
+        SavedCommandDomain::IOSArchive => Profile::IOSArchive(ios_wire::Profile::MacArm64),
+        SavedCommandDomain::ArtifactInspection => Profile::ArtifactInspection(artifact_wire::Profile::MacosArm64) };
     let owner = Arc::new(Session { domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
         profile, clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
-        material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, native_failure: Mutex::new(None),
-        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None, artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
         android_control: None,
-        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
         android_close: None,
         stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
         driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
@@ -108,7 +144,7 @@ fn active_with_context(application: SavedCommandOwner, context: Context) -> (Sav
         driver: AsyncMutex::new(None), watchdog: Mutex::new(None), manager: AsyncMutex::new(None), observer: AsyncMutex::new(None),
         driver_return: Mutex::new(None), manager_return: Mutex::new(None), observer_return: Mutex::new(None), watchdog_return: Mutex::new(None),
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         fixture: None,
     });
     p.phase = Phase::Starting; p.intent_usable = false;
@@ -133,16 +169,17 @@ fn bound_document_model() -> (Arc<crate::bridge::DesktopBridge>, crate::asset_se
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration_callback() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive, SavedCommandDomain::ArtifactInspection] {
         let (bridge, document) = bound_document_model();
         let original = match domain {
             SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
             SavedCommandDomain::AndroidBuild => bridge.android_build.original_for_test(),
             SavedCommandDomain::ProjectRecovery => bridge.project_recovery.original_for_test(),
             SavedCommandDomain::IOSArchive => bridge.ios_archive.original_for_test(),
+            SavedCommandDomain::ArtifactInspection => &bridge.artifact_inspection,
         };
         original.inner.lock().prepared = Some(Prepared { projection: projection(domain),
-            expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None });
+            expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
         assert_eq!(original.inner.qualified(None), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
             && original.inner.runtime.offline_preflight_installed_profile_available());
         assert_eq!(document.offline_preflight_status().unwrap().availability, wire::Availability::Busy);
@@ -167,6 +204,10 @@ fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration
         // Removing the redundant shell idle check does not bypass shutdown or
         // document loss: the same admission method must still refuse callback.
         entered.set(false); original.request_shutdown();
+        if domain == SavedCommandDomain::ArtifactInspection {
+            // Actual original peer shutdown precedes unsupported-platform DATA.
+            assert_eq!(document.ios_archive_status().unwrap().availability, ios_wire::Availability::Shutdown);
+        }
         assert_eq!(document.configuration_edit_admit(|_| { entered.set(true); Ok(()) }).err().unwrap().code, "shutting_down");
         document.lost();
         assert!(document.configuration_edit_admit(|_| { entered.set(true); Ok(()) }).is_err());
@@ -177,13 +218,14 @@ fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_and_cancel() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive, SavedCommandDomain::ArtifactInspection] {
         let (bridge, document) = bound_document_model();
         let original = match domain {
             SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
             SavedCommandDomain::AndroidBuild => bridge.android_build.original_for_test(),
             SavedCommandDomain::ProjectRecovery => bridge.project_recovery.original_for_test(),
             SavedCommandDomain::IOSArchive => bridge.ios_archive.original_for_test(),
+            SavedCommandDomain::ArtifactInspection => &bridge.artifact_inspection,
         };
         let (application, owner) = active_in(original.clone());
         assert!(Arc::ptr_eq(&application.inner, &original.inner));
@@ -214,6 +256,10 @@ fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_a
         };
         drop(watchdog);
         assert!(!application.can_exit() && application.disabled());
+        if domain == SavedCommandDomain::ArtifactInspection {
+            // Missing actual joins become retained Unknown, not a new iOS run.
+            assert_eq!(document.ios_archive_status().unwrap().availability, ios_wire::Availability::CleanupUnknown);
+        }
         assert_eq!(document.offline_preflight_status().unwrap().availability, wire::Availability::CleanupUnknown);
         assert_eq!(document.android_build_status().unwrap().availability, android_wire::Availability::CleanupUnknown);
         assert_eq!(document.project_recovery_status().unwrap().availability, recovery_wire::Availability::CleanupUnknown);
@@ -238,6 +284,10 @@ fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_a
                 let status = document.cancel_ios_archive(ios_wire::Cancel { operation_id: owner.id.clone(), owner_generation: owner.generation.clone() }).unwrap();
                 assert_eq!(status.operation.unwrap().phase, ios_wire::Phase::Unknown);
             },
+            SavedCommandDomain::ArtifactInspection => {
+                let status = document.artifact_inspection_cancel(artifact_wire::Cancel { operation_id: owner.id.clone(), owner_generation: owner.generation.clone() }).unwrap();
+                assert_eq!(status.operation.unwrap().phase, artifact_wire::Phase::Unknown);
+            },
         }
         let r = application.inner.lock(); let a = r.active.as_ref().unwrap();
         assert!(Arc::ptr_eq(&a.owner, &owner) && a.unknown && !a.final_join_seen && r.last.is_none());
@@ -258,19 +308,20 @@ fn android_terminal(value: &Value) -> android_wire::Terminal {
 }
 fn frame(domain: SavedCommandDomain, sequence: u32, kind: &str, payload: Value) -> Vec<u8> {
     let protocol = match domain { SavedCommandDomain::OfflinePreflight => wire::PROTOCOL, SavedCommandDomain::AndroidBuild => android_wire::PROTOCOL,
-        SavedCommandDomain::ProjectRecovery => recovery_wire::PROTOCOL, SavedCommandDomain::IOSArchive => ios_wire::PROTOCOL };
+        SavedCommandDomain::ProjectRecovery => recovery_wire::PROTOCOL, SavedCommandDomain::IOSArchive => ios_wire::PROTOCOL, SavedCommandDomain::ArtifactInspection => artifact_wire::PROTOCOL };
     let mut bytes = serde_json::to_vec(&json!({"protocol":protocol,"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),
         "sequence":sequence,"kind":kind,"payload":payload})).unwrap(); bytes.push(b'\n'); bytes
 }
 fn accepted(domain: SavedCommandDomain) -> Vec<u8> {
     let context = match context(domain) { Context::OfflinePreflight(c) => serde_json::to_value(c).unwrap(),
         Context::AndroidBuild(c) => serde_json::to_value(c).unwrap(),
-        Context::ProjectRecovery(c) => serde_json::to_value(c).unwrap(), Context::IOSArchive(c) => serde_json::to_value(c).unwrap() };
+        Context::ProjectRecovery(c) => serde_json::to_value(c).unwrap(), Context::IOSArchive(c) => serde_json::to_value(c).unwrap(), Context::ArtifactInspection(c) => serde_json::to_value(c).unwrap() };
     frame(domain, 0, "accepted", json!({"schemaVersion":1,"context":context}))
 }
 fn complete_stream(domain: SavedCommandDomain, progress: bool) -> Vec<Vec<u8>> {
     let mut frames = vec![accepted(domain)];
     match domain {
+        SavedCommandDomain::ArtifactInspection => frames.push(frame(domain, 1, "terminal", artifact_wire::tests::terminal()["payload"].clone())),
         SavedCommandDomain::OfflinePreflight => {
             let wire::Frame::Terminal(terminal) = wire::tests::terminal_frame(&wire::tests::context()) else { panic!("offline DATA") };
             frames.push(frame(domain, 1, "terminal", serde_json::to_value(terminal).unwrap()));
@@ -301,6 +352,7 @@ fn declared_domains_have_fixed_nonrenewable_clocks_and_distinct_limits() {
         (SavedCommandDomain::AndroidBuild, 3000, 3010, 32768, 65536, 8),
         (SavedCommandDomain::ProjectRecovery, 120, 130, 16384, 32768, 2),
         (SavedCommandDomain::IOSArchive, 5400, 5410, 32768, 65536, 9),
+        (SavedCommandDomain::ArtifactInspection, 900, 910, 32768, 65536, 2),
     ] {
         let c = Clocks::new(domain, admitted);
         let ordinary = application(domain).inner.start_clocks(admitted);
@@ -335,7 +387,7 @@ fn typed_consent_cannot_cross_domains_and_android_burns_before_any_custody() {
         let mut prepared = projection(SavedCommandDomain::AndroidBuild);
         prepared.context = Context::AndroidBuild(context.clone());
         owner.inner.lock().prepared = Some(Prepared { projection: prepared,
-            expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None });
+            expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
         assert!(owner.start_offline(wire::start(&wrong_consent).unwrap(), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
         assert!(owner.inner.lock().prepared.is_some());
         let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":android_wire::CONSENT});
@@ -354,7 +406,7 @@ fn typed_consent_cannot_cross_domains_and_android_burns_before_any_custody() {
 #[test]
 fn recovery_uses_its_own_closed_domain_and_one_use_intent_without_opening_a_runtime() {
     let owner = application(SavedCommandDomain::ProjectRecovery);
-    assert_eq!(owner.inner.qualified(None), cfg!(all(target_os = "macos", target_arch = "aarch64"))
+    assert_eq!(owner.inner.qualified(None), cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
         && owner.inner.recovery_installed_selected());
     assert_eq!(owner.inner.recovery_installed_selected(), cfg!(feature = "custom-protocol")
         && owner.inner.runtime.project_recovery_installed_profile_available());
@@ -366,7 +418,7 @@ fn recovery_uses_its_own_closed_domain_and_one_use_intent_without_opening_a_runt
     assert!(owner.prepare_recovery(request, 1, project(), recovery_wire::Availability::Available).is_err());
     { let r = owner.inner.lock(); assert!(r.recovery_review.is_none() && r.prepared.is_none()); }
     owner.inner.lock().prepared = Some(Prepared { projection: projection(SavedCommandDomain::ProjectRecovery),
-        expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None });
+        expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
     let input = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":recovery_wire::CONSENT});
     // An unqualified runtime or this plain test's absent executor refuses the
     // comparison-only intent before acquisition. Available is not custody.
@@ -454,7 +506,6 @@ fn signed_and_recovery_clocks_share_only_original_first_failure_cleanup_not_work
         assert_eq!(clocks.cleanup_end(Some(clocks.finality)), clocks.cleanup);
         assert_eq!(clocks.settlement(Some(clocks.finality)), clocks.finality);
     }
-    assert!(!IOS_SIGNED_NATIVE_QUALIFIED && !IOS_RECOVERY_NATIVE_QUALIFIED);
 }
 
 fn recovery_terminal_data() -> ios_wire::Terminal {
@@ -515,7 +566,7 @@ fn recovery_start_consumes_observation_and_refuses_a_different_arc_or_lost_conte
         let mut p = projection(SavedCommandDomain::IOSArchive); p.context = recovery_action();
         { let mut r = app.inner.lock(); r.recovery = Some(observed);
             r.prepared = Some(Prepared { projection:p, expires:Instant::now()+INTENT, registration:1,
-                project:project(), recovery_stamp:None, material:None, recovery:Some(prepared), android_selection:None }); }
+                project:project(), recovery_stamp:None, material:None, recovery:Some(prepared), android_selection: None, artifact_selection: None, artifact_tools: None }); }
         let admitted = app.start(Start { operation_id:"a".repeat(32), owner_generation:"b".repeat(32) },
             Instant::now(), Some((1, project())), Availability::Available).unwrap();
         assert!(admitted.release.is_none());
@@ -629,7 +680,7 @@ fn android_unselected_stale_and_stopped_intents_refuse_before_any_native_book() 
         { let mut r = owner.inner.lock();
             assert!(r.active.is_none() && r.prepared.is_none());
             r.prepared = Some(Prepared { projection: projection(SavedCommandDomain::AndroidBuild), expires: Instant::now() + INTENT,
-                registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None }); }
+                registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None }); }
         let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":android_wire::CONSENT});
         let registration = if scenario == "stale-registration" { 2 } else { 1 };
         let status = owner.start_android(android_wire::start(&request).unwrap(), Instant::now(), Some((registration, project())),
@@ -831,9 +882,10 @@ async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_
         let selected = match domain {
             SavedCommandDomain::OfflinePreflight => application.inner.offline_installed_selected(),
             SavedCommandDomain::AndroidBuild => false, // No original document/catalog selection was bound.
-            SavedCommandDomain::ProjectRecovery => cfg!(all(target_os = "macos", target_arch = "aarch64"))
+            SavedCommandDomain::ProjectRecovery => cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
                 && application.inner.recovery_installed_selected(),
-            SavedCommandDomain::IOSArchive => application.inner.ios_unsigned_installed_selected(),
+            SavedCommandDomain::IOSArchive => application.inner.ios_installed_selected(),
+            SavedCommandDomain::ArtifactInspection => application.inner.artifact_installed_selected(),
         };
         assert_eq!(application.inner.qualified(None), selected);
         let cutoff = owner.native_audit_cutoff.subscribe();
@@ -845,6 +897,7 @@ async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_
             assert_eq!(r.active.as_ref().unwrap().first_stop, Some(owner.clocks.admitted));
             let expected = match domain {
                 SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive => owner.clocks.admitted + SETTLEMENT,
+                SavedCommandDomain::ArtifactInspection => owner.clocks.work,
                 SavedCommandDomain::OfflinePreflight | SavedCommandDomain::ProjectRecovery => owner.clocks.work,
             };
             assert_eq!(*cutoff.borrow(), expected);
@@ -885,7 +938,7 @@ fn foreign_domain_frames_fail_closed_without_converting_any_result() {
     for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive] {
         let (application, owner) = active(domain);
         let foreign = match domain { SavedCommandDomain::OfflinePreflight => Frame::AndroidBuild(android_wire::Frame::Accepted),
-            SavedCommandDomain::AndroidBuild | SavedCommandDomain::ProjectRecovery | SavedCommandDomain::IOSArchive => Frame::OfflinePreflight(wire::Frame::Accepted) };
+            SavedCommandDomain::AndroidBuild | SavedCommandDomain::ProjectRecovery | SavedCommandDomain::IOSArchive | SavedCommandDomain::ArtifactInspection => Frame::OfflinePreflight(wire::Frame::Accepted) };
         application.inner.accept_at(&owner, foreign, owner.clocks.admitted);
         let r = application.inner.lock(); let a = r.active.as_ref().unwrap();
         assert!(a.unknown && r.disabled && !a.accepted && !a.terminal);
@@ -1053,14 +1106,14 @@ async fn accepted_only_eof_is_not_a_settled_decoder_in_any_domain() {
 #[test]
 fn ios_consent_is_domain_local_one_use_and_cannot_qualify_runtime_custody() {
     let owner = application(SavedCommandDomain::IOSArchive);
-    assert_eq!(owner.inner.qualified(None), owner.inner.ios_unsigned_installed_selected());
+    assert_eq!(owner.inner.qualified(None), owner.inner.ios_installed_selected());
     let mut android = serde_json::to_value(android_wire::tests::context()).unwrap();
     android.as_object_mut().unwrap().remove("platform"); android.as_object_mut().unwrap().remove("operation");
     assert!(owner.prepare_android(android_wire::prepare(&android).unwrap(), 1, project(), android_wire::Availability::Available).is_err());
     assert_eq!(owner.inner.lock().revision, 0);
     assert!(owner.inner.lock().prepared.is_none() && owner.inner.lock().active.is_none());
     owner.inner.lock().prepared = Some(Prepared { projection: projection(SavedCommandDomain::IOSArchive),
-        expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None });
+        expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
     let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":ios_wire::CONSENT});
     let status = owner.start_ios(ios_wire::start(&request).unwrap(), Instant::now(), Some((1,project())), ios_wire::Availability::Available).unwrap().release();
     let projection = status.operation.unwrap();
@@ -1130,4 +1183,83 @@ fn earlier_actual_native_failure_shortens_original_cutoff_even_when_observed_aft
     application.inner.advance_locked(&mut registry,&owner,earlier+SETTLEMENT);
     assert!(registry.active.as_ref().unwrap().unknown);
     assert!(!final_clock_clear(&registry,&owner,earlier+SETTLEMENT));
+}
+
+#[test]
+fn artifact_two_frames_without_selected_originals_never_publish_and_first_stop_never_renews() {
+    // Same real registry and shutdown method, with an inert unstarted intent.
+    // No selected-original/worker custody is invented by this DATA fixture.
+    let prepared = application(SavedCommandDomain::ArtifactInspection);
+    assert!(prepared.can_exit() && !prepared.stopping());
+    let intent = projection(SavedCommandDomain::ArtifactInspection);
+    let intent_id = intent.operation_id.clone();
+    let intent_generation = intent.owner_generation.clone();
+    prepared.inner.lock().prepared = Some(Prepared { projection: intent,
+        expires: Instant::now() + INTENT, registration: 1, project: project(),
+        recovery_stamp: None, material: None, recovery: None, android_selection: None,
+        artifact_selection: None, artifact_tools: None });
+    assert!(prepared.busy() && !prepared.can_exit());
+    prepared.request_shutdown();
+    assert!(prepared.stopping() && prepared.can_exit());
+    for _ in 0..2 {
+        let registry = prepared.inner.lock();
+        assert!(registry.prepared.is_none() && registry.active.is_none());
+        let retired = registry.last.as_ref().unwrap();
+        assert_eq!((&retired.operation_id, &retired.owner_generation), (&intent_id, &intent_generation));
+        assert_eq!(retired.reason, Reason::Shutdown);
+        assert!(!retired.intent_usable && retired.result.is_none());
+        drop(registry);
+        prepared.request_shutdown();
+    }
+    assert!(prepared.can_exit() && prepared.stopping());
+
+    let (application,owner)=active(SavedCommandDomain::ArtifactInspection);
+    let t=owner.clocks.admitted;
+    assert_eq!(owner.clocks.work,t+Duration::from_secs(900));
+    assert_eq!(owner.clocks.finality,t+Duration::from_secs(910));
+    assert!(!owner.clocks.signed&&!owner.clocks.recovery);
+    // Complete-looking core DATA cannot supply the original selected-ID loan.
+    let mut decoder=OutputDecoder::new(&owner).unwrap();
+    assert!(decoder.push(&accepted(SavedCommandDomain::ArtifactInspection),&owner).is_ok());
+    let terminal=frame(SavedCommandDomain::ArtifactInspection,1,"terminal",artifact_wire::tests::terminal()["payload"].clone());
+    assert!(decoder.push(&terminal,&owner).is_err());
+    assert!(!decoder.finish());
+    {
+        let r=application.inner.lock();
+        assert!(!artifact_installed_closure_ready(&r,&owner,false,false));
+        assert!(!artifact_installed_closure_ready(&r,&owner,true,true));
+        assert!(r.last.is_none());
+    }
+    application.inner.accept_at(&owner,Frame::ArtifactInspection(artifact_wire::Frame::Accepted),t);
+    application.inner.accept_at(&owner,Frame::OfflinePreflight(wire::Frame::Accepted),t);
+    let first=application.inner.lock().active.as_ref().unwrap().first_stop;
+    assert_eq!(first,Some(t));
+    application.context_changed();application.request_shutdown();
+    let r=application.inner.lock();let active=r.active.as_ref().unwrap();
+    assert!(Arc::ptr_eq(&active.owner,&owner)&&active.unknown&&!active.final_join_seen);
+    assert_eq!(active.first_stop,first);assert!(active.projection.public().result.is_none());
+    assert!(r.last.is_none()&&r.prepared.is_none());
+    drop(r);
+    assert!(application.stopping() && !application.can_exit());
+}
+
+#[test]
+fn artifact_original_closure_distinguishes_unentered_from_claimed_and_unreturned_workers() {
+    let (application,owner)=active(SavedCommandDomain::ArtifactInspection);
+    let r=application.inner.lock();
+    let mut projected=r.active.as_ref().unwrap().projection.clone();
+    projected.outcome=Some(Outcome::Failed);projected.reason=Reason::ProtocolError;
+    assert_eq!(projected.artifact().unwrap().outcome,Some(artifact_wire::Outcome::Failed));
+    // These are production-used necessary predicates, not native receipts.
+    assert!(artifact_installed_closure_ready(&r,&owner,false,true));
+    assert!(!artifact_installed_closure_ready(&r,&owner,false,false));
+    assert!(!artifact_installed_closure_ready(&r,&owner,true,true));
+    drop(r);
+    let book=Resources::default();let startup=Startup::default();
+    assert!(!offline_consumers_returned(&book,&startup,true));
+    let mut book=book;book.artifact_selected=true;
+    assert!(!artifact_installed_final(&book));
+    assert!(!owner.startup.lock().unwrap().attempted);
+    assert!(!owner.resource_unknown.load(Ordering::SeqCst));
+    assert!(owner.artifact_selection.is_none()&&owner.artifact_tools.is_none());
 }

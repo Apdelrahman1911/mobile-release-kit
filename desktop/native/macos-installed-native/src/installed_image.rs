@@ -2,7 +2,7 @@
 //! book; the Registry receives only its immutable identity DATA.
 use crate::{android_maintenance_wire::{Binding,Identity,Tail},android_service_resident::ResidentReturn,
     vault_helper_wire::uptime};
-use std::mem::{align_of,size_of,ManuallyDrop};
+use std::mem::{align_of,offset_of,size_of,ManuallyDrop};
 
 pub type TakeRead=unsafe extern "C" fn(*const Binding,*mut i32)->i32;
 #[repr(C)]
@@ -15,7 +15,9 @@ pub struct Return {
     version:u32,bytes:u32,kind:u32,reserved:u32,binding:Binding,
     ceiling:u64,retirement:u64,first:u64,cutoff:u64,returned_at:u64,last:u64,
 }
-const _:()=assert!(size_of::<Host>()==168 && size_of::<Return>()==320);
+// Match the first-party C schema in image_abi.h on each supported Mac target.
+const _:()=assert!(size_of::<Host>()==168 && offset_of!(Host,take_read)==160
+    && size_of::<Return>()==320 && offset_of!(Return,binding)==16 && offset_of!(Return,ceiling)==272);
 /// No safe constructor and no Clone. The fixed facade is its only provider.
 pub struct AdmittedHost { host:Host }
 impl AdmittedHost {

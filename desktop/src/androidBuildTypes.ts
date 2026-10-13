@@ -71,7 +71,7 @@ interface AndroidBuildResultCommon extends AndroidBuildInspection {
 }
 export type AndroidBuildResult = AndroidBuildResultCommon & (
   { schemaVersion: 1; toolchainProfile: 'android-local-linux-gnu-x86_64-v1'; toolchainSelection?: never } |
-  { schemaVersion: 2; toolchainProfile: 'android-registered-macos-arm64-v1'; toolchainSelection: AndroidMacToolchainSelection }
+  { schemaVersion: 2; toolchainProfile: 'android-registered-macos-arm64-v1' | 'android-registered-macos-x86_64-v1'; toolchainSelection: AndroidMacToolchainSelection }
 );
 export interface AndroidBuildDisposition {
   work: 'not-created' | 'removed' | 'retained-work' | 'unknown';

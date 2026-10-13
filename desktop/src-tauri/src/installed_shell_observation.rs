@@ -3930,7 +3930,7 @@ impl MetadataRecord {
             || !status.capability.available || status.capability.reason != edit::EditAvailability::Available
             || owner.domain != metadata::DOMAIN || owner.project_id != pending.project_id
             || owner.owner_generation != pending.generation || !edit::token(&owner.session_id)
-            || owner.platform != metadata::Platform::Android || owner.locale != "en-US"
+            || owner.recovery.is_some() || owner.platform != Some(metadata::Platform::Android) || owner.locale.as_deref() != Some("en-US")
             || owner.prepared.is_some() || owner.core_outcome.is_some() || owner.apply_submitted || owner.late_settled
             || owner.native_reason != edit::NativeEditReason::None || owner.native_finality != edit::NativeFinality::Pending
             || (if returned { owner.phase != edit::Phase::Opening } else { !matches!(owner.phase,edit::Phase::Opening | edit::Phase::Editing) })
@@ -4028,8 +4028,8 @@ fn assert_metadata_open_race_contract() {
         window_generation:generation.clone(), status_revision:11,
         capability:edit::Capability { available:true, reason:edit::EditAvailability::Available },
         active:Some(metadata::Projection { domain:metadata::DOMAIN, project_id:"inert-project".into(),
-            session_id:session_id.clone(), owner_generation:generation.clone(), platform:metadata::Platform::Android,
-            locale:"en-US".into(), phase:edit::Phase::Opening, review_remaining_ms:1000, checkout:None, prepared:None,
+            session_id:session_id.clone(), owner_generation:generation.clone(), platform:Some(metadata::Platform::Android),
+            locale:Some("en-US".into()), phase:edit::Phase::Opening, review_remaining_ms:1000, checkout:None, prepared:None, recovery:None,
             apply_submitted:false, core_outcome:None, native_reason:edit::NativeEditReason::None,
             native_finality:edit::NativeFinality::Pending, late_settled:false }), last_terminal:None };
     let mut editing = opening.clone(); editing.status_revision = 12;
@@ -4092,8 +4092,8 @@ fn assert_metadata_open_race_contract() {
         |s|s.active.as_mut().unwrap().project_id = "other-project".into(),
         |s|s.active.as_mut().unwrap().owner_generation = "4".repeat(32),
         |s|s.active.as_mut().unwrap().domain = "wrong-domain",
-        |s|s.active.as_mut().unwrap().platform = metadata::Platform::Ios,
-        |s|s.active.as_mut().unwrap().locale = "fr-FR".into(),
+        |s|s.active.as_mut().unwrap().platform = Some(metadata::Platform::Ios),
+        |s|s.active.as_mut().unwrap().locale = Some("fr-FR".into()),
         |s|s.active.as_mut().unwrap().phase = edit::Phase::Preparing,
         |s|s.active.as_mut().unwrap().checkout = None,
         |s|s.active.as_mut().unwrap().checkout.as_mut().unwrap().metadata_root = "other/root".into(),
@@ -4367,7 +4367,7 @@ fn assert_version_open_race_contract() {
         capability:edit::Capability { available:true, reason:edit::EditAvailability::Available },
         active:Some(version::Projection { domain:version::DOMAIN, project_id:"inert-project".into(),
             session_id:session_id.clone(), owner_generation:generation.clone(), phase:edit::Phase::Opening,
-            review_remaining_ms:1000, checkout:None, prepared:None, apply_submitted:false, core_outcome:None,
+            review_remaining_ms:1000, checkout:None, prepared:None, recovery:None, apply_submitted:false, core_outcome:None,
             native_reason:edit::NativeEditReason::None, native_finality:edit::NativeFinality::Pending, late_settled:false }),
         last_terminal:None };
     let mut editing = opening.clone(); editing.status_revision = 12;
@@ -5687,7 +5687,7 @@ impl Observation {
             let Some(index) = r.metadata.sessions.iter().position(|s|s.projection.session_id == projection.session_id) else { self.fail(); return; };
             let old = r.metadata.sessions[index].projection.clone();
             let session = &r.metadata.sessions[index];
-            if projection.domain != metadata::DOMAIN || projection.platform != metadata::Platform::Android || projection.locale != "en-US"
+            if projection.domain != metadata::DOMAIN || projection.recovery.is_some() || projection.platform != Some(metadata::Platform::Android) || projection.locale.as_deref() != Some("en-US")
                 || projection.project_id != old.project_id || projection.owner_generation != status.window_generation
                 || !edit::token(&projection.session_id) || projection.late_settled || projection.phase == edit::Phase::Unknown
                 || phase_order(projection.phase) < phase_order(old.phase) || projection.native_finality == edit::NativeFinality::Unknown

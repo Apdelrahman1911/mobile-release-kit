@@ -251,5 +251,148 @@ class WorkflowRecoveryEngineRoutingTests(unittest.TestCase):
                                  ("committed", "recovery_required", "unknown", "filesystem_error"))
 
 
+
+def configuration_request(seq, op, *, recover=True):
+    params = ({"root": "/inert/registered-project", **({"registeredIdentity": IDENTITY, "intent": "recover"} if recover else {})}
+              if op == "open" else
+              {"revision": REVISION, **({"intent": "recover"} if recover else {"expectedBase": None, "draft": {}})}
+              if op == "prepare" else {"planToken": TOKEN, **({"intent": "recover"} if recover else {})}
+              if op == "apply" else {})
+    raw = json.dumps({"protocol": wire.PROTOCOL, "session": SESSION, "seq": seq,
+                      "op": op, "params": params}).encode() + b"\n"
+    return wire.parse_request(raw, sequence=seq, session=None if seq == 0 else SESSION)
+
+
+@contextmanager
+def configuration_routing(requests, *, action="rollback", state="recoverable"):
+    guard, control = _RoutingGuard(), _RoutingInput(requests)
+    lease = _RoutingLease(guard)
+    effect = {"preparing_cleanup": "not_started", "rollback": "rolled_back",
+              "committed_cleanup": "committed", "rolled_back_cleanup": "rolled_back"}[action]
+    view = {"schemaVersion": 1, "kind": "recovery", "state": state,
+            "action": action if state == "recoverable" else None,
+            "transactionId": "d" * 32 if state == "recoverable" else None,
+            "files": [{"id": identity, "path": path, "action": "remove" if action == "rollback" else "preserve",
+                       "before": None, "after": {"size": 20000, "mode": 0o644, "sha256": "e" * 64}}
+                      for identity, path in (("configuration", "release/mobile-release.json"), ("root-ignore", ".gitignore"))]
+                     if state == "recoverable" else [],
+            "privateCleanup": {"fileCount": 6 if state == "recoverable" else 0, "directoryCount": 0,
+                               "scope": "inspected-configuration-journal-only"}}
+    checkout = SimpleNamespace(revision=REVISION, view=view, base=None)
+    plan = SimpleNamespace(revision=REVISION, token=TOKEN, view=view)
+    frames = []
+    def capture(_lease):
+        lease._workflow_recovery_effect = effect if action != "rollback" else "not_started"
+        lease._workflow_recovery_journal = "not_created" if state == "idle" else "recovery_required"
+        return checkout
+    def apply(_lease, _plan):
+        lease._workflow_recovery_effect, lease._workflow_recovery_journal = effect, "clean"
+        return recovery_outcome(lease)
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(engine, "DefaultCancellation", return_value=guard))
+        stack.enter_context(patch.object(engine, "EditInput", return_value=control))
+        constructor = stack.enter_context(patch.object(engine, "InitRootLease", return_value=lease))
+        stack.enter_context(patch.object(engine.os, "set_blocking"))
+        stack.enter_context(patch.object(engine, "_attempt_all", side_effect=lambda _guard, actions: [action() for action in actions]))
+        calls = {}
+        for name, options in {
+            "capture_configuration_recovery": {"side_effect": capture},
+            "prepare_configuration_recovery": {"return_value": plan},
+            "apply_configuration_recovery": {"side_effect": apply},
+            "discard_configuration_recovery": {},
+            "capture_config_edit": {"return_value": checkout}, "prepare_config_edit": {"return_value": plan},
+            "apply_config_edit": {}, "discard_config_edit": {},
+            "capture_github_workflow_recovery": {}, "prepare_github_workflow_recovery": {},
+            "apply_github_workflow_recovery": {}, "discard_github_workflow_recovery": {},
+        }.items():
+            calls[name] = stack.enter_context(patch.object(engine, name, **options))
+        child = engine._Engine(0.0, domain="configuration")
+        child.write = lambda raw, **kwargs: frames.append(json.loads(raw))
+        yield SimpleNamespace(child=child, lease=lease, guard=guard, control=control, checkout=checkout,
+                              plan=plan, calls=calls, frames=frames, constructor=constructor)
+
+
+class ConfigurationRecoveryEngineRoutingTests(unittest.TestCase):
+    def test_all_four_actions_use_registered_config_facade_and_original_terminal_shape(self):
+        for action, effect in (("preparing_cleanup", "not_started"), ("rollback", "rolled_back"),
+                               ("committed_cleanup", "committed"), ("rolled_back_cleanup", "rolled_back")):
+            requests = [configuration_request(seq, op) for seq, op in enumerate(("open", "prepare", "apply"))]
+            with self.subTest(action=action), configuration_routing(requests, action=action) as r:
+                r.child.run()
+                r.constructor.assert_called_once_with(Path("/inert/registered-project"), cancellation=r.guard,
+                    registered_identity={"device": 1, "inode": 2, "mode": 0o40755, "uid": 1000, "gid": 1001},
+                    configuration_recovery=True)
+                r.calls["capture_configuration_recovery"].assert_called_once_with(r.lease)
+                r.calls["prepare_configuration_recovery"].assert_called_once_with(r.lease, r.checkout, REVISION)
+                r.calls["apply_configuration_recovery"].assert_called_once_with(r.lease, r.plan)
+                self.assertEqual([row["kind"] for row in r.frames], ["opened", "prepared"])
+                self.assertEqual(r.frames[0]["result"], {"revision": REVISION, "recovery": r.checkout.view, "scopeResources": "settled"})
+                r.child.cleanup()
+                r.child.terminal()
+                self.assertEqual(r.frames[-1]["result"], {"planToken": TOKEN, "effect": effect, "journal": "clean",
+                                                         "resources": "settled", "reason": "none"})
+                r.calls["discard_configuration_recovery"].assert_called_once_with(r.plan)
+                for name, call in r.calls.items():
+                    if name.endswith("_edit") or "github" in name:
+                        call.assert_not_called()
+
+    def test_retained_configuration_intent_cannot_switch_at_prepare_or_apply(self):
+        for initial, switch in ((True, 1), (False, 1), (True, 2), (False, 2)):
+            requests = [configuration_request(seq, op, recover=not initial if seq == switch else initial)
+                        for seq, op in enumerate(("open", "prepare", "apply")) if seq <= switch]
+            with self.subTest(initial=initial, switch=switch), configuration_routing(requests) as r:
+                with self.assertRaises(wire.ProtocolError):
+                    r.child.run()
+                r.calls["apply_configuration_recovery"].assert_not_called()
+                r.calls["apply_config_edit"].assert_not_called()
+                self.assertEqual(r.calls["prepare_configuration_recovery"].call_count, int(initial and switch == 2))
+                self.assertEqual(r.calls["prepare_config_edit"].call_count, int(not initial and switch == 2))
+                if not initial:
+                    r.constructor.assert_called_once_with(Path("/inert/registered-project"), cancellation=r.guard)
+
+    def test_pending_discard_first_failure_and_each_outer_close_remain_truthful(self):
+        for prepared in (False, True):
+            requests = ([configuration_request(0, "open"), configuration_request(1, "prepare"), configuration_request(2, "discard")]
+                        if prepared else [configuration_request(0, "open"), configuration_request(1, "discard")])
+            with self.subTest(prepared=prepared), configuration_routing(requests, action="committed_cleanup") as r:
+                r.child.run()
+                self.assertEqual((r.child.outcome.effect, r.child.outcome.journal, r.child.outcome.reason),
+                                 ("committed", "recovery_required", "pending_state"))
+                first = wire.ProtocolError("inert first original failure")
+                r.child._remember(first)
+                r.child._remember(OSError("inert later failure"))
+                self.assertIs(r.child.first, first)
+                self.assertEqual(r.child.outcome.reason, "invalid_params")
+                r.child.cleanup()
+                r.child.terminal()
+                self.assertEqual(r.frames[-1]["result"]["planToken"], TOKEN if prepared else None)
+                r.calls["apply_configuration_recovery"].assert_not_called()
+        for missing in ("input", "lease", "handler", "ledger"):
+            with self.subTest(missing=missing), configuration_routing(
+                    [configuration_request(0, "open"), configuration_request(1, "discard")], action="committed_cleanup") as r:
+                r.child.run()
+                r.child.cleanup()
+                if missing == "input":
+                    r.control.closed = False
+                elif missing == "lease":
+                    r.lease.closed = False
+                elif missing == "handler":
+                    r.guard.handler_state = "UNKNOWN"
+                else:
+                    r.guard.lifetime_ledger.fatal = True
+                r.child.terminal()
+                result = r.frames[-1]["result"]
+                self.assertEqual((result["effect"], result["journal"], result["resources"], result["reason"]),
+                                 ("committed", "recovery_required", "unknown", "pending_state"))
+        for state in ("idle", "conflict"):
+            with self.subTest(state=state), configuration_routing(
+                    [configuration_request(0, "open"), configuration_request(1, "discard")], state=state, action="preparing_cleanup") as r:
+                r.child.run()
+                r.child.cleanup()
+                r.child.terminal()
+                r.calls["prepare_configuration_recovery"].assert_not_called()
+                r.calls["apply_configuration_recovery"].assert_not_called()
+                self.assertIsNone(r.frames[-1]["result"]["planToken"])
+
 if __name__ == "__main__":
     unittest.main()

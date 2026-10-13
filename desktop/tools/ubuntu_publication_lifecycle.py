@@ -2273,8 +2273,8 @@ CORE_PINS = {
     "owned_process.py": (9037, "0c7c87c7eaf27629be2eb33c195a956b6c40b7b5883214a08e15f255ac4939b8"),
     "_command_process.py": (172299, "30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69"),
     "_native_process.py": (62175, "70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4"),
-    "cancellation.py": (31041, "5f469444f42b5ad6a69ecce8161a7d83e67303c92a221a31f88c079f4ff29d35"),
-    "_lifetime_evidence.py": (19072, "f79d21c9846d7527b9c08f474ef47bc57515f592a090b7c61ba9046a82232da3"),
+    "cancellation.py": (31723, "e71c7063e2652e3ce539c95c0b667ab13275f7ce01559b460585e99e1550f916"),
+    "_lifetime_evidence.py": (19514, "fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d"),
     "_store_lane_contract.py": (9500, "8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e"),
     "errors.py": (749, "26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853"),
 }

@@ -20,6 +20,23 @@ const stages: Record<AndroidBuildStage, string> = { accepted: 'Request accepted'
   'validating-signing': 'Checking the upload key', capturing: 'Capturing post-run AAB', signing: 'Signing the private AAB copy', 'restoring-inputs': 'Restoring original build inputs', inspecting: 'Inspecting captured bytes', 'disposing-work': 'Disposing task-owned work' };
 const negative = (status: AndroidBuildCoreStatus) => ['FAIL', 'MISSING', 'BLOCKED', 'INVALID'].includes(status);
 
+// Display only the parsed current original, never a caller-supplied identity or
+// a retained result from a different project/version. Controls keep their own
+// existing consent and native-finality gates.
+function AndroidBuildDetails({ state, review = false }: { state: AndroidBuildState; review?: boolean }) {
+  const op = state.status?.operation, consent = state.consent;
+  if (state.mode !== 'native' || !op || state.historical || state.integrityFailed || state.nativeBlocked
+      || state.originalUnconfirmed) return null;
+  if (review && (op.phase !== 'awaiting-consent' || !op.intentUsable || !consent
+      || consent.operationId !== op.operationId || consent.ownerGeneration !== op.ownerGeneration)) return null;
+  return <div className="session-review" role="group" aria-label="Build details">
+    <h4>Build details</h4>
+    <p>{`Build operation ID: ${op.operationId}`}</p>
+    <p>{`Build owner generation: ${op.ownerGeneration}`}</p>
+    <p className="save-note">These identify the original request; they do not authorize a build or a file operation.</p>
+  </div>;
+}
+
 // Shared by Releases and Artifacts. No arbitrary result prop, file opener or
 // candidate-evidence shortcut: only the parsed native completed Status supplies
 // a result. A provisional core terminal/progress event cannot populate it.
@@ -30,6 +47,7 @@ export function AndroidBuildResultView({ state, operationProjectName = null }: {
   return <section className="offline-report" aria-label="Completed local Android AAB observation">
     <div className="inline-heading"><h3>Local AAB observation · {operationProjectName ?? op.context.projectId}</h3><Badge tone={historical ? 'warning' : 'info'}>{historical ? 'Historical / retained context' : 'This build only'}</Badge></div>
     <p><strong>Complete is not PASS, a fresh build or release approval.</strong> Native completion permits this bounded observation to be shown. It does not establish that these are current source outputs or current-file authority.</p>
+    <AndroidBuildDetails state={state} />
     <p>Saved version {result.usedVersion.name} · build {result.usedVersion.build} · module <code>{result.selection.module}</code> · variant <code>{result.selection.variant}</code> · application ID <code>{result.selection.applicationId}</code>.</p>
     {result.signing === 'local-upload-key' && <p><strong>Signed locally and verified with the selected upload key.</strong> No Store upload or release approval occurred.</p>}
     <p>Known Gradle exit: {result.command.exitCode}. Structure: {result.assurances.structure}; native manifest: {result.assurances.nativeManifest}; application version: {result.assurances.applicationVersion}.</p>
@@ -123,7 +141,7 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
       <label className="offline-ack"><input type="checkbox" checked={state.buildMode === 'signed'}
         onChange={(event) => controller.setBuildMode(event.target.checked ? 'signed' : 'unsigned')} />
         <span>Sign locally with my upload key</span></label>
-      <p className="save-note">Optional and off by default. Signs a private copy, never the project’s AAB. Requires current keystore assignments and the separately admitted Apple-silicon Mac owner; no Store upload occurs. {onHelp && <HelpButton content={androidBuildLocalSigningHelp} onHelp={onHelp} />}</p>
+      <p className="save-note">Optional and off by default. Signs a private copy, never the project’s AAB. Requires current keystore assignments and the separately admitted Apple-silicon or Intel Mac owner; no Store upload occurs. {onHelp && <HelpButton content={androidBuildLocalSigningHelp} onHelp={onHelp} />}</p>
       {state.buildMode === 'signed' && <>
         {state.signing.issue ? <p className="review-caution">{state.signing.issue}</p> : <p>Current inputs are assigned. Passwords, private-key use and certificate policy will be checked during the owned run; file-format assessment alone is not signing verification.</p>}
         <div className="button-row">
@@ -143,6 +161,7 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
     {!consent && <><button type="button" className="button" disabled={prepareReason !== null} onClick={() => void controller.prepare()}>Review saved inputs</button>{prepareReason && <p className="review-caution">{prepareReason}</p>}</>}
     {consent && <div className="session-review" role="group" aria-label="Confirm this saved Android-build intent">
       <h3>Build these saved inputs once?</h3>
+      <AndroidBuildDetails state={state} review />
       <p>Build project: <strong>{consent.binding.context.projectId}</strong>. Module <code>{consent.binding.selection.module}</code>, variant <code>{consent.binding.selection.variant}</code>, application ID <code>{consent.binding.selection.applicationId}</code>.</p>
       <p>Version <strong>{consent.binding.context.savedVersion.name}</strong>, build <strong>{consent.binding.context.savedVersion.build}</strong>, selected source <code>{consent.binding.context.savedVersion.source}</code>.</p>
       <p>Saved configuration SHA-256: <code>{consent.binding.context.savedConfig.sha256}</code>. Saved version SHA-256: <code>{consent.binding.context.savedVersion.sha256}</code>.</p>
@@ -157,8 +176,9 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
     </div>}
     {state.error && <ErrorNotice error={state.error} title="No new Android-build outcome was confirmed" />}
     {state.originalUnconfirmed && <p className="review-caution" role="status">The original request acknowledgement is unconfirmed. Do not repeat Start. Original Status may help cancel or settle that operation, but cannot create new consent.</p>}
-    {op && <div className="session-progress" role="status" aria-live="polite">
+    {op && <div className="session-progress" role="status" aria-live="polite" aria-label="Original Android build status">
       <div className="inline-heading"><h3>Build status · {operationProjectName ?? op.context.projectId}</h3><Badge tone={op.phase === 'unknown' ? 'warning' : 'neutral'}>{phases[op.phase]}</Badge></div>
+      <AndroidBuildDetails state={state} />
       {op.stage && <p>Reached stage: {stages[op.stage]}. A stage is not a progress percentage or native completion.</p>}
       {op.outcome && <p><strong>Outcome:</strong> {op.outcome}</p>}<p>{androidBuildReasonText[op.reason]}</p>
       {op.activity && <p>Build command: {op.activity.command.outcome === 'exited' ? `known exit ${op.activity.command.exitCode}` : op.activity.command.outcome === 'not-dispatched' ? 'not dispatched' : 'no usable exit outcome'}.</p>}
@@ -261,7 +281,7 @@ function AndroidToolSources({ state, controller, onHelp }: {
     <p className="save-note">This step only remembers the selected directories for this app session. It does not execute, install or change them. Browsing alone neither inspects supplier contents nor registers a copy; separate inspection and protected-copy approval stay disabled until their actual prerequisites are available.</p>
     {sourceRoles.map((role) => {
       const help = androidToolSourceHelp[role], selected = sameProject ? sources?.selections.find((item) => item.role === role) : null;
-      return <div className="session-review" key={role}>
+      return <div className="session-review" key={role} role="group" aria-label={`${help.label} source folder`}>
         <div className="inline-heading"><h4>{help.label}</h4>{onHelp && <HelpButton content={help} onHelp={onHelp} />}</div>
         <p>{help.what}</p><p className="save-note">{help.where}</p>
         <p className="save-note">Required before registering Android tools. {selected ? <>Selected folder: <strong>{selected.displayName}</strong> · folder selection only.</> : 'No folder selected for this project.'}</p>

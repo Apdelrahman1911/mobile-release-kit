@@ -974,7 +974,8 @@ class Build:
         need(names == set(self.configuration["generated"]), "python-generated-complete-roster")
         for name in self.configuration["generated"]:
             add("python/lib/python3.14/" + name, read(generated_root / name, 2 * MIB))
-        add("python/lib/python314.zip", b"PK\x05\x06" + b"\0" * 18)
+        # CPython keeps the optional ZIP search path even without an archive.
+        # The real stdlib is projected unzipped; do not emit an empty ZIP.
         add("python/lib/python3.14/lib-dynload/README.mrk", b"All selected extension modules are built in.\n")
         notices = []
         lock = decode(self.lock_body)

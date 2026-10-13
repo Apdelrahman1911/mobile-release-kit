@@ -68,7 +68,7 @@ pub(crate) struct LookupBook{
     terminal:Option<Terminal>,terminal_seen:bool,output_failed:bool,stderr_seen:bool,
     work:Option<Instant>,cleanup:Option<Instant>,first:Option<(Problem,Instant)>,uncertain:bool,effect:u32,
     candidate:Option<WrappingKeyCandidate>,disposed:bool,postchecked:bool,
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     qualification: QualificationBook,
 }
 pub(crate) const LOOKUP_CONTROL_BYTES:usize=std::mem::size_of::<LookupBook>()+std::mem::size_of::<LookupInput>()
@@ -87,7 +87,7 @@ impl LookupBook{
         go:false,write_attempted:false,request_sent:false,stop_attempted:false,stop_sent:false,output:Zeroizing::new([0;wire::RESPONSE_LIMIT+1]),
         used:0,notice_seen:false,terminal_start:0,terminal:None,terminal_seen:false,output_failed:false,stderr_seen:false,
         work:None,cleanup:None,first:None,uncertain:false,effect:0,candidate:None,disposed:false,postchecked:false,
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         qualification: QualificationBook::default()}}
     pub(crate) fn started(&self)->bool{self.entered}
     pub(crate) fn memory_held(&self)->bool{self.charge.is_some()}
@@ -298,10 +298,10 @@ impl LookupBook{
     fn observe_exit(&mut self){
         if self.exit.is_some() || self.wait_failed{return;}
         if let Some(child)=self.child.as_mut(){
-            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             { self.qualification.try_wait_entered = true; self.qualification.try_wait_returned = false; }
             let result = child.try_wait();
-            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             { self.qualification.try_wait_returned = true; }
             match result{Ok(Some(exit))=>{
                     self.exit=Some(exit);if !exit.success(){self.fail(Problem::Unavailable);}
@@ -419,7 +419,7 @@ impl LookupBook{
         if !self.request_sent && self.write_attempted{self.uncertain=true;}
         if self.first.is_none() && !self.transport_success(){self.fail(Problem::Unavailable);}
         Self::project_cleanup(&mut self.first,&mut self.cleanup,&mut self.uncertain,None,project);
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         { self.qualification.driver_before_cleanup = self.cleanup.is_some_and(|end| Instant::now() < end); }
         self.driver_returned=true;
         let result=if self.uncertain{Err(Problem::CleanupUnknown)}else if let Some(p)=self.problem(){Err(p)}else{Ok(())};
@@ -463,7 +463,7 @@ impl LookupBook{
             let mut bytes=Zeroizing::new([0;32]);
             let start=self.terminal_start+wire::TERMINAL_BYTES-32;bytes.copy_from_slice(&self.output[start..start+32]);
             self.candidate=Some(WrappingKeyCandidate{bytes});
-            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             { self.qualification.application_constructed = true; }
         }
         self.output.zeroize();self.request_bytes.zeroize();
@@ -496,16 +496,16 @@ impl LookupBook{
         if !self.resources_settled() || !self.memory_held() || self.first.is_some() || !self.joined
             || self.work.is_none_or(|end|Instant::now()>=end){return Err(self.problem().unwrap_or(Problem::CleanupUnknown));}
         let candidate=self.candidate.take().ok_or(Problem::CleanupUnknown)?;
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         { self.qualification.application_taken = true; }
         let result = authenticate(candidate);
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         { self.qualification.application_returned = true; }
         Ok(result)
     }
     pub(crate) fn dispose_settled_storage(&mut self)->bool{
         if self.disposed || !self.memory_held() || !self.resources_settled(){return false;}
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         { self.qualification.saved = self.qualification_snapshot(); }
         self.input=None;self.request=None;self.slots=None;
         if let Some(child)=self.child.take(){drop(ManuallyDrop::into_inner(child));}
@@ -700,7 +700,7 @@ impl LookupBook {
 
 // Observer DATA is absent from every normal app/helper profile. It is captured
 // before disposal, and it never becomes an admission or cleanup token.
-#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 mod qualification {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
@@ -911,13 +911,13 @@ mod qualification {
         }
     }
 }
-#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 use qualification::Book as QualificationBook;
-#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use qualification::Snapshot as QualificationSnapshot;
 
-#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use qualification::TransportSnapshot as QualificationTransportSnapshot;
 
-#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use qualification::data_checks as qualification_data_checks;

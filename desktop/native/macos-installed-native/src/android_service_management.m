@@ -10,7 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #if !defined(MRK_ANDROID_REGISTRATION_HELPER) && !defined(MRK_WRAPPING_VAULT_HELPER)
+#include "../../macos-installed-entry/gate.h"
 extern int mrk_android_identity_available(void);
 #define MRK_ANDROID_MANAGEMENT_MAGIC UINT64_C(0x4d524b41534d4732)
 #if defined(MRK_E2_NATIVE_FIXTURE)
@@ -36,17 +38,26 @@ enum {
 typedef struct {
     uint32_t version,action,status,outcome,entered,returned,cleanup_known,unknown;
     uint32_t phase,service_state,called,reserved;
+#if defined(MRK_E2_NATIVE_FIXTURE)
+    mrk_e2_fixture_bundle_lookup fixture_lookup;
+#endif
 } mrk_android_management_report;
 typedef struct {
     uint64_t magic;
     id service; // explicit original +1 reference, NEVER a pool or borrowed NSError
     mrk_android_management_report report;
+    /* Five original FDs, retained inside the existing <=1024B native cell. */
+    mrk_entry_book reservation;
 #if defined(MRK_E2_NATIVE_FIXTURE)
     void *fixture_identity;
 #endif
 } mrk_android_management;
 _Static_assert(sizeof(mrk_android_management)<=1024u,"supplied cell, not framework heap");
+#if defined(MRK_E2_NATIVE_FIXTURE)
+_Static_assert(sizeof(mrk_android_management_report)==64u,"fixture Rust/C phase report layout");
+#else
 _Static_assert(sizeof(mrk_android_management_report)==48u,"Rust/C phase report layout");
+#endif
 static int manager_valid(mrk_android_management *original) {
     return original && original->magic==MRK_ANDROID_MANAGEMENT_MAGIC && pthread_main_np()==1;
 }
@@ -71,6 +82,7 @@ void *mrk_android_management_new(uint32_t action) {
     mrk_android_management *original=calloc(1,sizeof(*original));
     if (!original) return NULL;
     original->magic=MRK_ANDROID_MANAGEMENT_MAGIC;
+    mrk_entry_init(&original->reservation);
     original->report.version=action==3?3:2;original->report.action=action;original->report.status=4;
     return original;
 }
@@ -85,6 +97,7 @@ void *mrk_android_e2_fixture_management_new(uint32_t action,void *identity) {
         return NULL;
     }
     original->magic=MRK_ANDROID_MANAGEMENT_MAGIC;original->fixture_identity=identity;
+    mrk_entry_init(&original->reservation);
     original->report.version=action==3?3:2;original->report.action=action;original->report.status=4;
     return original;
 }
@@ -136,6 +149,17 @@ int mrk_android_management_step(void *raw,uint32_t phase,mrk_android_management_
         switch (phase) {
             case MRK_SERVICE_ACQUIRE: {
                 original->report.called=1;original->report.service_state=1;
+                if (original->report.action==1 || original->report.action==2) {
+                    int admitted=0;
+                    if (mrk_entry_root(&original->reservation)
+                        && mrk_entry_open_registration(&original->reservation))
+                        admitted=mrk_registration_acquire_shared(&original->reservation);
+                    if (admitted!=1) {
+                        original->report.service_state=4;original->report.outcome=6;
+                        if (admitted<0 || original->reservation.registration_unknown) manager_unknown(original);
+                        break;
+                    }
+                }
                 // Record original identity before taking ownership. If retain
                 // has an uncertain return the slot is Unknown, never reused or
                 // dereferenced after returning to the framework's own pool.
@@ -147,6 +171,14 @@ int mrk_android_management_step(void *raw,uint32_t phase,mrk_android_management_
             }
             case MRK_SERVICE_STATUS: {
                 original->report.status=status_data((SMAppService *)original->service);
+#if defined(MRK_E2_NATIVE_FIXTURE)
+                /* Observe ONLY after the original status. This does not select
+                 * SMAppService's bundle or change any status/mutation policy. */
+                if (original->report.action==0 && original->fixture_identity
+                    && !mrk_e2_fixture_main_bundle_lookup(original->fixture_identity,&original->report.fixture_lookup)) {
+                    manager_unknown(original);break;
+                }
+#endif
                 if (original->report.status==5) original->report.outcome=7;
                 else if (original->report.action==0) original->report.outcome=1;
                 else if (original->report.action==3) {
@@ -160,6 +192,13 @@ int mrk_android_management_step(void *raw,uint32_t phase,mrk_android_management_
                 break;
             }
             case MRK_SERVICE_MUTATE: {
+                if ((original->report.action==1 || original->report.action==2)
+                    && (!original->reservation.registration_held
+                        || original->reservation.registration_unknown
+                        || original->reservation.registration_retired
+                        || !mrk_entry_gate_matches(&original->reservation, FD_CLOEXEC))) {
+                    original->report.outcome=6;break;
+                }
                 // The app's private matching native consent is independently
                 // checked at action admission. This flag records the REAL
                 // selector entry, not admission, service creation or status.
@@ -215,6 +254,9 @@ int mrk_android_management_retire(void *raw,uint32_t unentered) {
         original->fixture_identity=NULL;
     }
 #endif
+    /* No further service selector can enter after this real cell consumption.
+     * Callback/TLS DATA publication is still independently owed by its owner. */
+    if (!mrk_registration_retire(&original->reservation)) return 0;
     original->magic=0;free(original);return 1;
 }
 

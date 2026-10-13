@@ -1,0 +1,280 @@
+name: Desktop Mac Intel external XCTest build diagnostic only
+
+on:
+  push:
+    branches:
+      - verify/desktop-macos-normal-ui-build-intel
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-normal-ui-build-intel-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  normal-ui-build-intel:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-normal-ui-build-intel'
+    runs-on: macos-26-intel
+    # Eight step caps sum21min plus4min overhead; no installed/UI acceptance.
+    timeout-minutes: 25
+    env:
+      MRK_MACOS_TARGET: x86_64-apple-darwin
+      MRK_MACOS_HOSTED_JOB: github-hosted-macos26-x86_64
+      MRK_EXPECTED_SHA: ${{ github.sha }}
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - name: Admit only the fixed credential-free Intel build diagnostic
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-normal-ui-build-intel ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-normal-ui-build-intel.yml@$GITHUB_REF" ]] || exit 1
+          for value in "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"; do
+            [[ "$value" =~ ^[1-9][0-9]{0,15}$ && "$value" -le 9007199254740991 ]] || exit 1
+          done
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == X64 ]] || exit 1
+          [[ "$MRK_MACOS_TARGET" == x86_64-apple-darwin && "$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-x86_64 ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == x86_64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/id -un)" == runner && "$HOME" == /Users/runner ]] || exit 1
+          [[ "$(/usr/bin/stat -f '%Su' /dev/console)" == runner && -d "$DEVELOPER_DIR" ]] || exit 1
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+      - name: Check out exact reviewed source without retained credentials
+        timeout-minutes: 2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select DATA stager Python, not the packaged interpreter
+        timeout-minutes: 2
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Reserve one fresh fixed-shape work root and current source context
+        timeout-minutes: 1
+        id: work
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit && "$PWD" == "$GITHUB_WORKSPACE" ]] || exit 1
+          [[ "$MRK_PYTHON" == /* && -x "$MRK_PYTHON" ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
+          "$MRK_PYTHON" -I -S -B - "$root" <<'PY_CONTEXT'
+          import json, os, re, stat, sys
+          if sys.version_info[:3] != (3, 14, 7): raise ValueError("fixed host Python differs")
+          root = sys.argv[1]
+          info = os.stat(root, follow_symlinks=False)
+          if (os.path.dirname(root) != "/Users/runner/work/_temp"
+                  or re.fullmatch(r"mrk-macos-installed\.[A-Za-z0-9]{8}", os.path.basename(root)) is None
+                  or not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700
+                  or (info.st_uid, info.st_gid) != (os.getuid(), os.getgid()) or os.getuid() == 0):
+              raise ValueError("fresh work identity refused")
+          source = os.environ["GITHUB_SHA"]
+          if not source == os.environ["GITHUB_WORKFLOW_SHA"] == os.environ["MRK_EXPECTED_SHA"]:
+              raise ValueError("current source tuple differs")
+          value = {"schemaVersion": 1, "scope": "intel-external-xctest-build-diagnostic-only",
+                   "source": source, "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
+                   "workflow": ".github/workflows/desktop-macos-normal-ui-build-intel.yml",
+                   "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                   "target": os.environ["MRK_MACOS_TARGET"], "workDirectory": [info.st_dev, info.st_ino, info.st_uid, info.st_gid],
+                   "applicationLaunched": False, "nativeSuccessInferred": False, "productReady": False}
+          body = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(body) > 4096: raise ValueError("local source context bound")
+          fd = os.open(root + "/source-binding.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          with os.fdopen(fd, "wb") as stream:
+              stream.write(body); stream.flush(); os.fsync(stream.fileno())
+          PY_CONTEXT
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\n' "$root" "$MRK_PYTHON" >> "$GITHUB_ENV"
+      - name: Bind the complete reviewed first-party checkout before compilation
+        timeout-minutes: 3
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]] || exit 1
+          "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/source-inventory.json" <<'PY_SOURCE'
+          import hashlib, json, os, stat, subprocess, sys
+          def git(*args):
+              return subprocess.run(["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15).stdout
+          rows = git("ls-tree", "-r", "-z", "--full-tree", "HEAD").split(b"\0")
+          if rows[-1] or len(rows) > 4096: raise ValueError("tracked inventory bound")
+          files = []
+          for row in rows[:-1]:
+              header, raw_name = row.split(b"\t", 1)
+              mode, kind, blob = header.split(b" ")
+              name = raw_name.decode("utf-8", "strict")
+              if kind != b"blob" or mode not in (b"100644", b"100755") or any(p in ("", ".", "..") for p in name.split("/")): raise ValueError("tracked inventory path/type")
+              fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+              try:
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 32 * 1024 * 1024: raise ValueError("tracked input refused")
+                  digest = hashlib.sha256()
+                  blob_digest = hashlib.sha1(b"blob " + str(before.st_size).encode() + b"\0")
+                  size = 0
+                  while block := os.read(fd, 65536):
+                      size += len(block)
+                      if size > before.st_size: raise ValueError("tracked input grew")
+                      digest.update(block)
+                      blob_digest.update(block)
+                  after = os.fstat(fd)
+                  sig = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+                  if size != before.st_size or sig(before) != sig(after) or sig(after) != sig(os.stat(name, follow_symlinks=False)): raise ValueError("tracked input changed")
+              finally:
+                  os.close(fd)
+              if blob_digest.hexdigest() != blob.decode() or bool(before.st_mode & 0o111) != (mode == b"100755"): raise ValueError("tracked blob or executable mode mismatch")
+              files.append({"path": name, "gitMode": mode.decode(), "blob": blob.decode(), "size": size, "sha256": digest.hexdigest()})
+          value = {"source": os.environ["GITHUB_SHA"], "tree": git("rev-parse", "HEAD^{tree}").decode().strip(), "files": files}
+          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 2 * 1024 * 1024: raise ValueError("source inventory output bound")
+          fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          with os.fdopen(fd, "wb") as stream:
+              stream.write(data)
+              stream.flush()
+              os.fsync(stream.fileno())
+          PY_SOURCE
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then
+            inventory_sha=$(/usr/bin/shasum -a 256 "$MRK_MACOS_WORK/source-inventory.json")
+            inventory_sha=${inventory_sha%% *}
+            [[ "$inventory_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
+            printf 'app-signature-source-inventory-sha256=%s\n' "$inventory_sha" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build only the external normal-app XCTest runner, not an instrumented app
+        id: normal_ui_build
+        timeout-minutes: 9
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/id -un)" == runner && "$HOME" == /Users/runner ]] || exit 1
+          [[ "$(/usr/bin/stat -f '%Su' /dev/console)" == runner && -d "$DEVELOPER_DIR" ]] || exit 1
+          [[ ! -e "$MRK_MACOS_WORK/normal-ui" && ! -L "$MRK_MACOS_WORK/normal-ui" ]] || exit 1
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/normal-ui"
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/normal-ui/tmp"
+          # Finite per-file logical size only; not RAM, total disk, service limits or finality.
+          set +e
+          ulimit -f 33554432
+          file_limit_status=$?
+          set -e
+          printf '%s\n' "$file_limit_status" > "$MRK_MACOS_WORK/normal-ui/build-file-limit.status" || exit $?
+          [[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"
+          set +e
+          "$MRK_PYTHON" -I -S -B - <<'PY_UI_FILE_BUDGET'
+          import json, os, resource
+          expected = 32 * 1024 * 1024 * 1024
+          actual = resource.getrlimit(resource.RLIMIT_FSIZE)
+          source = os.environ["GITHUB_SHA"]
+          if source != os.environ["GITHUB_WORKFLOW_SHA"] or source != os.environ["MRK_EXPECTED_SHA"]:
+              raise ValueError("ordinary XCTest file-budget source binding differs")
+          admitted = actual == (expected, expected)
+          value = {"schemaVersion": 1, "scope": "ordinary-xctest-shell-child-file-budget-only",
+                   "sourceCommit": source, "workflowSourceCommit": os.environ["GITHUB_WORKFLOW_SHA"],
+                   "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                   "phase": "build", "expectedBytes": expected, "softBytes": actual[0], "hardBytes": actual[1],
+                   "admitted": admitted, "nativeSuccessInferred": False, "serviceLimitsObserved": False,
+                   "productQualified": False}
+          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 4096: raise ValueError("ordinary XCTest file-budget fact bound")
+          fd = os.open(os.path.join(os.environ["MRK_MACOS_WORK"], "normal-ui/build-file-budget.json"),
+                       os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              with os.fdopen(fd, "wb", closefd=False) as output:
+                  output.write(data); output.flush(); os.fsync(fd)
+          finally: os.close(fd)
+          if not admitted:
+              raise ValueError("actual ordinary XCTest file allowance differs from the finite reviewed budget")
+          PY_UI_FILE_BUDGET
+          file_budget_status=$?
+          set -e
+          printf '%s\n' "$file_budget_status" > "$MRK_MACOS_WORK/normal-ui/build-file-budget.status" || exit $?
+          [[ "$file_budget_status" == 0 ]] || exit "$file_budget_status"
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
+              LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
+          }
+          # Fixed original owner admits four bounded queries and the external runner build.
+          # The installed normal Cargo app is not rebuilt or instrumented here.
+          set +e
+          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-build \
+            > "$MRK_MACOS_WORK/normal-ui/build.log" 2>&1
+          build_status=$?
+          set -e
+          printf '%s\n' "$build_status" > "$MRK_MACOS_WORK/normal-ui/build.status"
+          if [[ "$build_status" != 0 ]]; then
+            # Only a complete closed exception record may leave the PRIVATE log.
+            # Diagnostic/import/publication failure never replaces the original status.
+            "$MRK_PYTHON" -I -S -B - <<'PY_ADMISSION_DIAGNOSTIC' > /dev/null 2>&1 || :
+          import importlib.util, os, sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location("mrk_normal_admission_projection", "desktop/tools/macos_normal_ui_runner.py")
+          if spec is None or spec.loader is None or spec.name in sys.modules:
+              raise ValueError("fixed diagnostic module unavailable")
+          module = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = module
+          spec.loader.exec_module(module)  # Inert classifier definitions, never native main.
+          normal = Path(os.environ["MRK_MACOS_WORK"]) / "normal-ui"
+          body = None
+          try:
+              fd = os.open(normal / "build.log", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+              try:
+                  candidate, identity, _ = module.original_body(fd, 65536, collect=True)
+                  module.need(module.full9(os.stat(normal / "build.log", follow_symlinks=False)) == identity,
+                              "diagnostic-original-changed")
+                  body = candidate
+              finally:
+                  os.close(fd)
+          except Exception:
+              body = None  # Unknown read/close is unavailable; never use a partial record.
+          value = module.classify_normal_admission_failure(body)
+          module.exclusive_output(normal / "build.admission-diagnostics.json", module.encoded(value) + b"\n", 4096)
+          PY_ADMISSION_DIAGNOSTIC
+            exit "$build_status"
+          fi
+      - name: Project only closed current build failure facts without raw captures
+        id: public_evidence
+        if: always() && steps.work.outcome == 'success' && steps.source.outcome == 'success'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_public_verification_evidence.py \
+            --profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \
+            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Preserve only the closed public Intel build diagnostic
+        if: always() && steps.public_evidence.outcome == 'success'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-macos-normal-ui-build-intel-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+    # No explicit cleanup: preserve uncertain originals for disposable-job retirement.
+    # Build/diagnostic output is not installed, launch, GUI or product qualification.

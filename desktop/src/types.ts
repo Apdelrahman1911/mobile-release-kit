@@ -1,9 +1,13 @@
-import type { InstallationDescription, InstallationRevealResult, InstallationStatus } from './installation.ts';
+import type { ArtifactInspectionApi } from './artifactInspectionTypes.ts';
+import type { ProjectInitializationApi } from './projectInitializationTypes.ts';
+import type { InstallationDescription, InstallationRevealResult, InstallationStatus, InstallationPreparationStatus } from './installation.ts';
 import type { AssetSessionApi } from './assetSessionTypes.ts';
 import type { GitHubWorkflowEditApi } from './githubWorkflowEditTypes.ts';
 import type { GitHubConnectionApi, GitHubConnectionHelp } from './githubConnectionTypes.ts';
+import type { GitHubRemoteSetupApi } from './GitHubRemoteSetupTypes.ts';
 import type { GitHubPreflightApi } from './githubPreflightTypes.ts';
 import type { GitHubReleaseApi } from './githubReleaseTypes.ts';
+import type { GitHubHistoryApi } from './githubHistoryTypes.ts';
 import type { MetadataTextApi, MetadataTextGuide } from './metadataText.ts';
 import type { EnvironmentRequest, EnvironmentResult } from './environment.ts';
 import type { EnvironmentDiagnosticsApi } from './environmentDiagnosticsTypes.ts';
@@ -357,6 +361,22 @@ export interface PreparedConfigView {
   ignoreAdditions: FixedIgnoreLine[];
   preview: ConfigPreview;
 }
+export type ConfigRecoveryAction = 'preparing_cleanup' | 'rollback' | 'committed_cleanup' | 'rolled_back_cleanup';
+export interface ConfigRecoveryFact { size: number; mode: number; sha256: string }
+export interface ConfigRecoveryView {
+  schemaVersion: 1;
+  kind: 'recovery';
+  state: 'idle' | 'conflict' | 'recoverable';
+  action: ConfigRecoveryAction | null;
+  transactionId: string | null;
+  files: { id: 'configuration' | 'root-ignore'; path: 'release/mobile-release.json' | '.gitignore';
+    action: 'preserve' | 'remove' | 'restore'; before: ConfigRecoveryFact | null; after: ConfigRecoveryFact | null }[];
+  privateCleanup: { fileCount: number; directoryCount: number; scope: 'inspected-configuration-journal-only' };
+}
+export interface ConfigRecoveryDetails {
+  checkout: { revision: string; view: ConfigRecoveryView } | null;
+  prepared: { revision: string; planToken: string; view: ConfigRecoveryView } | null;
+}
 export interface ConfigEditProjection {
   projectId: string;
   sessionId: string;
@@ -365,6 +385,8 @@ export interface ConfigEditProjection {
   reviewRemainingMs: number;
   checkout: { revision: string; base: JsonObject | null } | null;
   prepared: { revision: string; planToken: string; draftRevision: number; baselineGeneration: number; view: PreparedConfigView } | null;
+  // Omitted on the normal wire; explicit recovery never fabricates normal details.
+  recovery?: ConfigRecoveryDetails;
   applySubmitted: boolean;
   coreOutcome: CoreEditOutcome | null;
   nativeReason: NativeEditReason;
@@ -388,13 +410,15 @@ export interface PrepareConfigEditRequest {
   baselineGeneration: number;
 }
 
-export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, GitHubReleaseApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi, IOSArchiveApi, ProjectRecoveryApi {
+export interface DesktopApi extends ArtifactInspectionApi, ProjectInitializationApi, AssetSessionApi, GitHubRemoteSetupApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, GitHubReleaseApi, GitHubHistoryApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi, IOSArchiveApi, ProjectRecoveryApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   revealInstallation(): Promise<InstallationRevealResult>;
   installationStatus(): Promise<InstallationStatus>;
   inspectInstallation(): Promise<InstallationStatus>;
   cancelInstallation(input: { operationId: number }): Promise<InstallationStatus>;
+  installationPreparationStatus(): Promise<InstallationPreparationStatus>;
+  prepareInstallationQuit(input: { confirmation: string }): Promise<InstallationPreparationStatus>;
   chooseProject(): Promise<ProjectReference | null>;
   chooseProjectPath(request: ProjectPathRequest): Promise<ProjectPathSelection | null>;
   snapshot(projectId: string): Promise<ProjectSnapshot>;
@@ -405,6 +429,9 @@ export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitH
   proposeGitHubSetup(request: GitHubSetupRequest): Promise<GitHubSetupResult>;
   environmentRequirements(request: EnvironmentRequest): Promise<EnvironmentResult>;
   openConfigEdit(projectId: string): Promise<ConfigEditStatus>;
+  openConfigRecovery(projectId: string): Promise<ConfigEditStatus>;
+  prepareConfigRecovery(sessionId: string, revision: string): Promise<ConfigEditStatus>;
+  applyConfigRecovery(sessionId: string, planToken: string): Promise<ConfigEditStatus>;
   prepareConfigEdit(request: PrepareConfigEditRequest): Promise<ConfigEditStatus>;
   applyConfigEdit(sessionId: string, planToken: string): Promise<ConfigEditStatus>;
   closeConfigEdit(sessionId: string): Promise<ConfigEditStatus>;

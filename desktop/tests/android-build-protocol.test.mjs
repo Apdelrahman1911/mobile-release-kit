@@ -523,17 +523,24 @@ test('availability text does not turn a closed gate into missing-SDK diagnosis o
 test('Mac results have a closed selected-tool extension while Linux stays exact', () => {
   const selected = { instance: 'c'.repeat(32), ownerUid: 501, catalogGeneration: 1,
     recordSha256: 'd'.repeat(64), inventorySha256: 'e'.repeat(64), osProviderSha256: 'f'.repeat(64) };
-  const mac = { ...report(), schemaVersion: 2, toolchainProfile: 'android-registered-macos-arm64-v1', toolchainSelection: selected };
-  assert.ok(parseAndroidBuildResult(mac));
-  assert.ok(parseAndroidBuildStatus(status(completed(mac))));
-  for (const field of Object.keys(selected)) {
-    const changed = clone(mac); delete changed.toolchainSelection[field];
-    assert.equal(parseAndroidBuildResult(changed), null, field);
-  }
-  for (const patch of [{ schemaVersion: 1 }, { toolchainSelection: null }, { toolchainProfile: ANDROID_BUILD_TOOLCHAIN_PROFILE },
-    { toolchainSelection: { ...selected, ownerUid: 0 } }, { toolchainSelection: { ...selected, catalogGeneration: 0xffff_ffff } },
-    { toolchainSelection: { ...selected, qualified: true } }]) {
-    assert.equal(parseAndroidBuildResult({ ...mac, ...patch }), null);
+  for (const toolchainProfile of ['android-registered-macos-arm64-v1', 'android-registered-macos-x86_64-v1']) {
+    const mac = { ...report(), schemaVersion: 2, toolchainProfile, toolchainSelection: selected };
+    assert.ok(parseAndroidBuildResult(mac));
+    assert.ok(parseAndroidBuildStatus(status(completed(mac))));
+    for (const field of Object.keys(selected)) {
+      const changed = clone(mac); delete changed.toolchainSelection[field];
+      assert.equal(parseAndroidBuildResult(changed), null, field);
+    }
+    for (const patch of [{ schemaVersion: 1 }, { toolchainSelection: null }, { toolchainProfile: ANDROID_BUILD_TOOLCHAIN_PROFILE },
+      { toolchainSelection: { ...selected, ownerUid: 0 } }, { toolchainSelection: { ...selected, catalogGeneration: 0xffff_ffff } },
+      { toolchainSelection: { ...selected, qualified: true } }]) {
+      assert.equal(parseAndroidBuildResult({ ...mac, ...patch }), null);
+    }
+    for (const unknown of ['android-registered-macos-unknown-v1', 'android-registered-macos-x64-v1', 'android-registered-macos-x86_64-v2']) {
+      const bad = { ...mac, toolchainProfile: unknown };
+      assert.equal(parseAndroidBuildResult(bad), null, unknown);
+      assert.equal(parseAndroidBuildStatus(status(completed(bad))), null, unknown);
+    }
   }
   assert.equal(parseAndroidBuildResult({ ...report(), toolchainSelection: selected }), null);
   assert.equal(parseAndroidBuildResult({ ...report(), schemaVersion: 2 }), null);
@@ -572,20 +579,28 @@ test('explicit local signing has closed current-assignment DATA and separate con
 });
 
 test('signed results require Mac selection and every final verification, not signature-only completion', () => {
-  const signed = { ...uploadReport(), schemaVersion: 2, toolchainProfile: 'android-registered-macos-arm64-v1', signing: 'local-upload-key',
-    toolchainSelection: { instance: OTHER, ownerUid: 501, catalogGeneration: 1, recordSha256: 'a'.repeat(64), inventorySha256: 'b'.repeat(64), osProviderSha256: 'c'.repeat(64) } };
-  signed.assurances.toolkitSigning = 'local-upload-key-verified';
-  signed.limitations = signed.limitations.map(item => item === 'toolkit-signing-not-requested' ? 'local-signing-not-store-enrollment' : item);
-  assert.ok(parseAndroidBuildResult(signed));
-  const done = completed(signed); done.context = { ...signedRequest(), platform: 'android', operation: 'android-build-sign' };
-  assert.ok(parseAndroidBuildStatus(status(done)));
-  const inspectionOnly = clone(done); delete inspectionOnly.context.signing; inspectionOnly.context.operation = 'android-build-inspect';
-  assert.equal(parseAndroidBuildStatus(status(inspectionOnly)), null);
-  for (const mutate of [x => { x.schemaVersion = 1; x.toolchainProfile = ANDROID_BUILD_TOOLCHAIN_PROFILE; delete x.toolchainSelection; },
-    x => { x.signing = null; }, x => { x.assurances.toolkitSigning = 'not-requested'; },
-    x => { x.limitations = uploadReport().limitations; }, x => { x.findings[3].status = 'FAIL'; x.summary.counts.PASS--; x.summary.counts.FAIL++; x.assurances.signer = 'failed'; },
-    x => { x.findings[2].status = 'FAIL'; x.summary.counts.PASS--; x.summary.counts.FAIL++; x.assurances.signature = 'failed'; }]) {
-    const bad = clone(signed); mutate(bad); assert.equal(parseAndroidBuildResult(bad), null);
+  for (const toolchainProfile of ['android-registered-macos-arm64-v1', 'android-registered-macos-x86_64-v1']) {
+    const signed = { ...uploadReport(), schemaVersion: 2, toolchainProfile, signing: 'local-upload-key',
+      toolchainSelection: { instance: OTHER, ownerUid: 501, catalogGeneration: 1, recordSha256: 'a'.repeat(64), inventorySha256: 'b'.repeat(64), osProviderSha256: 'c'.repeat(64) } };
+    signed.assurances.toolkitSigning = 'local-upload-key-verified';
+    signed.limitations = signed.limitations.map(item => item === 'toolkit-signing-not-requested' ? 'local-signing-not-store-enrollment' : item);
+    assert.ok(parseAndroidBuildResult(signed));
+    const done = completed(signed); done.context = { ...signedRequest(), platform: 'android', operation: 'android-build-sign' };
+    assert.ok(parseAndroidBuildStatus(status(done)));
+    const inspectionOnly = clone(done); delete inspectionOnly.context.signing; inspectionOnly.context.operation = 'android-build-inspect';
+    assert.equal(parseAndroidBuildStatus(status(inspectionOnly)), null);
+    for (const mutate of [x => { x.schemaVersion = 1; x.toolchainProfile = ANDROID_BUILD_TOOLCHAIN_PROFILE; delete x.toolchainSelection; },
+      x => { x.signing = null; }, x => { x.assurances.toolkitSigning = 'not-requested'; },
+      x => { x.limitations = uploadReport().limitations; }, x => { x.findings[3].status = 'FAIL'; x.summary.counts.PASS--; x.summary.counts.FAIL++; x.assurances.signer = 'failed'; },
+      x => { x.findings[2].status = 'FAIL'; x.summary.counts.PASS--; x.summary.counts.FAIL++; x.assurances.signature = 'failed'; }]) {
+      const bad = clone(signed); mutate(bad); assert.equal(parseAndroidBuildResult(bad), null);
+    }
+    for (const unknown of ['android-registered-macos-unknown-v1', 'android-registered-macos-x64-v1', 'android-registered-macos-x86_64-v2']) {
+      const bad = { ...signed, toolchainProfile: unknown }, badDone = clone(done);
+      badDone.result = clone(bad);
+      assert.equal(parseAndroidBuildResult(bad), null, unknown);
+      assert.equal(parseAndroidBuildStatus(status(badDone)), null, unknown);
+    }
   }
 });
 

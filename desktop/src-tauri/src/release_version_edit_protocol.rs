@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use crate::{edit_protocol::{self as edit, bounded, token, Capability, ChildFrame,
     CoreEditOutcome, CoreReason, Effect, Journal, NativeEditReason, NativeFinality, Phase, ResourceState},
     error::BridgeError, github_workflow_edit_protocol::{value_bounds, RegisteredIdentity},
+    saved_text_recovery_protocol as recovery,
     protocol::{check_value, strict_json}, release_version_protocol::relative_display_path};
 
 pub const PROTOCOL: &str = "mrk-release-version/1";
@@ -27,7 +28,7 @@ fn key(value: &str) -> bool {
     !value.is_empty() && value.len() <= 64 && value.as_bytes()[0].is_ascii_uppercase()
         && value.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
 }
-fn selection(source: &str, name_key: &str, build_key: &str) -> bool {
+pub(crate) fn selection(source: &str, name_key: &str, build_key: &str) -> bool {
     relative_display_path(source) && !source.eq_ignore_ascii_case("release/mobile-release.json")
         && key(name_key) && key(build_key) && name_key != build_key
 }
@@ -191,7 +192,12 @@ pub struct Checkout {
 #[serde(rename_all = "camelCase")]
 pub struct Prepared { pub revision: String, pub plan_token: String, pub draft_revision: u32, pub baseline_generation: u32, pub view: PreparedView }
 #[derive(Clone, Default)]
-pub(crate) struct Details { pub(crate) checkout: Option<Checkout>, pub(crate) prepared: Option<Prepared>, pub(crate) submission: Option<Submission> }
+pub(crate) struct Details { pub(crate) checkout: Option<Checkout>, pub(crate) prepared: Option<Prepared>, pub(crate) submission: Option<Submission>, pub(crate) recovery: Option<recovery::Details> }
+impl Details {
+    pub(crate) fn recovery() -> Self { Self { recovery: Some(recovery::Details::default()), ..Self::default() } }
+    pub(crate) fn revision(&self) -> Option<&str> { self.recovery.as_ref().map_or_else(|| self.checkout.as_ref().map(|c| c.revision.as_str()), recovery::Details::revision) }
+    pub(crate) fn plan_token(&self) -> Option<&str> { self.recovery.as_ref().map_or_else(|| self.prepared.as_ref().map(|p| p.plan_token.as_str()), recovery::Details::plan_token) }
+}
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Projection {
@@ -199,6 +205,8 @@ pub struct Projection {
     pub phase: Phase, pub review_remaining_ms: u32, pub checkout: Option<Checkout>, pub prepared: Option<Prepared>,
     pub apply_submitted: bool, pub core_outcome: Option<CoreEditOutcome>, pub native_reason: NativeEditReason,
     pub native_finality: NativeFinality, pub late_settled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<recovery::Details>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -243,6 +251,7 @@ pub(crate) fn request(session: &str, seq: u32, op: &str, params: Value) -> Resul
     if !token(session) || seq > 2 { return Err(BridgeError::invalid()); }
     value_bounds(&params, 16, REQUEST_LIMIT)?;
     let legal = match (seq, op) {
+        (0, "open") | (1, "prepare") | (2, "apply") if params["intent"] == "recover" => recovery::private_request(seq, op, &params),
         (0, "open") => PrivateOpen::deserialize(&params).is_ok_and(|p| p.root.len() > 1 && p.root.len() <= 4096
             && !p.root.contains('\0') && p.registered_identity.valid()),
         (1, "prepare") => PrivatePrepare::deserialize(&params).is_ok_and(|p| token(&p.revision)
@@ -257,6 +266,9 @@ pub(crate) fn request(session: &str, seq: u32, op: &str, params: Value) -> Resul
     let mut bytes = bounded(&value, REQUEST_LIMIT - 1)?; bytes.push(b'\n'); Ok(bytes)
 }
 pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
+    decode_with_intent(bytes, session, false)
+}
+pub(crate) fn decode_with_intent(bytes: &[u8], session: &str, recovering: bool) -> Result<ChildFrame, BridgeError> {
     if !token(session) || bytes.len() > RESPONSE_LIMIT || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
     let body = &bytes[..bytes.len() - 1];
     if body.first() != Some(&b'{') || body.last() != Some(&b'}') || body.iter().any(|b| matches!(*b, b'\r' | b'\n')) { return Err(BridgeError::protocol()); }
@@ -266,7 +278,9 @@ pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeEr
     let raw = &value["result"];
     value_bounds(raw, 16, RESPONSE_LIMIT).map_err(|_| BridgeError::protocol())?;
     match value["kind"].as_str() {
-        Some("opened") if seq == 0 => {
+        Some("opened") if seq == 0 && recovering => Ok(ChildFrame::ReleaseVersionRecoveryOpened(recovery::opened(raw, edit::EditDomain::ReleaseVersion)?)),
+        Some("prepared") if seq == 1 && recovering => Ok(ChildFrame::ReleaseVersionRecoveryPrepared(recovery::prepared(raw, edit::EditDomain::ReleaseVersion)?)),
+        Some("opened") if seq == 0 && !recovering => {
             // Option fields must be explicitly present, including null absence.
             if !keys(raw, &["revision","source","nameKey","buildKey","iosEnabled","values","baseline","scopeResources"]) { return Err(BridgeError::protocol()); }
             let result = Opened::deserialize(raw).map_err(|_| BridgeError::protocol())?;
@@ -279,7 +293,7 @@ pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeEr
                 } { return Err(BridgeError::protocol()); }
             Ok(ChildFrame::ReleaseVersionOpened(result))
         },
-        Some("prepared") if seq == 1 => {
+        Some("prepared") if seq == 1 && !recovering => {
             let result = PreparedReply::deserialize(raw).map_err(|_| BridgeError::protocol())?;
             if !token(&result.revision) || !token(&result.plan_token) || result.revision == result.plan_token
                 || result.scope_resources != ResourceState::Settled || !result.view.valid() { return Err(BridgeError::protocol()); }
@@ -288,7 +302,7 @@ pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeEr
         Some("terminal") if bytes.len() <= edit::TERMINAL_LIMIT => {
             if !keys(raw, &["kind","planToken","effect","journal","resources","reason"]) { return Err(BridgeError::protocol()); }
             let result = TerminalReply::deserialize(raw).map_err(|_| BridgeError::protocol())?;
-            if !result.outcome().valid() || result.plan_token.as_deref().is_some_and(|s| !token(s)) { return Err(BridgeError::protocol()); }
+            if !(if recovering { recovery::outcome_valid(&result.outcome()) } else { result.outcome().valid() }) || result.plan_token.as_deref().is_some_and(|s| !token(s)) { return Err(BridgeError::protocol()); }
             Ok(ChildFrame::ReleaseVersionTerminal(seq, result))
         },
         _ => Err(BridgeError::protocol()),
@@ -298,6 +312,24 @@ pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saved_text_recovery_frames_require_captured_intent_and_do_not_relax_normal_outcomes() {
+        let session="a".repeat(32); let revision="b".repeat(32);
+        let identity=json!({"device":1,"inode":2,"owner":3,"mode":16832,"ctimeNs":4});
+        // Actual identity spelling is covered by the existing registered-root tests;
+        // public recovery never accepts a caller-supplied identity or source.
+        let public=json!({"projectId":"p","intent":"recover"});
+        assert!(recovery::open(&public).is_ok());
+        let mut bad=public; bad["registeredIdentity"]=identity; assert!(recovery::open(&bad).is_err());
+        let view=json!({"schemaVersion":1,"kind":"saved-text-recovery","domain":DOMAIN,"state":"idle","reason":"none",
+            "action":null,"transactionId":null,"selection":null,"files":[],"privateCleanup":{"fileCount":0,"directoryCount":0,"scope":"inspected-owned-journal-only"}});
+        let mut frame=serde_json::to_vec(&json!({"protocol":PROTOCOL,"session":session,"seq":0,"kind":"opened",
+            "result":{"revision":revision,"recovery":view,"scopeResources":"settled"}})).unwrap(); frame.push(b'\n');
+        assert!(decode(&frame,&session).is_err()); assert!(decode_with_intent(&frame,&session,true).is_ok());
+        let mut frame=serde_json::to_vec(&json!({"protocol":PROTOCOL,"session":session,"seq":0,"kind":"terminal",
+            "result":{"kind":"outcome","planToken":null,"effect":"committed","journal":"recovery_required","resources":"settled","reason":"none"}})).unwrap(); frame.push(b'\n');
+        assert!(decode(&frame,&session).is_err()); assert!(decode_with_intent(&frame,&session,true).is_ok());
+    }
     const SESSION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const REVISION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const PLAN: &str = "cccccccccccccccccccccccccccccccc";

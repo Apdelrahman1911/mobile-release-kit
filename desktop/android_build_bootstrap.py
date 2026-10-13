@@ -13,9 +13,10 @@ def _supported_host() -> bool:
         return True  # Existing Linux gate; the native owner admits its exact ABI.
     if sys.platform != "darwin":
         return False
-    # Current Mac runtime/tool policy is native ARM64 only, never Rosetta fallback.
+    # Host shape only; the native owner still proves exact ABI and refuses Rosetta.
     try:
-        return os.uname().machine == "arm64"
+        machine = os.uname().machine
+        return machine == "arm64" or (machine == "x86_64" and sys.maxsize == 2**63 - 1)
     except OSError:
         return False
 

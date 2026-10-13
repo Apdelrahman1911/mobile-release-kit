@@ -1,7 +1,7 @@
 """Pure, bounded observation-DATA to private Rust catalogue SOURCE projection.
 
-No filesystem, archive, network, native tool, subprocess, selected-root or Store
-access. An external owner supplies already admitted original DATA bytes and owns
+No filesystem, network, native tool, subprocess, selected-root or Store
+access. The explicit signed-support route reads bounded authenticated archive DATA. An external owner supplies already admitted original DATA bytes and owns
 all output custody, limits, original clocks and finality. A generated table is
 proposed SOURCE, never supplier/native/runtime qualification. Rust's existing
 reference_digest remains the sole reference commitment implementation.
@@ -725,6 +725,70 @@ class Member:
         return {"name": self.name, "kind": self.kind, "mode": self.mode, "size": self.size, "sha256": self.sha256}
 
 
+def _outer_rows(label, rows, counts, archive_bytes):
+    """Shared raw-row checks; callers independently bind their real schema/pin."""
+    need(type(rows) is list and 0 < len(rows) <= ENTRY_LIMIT, "outer-rows-bound")
+    members, by_name = [], {}
+    ordering = []
+    for row in rows:
+        need(type(row) is list and len(row) == len(COLUMNS), "outer-columns")
+        member = Member(*row)
+        relative(member.name)
+        need(member.kind in ("file", "directory", "alias"), "outer-kind")
+        integer(member.mode, 0, 0o177777)
+        need(member.mode & ~0o170777 == 0 or label == "jdk" and member.kind == "directory"
+             and member.mode == 0o042755, "archive-special-mode")
+        integer(member.size, 0, 512 * 1024 * 1024)
+        need(member.hint is None or type(member.hint) is str and member.hint in
+             ("shell", "macho", "fat-macho-or-java-class", "elf", "pe", "zip", "jmod"), "outer-format")
+        if member.kind == "file":
+            sha(member.sha256)
+            need(member.target is None and member.mode & 0o170000 in (0, 0o100000), "file-kind-mode")
+        elif member.kind == "directory":
+            need(member.size == 0 and member.sha256 is None and member.target is None and member.hint is None
+                 and member.mode & 0o170000 in (0, 0o040000), "directory-kind-mode")
+        else:
+            text(member.target)
+            need(member.size == 0 and member.sha256 is None and member.hint is None
+                 and member.mode & 0o170000 in (0, 0o120000) and label == "jdk", "alias-kind-mode")
+        if label == "jdk":
+            need(all(v is None for v in (member.local, member.data, member.compressed, member.method, member.flags, member.crc32, member.creator)), "tar-no-zip-fields")
+        else:
+            for value in (member.local, member.data, member.compressed):
+                integer(value, 0, archive_bytes)
+            need(member.local < member.data and member.data + member.compressed <= archive_bytes, "zip-range")
+            need(type(member.method) is int and member.method in (0, 8), "zip-method")
+            integer(member.flags, 0, 65535); integer(member.crc32, 0, (1 << 32) - 1); integer(member.creator, 0, 255)
+        key = member.name if label == "bundletool" else member.name.lower()
+        need(not ordering or ordering[-1] < key, "outer-order-or-collision")
+        ordering.append(key)
+        members.append(member)
+        by_name[member.name] = member
+    for key, actual in (("members", len(rows)), ("entryHeaders", len(rows)),
+                        ("files", sum(m.kind == "file" for m in members)),
+                        ("aliases", sum(m.kind == "alias" for m in members)),
+                        ("expandedBytes", sum(m.size for m in members))):
+        need(integer(counts[key]) == actual, "complete-outer-count")
+    need(counts["expandedBytes"] <= TOTAL_LIMIT, "outer-expanded-bound")
+    need(counts["files"] <= FILE_COUNT and counts["aliases"] <= ALIAS_COUNT, "outer-leaf-bound")
+    # Case-sensitive Bundletool classes never become picked filesystem
+    # paths. All other archives preserve the exact spelling of every
+    # shared parent, even when it has no explicit directory header.
+    prefixes = {}
+    for member in members:
+        parts = member.name.split("/")
+        for end in range(1, len(parts)):
+            parent = "/".join(parts[:end])
+            key = parent if label == "bundletool" else parent.lower()
+            need(key not in prefixes or prefixes[key] == parent, "archive-parent-spelling")
+            prefixes[key] = parent
+    named = {(m.name if label == "bundletool" else m.name.lower()): m for m in members}
+    for key, spelling in prefixes.items():
+        if key in named:
+            need(named[key].name == spelling and named[key].kind == "directory", "archive-parent-kind")
+    return members, by_name
+
+
 class Outer:
     def __init__(self, label, document):
         keys(document, ("schemaVersion", "kind", "label", "archiveBytes", "archiveSha256", "completeMemberHashes",
@@ -735,66 +799,8 @@ class Outer:
              and document["completeMemberHashes"] is True and document["supplierAuthority"] is False
              and document["nativeClosure"] is False and document["columns"] == list(COLUMNS), "outer-header")
         integer(document["archiveBytes"], 1)
-        rows = document["rows"]
-        need(type(rows) is list and 0 < len(rows) <= ENTRY_LIMIT, "outer-rows-bound")
-        self.label, self.members, self.by_name = label, [], {}
-        ordering = []
-        for row in rows:
-            need(type(row) is list and len(row) == len(COLUMNS), "outer-columns")
-            member = Member(*row)
-            relative(member.name)
-            need(member.kind in ("file", "directory", "alias"), "outer-kind")
-            integer(member.mode, 0, 0o177777)
-            need(member.mode & ~0o170777 == 0 or label == "jdk" and member.kind == "directory"
-                 and member.mode == 0o042755, "archive-special-mode")
-            integer(member.size, 0, 512 * 1024 * 1024)
-            need(member.hint is None or type(member.hint) is str and member.hint in
-                 ("shell", "macho", "fat-macho-or-java-class", "elf", "pe", "zip", "jmod"), "outer-format")
-            if member.kind == "file":
-                sha(member.sha256)
-                need(member.target is None and member.mode & 0o170000 in (0, 0o100000), "file-kind-mode")
-            elif member.kind == "directory":
-                need(member.size == 0 and member.sha256 is None and member.target is None and member.hint is None
-                     and member.mode & 0o170000 in (0, 0o040000), "directory-kind-mode")
-            else:
-                text(member.target)
-                need(member.size == 0 and member.sha256 is None and member.hint is None
-                     and member.mode & 0o170000 in (0, 0o120000) and label == "jdk", "alias-kind-mode")
-            if label == "jdk":
-                need(all(v is None for v in (member.local, member.data, member.compressed, member.method, member.flags, member.crc32, member.creator)), "tar-no-zip-fields")
-            else:
-                for value in (member.local, member.data, member.compressed):
-                    integer(value, 0, ARCHIVES[label][0])
-                need(member.local < member.data and member.data + member.compressed <= ARCHIVES[label][0], "zip-range")
-                need(type(member.method) is int and member.method in (0, 8), "zip-method")
-                integer(member.flags, 0, 65535); integer(member.crc32, 0, (1 << 32) - 1); integer(member.creator, 0, 255)
-            key = member.name if label == "bundletool" else member.name.lower()
-            need(not ordering or ordering[-1] < key, "outer-order-or-collision")
-            ordering.append(key)
-            self.members.append(member)
-            self.by_name[member.name] = member
-        for key, actual in (("members", len(rows)), ("entryHeaders", len(rows)),
-                            ("files", sum(m.kind == "file" for m in self.members)),
-                            ("aliases", sum(m.kind == "alias" for m in self.members)),
-                            ("expandedBytes", sum(m.size for m in self.members))):
-            need(integer(document[key]) == actual, "complete-outer-count")
-        need(document["expandedBytes"] <= TOTAL_LIMIT, "outer-expanded-bound")
-        need(document["files"] <= FILE_COUNT and document["aliases"] <= ALIAS_COUNT, "outer-leaf-bound")
-        # Case-sensitive Bundletool classes never become picked filesystem
-        # paths. All other archives preserve the exact spelling of every
-        # shared parent, even when it has no explicit directory header.
-        prefixes = {}
-        for member in self.members:
-            parts = member.name.split("/")
-            for end in range(1, len(parts)):
-                parent = "/".join(parts[:end])
-                key = parent if label == "bundletool" else parent.lower()
-                need(key not in prefixes or prefixes[key] == parent, "archive-parent-spelling")
-                prefixes[key] = parent
-        named = {(m.name if label == "bundletool" else m.name.lower()): m for m in self.members}
-        for key, spelling in prefixes.items():
-            if key in named:
-                need(named[key].name == spelling and named[key].kind == "directory", "archive-parent-kind")
+        self.label = label
+        self.members, self.by_name = _outer_rows(label, document["rows"], document, ARCHIVES[label][0])
 
 
 def archive_tuple(value, label):
@@ -1331,7 +1337,10 @@ def collect_sources(outers):
     return ordered
 
 
-def classify(member, label, path, proofs):
+def classify(member, label, path, proofs, *, profile="arm64"):
+    _projection_profile(profile)
+    if profile == "x86_64":
+        return _classify_intel(member, label, path, proofs)
     key = (label, member.name)
     if member.name.endswith((".jar", ".jmod")):
         if label in SDK_NEGATIVE:
@@ -1390,7 +1399,9 @@ def classify(member, label, path, proofs):
 
 
 class Projection:
-    def __init__(self, outers, proofs):
+    def __init__(self, outers, proofs, *, profile="arm64"):
+        archives = _projection_profile(profile)
+        self.profile = profile
         self.outers, self.proofs = outers, proofs
         for label, name, size, digest in SDK_PROPERTIES:
             row = outers[label].by_name.get(name)
@@ -1409,7 +1420,7 @@ class Projection:
             if source.kind == "file":
                 member = outers[LABELS[source.archive]].members[source.member]
                 path = canonical_source(source.group, source.relative)
-                mode, classification = classify(member, LABELS[source.archive], path, proofs)
+                mode, classification = classify(member, LABELS[source.archive], path, proofs, profile=profile)
                 self.payload.append(Payload(path, member.size, member.sha256, mode,
                                            ("Picked", source.group, source.relative), classification))
             elif source.kind == "alias":
@@ -1418,14 +1429,16 @@ class Projection:
         # Compiled SDK XML is not a fabricated selected package.xml header.
         for path, size, digest, kind in XML_FILES:
             self.payload.append(Payload(path, size, digest, 0o444, ("CompiledSdkMetadata", kind), ("Data",)))
-        bundle = finite_native("bundletool/bundletool.jar", ARCHIVES["bundletool"][:2], proofs.bundle["nativeMembers"])
+        bundle = (finite_native("bundletool/bundletool.jar", archives["bundletool"][:2], proofs.bundle["nativeMembers"])
+                  if profile == "arm64" else _intel_finite_native("bundletool/bundletool.jar",
+                      archives["bundletool"][:2], _intel_native_rows(proofs.bundle)))
         self.payload.append(Payload("bundletool/bundletool.jar", *ARCHIVES["bundletool"][:2], 0o444,
                                    ("Support", "BundletoolJar"), ("JvmArchive", bundle)))
         aapt = outers["aapt2"].by_name.get("aapt2")
         need(aapt is not None and (aapt.size, aapt.sha256, aapt.mode) == (11143368,
              "213e3d049e2c85daa930ed777bbd5627c1c5479a8d6698029b8f9c0161ad0a7e", 0o100755), "aapt2-member-pin")
         snapshot = proofs.direct[("aapt2", "aapt2")]
-        need(snapshot[2] == ARM64, "aapt2-arm64-snapshot")
+        need(snapshot[2] == (ARM64 if profile == "arm64" else 0x01000007), "aapt2-selected-snapshot")
         self.payload.append(Payload(AAPT2_PATH, aapt.size, aapt.sha256, 0o555,
                                    ("MemberOfSameOriginalArchive",), ("MachO", snapshot)))
         self.aapt = aapt
@@ -1477,8 +1490,8 @@ def rust_string(value):
     return json.dumps(value, ensure_ascii=True)
 
 
-def archive_literal(label):
-    size, digest = ARCHIVES[label][:2]
+def archive_literal(label, *, profile="arm64"):
+    size, digest = _projection_profile(profile)[label][:2]
     return "ArchivePin { bytes: " + str(size) + ", sha256: " + rust_string(digest) + " }"
 
 
@@ -1521,7 +1534,9 @@ class Emitter:
         return {"bytes": self.total, "sha256": self.digest.hexdigest()}
 
 
-def render(projection, sink):
+def render(projection, sink, *, profile="arm64"):
+    archives = _projection_profile(profile)
+    need(projection.profile == profile, "projection-render-profile")
     output = Emitter(sink)
     put = output.put
     headers, header_ids = [], {}
@@ -1538,6 +1553,8 @@ def render(projection, sink):
         return "NativeHeader { prefix: CAT_H" + str(ordinal) + "_PREFIX, commands: CAT_H" + str(ordinal) + "_COMMANDS }"
     put("// Generated proposed SOURCE from complete admitted official observation DATA.\n")
     put("// No IO, mutable runtime registration, reference digest or native qualification.\n")
+    if profile == "x86_64":
+        put("use super::*;\n")
     for ordinal, (prefix, commands, _) in enumerate(headers):
         for suffix, raw in (("PREFIX", prefix), ("COMMANDS", commands)):
             put("const CAT_H" + str(ordinal) + "_" + suffix + ": &[u8] = &[\n")
@@ -1550,7 +1567,9 @@ def render(projection, sink):
         put("const CAT_N" + str(ordinal) + ": &[NestedNative] = &[\n")
         for row, kind, snapshot in payload.classification[1]:
             need(kind in ("Arm64", "JdkInstalledCounterpart", "JdkJpackageTemplate", "OtherPlatformElf", "OtherPlatformPe",
-                          "GradleIntelPlatform", "GradlePlainJansiIntel", "BundletoolDarwinI386X64"), "native-literal-kind")
+                          "GradleIntelPlatform", "GradlePlainJansiIntel", "BundletoolDarwinI386X64")
+                 or profile == "x86_64" and kind in ("CurrentX64", "OtherPlatformArm64", "OtherPlatformI386"),
+                 "native-literal-kind")
             put("    NestedNative { member: " + rust_string(row["name"]) + ", bytes: " + str(row["bytes"])
                 + ", sha256: " + rust_string(row["sha256"]) + ", mode: " + oct(row["mode"])
                 + ", kind: NativeResourceKind::" + kind + ", header: " + ("Some(" + native(snapshot) + ")" if snapshot is not None else "None") + " },\n")
@@ -1575,9 +1594,9 @@ def render(projection, sink):
         put("];\n")
     put("const CAT_ARCHIVES: &[OfficialArchive] = &[\n")
     for archive, label in enumerate(LABELS):
-        published = "Sha1(" + rust_string(SDK_SHA1[label]) + ")" if label in SDK_SHA1 else "Sha256(" + rust_string(ARCHIVES[label][1]) + ")"
-        put("    OfficialArchive { component: Component::" + COMPONENTS[archive] + ", official_source: " + rust_string(ARCHIVES[label][2])
-            + ", vendor_release: " + rust_string(ARCHIVES[label][3]) + ", archive: " + archive_literal(label)
+        published = "Sha1(" + rust_string(SDK_SHA1[label]) + ")" if label in SDK_SHA1 else "Sha256(" + rust_string(archives[label][1]) + ")"
+        put("    OfficialArchive { component: Component::" + COMPONENTS[archive] + ", official_source: " + rust_string(archives[label][2])
+            + ", vendor_release: " + rust_string(archives[label][3]) + ", archive: " + archive_literal(label, profile=profile)
             + ", published: PublishedChecksum::" + published + ", member_count: " + str(len(projection.outers[label].members))
             + ", expanded_bytes: " + str(sum(m.size for m in projection.outers[label].members)) + ", members: CAT_A" + str(archive) + " },\n")
     put("];\nconst CAT_TREES: &[SourceTree] = &[\n")
@@ -1606,7 +1625,7 @@ def render(projection, sink):
         put("    SourceBinding { provenance: SourceProvenance::" + provenance + ", disposition: SourceDisposition::" + disposition + " },\n")
     put("];\nconst CAT_SUPPORT: &[SupportOriginalSpec] = &[\n")
     for label, asset in (("bundletool", "BundletoolJar"), ("aapt2", "Aapt2OsxJar")):
-        put("    SupportOriginalSpec { asset: SupportAsset::" + asset + ", archive: " + archive_literal(label) + ", modes: &[0o444] },\n")
+        put("    SupportOriginalSpec { asset: SupportAsset::" + asset + ", archive: " + archive_literal(label, profile=profile) + ", modes: &[0o444] },\n")
     put("];\nconst CAT_PROJECTED: ZipMemberSpec<'static> = " + zip_literal(projection.aapt) + ";\n")
     put("const CAT_SUPPORT_MEMBERS: &[SupportMemberSpec] = &[SupportMemberSpec { asset: SupportAsset::Aapt2OsxJar, member: CAT_PROJECTED }];\n")
     put("const CAT_PAYLOAD: &[PayloadSource] = &[\n")
@@ -1621,7 +1640,7 @@ def render(projection, sink):
             value = "CompiledSdkMetadata(SdkMetadataKind::" + origin[1] + ")"
         else:
             need(origin == ("MemberOfSameOriginalArchive",), "payload-origin-kind")
-            value = "MemberOfSameOriginalArchive { asset: SupportAsset::Aapt2OsxJar, archive: " + archive_literal("aapt2") + ", member: CAT_PROJECTED }"
+            value = "MemberOfSameOriginalArchive { asset: SupportAsset::Aapt2OsxJar, archive: " + archive_literal("aapt2", profile=profile) + ", member: CAT_PROJECTED }"
         put("    PayloadSource { installed: CanonicalFile { path: " + rust_string(payload.path) + ", size: " + str(payload.size)
             + ", sha256: " + rust_string(payload.sha256) + ", mode: " + oct(payload.mode) + " }, origin: PayloadOrigin::" + value + " },\n")
     put("];\nconst CAT_CLASSES: &[FileClass] = &[\n")
@@ -1648,14 +1667,15 @@ def render(projection, sink):
     put("];\nconst CAT_DIRECTORIES: &[&str] = &[\n")
     for path in projection.directories:
         put("    " + rust_string(path) + ",\n")
-    put("];\nconst REFERENCES: &[Reference] = &[Reference {\n")
-    put("    profile: crate::android_build_protocol::MAC_TOOLCHAIN_PROFILE,\n")
+    put("];\n" + ("pub(super) " if profile == "x86_64" else "") + "const REFERENCES: &[Reference] = &[Reference {\n")
+    put("    profile: crate::android_build_protocol::" + ("MAC_TOOLCHAIN_PROFILE" if profile == "arm64"
+        else "MAC_X64_TOOLCHAIN_PROFILE") + ",\n")
     put("    observed_jdk_vendor: " + rust_string(projection.vendor) + ", observed_jdk_version: " + rust_string(projection.version) + ",\n")
     put('    versions: VersionSpec { jdk_vendor: "temurin", jdk_version: "17.0.20.1", gradle_version: "8.14.5", agp_version: "8.9.2",\n')
     put('        sdk_platform: "android-35", sdk_platform_revision: "2", sdk_build_tools_version: "35.0.0" },\n')
     put("    roles: RoleSpec { java: " + rust_string(INSTALLED_JDK + "Contents/Home/bin/java") + ", javac: " + rust_string(INSTALLED_JDK + "Contents/Home/bin/javac")
         + ', gradle: "gradle/bin/gradle", bundletool: "bundletool/bundletool.jar", sdk: "sdk" },\n')
-    put("    gradle_distribution_url: " + rust_string(GRADLE_WRAPPER_URL) + ", gradle_distribution_sha256: " + rust_string(ARCHIVES["gradle"][1]) + ",\n")
+    put("    gradle_distribution_url: " + rust_string(GRADLE_WRAPPER_URL) + ", gradle_distribution_sha256: " + rust_string(archives["gradle"][1]) + ",\n")
     put("    archives: CAT_ARCHIVES, trees: CAT_TREES, source_members: CAT_SOURCES, source_bindings: CAT_BINDINGS,\n")
     put("    support: CAT_SUPPORT, support_members: CAT_SUPPORT_MEMBERS, payload: CAT_PAYLOAD, classes: CAT_CLASSES,\n")
     put("    aliases: CAT_ALIASES, directories: CAT_DIRECTORIES,\n}];\n")
@@ -1685,3 +1705,1094 @@ def generate(documents: Mapping[str, bytes], sink: Callable[[bytes], None]):
     summary["inputs"] = [{"path": path, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
                          for path, raw in sorted(inputs.documents.items())]
     return summary
+
+
+# Fresh Intel observations are a different DATA protocol, not replacements for
+# Inputs' historical ARM documents. Private admission below is DATA only; the
+# separate generate_intel entry can propose SOURCE, never a runtime grant.
+_FRESH_INTEL_ROLES = (
+    "jdk-correspondence.json", "jdk-inspection.json", "gradle-inspection.json",
+    "sdk-platform-inspection.json", "sdk-build-tools-inspection.json",
+    "aapt2-inspection.json", "bundletool-inspection.json", "jdk-release.bytes", "jdk-jvm-cfg.bytes",
+)
+_FRESH_INTEL_JDK = (180578248, "c01975da12ed4235250ff891fe8bba73a9e73037d444b269c9d0922b5dbc8e0a")
+_FRESH_INTEL_CORRESPONDENCE = (100949, "fd4287337be6dc07ebb3576e1790a2c708487899637ed945d60d5197e8d30e46")
+_FRESH_INTEL_SELECTED = (
+    ("jdk-release.bytes", JDK_ROOT + "/Contents/Home/release", 1637,
+     "edbe3a2e6b6a3186010a3b75257685d943a8baa013a92174c9a48b8c1a73886b"),
+    ("jdk-jvm-cfg.bytes", JDK_ROOT + "/Contents/Home/lib/jvm.cfg", 29,
+     "aa9efb969444c1484e29adecab55a122458090616e766b2f1230ef05bc3867e0"),
+)
+# One observed SDK member is inert manifest text despite its raw execute mode.
+# This is a DATA classification, never a native role or a complete-negative claim.
+_FRESH_SDK_MANIFEST = (
+    ("sdk-build-tools", 76857898, "530cdbd1ec315e1477624d7ed2f0f2962108d69f36eddba5894cef9ea2cedb48"),
+    ("android-15/renderscript/lib/androidx-rs.jar", 0o100644, 155117,
+     "174eb53df52a9cca7bf9c396ba93bf4ac0262a48f2a1375f626efddf405d4666"),
+    ("META-INF/MANIFEST.MF", 0o100700, 45,
+     "5b85b9d62b7ac535a1d6d3c4801a50d63a08bc1cc31d55ca1396c34c8be6d332"),
+    b"Manifest-Version: 1.0\nCreated-By: soong_zip\n\n",
+    (87, 87, 84, 3, 338616, "841abae6dabfdc606b1188d54e0a1e7d7ae2875380ccc5b95ec2a9de44c3efee"),
+)
+_FRESH_FORMATS = ("macho", "java-class-header", "unsupported-native", "ambiguous-native",
+                  "foreign-native", "zip", "jmod", "unsupported-jmod", "shell", "opaque")
+_FRESH_COMPLETE_OBLIGATIONS = ["fresh-complete-target-reference", "target-native-role-review",
+                              "installed-loader-provider-custody", "native-Mac-qualification"]
+_FRESH_SELECTED_OBLIGATIONS = ["kotlin-shaded-jansi", "sdk-platform", "sdk-build-tools",
+                              "installed-loader-provider-custody", "native-Mac-qualification"]
+_FRESH_RESOURCE_KEYS = ("issuedReadBytes", "innerExpandedBytes", "prepublicationPeakReservedBytes",
+                        "prepublicationPeakReservations", "reservationMeaning")
+
+
+class _FreshIntelInputs:
+    """Nine immutable originals supplied by an owner, never filesystem paths.
+
+    Commitments cover the ORIGINAL bytes, not reserialized/normalized reports.
+    This bookkeeping alone does not validate a component or grant authority.
+    """
+    def __init__(self, documents: Mapping[str, bytes]):
+        need(type(documents) is dict and set(documents) == set(_FRESH_INTEL_ROLES), "fresh-input-roles")
+        need(all(type(k) is str and type(v) is bytes and 0 < len(v) <= DOCUMENT_LIMIT
+                 for k, v in documents.items()), "fresh-input-bytes")
+        need(len(documents) <= RECORD_LIMIT and sum(map(len, documents.values())) <= INPUT_LIMIT,
+             "aggregate-input-bound")
+        self.documents = dict(documents)
+        self.commitments = tuple((name, len(documents[name]), hashlib.sha256(documents[name]).hexdigest())
+                                 for name in _FRESH_INTEL_ROLES)
+        self.used = set()
+        self.finished = False
+
+    def raw(self, role):
+        need(type(role) is str and role in self.documents and role not in self.used and not self.finished,
+             "fresh-input-missing-duplicate-or-finished")
+        self.used.add(role)
+        return self.documents[role]
+
+    def document(self, role):
+        need(role in _FRESH_INTEL_ROLES[:-2], "fresh-not-a-json-role")
+        return decode(self.raw(role))
+
+    def finish(self):
+        need(not self.finished and self.used == set(_FRESH_INTEL_ROLES), "fresh-unconsumed-or-finished")
+        self.finished = True
+        return self.commitments
+
+
+@dataclass(frozen=True, slots=True)
+class _FreshOuter:
+    label: str
+    members: list[Member]
+    by_name: dict[str, Member]
+
+
+def _fresh_pin(label):
+    need(type(label) is str and label in LABELS, "fresh-component")
+    return _FRESH_INTEL_JDK if label == "jdk" else ARCHIVES[label][:2]
+
+
+def _fresh_archive(value, label):
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["target"] == "x86_64-apple-darwin"
+         and (integer(value["archiveBytes"], 1), sha(value["archiveSha256"])) == _fresh_pin(label)
+         and all(value[k] is False for k in ("nativeExecuted", "nativeClosure", "supplierAuthority")),
+         "fresh-report-header")
+
+
+def _fresh_outer(label, summary, rows):
+    keys(summary, ("entryHeaders", "members", "files", "aliases", "expandedBytes",
+                   "issuedReadBytes", "rosterReservationBytes"), "fresh-outer-summary")
+    members, by_name = _outer_rows(label, rows, summary, _fresh_pin(label)[0])
+    need(summary["aliases"] == 0, "fresh-outer-aliases")
+    integer(summary["issuedReadBytes"], _fresh_pin(label)[0], 768 * 1024 * 1024)
+    expected = sum(1536 + 8 * len(row.name) + 8 * len(row.target or "") for row in members)
+    need(integer(summary["rosterReservationBytes"], 1, 48 * 1024 * 1024) == expected,
+         "fresh-outer-roster-accounting")
+    return _FreshOuter(label, members, by_name)
+
+
+def _fresh_file(value, member=None):
+    relative(value["name"])
+    integer(value["bytes"], 0, 512 * 1024 * 1024)
+    mode = integer(value["mode"], 0, 0o170777)
+    need(mode & ~0o170777 == 0 and mode & 0o170000 in (0, 0o100000), "fresh-file-mode")
+    sha(value["sha256"])
+    if member is not None:
+        need(member.kind == "file" and (value["name"], value["bytes"], mode, value["sha256"])
+             == (member.name, member.size, member.mode, member.sha256), "fresh-containing-member-join")
+
+
+def _fresh_slice(prefix, size):
+    # Match the producer's bounded snapshot-placement facts only. Load commands,
+    # dyld roles and supported supplier CPU policy still belong to Rust.
+    need(len(prefix) >= 32 and size >= 32, "fresh-native-prefix")
+    def number(at, width=4, order="big"):
+        return int.from_bytes(prefix[at:at + width], order)
+    magic = prefix[:4]
+    if magic == b"\xcf\xfa\xed\xfe":
+        cpu, subtype = number(4, order="little"), number(8, order="little")
+        return (0, size, cpu, subtype) if cpu == 0x01000007 else None
+    need(magic in (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"), "fresh-native-magic")
+    count, width = number(4), 20 if magic == b"\xca\xfe\xba\xbe" else 32
+    end = 8 + count * width
+    need(1 <= count <= 4 and end <= len(prefix), "fresh-native-fat-table")
+    cpus, ranges, selected = set(), [], None
+    for index in range(count):
+        at = 8 + index * width
+        cpu, subtype = number(at), number(at + 4)
+        field = 4 if width == 20 else 8
+        offset, extent = number(at + 8, field), number(at + 8 + field, field)
+        alignment = number(at + 8 + 2 * field)
+        need(width == 20 or number(at + 28) == 0, "fresh-native-fat-reserved")
+        need(cpu not in cpus and alignment <= 20 and offset >= end and extent >= 32
+             and offset % (1 << alignment) == 0 and offset + extent <= size
+             and all(offset + extent <= lo or offset >= hi for lo, hi in ranges), "fresh-native-fat-range")
+        cpus.add(cpu); ranges.append((offset, offset + extent))
+        if cpu == 0x01000007:
+            selected = (offset, extent, cpu, subtype)
+    return selected
+
+
+def _fresh_native(value, member=None, *, counterpart=False):
+    expected = ("name", "bytes", "mode", "sha256", "format", "prefixBytes", "prefixSha256", "prefixBase64",
+                "selectedCpu", "sliceOffset", "sliceBytes", "commandsBytes", "commandsSha256", "commandsBase64")
+    keys(value, (*expected, "counterpart") if counterpart else expected, "fresh-native-shape")
+    _fresh_file(value, member)
+    need(value["format"] == "macho", "fresh-native-format")
+    if counterpart:
+        claim = keys(value["counterpart"], ("candidate", "matched", "status"), "fresh-counterpart-shape")
+        if claim["candidate"] is not None:
+            relative(claim["candidate"])
+        need(type(claim["matched"]) is bool and claim["status"] in
+             ("exact-byte-and-snapshot-match", "different-bytes-or-snapshot",
+              "embedded-jpackage-template-observed", "unmatched"), "fresh-counterpart-fields")
+    prefix = base64_bytes(value["prefixBase64"], value["prefixBytes"], value["prefixSha256"], 4096)
+    need(len(prefix) == min(value["bytes"], 4096), "fresh-native-prefix-extent")
+    if len(prefix) == value["bytes"]:
+        need(value["prefixSha256"] == value["sha256"], "fresh-complete-prefix-hash")
+    selected = _fresh_slice(prefix, value["bytes"])
+    if selected is None:
+        need(value["selectedCpu"] is None and value["sliceOffset"] is None and value["sliceBytes"] is None
+             and type(value["commandsBytes"]) is int and value["commandsBytes"] == 0
+             and value["commandsSha256"] is None and value["commandsBase64"] is None,
+             "fresh-nonhost-has-no-selected-snapshot")
+        return (prefix, None)
+    need(value["selectedCpu"] == "x86_64" and
+         (integer(value["sliceOffset"], 0, value["bytes"]), integer(value["sliceBytes"], 32, value["bytes"]))
+         == selected[:2], "fresh-selected-slice-join")
+    commands = base64_bytes(value["commandsBase64"], value["commandsBytes"], value["commandsSha256"], 65536)
+    need(32 <= len(commands) <= selected[1], "fresh-selected-command-extent")
+    words = tuple(int.from_bytes(commands[at:at + 4], "little") for at in range(0, 32, 4))
+    need(words[0] == 0xFEEDFACF and words[1:3] == selected[2:] and words[3] in (2, 6, 8)
+         and 1 <= words[4] <= 1024 and 8 * words[4] <= words[5] and 32 + words[5] == len(commands),
+         "fresh-selected-command-header")
+    overlap = max(0, min(len(prefix) - selected[0], len(commands)))
+    need(prefix[selected[0]:selected[0] + overlap] == commands[:overlap], "fresh-prefix-command-overlap")
+    return (prefix, commands)
+
+
+def _fresh_foreign(value, member=None, *, complete):
+    basic = ("name", "bytes", "mode", "sha256", "format", "prefixBase64")
+    keys(value, (*basic, "prefixBytes", "prefixSha256") if complete else basic, "fresh-foreign-shape")
+    _fresh_file(value, member)
+    if complete:
+        need(value["format"] in ("ELF", "PE"), "fresh-foreign-format")
+        prefix = base64_bytes(value["prefixBase64"], value["prefixBytes"], value["prefixSha256"], 4096)
+        need(len(prefix) == min(value["bytes"], 4096), "fresh-foreign-prefix-extent")
+        if len(prefix) == value["bytes"]:
+            need(value["prefixSha256"] == value["sha256"], "fresh-complete-prefix-hash")
+    else:
+        # Legacy reports have the actual small prefix but NO separate prefix
+        # digest. Do not invent one or silently convert this to the new schema.
+        need(value["format"] == "foreign-native" and type(value["prefixBase64"]) is str
+             and len(value["prefixBase64"]) == 4 * ((min(160, value["bytes"]) + 2) // 3),
+             "fresh-legacy-foreign-prefix")
+        try:
+            prefix = base64.b64decode(value["prefixBase64"], validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise Refused("fresh-legacy-base64") from error
+        need(len(prefix) == min(160, value["bytes"])
+             and base64.b64encode(prefix).decode("ascii") == value["prefixBase64"], "fresh-legacy-base64")
+        if len(prefix) == value["bytes"]:
+            need(hashlib.sha256(prefix).hexdigest() == value["sha256"], "fresh-complete-prefix-hash")
+    kind = "ELF" if prefix.startswith(b"\x7fELF") else "PE" if prefix.startswith(b"MZ") else None
+    need(kind is not None and (not complete or value["format"] == kind), "fresh-foreign-prefix-format")
+    return kind
+
+
+def _fresh_counts(value, files):
+    counts = keys(value, _FRESH_FORMATS, "fresh-format-counts")
+    need(sum(integer(n, 0, files) for n in counts.values()) == files, "fresh-file-format-census")
+    need(all(counts[k] == 0 for k in ("unsupported-native", "ambiguous-native", "unsupported-jmod")),
+         "fresh-unresolved-format")
+    return counts
+
+
+def _fresh_sdk_manifest(value, counts, container, containing):
+    """Retain the exact executable-opaque observation as finite inert DATA."""
+    archive, jar, manifest, body, census = _FRESH_SDK_MANIFEST
+    need(type(container) is _FreshOuter and type(containing) is Member
+         and container.label == archive[0] and _fresh_pin(container.label) == archive[1:]
+         and container.by_name.get(jar[0]) is containing, "fresh-inert-containing-origin")
+    need(containing.kind == "file" and containing.hint == "zip"
+         and (containing.name, containing.mode, containing.size, containing.sha256) == jar
+         and (value["name"], value["mode"], value["bytes"], value["sha256"]) == jar
+         and value["format"] == "zip" and type(value["zipViewOffset"]) is int
+         and value["zipViewOffset"] == 0, "fresh-inert-containing-tuple")
+    observed = tuple(integer(value[k]) for k in ("centralMembers", "inspectedMembers", "files",
+                     "directoryMembers", "expandedInspectedBytes")) + (sha(value["enumerationSha256"]),)
+    need(observed == census and counts == {key: 83 if key == "java-class-header" else
+         1 if key == "opaque" else 0 for key in _FRESH_FORMATS}, "fresh-inert-containing-census")
+    unknown = value["unknownMembers"]
+    need(len(unknown) == 1, "fresh-unresolved-resource")
+    item = keys(unknown[0], ("name", "bytes", "mode", "sha256", "format", "prefixBytes",
+                "prefixSha256", "prefixBase64", "reason"), "fresh-inert-row")
+    _fresh_file(item)
+    need((item["name"], item["mode"], item["bytes"], item["sha256"]) == manifest
+         and item["format"] == "opaque" and item["reason"] == "executable-opaque",
+         "fresh-inert-member-tuple")
+    prefix = base64_bytes(item["prefixBase64"], item["prefixBytes"], item["prefixSha256"], 45)
+    need(len(prefix) == item["bytes"] == 45 and item["prefixSha256"] == manifest[3]
+         and prefix == body, "fresh-inert-complete-bytes")
+    return item["name"]
+
+
+def _fresh_specials(value, counts, *, complete, outer=None, counterpart=False, container=None, containing=None):
+    native = value["nativeMembers"]
+    unknown = value["unknownMembers"]
+    need(type(native) is list and len(native) <= 128 and type(unknown) is list, "fresh-special-lists")
+    names = set()
+    if complete:
+        if unknown:
+            if outer is not None and outer.label == "gradle":
+                names.add(_fresh_gradle_launcher(value, outer))
+            elif _fresh_gradle_context(container, containing) is not None:
+                names.update(_fresh_gradle_specials(value, counts, container, containing))
+            else:
+                names.add(_fresh_sdk_manifest(value, counts, container, containing))
+        foreign = value["foreignNativeMembers"]
+    else:
+        # Only the old producer's explicitly recognized ELF/PE rows can move
+        # forward as foreign DATA. Unsupported/ambiguous records still refuse.
+        foreign = unknown
+    need(type(foreign) is list and len(native) + len(foreign) <= 128
+         and len(native) == counts["macho"] and len(foreign) == counts["foreign-native"],
+         "fresh-native-census")
+    for items, is_native in ((native, True), (foreign, False)):
+        previous = None
+        for item in items:
+            need(type(item) is dict and type(item.get("name")) is str, "fresh-special-row")
+            name = item["name"]
+            need(name not in names and (previous is None or previous < name), "fresh-special-order-or-duplicate")
+            names.add(name); previous = name
+            member = None if outer is None else outer.by_name.get(name)
+            need(outer is None or member is not None, "fresh-special-outer-name")
+            if is_native:
+                _fresh_native(item, member, counterpart=counterpart)
+                need(member is None or member.hint in ("macho", "fat-macho-or-java-class"), "fresh-native-outer-hint")
+            else:
+                kind = _fresh_foreign(item, member, complete=complete)
+                need(member is None or member.hint == ("elf" if kind == "ELF" else "pe"), "fresh-foreign-outer-hint")
+    return names
+
+
+def _fresh_inner(value, member=None, *, complete, counterpart=False, depth=0, nested=None, container=None):
+    basic = ("name", "bytes", "sha256", "mode", "format", "zipViewOffset", "centralMembers", "inspectedMembers",
+             "files", "completeMemberHashes", "expandedInspectedBytes", "enumerationSha256", "formatCounts",
+             "nativeMembers", "unknownMembers", "nestedArchives", "innerBookReservationBytes", "issuedReadBytes",
+             "nativeExecuted", "supplierAuthority")
+    keys(value, (*basic, "directoryMembers", "foreignNativeMembers", "negativeEvidence") if complete else basic,
+         "fresh-inner-shape")
+    _fresh_file(value, member)
+    integer(value["bytes"], 1, 64 * 1024 * 1024)
+    need(value["format"] in ("zip", "jmod") and type(value["zipViewOffset"]) is int
+         and value["zipViewOffset"] == (4 if value["format"] == "jmod" else 0)
+         and value["bytes"] >= 22 + value["zipViewOffset"]
+         and (member is None or member.hint == value["format"]), "fresh-inner-format")
+    count = integer(value["centralMembers"], 1, ENTRY_LIMIT)
+    files = integer(value["files"], 0, count)
+    need(integer(value["inspectedMembers"]) == count and value["completeMemberHashes"] is True
+         and value["nativeExecuted"] is False and value["supplierAuthority"] is False, "fresh-inner-complete")
+    if complete:
+        need(integer(value["directoryMembers"]) == count - files, "fresh-inner-directory-census")
+    expanded = integer(value["expandedInspectedBytes"], 0, TOTAL_LIMIT)
+    reads = integer(value["issuedReadBytes"], value["bytes"] - value["zipViewOffset"], 768 * 1024 * 1024)
+    integer(value["innerBookReservationBytes"], 1, 48 * 1024 * 1024)
+    sha(value["enumerationSha256"])
+    counts = _fresh_inner_counts(value, files, container, member)  # Files, NOT centralMembers.
+    need(container is None or depth == 0, "fresh-inert-origin-depth")
+    names = _fresh_specials(value, counts, complete=complete, counterpart=counterpart,
+                           container=container, containing=member)
+    children = value["nestedArchives"]
+    need(type(children) is list and len(children) <= 3
+         and len(children) == counts["zip"] + counts["jmod"], "fresh-nested-census")
+    nested = [0] if nested is None else nested
+    previous = None
+    own_special_bytes = sum(item["bytes"] for item in value["nativeMembers"] + value["unknownMembers"])
+    if complete:
+        own_special_bytes += sum(item["bytes"] for item in value["foreignNativeMembers"])
+    for child in children:
+        need(type(child) is dict and type(child.get("name")) is str, "fresh-nested-row")
+        name = child["name"]
+        need(name not in names and (previous is None or previous < name), "fresh-nested-order-or-duplicate")
+        names.add(name); previous = name
+        nested[0] += 1
+        need(depth < 2 and nested[0] <= 3, "fresh-nested-depth-or-count")
+        child_expanded, child_reads = _fresh_inner(child, complete=complete, depth=depth + 1, nested=nested)
+        expanded += child_expanded; reads += child_reads
+        own_special_bytes += child["bytes"]
+    need(all(sum(child["format"] == kind for child in children) == counts[kind] for kind in ("zip", "jmod")),
+         "fresh-nested-format-census")
+    need(own_special_bytes <= value["expandedInspectedBytes"], "fresh-inner-special-byte-census")
+    for name in names:
+        parts = name.split("/")
+        need(all("/".join(parts[:end]) not in names for end in range(1, len(parts))), "fresh-resource-file-parent")
+    if complete:
+        eligible = not names and all(n == 0 for k, n in counts.items() if k not in ("java-class-header", "opaque"))
+        need((value["negativeEvidence"] is not None) == eligible, "fresh-negative-presence")
+    if complete and value["negativeEvidence"] is not None:
+        negative_value = value["negativeEvidence"]
+        expected = {key: value[key] for key in ("centralMembers", "inspectedMembers", "files", "completeMemberHashes",
+                    "expandedInspectedBytes", "enumerationSha256")}
+        expected.update(kind="complete-recognized-format-negative", nativeMembers=[], nestedArchives=[],
+                        nativeExecution=False, supplierAuthority=False)
+        keys(negative_value, expected, "fresh-negative-shape")
+        # Equality alone would admit bools in numeric positions.
+        for key in ("centralMembers", "inspectedMembers", "files", "expandedInspectedBytes"):
+            integer(negative_value[key])
+        need(negative_value == expected and negative_value["completeMemberHashes"] is True
+             and negative_value["nativeExecution"] is False and negative_value["supplierAuthority"] is False
+             and not names and all(n == 0 for k, n in counts.items() if k not in ("java-class-header", "opaque")),
+             "fresh-negative-binding")
+    need(expanded <= TOTAL_LIMIT and reads <= 768 * 1024 * 1024, "fresh-inner-aggregate")
+    # No inner rows were supplied: enumerationSha256 remains the producer's
+    # bound observation, not a recreated legacy enumeration/proof document.
+    return expanded, reads
+
+
+def _fresh_resources(value, reads, expanded):
+    need(integer(value["issuedReadBytes"], 1, 768 * 1024 * 1024) == reads
+         and integer(value["innerExpandedBytes"], 0, TOTAL_LIMIT) == expanded, "fresh-aggregate-counters")
+    peaks = keys(value["prepublicationPeakReservations"], ("payload", "rows", "facts", "output", "other"),
+                 "fresh-reservation-shape")
+    for kind, maximum in (("payload", 64 * 1024 * 1024), ("rows", 48 * 1024 * 1024),
+                          ("facts", 128 * 1024 * 1024), ("output", 0), ("other", 128 * 1024 * 1024)):
+        integer(peaks[kind], 0, maximum)
+    peak = integer(value["prepublicationPeakReservedBytes"], 8 * 1024 * 1024, 128 * 1024 * 1024)
+    need(peaks["other"] >= 8 * 1024 * 1024 and max(peaks.values()) <= peak <= sum(peaks.values())
+         and value["reservationMeaning"] == "explicit-owned-allocation-budget-not-total-interpreter-memory",
+         "fresh-reservation-meaning")
+
+
+def _fresh_outer_observation(value, outer, archives, *, complete, jdk=False):
+    counts = _fresh_counts(value["formatCounts"], sum(m.kind == "file" for m in outer.members))
+    names = _fresh_specials(value, counts, complete=complete, outer=outer)
+    need(type(archives) is list and len(archives) <= ENTRY_LIMIT
+         and len(archives) == counts["zip"] + counts["jmod"], "fresh-outer-inner-census")
+    expected = {m.name for m in outer.members if m.kind == "file" and m.hint in ("zip", "jmod")}
+    visited, previous, expanded, reads = set(), None, 0, 0
+    for archive in archives:
+        need(type(archive) is dict and type(archive.get("name")) is str, "fresh-outer-inner-row")
+        name = archive["name"]
+        need(name in expected and name not in names and name not in visited
+             and (previous is None or previous < name), "fresh-outer-inner-inverse")
+        visited.add(name); previous = name
+        amount, issued = _fresh_inner(archive, outer.by_name[name], complete=complete,
+                                      counterpart=jdk and archive.get("format") == "jmod", container=outer)
+        expanded += amount; reads += issued
+    need(visited == expected, "fresh-missing-inner-report")
+    if complete:
+        for member in outer.members:
+            if member.kind != "file":
+                continue
+            name = member.name
+            need(not name.endswith((".jar", ".jmod"))
+                 or member.hint == ("jmod" if name.endswith(".jmod") else "zip"), "fresh-outer-archive-suffix")
+            need(not name.endswith(".class") or member.hint == "fat-macho-or-java-class" and name not in names,
+                 "fresh-outer-class-suffix")
+            need(not name.endswith((".dylib", ".jnilib", ".so", ".dll", ".exe")) or name in names,
+                 "fresh-outer-native-suffix")
+            need(member.hint is not None or not member.mode & 0o111
+                 or outer.label == "gradle" and name == _INTEL_GRADLE_LAUNCHER[0] and name in names,
+                 "fresh-outer-executable-opaque")
+    # Exact inverse for the independently supplied OUTER rows. The ambiguous
+    # FAT/class hint is divided by the actual native list, not guessed as x64.
+    hints = {hint: sum(m.kind == "file" and m.hint == hint for m in outer.members)
+             for hint in (None, "shell", "macho", "fat-macho-or-java-class", "elf", "pe", "zip", "jmod")}
+    fat_native = sum(outer.by_name[item["name"]].hint == "fat-macho-or-java-class" for item in value["nativeMembers"])
+    need(counts["macho"] - fat_native == hints["macho"]
+         and counts["java-class-header"] + fat_native == hints["fat-macho-or-java-class"]
+         and counts["foreign-native"] == hints["elf"] + hints["pe"]
+         and all(counts[k] == hints[k] for k in ("shell", "zip", "jmod"))
+         and counts["opaque"] == hints[None], "fresh-outer-format-inverse")
+    need(expanded <= TOTAL_LIMIT and reads <= 768 * 1024 * 1024, "fresh-component-inner-aggregate")
+    return expanded, reads
+
+
+def _fresh_non_jdk(label, value):
+    need(type(label) is str and label in LABELS[1:], "fresh-non-jdk-component")
+    complete = label in ("gradle", "sdk-platform", "sdk-build-tools")
+    base = ("schemaVersion", "kind", "target", "component", "archiveBytes", "archiveSha256", "columns", "outer", "rows",
+            "completeOuterMemberHashes", "formatCounts", "nativeMembers", "unknownMembers", "uninspectedInnerArchives",
+            "uninspectedInnerArchiveCount", "innerInspectionScope", "remainingObligations", "nativeExecuted",
+            "nativeClosure", "supplierAuthority", *_FRESH_RESOURCE_KEYS)
+    extra = ("completeInnerCoverage", "directoryMembers", "foreignNativeMembers", "innerArchives") if complete else ("selectedInnerArchives",)
+    keys(value, (*base, *extra), "fresh-non-jdk-shape")
+    _fresh_archive(value, label)
+    need(value["kind"] == ("mrk-intel-complete-non-jdk-observation-data-v1" if complete
+                           else "mrk-intel-non-jdk-observation-data-v1")
+         and value["component"] == label and value["columns"] == list(COLUMNS)
+         and value["completeOuterMemberHashes"] is True and value["uninspectedInnerArchives"] == []
+         and type(value["uninspectedInnerArchiveCount"]) is int and value["uninspectedInnerArchiveCount"] == 0,
+         "fresh-non-jdk-completion")
+    outer = _fresh_outer(label, value["outer"], value["rows"])
+    if complete:
+        need(value["completeInnerCoverage"] is True
+             and integer(value["directoryMembers"]) == len(outer.members) - value["outer"]["files"]
+             and value["innerInspectionScope"] == "all-complete-outer-zip-or-jmod"
+             and value["remainingObligations"] == _FRESH_COMPLETE_OBLIGATIONS, "fresh-complete-scope")
+        archives = value["innerArchives"]
+    else:
+        need(value["selectedInnerArchives"] == []
+             and value["innerInspectionScope"] == "fixed-selected-outer-jars-only"
+             and value["remainingObligations"] == _FRESH_SELECTED_OBLIGATIONS, "fresh-selected-scope")
+        archives = value["selectedInnerArchives"]
+    expanded, reads = _fresh_outer_observation(value, outer, archives, complete=complete)
+    _fresh_resources(value, reads + value["outer"]["issuedReadBytes"], expanded)
+    return outer
+
+
+def _fresh_jdk_counterparts(direct, archives):
+    names = {item["name"]: item for item in direct}
+    compared = ("bytes", "sha256", "prefixBytes", "prefixSha256", "prefixBase64", "selectedCpu",
+                "sliceOffset", "sliceBytes", "commandsBytes", "commandsSha256", "commandsBase64")
+    for archive in archives:
+        if archive["format"] != "jmod":
+            continue
+        for item in archive["nativeMembers"]:
+            claim = keys(item["counterpart"], ("candidate", "matched", "status"), "fresh-counterpart-shape")
+            name = item["name"]
+            candidate = JDK_ROOT + "/Contents/Home/" + name if name.startswith(("bin/", "lib/")) else None
+            other = names.get(candidate)
+            exact = other is not None and all(item[key] == other[key] for key in compared)
+            template = (archive["name"] == JDK_ROOT + "/Contents/Home/jmods/jdk.jpackage.jmod"
+                        and name == "classes/jdk/jpackage/internal/resources/jpackageapplauncher")
+            status = ("exact-byte-and-snapshot-match" if exact else "different-bytes-or-snapshot" if other is not None
+                      else "embedded-jpackage-template-observed" if template else "unmatched")
+            need(claim["candidate"] == candidate and claim["matched"] is exact and claim["status"] == status,
+                 "fresh-counterpart-observation-join")
+            # SOURCE comparison DATA only, not a new executable/template role.
+            template_pin = (188160, "2fc0206e6e6fb80c90d2b1893d2e145e1b9a6162fa1ce5b0349307566b75d7fd",
+                            "b5c98cf8727e50ecd11f3547c321188ad93b9642720be069959b59a261d354d8",
+                            "7a39418a30571af042282559035c16b41a57d56bee960a48a45c8e6400aeab9e")
+            need(exact or template and (item["bytes"], item["sha256"], item["prefixSha256"], item["commandsSha256"])
+                 == template_pin, "fresh-unmatched-jdk-native")
+
+
+def _fresh_jdk(outer_raw, value):
+    need(type(outer_raw) is bytes and (len(outer_raw), hashlib.sha256(outer_raw).hexdigest())
+         == _FRESH_INTEL_CORRESPONDENCE, "fresh-jdk-correspondence-original")
+    document = decode(outer_raw)
+    keys(document, ("schemaVersion", "kind", "label", "archiveBytes", "archiveSha256", "completeMemberHashes",
+                    "supplierAuthority", "nativeClosure", "entryHeaders", "members", "files", "aliases",
+                    "expandedBytes", "columns", "rows"), "fresh-jdk-correspondence-shape")
+    need(type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+         and document["kind"] == "offline-official-archive-correspondence-data" and document["label"] == "jdk"
+         and (integer(document["archiveBytes"], 1), sha(document["archiveSha256"])) == _FRESH_INTEL_JDK
+         and document["completeMemberHashes"] is True and document["supplierAuthority"] is False
+         and document["nativeClosure"] is False and document["columns"] == list(COLUMNS), "fresh-jdk-correspondence-header")
+    keys(value, ("schemaVersion", "kind", "target", "archiveBytes", "archiveSha256", "correspondenceSha256", "outer",
+                 "formatCounts", "nativeMembers", "unknownMembers", "jvmMembers", "nativeExecuted", "nativeClosure",
+                 "supplierAuthority", *_FRESH_RESOURCE_KEYS), "fresh-jdk-shape")
+    _fresh_archive(value, "jdk")
+    need(value["kind"] == "mrk-intel-jdk-native-jvm-data-v1"
+         and sha(value["correspondenceSha256"]) == hashlib.sha256(outer_raw).hexdigest(), "fresh-jdk-raw-correspondence-join")
+    outer = _fresh_outer("jdk", value["outer"], document["rows"])
+    for key in ("entryHeaders", "members", "files", "aliases", "expandedBytes"):
+        need(integer(document[key]) == value["outer"][key], "fresh-jdk-complete-outer-join")
+    need((document["members"], document["files"], document["aliases"], document["expandedBytes"])
+         == (549, 457, 0, 299747655), "fresh-jdk-census")
+    expanded, reads = _fresh_outer_observation(value, outer, value["jvmMembers"], complete=False, jdk=True)
+    need(len(value["nativeMembers"]) == 71 and len(value["jvmMembers"]) == 74
+         and sum(item["format"] == "jmod" for item in value["jvmMembers"]) == 70, "fresh-jdk-selected-census")
+    _fresh_jdk_counterparts(value["nativeMembers"], value["jvmMembers"])
+    _fresh_resources(value, reads + value["outer"]["issuedReadBytes"], expanded)
+    return outer
+
+
+def _fresh_selected_bytes(inputs, outer):
+    selected = []
+    for role, name, size, digest in _FRESH_INTEL_SELECTED:
+        raw = inputs.raw(role)
+        member = outer.by_name.get(name)
+        need(type(raw) is bytes and member is not None and member.tuple()
+             == {"name": name, "kind": "file", "mode": 0o100644, "size": size, "sha256": digest}
+             and (len(raw), hashlib.sha256(raw).hexdigest()) == (size, digest), "fresh-selected-original-bytes")
+        selected.append((name, raw))
+    return tuple(selected)
+
+
+@dataclass(frozen=True, slots=True)
+class _FreshIntelData:
+    # Private schema/correspondence DATA, deliberately lacking emit/Reference/
+    # authority methods. Runtime role/provider review remains wholly separate.
+    originals: tuple[tuple[str, bytes], ...]
+    commitments: tuple[tuple[str, int, str], ...]
+    outers: tuple[_FreshOuter, ...]
+    observations: tuple[dict, ...]
+    selected_bytes: tuple[tuple[str, bytes], ...]
+
+
+def _fresh_intel_data(documents):
+    return _fresh_intel_read(_FreshIntelInputs(documents))
+
+
+def _fresh_intel_read(inputs):
+    need(type(inputs) is _FreshIntelInputs, "fresh-input-book")
+    outer_raw = inputs.raw("jdk-correspondence.json")
+    jdk = inputs.document("jdk-inspection.json")
+    outers, observations = [_fresh_jdk(outer_raw, jdk)], [jdk]
+    for label in LABELS[1:]:
+        value = inputs.document(label + "-inspection.json")
+        outers.append(_fresh_non_jdk(label, value)); observations.append(value)
+    selected = _fresh_selected_bytes(inputs, outers[0])
+    commitments = inputs.finish()
+    # No SOURCE sink exists on this route. A caller still needs the separately
+    # pinned complete projection, and real runtime custody/role admission.
+    return _FreshIntelData(tuple((name, inputs.documents[name]) for name in _FRESH_INTEL_ROLES),
+                           commitments, tuple(outers), tuple(observations), selected)
+
+
+_INTEL_INPUT_COMMITMENTS = (('jdk-correspondence.json', 100949, 'fd4287337be6dc07ebb3576e1790a2c708487899637ed945d60d5197e8d30e46'),
+ ('jdk-inspection.json', 1290358, '2c47970095d5ef969fc51bf688fcf2aac30899c68bd1c82d14a621e95debb246'),
+ ('gradle-inspection.json', 1272954, '918398b9ad0e63b1c8fc109a79aeac34c7aca77886de71ddea6296d6952f7c08'),
+ ('sdk-platform-inspection.json', 2231680, '49197e87a4accfa69b28ef4e898b2fcaad61bf576dae182839b8e9fa6701c315'),
+ ('sdk-build-tools-inspection.json', 322435, '0de11cf169df014f73fdde1b78065ae56aefb4cea56e3f2d3aea62eca16d1013'),
+ ('aapt2-inspection.json', 11261, '0b3cba2d81005bbc08fc50eb596aec51027e20b6e1a3ae689be7cecd72881aa8'),
+ ('bundletool-inspection.json', 2958475, '14398d557aef3777fd3f7049e54b8a4542dac1990b8edf3cbae5a14bda670797'),
+ ('jdk-release.bytes', 1637, 'edbe3a2e6b6a3186010a3b75257685d943a8baa013a92174c9a48b8c1a73886b'),
+ ('jdk-jvm-cfg.bytes', 29, 'aa9efb969444c1484e29adecab55a122458090616e766b2f1230ef05bc3867e0'))
+
+
+# Fixed fresh-observation SOURCE proposal only. These commitments do not grant
+# runtime custody or a native phase; the separately reviewed Rust reference does.
+_INTEL_ARCHIVES = {**ARCHIVES, "jdk": (*_FRESH_INTEL_JDK,
+    "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_mac_hotspot_17.0.20.1_1.tar.gz",
+    "jdk-17.0.20.1+1")}
+_INTEL_GRADLE_LAUNCHER = ("gradle-8.14.5/bin/gradle.bat", 3018,
+    "d20e9ded0291e1ed6552d1df30022d2e5952ad493f9d3380f6a32b97f0cc80c7", 0o100755)
+_INTEL_KOTLIN_I386 = ("org/jetbrains/kotlin/org/fusesource/jansi/internal/native/Mac/x86/libjansi.jnilib",
+    14748, "ea7ceaf2b63f95ac34822fed2f4cdfd436599c682e04383fac3736dd4c4a41a6", 0,
+    "7cc4e324aee6f2555b8a2b9c4e3988b5638d14d60e8ccb3e75066479c5ec08ea")
+# Exact containing tuple, unresolved-row count, observed format, class version,
+# required versioned path (None for historical classes), and full canonical row
+# commitment. Original unknown/count/negative fields are NEVER rewritten.
+_INTEL_GRADLE_RESOURCES = {
+    "gradle-8.14.5/lib/jackson-core-2.18.6.jar": (589904,
+        "e7e1bfa50f0a79db37e6aa37db111cf03aebf4a484b359d21127ab43ab2398c6", 2,
+        "ambiguous-native", (65, 0), "META-INF/versions/21/",
+        "1272a46b0599dd250638ee512b011d1dfe8bbfd54dcf4db8385e57af217921a2"),
+    "gradle-8.14.5/lib/plugins/bcprov-jdk18on-1.84.jar": (8919063,
+        "64d6c5a6121fcd927152dd182cbed39afe0fda641a970d9bcc0c9cb1858b2731", 24,
+        "ambiguous-native", (69, 0), "META-INF/versions/25/",
+        "07eae1913819bb60ffc0e17d7c642bd7881e945b6f76c3cb4b519dd7744f33b3"),
+    "gradle-8.14.5/lib/xml-apis-1.4.01.jar": (220536,
+        "a840968176645684bb01aed376e067ab39614885f9eee44abe35a5f20ebe7fad", 346,
+        "ambiguous-native", (45, 3), None,
+        "7287ab3a8414dc3609d88acb090654103001cb5a2f43572e4fe6f361b952dac4"),
+    "gradle-8.14.5/lib/kotlin-compiler-embeddable-2.0.21.jar": (58272093,
+        "9fa8cdd1de0dccffe154c997d423ec6b5f53cd6d9177e3a77a9b0de03fb1bc81", 1,
+        "unsupported-native", None, None,
+        "6db635559b82d6a2630ce9da705852f80bb632b7482ccacd1211aaacf0888497"),
+}
+_INTEL_CURRENT_NATIVE = (
+    ("bundletool/bundletool.jar", "com/sun/jna/darwin/libjnidispatch.jnilib"),
+    ("bundletool/bundletool.jar", "macos/aapt2"),
+    ("gradle/lib/gradle-fileevents-0.2.7.jar", "net/rubygrapefruit/platform/x86_64-macos/libgradle-fileevents.dylib"),
+    ("gradle/lib/jansi-1.18.jar", "META-INF/native/osx/libjansi.jnilib"),
+    ("gradle/lib/kotlin-compiler-embeddable-2.0.21.jar",
+     "org/jetbrains/kotlin/org/fusesource/jansi/internal/native/Mac/x86_64/libjansi.jnilib"),
+    ("gradle/lib/native-platform-osx-amd64-0.22-milestone-28.jar", "net/rubygrapefruit/platform/osx-amd64/libnative-platform-curses.dylib"),
+    ("gradle/lib/native-platform-osx-amd64-0.22-milestone-28.jar", "net/rubygrapefruit/platform/osx-amd64/libnative-platform.dylib"),
+)
+_INTEL_NONHOST_ARM = (
+    ("gradle/lib/gradle-fileevents-0.2.7.jar", "net/rubygrapefruit/platform/aarch64-macos/libgradle-fileevents.dylib"),
+    ("gradle/lib/kotlin-compiler-embeddable-2.0.21.jar",
+     "org/jetbrains/kotlin/org/fusesource/jansi/internal/native/Mac/arm64/libjansi.jnilib"),
+    ("gradle/lib/native-platform-osx-aarch64-0.22-milestone-28.jar", "net/rubygrapefruit/platform/osx-aarch64/libnative-platform-curses.dylib"),
+    ("gradle/lib/native-platform-osx-aarch64-0.22-milestone-28.jar", "net/rubygrapefruit/platform/osx-aarch64/libnative-platform.dylib"),
+)
+
+
+def _projection_profile(profile):
+    need(type(profile) is str and profile in ("arm64", "x86_64"), "closed-projection-profile")
+    return ARCHIVES if profile == "arm64" else _INTEL_ARCHIVES
+
+
+def _fresh_gradle_context(container, containing):
+    if type(container) is not _FreshOuter or container.label != "gradle" or type(containing) is not Member:
+        return None
+    pin = _INTEL_GRADLE_RESOURCES.get(containing.name)
+    if pin is None:
+        return None
+    need(container.by_name.get(containing.name) is containing
+         and (containing.kind, containing.hint, containing.mode, containing.size, containing.sha256)
+         == ("file", "zip", 0o100644, pin[0], pin[1]), "fresh-gradle-containing-original")
+    return pin
+
+
+def _fresh_inner_counts(value, files, container, containing):
+    pin = _fresh_gradle_context(container, containing)
+    if pin is None:
+        return _fresh_counts(value["formatCounts"], files)
+    counts = keys(value["formatCounts"], _FRESH_FORMATS, "fresh-format-counts")
+    need(sum(integer(n, 0, files) for n in counts.values()) == files, "fresh-file-format-census")
+    need(all(counts[k] == (pin[2] if k == pin[3] else 0)
+             for k in ("unsupported-native", "ambiguous-native", "unsupported-jmod")),
+         "fresh-gradle-fixed-unresolved-census")
+    return counts
+
+
+def _fresh_unknown_prefix(item):
+    keys(item, ("name", "bytes", "mode", "sha256", "format", "prefixBytes", "prefixSha256",
+                "prefixBase64", "reason"), "fresh-fixed-unknown-shape")
+    _fresh_file(item)
+    prefix = base64_bytes(item["prefixBase64"], item["prefixBytes"], item["prefixSha256"], 4096)
+    need(len(prefix) == min(item["bytes"], 4096), "fresh-fixed-unknown-prefix-extent")
+    if len(prefix) == item["bytes"]:
+        need(item["prefixSha256"] == item["sha256"], "fresh-fixed-unknown-whole-prefix")
+    return prefix
+
+
+def _fresh_class_header(prefix, size, version):
+    """Finite header DATA, not class verification/loading or an MR manifest.
+
+    JVMS25 4.1 admits these versions. Independently rule OUT FAT32 using
+    necessary original-size constraints, never the project's slice-count cap.
+    """
+    need(type(prefix) is bytes and type(size) is int and 11 <= len(prefix) <= min(size, 4096)
+         and type(version) is tuple and all(type(value) is int for value in version)
+         and version in ((45, 3), (65, 0), (69, 0)), "fresh-fixed-class-input")
+    need(prefix[:4] == b"\xca\xfe\xba\xbe"
+         and (int.from_bytes(prefix[6:8], "big"), int.from_bytes(prefix[4:6], "big")) == version,
+         "fresh-fixed-class-version")
+    tags = (1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12) if version[0] == 45 else (
+        1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 16, 17, 18, 19, 20)
+    need(int.from_bytes(prefix[8:10], "big") > 1 and prefix[10] in tags,
+         "fresh-fixed-class-initial-pool-header")
+    table_end = 8 + 20 * int.from_bytes(prefix[4:8], "big")
+    impossible = table_end > size
+    if not impossible:
+        need(len(prefix) >= 28, "fresh-fixed-class-fat-evidence-missing")
+        offset = int.from_bytes(prefix[16:20], "big")
+        extent = int.from_bytes(prefix[20:24], "big")
+        impossible = offset < table_end or offset + extent > size
+    need(impossible, "fresh-fixed-class-fat-not-excluded")
+
+
+def _fresh_kotlin_i386(item, prefix):
+    name, size, digest, mode, prefix_digest = _INTEL_KOTLIN_I386
+    need((item["name"], item["bytes"], item["sha256"], item["mode"], item["prefixSha256"])
+         == (name, size, digest, mode, prefix_digest)
+         and item["format"] == item["reason"] == "unsupported-native"
+         and len(prefix) == 4096 and prefix[:4] == b"\xce\xfa\xed\xfe"
+         and tuple(int.from_bytes(prefix[n:n + 4], "little") for n in (4, 8, 12)) == (7, 3, 6),
+         "fresh-fixed-kotlin-i386-original")
+
+
+def _fresh_gradle_specials(value, counts, container, containing):
+    pin = _fresh_gradle_context(container, containing)
+    need(pin is not None and (value["name"], value["bytes"], value["sha256"], value["mode"])
+         == (containing.name, pin[0], pin[1], 0o100644)
+         and value["format"] == "zip" and value["zipViewOffset"] == 0,
+         "fresh-fixed-gradle-resource-parent")
+    rows = value["unknownMembers"]
+    need(type(rows) is list and len(rows) == counts[pin[3]] == pin[2]
+         and hashlib.sha256(canonical(rows)).hexdigest() == pin[6], "fresh-fixed-gradle-resource-roster")
+    names, previous = set(), None
+    for item in rows:
+        prefix = _fresh_unknown_prefix(item)
+        name = item["name"]
+        need(name not in names and (previous is None or previous < name)
+             and item["format"] == item["reason"] == pin[3], "fresh-fixed-gradle-resource-order")
+        names.add(name); previous = name
+        if pin[4] is None:
+            _fresh_kotlin_i386(item, prefix)
+        else:
+            need(name.endswith(".class") and (pin[5] is None or name.startswith(pin[5])),
+                 "fresh-fixed-versioned-class-path")
+            _fresh_class_header(prefix, item["bytes"], pin[4])
+    return names
+
+
+def _fresh_gradle_launcher(value, outer):
+    need(type(outer) is _FreshOuter and outer.label == "gradle", "fresh-fixed-launcher-component")
+    unknown = value["unknownMembers"]
+    need(len(unknown) == 1, "fresh-fixed-launcher-roster")
+    item = unknown[0]
+    prefix = _fresh_unknown_prefix(item)
+    member = outer.by_name.get(_INTEL_GRADLE_LAUNCHER[0])
+    need(member is not None and member.kind == "file" and member.hint is None
+         and (member.name, member.size, member.sha256, member.mode) == _INTEL_GRADLE_LAUNCHER
+         and (item["name"], item["bytes"], item["sha256"], item["mode"]) == _INTEL_GRADLE_LAUNCHER
+         and item["format"] == "opaque" and item["reason"] == "executable-opaque"
+         and len(prefix) == member.size, "fresh-fixed-launcher-original")
+    return member.name
+
+
+def _intel_native_rows(value):
+    rows = list(value["nativeMembers"])
+    if "foreignNativeMembers" in value:
+        rows.extend(value["foreignNativeMembers"])
+        if value.get("name") == "gradle-8.14.5/lib/kotlin-compiler-embeddable-2.0.21.jar":
+            rows.extend(value["unknownMembers"])
+    else:
+        # In the legacy outer-only Bundletool schema these are explicit ELF/PE
+        # records, not complete-mode unknown class/native dispositions.
+        rows.extend(value["unknownMembers"])
+    return rows
+
+
+def _intel_native_kind(path, expected):
+    name, _, _, _, kind = expected
+    key = (path, name)
+    if key in _INTEL_CURRENT_NATIVE:
+        need(kind in ("Arm64", "GradleIntelPlatform", "GradlePlainJansiIntel", "BundletoolDarwinI386X64"),
+             "intel-current-native-source-kind")
+        return "CurrentX64"
+    if key in _INTEL_NONHOST_ARM:
+        need(kind == "Arm64", "intel-nonhost-arm-source-kind")
+        return "OtherPlatformArm64"
+    if key == ("gradle/lib/kotlin-compiler-embeddable-2.0.21.jar", _INTEL_KOTLIN_I386[0]):
+        need(kind == "GradleIntelPlatform", "intel-i386-source-kind")
+        return "OtherPlatformI386"
+    need(kind in ("OtherPlatformElf", "OtherPlatformPe"), "intel-native-unassigned-role")
+    return kind
+
+
+def _intel_finite_native(path, archive, rows):
+    pin = NATIVE_PINS.get(path)
+    ordered = sorted(rows, key=lambda row: row["name"].lower())
+    if pin is None:
+        need(not ordered, "unlisted-native-resource")
+        return ()
+    need(archive == pin[:2] and len(ordered) == len(pin[2]), "native-archive-pin")
+    result = []
+    for row, expected in zip(ordered, pin[2]):
+        need((row["name"], row["bytes"], row["sha256"], row["mode"]) == expected[:4], "native-resource-pin")
+        kind, snapshot = _intel_native_kind(path, expected), None
+        if kind in ("CurrentX64", "OtherPlatformArm64"):
+            prefix, commands = _fresh_native(row)
+            if kind == "CurrentX64":
+                need(commands is not None, "intel-current-native-snapshot")
+                snapshot = (prefix, commands, 0x01000007)
+            else:
+                need(commands is None and prefix[:4] == b"\xcf\xfa\xed\xfe"
+                     and int.from_bytes(prefix[4:8], "little") == ARM64, "intel-finite-nonhost-arm")
+        elif kind == "OtherPlatformI386":
+            _fresh_kotlin_i386(row, _fresh_unknown_prefix(row))
+        else:
+            actual = _fresh_foreign(row, None, complete=row["format"] in ("ELF", "PE"))
+            need(actual == ("ELF" if kind == "OtherPlatformElf" else "PE"), "intel-finite-foreign-format")
+        result.append((row, kind, snapshot))
+    return tuple(result)
+
+
+def _intel_jdk_members(value):
+    result = []
+    for row in sorted(value["nativeMembers"], key=lambda row: row["name"].lower()):
+        prefix, commands = _fresh_native(row, counterpart=value["format"] == "jmod")
+        need(commands is not None, "intel-jdk-selected-native")
+        counterpart = row.get("counterpart")
+        need(counterpart is not None, "intel-jdk-native-requires-counterpart-claim")
+        kind = "JdkInstalledCounterpart" if counterpart["matched"] else "JdkJpackageTemplate"
+        # _fresh_jdk_counterparts already joined all full originals, prefixes,
+        # commands and the one exact no-counterpart jpackage template.
+        result.append((row, kind, (prefix, commands, 0x01000007)))
+    return tuple(result)
+
+
+def _classify_intel(member, label, path, proofs):
+    key = (label, member.name)
+    if member.name.endswith((".jar", ".jmod")):
+        value = proofs.jvms.get(key)
+        need(value is not None, "jvm-complete-observation-missing")
+        native = (_intel_jdk_members(value) if label == "jdk" else
+                  _intel_finite_native(path, (member.size, member.sha256), _intel_native_rows(value)))
+        return 0o444, ("JvmArchive", native)
+    if label == "sdk-build-tools" and member.name in SDK_PINS:
+        kind, expected_path, size, digest, mode = SDK_PINS[member.name]
+        need((path, member.size, member.sha256, member.mode) == (expected_path, size, digest, 0o100000 | mode), "sdk-special-pin")
+        if kind in ("D8", "Apksigner", "LldShell"):
+            need(member.hint == "shell", "sdk-script-prefix")
+            return mode & ~0o222, ("SdkBash", kind)
+        snapshot = proofs.direct.get(key)
+        need(snapshot is not None and snapshot[2] == 0x01000007, "sdk-legacy-intel-snapshot")
+        return mode & ~0o222, ("SdkLegacyIntel", kind, snapshot)
+    if member.hint == "elf":
+        pin = ELF_PINS.get(member.name) if label == "sdk-build-tools" else None
+        need(pin is not None and (path, member.size, member.sha256, member.mode)
+             == (pin[0], pin[1], pin[2], 0o100000 | pin[3]), "unlisted-target-elf")
+        snapshot = proofs.direct.get(key)
+        need(snapshot is not None and snapshot[2] is None and snapshot[0].startswith(pin[4]), "target-elf-header-pin")
+        return 0o444, ("AndroidTargetElf",)
+    if member.hint in ("macho", "fat-macho-or-java-class"):
+        snapshot = proofs.direct.get(key)
+        need(snapshot is not None and snapshot[2] == 0x01000007 and label in ("jdk", "sdk-build-tools"),
+             "intel-direct-native-snapshot")
+        mode = (member.mode & 0o777) & ~0o222
+        need(mode in (0o444, 0o555), "direct-installed-mode")
+        return mode, ("MachO", snapshot)
+    # The remaining fixed script/foreign launcher/license/data rules are
+    # architecture-independent and unchanged. No JVM/native case falls here.
+    return classify(member, label, path, proofs)
+
+
+class _IntelProofs:
+    """Direct typed adapter over authentic fresh DATA, not a legacy report."""
+    def __init__(self, data):
+        need(type(data) is _FreshIntelData and data.commitments == _INTEL_INPUT_COMMITMENTS,
+             "intel-projection-fresh-originals")
+        self.direct, self.jvms, self.negatives = {}, {}, {}
+        self.selected = dict(data.selected_bytes)
+        self.bundle = data.observations[LABELS.index("bundletool")]
+        for label, value in zip(LABELS, data.observations):
+            for row in value["nativeMembers"]:
+                prefix, commands = _fresh_native(row)
+                need(commands is not None, "intel-direct-selected-snapshot")
+                self.direct[(label, row["name"])] = (prefix, commands, 0x01000007)
+            if label == "sdk-build-tools":
+                for row in value["foreignNativeMembers"]:
+                    kind = _fresh_foreign(row, None, complete=True)
+                    need(kind == "ELF", "intel-sdk-foreign-kind")
+                    self.direct[(label, row["name"])] = (
+                        base64_bytes(row["prefixBase64"], row["prefixBytes"], row["prefixSha256"], 4096), b"", None)
+            if label not in LABELS[:4]:
+                continue
+            for row in value["jvmMembers"] if label == "jdk" else value["innerArchives"]:
+                key = (label, row["name"])
+                need(key not in self.jvms and key not in self.negatives, "intel-duplicate-jvm-proof")
+                if row["name"].endswith((".jar", ".jmod")):
+                    self.jvms[key] = row
+                else:
+                    need(not row["nativeMembers"] and not row["unknownMembers"] and not row["nestedArchives"]
+                         and all(n == 0 for kind, n in row["formatCounts"].items()
+                                 if kind not in ("java-class-header", "opaque")), "intel-non-jvm-interior")
+                    # Retain the original, fully admitted record. No invented
+                    # negativeEvidence field or rewritten enum/counts.
+                    self.negatives[key] = row
+        for label, expected in SDK_NEGATIVE.items():
+            need({name for group, name in self.jvms.keys() | self.negatives.keys() if group == label}
+                 == expected, "intel-sdk-inner-inverse")
+
+    def release(self):
+        # Reuse the exact existing release grammar on the actual selected bytes.
+        # The path is the same; neither the old ARM size/hash nor a JSON wrapper
+        # substitutes for the independently admitted Intel release original.
+        return Proofs.release(self)
+
+
+def generate_intel(documents: Mapping[str, bytes], sink: Callable[[bytes], None]):
+    """Propose Intel SOURCE from the exact fresh nine; no runtime authority."""
+    inputs = _FreshIntelInputs(documents)
+    need(inputs.commitments == _INTEL_INPUT_COMMITMENTS, "intel-emission-input-commitments")
+    data = _fresh_intel_read(inputs)
+    proofs = _IntelProofs(data)
+    projection = Projection(dict(zip(LABELS, data.outers)), proofs, profile="x86_64")
+    summary = projection.summary()
+    summary["profile"] = "android-registered-macos-x86_64-v1"
+    summary["inputs"] = [{"path": name, "bytes": size, "sha256": digest} for name, size, digest in data.commitments]
+    summary["output"] = render(projection, sink, profile="x86_64")
+    return summary
+
+# This route consumes the fixed publicly signed capsule, not original vendor
+# observation documents. Only the enumerated installed-support regions change;
+# original official arrays and REFERENCES remain byte-for-byte unchanged.
+SIGNED_CATALOGUES = {
+    "arm64": (20409741, "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"),
+    "x86_64": (20434427, "e88c50067e1b7f70b33d2d6f31abaa11e9f3c8f020b0b74294836984e1fa1b9a"),
+}
+SIGNED_NOMINATION = (3942, "64c77de1505c4d8a71b848349609d26c2bef49a1bc61f277ce5d5a0a31ad59a9")
+SIGNED_INPUT_NAMES = frozenset(("android-support.json", "android-support-signed.json",
+    "android-support-signed-receipt.json", "producer-profile.json", "service-profile.json",
+    "bundletool-all-1.18.3.jar", "aapt2-8.9.2-12782657-osx.jar"))
+
+
+def _signed_pin(raw, pin):
+    return type(raw) is bytes and len(raw) == pin[0] and hashlib.sha256(raw).hexdigest() == pin[1]
+
+
+def _signed_native(raw, expected_cpus):
+    """Finite byte windows only; Rust's native parser remains authoritative."""
+    import struct
+    need(type(raw) is bytes and 4096 <= len(raw) <= 16 * 1024 * 1024
+         and raw[:8] == b"\xca\xfe\xba\xbe\0\0\0\2", "signed-native-fat")
+    rows, end = [], 48
+    for index, expected in enumerate(expected_cpus):
+        cpu, subtype, offset, size, alignment = struct.unpack_from(">iiIII", raw, 8 + 20 * index)
+        need((cpu, subtype) == expected and 2 <= alignment <= 20 and offset % (1 << alignment) == 0
+             and end <= offset and 28 <= size and offset + size <= len(raw), "signed-native-slice")
+        magic, selected_cpu, selected_subtype, file_type, count, commands = struct.unpack_from("<IiiIII", raw, offset)
+        header_size = 28 if cpu == 7 else 32
+        need(magic == (0xfeedface if cpu == 7 else 0xfeedfacf) and (selected_cpu, selected_subtype) == expected
+             and file_type in (2, 6) and 0 < count <= 128 and count * 8 <= commands <= 16384
+             and header_size + commands <= size, "signed-native-header")
+        data = raw[offset:offset + header_size + commands]
+        at = header_size
+        for _ in range(count):
+            need(at + 8 <= len(data), "signed-native-command")
+            _, length = struct.unpack_from("<II", data, at)
+            need(length >= 8 and length % 4 == 0 and at + length <= len(data), "signed-native-command")
+            at += length
+        need(at == len(data), "signed-native-command-tail")
+        rows.append((cpu, subtype, offset, size, data))
+        end = offset + size
+    need(end == len(raw), "signed-native-fat-tail")
+    return raw[:4096], tuple(rows)
+
+
+def _signed_member(archive, member):
+    import io
+    import struct
+    import zipfile
+    # The caller authenticated the complete fixed archive before ZIP parsing.
+    # At most one <=16MiB member is expanded at a time; there is no whole extract.
+    with zipfile.ZipFile(io.BytesIO(archive)) as source:
+        entries = source.infolist()
+        need(len(entries) <= 16384 and sum(item.filename == member.path for item in entries) == 1,
+             "signed-native-member-roster")
+        info = source.getinfo(member.path)
+        need(not info.is_dir() and info.file_size == member.derived.size <= 16 * 1024 * 1024
+             and info.compress_type in (0, 8) and info.flag_bits == 2048 and not info.extra
+             and not info.comment and 0 <= info.header_offset <= len(archive) - 30,
+             "signed-native-member")
+        local = struct.unpack_from("<IHHHHHIIIHH", archive, info.header_offset)
+        need(local[0] == 0x04034b50 and local[2] == info.flag_bits and local[3] == info.compress_type
+             and local[6:9] == (info.CRC, info.compress_size, info.file_size)
+             and local[10] == 0, "signed-native-local-header")
+        data_offset = info.header_offset + 30 + local[9]
+        need(archive[info.header_offset + 30:data_offset] == member.path.encode("utf-8")
+             and data_offset + info.compress_size <= source.start_dir, "signed-native-local-name")
+        with source.open(info) as stream:
+            raw = stream.read(member.derived.size + 1)
+            need(len(raw) == member.derived.size and not stream.read(1)
+                 and hashlib.sha256(raw).hexdigest() == member.derived.sha256, "signed-native-bytes")
+        prefix, slices = _signed_native(raw, member.slices)
+        return {"member": member, "prefix": prefix, "slices": slices,
+                "local": info.header_offset, "data": data_offset, "compressed": info.compress_size,
+                "method": info.compress_type, "flags": info.flag_bits, "crc32": info.CRC}
+
+
+def _signed_array(name, raw):
+    need(type(name) is str and name.startswith("CAT_H") and len(raw) <= 16416, "signed-array")
+    return ("const " + name + ": &[u8] = &[\n" + "".join(
+        "    " + ",".join(map(str, raw[at:at + 32])) + ",\n" for at in range(0, len(raw), 32)) + "];\n").encode("ascii")
+
+
+def _signed_regions(source, rows, archives, profile):
+    """Fixed regional templates; no supplied patch, Rust expression or selector."""
+    need(profile in SIGNED_CATALOGUES and type(source) is bytes, "signed-region-profile")
+    changes = []
+
+    def region(marker, tail, replacement, *, within=None):
+        begin, limit = (0, len(source)) if within is None else within
+        need(source.count(marker, begin, limit) == 1, "signed-region-cardinality")
+        start = source.index(marker, begin, limit)
+        end = source.find(tail, start, limit)
+        need(end >= start, "signed-region-tail")
+        end += len(tail)
+        before = source[start:end]
+        after = replacement(before) if callable(replacement) else replacement
+        need(type(after) is bytes and 0 < len(after) <= 65536 and after.isascii(), "signed-region-output")
+        changes.append((start, end, after))
+
+    def block(name):
+        marker = ("const " + name + ":").encode("ascii")
+        need(source.count(marker) == 1, "signed-block-cardinality")
+        begin = source.index(marker)
+        end = source.find(b"\n];\n", begin)
+        need(end >= begin, "signed-block-tail")
+        return begin, end + 4
+
+    def replace_pin(before, field, old, new):
+        old_bytes = (field + ": " + str(old.size) + ", sha256: " + rust_string(old.sha256)).encode("ascii")
+        new_bytes = (field + ": " + str(new.size) + ", sha256: " + rust_string(new.sha256)).encode("ascii")
+        need(before.count(old_bytes) == 1, "signed-original-pin")
+        return before.replace(old_bytes, new_bytes)
+
+    selected = {"arm64": (("bundletool-aapt2", 0), ("agp-aapt2", 5)),
+                "x86_64": (("bundletool-jna", 0), ("bundletool-aapt2", 1), ("agp-aapt2", 7))}[profile]
+    cpu = ARM64 if profile == "arm64" else 0x01000007
+    for role, index in selected:
+        row = rows[role]
+        matches = [item for item in row["slices"] if item[0] == cpu]
+        need(len(matches) == 1, "signed-selected-slice")
+        for suffix, raw in (("PREFIX", row["prefix"]), ("COMMANDS", matches[0][4])):
+            name = f"CAT_H{index}_{suffix}"
+            region(("const " + name + ":").encode("ascii"), b"\n];\n", _signed_array(name, raw))
+    native_scope, payload_scope = block("CAT_N0"), block("CAT_PAYLOAD")
+    for role in ("bundletool-jna", "bundletool-aapt2"):
+        member = rows[role]["member"]
+        region(("    NestedNative { member: " + rust_string(member.path) + ",").encode("ascii"), b"\n",
+               lambda before, m=member: replace_pin(before, "bytes", m.upstream, m.derived), within=native_scope)
+    for identity, asset in (("bundletool", "BundletoolJar"), ("aapt2", "Aapt2OsxJar")):
+        archive = archives[identity]
+        region(("    SupportOriginalSpec { asset: SupportAsset::" + asset + ",").encode("ascii"), b"\n",
+               lambda before, a=archive: replace_pin(before, "bytes", a.upstream, a.derived), within=block("CAT_SUPPORT"))
+    row = rows["agp-aapt2"]
+    projected = ("const CAT_PROJECTED: ZipMemberSpec<'static> = ZipMemberSpec { name: \"aapt2\", method: ZipMethod::"
+        + ("Stored" if row["method"] == 0 else "Deflate") + ", flags: " + str(row["flags"])
+        + ", local_header_offset: " + str(row["local"]) + ", data_offset: " + str(row["data"])
+        + ", compressed_bytes: " + str(row["compressed"]) + ", bytes: " + str(row["member"].derived.size)
+        + ", crc32: " + str(row["crc32"]) + ", sha256: " + rust_string(row["member"].derived.sha256) + " };\n")
+    region(b"const CAT_PROJECTED:", b"\n", projected.encode("ascii"))
+    archive = archives["bundletool"]
+    region(b'    PayloadSource { installed: CanonicalFile { path: "bundletool/bundletool.jar",', b"\n",
+           lambda before: replace_pin(before, "size", archive.upstream, archive.derived), within=payload_scope)
+    archive, member = archives["aapt2"], row["member"]
+    region(b'    PayloadSource { installed: CanonicalFile { path: "gradle/native/aapt2/aapt2",', b"\n",
+           lambda before: replace_pin(replace_pin(before, "size", member.upstream, member.derived),
+                                      "bytes", archive.upstream, archive.derived), within=payload_scope)
+    changes.sort()
+    need(len(changes) == (11 if profile == "arm64" else 13)
+         and all(left[1] <= right[0] for left, right in zip(changes, changes[1:])), "signed-regions-overlap")
+    return tuple(changes)
+
+
+def derive_signed_support(original_source, signed_inputs, sink, *, profile):
+    """Reproducible proposed SOURCE, not native or shipping authorization.
+
+    The external owner binds this module and its fixed passive sibling import,
+    owns input/output custody and deadlines, and supplies all seven DATA values.
+    No path, filesystem extraction, subprocess or original supplier rerun occurs.
+    """
+    need(type(profile) is str and profile in SIGNED_CATALOGUES
+         and _signed_pin(original_source, SIGNED_CATALOGUES[profile]), "signed-catalogue-preimage")
+    need(type(signed_inputs) is dict and set(signed_inputs) == SIGNED_INPUT_NAMES
+         and all(type(value) is bytes for value in signed_inputs.values())
+         and sum(map(len, signed_inputs.values())) <= 48 * 1024 * 1024 + 5 * 16384,
+         "signed-input-roster")
+    need(_signed_pin(signed_inputs["android-support-signed.json"], SIGNED_NOMINATION), "signed-source-nomination")
+    import macos_android_support_signed as signed
+    relation = signed.nomination(signed_inputs["android-support-signed.json"], signed_inputs["android-support.json"])
+    archive_bytes = {a.file_name: signed_inputs[a.file_name] for a in relation.archives}
+    signed.admit_capsule(relation, signed_inputs["android-support-signed-receipt.json"], archive_bytes,
+        producer_profile_raw=signed_inputs["producer-profile.json"], service_profile_raw=signed_inputs["service-profile.json"])
+    rows = {member.role: _signed_member(archive_bytes[next(a.file_name for a in relation.archives
+                                                       if a.identity == member.archive_id)], member)
+            for member in relation.members}
+    changes = _signed_regions(original_source, rows, {a.identity: a for a in relation.archives}, profile)
+    output, previous = Emitter(sink), 0
+    for start, end, replacement in (*changes, (len(original_source), len(original_source), b"")):
+        for at in range(previous, start, 65536):
+            output.put(original_source[at:min(at + 65536, start)].decode("ascii"))
+        if replacement:
+            output.put(replacement.decode("ascii"))
+        previous = end
+    result = output.finish()
+    return {"schemaVersion": 1, "kind": "signed-support-catalogue-source-projection-v1", "profile": profile,
+            "before": {"bytes": len(original_source), "sha256": hashlib.sha256(original_source).hexdigest()},
+            "output": result, "nominationSha256": relation.sha256,
+            "regions": [{"start": start, "end": end, "beforeSha256": hashlib.sha256(original_source[start:end]).hexdigest(),
+                         "afterSha256": hashlib.sha256(replacement).hexdigest(), "afterBytes": len(replacement)}
+                        for start, end, replacement in changes],
+            "nativeExecuted": False, "supplierAuthority": False, "shippingEnrollment": False}
