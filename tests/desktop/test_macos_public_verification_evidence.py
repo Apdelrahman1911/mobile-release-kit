@@ -1433,6 +1433,67 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertIs(projected["recordedPassed"], False)
             self.assertNotIn(SENTINEL, json.dumps(projected))
 
+        # Genuine fixed-token projector and reader, no native/credential work.
+        source = (ROOT / "desktop/src-tauri/examples/macos_package_producer.rs").read_text()
+        mapping = dict(re.findall(r'"([a-z-]+)"=>"(package-producer-refused:[a-z-]+)"', source))
+        self.assertEqual({(token + "\n").encode(): reason for reason, token in mapping.items()},
+                         DATA.PRODUCER_REFUSAL_TOKENS)
+        self.assertIn('_=>"package-producer-refused"', source)
+        self.assertIn('eprintln!("{}",failure_token(reason));std::process::ExitCode::from(78)', source)
+        token = b"package-producer-refused:private-acl\n"
+        value = receipt("package-install"); value["passed"] = False
+        del value["finalImage"], value["notarySubmission"]
+        value["failure"] = {"stage": "package-producer-emission", "type": "Refused",
+                            "reason": "original-nonzero-producer-emitter"}
+        call = value["originalCalls"][0]
+        call.update(role="producer-emitter", returncode=78, stdoutSha256=hashlib.sha256(b"").hexdigest(),
+                    stderrSha256=hashlib.sha256(token).hexdigest())
+        phase = DATA.project_receipt(value, CONTEXT, "package-install")
+        phase["callerStatus"] = {"receiptState": "observed", "returncode": 1}
+        for body, reason in DATA.PRODUCER_REFUSAL_TOKENS.items():
+            fresh = copy.deepcopy(phase)
+            fresh["originalCalls"]["calls"][0]["stderrSha256"] = hashlib.sha256(body).hexdigest()
+            result = DATA.project_producer_refusal(body, fresh)
+            self.assertEqual(result["reason"], reason)
+            self.assertIs(result["nativeSuccessInferred"], False)
+        bad = []
+        for name, replacement in (("entered", False), ("returned", False), ("capturesSettled", False),
+                                  ("returncode", 0), ("returncode", True), ("stdoutSha256", "1" * 64),
+                                  ("stderrSha256", "2" * 64), ("role", "installer")):
+            fresh = copy.deepcopy(phase); fresh["originalCalls"]["calls"][0][name] = replacement; bad.append(fresh)
+        for name, replacement in (("recordedPassed", True), ("correlationMatches", False),
+                                  ("receiptState", "refused"), ("callerStatus", {"receiptState": "observed", "returncode": 0})):
+            fresh = copy.deepcopy(phase); fresh[name] = replacement; bad.append(fresh)
+        for appended in ({"role": "installer", "entered": True}, phase["originalCalls"]["calls"][0]):
+            fresh = copy.deepcopy(phase); fresh["originalCalls"]["calls"].append(copy.deepcopy(appended))
+            fresh["originalCalls"]["recordedCount"] += 1; bad.append(fresh)
+        for fresh in bad:
+            with self.assertRaises(DATA.Refused): DATA.project_producer_refusal(token, fresh)
+        for body in (b"package-producer-refused\n", b"package-producer-refused:unknown\n",
+                     token + b"extra\n", token.rstrip(), SENTINEL.encode(), b"x" * 129, b"\xff\n"):
+            with self.assertRaises(DATA.Refused): DATA.project_producer_refusal(body, phase)
+        for scenario in ("valid", "wrong-context", "hash", "private", "long", "linked", "symlink", "absent"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); fresh = copy.deepcopy(value)
+                if scenario == "wrong-context": fresh["runAttempt"] = "99"
+                if scenario == "hash": fresh["originalCalls"][0]["stderrSha256"] = "3" * 64
+                original = write(root, "android-helper-package-install.json", fresh)
+                write(root, "package-install.status", b"1\n")
+                body = SENTINEL.encode() if scenario == "private" else b"x" * 129 if scenario == "long" else token
+                path = root / "android-helper-producer-emitter.stderr"
+                if scenario == "symlink":
+                    private = write(root, "private-original", body); os.symlink(private.name, path)
+                elif scenario != "absent":
+                    write(root, path.name, body)
+                    if scenario == "linked": os.link(path, root / "retained-original")
+                before = original.read_bytes(); result = project(root)
+                diagnostic = result["producerFailureDiagnostic"]
+                self.assertEqual(diagnostic["receiptState"], "observed" if scenario == "valid" else "absent" if scenario == "absent" else "refused")
+                self.assertIs(result["productReady"], False)
+                self.assertNotIn(SENTINEL, json.dumps(result)); self.assertNotIn(str(root), json.dumps(result))
+                self.assertEqual(original.read_bytes(), before)
+                if scenario != "absent": self.assertEqual(path.read_bytes(), body)
+
     def test_fixed_signature_and_notary_refusals_remain_distinguishable(self):
         reasons = ("package-signature-bound", "package-signature-header", "package-signature-trust-timestamp",
                    "package-signature-source-chain", "package-signature-source-fingerprint", "notary-submit-terminal",

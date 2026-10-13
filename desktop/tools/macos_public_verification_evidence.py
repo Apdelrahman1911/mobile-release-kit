@@ -2,8 +2,10 @@
 """Closed DATA projection for verification artifacts, never native acceptance.
 
 Original receipts/captures remain local and authoritative to their existing
-validators. This script reads only the fixed roster below, never tool output,
-source-binding.json, private native reports, credentials or directory listings.
+validators. This script reads only the fixed roster below. One exception to
+tool-output exclusion is the <=128-byte compile-fixed producer refusal token,
+joined to its failed original call. No raw fallback, source-binding.json, private
+native reports, credentials or directory listings are read.
 """
 from __future__ import annotations
 
@@ -366,6 +368,81 @@ DATA_CONTRACT_TEST_IDS = (
 )
 DATA_CONTRACT_GUARDS = frozenset(('cargo-artifact-eof', 'cargo-artifact-original', 'cargo-artifact-path', 'cargo-artifact-postimage', 'cargo-artifact-shape', 'cargo-build-finished', 'cargo-debug-artifact', 'command-not-complete', 'filesystem-header', 'filesystem-native-volume', 'filesystem-row', 'filesystem-volume', 'fixed-input-changed', 'fixed-input-shape', 'output-bound', 'output-changed', 'python-counts', 'rust-aggregate-marker', 'source-post', 'temporary-nonempty', 'temporary-post', 'unclassified'))
 
+
+PRODUCER_REFUSAL_TOKENS = {
+    b"package-producer-refused:arguments\n": "arguments",
+    b"package-producer-refused:clock\n": "clock",
+    b"package-producer-refused:completed-package-magic\n": "completed-package-magic",
+    b"package-producer-refused:created-root-original\n": "created-root-original",
+    b"package-producer-refused:deadline\n": "deadline",
+    b"package-producer-refused:descriptor-data\n": "descriptor-data",
+    b"package-producer-refused:descriptor-name\n": "descriptor-name",
+    b"package-producer-refused:descriptor-outside-package-root\n": "descriptor-outside-package-root",
+    b"package-producer-refused:emission-binding\n": "emission-binding",
+    b"package-producer-refused:file-finality\n": "file-finality",
+    b"package-producer-refused:final-input-post\n": "final-input-post",
+    b"package-producer-refused:final-report-bound\n": "final-report-bound",
+    b"package-producer-refused:final-report-deadline\n": "final-report-deadline",
+    b"package-producer-refused:final-report-flush\n": "final-report-flush",
+    b"package-producer-refused:final-report-write\n": "final-report-write",
+    b"package-producer-refused:observer-input-roster\n": "observer-input-roster",
+    b"package-producer-refused:ordinary-user\n": "ordinary-user",
+    b"package-producer-refused:original-limit\n": "original-limit",
+    b"package-producer-refused:original-name\n": "original-name",
+    b"package-producer-refused:original-no-handle\n": "original-no-handle",
+    b"package-producer-refused:original-not-owned\n": "original-not-owned",
+    b"package-producer-refused:original-open\n": "original-open",
+    b"package-producer-refused:original-pending\n": "original-pending",
+    b"package-producer-refused:original-post\n": "original-post",
+    b"package-producer-refused:original-slot\n": "original-slot",
+    b"package-producer-refused:original-stat\n": "original-stat",
+    b"package-producer-refused:original-type\n": "original-type",
+    b"package-producer-refused:original-unbound\n": "original-unbound",
+    b"package-producer-refused:original-unknown\n": "original-unknown",
+    b"package-producer-refused:parent-protection\n": "parent-protection",
+    b"package-producer-refused:path-components\n": "path-components",
+    b"package-producer-refused:path-encoding\n": "path-encoding",
+    b"package-producer-refused:path-shape\n": "path-shape",
+    b"package-producer-refused:platform\n": "platform",
+    b"package-producer-refused:private-acl\n": "private-acl",
+    b"package-producer-refused:private-attributes\n": "private-attributes",
+    b"package-producer-refused:private-file\n": "private-file",
+    b"package-producer-refused:private-program\n": "private-program",
+    b"package-producer-refused:private-root\n": "private-root",
+    b"package-producer-refused:read-budget\n": "read-budget",
+    b"package-producer-refused:read-extent\n": "read-extent",
+    b"package-producer-refused:read-limit\n": "read-limit",
+    b"package-producer-refused:read-original\n": "read-original",
+    b"package-producer-refused:read-short\n": "read-short",
+    b"package-producer-refused:read-size\n": "read-size",
+    b"package-producer-refused:root-roster\n": "root-roster",
+    b"package-producer-refused:root-roster-bound\n": "root-roster-bound",
+    b"package-producer-refused:root-roster-close\n": "root-roster-close",
+    b"package-producer-refused:root-roster-eof\n": "root-roster-eof",
+    b"package-producer-refused:root-roster-member\n": "root-roster-member",
+    b"package-producer-refused:root-roster-name\n": "root-roster-name",
+    b"package-producer-refused:root-roster-record\n": "root-roster-record",
+    b"package-producer-refused:roster-original\n": "roster-original",
+    b"package-producer-refused:sidecar-created\n": "sidecar-created",
+    b"package-producer-refused:sidecar-mode\n": "sidecar-mode",
+    b"package-producer-refused:sidecar-persist\n": "sidecar-persist",
+    b"package-producer-refused:sidecar-readback\n": "sidecar-readback",
+    b"package-producer-refused:sidecar-root-persist\n": "sidecar-root-persist",
+    b"package-producer-refused:sidecar-sealed-original\n": "sidecar-sealed-original",
+    b"package-producer-refused:sidecar-shape\n": "sidecar-shape",
+    b"package-producer-refused:sidecar-write\n": "sidecar-write",
+    b"package-producer-refused:sidecar-write-bound\n": "sidecar-write-bound",
+    b"package-producer-refused:sidecar-written-original\n": "sidecar-written-original",
+    b"package-producer-refused:signature-not-created\n": "signature-not-created",
+    b"package-producer-refused:signature-verification\n": "signature-verification",
+    b"package-producer-refused:signed-input-post\n": "signed-input-post",
+    b"package-producer-refused:signer-finality\n": "signer-finality",
+    b"package-producer-refused:source-current-unavailable\n": "source-current-unavailable",
+    b"package-producer-refused:source-inventory-unavailable\n": "source-inventory-unavailable",
+    b"package-producer-refused:source-runtime-unavailable\n": "source-runtime-unavailable",
+    b"package-producer-refused:source-signer-unavailable\n": "source-signer-unavailable",
+    b"package-producer-refused:verification-finality\n": "verification-finality",
+}
 
 class Refused(ValueError):
     """Fixed refusal only; no input text is ever included."""
@@ -1761,6 +1838,34 @@ def positive_ui_observations(root, context, statuses, phases, inventory, budget)
     return result
 
 
+def project_producer_refusal(body, phase):
+    """One finite token is a diagnostic observation, never producer finality."""
+    need(type(body) is bytes and 0 < len(body) <= 128 and body in PRODUCER_REFUSAL_TOKENS
+         and type(phase) is dict and phase.get("receiptState") == "observed"
+         and phase.get("correlationMatches") is True and phase.get("recordedPassed") is False)
+    caller = phase.get("callerStatus")
+    need(type(caller) is dict and caller.get("receiptState") == "observed"
+         and type(caller.get("returncode")) is int and caller["returncode"] != 0)
+    failure = phase.get("failure")
+    need(type(failure) is dict and failure.get("type") == "Refused"
+         and failure.get("stage") == "package-producer-emission"
+         and failure.get("reason") == "original-nonzero-producer-emitter")
+    originals = phase.get("originalCalls")
+    need(type(originals) is dict and originals.get("unclassifiedCount") == 0)
+    calls = originals.get("calls")
+    need(type(calls) is list and originals.get("recordedCount") == len(calls))
+    emitters = [row for row in calls if row.get("role") == "producer-emitter"]
+    entered = [row for row in calls if row.get("entered") is True]
+    need(len(emitters) == 1 and entered and entered[-1] is emitters[0])
+    call = emitters[0]
+    need(call.get("entered") is True and call.get("returned") is True and call.get("capturesSettled") is True
+         and type(call.get("returncode")) is int and call["returncode"] == 78
+         and call.get("stdoutSha256") == hashlib.sha256(b"").hexdigest()
+         and call.get("stderrSha256") == hashlib.sha256(body).hexdigest())
+    return {"receiptState": "observed", "reason": PRODUCER_REFUSAL_TOKENS[body],
+            "binding": "same-source-run-target-failed-original", "nativeSuccessInferred": False}
+
+
 def project(work, *, profile, source, workflow_source, run_id, run_attempt, target, removal_case="disabled"):
     need(profile in ("installed", "aqua") and target in TARGETS)
     need(removal_case in ("disabled", "ordinary", "abrupt")
@@ -1771,7 +1876,7 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
     need(source == workflow_source and len(PHASES) <= 20 and len(STATUS_FILES) <= 100
          and len(set(STATUS_FILES)) == len(STATUS_FILES))
     # All fixed attempts count, including absent originals, before any read.
-    need(len(STATUS_FILES) + len(PHASES) + 3
+    need(len(STATUS_FILES) + len(PHASES) + 4
          + (len(UI_DIAGNOSTICS) + 6 + len(POSITIVE_UI_INPUTS) if profile == "installed" else 0) <= 128)
     budget = {"deadline": time.monotonic_ns() + 45_000_000_000, "files": 0, "bytes": 0, "nodes": 0,
               "outputBytes": 16384}  # Reserve the fixed roster keys/envelope/caller-status duplicates.
@@ -1811,6 +1916,8 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
                 if type(caller) is not dict or caller.get("receiptState") != "observed" or caller.get("returncode") != 0:
                     row = {"receiptState": "refused", "callerStatus": caller}
             phases[phase] = row
+        producer_refusal = observe("android-helper-producer-emitter.stderr", 128,
+            lambda body: project_producer_refusal(body, phases["package-install"]))
         try:
             update = update_join(phases["update-baseline"], phases["package-install"])
         except Refused:
@@ -1844,7 +1951,7 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
         value = {"schemaVersion": 1, "kind": "mrk-public-verification-evidence-v1", **context,
                  "diagnosticOnly": True, "productReady": False, "sourceInventory": inventory,
                  "phases": phases, "statuses": statuses, "deliveries": deliveries, "normalUiBuildDiagnostics": ui_diagnostics,
-                 "dataContractFailure": data_failure, "buildSettingsDiagnostic": settings_diagnostic, "appAbsence": app_absence, "positiveUpdate": update}
+                 "producerFailureDiagnostic": producer_refusal, "dataContractFailure": data_failure, "buildSettingsDiagnostic": settings_diagnostic, "appAbsence": app_absence, "positiveUpdate": update}
         if profile == "installed":
             value["positiveUiObservations"] = positive_ui_observations(root, context, statuses, phases, inventory, budget)
         body = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")

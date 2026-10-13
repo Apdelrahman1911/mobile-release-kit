@@ -103,11 +103,90 @@ mod emitter {
     }
 }
 
+// SOURCE-only finite diagnostics: never format an input or native error.
+fn failure_token(reason:&str)->&'static str {
+    match reason {
+        "arguments"=>"package-producer-refused:arguments",
+        "clock"=>"package-producer-refused:clock",
+        "completed-package-magic"=>"package-producer-refused:completed-package-magic",
+        "created-root-original"=>"package-producer-refused:created-root-original",
+        "deadline"=>"package-producer-refused:deadline",
+        "descriptor-data"=>"package-producer-refused:descriptor-data",
+        "descriptor-name"=>"package-producer-refused:descriptor-name",
+        "descriptor-outside-package-root"=>"package-producer-refused:descriptor-outside-package-root",
+        "emission-binding"=>"package-producer-refused:emission-binding",
+        "file-finality"=>"package-producer-refused:file-finality",
+        "final-input-post"=>"package-producer-refused:final-input-post",
+        "final-report-bound"=>"package-producer-refused:final-report-bound",
+        "final-report-deadline"=>"package-producer-refused:final-report-deadline",
+        "final-report-flush"=>"package-producer-refused:final-report-flush",
+        "final-report-write"=>"package-producer-refused:final-report-write",
+        "observer-input-roster"=>"package-producer-refused:observer-input-roster",
+        "ordinary-user"=>"package-producer-refused:ordinary-user",
+        "original-limit"=>"package-producer-refused:original-limit",
+        "original-name"=>"package-producer-refused:original-name",
+        "original-no-handle"=>"package-producer-refused:original-no-handle",
+        "original-not-owned"=>"package-producer-refused:original-not-owned",
+        "original-open"=>"package-producer-refused:original-open",
+        "original-pending"=>"package-producer-refused:original-pending",
+        "original-post"=>"package-producer-refused:original-post",
+        "original-slot"=>"package-producer-refused:original-slot",
+        "original-stat"=>"package-producer-refused:original-stat",
+        "original-type"=>"package-producer-refused:original-type",
+        "original-unbound"=>"package-producer-refused:original-unbound",
+        "original-unknown"=>"package-producer-refused:original-unknown",
+        "parent-protection"=>"package-producer-refused:parent-protection",
+        "path-components"=>"package-producer-refused:path-components",
+        "path-encoding"=>"package-producer-refused:path-encoding",
+        "path-shape"=>"package-producer-refused:path-shape",
+        "platform"=>"package-producer-refused:platform",
+        "private-acl"=>"package-producer-refused:private-acl",
+        "private-attributes"=>"package-producer-refused:private-attributes",
+        "private-file"=>"package-producer-refused:private-file",
+        "private-program"=>"package-producer-refused:private-program",
+        "private-root"=>"package-producer-refused:private-root",
+        "read-budget"=>"package-producer-refused:read-budget",
+        "read-extent"=>"package-producer-refused:read-extent",
+        "read-limit"=>"package-producer-refused:read-limit",
+        "read-original"=>"package-producer-refused:read-original",
+        "read-short"=>"package-producer-refused:read-short",
+        "read-size"=>"package-producer-refused:read-size",
+        "root-roster"=>"package-producer-refused:root-roster",
+        "root-roster-bound"=>"package-producer-refused:root-roster-bound",
+        "root-roster-close"=>"package-producer-refused:root-roster-close",
+        "root-roster-eof"=>"package-producer-refused:root-roster-eof",
+        "root-roster-member"=>"package-producer-refused:root-roster-member",
+        "root-roster-name"=>"package-producer-refused:root-roster-name",
+        "root-roster-record"=>"package-producer-refused:root-roster-record",
+        "roster-original"=>"package-producer-refused:roster-original",
+        "sidecar-created"=>"package-producer-refused:sidecar-created",
+        "sidecar-mode"=>"package-producer-refused:sidecar-mode",
+        "sidecar-persist"=>"package-producer-refused:sidecar-persist",
+        "sidecar-readback"=>"package-producer-refused:sidecar-readback",
+        "sidecar-root-persist"=>"package-producer-refused:sidecar-root-persist",
+        "sidecar-sealed-original"=>"package-producer-refused:sidecar-sealed-original",
+        "sidecar-shape"=>"package-producer-refused:sidecar-shape",
+        "sidecar-write"=>"package-producer-refused:sidecar-write",
+        "sidecar-write-bound"=>"package-producer-refused:sidecar-write-bound",
+        "sidecar-written-original"=>"package-producer-refused:sidecar-written-original",
+        "signature-not-created"=>"package-producer-refused:signature-not-created",
+        "signature-verification"=>"package-producer-refused:signature-verification",
+        "signed-input-post"=>"package-producer-refused:signed-input-post",
+        "signer-finality"=>"package-producer-refused:signer-finality",
+        "source-current-unavailable"=>"package-producer-refused:source-current-unavailable",
+        "source-inventory-unavailable"=>"package-producer-refused:source-inventory-unavailable",
+        "source-runtime-unavailable"=>"package-producer-refused:source-runtime-unavailable",
+        "source-signer-unavailable"=>"package-producer-refused:source-signer-unavailable",
+        "verification-finality"=>"package-producer-refused:verification-finality",
+        _=>"package-producer-refused",
+    }
+}
+
 fn main()->std::process::ExitCode {
     #[cfg(all(feature="macos-package-producer",target_os="macos",target_pointer_width="64",
         any(target_arch="aarch64",target_arch="x86_64")))]
-    {match emitter::run() {Ok(())=>std::process::ExitCode::SUCCESS,Err(_)=>{
-        eprintln!("package-producer-refused");std::process::ExitCode::from(78)}}}
+    {match emitter::run() {Ok(())=>std::process::ExitCode::SUCCESS,Err(reason)=>{
+        eprintln!("{}",failure_token(reason));std::process::ExitCode::from(78)}}}
     #[cfg(not(all(feature="macos-package-producer",target_os="macos",target_pointer_width="64",
         any(target_arch="aarch64",target_arch="x86_64"))))]
     {eprintln!("package-producer-unavailable");std::process::ExitCode::from(78)}
