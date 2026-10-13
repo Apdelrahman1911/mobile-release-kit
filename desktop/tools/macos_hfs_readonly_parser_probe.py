@@ -27,6 +27,7 @@ REASONS = ('distribution-attach-original', 'distribution-attach-plist', 'distrib
            'distribution-attach-mount', 'distribution-attach-single-mount', 'distribution-package-name',
            'distribution-three-file-roster', 'distribution-original-byte-mode')
 SOURCE_PINS = {
+    'desktop/tools/macos_xcode_host_preparation.py': (96477, 'd03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376'),
     'desktop/tools/macos_android_helper_package.py': (533030, '946327b46109dbe5bd0aa8464724e4483e84127a010f7b853dc98f9fdfc4dce0'),
     'desktop/macos-installed-inputs/build-release.json': (95, '521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512'),
     'desktop/tools/macos_e2_native_fixture.py': (390498, 'e4ac0883d7a077d59cc065e3467b4052a47476838f7d0a98cc0e17caaee892a8'),
@@ -265,6 +266,105 @@ def readonly_image(book, entry, signature):
     need(book.read(entry) == body)
 
 
+
+MOUNT_REASONS = ('package-original-mount-unavailable', 'package-mount-host-source-post',
+    'package-readonly-mount-shape', 'package-readonly-mount-original', 'package-readonly-mount-post')
+
+
+def mount_method(source):
+    """Compile the authenticated genuine single method, not a copied validator."""
+    tree = ast.parse(source)
+    definitions = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))
+                   and n.name in ('need', 'Refused', 'signature')]
+    operations = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Operation']
+    need(len(definitions) == 3 and len(operations) == 1)
+    methods = [n for n in operations[0].body if isinstance(n, ast.FunctionDef) and n.name == 'mount_facts']
+    need(len(methods) == 1)
+    selected = ast.ClassDef(name='OriginalMountMethod', bases=[], keywords=[], body=methods, decorator_list=[])
+    ast.copy_location(selected, operations[0])
+    namespace = {'os': os, 'stat': stat}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=definitions + [selected], type_ignores=[])),
+        str(ROOT / 'desktop/tools/macos_android_helper_package.py'), 'exec'), namespace)
+    return namespace['OriginalMountMethod'], namespace['Refused']
+
+
+def mount_projection(entry, work, device, fs):
+    """Finite comparisons only; no raw paths, devices, dates or filesystem text."""
+    held = os.fstat(entry['fd'])
+    named = os.stat('package-mount', dir_fd=work['fd'], follow_symlinks=False)
+    vflags = os.fstatvfs(entry['fd']).f_flag
+    native = type(fs) is dict and type(fs.get('flags')) is int and 0 <= fs['flags'] < 1 << 32
+    flags = fs['flags'] if native else None
+    return {'diagnosticOnly': True, 'fullOperationIntegration': False,
+        'vfsFlags': vflags if type(vflags) is int and 0 <= vflags < 1 << 32 else None,
+        'fsFlags': flags, 'nativeFlagsUnsigned32': native,
+        'vfsReadonly': type(vflags) is int and bool(vflags & os.ST_RDONLY),
+        'nativeReadonly': native and bool(flags & 1), 'nativeLocal': native and bool(flags & 0x1000),
+        'nativeUnion': native and bool(flags & 0x20), 'nativeMultilabel': native and bool(flags & 0x4000000),
+        'nativeIgnoreOwnership': native and bool(flags & 0x200000),
+        'nativeDontBrowse': native and bool(flags & 0x100000),
+        'typeName': fs.get('typeName') if type(fs) is dict and fs.get('typeName') in ('hfs', 'apfs') else 'other',
+        'mountOnMatches': type(fs) is dict and fs.get('mountOn') == str(work['path'] / 'package-mount'),
+        'mountFromMatches': type(fs) is dict and fs.get('mountFrom') == device,
+        'heldNamedFullSignature': (held.st_dev, held.st_ino, held.st_mode, held.st_nlink, held.st_uid,
+            held.st_gid, held.st_size, held.st_mtime_ns, held.st_ctime_ns) ==
+            (named.st_dev, named.st_ino, named.st_mode, named.st_nlink, named.st_uid,
+            named.st_gid, named.st_size, named.st_mtime_ns, named.st_ctime_ns),
+        'registeredIdentityMatches': (held.st_dev, held.st_ino, held.st_mode, held.st_uid, held.st_gid) == entry['identity'],
+        'directory': stat.S_ISDIR(held.st_mode), 'ownerAllowed': held.st_uid in (0, os.getuid()),
+        'notGroupOtherWritable': not bool(held.st_mode & 0o022),
+        'deviceDiffersFromWork': held.st_dev != work['identity'][0]}
+
+
+def original_mount_diagnostic(helper, provider, book, root, mount, device, host_source, end, target):
+    """Actual Darwin fstatfs and genuine method; lifecycle ports explicitly bounded."""
+    class SameClock:
+        def check(self):
+            need(time.monotonic_ns() < end)
+    clock = SameClock()
+    clock.check()
+    api = provider.DarwinAPI(clock, target=target)
+    clock.check()
+    method, refused = mount_method(helper)
+    original = method()
+    entry = {'fd': mount['fd'], 'closed': mount['closed'], 'parent': root['fd'], 'name': 'package-mount',
+        'identity': mount['identity']}
+    source, body = host_source
+    last = {'fs': None}
+    class OneOriginalFilesystem:
+        def filesystem(self, fd):
+            need(last['fs'] is None and fd == mount['fd'])
+            last['fs'] = api.filesystem(fd)
+            return last['fs']
+    def work_post(work):
+        need(work is original.work_entry)
+        book.check_one(root)
+    original.package_clock = clock.check
+    original.recheck_directory = work_post
+    original.work_entry = {'fd': root['fd'], 'identity': root['identity']}
+    original.work = root['path']
+    original.entry_registry = {id(entry): entry}
+    original.mount_api = OneOriginalFilesystem()
+    original.mount_host_source = (source, body)
+    original.read = book.read
+    original.mount_device = device
+    result = {'attempted': True, 'methodPassed': False, 'reason': None, 'errorType': None,
+        'genuineSingleMethod': True, 'sameDeadline': True, 'fullOperationIntegration': False}
+    try:
+        fs = original.mount_facts(entry)
+        need(fs is last['fs'])
+        result['methodPassed'] = True
+    except BaseException as error:
+        result['errorType'] = 'helper-refused' if type(error) is refused else 'os-error' if type(error) is OSError else 'other'
+        args = BaseException.args.__get__(error)
+        result['reason'] = args[0] if type(error) is refused and type(args) is tuple and len(args) == 1 and type(args[0]) is str and args[0] in MOUNT_REASONS else 'unclassified'
+    result['facts'] = mount_projection(entry, dict(root, identity=root['identity']), device, last['fs'])
+    clock.check()
+    need(book.read(source) == body)
+    book.check_one(root); book.check_one(mount)
+    return result
+
+
 def main():
     os.umask(0o077)
     end = time.monotonic_ns() + 180_000_000_000
@@ -297,7 +397,7 @@ def main():
         for relative, (size, expected) in SOURCE_PINS.items():
             item, body = book.file(ROOT / relative, size, modes=(0o644, 0o444))
             need(len(body) == size and digest(body) == expected); sources[relative] = body; source_entries.append((item, digest(body)))
-        own, ownbody = book.file(Path(__file__).absolute(), 32768, modes=(0o644,))
+        own, ownbody = book.file(Path(__file__).absolute(), 65536, modes=(0o644,))
         need(digest(ownbody) == report['observerSourceSha256']); source_entries.append((own, digest(ownbody)))
         _, head = book.file(ROOT / '.git/HEAD', 41, modes=(0o644,)); need(head == report['source'].encode() + b'\n')
         _, system = book.file(Path('/System/Library/CoreServices/SystemVersion.plist'), 8192, uid=0)
@@ -315,7 +415,7 @@ def main():
         scratch = PARENT / name
         root = book.directory(scratch); root_origin = root['identity']; need(stat.S_IMODE(os.fstat(root['fd']).st_mode) == 0o700 and os.fstat(root['fd']).st_uid == os.getuid() and os.fstat(root['fd']).st_gid == os.getgid() and not os.listdir(root['fd']))
         need(os.fstatvfs(root['fd']).f_bavail * os.fstatvfs(root['fd']).f_frsize >= 128 * 1024 * 1024)
-        for leaf in ('home', 'tmp', 'carrier', 'mount'):
+        for leaf in ('home', 'tmp', 'carrier', 'package-mount'):
             os.mkdir(leaf, 0o700, dir_fd=root['fd']); directories.append(book.directory(scratch / leaf))
         for leaf, body in NAMES.items():
             book.publish(scratch / 'carrier' / leaf, body, mode=0o444)
@@ -357,7 +457,7 @@ def main():
         need(result.returncode == 0)
         image_entry, imagebody = book.file(image, LIMIT, modes=(0o644, 0o600)); private_files.append(image_entry); image_digest = digest(imagebody); report['imageBytes'] = len(imagebody); del imagebody
         readonly_image(book, image_entry, signature)
-        mountpoint = scratch / 'mount'
+        mountpoint = scratch / 'package-mount'
         placeholder = book.directories[mountpoint]
         need(not os.listdir(placeholder['fd'])); book.check_one(placeholder); book.close(placeholder); need(placeholder['closed'])
         result = call('attach', ['/usr/bin/hdiutil', 'attach', str(image), '-readonly', '-nobrowse', '-noautoopen', '-mountpoint', str(mountpoint), '-plist'], 30)
@@ -366,14 +466,14 @@ def main():
         report['probeStage'] = 'observation'
         device, report['attachShape'] = mount_observation(result.stdout, result.stderr, result.returncode, mountpoint)
         attach_observed = True
-        fd = os.open('mount', READ | os.O_DIRECTORY, dir_fd=root['fd'])
+        fd = os.open('package-mount', READ | os.O_DIRECTORY, dir_fd=root['fd'])
         mount = book.register(fd, mountpoint, 'readonly-mount'); mount['parent'] = root
         info = os.fstat(fd); mount['identity'] = signature(info)[:5]
         need(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, os.getuid()) and not stat.S_IMODE(info.st_mode) & 0o022
              and os.fstatvfs(fd).f_flag & os.ST_RDONLY); book.check_one(mount)
         book.directories[mountpoint] = mount
         report['mountFacts'] = {'readonly': bool(os.fstatvfs(fd).f_flag & os.ST_RDONLY),
-            'heldNamedIdentity': signature(os.fstat(fd))[:5] == signature(os.stat('mount', dir_fd=root['fd'], follow_symlinks=False))[:5],
+            'heldNamedIdentity': signature(os.fstat(fd))[:5] == signature(os.stat('package-mount', dir_fd=root['fd'], follow_symlinks=False))[:5],
             'threeFileRoster': set(os.listdir(fd)) == set(NAMES), 'modes0444': True, 'nlink1': True, 'bytesEqual': True}
         actual = {}
         need(set(os.listdir(fd)) == set(NAMES))
@@ -384,6 +484,13 @@ def main():
             report['mountFacts']['modes0444'] &= stat.S_IMODE(os.fstat(item['fd']).st_mode) == 0o444
             report['mountFacts']['nlink1'] &= os.fstat(item['fd']).st_nlink == 1
             report['mountFacts']['bytesEqual'] &= body == expected
+        host_relative = 'desktop/tools/macos_xcode_host_preparation.py'
+        host_entry = next(item for item, _ in source_entries if item['path'] == ROOT / host_relative)
+        provider = module(sources[host_relative], '_mrk_hfs_mount_provider', ROOT / host_relative)
+        report['probeStage'] = 'original-mount-facts'
+        report['originalMountDiagnostic'] = original_mount_diagnostic(
+            sources['desktop/tools/macos_android_helper_package.py'], provider, book, root, mount,
+            device, (host_entry, sources[host_relative]), end, report['target'])
         report['parserPassed'] = False
         try:
             parsed = stager.distribution_mount_data(result.stdout, result.stderr, result.returncode, mountpoint)
@@ -424,8 +531,8 @@ def main():
                 and (not any(r['role'] == 'attach' for r in calls) or attach_observed and detached)):
             try:
                 book.check(); need(root['identity'] == root_origin)
-                need(set(os.listdir(root['fd'])) == {'home', 'tmp', 'carrier', 'mount', 'synthetic.dmg'})
-                for leaf in ('home', 'tmp', 'mount'):
+                need(set(os.listdir(root['fd'])) == {'home', 'tmp', 'carrier', 'package-mount', 'synthetic.dmg'})
+                for leaf in ('home', 'tmp', 'package-mount'):
                     info = os.stat(leaf, dir_fd=root['fd'], follow_symlinks=False)
                     known = next(item for item in directories if item['path'].name == leaf)
                     need(signature(info)[:5] == known['identity'])
