@@ -129,7 +129,7 @@ def original_class(source):
     need(len(nodes) == len(names))
     namespace = {'os': os, 'stat': stat, 'Path': Path}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(ROOT / 'desktop/tools/macos_e2_native_fixture.py'), 'exec'), namespace)
-    return namespace['Originals'], namespace['signature']
+    return namespace['Originals'], namespace['signature'], namespace['Refused']
 
 
 def parser_reason(error, stager):
@@ -223,6 +223,32 @@ def mount_observation(body, stderr, code, mountpoint):
                     'mountedRows': 1, 'independentMountObservation': True}
 
 
+def ledger_post_data(book, signature):
+    """Finite failure diagnosis on existing originals, never custody authority."""
+    result = {'bounded': type(book.entries) is list and len(book.entries) <= 96, 'checked': 0, 'allEqual': False}
+    if not result['bounded']: return result
+    for index, entry in enumerate(book.entries):
+        if entry.get('fd') is None: continue
+        facts = {'index': index, 'kind': entry.get('kind') if entry.get('kind') in
+            ('source', 'directory', 'file', 'output', 'readonly-mount') else 'other'}
+        expected = entry.get('identity')
+        if type(expected) is not tuple or len(expected) not in (5, 9):
+            result['firstMismatch'] = dict(facts, read='unbound'); return result
+        try:
+            held = signature(os.fstat(entry['fd']))[:len(expected)]
+            parent = entry.get('parent')
+            named = signature(os.stat(str(entry['path']) if parent is None else entry['path'].name,
+                dir_fd=None if parent is None else parent['fd'], follow_symlinks=False))[:len(expected)]
+        except (OSError, TypeError, ValueError, KeyError):
+            result['firstMismatch'] = dict(facts, read='unavailable'); return result
+        result['checked'] += 1
+        if held != expected or named != expected:
+            result['firstMismatch'] = dict(facts, read='known', held=[a == b for a,b in zip(held,expected)],
+                named=[a == b for a,b in zip(named,expected)]); return result
+    result['allEqual'] = True
+    return result
+
+
 def main():
     os.umask(0o077)
     end = time.monotonic_ns() + 180_000_000_000
@@ -233,6 +259,8 @@ def main():
     resource.setrlimit(resource.RLIMIT_FSIZE, (LIMIT, LIMIT))
     book = None; scratch = None; mount = None; device = None; calls = []; closed = False; retired = False
     attach_observed = False; detached = False; source_post = False
+    report['probeStage'] = 'bootstrap'
+    donor_refused = None
     failure = None; stager = None; owner = None; mount_entries = []; root = None; private_files = []; source_entries = []; directories = []
     try:
         # Bootstrap original donor through original held SOURCE before any call.
@@ -242,7 +270,7 @@ def main():
             need(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
                  and len(source) == info.st_size == SOURCE_PINS['desktop/tools/macos_e2_native_fixture.py'][0] and not os.pread(fd, 1, info.st_size)
                  and digest(source) == SOURCE_PINS['desktop/tools/macos_e2_native_fixture.py'][1])
-            Book, signature = original_class(source); book = Book()
+            Book, signature, donor_refused = original_class(source); book = Book()
             parent = book.directory((ROOT / 'desktop/tools').absolute())
             entry = book.register(fd, ROOT / 'desktop/tools/macos_e2_native_fixture.py', 'source')
             fd = None; entry['parent'] = parent; entry['identity'] = signature(info)
@@ -304,7 +332,10 @@ def main():
             need(type(result) is subprocess.CompletedProcess and result.args == argv and type(result.returncode) is int
                  and type(result.stdout) is bytes and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= CAPTURE)
             row.update(returned=True, returncode=result.returncode, stdoutSha256=digest(result.stdout), stderrSha256=digest(result.stderr))
-            book.check(); need(all(digest(book.read(item)) == expected for item, expected in source_entries)); need(time.monotonic_ns() < end); return result
+            row['postStage'] = 'book-post'; book.check()
+            row['postStage'] = 'source-post'; need(all(digest(book.read(item)) == expected for item, expected in source_entries))
+            row['postStage'] = 'deadline-post'; need(time.monotonic_ns() < end)
+            row['postStage'] = 'complete'; return result
         image = scratch / 'synthetic.dmg'
         result = call('create', ['/usr/bin/hdiutil', 'create', '-srcfolder', str(scratch / 'carrier'), '-fs', 'HFS+', '-format', 'UDZO',
             '-volname', 'MRK Synthetic Parser Probe', str(image)], 60)
@@ -315,7 +346,9 @@ def main():
         need(not os.listdir(placeholder['fd'])); book.check_one(placeholder); book.close(placeholder); need(placeholder['closed'])
         result = call('attach', ['/usr/bin/hdiutil', 'attach', str(image), '-readonly', '-nobrowse', '-noautoopen', '-mountpoint', str(mountpoint), '-plist'], 30)
         # The production parser is not used as a fallback cleanup authority.
+        report['probeStage'] = 'attach-shape'
         report['attachDiagnostic'] = attach_shape_data(result.stdout, result.stderr, result.returncode, mountpoint)
+        report['probeStage'] = 'observation'
         device, report['attachShape'] = mount_observation(result.stdout, result.stderr, result.returncode, mountpoint)
         attach_observed = True
         fd = os.open('mount', READ | os.O_DIRECTORY, dir_fd=root['fd'])
@@ -354,8 +387,15 @@ def main():
         book.directories.pop(mountpoint); mount = None
         book.check(); need(time.monotonic_ns() < end)
         report['diagnosisComplete'] = True
-    except BaseException:
+    except BaseException as error:
         failure = 'probe-refused'
+        if donor_refused is not None and type(error) is donor_refused:
+            arguments = BaseException.args.__get__(error)
+            allowed = ('original-changed', 'original-unbound', 'original-short-read', 'original-grew')
+            report['donorReason'] = arguments[0] if type(arguments) is tuple and len(arguments) == 1 and type(arguments[0]) is str and arguments[0] in allowed else 'other'
+        if book is not None:
+            try: report['ledgerPost'] = ledger_post_data(book, signature)
+            except BaseException: report['ledgerPost'] = {'read': 'unavailable'}
     finally:
         # Independent known mount custody permits cleanup after parser refusal,
         # never across an unknown original process boundary or close.
