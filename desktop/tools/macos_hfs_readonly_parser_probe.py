@@ -26,6 +26,7 @@ REASONS = ('distribution-attach-original', 'distribution-attach-plist', 'distrib
            'distribution-attach-mount', 'distribution-attach-single-mount', 'distribution-package-name',
            'distribution-three-file-roster', 'distribution-original-byte-mode')
 SOURCE_PINS = {
+    'desktop/tools/macos_android_helper_package.py': (527051, '5ceeee6906ee41c7629b64400734b43e8142028426e9fcfd12cc51eadcbd2a43'),
     'desktop/macos-installed-inputs/build-release.json': (95, '521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512'),
     'desktop/tools/macos_e2_native_fixture.py': (390498, 'e4ac0883d7a077d59cc065e3467b4052a47476838f7d0a98cc0e17caaee892a8'),
     'desktop/tools/macos_aqua_qualification.py': (464005, '62f40be14d242c967643eb88a793d2cac19c1d0e47992ebcfd61648d6c6864b5'),
@@ -70,10 +71,27 @@ def context(environment):
          and Path(__file__).absolute() == ROOT / 'desktop/tools/macos_hfs_readonly_parser_probe.py')
     ids = [environment.get(k, '') for k in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')]
     need(all(re.fullmatch('[1-9][0-9]{0,19}', v) is not None for v in ids))
+    interpreter = environment.get('MRK_HFS_PYTHON', '')
+    need(type(interpreter) is str and interpreter.startswith('/') and len(interpreter) <= 4096
+         and interpreter == sys.executable and sys.implementation.name == 'cpython' and sys.version_info >= (3, 11)
+         and all(type(value) is int and 0 <= value <= 255 for value in sys.version_info[:3])
+         and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode)
     expected_sha = environment.get('MRK_HFS_SOURCE_SHA256', '')
     need(re.fullmatch('[0-9a-f]{64}', expected_sha) is not None)
     return dict(source=source, workflowSource=source, runId=ids[0], runAttempt=ids[1], target=target,
-                observerSourceSha256=expected_sha)
+                observerSourceSha256=expected_sha,
+                python={'version': list(sys.version_info[:3]), 'cpython': True, 'supported': True,
+                    'isolated': bool(sys.flags.isolated), 'noSite': bool(sys.flags.no_site),
+                    'noBytecode': bool(sys.dont_write_bytecode), 'cachePrefixNone': sys.pycache_prefix is None})
+
+
+def failure_projection(source):
+    names = {'original_failure', 'need', 'Refused'}
+    nodes = [n for n in ast.parse(source).body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names]
+    need(len(nodes) == len(names))
+    namespace = {'json': json, 're': re, 'Path': Path}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(ROOT / 'desktop/tools/macos_android_helper_package.py'), 'exec'), namespace)
+    return namespace['original_failure']
 
 
 def module(body, name, filename):
@@ -175,6 +193,7 @@ def main():
         stager = module(sources['desktop/tools/stage_macos_installed.py'], '_mrk_hfs_stager', ROOT / 'desktop/tools/stage_macos_installed.py')
         aqua = module(sources['desktop/tools/macos_aqua_qualification.py'], '_mrk_hfs_aqua', ROOT / 'desktop/tools/macos_aqua_qualification.py')
         book.check(); owner = aqua.load_owner(ROOT); book.check()
+        original_failure = failure_projection(sources['desktop/tools/macos_android_helper_package.py'])
         parent = book.directory(PARENT)
         need(os.fstat(parent['fd']).st_uid == os.getuid() and os.fstat(parent['fd']).st_gid == os.getgid())
         name = 'mrk-hfs-parser-' + os.urandom(16).hex(); os.mkdir(name, 0o700, dir_fd=parent['fd'])
@@ -193,7 +212,23 @@ def main():
             need(time.monotonic_ns() + (maximum + 5) * 1_000_000_000 < end and len(book.entries) < 96)
             book.check(); need(all(digest(book.read(item)) == expected for item, expected in source_entries))
             row = {'role': role, 'entered': True, 'returned': False, 'returncode': None}; calls.append(row)
-            result = owner.run_owned(argv, environ=environment, cwd=scratch, timeout=maximum, capture=True, text=False, output_limit=CAPTURE)
+            try:
+                result = owner.run_owned(argv, environ=environment, cwd=scratch, timeout=maximum, capture=True, text=False, output_limit=CAPTURE)
+            except BaseException as error:
+                # Optional finite diagnostic never replaces this same original.
+                try:
+                    row['originalFailure'] = original_failure(error, owner, ROOT, maximum, CAPTURE)
+                    builtins = {'TypeError': TypeError, 'ValueError': ValueError, 'OSError': OSError,
+                        'ImportError': ImportError, 'AttributeError': AttributeError, 'RuntimeError': RuntimeError,
+                        'KeyboardInterrupt': KeyboardInterrupt, 'SystemExit': SystemExit}
+                    row['builtinErrorType'] = next((name for name, cls in builtins.items() if type(error) is cls), 'other')
+                    if any(type(error) is vars(owner).get(name) for name in ('ProcessError', 'ProcessCleanupError', 'ProcessOutcomeUnknown', 'ProcessInterrupted')):
+                        fields = BaseException.__dict__['__dict__'].__get__(error)
+                        row['ownerFailure'] = {name: fields.get(name) if type(fields.get(name)) is bool else None
+                            for name in ('dispatched', 'contained', 'cleanup_complete')}
+                except BaseException:
+                    pass
+                raise
             need(type(result) is subprocess.CompletedProcess and result.args == argv and type(result.returncode) is int
                  and type(result.stdout) is bytes and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= CAPTURE)
             row.update(returned=True, returncode=result.returncode, stdoutSha256=digest(result.stdout), stderrSha256=digest(result.stderr))

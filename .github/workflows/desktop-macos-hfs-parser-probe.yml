@@ -21,8 +21,14 @@ jobs:
           - runner: macos-26-intel
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 7
+    timeout-minutes: 10
     steps:
+      - name: Select the existing supported public CI interpreter
+        id: python
+        timeout-minutes: 3
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
       - name: Check out exact reviewed source without retained credentials
         timeout-minutes: 2
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,15 +42,16 @@ jobs:
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_HFS_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_HFS_TARGET: ${{ matrix.target }}
           MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
-          MRK_HFS_SOURCE_SHA256: 472f245d5aeb4ce0eb488cd1565b40a8978684433701ef4b02fd369c58784597
+          MRK_HFS_SOURCE_SHA256: 57bd5c4f9cc43a921228fe5d2b46849ab8214797722fb56c348c4d1a83b0e359
         run: |
           set +x
           set +a
           set -euo pipefail
           umask 077
-          /usr/bin/python3 -I -S -B desktop/tools/macos_hfs_readonly_parser_probe.py
+          "${MRK_HFS_PYTHON}" -I -S -B desktop/tools/macos_hfs_readonly_parser_probe.py
       - name: Preserve only the closed finite parser observation
         if: always() && hashFiles('hfs-parser-public.json') != ''
         timeout-minutes: 1
