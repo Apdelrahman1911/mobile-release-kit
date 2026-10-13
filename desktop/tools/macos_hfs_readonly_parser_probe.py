@@ -185,6 +185,10 @@ def attach_shape_data(body, stderr, code, mountpoint):
             facts.update(keyCount=min(len(row), 33), keysBounded=len(row) <= 12,
                 plainKeys=all(type(key) is str for key in row),
                 unknownKeyCount=min(sum(key not in known for key in row), 33),
+                volumeKindPresent='volume-kind' in row,
+                volumeKindType='absent' if 'volume-kind' not in row else 'string' if type(row['volume-kind']) is str else 'other',
+                volumeKindValue='absent' if 'volume-kind' not in row else row['volume-kind'] if type(row['volume-kind']) is str and row['volume-kind'] in ('hfs', 'apfs') else 'other',
+                remainingUnknownKeyCount=min(sum(key not in known and key != 'volume-kind' for key in row), 33),
                 knownValueKinds={key: next((label for label, cls in kinds if type(row[key]) is cls), 'other')
                     for key in sorted(known) if key in row},
                 hasMount='mount-point' in row, mountMatches=type(row.get('mount-point')) is str and row['mount-point'] == str(mountpoint),

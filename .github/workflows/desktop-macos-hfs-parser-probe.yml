@@ -45,7 +45,7 @@ jobs:
           MRK_HFS_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_HFS_TARGET: ${{ matrix.target }}
           MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
-          MRK_HFS_SOURCE_SHA256: a53ee2db1cf6f80f006e9451a77299f6f0779eb3e2c4325142c2a5e346b38812
+          MRK_HFS_SOURCE_SHA256: 94a552ddca73c6aa6b54221a31071ecd3fe416245391d2c4520fa5b22f150ee9
         run: |
           set +x
           set +a
