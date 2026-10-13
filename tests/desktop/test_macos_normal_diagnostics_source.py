@@ -257,7 +257,498 @@ ARTIFACT_WAIT_DIAGNOSTIC_BEGIN = '        // Fixed pre-wait diagnostic only: sev
 ARTIFACT_WAIT_DIAGNOSTIC_END = '        // End fixed artifact pre-wait diagnostic; original wait remains authoritative.\n'
 ARTIFACT_WAIT_DIAGNOSTIC_SHA256 = '8f6eb5e3fd9beab058345e951d81998496d2c0f8fd538cfebc018e948c001b2b'
 
+NORMAL_IOS_PENDING_SWIFT_INVERSE = (('init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,\n'
+  '             engineeringDiagnostic: Bool = false) throws {',
+  'init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,\n'
+  '             iosRecovery: Bool = false, engineeringDiagnostic: Bool = false) throws {'),
+ ('guard now.isFinite, now >= 0, !(androidPositive && iosUnsigned), ((androidPositive || iosUnsigned) ? '
+  'seconds == 900 : (seconds == 60 || seconds == 300)),',
+  'guard now.isFinite, now >= 0, [androidPositive, iosUnsigned, iosRecovery].filter({ $0 }).count <= 1,\n'
+  '                  (iosRecovery ? seconds == 525 : ((androidPositive || iosUnsigned) ? seconds == 900 : '
+  '(seconds == 60 || seconds == 300))),'),
+ ('@MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool '
+  '= false,\n'
+  '                                      removal: Bool = false, engineeringDiagnostic: Bool = false) throws '
+  '{',
+  '@MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool '
+  '= false,\n'
+  '                                      iosRecovery: Bool = false, removal: Bool = false, '
+  'engineeringDiagnostic: Bool = false) throws {'),
+ ('&& (!removal || (seconds == 300 && !androidPositive && !iosUnsigned))',
+  '&& (!removal || (seconds == 300 && !androidPositive && !iosUnsigned && !iosRecovery))'),
+ ('let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned,\n'
+  '                                  engineeringDiagnostic: engineeringDiagnostic)',
+  'let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned,\n'
+  '                                  iosRecovery: iosRecovery, engineeringDiagnostic: '
+  'engineeringDiagnostic)'),
+ ('    private final class LocalFixture {',
+  '    // Read-only directory custody for the existing parent-produced fixture.\n'
+  '    // Account/native contents and their restoration are checked by the parent;\n'
+  '    // this observation never creates state, recovers by CLI or deletes anything.\n'
+  '    @MainActor private final class IOSRecoveryFixture {\n'
+  '        enum Profile: String { case pending = "ios-recovery-pending" }\n'
+  '        private struct Directory {\n'
+  '            let fd: Int32\n'
+  '            let parent: Int32?\n'
+  '            let name: String\n'
+  '            let identity: StatFacts\n'
+  '        }\n'
+  '        private let clock: CaseClock\n'
+  '        private var descriptors: [Int32] = []\n'
+  '        private var directories: [Directory] = []\n'
+  '        private var entered = false, closed = false, closeFailed = false\n'
+  '        private(set) var source = "", run = "", attempt = "", projectPath = ""\n'
+  '        init(clock: CaseClock) { self.clock = clock }\n'
+  '        private func need(_ yes: Bool, _ reason: String) throws {\n'
+  '            guard yes else { throw clock.fail(reason) }\n'
+  '            _ = try clock.remaining(1, before: clock.deadline - 10)\n'
+  '        }\n'
+  '        private func info(_ fd: Int32) throws -> StatFacts {\n'
+  '            var value = stat()\n'
+  '            try need(fstat(fd, &value) == 0 && fcntl(fd, F_GETFD) == FD_CLOEXEC,\n'
+  '                     "recovery fixture original descriptor unavailable")\n'
+  '            return StatFacts(value)\n'
+  '        }\n'
+  '        private func named(_ parent: Int32, _ name: String) throws -> StatFacts {\n'
+  '            var value = stat()\n'
+  '            try need(fstatat(parent, name, &value, AT_SYMLINK_NOFOLLOW) == 0,\n'
+  '                     "recovery fixture original name unavailable")\n'
+  '            return StatFacts(value)\n'
+  '        }\n'
+  '        func open(_ profile: Profile) throws {\n'
+  '            try need(!entered && !closed && descriptors.isEmpty && getuid() != 0\n'
+  '                     && getuid() == geteuid() && getgid() == getegid(), "recovery fixture admission '
+  'reused")\n'
+  '            entered = true\n'
+  '            let context = ProcessInfo.processInfo.environment\n'
+  '            source = context["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? ""\n'
+  '            run = context["MRK_NORMAL_UI_IOS_RECOVERY_RUN_ID"] ?? ""\n'
+  '            attempt = context["MRK_NORMAL_UI_IOS_RECOVERY_RUN_ATTEMPT"] ?? ""\n'
+  '            let decimal: (String) -> Bool = { value in\n'
+  '                let bytes = Array(value.utf8)\n'
+  '                return (1...20).contains(bytes.count) && bytes[0] >= 49 && bytes[0] <= 57\n'
+  '                    && bytes.allSatisfy { (48...57).contains($0) }\n'
+  '            }\n'
+  '            try need(source.utf8.count == 40 && source.utf8.allSatisfy { (48...57).contains($0) || '
+  '(97...102).contains($0) }\n'
+  '                && context["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source && decimal(run) && '
+  'decimal(attempt),\n'
+  '                "recovery fixture exact same-build context unavailable")\n'
+  '            let task = "mrk-macos-aqua-\\(source)-\\(run)-\\(attempt)"\n'
+  '            projectPath = "/private/tmp/" + task + "/" + profile.rawValue\n'
+  '            let parts = ["/", "private", "tmp", task, profile.rawValue]\n'
+  '            for (index, name) in parts.enumerated() {\n'
+  '                _ = try clock.remaining(1, before: clock.deadline - 10)\n'
+  '                let parent = directories.last?.fd\n'
+  '                let fd = parent.map { openat($0, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) '
+  '}\n'
+  '                    ?? Darwin.open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)\n'
+  '                if fd >= 0 { descriptors.append(fd) } // Custody before any fallible observation.\n'
+  '                try need(fd >= 0, "recovery fixture original directory open failed")\n'
+  '                let identity = try info(fd)\n'
+  '                try need(identity.mode & mode_t(S_IFMT) == mode_t(S_IFDIR), "recovery fixture is not a '
+  'directory")\n'
+  '                if let parent { try need(identity == named(parent, name), "recovery fixture entry changed '
+  'at admission") }\n'
+  '                if index < 3 {\n'
+  '                    try need(identity.uid == 0 && (index == 2 ? identity.mode & 0o7777 == 0o1777 : '
+  'identity.mode & 0o022 == 0),\n'
+  '                             "recovery fixture fixed anchor ownership differs")\n'
+  '                } else {\n'
+  '                    try need(identity.uid == getuid() && identity.gid == getgid() && identity.mode & '
+  '0o7777 == 0o700\n'
+  '                             && identity.flags == 0 && identity.device == directories[index - '
+  '1].identity.device,\n'
+  '                             "recovery fixture private original differs")\n'
+  '                }\n'
+  '                directories.append(Directory(fd: fd, parent: parent, name: name, identity: identity))\n'
+  '            }\n'
+  '            try post()\n'
+  '        }\n'
+  '        func post() throws {\n'
+  '            try need(entered && !closed && directories.count == 5 && descriptors.count == 5,\n'
+  '                     "recovery fixture original census unavailable")\n'
+  '            for directory in directories {\n'
+  '                let actual = try info(directory.fd)\n'
+  '                try need(directory.identity.sameDirectory(actual), "recovery fixture held identity '
+  'changed")\n'
+  '                if let parent = directory.parent {\n'
+  '                    try need(actual.sameDirectory(named(parent, directory.name)), "recovery fixture name '
+  'binding changed")\n'
+  '                } else {\n'
+  '                    var root = stat()\n'
+  '                    try need(lstat("/", &root) == 0 && actual.sameDirectory(StatFacts(root)), "recovery '
+  'fixture root binding changed")\n'
+  '                }\n'
+  '            }\n'
+  '        }\n'
+  '        func closeOriginals() throws {\n'
+  '            if closed {\n'
+  '                if closeFailed { throw Refusal.condition("recovery fixture prior close remains '
+  'unconfirmed") }\n'
+  '                return\n'
+  '            }\n'
+  '            var failure: Error?\n'
+  '            do { try post() } catch { failure = error }\n'
+  '            closed = true // Consuming closes, even after partial admission/Unknown; no retry.\n'
+  '            while let fd = descriptors.popLast() {\n'
+  '                if Darwin.close(fd) != 0 && failure == nil { failure = Refusal.condition("recovery '
+  'fixture consuming close failed") }\n'
+  '            }\n'
+  '            directories.removeAll()\n'
+  '            closeFailed = failure != nil\n'
+  '            if let failure { throw failure }\n'
+  '        }\n'
+  '    }\n'
+  '\n'
+  '    private final class LocalFixture {'),
+ ('    @MainActor private var ownedFixture: LocalFixture?',
+  '    @MainActor private var ownedIOSRecoveryFixture: IOSRecoveryFixture?\n'
+  '    @MainActor private var ownedFixture: LocalFixture?'),
+ ('    @MainActor func testSyntheticProjectAndroidSignedBuild() throws {',
+  '    private struct IOSRecoveryObservation: Equatable {\n'
+  '        let operationID: String, ownerGeneration: String, phase: String, outcome: String, reason: String\n'
+  '        var fields: [String: String] { ["operationId": operationID, "ownerGeneration": ownerGeneration,\n'
+  '                                      "phase": phase, "outcome": outcome, "reason": reason] }\n'
+  '    }\n'
+  '    @MainActor private func iosRecoveryObservation(_ renderer: XCUIElement, phase: String) throws -> '
+  'IOSRecoveryObservation {\n'
+  '        let details = try unique(named(renderer, "Recovery details"), "current recovery details missing '
+  'or repeated")\n'
+  '        try reveal(details, in: renderer)\n'
+  '        var values: [String] = []\n'
+  '        for prefix in ["Recovery operation ID: ", "Recovery owner generation: ", "Recovery phase: ",\n'
+  '                       "Recovery outcome: ", "Recovery reason: "] {\n'
+  '            let field = try unique(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '
+  '%@", prefix)),\n'
+  '                                   "current recovery field missing or repeated")\n'
+  '            try require(field.isHittable && field.label.hasPrefix(prefix), "current recovery field is not '
+  'visible")\n'
+  '            let value = String(field.label.dropFirst(prefix.count))\n'
+  '            try require(value.utf8.count <= 64, "current recovery field exceeds its bound")\n'
+  '            values.append(value)\n'
+  '        }\n'
+  '        for value in values.prefix(2) {\n'
+  '            try require(value.utf8.count == 32 && value.utf8.allSatisfy { (48...57).contains($0) || '
+  '(97...102).contains($0) },\n'
+  '                        "current recovery identity shape differs")\n'
+  '        }\n'
+  '        try require((phase == "awaiting-consent" || phase == "terminal") && values[2] == phase\n'
+  '            && values[3] == (phase == "terminal" ? "complete" : "not-observed") && values[4] == "none",\n'
+  '            "current recovery phase/outcome/reason differs")\n'
+  '        return IOSRecoveryObservation(operationID: values[0], ownerGeneration: values[1], phase: '
+  'values[2],\n'
+  '                                      outcome: values[3], reason: values[4])\n'
+  '    }\n'
+  '    @MainActor private func iosRecoverySession(_ container: XCUIElement, review: Bool = false) throws -> '
+  'String {\n'
+  '        let text = try iosPublicText(container)\n'
+  '        let pattern = review ? #"(?:^| )Inspected session: ([0-9a-f]{32})\\s*\\."#\n'
+  '                             : #"(?:^| )Exact inspected session: ([0-9a-f]{32})\\s*\\."#\n'
+  '        let expression = try NSRegularExpression(pattern: pattern)\n'
+  '        let matches = expression.matches(in: text, range: NSRange(text.startIndex..., in: text))\n'
+  '        guard matches.count == 1, let range = Range(matches[0].range(at: 1), in: text) else {\n'
+  '            throw Refusal.condition("current account session absent or ambiguous")\n'
+  '        }\n'
+  '        return String(text[range]) // Retained in memory only; only its digest may be printed.\n'
+  '    }\n'
+  '    @MainActor private func iosRecoveryAccount(_ renderer: XCUIElement, status: String) throws -> '
+  '(String, String) {\n'
+  '        let group = try unique(named(renderer, "Account signing recovery state"), "current account report '
+  'missing or repeated")\n'
+  '        try reveal(group, in: renderer)\n'
+  '        let prefix = "Account signing state · "\n'
+  '        let heading = try unique(group.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", '
+  'prefix)),\n'
+  '                                 "current account state missing or repeated")\n'
+  '        try require(heading.isHittable && heading.label == prefix + status && (status == "pending" || '
+  'status == "recovered"),\n'
+  '                    "current account state differs")\n'
+  '        return (String(heading.label.dropFirst(prefix.count)), try iosRecoverySession(group))\n'
+  '    }\n'
+  '\n'
+  '    @MainActor func testInstalledIOSPendingAccountRecoveryThroughUI() throws {\n'
+  '        continueAfterFailure = false\n'
+  '        executionTimeAllowance = 525\n'
+  '        try beginCase(seconds: 525, iosRecovery: true)\n'
+  '        guard let clock = caseClock else { throw Refusal.condition("recovery original case clock '
+  'missing") }\n'
+  '        journeyDeadline = clock.deadline - 10 // 515s work including Quit, then only original reporting '
+  'reserve.\n'
+  '        let fixture = IOSRecoveryFixture(clock: clock)\n'
+  '        ownedIOSRecoveryFixture = fixture // Includes partial-admission consuming closes in teardown.\n'
+  '        do {\n'
+  '            try stage("ios-recovery-admission") {\n'
+  '                _ = try admitHostedAccount()\n'
+  '                try fixture.open(.pending)\n'
+  '            }\n'
+  '            let (app, window, renderer) = try launchForJourney()\n'
+  '            try stage("ios-recovery-project") {\n'
+  '                try fixture.post()\n'
+  '                try press(renderer, "Open project folder", renderer: renderer)\n'
+  '                let sheet = try nativeSheet(window, title: "Choose a mobile project folder")\n'
+  '                try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)\n'
+  '                _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", '
+  '"Let’s get ios-recovery-pending ready.")),\n'
+  '                                    in: renderer, failures: ["Static observation unavailable", "Only a '
+  'partial static observation is available"])\n'
+  '                _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "recovery '
+  'selected project differs")\n'
+  '                try fixture.post()\n'
+  '                try press(renderer, "Recovery", renderer: renderer)\n'
+  '            }\n'
+  '            let failures = ["No new local recovery outcome was confirmed", "Recovery phase: unknown", '
+  '"Cleanup needs attention"]\n'
+  '            var inspect: IOSRecoveryObservation?, recover: IOSRecoveryObservation?\n'
+  '            var session = "", inspectStatus = "", recoverStatus = ""\n'
+  '            var inspectUnchecked = false, recoverUnchecked = false\n'
+  '            try stage("ios-recovery-inspect") {\n'
+  '                try fixture.post()\n'
+  '                try require(named(renderer, "Recovery details").count == 0, "prior recovery cannot supply '
+  'this journey")\n'
+  '                try press(renderer, "Review local recovery inspection", renderer: renderer, failures: '
+  'failures)\n'
+  '                let review = try waitElement(named(renderer, "Confirm this exact local recovery action"), '
+  'in: renderer, failures: failures)\n'
+  '                let pair = try iosRecoveryObservation(renderer, phase: "awaiting-consent")\n'
+  '                let consent = try waitElement(controls(review, [.checkBox], label:\n'
+  '                    "I authorize one local inspection of the account signing and selected project '
+  'build-input recovery controls.", prefix: true),\n'
+  '                    in: review, enabled: true, failures: failures)\n'
+  '                try reveal(consent, in: renderer)\n'
+  '                try require(consent.value as? String == "0", "inspection consent must begin unchecked")\n'
+  '                inspectUnchecked = true\n'
+  '                consent.click()\n'
+  '                try require(consent.value as? String == "1", "inspection explicit consent not observed")\n'
+  '                try require(try iosRecoveryObservation(renderer, phase: "awaiting-consent") == pair, '
+  '"inspection review changed before Start")\n'
+  '                try fixture.post()\n'
+  '                try press(review, "Inspect local state once", renderer: renderer, failures: failures) // '
+  'One actual Start.\n'
+  '                _ = try waitElement(renderer.staticTexts.matching(identifier: "Recovery phase: '
+  'terminal"), in: renderer,\n'
+  '                                    timeout: 210, failures: failures)\n'
+  '                let observed = try iosRecoveryObservation(renderer, phase: "terminal")\n'
+  '                try require(observed.operationID == pair.operationID && observed.ownerGeneration == '
+  'pair.ownerGeneration,\n'
+  '                            "inspection terminal original differs")\n'
+  '                let account = try iosRecoveryAccount(renderer, status: "pending")\n'
+  '                try require(try iosRecoveryObservation(renderer, phase: "terminal") == observed, '
+  '"inspection changed during account read")\n'
+  '                inspect = observed; inspectStatus = account.0; session = account.1\n'
+  '                try fixture.post()\n'
+  '            }\n'
+  '            guard let inspected = inspect else { throw Refusal.condition("inspection original absent") }\n'
+  '            try stage("ios-recovery-account") {\n'
+  '                try press(renderer, "Review ordinary account recovery", renderer: renderer, failures: '
+  'failures)\n'
+  '                let review = try waitElement(named(renderer, "Confirm this exact local recovery action"), '
+  'in: renderer, failures: failures)\n'
+  '                let pair = try iosRecoveryObservation(renderer, phase: "awaiting-consent")\n'
+  '                try require(pair.operationID != inspected.operationID && pair.ownerGeneration != '
+  'inspected.ownerGeneration,\n'
+  '                            "account recovery requires a fresh original pair")\n'
+  '                try require(try iosRecoverySession(review, review: true) == session, "account recovery '
+  'review session differs")\n'
+  '                let consent = try waitElement(controls(review, [.checkBox], label:\n'
+  '                    "I confirm this macOS account and signing services are idle and authorize ordinary '
+  'restoration of only this inspected account session’s owned state.", prefix: true),\n'
+  '                    in: review, enabled: true, failures: failures)\n'
+  '                try reveal(consent, in: renderer)\n'
+  '                try require(consent.value as? String == "0", "account recovery consent must begin '
+  'unchecked")\n'
+  '                recoverUnchecked = true\n'
+  '                consent.click()\n'
+  '                try require(consent.value as? String == "1", "account recovery explicit consent not '
+  'observed")\n'
+  '                try require(try iosRecoveryObservation(renderer, phase: "awaiting-consent") == pair\n'
+  '                            && iosRecoverySession(review, review: true) == session, "account recovery '
+  'review changed before Start")\n'
+  '                try fixture.post()\n'
+  '                try press(review, "Recover inspected account session", renderer: renderer, failures: '
+  'failures) // One actual Start.\n'
+  '                _ = try waitElement(renderer.staticTexts.matching(identifier: "Recovery phase: '
+  'terminal"), in: renderer,\n'
+  '                                    timeout: 240, failures: failures)\n'
+  '                let observed = try iosRecoveryObservation(renderer, phase: "terminal")\n'
+  '                try require(observed.operationID == pair.operationID && observed.ownerGeneration == '
+  'pair.ownerGeneration,\n'
+  '                            "account recovery terminal original differs")\n'
+  '                let account = try iosRecoveryAccount(renderer, status: "recovered")\n'
+  '                try require(account.1 == session, "recovered account session differs from original '
+  'inspection")\n'
+  '                try require(try iosRecoveryObservation(renderer, phase: "terminal") == observed, '
+  '"recovery changed during account read")\n'
+  '                recover = observed; recoverStatus = account.0\n'
+  '                try fixture.post()\n'
+  '            }\n'
+  '            guard let recovered = recover else { throw Refusal.condition("account recovery original '
+  'absent") }\n'
+  '            try stage("ios-recovery-quit") {\n'
+  '                let sheet = try quitSheet(app, window)\n'
+  '                try click(sheet.buttons.matching(identifier: "Quit"), "recovery ordinary Quit '
+  'unavailable")\n'
+  '                try completeNormalQuit(app)\n'
+  '                ownedIOSRecoveryFixture = nil\n'
+  '                try fixture.closeOriginals() // Descriptor closes only, never account/fixture deletion.\n'
+  '                _ = try remaining(1)\n'
+  '            }\n'
+  '            journeyDeadline = clock.deadline // Same immutable end, only the reserved reporting window.\n'
+  '            try acceptFinalScenario()\n'
+  '            #if arch(arm64)\n'
+  '            let target = "aarch64-apple-darwin"\n'
+  '            #elseif arch(x86_64)\n'
+  '            let target = "x86_64-apple-darwin"\n'
+  '            #endif\n'
+  '            var inspectFields = inspected.fields, recoverFields = recovered.fields\n'
+  '            inspectFields["accountStatus"] = inspectStatus; recoverFields["accountStatus"] = '
+  'recoverStatus\n'
+  '            let facts: [String: Any] = ["schemaVersion": 1, "sourceCommit": fixture.source, "target": '
+  'target,\n'
+  '                "runId": fixture.run, "runAttempt": fixture.attempt,\n'
+  '                "fixtureSha256": SHA256.hash(data: Data(fixture.projectPath.utf8)).map { String(format: '
+  '"%02x", $0) }.joined(),\n'
+  '                "inspect": inspectFields, "recover": recoverFields,\n'
+  '                "sessionSha256": SHA256.hash(data: Data(session.utf8)).map { String(format: "%02x", $0) '
+  '}.joined(),\n'
+  '                "inspectUnchecked": inspectUnchecked, "recoverUnchecked": recoverUnchecked, '
+  '"ordinaryQuit": normalQuitObserved]\n'
+  '            let raw = try JSONSerialization.data(withJSONObject: facts, options: [.sortedKeys, '
+  '.withoutEscapingSlashes])\n'
+  '            try require(raw.count <= 4096 && inspectUnchecked && recoverUnchecked && normalQuitObserved,\n'
+  '                        "recovery bounded observation incomplete")\n'
+  '            _ = try remaining(1)\n'
+  '            print("MRK_MACOS_UI_IOS_PENDING_RECOVERY=" + String(decoding: raw, as: UTF8.self))\n'
+  '        } catch {\n'
+  '            let primary = error\n'
+  '            _ = clock.fail("pending account recovery observation failed")\n'
+  '            // No CLI recovery, subsequent observer, automatic new Start or state\n'
+  '            // deletion. Existing original-owner teardown retains unknown finality.\n'
+  '            throw primary\n'
+  '        }\n'
+  '    }\n'
+  '\n'
+  '    @MainActor func testSyntheticProjectAndroidSignedBuild() throws {'),
+ ('        // Never delete possibly live fixture/app state or seek a replacement owner.',
+  '        // Independent read-only fixture closes, even after failed/Unknown UI.\n'
+  '        do {\n'
+  '            try await MainActor.run {\n'
+  '                if let fixture = ownedIOSRecoveryFixture {\n'
+  '                    ownedIOSRecoveryFixture = nil\n'
+  '                    try fixture.closeOriginals()\n'
+  '                }\n'
+  '            }\n'
+  '        } catch { if cleanupFailure == nil { cleanupFailure = error } }\n'
+  '        // Never delete possibly live fixture/app state or seek a replacement owner.'))
+
+INTEL_FETCH_WORKFLOW_INVERSE = (('name: Desktop Mac normal package and limited early preview (Aqua gate separate)', [("      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}", "      # Intel fetch120 is separate; compile720 and containing job caps are unchanged.\n      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 26 || 10 }}"), ('Raw timed-step union577min (ARM) /615min (Intel)', 'Raw timed-step union577min (ARM) /617min (Intel)'), ('App-signature: ARM82 / Intel120 timed preparation', 'App-signature: ARM82 / Intel122 timed preparation')]), ('name: Desktop macOS genuine Aqua engineering verification', [("      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}", "      # Intel fetch120 is separate; compile720 and containing job caps are unchanged.\n      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 26 || 10 }}")]))
+
+INTEL_FETCH_PREPARE_PREFIX = '        if self.target == INTEL_TARGET:\n            self.stage = "resident-dependency-fetch"\n            # Separate acquisition from the unchanged compiler deadline. The\n            # same original call must return0 with settled captures first.\n            self.call("resident-fetch", [direct_rust_tools(self.target)[0], "fetch", "--manifest-path",\n                      str(self.checkout / WORKSPACE / "Cargo.toml"), "--locked", "--target", self.target],\n                      build_environment(self.environment, self.work, self.image_release, target=self.target),\n                      cwd=self.checkout / WORKSPACE, timeout=120, limit=4 * 1024 * 1024)\n'
+
+INTEL_FETCH_OFFLINE_REGION = ('                           "--locked", "--release", "--jobs", "1", "--target", self.target,', '                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--jobs", "1", "--target", self.target,')
+
+def without_primary_owner_runtime_source_pin(source):
+    # Exact current SOURCE nomination only; all historical oracles stay fixed.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("primary owner runtime SOURCE bound differs")
+    current = "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"
+    previous = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+    if current not in source:
+        return source
+    configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + current + "\n"
+    guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + current + ' ]] || exit 1\n'
+    if (source.count(current) != 2 or previous in source
+            or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
+        raise AssertionError("primary owner runtime SOURCE exact two-site delta differs")
+    for line in (configured, guard):
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
+def without_intel_fetch_workflow(source):
+    source = without_primary_owner_runtime_source_pin(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("Intel fetch workflow SOURCE bound differs")
+    markers = ("Intel fetch120 is separate", "&& 26 || 10")
+    if not any(marker in source for marker in markers):
+        return source
+    selected = [rows for route, rows in INTEL_FETCH_WORKFLOW_INVERSE if source.startswith(route + "\n")]
+    if len(selected) != 1:
+        raise AssertionError("Intel fetch workflow route differs")
+    for previous, current in selected[0]:
+        if source.count(current) != 1 or source.count(previous) != current.count(previous):
+            raise AssertionError("Intel fetch workflow complete exact delta differs")
+    for previous, current in reversed(selected[0]):
+        source = source.replace(current, previous, 1)
+    if any(marker in source for marker in markers):
+        raise AssertionError("Intel fetch workflow partial delta remains")
+    return source
+
+
+def without_primary_owner_runtime_source(source):
+    if type(source) is not str or len(source.encode()) > 1024 * 1024:
+        raise AssertionError("primary owner Swift SOURCE bound differs")
+    current = "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"
+    previous = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+    if current not in source:
+        return source
+    line = '                  raw["sourceInputsSha256"] as? String == "' + current + '",\n'
+    if source.count(current) != 1 or previous in source or source.count("\n" + line) != 1:
+        raise AssertionError("primary owner Swift runtime line differs")
+    return source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+
+
+def without_normal_ios_pending_source(source):
+    source = without_primary_owner_runtime_source(source)
+    if type(source) is not str or len(source.encode()) > 1024 * 1024:
+        raise AssertionError("normal iOS pending Swift SOURCE bound differs")
+    markers = ("testInstalledIOSPendingAccountRecoveryThroughUI", "IOSRecoveryFixture", "iosRecovery:")
+    if not any(marker in source for marker in markers):
+        return source  # Earlier exact SOURCE layers retain their own guards.
+    for before, current in reversed(NORMAL_IOS_PENDING_SWIFT_INVERSE):
+        if source.count(current) != 1:
+            raise AssertionError("normal iOS pending Swift SOURCE region differs")
+        source = source.replace(current, before, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "f1e19af70b5b8f85384aa2515d515bddb749ae043b4bf560d88a2d3c39281386":
+        raise AssertionError("normal iOS pending Swift SOURCE predecessor differs")
+    return source
+
+
+def without_signed_android_runtime_source(source):
+    if type(source) is not str or len(source.encode()) > 1024 * 1024:
+        raise AssertionError("signed Android Swift SOURCE bound differs")
+    source = without_normal_ios_pending_source(source)
+    current = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+    previous = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+    if current in source:
+        line = '                  raw["sourceInputsSha256"] as? String == "' + current + '",\n'
+        if source.count(current) != 1 or previous in source or source.count("\n" + line) != 1:
+            raise AssertionError("signed Android Swift runtime line differs")
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    pairs = (("24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5", "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"),
+             ("0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb", "e88c50067e1b7f70b33d2d6f31abaa11e9f3c8f020b0b74294836984e1fa1b9a"))
+    if any(current in source for current, _ in pairs):
+        for current, previous in pairs:
+            line = '            private static let catalogue = "' + current + '"\n'
+            if source.count(current) != 1 or previous in source or source.count("\n" + line) != 1:
+                raise AssertionError("signed Android Swift catalogue pair differs")
+        for current, previous in pairs:
+            line = '            private static let catalogue = "' + current + '"\n'
+            source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
 def without_artifact_wait_diagnostic_source(source):
+    source = without_signed_android_runtime_source(source)
+    # Exact current-runtime handoff line only; historical SOURCE hashes stay fixed.
+    saved_marker = 'raw["sourceInputsSha256"] as? String'
+    saved_prior = '                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",\n'
+    saved_current = '                  raw["sourceInputsSha256"] as? String == "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09",\n'
+    if saved_marker in source:
+        if (source.count(saved_marker) != 1
+                or source.count(saved_prior) + source.count(saved_current) != 1):
+            raise AssertionError('saved-version current SOURCE handoff differs')
+        source = source.replace(saved_current, saved_prior, 1)
     if 'MRK_MACOS_ENGINEERING_ARTIFACT_QUERY' not in source:
         return source  # Historical intermediate source remains valid for old inverses.
     if (source.count(ARTIFACT_WAIT_DIAGNOSTIC_BEGIN) != 1 or source.count(ARTIFACT_WAIT_DIAGNOSTIC_END) != 1
@@ -398,7 +889,65 @@ def without_engineering_wait_status_source(source):
         source = source.replace(current, previous, 1)
     return source
 
+INTEL_ANDROID_SWIFT_INVERSE = (('            private static let fileNames: Set<String> = ["upload.jks", "upload.der", "scalars.json"]\n'
+  '            private static let catalogue = "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"\n'
+  '\n',
+  '            private static let fileNames: Set<String> = ["upload.jks", "upload.der", "scalars.json"]\n'
+  '            #if arch(arm64)\n'
+  '            static let target = "aarch64-apple-darwin"\n'
+  '            private static let hostedJob = "github-hosted-macos26-arm64"\n'
+  '            private static let catalogue = "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"\n'
+  '            #elseif arch(x86_64)\n'
+  '            static let target = "x86_64-apple-darwin"\n'
+  '            private static let hostedJob = "github-hosted-macos26-x86_64"\n'
+  '            private static let catalogue = "e88c50067e1b7f70b33d2d6f31abaa11e9f3c8f020b0b74294836984e1fa1b9a"\n'
+  '            #endif\n'
+  '\n'),
+ ('                    && object["scope"] as? String == "one-owned-android-ui-inputs" && object["sourceCommit"] '
+  'as? String == source\n'
+  '                    && object["target"] as? String == "aarch64-apple-darwin" && object["runId"] as? String == '
+  'run\n'
+  '                    && object["runAttempt"] as? String == attempt && object["root"] as? String == rootPath\n',
+  '                    && object["scope"] as? String == "one-owned-android-ui-inputs" && object["sourceCommit"] '
+  'as? String == source\n'
+  '                    && object["target"] as? String == Self.target && object["runId"] as? String == run\n'
+  '                    && object["runAttempt"] as? String == attempt && object["root"] as? String == rootPath\n'),
+ ('                      env["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source,\n'
+  '                      env["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",\n'
+  '                      let run = env["MRK_NORMAL_UI_ANDROID_RUN_ID"], Self.matches(run, '
+  '#"^[1-9][0-9]{0,19}$"#),\n',
+  '                      env["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source,\n'
+  '                      env["MRK_NORMAL_UI_HOSTED_JOB"] == Self.hostedJob,\n'
+  '                      let run = env["MRK_NORMAL_UI_ANDROID_RUN_ID"], Self.matches(run, '
+  '#"^[1-9][0-9]{0,19}$"#),\n'),
+ ('        let facts: [String: Any] = ["schemaVersion": 1, "scope": "one-ordinary-local-signed-android-build",\n'
+  '            "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": "aarch64-apple-darwin",\n'
+  '            "runId": env["MRK_NORMAL_UI_ANDROID_RUN_ID"] ?? "", "runAttempt": '
+  'env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"] ?? "",\n',
+  '        let facts: [String: Any] = ["schemaVersion": 1, "scope": "one-ordinary-local-signed-android-build",\n'
+  '            "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": '
+  'LocalFixture.AndroidInputs.target,\n'
+  '            "runId": env["MRK_NORMAL_UI_ANDROID_RUN_ID"] ?? "", "runAttempt": '
+  'env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"] ?? "",\n'))
+
+
+def without_intel_android_source(source):
+    source = without_signed_android_runtime_source(source)
+    if type(source) is not str or len(source.encode()) > 1048576:
+        raise AssertionError("Intel Android source bound differs")
+    if 'LocalFixture.AndroidInputs.target' not in source:
+        return source
+    for previous, current in INTEL_ANDROID_SWIFT_INVERSE:
+        if source.count(current) != 1:
+            raise AssertionError("Intel Android exact source region differs")
+    for previous, current in reversed(INTEL_ANDROID_SWIFT_INVERSE):
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != '6754fa2935ac1493f5b3f0da7c50e97dd8b5eeafed339b9d7e89fde3064b1164':
+        raise AssertionError("Intel Android source predecessor differs")
+    return source
+
 def without_release_evidence_source(source):
+    source = without_intel_android_source(source)
     source = without_engineering_wait_status_source(source)
     if 'static let releaseEvidenceDocuments:' not in source:
         if 'testSyntheticProjectSavedReleaseEvidence' in source: raise AssertionError("partial release_evidence_source source")
@@ -744,7 +1293,1909 @@ RELEASE_EVIDENCE_WORKFLOW_INVERSE = ((8803,
 
 APP_SIGNATURE_WORKFLOW_INVERSE = ((273, 43, '7fce308b4a7080ff7750eac96f2d9b4cffbb3783b4122ba8cba542498acb5bfd', ''), (711, 65, '41559436d557d14e00f7d258f8c4e12dbe18d63c9fa21299122ea4ef10cecc72', ''), (1535, 196, '19f9ce6b7d1ec6a940317d1ab55b2a8098cd4c1dc4888103cf0534954547c57f', 'timeout-minutes: 350'), (8496, 346, '007ec8dc2b6263d463042cde185b2b11532cd97452239be023a87962e7dec487', ') ]] || exit 1'), (22387, 392, '140f1114a37be725631dc52ff0d6e6d7bc70c25a2643c3ede69bcadaa9f7435d', ''), (28064, 404, 'f02b9ddfefd341e9b719b357cfefbd9e153c83ca836d04b6e334969e895d37ce', ''), (6090, 106, 'e2d105aeb112cfd2bd59cf0647c033334694eb6acce215f761c44f7138231cc7', ''), (12337, 106, 'd50f52c13a8a19f68b2c33b50d5b25e6dd20d369fe17756888f8b9bbdc25d5b2', ''), (12803, 106, '7ee78366225f739c169111fbefed37f411bcbbd3cc2690ce927f99a229829b0a', ''), (16823, 106, '7ee78366225f739c169111fbefed37f411bcbbd3cc2690ce927f99a229829b0a', ''), (17177, 106, '7ee78366225f739c169111fbefed37f411bcbbd3cc2690ce927f99a229829b0a', ''), (25310, 106, 'd50f52c13a8a19f68b2c33b50d5b25e6dd20d369fe17756888f8b9bbdc25d5b2', ''), (46887, 22, '7c17228c1639da37cc0cb9c729e8fa369e145457f66dbca110e45efa0b5b819a', ''), (47906, 24, '4bd7d18a6ab921647f28b9f705afce990e7be141983b0261a1bd78a2027b46cd', ''), (49834, 569, '0cb195b9032334ab1fde6250bd5a506aa55210401354052606487836d0941e5d', "== 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'"), (56371, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (59904, 113, 'f5a33c75c6ce8fc9ab4318b9ff1c9c73431c21443fda21b6e7c5c4dd7aec9064', "== 'refs/heads/verify/desktop-macos-installed'"), (73979, 26, '597f8c7b070b180f75b720d5e0ed56c9d8516121f2362472835a8d2ca9f62a3f', ''), (77317, 22, '1ff00fb090aa18879ebc52e6139b586ab4df0a1f8ae2bf554349f760fd5d4971', ''), (81724, 22, '26477eb4b9b1e9f4e33d895f3a8078a3c0dd77bf259f688adef6a71076ccc3d6', ''), (86995, 25, '77ab554b279f18d90fa1e1c00e32cc72ccd74339ab1691df1db5c4813a45c27f', ''), (91240, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (91584, 25, '5cc48d8e6d98662ab3c2aab2df255eae1e5ec11f1feda55fd65b35debb50f20d', ''), (99092, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (101598, 113, 'f5a33c75c6ce8fc9ab4318b9ff1c9c73431c21443fda21b6e7c5c4dd7aec9064', "== 'refs/heads/verify/desktop-macos-installed'"), (109317, 85, '2644bb6d6cdfe3a94764f272420ae678b46e191a59addb024a0e7bb20d1991f0', "removal-lifecycle'"), (113961, 85, '2644bb6d6cdfe3a94764f272420ae678b46e191a59addb024a0e7bb20d1991f0', "removal-lifecycle'"), (116948, 85, '2644bb6d6cdfe3a94764f272420ae678b46e191a59addb024a0e7bb20d1991f0', "removal-lifecycle'"), (117883, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (122676, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (125088, 74, 'bad463f354b2a866e9cf26c7a6d2e05a0a489eec8c9f6e744e83f2a8efb2b615', ''), (127216, 308, 'ab9cdf74283bafd177c5d7f4f3f00fecc8d0e2e1afd617e17e6dec40263465c8', "== 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'"), (130098, 314, 'ed4d8df25865bb2efa1affa1aae5e6735d5fdcc45207f0f28dd32b27e8979442', "== 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_inputs.outcome == 'success' && steps.package_install.outcome == 'success'"), (132865, 315, 'c7db2067611ed9836dea7e55cd0efdbcdca216304f6aef8d00395619e34bf015', "== 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_ui_test.outcome == 'success' && steps.package_install.outcome == 'success'"), (157373, 366, 'eea4d991941793cc3ff538b64e95b890df2522d3461df258b3bccc68b244918f', "== 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'"), (160117, 415, 'b91605221b6e03330e1de20fec73ff21c41bf31c8851e403dc87eaec309db3d6', "== 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'"), (162951, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (164606, 180, '8c4abdb5c61de686aec61b6587e7bcf2c5111317be45104dfcd69d973594f235', "== 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'"), (168336, 180, '8c4abdb5c61de686aec61b6587e7bcf2c5111317be45104dfcd69d973594f235', "== 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'"), (170714, 180, '8c4abdb5c61de686aec61b6587e7bcf2c5111317be45104dfcd69d973594f235', "== 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'"), (172776, 213, '43ed53d5845b014b6ed81e99151694b3ecd71ce09e89d25f19f2aa373b92db13', "== 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_package.outcome == 'success' && steps.normal_ui_build.outcome == 'success'"), (175646, 215, 'f90633631773d375f84c5b8e75e7e2f4a4a0125844ec4e11a37514f56b489aeb', "== 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_observers.outcome == 'success' && steps.normal_ui_build.outcome == 'success'"), (177434, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (179130, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (180189, 149, 'c9f8c1b898ebe47511fc19a92d4779c383cf0fd9bdd3add2fe114ea267529845', "== 'refs/heads/verify/desktop-macos-preview' && steps.preview.outcome == 'success'"), (181255, 202, '80a104c2c0efbbebaecb3357f952d702096bd2ec9274733a50e9889e055086bc', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success' && steps.preview_upload.outcome == 'success'"), (185986, 156, '04803e48fbef0bb42a74922ce1f3f1d52ed0d93229d52140c613b22c3aa02bbd', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_test.outcome == 'success'"), (200721, 158, '22a1be5e5346d3f9463dbcbec338a30f1612bae9eb3aab8ed6f9347c44767cee', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'"), (205582, 164, 'ec40c206029f6e512ed2542530214ccd1c2b27ae228b6eb636c4a5edb22d50aa', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success'"), (221342, 158, '22a1be5e5346d3f9463dbcbec338a30f1612bae9eb3aab8ed6f9347c44767cee', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'"), (229607, 168, 'e84aa7b7c1c39bcca3049d9454603cbdb2f1329bec45cc9c04d7a74bdbb41aab', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == 'success'"), (248219, 170, 'd1cf60824d1d2edbaada6b17cc0cb4b260eaa273653bd503a4b1ea9b8827f85f', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == 'success'"), (256538, 168, '04d55d596e2237f5bb1673b6f5eca44367d66a3a05b8595d55d127d7f5a2b3f2', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_test.outcome == 'success'"), (275763, 227, 'af714bbb5dd50503c6e50c46cad8b225faa61d5b41d5009163553cfe33a05429', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'"), (284537, 169, '8a205d64a41a2fb50e9668e96d3f1dc3cf06cfd29505d360f916c4781c664ce7', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_checks_ui_test.outcome == 'success'"), (306585, 354, '98d0f1fff12aee1fdc4d912ff203420fb5ecbaaba63381407e1992308e8fe322', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence'"), (310167, 363, 'b77a50fe6b42263b79e7c5c58bbcc09478e6af96e7f7acc5158cc2d0e6942dfb', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_version_recovery_ui_test.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence'"), (328621, 108, '5c417bb5e050744e16fefbeb795e9f68f08a699c1f2e2e4245c922c3e43f96f8', "always() && steps.work.outputs.root != ''"), (348311, 802, '4a646c829e8f95a14c43b2abf5d5ad076e9284d64a7a10f1f330002887c0482c', "always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'"), (99000, 6360, '1fd61cebe258aef7e40106cf2093ea57d052bf385053c294bbd41d23ef25faac', ''))
 
+# Exact recent SOURCE deltas only; the historical tables and their final
+# predecessor hashes below remain authoritative for every other byte.
+RECENT_APP_SIGNATURE_WORKFLOW_INVERSE = (('prebuild',
+  ('Check fixed optional-array argv before native preparation',
+   'tests/desktop/test_macos_optional_arrays.py',
+   '# App-signature:82 timed preparation +14 bounded setup'),
+  (('    # App-signature:82 timed preparation +14 bounded setup +7 summary/cleanup/upload;7 overhead.\n',
+    '    # App-signature:82 timed preparation +13 bounded setup +7 summary/cleanup/upload;8 overhead.\n'),
+   ('      - name: Check fixed optional-array argv before native preparation\n'
+    '        timeout-minutes: 1\n'
+    '        shell: bash\n'
+    '        run: |\n'
+    '          set -euo pipefail\n'
+    '          /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C "$MRK_PYTHON" -I -S -B \\\n'
+    '            tests/desktop/test_macos_optional_arrays.py \\\n'
+    '            MacOSOptionalArraysTests.test_optional_arrays_preserve_empty_and_quoted_argv_under_nounset '
+    '-v\n',
+    ''))),
+ ('optional arrays',
+  ('${history_provider_arguments[@]+', '${removal_arguments[@]+', '${github_seal_arguments[@]+'),
+  (('            --target "$MRK_MACOS_TARGET" '
+    '${history_provider_arguments[@]+"${history_provider_arguments[@]}"} \\\n',
+    '            --target "$MRK_MACOS_TARGET" "${history_provider_arguments[@]}" \\\n'),
+   ('          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" '
+    '${removal_arguments[@]+"${removal_arguments[@]}"} '
+    '${github_seal_arguments[@]+"${github_seal_arguments[@]}"} \\\n',
+    '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" '
+    '"${removal_arguments[@]}" "${github_seal_arguments[@]}" \\\n'),
+   ('          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py remove-scripts --target '
+    '"$MRK_MACOS_TARGET" ${removal_arguments[@]+"${removal_arguments[@]}"} \\\n',
+    '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py remove-scripts --target '
+    '"$MRK_MACOS_TARGET" "${removal_arguments[@]}" \\\n'),
+   ('          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-remove-package --target '
+    '"$MRK_MACOS_TARGET" ${removal_arguments[@]+"${removal_arguments[@]}"} --expected-remover '
+    '"$MRK_MACOS_REMOVER_SHA256" \\\n',
+    '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-remove-package --target '
+    '"$MRK_MACOS_TARGET" "${removal_arguments[@]}" --expected-remover "$MRK_MACOS_REMOVER_SHA256" \\\n'))),
+ ('confidential diagnostics',
+  ('confidential_compiler',
+   'macos_resident_confidential_capture.py',
+   'Encrypt only the settled failed ARM compiler captures',
+   'Retain ciphertext and finite transport receipt only',
+   'confidential-resident-compiler-'),
+  (('      # TEMPORARY verification-only diagnostic. Never copy to product workflows.\n'
+    '      - name: Encrypt only the settled failed ARM compiler captures\n'
+    '        id: confidential_compiler\n'
+    "        if: failure() && github.ref == 'refs/heads/verify/desktop-macos-app-signature' && matrix.target "
+    "== 'aarch64-apple-darwin' && steps.work.outcome == 'success' && steps.android_helper.outcome == "
+    "'failure'\n"
+    '        timeout-minutes: 2\n'
+    '        shell: bash\n'
+    '        env:\n'
+    '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+    '        run: |\n'
+    '          set +x\n'
+    '          set -euo pipefail\n'
+    '          umask 077\n'
+    '          ulimit -c 0\n'
+    '          "$MRK_PYTHON" -I -S -B desktop/tools/macos_resident_confidential_capture.py\n'
+    '      - name: Retain ciphertext and finite transport receipt only\n'
+    "        if: always() && github.ref == 'refs/heads/verify/desktop-macos-app-signature' && matrix.target == "
+    "'aarch64-apple-darwin' && steps.confidential_compiler.outcome == 'success'\n"
+    '        timeout-minutes: 2\n'
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: confidential-resident-compiler-${{ github.sha }}-${{ github.run_id }}-${{ '
+    'github.run_attempt }}\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/resident-compiler-confidential/cargo-capture.cms\n'
+    '            ${{ steps.work.outputs.root }}/resident-compiler-confidential/receipt.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 1\n'
+    '          compression-level: 0\n',
+    ''),)))
+
+
+# Exact public-evidence/export-only successor. Never refresh the historical
+# workflow hashes or treat reconstructed private capture paths as upload policy.
+PUBLIC_VERIFICATION_WORKFLOW_INVERSE = (('.github/workflows/desktop-macos-installed.yml',
+  'name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n',
+  'f6a2aae527c8daceb01621195f127d83fdb5e33a0de59e1d27744d79462bd071',
+  (('            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/vault-helper-build.stderr" >&2\n'
+    '            /usr/bin/tail -c 32768 "$MRK_MACOS_WORK/vault-helper-build.jsonl" >&2\n',
+    "            printf 'Fixed vault helper compiler failed with original status %s; originals remain local.\\n' "
+    '"$status" >&2 || :\n'),
+   ('          if [[ "$remover_status" != 0 ]]; then\n'
+    '            # Optional diagnostics cannot replace the original compiler status.\n'
+    '            set +e\n'
+    "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+    'retained.\\n\' "$remover_status" >&2\n'
+    '            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/remover-build.stderr" >&2\n'
+    '            exit "$remover_status"\n'
+    '          fi\n',
+    '          if [[ "$remover_status" != 0 ]]; then\n'
+    '            # Optional diagnostics cannot replace the original compiler status.\n'
+    '            set +e\n'
+    "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+    'retained.\\n\' "$remover_status" >&2\n'
+    '            exit "$remover_status"\n'
+    '          fi\n'),
+   ('            "$@" 2>&1 | /usr/bin/tee /dev/stderr | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/$label.log"\n',
+    '            "$@" 2>&1 | /usr/bin/tee /dev/null | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/$label.log"\n'),
+   ('      - name: Preserve bounded originals; upload success is never GUI/native acceptance\n',
+    '      - name: Project closed public verification facts without raw originals\n'
+    '        id: public_evidence\n'
+    "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && "
+    "steps.work.outputs.root != '')\n"
+    '        timeout-minutes: 1\n'
+    '        shell: bash\n'
+    '        run: |\n'
+    '          set -euo pipefail\n'
+    '          umask 077\n'
+    '          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \\\n'
+    '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_public_verification_evidence.py \\\n'
+    '            --profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n'
+    '            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n'
+    '            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"\n'
+    '      - name: Preserve bounded originals; upload success is never GUI/native acceptance\n'),
+   ('      - name: Preserve bounded originals; upload success is never GUI/native acceptance\n'
+    '        id: evidence\n'
+    "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && "
+    "steps.work.outputs.root != '')\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-installed-${{ matrix.target }}${{ matrix.removal_case && '
+    "format('-removal-{0}', matrix.removal_case) || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ "
+    'github.run_attempt }}\n'
+    '          path: |\n'
+    "            ${{ format('{0}/source-binding.json\n"
+    '            {0}/removal-observer-build.status\n'
+    '            {0}/removal-observers.status\n'
+    '            {0}/android-helper-prepare-removal-observers.json\n'
+    '            {0}/package-removal-fixture.status\n'
+    '            {0}/android-helper-package-removal-fixture.json\n'
+    '            {0}/normal-ui/removal-ordinary-test.runner-admission.json\n'
+    '            {0}/normal-ui/removal-abrupt-test.runner-admission.json\n'
+    '            {0}/normal-ui/android-inputs.status\n'
+    '            {0}/normal-ui/android-input-status.json\n'
+    '            {0}/prepare-ui-inputs-failure.json\n'
+    '            {0}/normal-ui/android-signed-build-test.status\n'
+    '            {0}/normal-ui/android-signed-build-summary.status\n'
+    '            {0}/normal-ui/android-signed-build-result.status\n'
+    '            {0}/normal-ui/android-signed-build.facts.json\n'
+    '            {0}/normal-ui/android-signed-build-result.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-test.status\n'
+    '            {0}/normal-ui/ios-unsigned-archive-summary.status\n'
+    '            {0}/normal-ui/ios-unsigned-archive.facts.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-test.runner-admission.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-summary.command-admission.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-summary.failure-diagnostics.json\n'
+    '            {0}/effective-rust-toolchain.json\n'
+    '            {0}/source-inventory.json\n'
+    '            {0}/data-contracts/mount.stdout\n'
+    '            {0}/data-contracts/mount.stderr\n'
+    '            {0}/data-contracts/mount.status\n'
+    '            {0}/data-contracts/apfs.stdout\n'
+    '            {0}/data-contracts/apfs.stderr\n'
+    '            {0}/data-contracts/apfs.status\n'
+    '            {0}/data-contracts/build.stdout\n'
+    '            {0}/data-contracts/build.stderr\n'
+    '            {0}/data-contracts/build.status\n'
+    '            {0}/data-contracts/rust.stdout\n'
+    '            {0}/data-contracts/rust.stderr\n'
+    '            {0}/data-contracts/rust.status\n'
+    '            {0}/data-contracts/python.stdout\n'
+    '            {0}/data-contracts/python.stderr\n'
+    '            {0}/data-contracts/python.status\n'
+    '            {0}/data-contracts/result.json\n'
+    '            {0}/normal-build.jsonl\n'
+    '            {0}/normal-build.status\n'
+    '            {0}/normal-build.stderr.tail.txt\n'
+    '            {0}/preview-result.json\n'
+    '            {0}/normal-ui/build-file-limit.status\n'
+    '            {0}/normal-ui/build-file-budget.status\n'
+    '            {0}/normal-ui/build-file-budget.json\n'
+    '            {0}/normal-ui/test-file-limit.status\n'
+    '            {0}/normal-ui/test-file-budget.status\n'
+    '            {0}/normal-ui/test-file-budget.json\n'
+    '            {0}/normal-ui/project-test-file-limit.status\n'
+    '            {0}/normal-ui/project-test-file-budget.status\n'
+    '            {0}/normal-ui/project-test-file-budget.json\n'
+    '            {0}/normal-ui/persistence-test-file-limit.status\n'
+    '            {0}/normal-ui/persistence-test-file-budget.status\n'
+    '            {0}/normal-ui/persistence-test-file-budget.json\n'
+    '            {0}/normal-ui/toolchain.failure-diagnostics.json\n'
+    '            {0}/normal-ui/build.failure-diagnostics.json\n'
+    '            {0}/normal-ui/build.admission-diagnostics.json\n'
+    '            {0}/normal-ui/build.command-admission.json\n'
+    '            {0}/normal-ui/test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/summary.command-admission.json\n'
+    '            {0}/normal-ui/project-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/project-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/project-summary.command-admission.json\n'
+    '            {0}/normal-ui/persistence-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/persistence-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/persistence-summary.command-admission.json\n'
+    '            {0}/normal-ui/diagnostics-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/diagnostics-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/diagnostics-summary.command-admission.json\n'
+    '            {0}/normal-ui/saved-checks-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/saved-checks-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/saved-checks-summary.command-admission.json\n'
+    '            {0}/normal-ui/saved-version-recovery-test-file-limit.status\n'
+    '            {0}/normal-ui/saved-version-recovery-test.status\n'
+    '            {0}/normal-ui/saved-version-recovery-test.runner-admission.json\n'
+    '            {0}/normal-ui/saved-version-recovery-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/saved-version-recovery-summary.status\n'
+    '            {0}/normal-ui/saved-version-recovery-summary.command-admission.json\n'
+    '            {0}/normal-ui/saved-version-recovery-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/saved-version-recovery-result.json\n'
+    '            {0}/normal-ui/workflow-refusal-test-file-limit.status\n'
+    '            {0}/normal-ui/workflow-refusal-test.status\n'
+    '            {0}/normal-ui/workflow-refusal-test.runner-admission.json\n'
+    '            {0}/normal-ui/workflow-refusal-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/workflow-refusal-summary.status\n'
+    '            {0}/normal-ui/workflow-refusal-summary.command-admission.json\n'
+    '            {0}/normal-ui/workflow-refusal-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/workflow-refusal-result.json\n'
+    '            {0}/normal-ui/release-evidence-test-file-limit.status\n'
+    '            {0}/normal-ui/release-evidence-test.status\n'
+    '            {0}/normal-ui/release-evidence-test.runner-admission.json\n'
+    '            {0}/normal-ui/release-evidence-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/release-evidence-summary.status\n'
+    '            {0}/normal-ui/release-evidence-summary.command-admission.json\n'
+    '            {0}/normal-ui/release-evidence-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/release-evidence-result.json\n'
+    '            {0}/normal-ui/build.status\n'
+    '            {0}/normal-ui/test.status\n'
+    '            {0}/normal-ui/test.runner-admission.json\n'
+    '            {0}/normal-ui/summary.status\n'
+    '            {0}/normal-ui/xcode-version.txt\n'
+    '            {0}/normal-ui/sdk-path.txt\n'
+    '            {0}/normal-ui/sdk-version.txt\n'
+    '            {0}/normal-ui/sdk-build.txt\n'
+    '            {0}/normal-ui/result.json\n'
+    '            {0}/normal-ui/persistence-test.status\n'
+    '            {0}/normal-ui/persistence-test.runner-admission.json\n'
+    '            {0}/normal-ui/persistence-diagnostics.json\n'
+    '            {0}/normal-ui/persistence-summary.status\n'
+    '            {0}/normal-ui/persistence-result.json\n'
+    '            {0}/normal-ui/project-test.status\n'
+    '            {0}/normal-ui/project-test.runner-admission.json\n'
+    '            {0}/normal-ui/project-summary.status\n'
+    '            {0}/normal-ui/project-result.json\n'
+    '            {0}/normal-ui/diagnostics-test-file-limit.status\n'
+    '            {0}/normal-ui/diagnostics-test-file-budget.status\n'
+    '            {0}/normal-ui/diagnostics-test-file-budget.json\n'
+    '            {0}/normal-ui/diagnostics-test.status\n'
+    '            {0}/normal-ui/diagnostics-test.runner-admission.json\n'
+    '            {0}/normal-ui/diagnostics-safe-facts.json\n'
+    '            {0}/normal-ui/diagnostics-summary.status\n'
+    '            {0}/normal-ui/diagnostics-result.json\n'
+    '            {0}/normal-ui/saved-checks-test-file-limit.status\n'
+    '            {0}/normal-ui/saved-checks-test-file-budget.status\n'
+    '            {0}/normal-ui/saved-checks-test-file-budget.json\n'
+    '            {0}/normal-ui/saved-checks-test.status\n'
+    '            {0}/normal-ui/saved-checks-test.runner-admission.json\n'
+    '            {0}/normal-ui/saved-checks-safe-facts.json\n'
+    '            {0}/normal-ui/saved-checks-summary.status\n'
+    '            {0}/normal-ui/saved-checks-result.json\n'
+    '            {0}/package-format-input.json\n'
+    '            {0}/PackageFormat-original.pkg\n'
+    '            {0}/package-format-prepare.json\n'
+    '            {0}/package-format-tar.status\n'
+    '            {0}/package-format-xar.status\n'
+    '            {0}/package-format-audit.json\n'
+    '            {0}/package-format-final/PackageFormat.pkg\n'
+    '            {0}/native-acl-compile.log\n'
+    '            {0}/native-acl-compile.status\n'
+    '            {0}/native-acl-probe.log\n'
+    '            {0}/native-acl-probe.status\n'
+    '            {0}/native-acl-cleanup.status\n'
+    '            {0}/native-acl-probe-result.json\n'
+    '            {0}/runtime-result.json\n'
+    '            {0}/fresh-python-transport-result.json\n'
+    '            {0}/android-support-result.json\n'
+    '            {0}/vault-helper-build.status\n'
+    '            {0}/vault-helper-build.jsonl\n'
+    '            {0}/vault-helper-build.stderr\n'
+    '            {0}/vault-helper-signing.json\n'
+    '            {0}/android-helper-prepare.json\n'
+    '            {0}/android-helper-build.jsonl\n'
+    '            {0}/android-helper-build.stderr\n'
+    '            {0}/android-helper-build.status\n'
+    '            {0}/android-helper-resident-image-sign.stdout\n'
+    '            {0}/android-helper-resident-image-sign.stderr\n'
+    '            {0}/android-helper-resident-image-sign.status\n'
+    '            {0}/android-helper-resident-image-verify-signed.stdout\n'
+    '            {0}/android-helper-resident-image-verify-signed.stderr\n'
+    '            {0}/android-helper-resident-image-verify-signed.status\n'
+    '            {0}/android-helper-entry-build.stdout\n'
+    '            {0}/android-helper-entry-build.stderr\n'
+    '            {0}/android-helper-entry-build.status\n'
+    '            {0}/android-helper-desktop-facade-build.stdout\n'
+    '            {0}/android-helper-desktop-facade-build.stderr\n'
+    '            {0}/android-helper-desktop-facade-build.status\n'
+    '            {0}/android-helper-resident-facade-build.stdout\n'
+    '            {0}/android-helper-resident-facade-build.stderr\n'
+    '            {0}/android-helper-resident-facade-build.status\n'
+    '            {0}/android-helper-verify-before-resident-image.stdout\n'
+    '            {0}/android-helper-verify-before-resident-image.stderr\n'
+    '            {0}/android-helper-verify-before-resident-image.status\n'
+    '            {0}/android-helper-verify-after-resident-image.stdout\n'
+    '            {0}/android-helper-verify-after-resident-image.stderr\n'
+    '            {0}/android-helper-verify-after-resident-image.status\n'
+    '            {0}/android-helper-sign.stdout\n'
+    '            {0}/android-helper-sign.stderr\n'
+    '            {0}/android-helper-sign.status\n'
+    '            {0}/android-helper-verify-signed.stdout\n'
+    '            {0}/android-helper-verify-signed.stderr\n'
+    '            {0}/android-helper-verify-signed.status\n'
+    '            {0}/android-helper-verify-before.stdout\n'
+    '            {0}/android-helper-verify-before.stderr\n'
+    '            {0}/android-helper-verify-before.status\n'
+    '            {0}/android-helper-verify-after.stdout\n'
+    '            {0}/android-helper-verify-after.stderr\n'
+    '            {0}/android-helper-verify-after.status\n'
+    '            {0}/android-helper-verify-before.json\n'
+    '            {0}/android-helper-verify-after.json\n'
+    '            {0}/android-helper-sign-vault-helper.json\n'
+    '            {0}/android-helper-sign-desktop-image.json\n'
+    '            {0}/android-helper-sign-desktop-payload.json\n'
+    '            {0}/android-helper-sign-root-app.json\n'
+    '            {0}/android-helper-sign-root-installer.json\n'
+    '            {0}/remover-build.jsonl\n'
+    '            {0}/remover-build.stderr\n'
+    '            {0}/remover-build.status\n'
+    '            {0}/android-helper-sign-remover.json\n'
+    '            {0}/app-result.json\n'
+    '            {0}/input-result.json\n'
+    '            {0}/dialog-regressions.log\n'
+    '            {0}/dialog-regressions.status\n'
+    '            {0}/installer-finalizer-regression.log\n'
+    '            {0}/installer-finalizer-regression.status\n'
+    '            {0}/native-abi-regression.log\n'
+    '            {0}/native-abi-regression.status\n'
+    '            {0}/focused-regressions.json\n'
+    '            {0}/scripts-fixture-result.json\n'
+    '            {0}/package-fixture-audit.json\n'
+    '            {0}/installer-fixture-output.txt\n'
+    '            {0}/installer-fixture-output.status\n'
+    '            {0}/installer-fixture-log-cursor.json\n'
+    '            {0}/installer-fixture-log-cursor.status\n'
+    '            {0}/installer-fixture-log-capture.json\n'
+    '            {0}/installer-fixture-log-capture.status\n'
+    '            {0}/installer-fixture-log-selected.txt\n'
+    '            {0}/installer-fixture-observation.json\n'
+    '            {0}/MobileReleaseKit-InstallerFixture-original.pkg\n'
+    '            {0}/package-fixture-prepare.json\n'
+    '            {0}/package-fixture-tar.status\n'
+    '            {0}/package-fixture-xar.status\n'
+    '            {0}/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg\n'
+    '            {0}/scripts-result.json\n'
+    '            {0}/package-audit.json\n'
+    '            {0}/installation-observation.json\n'
+    '            {0}/installer-output.txt\n'
+    '            {0}/installer-output.status\n'
+    '            {0}/installer-log-cursor.json\n'
+    '            {0}/installer-log-cursor.status\n'
+    '            {0}/installer-log-capture.json\n'
+    '            {0}/installer-log-capture.status\n'
+    '            {0}/installer-log-selected.txt\n'
+    '            {0}/MobileReleaseKit-original.pkg\n'
+    '            {0}/package-prepare.json\n'
+    '            {0}/package-tar.status\n'
+    '            {0}/package-xar.status\n'
+    '            {0}/package-final/MobileReleaseKit.pkg\n'
+    '            {0}/packaging-selection.json\n'
+    '            {0}/producer-root/Install.pkg\n'
+    '            {0}/producer-root/producer.json\n'
+    '            {0}/producer-root/producer.sig\n'
+    '            {0}/distribution/MobileReleaseKit.dmg\n'
+    '            {0}/distribution/MobileReleaseKit-Observation.dmg\n'
+    '            {0}/package-request-id.txt\n'
+    '            {0}/android-helper-package-install.json\n'
+    '            {0}/remove-scripts-result.json\n'
+    '            {0}/remove-package-prepare.json\n'
+    '            {0}/remove-package-tar.status\n'
+    '            {0}/remove-package-xar.status\n'
+    '            {0}/remove-package-finalization.status\n'
+    '            {0}/package-remove.status\n'
+    '            {0}/remove-image-finalization.status\n'
+    '            {0}/android-helper-finalize-remove-package.json\n'
+    '            {0}/android-helper-package-remove.json\n'
+    '            {0}/android-helper-finalize-remove-image.json\n'
+    '            {0}/remove-preview-result.json\n'
+    '            {0}/android-helper-notarize-payload.json\n'
+    '            {0}/android-helper-finalize-package.json\n'
+    '            {0}/package-finalization.status\n'
+    '            {0}/image-finalization.status\n'
+    '            {0}/image-finalization.stdout\n'
+    '            {0}/image-finalization.stderr\n'
+    '            {0}/android-helper-finalize-image.json\n'
+    '            {0}/android-helper-final-image-resolve-notarytool.stdout\n'
+    '            {0}/android-helper-final-image-resolve-notarytool.stderr\n'
+    '            {0}/android-helper-final-image-resolve-notarytool.status\n'
+    '            {0}/android-helper-final-image-resolve-stapler.stdout\n'
+    '            {0}/android-helper-final-image-resolve-stapler.stderr\n'
+    '            {0}/android-helper-final-image-resolve-stapler.status\n'
+    '            {0}/android-helper-final-image-signature-before.stdout\n'
+    '            {0}/android-helper-final-image-signature-before.stderr\n'
+    '            {0}/android-helper-final-image-signature-before.status\n'
+    '            {0}/android-helper-final-image-submit.stdout\n'
+    '            {0}/android-helper-final-image-submit.stderr\n'
+    '            {0}/android-helper-final-image-submit.status\n'
+    '            {0}/android-helper-final-image-log.stdout\n'
+    '            {0}/android-helper-final-image-log.stderr\n'
+    '            {0}/android-helper-final-image-log.status\n'
+    '            {0}/android-helper-final-image-staple.stdout\n'
+    '            {0}/android-helper-final-image-staple.stderr\n'
+    '            {0}/android-helper-final-image-staple.status\n'
+    '            {0}/android-helper-final-image-validate.stdout\n'
+    '            {0}/android-helper-final-image-validate.stderr\n'
+    '            {0}/android-helper-final-image-validate.status\n'
+    '            {0}/android-helper-final-image-signature-after.stdout\n'
+    '            {0}/android-helper-final-image-signature-after.stderr\n'
+    '            {0}/android-helper-final-image-signature-after.status\n'
+    '            {0}/android-helper-final-image-verify.stdout\n'
+    '            {0}/android-helper-final-image-verify.stderr\n'
+    '            {0}/android-helper-final-image-verify.status\n'
+    '            {0}/android-helper-final-image-attach.stdout\n'
+    '            {0}/android-helper-final-image-attach.stderr\n'
+    '            {0}/android-helper-final-image-attach.status\n'
+    '            {0}/android-helper-final-image-detach.stdout\n'
+    '            {0}/android-helper-final-image-detach.stderr\n'
+    '            {0}/android-helper-final-image-detach.status\n'
+    '            {0}/package-install.stdout\n'
+    '            {0}/package-install.stderr\n'
+    '            {0}/package-install.status\n'
+    '            {0}/android-helper-producer-build.stdout\n'
+    '            {0}/android-helper-producer-build.stderr\n'
+    '            {0}/android-helper-producer-build.status\n'
+    '            {0}/android-helper-producer-emitter.stdout\n'
+    '            {0}/android-helper-producer-emitter.stderr\n'
+    '            {0}/android-helper-producer-emitter.status\n'
+    '            {0}/android-helper-distribution-create.stdout\n'
+    '            {0}/android-helper-distribution-create.stderr\n'
+    '            {0}/android-helper-distribution-create.status\n'
+    '            {0}/android-helper-distribution-sign.stdout\n'
+    '            {0}/android-helper-distribution-sign.stderr\n'
+    '            {0}/android-helper-distribution-sign.status\n'
+    '            {0}/android-helper-distribution-verify-signature.stdout\n'
+    '            {0}/android-helper-distribution-verify-signature.stderr\n'
+    '            {0}/android-helper-distribution-verify-signature.status\n'
+    '            {0}/android-helper-distribution-verify-image.stdout\n'
+    '            {0}/android-helper-distribution-verify-image.stderr\n'
+    '            {0}/android-helper-distribution-verify-image.status\n'
+    '            {0}/android-helper-observation-create.stdout\n'
+    '            {0}/android-helper-observation-create.stderr\n'
+    '            {0}/android-helper-observation-create.status\n'
+    '            {0}/android-helper-observation-sign.stdout\n'
+    '            {0}/android-helper-observation-sign.stderr\n'
+    '            {0}/android-helper-observation-sign.status\n'
+    '            {0}/android-helper-observation-verify-signature.stdout\n'
+    '            {0}/android-helper-observation-verify-signature.stderr\n'
+    '            {0}/android-helper-observation-verify-signature.status\n'
+    '            {0}/android-helper-observation-verify-image.stdout\n'
+    '            {0}/android-helper-observation-verify-image.stderr\n'
+    '            {0}/android-helper-observation-verify-image.status\n'
+    '            {0}/android-helper-distribution-attach.stdout\n'
+    '            {0}/android-helper-distribution-attach.stderr\n'
+    '            {0}/android-helper-distribution-attach.status\n'
+    '            {0}/android-helper-installer-log-cursor.stdout\n'
+    '            {0}/android-helper-installer-log-cursor.stderr\n'
+    '            {0}/android-helper-installer-log-cursor.status\n'
+    '            {0}/android-helper-installer.stdout\n'
+    '            {0}/android-helper-installer.stderr\n'
+    '            {0}/android-helper-installer.status\n'
+    '            {0}/android-helper-installer-log-capture.stdout\n'
+    '            {0}/android-helper-installer-log-capture.stderr\n'
+    '            {0}/android-helper-installer-log-capture.status\n'
+    '            {0}/android-helper-distribution-detach.stdout\n'
+    '            {0}/android-helper-distribution-detach.stderr\n'
+    "            {0}/android-helper-distribution-detach.status', steps.work.outputs.root) }}\n"
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'
+    '          compression-level: 0\n'
+    '      # Do not start a payload build, host scan, notice-only task, service,\n'
+    '      # publication of a release, Store workflow, or synthetic GUI success here.\n'
+    '      # The focused real Aqua/Save procedure and separate command/result gates\n'
+    '      # are in desktop/packaging/macos-installed.md.\n',
+    '      - name: Preserve bounded originals; upload success is never GUI/native acceptance\n'
+    '        id: evidence\n'
+    "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && "
+    "steps.work.outputs.root != '') && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-installed-${{ matrix.target }}${{ matrix.removal_case && '
+    "format('-removal-{0}', matrix.removal_case) || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ "
+    'github.run_attempt }}\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'
+    '          compression-level: 0\n'
+    '      # Do not start a payload build, host scan, notice-only task, service,\n'
+    '      # publication of a release, Store workflow, or synthetic GUI success here.\n'
+    '      # The focused real Aqua/Save procedure and separate command/result gates\n'
+    '      # are in desktop/packaging/macos-installed.md.\n'))),
+ ('.github/workflows/desktop-macos-aqua.yml',
+  'name: Desktop macOS genuine Aqua engineering verification\n',
+  '3ada5fb2ddacbc22ab11e039e9028cc729e7383cb3467f19977ddf17a1d4f258',
+  (('            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/vault-helper-build.stderr" >&2\n'
+    '            /usr/bin/tail -c 32768 "$MRK_MACOS_WORK/vault-helper-build.jsonl" >&2\n',
+    "            printf 'Fixed vault helper compiler failed with original status %s; originals remain local.\\n' "
+    '"$status" >&2 || :\n'),
+   ('          if [[ "$remover_status" != 0 ]]; then\n'
+    '            # Optional diagnostics cannot replace the original compiler status.\n'
+    '            set +e\n'
+    "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+    'retained.\\n\' "$remover_status" >&2\n'
+    '            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/remover-build.stderr" >&2\n'
+    '            exit "$remover_status"\n'
+    '          fi\n',
+    '          if [[ "$remover_status" != 0 ]]; then\n'
+    '            # Optional diagnostics cannot replace the original compiler status.\n'
+    '            set +e\n'
+    "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+    'retained.\\n\' "$remover_status" >&2\n'
+    '            exit "$remover_status"\n'
+    '          fi\n'),
+   ('      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n',
+    '      - name: Project closed public verification facts without raw originals\n'
+    '        id: public_evidence\n'
+    "        if: always() && steps.work.outputs.root != ''\n"
+    '        timeout-minutes: 1\n'
+    '        shell: bash\n'
+    '        run: |\n'
+    '          set -euo pipefail\n'
+    '          umask 077\n'
+    '          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \\\n'
+    '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_public_verification_evidence.py \\\n'
+    '            --profile aqua --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n'
+    '            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n'
+    '            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"\n'
+    '      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n'),
+   ('      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n'
+    "        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == "
+    "'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE "
+    "== 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' "
+    "|| env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ '
+    'env.MRK_MACOS_AQUA_SCOPE }}-${{ matrix.target }}\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/source-binding.json\n'
+    '            ${{ steps.work.outputs.root }}/package-format-input.json\n'
+    '            ${{ steps.work.outputs.root }}/PackageFormat-original.pkg\n'
+    '            ${{ steps.work.outputs.root }}/package-format-prepare.json\n'
+    '            ${{ steps.work.outputs.root }}/package-format-tar.status\n'
+    '            ${{ steps.work.outputs.root }}/package-format-xar.status\n'
+    '            ${{ steps.work.outputs.root }}/package-format-audit.json\n'
+    '            ${{ steps.work.outputs.root }}/package-format-final/PackageFormat.pkg\n'
+    '            ${{ steps.work.outputs.root }}/source-inventory.json\n'
+    '            ${{ steps.work.outputs.root }}/xcode-host-preparation-intent.json\n'
+    '            ${{ steps.work.outputs.root }}/xcode-host-preparation-result.json\n'
+    '            ${{ steps.work.outputs.root }}/runtime-result.json\n'
+    '            ${{ steps.work.outputs.root }}/fresh-python-transport-result.json\n'
+    '            ${{ steps.work.outputs.root }}/android-support-result.json\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.admitted.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.stderr.tail.txt\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-catalogue-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-catalogue-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-catalogue-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/shipping-gate-control.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/shipping-gate-control.status\n'
+    '            ${{ steps.work.outputs.root }}/shipping-capacity-data.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/shipping-capacity-data.status\n'
+    '            ${{ steps.work.outputs.root }}/frontend-data.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/frontend-data-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/frontend-data-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/observer-build.admitted.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/observer-build.stderr.tail.txt\n'
+    '            ${{ steps.work.outputs.root }}/bounded-diagnostics.json\n'
+    '            ${{ steps.work.outputs.root }}/observer-build.status\n'
+    '            ${{ steps.work.outputs.root }}/vault-helper-build.status\n'
+    '            ${{ steps.work.outputs.root }}/vault-helper-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/vault-helper-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/vault-helper-signing.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-prepare.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-entry-build.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-entry-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-entry-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-signed.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-vault-helper.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-desktop-payload.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-root-app.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-root-installer.json\n'
+    '            ${{ steps.work.outputs.root }}/remover-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/remover-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/remover-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-remover.json\n'
+    '            ${{ steps.work.outputs.root }}/app-result.json\n'
+    '            ${{ steps.work.outputs.root }}/input-result.json\n'
+    '            ${{ steps.work.outputs.root }}/scripts-result.json\n'
+    '            ${{ steps.work.outputs.root }}/package-audit.json\n'
+    '            ${{ steps.work.outputs.root }}/installation-observation.json\n'
+    '            ${{ steps.work.outputs.root }}/installer-output.tail.txt\n'
+    '            ${{ steps.work.outputs.root }}/installer-output.status\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-cursor.json\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-cursor.status\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-capture.json\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-capture.status\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-selected.txt\n'
+    '            ${{ steps.work.outputs.root }}/MobileReleaseKit-original.pkg\n'
+    '            ${{ steps.work.outputs.root }}/package-prepare.json\n'
+    '            ${{ steps.work.outputs.root }}/package-tar.status\n'
+    '            ${{ steps.work.outputs.root }}/package-xar.status\n'
+    '            ${{ steps.work.outputs.root }}/package-final/MobileReleaseKit.pkg\n'
+    '            ${{ steps.work.outputs.root }}/packaging-selection.json\n'
+    '            ${{ steps.work.outputs.root }}/producer-root/Install.pkg\n'
+    '            ${{ steps.work.outputs.root }}/producer-root/producer.json\n'
+    '            ${{ steps.work.outputs.root }}/producer-root/producer.sig\n'
+    '            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit.dmg\n'
+    '            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit-Observation.dmg\n'
+    '            ${{ steps.work.outputs.root }}/package-request-id.txt\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-package-install.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-notarize-payload.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-finalize-package.json\n'
+    '            ${{ steps.work.outputs.root }}/package-finalization.status\n'
+    '            ${{ steps.work.outputs.root }}/package-install.stdout\n'
+    '            ${{ steps.work.outputs.root }}/package-install.stderr\n'
+    '            ${{ steps.work.outputs.root }}/package-install.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-build.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-create.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-create.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-create.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-create.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-create.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-create.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-sign.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-fields-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-fields-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-fields.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-android-inputs-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-android-inputs-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-android-inputs.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-local-edits3-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-local-edits3-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-local-edits3.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-doctor-preflight2-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-doctor-preflight2-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-doctor-preflight2.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-vault-helper-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-vault-helper-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-vault-helper.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-installation-inspection-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-installation-inspection-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-installation-inspection.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-recovery-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-recovery-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-recovery.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-ios-account-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-ios-account-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-ios-account.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua.status\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'
+    '          compression-level: 0\n'
+    '      # Instrumented engineering evidence only. No release, Store mutation,\n'
+    '      # shipping-binary equivalence, notarization or physical-device claim.\n'
+    '      # On uncertainty retain originals; runner disposal is not observed here.\n',
+    '      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n'
+    "        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == "
+    "'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE "
+    "== 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' "
+    "|| env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'local-edits3') && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ '
+    'env.MRK_MACOS_AQUA_SCOPE }}-${{ matrix.target }}\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'
+    '          compression-level: 0\n'
+    '      # Instrumented engineering evidence only. No release, Store mutation,\n'
+    '      # shipping-binary equivalence, notarization or physical-device claim.\n'
+    '      # On uncertainty retain originals; runner disposal is not observed here.\n'),
+   ('      - name: Preserve bounded Android lifecycle results and original workflow exit evidence\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome "
+    "== 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-android-registration-lifecycle\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/source-inventory.json\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.admitted.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.stderr.tail.txt\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/bounded-diagnostics.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n',
+    '      - name: Preserve bounded Android lifecycle results and original workflow exit evidence\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome "
+    "== 'success' && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-android-registration-lifecycle\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'),
+   ('      - name: Preserve bounded classification DATA and original workflow exit evidence\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome "
+    "== 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-xcode-installed-classification\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/source-inventory.json\n'
+    '            ${{ steps.work.outputs.root }}/xcode-installed-classification-result.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 7\n',
+    '      - name: Preserve bounded classification DATA and original workflow exit evidence\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome "
+    "== 'success' && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-xcode-installed-classification\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 7\n'),
+   ('      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' && steps.source.outcome == "
+    "'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-wrapping-keychain-private\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/source-inventory.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-native.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-native.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-before-add.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-before-lookup.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-creator.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-reader.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-pair.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-codec.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-codec-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-codec-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-codec-build.status\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-normal-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-normal-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-normal-build.status\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-observer-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-observer-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-observer-build.status\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-qualification-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-qualification-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-qualification-build.status\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-reader-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-reader-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-reader-build.status\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 7\n'
+    '          compression-level: 0\n'
+    '      # Never upload native stdout/stderr, a private Keychain, task-root contents\n'
+    '      # or a diagnostic filesystem sweep. Uncertainty has no fixture cleanup.\n',
+    '      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' && steps.source.outcome == "
+    "'success' && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-wrapping-keychain-private\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 7\n'
+    '          compression-level: 0\n'
+    '      # Never upload native stdout/stderr, a private Keychain, task-root contents\n'
+    '      # or a diagnostic filesystem sweep. Uncertainty has no fixture cleanup.\n'))))
+PUBLIC_VERIFICATION_WORKFLOW_MARKERS = ('public_evidence',
+ 'public-verification-evidence.json',
+ 'macos_public_verification_evidence.py',
+ 'Fixed vault helper compiler failed with original status',
+ '          if [[ "$remover_status" != 0 ]]; then\n'
+ '            # Optional diagnostics cannot replace the original compiler status.\n'
+ '            set +e\n'
+ "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+ 'retained.\\n\' "$remover_status" >&2\n'
+ '            exit "$remover_status"\n'
+ '          fi\n',
+ '            "$@" 2>&1 | /usr/bin/tee /dev/null | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/$label.log"\n')
+
+
+# Exact Intel-only app-build allocation, before every historical workflow layer.
+# Marker-free old intermediates stay unchanged; whole-predecessor hashes remain authoritative.
+INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE = (('    # Raw timed-step union535min; disjoint scopes retain the350min hard job cap.\n'
+  '    # Pre-Remove baseline preview345 / recovery339 / installed210, plus5 overhead.\n'
+  '    # Remove preview adds90 nominal step maxima; this sum establishes no fit.\n'
+  '    # Dormant Android272 / iOS248 include5 overhead; no native qualification claimed.\n'
+  '    # Fixed removal uses its own two fresh ARM rows, the same350min ceiling,\n'
+  '    # separate baseline Install/UI-build preparation, O3 work1740/hard1800,\n'
+  '    # then one removal owner990 (fixed segment sum963); no budget restart.\n'
+  '    # App-signature:82 timed preparation +14 bounded setup +7 summary/cleanup/upload;7 overhead.\n',
+  '    # Raw timed-step union535min (ARM) /559min (Intel); no job fit is established.\n'
+  '    # Historical pre-Remove baselines: preview345 / recovery339 / installed210, plus5 overhead.\n'
+  '    # Remove preview adds90 nominal step maxima; Intel app-build adds24 to the old allocation.\n'
+  '    # Dormant Android272 / iOS248 include5 overhead; historical baselines, not fit proofs.\n'
+  '    # Fixed removal uses its own two fresh ARM rows, the same350min ceiling,\n'
+  '    # separate baseline Install/UI-build preparation, O3 work1740/hard1800,\n'
+  '    # then one removal owner990 (fixed segment sum963); no budget restart.\n'
+  '    # App-signature: ARM82 / Intel106 timed preparation +14 bounded setup\n'
+  '    # +7 summary/cleanup/upload;7 overhead. Independent110 hard cap takes precedence.\n'),
+ ('        id: app_build\n        timeout-minutes: 24\n',
+  '        id: app_build\n'
+  "        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}\n"),
+ ('          # Same24-minute app-build budget; no independent timeout entitlement.\n',
+  '          # Same architecture-selected app-build budget; no independent timeout entitlement.\n'))
+INTEL_APP_BUILD_BUDGET_WORKFLOW_MARKERS = ('Raw timed-step union535min (ARM) /559min (Intel)', "matrix.target == 'x86_64-apple-darwin' && 48 || 24", 'Same architecture-selected app-build budget')
+
+
+REMAINING_THREE_WORKFLOW_INVERSE = (
+    ('    # Raw timed-step union535min (ARM) /559min (Intel); no job fit is established.\n', '    # Raw timed-step union577min (ARM) /601min (Intel) includes the retained42min alternative.\n    # Remaining-three adds28 nominal minutes versus one singleton; no350min fit is claimed.\n    # The unchanged350min job cap is containing authority, never renewed per case.\n'),
+    ('      MRK_MACOS_SAVED_FILE_UI_SCOPE: ordinary-seven\n', "      MRK_MACOS_SAVED_FILE_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'remaining-three' || 'ordinary-seven' }}\n"),
+    ('            saved-version-recovery|workflow-refusal|release-evidence) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;\n', '            saved-version-recovery|workflow-refusal|release-evidence|remaining-three) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;\n'),
+    ('      - name: Project closed public verification facts without raw originals\n', '      - name: Exercise and bind each remaining saved-file journey once in fixed order\n        id: normal_remaining_saved_file_ui\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\' && (github.ref == \'refs/heads/verify/desktop-macos-preview\' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == \'remaining-three\' && steps.normal_diagnostics_ui_result.outcome == \'success\')\n        timeout-minutes: 42\n        shell: bash\n        env:\n          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n        run: |\n          for MRK_MACOS_SAVED_FILE_UI_SCOPE in saved-version-recovery workflow-refusal release-evidence; do\n          export MRK_MACOS_SAVED_FILE_UI_SCOPE\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in\n            saved-version-recovery) singleton=saved-version-recovery; singleton_method=testSyntheticProjectSavedVersionRecovery ;;\n            workflow-refusal) singleton=workflow-refusal; singleton_method=testSyntheticProjectManagedWorkflowRefusal ;;\n            release-evidence) singleton=release-evidence; singleton_method=testSyntheticProjectSavedReleaseEvidence ;;\n            *) exit 1 ;;\n          esac\n          # Finite per-file logical size only; not RAM, total disk, service limits or finality.\n          set +e\n          ulimit -f 1048576\n          file_limit_status=$?\n          set -e\n          printf \'%s\\n\' "$file_limit_status" > "$MRK_MACOS_WORK/normal-ui/${singleton}-test-file-limit.status" || exit $?\n          [[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"\n          # normal_context freshly verifies both actual RLIMIT_FSIZE values;\n          # its original receipt/status, not a prior budget report, gates acceptance.\n          clean() {\n            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \\\n              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \\\n              LANG=en_US.UTF-8 TZ=UTC LC_ALL=en_US.UTF-8 "DEVELOPER_DIR=$DEVELOPER_DIR" \\\n              "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \\\n              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \\\n              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"\n          }\n          # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.\n          # One selected300s journey; unchanged420s command/585s phase. Only recovery runs its fixed20s producer.\n          set +e\n          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building \\\n            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \\\n            -configuration Debug -destination "platform=macOS,arch=$MRK_MACOS_MACHINE" -destination-timeout 15 \\\n            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \\\n            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/${singleton}-test.xcresult" \\\n            -only-testing:MRKNormalAppUITests/NormalAppUITests/"$singleton_method" \\\n            -parallel-testing-enabled NO -test-timeouts-enabled YES \\\n            -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \\\n            -disableAutomaticPackageResolution \\\n            > "$MRK_MACOS_WORK/normal-ui/${singleton}-test.log" 2>&1\n          test_status=$?\n          set -e\n          printf \'%s\\n\' "$test_status" > "$MRK_MACOS_WORK/normal-ui/${singleton}-test.status"\n          [[ "$test_status" == 0 ]] || exit "$test_status"\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in\n            saved-version-recovery) singleton=saved-version-recovery; singleton_method=testSyntheticProjectSavedVersionRecovery ;;\n            workflow-refusal) singleton=workflow-refusal; singleton_method=testSyntheticProjectManagedWorkflowRefusal ;;\n            release-evidence) singleton=release-evidence; singleton_method=testSyntheticProjectSavedReleaseEvidence ;;\n            *) exit 1 ;;\n          esac\n          # Each summary has its own finite one-GiB file limit and original owner phase.\n          ulimit -f 1048576\n          set +e\n          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \\\n            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \\\n            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \\\n            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-summary "${singleton}-test.xcresult" \\\n            > "$MRK_MACOS_WORK/normal-ui/${singleton}-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/${singleton}-summary.stderr"\n          summary_status=$?\n          set -e\n          printf \'%s\\n\' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/${singleton}-summary.status"\n          [[ "$summary_status" == 0 ]] || exit "$summary_status"\n          "$MRK_PYTHON" -I -S -B - <<\'PY_SAVED_VERSION_RECOVERY_RESULT\'\n          import hashlib, json, os, re, stat\n          from pathlib import Path\n          root = Path(os.environ["MRK_MACOS_WORK"])\n          source, target = os.environ["GITHUB_SHA"], os.environ["MRK_MACOS_TARGET"]\n          if source != os.environ["GITHUB_WORKFLOW_SHA"] or source != os.environ["MRK_EXPECTED_SHA"]:\n              raise ValueError("singleton result SOURCE differs")\n          def need(value):\n              if not value: raise ValueError("original selected singleton binding refused")\n          def singleton_selection(scope):\n              need(type(scope) is str and scope in ("saved-version-recovery", "workflow-refusal", "release-evidence"))\n              return (scope, {"saved-version-recovery": "testSyntheticProjectSavedVersionRecovery",\n                  "workflow-refusal": "testSyntheticProjectManagedWorkflowRefusal",\n                  "release-evidence": "testSyntheticProjectSavedReleaseEvidence"}[scope])\n          selected_scope = os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"]\n          stem, method = singleton_selection(selected_scope)\n          def read(name, limit):\n              path = root / name\n              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)\n              try:\n                  facts = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)\n                  before = os.fstat(fd)\n                  need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1\n                       and not before.st_mode & 0o022 and 0 <= before.st_size <= limit)\n                  with os.fdopen(fd, "rb", closefd=False) as stream: body = stream.read(limit + 1)\n                  need(len(body) == before.st_size and facts(before) == facts(os.fstat(fd)) == facts(os.stat(path, follow_symlinks=False)))\n                  return body\n              finally: os.close(fd)\n          def unique(rows):\n              result = {}\n              for key, value in rows:\n                  need(key not in result); result[key] = value\n              return result\n          def decode(body):\n              value = json.loads(body, object_pairs_hook=unique)\n              need(type(value) is dict)\n              return value\n          def digest(body): return hashlib.sha256(body).hexdigest()\n          def hex64(value): return type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None\n          preview = decode(read("preview/PREVIEW.json", 65536))\n          platforms = {"aarch64-apple-darwin": "macOS26-arm64", "x86_64-apple-darwin": "macOS26-x86_64"}\n          need(target in platforms and preview.get("platform") == platforms[target]\n               and preview.get("scope") == "normal-macos-early-preview" and preview.get("instrumented") is False\n               and preview.get("sourceCommit") == source and preview.get("runId") == os.environ["GITHUB_RUN_ID"]\n               and preview.get("runAttempt") == os.environ["GITHUB_RUN_ATTEMPT"]\n               and all(preview.get(key) == "passed" for key in ("normalBuild", "packageAudit", "installationReadback")))\n          prior_bytes = read("normal-ui/diagnostics-result.json", 65536)\n          prior = decode(prior_bytes)\n          need(prior.get("scope") == "ordinary-ui-observed-original-diagnostics-report-and-settled-projection"\n               and prior.get("target") == target and prior.get("applicationSourceCommit") == prior.get("harnessSourceCommit") == source\n               and prior.get("workflow") == ".github/workflows/desktop-macos-installed.yml"\n               and all(prior.get(key) == preview[key] for key in ("sourceTree", "runId", "runAttempt", "platform", "packageSha256", "packageSize",\n                   "signedAppBinarySha256", "normalBinaryBeforeSigningSha256", "runtimeManifestSha256", "installerInventorySha256")))\n          # Reuse only this source-bound prerequisite\'s unchanged build/tool-version DATA.\n          # Its success is never a substitute for this case\'s fresh input/original owners.\n          build_bytes = read("normal-ui/build.command-admission.json", 32768)\n          need(digest(build_bytes) == prior.get("buildCommandAdmissionSha256") and type(prior.get("toolchain")) is dict)\n          for name in ("build", stem + "-test-file-limit", stem + "-test", stem + "-summary"):\n              need(read("normal-ui/" + name + ".status", 16) == b"0\\n")\n          roster = ("normal-ui-source-roster", 15, 1048576, 0)\n          def admitted(name, phase, seconds, roles):\n              raw = read("normal-ui/" + name, 32768); value = decode(raw)\n              need(value.get("schemaVersion") == 1 and type(value["schemaVersion"]) is int\n                   and value.get("scope") == ("actual-generated-xctrunner-admission-only" if phase == "test" else "normal-ui-original-command-admission-only")\n                   and value.get("sourceCommit") == source and value.get("target") == target and value.get("resultBundle") == stem + "-test.xcresult"\n                   and value.get("normalPhase" if phase == "test" else "phase") == phase\n                   and value.get("originalCommandReturned") is True and value.get("sourcePrePostMatched") is True\n                   and hex64(value.get("sourceRosterSha256")) and value.get("fileLimitBytes") == [1073741824, 1073741824]\n                   and all(type(n) is int for n in value["fileLimitBytes"]) and value.get("receiptPolicy") == "exclusive0600-readback-consuming-close"\n                   and type(value.get("originalTestReturncode" if phase == "test" else "originalReturncode")) is int\n                   and value["originalTestReturncode" if phase == "test" else "originalReturncode"] == 0)\n              clock = value.get("phaseClock")\n              need(type(clock) is dict and set(clock) == {"startNs", "deadlineNs", "beforePublicationNs", "postCloseDeadlineRequired"}\n                   and clock["postCloseDeadlineRequired"] is True and all(type(clock[k]) is str and re.fullmatch(r"0|[1-9][0-9]{0,19}", clock[k])\n                       for k in ("startNs", "deadlineNs", "beforePublicationNs")))\n              start, end, before_close = (int(clock[k]) for k in ("startNs", "deadlineNs", "beforePublicationNs"))\n              need(end - start == seconds * 1000000000 and start <= before_close < end)\n              commands = value.get("commands"); need(type(commands) is list and len(commands) == len(roles))\n              for row, (role, cap, limit, code) in zip(commands, roles):\n                  need(type(row) is dict and row.get("role") == role and type(row.get("returncode")) is int and row["returncode"] == code\n                       and type(row.get("roleCapSeconds")) is int and row["roleCapSeconds"] == cap\n                       and type(row.get("timeoutSeconds")) is int and 1 <= row["timeoutSeconds"] <= cap\n                       and type(row.get("outputLimitBytes")) is int and row["outputLimitBytes"] == limit\n                       and all(type(row.get(k)) is int and 0 <= row[k] <= limit for k in ("stdoutBytes", "stderrBytes"))\n                       and row["stdoutBytes"] + row["stderrBytes"] <= limit\n                       and all(hex64(row.get(k)) for k in ("argvSha256", "stdoutSha256", "stderrSha256")))\n              return value, raw\n          def singleton_test_roles(scope):\n              singleton_selection(scope)\n              prefix = [("normal-ui-source-roster", 15, 1048576, 0)]\n              if scope == "saved-version-recovery":\n                  prefix += [("saved-version-source-roster", 15, 65536, 0), ("saved-version-core-interrupt", 20, 65536, 86)]\n              return prefix + [("verify-generated-runner", 30, 1048576, 0),\n                  ("generated-runner-entitlements", 30, 1048576, 0), ("one-admitted-ui-test", 420, 1048576, 0),\n                  ("normal-ui-source-roster", 15, 1048576, 0)]\n          runner, runner_bytes = admitted(stem + "-test.runner-admission.json", "test", 585,\n              singleton_test_roles(selected_scope))\n          summary_owner, summary_owner_bytes = admitted(stem + "-summary.command-admission.json", "summary", 90,\n              [roster, ("normal-ui-summary", 30, 262144, 0), roster])\n          need(summary_owner.get("originalCommandRole") == "normal-ui-summary"\n               and runner.get("appSandboxEntitlement") in ("absent", "false") and runner.get("strictCodesignOriginalZero") is True\n               and runner.get("originalProductsPrePostMatched") is True and runner.get("originalClosesCompleted") is True\n               and runner.get("reSignedOrRepaired") is False\n               and runner["sourceRosterSha256"] == summary_owner["sourceRosterSha256"] == decode(build_bytes)["sourceRosterSha256"])\n          summary_bytes = read("normal-ui/" + stem + "-summary.raw.json", 262144)\n          need(len(summary_bytes) == summary_owner["commands"][1]["stdoutBytes"] and digest(summary_bytes) == summary_owner["commands"][1]["stdoutSha256"])\n          summary = decode(summary_bytes)\n          counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}\n          need(all(type(summary.get(k)) is int and summary[k] == v for k, v in counts.items()))\n          def singleton_case_data(scope, runner, preview, expected_inputs, runtime_digest):\n              singleton_selection(scope)\n              if scope == "release-evidence":\n                  need(runner.get("savedReleaseEvidenceMarkerObserved") is True\n                       and "managedWorkflowRefusalMarkerObserved" not in runner\n                       and "savedVersionRecovery" not in runner and runtime_digest is None)\n                  return {"scope": "ordinary-ui-observed-original-saved-release-evidence-documents-only",\n                      "savedReleaseEvidenceUI": "passed", "nativeEvidencePickerObserved": True,\n                      "candidateDocumentsAgreeObserved": True, "sharedCandidateGuidanceObserved": True,\n                      "stageChangeRetainsCandidateObserved": True, "replacementCancelStaleObserved": True,\n                      "releaseInputsUnpopulatedObserved": True, "fixtureOriginalsPreserved": True,\n                      "remoteGitHubOperationObserved": False, "releasePromotionObserved": False,\n                      "artifactBytesVerified": False, "signingAuthenticated": False,\n                      "githubAuthenticityEstablished": False, "storeStateEstablished": False,\n                      "releaseReadinessEstablished": False, "recoverySafetyEstablished": False}\n              need("savedReleaseEvidenceMarkerObserved" not in runner)\n              if scope == "workflow-refusal":\n                  need(runner.get("managedWorkflowRefusalMarkerObserved") is True\n                       and "savedVersionRecovery" not in runner and runtime_digest is None)\n                  return {"scope": "ordinary-ui-observed-original-managed-workflow-refusal",\n                      "managedWorkflowRefusalUI": "passed", "managedWorkflowBundleRefused": True,\n                      "fixtureOriginalsPreserved": True, "workflowMutationObserved": False,\n                      "remoteGitHubOperationObserved": False, "releasePromotionObserved": False,\n                      "coreOutcomeObserved": {"effect": "not_started", "journal": "not_created", "resources": "settled"},\n                      "nativeProjectionObserved": {"finality": "settled"}}\n              need("managedWorkflowRefusalMarkerObserved" not in runner)\n              recovery = runner.get("savedVersionRecovery")\n              digests = ("sourceInputsSha256", "runtimeManifestSha256", "runtimeResultSha256", "sourceClosureSha256", "fixtureDataSha256", "producerSha256", "producerFramesSha256", "handoffSha256")\n              positives = ("originalFixtureRestored", "unrelatedOriginalsUnchanged", "readyJournalRemoved", "sourcePrePostMatched", "uiOriginalMarkersObserved", "originalClosesCompleted")\n              need(type(recovery) is dict and set(recovery) == set(digests) | set(positives) | {"producerReturncode", "publicOriginalCount", "readyJournalFileCount", "interruptedGuiSaveObserved"}\n                   and all(hex64(recovery[k]) for k in digests) and all(recovery[k] is True for k in positives)\n                   and recovery["interruptedGuiSaveObserved"] is False\n                   and all(type(recovery[k]) is int and recovery[k] == n for k, n in (("producerReturncode", 86), ("publicOriginalCount", 13), ("readyJournalFileCount", 6)))\n                   and recovery["sourceInputsSha256"] == expected_inputs\n                   and recovery["runtimeManifestSha256"] == preview["runtimeManifestSha256"]\n                   and recovery["runtimeResultSha256"] == runtime_digest\n                   and recovery["producerFramesSha256"] == runner["commands"][2]["stdoutSha256"]\n                   and runner["commands"][2]["stderrBytes"] == 0 and runner["commands"][2]["stderrSha256"] == digest(b""))\n              return {"scope": "ordinary-ui-observed-original-saved-version-rollback-and-fresh-load",\n                  "savedVersionRecoveryUI": "passed", "savedVersionRecovery": recovery,\n                  "coreOutcomeObserved": {"effect": "rolled_back", "journal": "clean", "resources": "settled", "reason": "none"},\n                  "nativeProjectionObserved": {"finality": "settled", "reason": "none"}, "freshSavedVersionObserved": {"name": "1.2.3", "build": "7"},\n                  "inspectionClosedWithoutApply": True, "explicitFreshRecoveryConfirmation": True, "interruptedGuiSaveObserved": False,\n                  "configurationTextImagesRecoveryObserved": False}\n          case_data = singleton_case_data(selected_scope, runner, preview,\n              os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"],\n              digest(read("runtime-result.json", 65536)) if selected_scope == "saved-version-recovery" else None)\n          result = {"schemaVersion": 1, **case_data,\n              "applicationSourceCommit": source, "harnessSourceCommit": source, "workflow": ".github/workflows/desktop-macos-installed.yml",\n              **{key: preview[key] for key in ("sourceTree", "runId", "runAttempt", "platform", "packageSha256", "packageSize", "runtimeManifestSha256",\n                  "installerInventorySha256", "normalBinaryBeforeSigningSha256", "signedAppBinarySha256")}, "target": target,\n              "toolchain": prior["toolchain"], "buildCommandAdmissionSha256": digest(build_bytes), "priorResultSha256": digest(prior_bytes),\n              "generatedRunnerAdmissionSha256": digest(runner_bytes), "summaryCommandAdmissionSha256": digest(summary_owner_bytes),\n              "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/" + method, "testCounts": counts,\n              "nativeSummarySha256": digest(summary_bytes),\n              "selectedSavedFileScope": selected_scope, "savedOfflineAndEmptyBuildInputCohortObserved": False,\n              "applicationStateAfterNormalQuit": "notRunning", "originalReferenceAndGateTerminalObserved": True,\n              "cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state", "independentOwnerResourceProof": False,\n              "fullUIQualified": False, "distributionQualified": False, "productReady": False}\n          body = json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False).encode() + b"\\n"\n          need(len(body) <= 65536)\n          fd = os.open(root / ("normal-ui/" + stem + "-result.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)\n          try:\n              with os.fdopen(fd, "wb", closefd=False) as output:\n                  output.write(body); output.flush(); os.fsync(fd)\n          finally: os.close(fd)\n          print("One ordinary saved-version recovery passed after original core interrupt86; interrupted GUI Save, other domains and all-worker finality remain unproved."\n                if selected_scope == "saved-version-recovery" else\n                "One preview-packaged GitHub local bundle refusal observed; remote GitHub, promotion, default-seven and independent all-worker finality remain unproved.")\n          PY_SAVED_VERSION_RECOVERY_RESULT\n          done\n      - name: Project closed public verification facts without raw originals\n'),
+    ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success')\n", "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success')\n"),
+    ('          if scope not in ("ordinary-seven", "saved-version-recovery", "workflow-refusal", "release-evidence"):\n              raise ValueError("task cleanup SOURCE scope refused")\n          stem = {"ordinary-seven": "saved-checks", "saved-version-recovery": "saved-version-recovery",\n                  "workflow-refusal": "workflow-refusal", "release-evidence": "release-evidence"}[scope]\n          test_stem, summary_stem = stem + "-test", stem + "-summary"\n          # The skipped cohort supplies no finality or cleanup authority.\n          saved_directory = root / ("normal-ui/" + test_stem + ".xcresult")\n          saved_logs = (test_stem + ".log", summary_stem + ".raw.json", summary_stem + ".stderr")\n', '          if scope not in ("ordinary-seven", "saved-version-recovery", "workflow-refusal", "release-evidence", "remaining-three"):\n              raise ValueError("task cleanup SOURCE scope refused")\n          stems = (("saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else\n                   ({"ordinary-seven": "saved-checks", "saved-version-recovery": "saved-version-recovery",\n                     "workflow-refusal": "workflow-refusal", "release-evidence": "release-evidence"}[scope],))\n          # The skipped cohort supplies no finality or cleanup authority.\n          # remaining-three reaches this step only after all three original binders returned0.\n          saved_directories = tuple(root / ("normal-ui/" + stem + "-test.xcresult") for stem in stems)\n          saved_logs = tuple(name for stem in stems for name in\n                             (stem + "-test.log", stem + "-summary.raw.json", stem + "-summary.stderr"))\n'),
+    ('                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/persistence-test.xcresult", root / "normal-ui/project-test.xcresult", root / "normal-ui/diagnostics-test.xcresult", saved_directory, root / "normal-ui/tmp",\n', '                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/persistence-test.xcresult", root / "normal-ui/project-test.xcresult", root / "normal-ui/diagnostics-test.xcresult", *saved_directories, root / "normal-ui/tmp",\n'),
+)
+
+
+INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_INVERSE = (('name: Desktop Mac normal package and limited early preview (Aqua gate separate)', (('    # Raw timed-step union577min (ARM) /601min (Intel) includes the retained42min alternative.\n', '    # Raw timed-step union577min (ARM) /615min (Intel) includes the retained42min alternative.\n'), ('    # App-signature: ARM82 / Intel106 timed preparation +14 bounded setup\n', '    # App-signature: ARM82 / Intel120 timed preparation +14 bounded setup\n'), ('      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        timeout-minutes: 10\n', "      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}\n"))), ('name: Desktop macOS genuine Aqua engineering verification', (("      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n        timeout-minutes: 10\n", "      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}\n"),)))
+INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_MARKERS = ("${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}", '    # Raw timed-step union577min (ARM) /615min (Intel)', '    # App-signature: ARM82 / Intel120 timed preparation')
+
+
+SAME_PACKAGE_WORKFLOW_INVERSE = (("      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}\n", "      # Separate reviewed activation only; baseline and later UI remain independent.\n      MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}\n      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}\n"), ('          case "$MRK_MACOS_ANDROID_UI_SCOPE" in\n', '          case "$MRK_MACOS_SAME_PACKAGE_SCOPE" in\n            disabled) ;;\n            same-package-noop) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;\n            *) exit 1 ;;\n          esac\n          case "$MRK_MACOS_ANDROID_UI_SCOPE" in\n'), ('      - name: Notarize, staple and verify only the final user image\n', '      - name: Notarize, staple and verify only the final user image\n        id: finalize_image\n'), ('      - name: Prepare the fixed two-file removal package without executing it\n', '      - name: Observe one ordinary finalized-carrier same-package no-op\n        id: same_package_noop\n        if: github.ref == \'refs/heads/verify/desktop-macos-preview\' && env.MRK_MACOS_SAME_PACKAGE_SCOPE == \'same-package-noop\' && steps.package_install.outcome == \'success\' && steps.finalize_image.outcome == \'success\'\n        timeout-minutes: 32\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          # The existing baseline is immutable. Only one ordinary Install.pkg\n          # original follows it; no build, sign, notary or privileged Python.\n          # This 32-minute optional step shares a1740s work/1800s hard owner;\n          # it adds32 nominal minutes, not a350-minute job fit guarantee.\n          [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == same-package-noop && "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py same-package-noop --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/same-package-noop.stdout" 2> "$MRK_MACOS_WORK/same-package-noop.stderr"\n          noop_status=$?\n          printf \'%s\\n\' "$noop_status" > "$MRK_MACOS_WORK/same-package-noop.status"\n          noop_status_saved=$?\n          set -e\n          if [[ "$noop_status" != 0 ]]; then exit "$noop_status"; fi\n          [[ "$noop_status_saved" == 0 ]] || exit "$noop_status_saved"\n          # Actual0, closed originals and live linked-state readback are all\n          # mandatory. This is not restore/update/GUI/service-exit evidence.\n\n      - name: Prepare the fixed two-file removal package without executing it\n'), ("&& steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success')", "&& steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))"))
+
+
+POSITIVE_UPDATE_WORKFLOW_INVERSE = (('      - verify/desktop-macos-app-absence-fixture\n\n',
+  '      - verify/desktop-macos-app-absence-fixture\n      - verify/desktop-macos-positive-update\n\n'),
+ ('  engineering-install:\n'
+  "    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || "
+  "github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '    environment: macos-developer-id\n',
+  '  engineering-install:\n'
+  "    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || "
+  "github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == "
+  "'refs/heads/verify/desktop-macos-positive-update')\n"
+  '    environment: macos-developer-id\n'),
+ ('          esac\n'
+  '          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || '
+  '"$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == '
+  'refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature '
+  '|| "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ) ]] || exit 1\n'
+  '          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ]]; then\n'
+  '            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && '
+  '"$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n',
+  '          esac\n'
+  '          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || '
+  '"$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == '
+  'refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature '
+  '|| "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == '
+  'refs/heads/verify/desktop-macos-positive-update ) ]] || exit 1\n'
+  '          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == '
+  'refs/heads/verify/desktop-macos-positive-update ]]; then\n'
+  '            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && '
+  '"$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n'),
+ ("          python-version: '3.14.7'\n"
+  '      - name: Select the fixed configured signed runtime before any payload download\n',
+  "          python-version: '3.14.7'\n"
+  '      - name: Refuse unconfigured update before any artifact download or native preparation\n'
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'\n"
+  '        id: update_selection\n'
+  '        timeout-minutes: 1\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          MRK_PYTHON: ${{ steps.python.outputs.python-path }}\n'
+  '        run: |\n'
+  '          set -euo pipefail\n'
+  '          umask 077\n'
+  '          selection=$("$MRK_PYTHON" -I -S -B desktop/tools/macos_update_verification.py select --target '
+  '"$MRK_MACOS_TARGET")\n'
+  '          [[ ${#selection} -le 1024 && "$HOME" == /* ]] || exit 1\n'
+  '          "$MRK_PYTHON" -I -S -B - "$selection" <<\'PY_UPDATE_SELECT\'\n'
+  '          import json, os, re, sys\n'
+  '          value = json.loads(sys.argv[1])\n'
+  '          if set(value) != {"artifactId", "runId", "artifactBytes", "additionalDiskBytes"}: raise '
+  'ValueError("update selection")\n'
+  '          rows = {}\n'
+  '          for field, key in (("artifactId", "MRK_UPDATE_ARTIFACT_ID"), ("runId", "MRK_UPDATE_RUN_ID")):\n'
+  '              v = value[field]\n'
+  '              if type(v) is not str or re.fullmatch(r"[1-9][0-9]{0,19}", v) is None: raise ValueError("update '
+  'identity")\n'
+  '              rows[key] = v\n'
+  '          for key in ("artifactBytes", "additionalDiskBytes"):\n'
+  '              if type(value[key]) is not int or not 0 < value[key] <= 8 * 1024**3: raise ValueError("update '
+  'quote")\n'
+  '          rows["MRK_UPDATE_DISK_BYTES"] = str(value["additionalDiskBytes"])\n'
+  '          home = os.environ["HOME"]\n'
+  '          if not home.startswith("/") or any(c in home for c in "\\r\\n\\0"): raise ValueError("update GUI home")\n'
+  '          rows["MRK_MACOS_GUI_HOME"] = home\n'
+  '          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:\n'
+  '              for key, value in rows.items(): output.write(key + "=" + value + "\\n")\n'
+  '          PY_UPDATE_SELECT\n'
+  '\n'
+  '      - name: Select the fixed configured signed runtime before any payload download\n'),
+ ('        id: data_contracts\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '        timeout-minutes: 28\n',
+  '        id: data_contracts\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || "
+  "github.ref == 'refs/heads/verify/desktop-macos-positive-update')\n"
+  '        timeout-minutes: 28\n'),
+ ('      - name: Build the separate fixed eight-case Installer package from the same completed input\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '        timeout-minutes: 8\n',
+  '      - name: Build the separate fixed eight-case Installer package from the same completed input\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != "
+  "'refs/heads/verify/desktop-macos-positive-update')\n"
+  '        timeout-minutes: 8\n'),
+ ('      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '        timeout-minutes: 18\n',
+  '      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != "
+  "'refs/heads/verify/desktop-macos-positive-update')\n"
+  '        timeout-minutes: 18\n'),
+ ('      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '        timeout-minutes: 3\n',
+  '      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != "
+  "'refs/heads/verify/desktop-macos-positive-update')\n"
+  '        timeout-minutes: 3\n'),
+ ('          # Closed receipt never certifies its own future original exit.\n\n'
+  '      - name: Standard Installer only is privileged; never execute the app or Python as root\n',
+  '          # Closed receipt never certifies its own future original exit.\n'
+  '\n'
+  '      - name: Admit only the reviewed update artifact incremental disk allocation\n'
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'\n"
+  '        timeout-minutes: 1\n'
+  '        shell: bash\n'
+  '        run: |\n'
+  '          set -euo pipefail\n'
+  '          umask 077\n'
+  '          "$MRK_PYTHON" -I -S -B - <<\'PY_UPDATE_SPACE\'\n'
+  '          import os, pathlib, stat\n'
+  '          root = pathlib.Path(os.environ["MRK_MACOS_WORK"])\n'
+  '          info = root.lstat()\n'
+  '          if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700: '
+  'raise ValueError("update work")\n'
+  '          budget = int(os.environ["MRK_UPDATE_DISK_BYTES"])\n'
+  '          capacity = os.statvfs(root)\n'
+  '          if not 0 < budget <= 8 * 1024**3 or capacity.f_bavail * capacity.f_frsize < budget + 64 * 1024**2: raise '
+  'ValueError("update disk")\n'
+  '          (root / "update-predecessor").mkdir(mode=0o700)\n'
+  '          PY_UPDATE_SPACE\n'
+  '\n'
+  '      - name: Download only SOURCE-nominated qualified predecessor DATA\n'
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'\n"
+  '        timeout-minutes: 5\n'
+  '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c\n'
+  '        with:\n'
+  '          artifact-ids: ${{ env.MRK_UPDATE_ARTIFACT_ID }}\n'
+  '          run-id: ${{ env.MRK_UPDATE_RUN_ID }}\n'
+  '          repository: Apdelrahman1911/mobile-release-kit\n'
+  '          github-token: ${{ github.token }}\n'
+  '          path: ${{ env.MRK_MACOS_WORK }}/update-predecessor\n'
+  "          merge-multiple: 'true'\n"
+  '          digest-mismatch: error\n'
+  "          skip-decompress: 'false'\n"
+  '\n'
+  '      - name: Install the exact qualified predecessor once before the existing current Installer original\n'
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'\n"
+  '        id: update_baseline\n'
+  '        timeout-minutes: 9\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          set +e\n'
+  '          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py update-baseline --target '
+  '"$MRK_MACOS_TARGET" \\\n'
+  '            > "$MRK_MACOS_WORK/update-baseline.stdout" 2> "$MRK_MACOS_WORK/update-baseline.stderr"\n'
+  '          phase_status=$?\n'
+  '          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/update-baseline.status"\n'
+  '          save_status=$?\n'
+  '          set -e\n'
+  '          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n'
+  '          [[ "$save_status" == 0 ]] || exit "$save_status"\n'
+  '          # P1 remains the existing one package-install original, not a replay.\n'
+  '\n'
+  '      - name: Standard Installer only is privileged; never execute the app or Python as root\n'))
+
+def without_positive_update_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("positive-update SOURCE bound differs")
+    source = without_intel_android_workflow(source)
+    if "verify/desktop-macos-positive-update" not in source:
+        if "update-baseline --target" in source or "MRK_UPDATE_ARTIFACT_ID" in source:
+            raise AssertionError("partial positive-update workflow")
+        return source
+    for before, after in POSITIVE_UPDATE_WORKFLOW_INVERSE:
+        if source.count(after) != 1 or source.count(before) != after.count(before):
+            raise AssertionError("positive-update exact region differs")
+    for before, after in reversed(POSITIVE_UPDATE_WORKFLOW_INVERSE):
+        source = source.replace(after, before, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "024cb67a62bbc1b7ba929c044a0edffc7f27731c8eeb508ca7e373924be4afc1":
+        raise AssertionError("positive-update whole predecessor differs")
+    return source
+
+
+APP_ABSENCE_WORKFLOW_INVERSE = (('      - verify/desktop-macos-removal-lifecycle\n      - verify/desktop-macos-app-signature\n\npermissions:\n', '      - verify/desktop-macos-removal-lifecycle\n      - verify/desktop-macos-app-signature\n      - verify/desktop-macos-app-absence-fixture\n\npermissions:\n'), ("jobs:\n  engineering-install:\n    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature')\n    environment: macos-developer-id\n    name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}\n", "jobs:\n  engineering-install:\n    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture')\n    environment: macos-developer-id\n    name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}\n"), ('            *) exit 1 ;;\n          esac\n          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ) ]] || exit 1\n          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then\n            [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n', '            *) exit 1 ;;\n          esac\n          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ) ]] || exit 1\n          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ]]; then\n            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n          fi\n          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then\n            [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n'), ("      - name: Compile and run only fixed native DATA contracts and exact host-Python regressions\n        id: data_contracts\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview')\n        timeout-minutes: 28\n        shell: bash\n", "      - name: Compile and run only fixed native DATA contracts and exact host-Python regressions\n        id: data_contracts\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture')\n        timeout-minutes: 28\n        shell: bash\n"), ("          PY\n      - name: Build the separate fixed eight-case Installer package from the same completed input\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle')\n        timeout-minutes: 8\n        shell: bash\n", "          PY\n      - name: Build the separate fixed eight-case Installer package from the same completed input\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture')\n        timeout-minutes: 8\n        shell: bash\n"), ('            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"\n      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\' && (github.ref != \'refs/heads/verify/desktop-macos-removal-lifecycle\')\n        timeout-minutes: 18\n        shell: bash\n', '            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"\n      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\' && (github.ref != \'refs/heads/verify/desktop-macos-removal-lifecycle\' && github.ref != \'refs/heads/verify/desktop-macos-app-absence-fixture\')\n        timeout-minutes: 18\n        shell: bash\n'), ("          # Any unexpected native failure/Unknown stops subsequent cases. No retry.\n      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle')\n        timeout-minutes: 3\n        shell: bash\n", "          # Any unexpected native failure/Unknown stops subsequent cases. No retry.\n      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture')\n        timeout-minutes: 3\n        shell: bash\n"), ("          # actual original0/status and the retained closed receipt, not a flag.\n\n      - name: Standard Installer only is privileged; never execute the app or Python as root\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'\n        id: package_install\n        timeout-minutes: 18\n        shell: bash\n        env:\n", '          # actual original0/status and the retained closed receipt, not a flag.\n\n      - name: Fixed nonshipping app-absence prepare-app-absence; no credentials or user artifact\n        id: app_absence_prepare\n        if: github.ref == \'refs/heads/verify/desktop-macos-app-absence-fixture\'\n        timeout-minutes: 56\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare-app-absence --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/prepare-app-absence.stdout" 2> "$MRK_MACOS_WORK/prepare-app-absence.stderr"\n          phase_status=$?\n          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/app-absence-preparation.status"\n          save_status=$?\n          set -e\n          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n          [[ "$save_status" == 0 ]] || exit "$save_status"\n          # Closed receipt never certifies its own future original exit.\n\n      - name: Standard Installer only is privileged; never execute the app or Python as root\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\'\n        id: package_install\n        timeout-minutes: ${{ github.ref == \'refs/heads/verify/desktop-macos-app-absence-fixture\' && 32 || 18 }}\n        shell: bash\n        env:\n'), ('          # One original existing owner: final archive audit, explicit producer,\n          # two fixed signed images, readonly mount, standard Installer and V2\n          # nonroot readback. Its one990s group includes known mount retirement.\n          # Previous pkgbuild/tar/xar construction is not relabeled as owned.\n          set +e\n', '          # One original existing owner: final archive audit, explicit producer,\n          # two fixed signed images, readonly mount, standard Installer and V2\n          # nonroot readback. Ordinary one990s remains unchanged. The fixed\n          # app-absence route alone adds baseline/image originals within1740s\n          # work/1800s hard; the job350min cap is never renewed.\n          # Previous pkgbuild/tar/xar construction is not relabeled as owned.\n          set +e\n'), ('          # Unknown resources remain retained; no forced detach or root Python.\n          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD\n      - name: Prepare fresh private Android UI suppliers and disposable key inputs\n        id: normal_android_inputs\n', '          # Unknown resources remain retained; no forced detach or root Python.\n          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD\n      - name: Fixed nonshipping app-absence app-absence-restore; no credentials or user artifact\n        id: app_absence_restore\n        if: github.ref == \'refs/heads/verify/desktop-macos-app-absence-fixture\'\n        timeout-minutes: 13\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py app-absence-restore --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/app-absence-restore.stdout" 2> "$MRK_MACOS_WORK/app-absence-restore.stderr"\n          phase_status=$?\n          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/app-absence-restore.status"\n          save_status=$?\n          set -e\n          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n          [[ "$save_status" == 0 ]] || exit "$save_status"\n          # Closed receipt never certifies its own future original exit.\n\n      - name: Prepare fresh private Android UI suppliers and disposable key inputs\n        id: normal_android_inputs\n'))
+
+SIGNED_ANDROID_SUPPORT_WORKFLOW_REGIONS = (('      - name: Acquire and verify the two fixed Android support archives as DATA\n        timeout-minutes: 4\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          set -o noclobber\n          umask 077\n          work=\'${{ steps.work.outputs.root }}\'\n          target=\'${{ matrix.target }}\'\n          [[ "$work" == /Users/runner/work/_temp/mrk-macos-installed.* && -d "$work" && ! -L "$work" ]] || exit 1\n          # Fresh outputs, no inherited credentials/proxy/curlrc, no retry or fallback.\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \\\n            --proto \'=https\' --proto-redir \'=https\' --connect-timeout 20 --max-time 90 --max-filesize 32520401 \\\n            --url \'https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar\' \\\n            > "$work/bundletool-all-1.18.3.jar"\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \\\n            --proto \'=https\' --proto-redir \'=https\' --connect-timeout 20 --max-time 90 --max-filesize 4339472 \\\n            --url \'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar\' \\\n            > "$work/aapt2-8.9.2-12782657-osx.jar"\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            \'${{ steps.python.outputs.python-path }}\' -I -S -B desktop/tools/stage_macos_installed.py android-support --target "$target" \\\n            --bundletool-archive "$work/bundletool-all-1.18.3.jar" --aapt2-archive "$work/aapt2-8.9.2-12782657-osx.jar" \\\n            > "$work/android-support-result.json"\n', '      - name: Download the fixed once-signed Android support capsule\n        timeout-minutes: 3\n        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8\n        with:\n          artifact-ids: \'11691308054\'\n          run-id: \'38109802320\'\n          repository: Apdelrahman1911/mobile-release-kit\n          github-token: ${{ github.token }}\n          path: ${{ steps.work.outputs.root }}/signed-android-transport\n          merge-multiple: \'false\'\n          digest-mismatch: error\n          skip-decompress: \'false\'\n      - name: Acquire and verify the two fixed Android support archives as DATA\n        timeout-minutes: 1\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          set -o noclobber\n          umask 077\n          work=\'${{ steps.work.outputs.root }}\'\n          target=\'${{ matrix.target }}\'\n          [[ "$work" == /Users/runner/work/_temp/mrk-macos-installed.* && -d "$work" && ! -L "$work" ]] || exit 1\n          # No native execution or credentials in DATA admission. Exact SOURCE\n          # joins all three originals to the successful once-signed producer.\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            \'${{ steps.python.outputs.python-path }}\' -I -S -B desktop/tools/stage_macos_installed.py android-support --target "$target" \\\n            --bundletool-archive "$work/signed-android-transport/bundletool-all-1.18.3.jar" \\\n            --aapt2-archive "$work/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \\\n            --android-support-signed-receipt "$work/signed-android-transport/android-support-signed-receipt.json" \\\n            > "$work/android-support-result.json"\n'), ('      - name: Acquire and verify the two fixed Android support archives as DATA\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == \'project-fields\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-current-synthetic\' || env.MRK_MACOS_AQUA_SCOPE == \'android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'project-fields-android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping\' || env.MRK_MACOS_AQUA_SCOPE == \'installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping-installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'project-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'doctor-preflight2\' || env.MRK_MACOS_AQUA_SCOPE == \'local-edits3\')\n        timeout-minutes: 4\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          set -o noclobber\n          umask 077\n          work=\'${{ steps.work.outputs.root }}\'\n          [[ "$work" == /Users/runner/work/_temp/mrk-macos-aqua.* && -d "$work" && ! -L "$work" ]] || exit 1\n          # Fresh outputs, no inherited credentials/proxy/curlrc, no retry or fallback.\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \\\n            --proto \'=https\' --proto-redir \'=https\' --connect-timeout 20 --max-time 90 --max-filesize 32520401 \\\n            --url \'https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar\' \\\n            > "$work/bundletool-all-1.18.3.jar"\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \\\n            --proto \'=https\' --proto-redir \'=https\' --connect-timeout 20 --max-time 90 --max-filesize 4339472 \\\n            --url \'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar\' \\\n            > "$work/aapt2-8.9.2-12782657-osx.jar"\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            \'${{ steps.python.outputs.python-path }}\' -I -S -B desktop/tools/stage_macos_installed.py android-support \\\n            --target \'${{ matrix.target }}\' \\\n            --bundletool-archive "$work/bundletool-all-1.18.3.jar" --aapt2-archive "$work/aapt2-8.9.2-12782657-osx.jar" \\\n            > "$work/android-support-result.json"\n', '      - name: Download the fixed once-signed Android support capsule\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == \'project-fields\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-current-synthetic\' || env.MRK_MACOS_AQUA_SCOPE == \'android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'project-fields-android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping\' || env.MRK_MACOS_AQUA_SCOPE == \'installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping-installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'project-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'doctor-preflight2\' || env.MRK_MACOS_AQUA_SCOPE == \'local-edits3\')\n        timeout-minutes: 3\n        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8\n        with:\n          artifact-ids: \'11691308054\'\n          run-id: \'38109802320\'\n          repository: Apdelrahman1911/mobile-release-kit\n          github-token: ${{ github.token }}\n          path: ${{ steps.work.outputs.root }}/signed-android-transport\n          merge-multiple: \'false\'\n          digest-mismatch: error\n          skip-decompress: \'false\'\n      - name: Acquire and verify the two fixed Android support archives as DATA\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == \'project-fields\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-current-synthetic\' || env.MRK_MACOS_AQUA_SCOPE == \'android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'project-fields-android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping\' || env.MRK_MACOS_AQUA_SCOPE == \'installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping-installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'project-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'doctor-preflight2\' || env.MRK_MACOS_AQUA_SCOPE == \'local-edits3\')\n        timeout-minutes: 1\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          set -o noclobber\n          umask 077\n          work=\'${{ steps.work.outputs.root }}\'\n          target=\'${{ matrix.target }}\'\n          [[ "$work" == /Users/runner/work/_temp/mrk-macos-aqua.* && -d "$work" && ! -L "$work" ]] || exit 1\n          # No native execution or credentials in DATA admission. Exact SOURCE\n          # joins all three originals to the successful once-signed producer.\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            \'${{ steps.python.outputs.python-path }}\' -I -S -B desktop/tools/stage_macos_installed.py android-support --target "$target" \\\n            --bundletool-archive "$work/signed-android-transport/bundletool-all-1.18.3.jar" \\\n            --aapt2-archive "$work/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \\\n            --android-support-signed-receipt "$work/signed-android-transport/android-support-signed-receipt.json" \\\n            > "$work/android-support-result.json"\n'))
+SIGNED_ANDROID_SUPPORT_WORKFLOW_COMMON = (('          [[ ! -e "$MRK_MACOS_WORK/signed-python-transport" && ! -L "$MRK_MACOS_WORK/signed-python-transport" ]] || exit 1\n', '          [[ ! -e "$MRK_MACOS_WORK/signed-python-transport" && ! -L "$MRK_MACOS_WORK/signed-python-transport" ]] || exit 1\n          [[ ! -e "$MRK_MACOS_WORK/signed-android-transport" && ! -L "$MRK_MACOS_WORK/signed-android-transport" ]] || exit 1\n'), ('            --bundletool-archive "$MRK_MACOS_WORK/bundletool-all-1.18.3.jar" \\\n            --aapt2-archive "$MRK_MACOS_WORK/aapt2-8.9.2-12782657-osx.jar" \\\n', '            --bundletool-archive "$MRK_MACOS_WORK/signed-android-transport/bundletool-all-1.18.3.jar" \\\n            --aapt2-archive "$MRK_MACOS_WORK/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \\\n            --android-support-signed-receipt "$MRK_MACOS_WORK/signed-android-transport/android-support-signed-receipt.json" \\\n'))
+
+
+def without_signed_android_runtime_source_pin(source):
+    # Fresh Mac core composition only; all older workflow oracles stay fixed.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("signed Android runtime SOURCE bound differs")
+    current = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+    previous = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+    if current not in source:
+        return source
+    configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + current + "\n"
+    guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + current + ' ]] || exit 1\n'
+    if (source.count(current) != 2 or previous in source
+            or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
+        raise AssertionError("signed Android runtime SOURCE exact two-site delta differs")
+    for line in (configured, guard):
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
+INSTALLED_ANDROID_ACTIVATION_INVERSE = (
+    '      # SOURCE-owned and OFF: legal/signing/current protected-copy prerequisites remain.\n      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n',
+    "      # SOURCE-owned: signed Android journey only on the fixed installed verification ref.\n      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'android-signed-build' || 'disabled' }}\n",
+)
+
+NORMAL_IOS_PENDING_WORKFLOW_INVERSE = (('      # SOURCE-owned: unsigned iOS journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'ios-unsigned-archive' || 'disabled' }}\n",
+  '      # SOURCE-owned: pending iOS recovery journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'ios-pending-recovery' || 'disabled' }}\n"),
+ ('            ios-unsigned-archive)\n', '            ios-unsigned-archive|ios-pending-recovery)\n'),
+ ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' "
+  "&& env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n",
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' "
+  "&& env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && (env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' || "
+  "env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery') && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && "
+  "env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n"),
+ ('      - name: Exercise one ordinary unsigned iOS archive and normal Quit\n'
+  '        id: normal_ios_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-test \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.log" 2>&1\n'
+  '          ios_test_status=$?\n'
+  '          printf \'%s\\n\' "$ios_test_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.status"\n'
+  '          ios_test_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi\n'
+  '          [[ "$ios_test_status_saved" == 0 ]] || exit 1\n'
+  '          # One900s case /1020s original /1245s phase; success observation must\n'
+  '          # latch by750s. The same original reserve is for failure/cancel/close,\n'
+  '          # not a replacement Start. Raw log, xcresult and archive stay PRIVATE.\n'
+  '\n'
+  '      - name: Observe the single unsigned iOS XCTest summary under the same source\n'
+  '        id: normal_ios_ui_summary\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 2\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-summary \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.json" 2> '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.stderr"\n'
+  '          ios_summary_status=$?\n'
+  '          printf \'%s\\n\' "$ios_summary_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.status"\n'
+  '          ios_summary_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi\n'
+  '          [[ "$ios_summary_status_saved" == 0 ]] || exit 1\n'
+  '          # The existing summary owner requires actual1/1 with no failure/skip.\n'
+  '          # Its closed source/command receipt plus the separately retained test0\n'
+  '          # and facts are evidence, never IPA/signing/distribution qualification.\n'
+  '\n',
+  '      - name: Exercise one ordinary unsigned iOS archive and normal Quit\n'
+  '        id: normal_ios_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-test \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.log" 2>&1\n'
+  '          ios_test_status=$?\n'
+  '          printf \'%s\\n\' "$ios_test_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.status"\n'
+  '          ios_test_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi\n'
+  '          [[ "$ios_test_status_saved" == 0 ]] || exit 1\n'
+  '          # One900s case /1020s original /1245s phase; success observation must\n'
+  '          # latch by750s. The same original reserve is for failure/cancel/close,\n'
+  '          # not a replacement Start. Raw log, xcresult and archive stay PRIVATE.\n'
+  '\n'
+  '      - name: Observe the single unsigned iOS XCTest summary under the same source\n'
+  '        id: normal_ios_ui_summary\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 2\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-summary \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.json" 2> '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.stderr"\n'
+  '          ios_summary_status=$?\n'
+  '          printf \'%s\\n\' "$ios_summary_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.status"\n'
+  '          ios_summary_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi\n'
+  '          [[ "$ios_summary_status_saved" == 0 ]] || exit 1\n'
+  '          # The existing summary owner requires actual1/1 with no failure/skip.\n'
+  '          # Its closed source/command receipt plus the separately retained test0\n'
+  '          # and facts are evidence, never IPA/signing/distribution qualification.\n'
+  '\n'
+  '      - name: Recover one genuine pending iOS account session through the ordinary app\n'
+  '        id: normal_ios_pending_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 19\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-pending-recovery ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # The same installed normal app, real console account, fixed fixture\n'
+  '          # and original runner are required. No signing material/Store action.\n'
+  '          # Never clean account state or private pending controls after failure.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \\\n'
+  '            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" '
+  '\\\n'
+  '            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \\\n'
+  '            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \\\n'
+  '            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" '
+  '\\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-pending-recovery-test \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-test.log" 2>&1\n'
+  '          ios_test_status=$?\n'
+  '          printf \'%s\\n\' "$ios_test_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-test.status"\n'
+  '          ios_test_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi\n'
+  '          [[ "$ios_test_status_saved" == 0 ]] || exit 1\n'
+  '          # Seven originals: sourcePRE/runner-signature/entitlements/producer180/\n'
+  '          # XCTest645 (525case)/observer90/sourcePOST, one1080s phase. The real\n'
+  '          # producer/UI/readback all must settle; logs and private baseline stay PRIVATE.\n'
+  '\n'
+  '      - name: Observe the one pending iOS recovery XCTest summary under the same source\n'
+  '        id: normal_ios_pending_ui_summary\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ios_pending_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 2\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-pending-recovery ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # The same installed normal app, real console account, fixed fixture\n'
+  '          # and original runner are required. No signing material/Store action.\n'
+  '          # Never clean account state or private pending controls after failure.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \\\n'
+  '            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" '
+  '\\\n'
+  '            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \\\n'
+  '            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \\\n'
+  '            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" '
+  '\\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-pending-recovery-summary \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.json" 2> '
+  '"$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.stderr"\n'
+  '          ios_summary_status=$?\n'
+  '          printf \'%s\\n\' "$ios_summary_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.status"\n'
+  '          ios_summary_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi\n'
+  '          [[ "$ios_summary_status_saved" == 0 ]] || exit 1\n'
+  '          # The existing summary owner requires actual1/1 with no failure/skip.\n'
+  '          # Its closed source/command receipt plus the separately retained test0\n'
+  '          # and facts are evidence, never IPA/signing/distribution qualification.\n'
+  '\n'))
+
+
+def without_normal_ios_pending_workflow(source):
+    source = without_intel_fetch_workflow(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("normal iOS pending workflow SOURCE bound differs")
+    if "ios-pending-recovery" not in source and "normal_ios_pending_ui_" not in source:
+        return source
+    for previous, current in reversed(NORMAL_IOS_PENDING_WORKFLOW_INVERSE):
+        if source.count(current) != 1:
+            raise AssertionError("normal iOS pending workflow exact SOURCE differs")
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "b96a9fe68f93b9eceeaf4297cdc4e1f54cb70b9c5ef51c346c84519e83ab4e65":
+        raise AssertionError("normal iOS pending workflow whole predecessor differs")
+    return source
+
+
+INSTALLED_IOS_ACTIVATION_INVERSE = (('      # SOURCE-owned: signed Android journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'android-signed-build' || 'disabled' }}\n",
+  '      # This installed verification run exercises iOS; Android keeps its separate qualification.\n'
+  '      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n'),
+ ('      # Separately reviewed unsigned archive UI; an installed app is still mandatory.\n'
+  '      MRK_MACOS_IOS_UI_SCOPE: disabled\n',
+  '      # SOURCE-owned: unsigned iOS journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'ios-unsigned-archive' || 'disabled' }}\n"))
+
+def without_installed_ios_activation_workflow(source):
+    source = without_normal_ios_pending_workflow(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("installed iOS activation SOURCE bound differs")
+    (old_android, new_android), (old_ios, new_ios) = INSTALLED_IOS_ACTIVATION_INVERSE
+    android_scopes = [line for line in source.splitlines(keepends=True)
+                      if line.startswith("      MRK_MACOS_ANDROID_UI_SCOPE:")]
+    ios_scopes = [line for line in source.splitlines(keepends=True)
+                  if line.startswith("      MRK_MACOS_IOS_UI_SCOPE:")]
+    if new_android not in source and new_ios not in source:
+        # Historical scope mutations belong to their unchanged exact inverse;
+        # only this new activation's own incomplete markers are refused here.
+        if (new_android.splitlines()[0] in source or new_ios.splitlines()[0] in source
+                or new_ios.splitlines(keepends=True)[1] in ios_scopes):
+            raise AssertionError("installed iOS activation partial SOURCE differs")
+        return source
+    if (source.count(new_android) != 1 or source.count(new_ios) != 1
+            or old_android in source or old_ios in source
+            or android_scopes != [new_android.splitlines(keepends=True)[1]]
+            or ios_scopes != [new_ios.splitlines(keepends=True)[1]]):
+        raise AssertionError("installed iOS activation exact SOURCE differs")
+    for previous, current in reversed(INSTALLED_IOS_ACTIVATION_INVERSE):
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "ec216ac8fceb8d35cd91f793c7e496c620f1ba212278026b8da883a88907a2dc":
+        raise AssertionError("installed iOS activation whole predecessor differs")
+    return source
+
+
+def without_installed_android_activation_workflow(source):
+    source = without_installed_ios_activation_workflow(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("installed Android activation SOURCE bound differs")
+    previous, current = INSTALLED_ANDROID_ACTIVATION_INVERSE
+    old_scope = previous.splitlines(keepends=True)[1]
+    new_scope = current.splitlines(keepends=True)[1]
+    scopes = [line for line in source.splitlines(keepends=True)
+              if line.startswith("      MRK_MACOS_ANDROID_UI_SCOPE:")]
+    if current not in source:
+        if (len(scopes) > 1 or any(line != old_scope for line in scopes)
+                or current.splitlines()[0] in source):
+            raise AssertionError("installed Android activation partial SOURCE differs")
+        return source
+    if source.count(current) != 1 or previous in source or scopes != [new_scope]:
+        raise AssertionError("installed Android activation exact SOURCE differs")
+    source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "b5e5776a4922100d68691f06fb0d354eb8aa6b6b92305889bd03251529d843ef":
+        raise AssertionError("installed Android activation whole predecessor differs")
+    return source
+
+
+def without_signed_android_support_workflow(source):
+    source = without_installed_android_activation_workflow(source)
+    source = without_signed_android_runtime_source_pin(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("signed Android support workflow SOURCE bound differs")
+    if "signed-android-transport" not in source:
+        return source
+    matches = [(old, new) for old, new in SIGNED_ANDROID_SUPPORT_WORKFLOW_REGIONS if new in source]
+    if len(matches) != 1:
+        raise AssertionError("signed Android support workflow exact download/admission differs")
+    regions = (*matches, *SIGNED_ANDROID_SUPPORT_WORKFLOW_COMMON)
+    for old, new in regions:
+        if source.count(new) != 1 or source.count(old) != new.count(old):
+            raise AssertionError("signed Android support workflow exact delta differs")
+    for old, new in reversed(regions):
+        source = source.replace(new, old, 1)
+    if any(marker in source for marker in ("signed-android-transport", "--android-support-signed-receipt",
+                                           "Download the fixed once-signed Android support capsule")):
+        raise AssertionError("signed Android support workflow extra delta differs")
+    return source
+
+
+INTEL_ANDROID_WORKFLOW_INVERSE = (('        id: normal_ui_build\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' "
+  "|| (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n"
+  '        timeout-minutes: 9\n',
+  '        id: normal_ui_build\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' "
+  "|| (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == "
+  "'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && "
+  "env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n"
+  '        timeout-minutes: 9\n'),
+ ('        id: normal_android_inputs\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n',
+  '        id: normal_android_inputs\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n'),
+ ('          umask 077\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == android-signed-build && "$MRK_MACOS_TARGET" == '
+  'aarch64-apple-darwin ]] || exit 1\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == '
+  '"$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1\n',
+  '          umask 077\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == android-signed-build ]] || exit 1\n'
+  '          case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$MRK_MACOS_HOSTED_JOB" in\n'
+  '            '
+  'aarch64-apple-darwin/ARM64/github-hosted-macos26-arm64|x86_64-apple-darwin/X64/github-hosted-macos26-x86_64) '
+  ';;\n'
+  '            *) exit 1 ;;\n'
+  '          esac\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == '
+  '"$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1\n'),
+ ('        id: normal_android_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_inputs.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 23\n',
+  '        id: normal_android_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && "
+  "steps.normal_android_inputs.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 23\n'),
+ ('        id: normal_android_ui_result\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_ui_test.outcome == 'success' "
+  "&& steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 3\n',
+  '        id: normal_android_ui_result\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && "
+  "steps.normal_android_ui_test.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 3\n'),
+ ("          SOURCE = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')\n"
+  "          TARGET = 'aarch64-apple-darwin'\n"
+  '          env = dict(os.environ)\n'
+  "          root = Path(env['MRK_MACOS_WORK'])\n",
+  "          SOURCE = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')\n"
+  '          env = dict(os.environ)\n'
+  "          TARGET = env['MRK_MACOS_TARGET']\n"
+  "          if TARGET not in ('aarch64-apple-darwin', 'x86_64-apple-darwin'): raise "
+  "ValueError('ui-fixed-target')\n"
+  "          root = Path(env['MRK_MACOS_WORK'])\n"),
+ ('              N, S, P = modules\n'
+  "              release_raw = source_body('desktop/macos-installed-inputs/build-release.json')\n"
+  '              release = S.build_release_data(release_raw, target=TARGET)\n',
+  '              N, S, P = modules\n'
+  "              release_raw = source_body('desktop/macos-installed-inputs/' +\n"
+  "                  ('build-release.json' if TARGET == 'aarch64-apple-darwin' else 'build-release-intel.json'))\n"
+  '              release = S.build_release_data(release_raw, target=TARGET)\n'),
+ ("              facts = N.android_signed_facts(document(original(normal / 'android-signed-build.facts.json', "
+  '16384)),\n'
+  '                                             source=source, run=run, attempt=attempt)\n'
+  "              build = document(original(normal / 'build.command-admission.json', 32768))\n",
+  "              facts = N.android_signed_facts(document(original(normal / 'android-signed-build.facts.json', "
+  '16384)),\n'
+  '                                             source=source, run=run, attempt=attempt, target=TARGET)\n'
+  "              build = document(original(normal / 'build.command-admission.json', 32768))\n"),
+ ("              summary = document(original(normal / 'android-signed-build-summary.command-admission.json', "
+  '32768))\n'
+  '              N.android_signed_receipts(build, test, summary, facts, source=source, normal=normal, run=run, '
+  'attempt=attempt)\n'
+  "              summary_raw = original(normal / 'android-signed-build-summary.json', 262144)\n",
+  "              summary = document(original(normal / 'android-signed-build-summary.command-admission.json', "
+  '32768))\n'
+  '              N.android_signed_receipts(build, test, summary, facts, source=source, normal=normal, run=run, '
+  'attempt=attempt, target=TARGET)\n'
+  "              summary_raw = original(normal / 'android-signed-build-summary.json', 262144)\n"))
+
+
+def without_intel_android_workflow(source):
+    if type(source) is not str or len(source.encode()) > 524288:
+        raise AssertionError("Intel Android source bound differs")
+    source = without_signed_android_support_workflow(source)
+    if "TARGET = env['MRK_MACOS_TARGET']" not in source:
+        return source
+    for previous, current in INTEL_ANDROID_WORKFLOW_INVERSE:
+        if source.count(current) != 1:
+            raise AssertionError("Intel Android exact source region differs")
+    for previous, current in reversed(INTEL_ANDROID_WORKFLOW_INVERSE):
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != '2363019ea613375c22473cb323adc4b5ee44fc42f5bedd1390fe05b524aeece8':
+        raise AssertionError("Intel Android source predecessor differs")
+    return source
+
+def without_app_absence_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("app-absence workflow source bound differs")
+    source = without_positive_update_workflow(source)
+    if "refs/heads/verify/desktop-macos-app-absence-fixture" not in source and "prepare-app-absence" not in source:
+        return source
+    for previous, current in APP_ABSENCE_WORKFLOW_INVERSE:
+        if source.count(current) != 1 or source.count(previous) != current.count(previous):
+            raise AssertionError("app-absence workflow exact delta differs")
+    for previous, current in reversed(APP_ABSENCE_WORKFLOW_INVERSE):
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != 'ce06d7acffac6e5d37b0bf2c3afbe86ab7cf58729e68b64408634908642b8f02':
+        raise AssertionError("app-absence workflow predecessor differs")
+    return source
+
+
+def without_command_terminal_runtime_source_pin(source):
+    # Only current core changed; preserve every older SOURCE inverse and hash.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("command terminal runtime SOURCE bound differs")
+    current = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+    previous = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
+    if current not in source:
+        return source
+    configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + current + "\n"
+    guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + current + ' ]] || exit 1\n'
+    if (source.count(current) != 2 or previous in source
+            or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
+        raise AssertionError("command terminal runtime SOURCE exact two-site delta differs")
+    for line in (configured, guard):
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
+def without_same_package_workflow(source):
+    source = without_app_absence_workflow(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("same-package workflow source bound differs")
+    source = without_command_terminal_runtime_source_pin(source)
+    if "MRK_MACOS_SAME_PACKAGE_SCOPE" not in source:
+        return source
+    for previous, current in SAME_PACKAGE_WORKFLOW_INVERSE:
+        if source.count(current) != 1 or source.count(previous) != current.count(previous):
+            raise AssertionError("same-package workflow exact delta differs")
+    for previous, current in reversed(SAME_PACKAGE_WORKFLOW_INVERSE):
+        source = source.replace(current, previous, 1)
+    if "MRK_MACOS_SAME_PACKAGE_SCOPE" in source or hashlib.sha256(source.encode()).hexdigest() != 'cf880d883ee3f0337caf11d328356e9dff07265135a32c2edb7f4f532de0083d':
+        raise AssertionError("same-package workflow predecessor differs")
+    return source
+
+
+def without_intel_resident_prepare_budget_workflow(source):
+    source = without_same_package_workflow(source)
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("Intel resident prepare budget workflow source bound differs")
+    if not any(marker in source for marker in INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_MARKERS):
+        return source
+    selected = [rows for route, rows in INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_INVERSE
+                if source.startswith(route + "\n")]
+    if len(selected) != 1:
+        raise AssertionError("Intel resident prepare budget workflow route differs")
+    for previous, current in selected[0]:
+        if source.count(current) != 1 or source.count("\n" + current) != 1 or previous in source:
+            raise AssertionError("Intel resident prepare budget workflow exact delta differs")
+    for previous, current in reversed(selected[0]):
+        source = source.replace("\n" + current, "\n" + previous, 1)
+    if any(marker in source for marker in INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_MARKERS):
+        raise AssertionError("Intel resident prepare budget workflow partial delta remains")
+    return source
+
+
+def without_remaining_three_workflow(source):
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("remaining-three workflow source bound differs")
+    source = without_intel_resident_prepare_budget_workflow(source)
+    markers = ("remaining-three", "normal_remaining_saved_file_ui")
+    if not any(marker in source for marker in markers):
+        return source
+    for previous, current in reversed(REMAINING_THREE_WORKFLOW_INVERSE):
+        if source.count(current) != 1 or source.count("\n" + current) != 1:
+            raise AssertionError("remaining-three workflow exact delta differs")
+        source = source.replace("\n" + current, "\n" + previous, 1)
+    if any(marker in source for marker in markers):
+        raise AssertionError("remaining-three workflow partial delta remains")
+    return source
+
+
+def without_intel_app_build_budget_workflow(source):
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("Intel app-build budget workflow source bound differs")
+    source = without_remaining_three_workflow(source)
+    if not any(marker in source for marker in INTEL_APP_BUILD_BUDGET_WORKFLOW_MARKERS):
+        return source
+    if not source.startswith("name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n"):
+        raise AssertionError("Intel app-build budget workflow route differs")
+    for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE:
+        if source.count(current) != 1 or source.count("\n" + current) != 1 or previous in source:
+            raise AssertionError("Intel app-build budget workflow exact delta differs")
+    for previous, current in reversed(INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE):
+        source = source.replace("\n" + current, "\n" + previous, 1)
+    if any(marker in source for marker in INTEL_APP_BUILD_BUDGET_WORKFLOW_MARKERS):
+        raise AssertionError("Intel app-build budget workflow partial delta remains")
+    return source
+
+
+# One exact optional removal-case CLI suffix, before the original privacy inverse.
+# This is SOURCE normalization only, never removal or original-finality evidence.
+REMOVAL_PUBLIC_VERIFICATION_WORKFLOW_INVERSE = ('            --profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"\n', '            --profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \\\n            --removal-case "$MRK_MACOS_REMOVAL_CASE"\n')
+
+
+def without_removal_public_verification_workflow(source):
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("removal public verification workflow source bound differs")
+    source = without_intel_app_build_budget_workflow(source)
+    # Retire the independent outer shipping-privacy delta before historical hashes.
+    source = without_shipping_compile_privacy_workflow(source)
+    installed = "name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n"
+    if "desktop/tools/macos_public_verification_evidence.py" not in source or not source.startswith(installed):
+        if "--removal-case" in source:
+            raise AssertionError("removal public verification workflow route differs")
+        return source
+    previous, current = REMOVAL_PUBLIC_VERIFICATION_WORKFLOW_INVERSE
+    anchor = '--profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET"'
+    if source.count(anchor) != 1:
+        raise AssertionError("removal public verification workflow anchor differs")
+    if source.count(previous) == 1 and source.count("\n" + previous) == 1 and "--removal-case" not in source:
+        return source
+    if (source.count(current) != 1 or source.count("\n" + current) != 1
+            or previous in source or source.count("--removal-case") != 1):
+        raise AssertionError("removal public verification workflow exact delta differs")
+    return source.replace("\n" + current, "\n" + previous, 1)
+
+
+def without_public_verification_workflow(source):
+    source = without_removal_public_verification_workflow(source)
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("public verification workflow source bound differs")
+    if not any(marker in source for marker in PUBLIC_VERIFICATION_WORKFLOW_MARKERS):
+        return source
+    selected = [rows for path, header, prior_hash, rows in PUBLIC_VERIFICATION_WORKFLOW_INVERSE
+                if source.startswith(header)]
+    if len(selected) != 1:
+        raise AssertionError("public verification workflow exact route differs")
+    for previous, current in reversed(selected[0]):
+        if source.count(current) != 1 or source.count("\n" + current) != 1:
+            raise AssertionError("public verification workflow exact delta differs")
+        source = source.replace("\n" + current, "\n" + previous, 1)
+    if any(marker in source for marker in PUBLIC_VERIFICATION_WORKFLOW_MARKERS):
+        raise AssertionError("public verification workflow partial delta remains")
+    return source
+
+
+def without_recent_app_signature_workflow(source):
+    source = without_public_verification_workflow(source)
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("recent app signature workflow source bound differs")
+    for label, markers, replacements in RECENT_APP_SIGNATURE_WORKFLOW_INVERSE:
+        if not any(marker in source for marker in markers):
+            continue
+        if any(source.count(current) != 1 or source.count("\n" + current) != 1
+               or (previous and previous in source) for current, previous in replacements):
+            raise AssertionError("recent app signature workflow " + label + " exact delta differs")
+        for current, previous in replacements:
+            source = source.replace("\n" + current, "\n" + previous, 1)
+        if any(marker in source for marker in markers):
+            raise AssertionError("recent app signature workflow " + label + " partial delta remains")
+    return source
+
+
+def without_enrolled_runtime_source_pin(source):
+    # The configured gh profile adds one real SOURCE row. Undo only the
+    # installed workflow's new two-site pin before its exact app-scope inverse.
+    # Unchanged Aqua still uses the old 177-row pin and bypasses this layer.
+    enrolled = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
+    preceding = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
+    if enrolled in source:
+        configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + enrolled + "\n"
+        guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + enrolled + ' ]] || exit 1\n'
+        if (source.count(enrolled) != 2 or preceding in source
+                or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
+            raise AssertionError("current runtime source pin exact two-site delta differs")
+        for line in (configured, guard):
+            source = source.replace("\n" + line, "\n" + line.replace(enrolled, preceding), 1)
+    return source
+
+
 def without_app_signature_workflow(source):
+    source = without_recent_app_signature_workflow(source)
+    source = without_enrolled_runtime_source_pin(source)
     if "verify/desktop-macos-app-signature" not in source:
         return source
     value = source.encode()
@@ -862,6 +3313,38 @@ def without_install_product_workflow(source):
     if hashlib.sha256(value).hexdigest() != "659016d8b299a5497ab895162695d3927b55e4dda96750cd3e5f9a742467bd00":
         raise AssertionError("Install product workflow inverse changed prior source")
     return value.decode()
+
+
+SHIPPING_COMPILE_PRIVACY_INVERSE = (('          prep_start = time.monotonic()\n', '          def compile_public_data(value, source, run_id, run_attempt):\n              """Closed prior compile observations, never receipt-publication authority."""\n              def check(ok):\n                  need(ok, \'compile-public-data\')\n\n              def digest(item):\n                  check(type(item) is str and re.fullmatch(r\'[0-9a-f]{64}\', item) is not None)\n                  return item\n\n              def integer(item, low, high):\n                  check(type(item) is int and low <= item <= high)\n                  return item\n\n              def nullable_bool(item):\n                  check(item is None or type(item) is bool)\n                  return item\n\n              roles = (\'node-version\', \'npm-version\', \'rustc-version\', \'cargo-version\',\n                       \'npm-ci\', \'frontend-build\', \'shipping-image-build\')\n              fact_names = (\'originalPending\', \'sourcePost\', \'toolsPost\', \'frontendGenerated\',\n                            \'facadeArtifactVerified\', \'inputOriginalsKnown\', \'toolOriginalsClosed\',\n                            \'generatedOutputsRetired\', \'shippingGraphCompiled\', \'installedQualified\',\n                            \'runtimeQualified\', \'launched\', \'signed\', \'pythonControllerPrepared\',\n                            \'pythonControllerPost\', \'pythonControllerRetired\')\n              conditions = (\'controller-record\', \'controller-base\', \'controller-row\', \'controller-roster\',\n                            \'controller-file\', \'controller-config\', \'controller-runtime\', \'controller-original-changed\',\n                            \'controller-total\', \'controller-directory\', \'controller-short-read\', \'controller-deadline\',\n                            \'controller-unexpected-process\', \'controller-work-root\', \'controller-template\',\n                            \'controller-publication\', \'controller-source-copy\', \'controller-operation\',\n                            \'cargo-output-bound\', \'cargo-line-bound\', \'cargo-document\', \'cargo-finished\',\n                            \'cargo-facade-count\', \'cargo-target-shape\', \'cargo-real-facade\', \'cargo-app-count\',\n                            \'cargo-shipping-feature\', \'compile-artifact-file\', \'compile-artifact-short\', \'compile-artifact-post\')\n              owner_reasons = (\'incomplete-output\', \'output-bound\', \'protocol-or-ownership\',\n                               \'command-failed-or-incomplete\', \'cleanup-unconfirmed\', \'exec-rejected\',\n                               \'stopped-before-exec\', \'parent-ended\', \'observer-ended\', \'fence-collision\', \'unknown\')\n              check(type(value) is dict and type(source) is str and re.fullmatch(r\'[0-9a-f]{40}\', source)\n                    and source != \'0\' * 40 and all(type(item) is str and re.fullmatch(r\'[1-9][0-9]{0,19}\', item)\n                                                 for item in (run_id, run_attempt)))\n              fixed = dict(schemaVersion=1, scope=\'fixed-arm-shipping-image-compile-only\', source=source,\n                           workflowSource=source, runId=run_id, runAttempt=run_attempt, target=\'aarch64-apple-darwin\')\n              check(type(value.get(\'schemaVersion\')) is int and all(value.get(key) == item for key, item in fixed.items()))\n              facts = {}\n              for name in fact_names:\n                  check(name not in value or type(value[name]) is bool)\n                  facts[name] = value.get(name)\n              check(type(facts[\'shippingGraphCompiled\']) is bool\n                    and all(facts[name] is False for name in (\'installedQualified\', \'runtimeQualified\', \'launched\', \'signed\')))\n              rows = value.get(\'commands\')\n              check(type(rows) is list and len(rows) <= len(roles))\n              commands = []\n              for index, row in enumerate(rows):\n                  check(type(row) is dict and row.get(\'role\') == roles[index]\n                        and type(row.get(\'returned\')) is bool and type(row.get(\'capturesSettled\')) is bool)\n                  out = integer(row.get(\'stdoutBytes\'), 0, 4096 if index < 4 else 4 * 1024 * 1024)\n                  err = integer(row.get(\'stderrBytes\'), 0, 4096 if index < 4 else 4 * 1024 * 1024)\n                  check(out + err <= (4096 if index < 4 else 4 * 1024 * 1024))\n                  commands.append(dict(role=roles[index], returned=row[\'returned\'], capturesSettled=row[\'capturesSettled\'],\n                                       returncode=integer(row.get(\'returncode\'), -(2**31), 2**31 - 1),\n                                       stdoutBytes=out, stderrBytes=err,\n                                       stdoutSha256=digest(row.get(\'stdoutSha256\')), stderrSha256=digest(row.get(\'stderrSha256\'))))\n              inventory = None\n              if \'sourceInventoryBytes\' in value or \'sourceInventorySha256\' in value:\n                  inventory = dict(bytes=integer(value.get(\'sourceInventoryBytes\'), 1, 2 * 1024 * 1024),\n                                   sha256=digest(value.get(\'sourceInventorySha256\')))\n              facade = None\n              if \'facadeArtifact\' in value:\n                  item = value[\'facadeArtifact\']\n                  check(type(item) is dict)\n                  facade = dict(bytes=integer(item.get(\'bytes\'), 1, 256 * 1024 * 1024), sha256=digest(item.get(\'sha256\')))\n              failure = None\n              if value.get(\'failure\') is not None:\n                  item = value[\'failure\']\n                  check(type(item) is dict)\n                  stages = (\'python-base\', \'python-create\', \'python-census\', \'python-publication\', \'admission\',\n                            \'source-tool-post\', \'generated-cleanup\', \'tool-close\', \'public-capture\') + roles\n                  stage, condition = item.get(\'stage\'), item.get(\'condition\')\n                  check(type(stage) is str and (condition is None or type(condition) is str))\n                  failure = dict(stage=stage if stage in stages else \'other\',\n                                 condition=condition if condition in conditions else None if condition is None else \'unclassified\',\n                                 ownerDiagnostic=None)\n                  if \'ownerDiagnostic\' in item:\n                      observed = item[\'ownerDiagnostic\']\n                      check(type(observed) is dict and type(observed.get(\'available\')) is bool)\n                      typed = observed.get(\'typedFacts\', [])\n                      check(type(typed) is list and len(typed) <= 16\n                            and (observed[\'available\'] or not typed))\n                      projected = []\n                      for row in typed:\n                          check(type(row) is dict and type(row.get(\'kind\')) is str and row[\'kind\'] in (\'process-error\', \'interrupted\')\n                                and type(row.get(\'reason\')) is str and row[\'reason\'] in owner_reasons)\n                          mask = row.get(\'ownerFailureMask\')\n                          check(mask is None or type(mask) is int and 1 <= mask <= 63)\n                          projected.append(dict(kind=row[\'kind\'], reason=row[\'reason\'], ownerFailureMask=mask,\n                                                **{key: nullable_bool(row.get(key)) for key in (\'dispatched\', \'contained\', \'cleanupComplete\')}))\n                      failure[\'ownerDiagnostic\'] = dict(available=observed[\'available\'], typedFacts=projected,\n                                                        chainTruncated=nullable_bool(observed.get(\'chainTruncated\')))\n              if facts[\'shippingGraphCompiled\']:\n                  check(len(commands) == len(roles) and all(row[\'returned\'] and row[\'capturesSettled\'] and row[\'returncode\'] == 0 for row in commands)\n                        and facts[\'originalPending\'] is False and failure is None and inventory is not None and facade is not None\n                        and all(facts[name] is True for name in (\'sourcePost\', \'toolsPost\', \'frontendGenerated\', \'facadeArtifactVerified\',\n                            \'inputOriginalsKnown\', \'toolOriginalsClosed\', \'generatedOutputsRetired\', \'pythonControllerPrepared\',\n                            \'pythonControllerPost\', \'pythonControllerRetired\')))\n              result = dict(kind=\'mrk-public-shipping-compile-evidence-v1\', **fixed, facts=facts,\n                            commands=commands, sourceInventory=inventory, facadeArtifact=facade, failure=failure)\n              check(len((json.dumps(result, sort_keys=True, separators=(\',\', \':\'), allow_nan=False) + \'\\n\').encode(\'ascii\')) <= 16384)\n              return result\n\n\n          prep_start = time.monotonic()\n'), ("          TARGET = 'aarch64-apple-darwin'\n          RUST_RELEASE = '1.98.1'\n", '          def compile_public_data(value, source, run_id, run_attempt):\n              """Closed prior compile observations, never receipt-publication authority."""\n              def check(ok):\n                  need(ok, \'compile-public-data\')\n\n              def digest(item):\n                  check(type(item) is str and re.fullmatch(r\'[0-9a-f]{64}\', item) is not None)\n                  return item\n\n              def integer(item, low, high):\n                  check(type(item) is int and low <= item <= high)\n                  return item\n\n              def nullable_bool(item):\n                  check(item is None or type(item) is bool)\n                  return item\n\n              roles = (\'node-version\', \'npm-version\', \'rustc-version\', \'cargo-version\',\n                       \'npm-ci\', \'frontend-build\', \'shipping-image-build\')\n              fact_names = (\'originalPending\', \'sourcePost\', \'toolsPost\', \'frontendGenerated\',\n                            \'facadeArtifactVerified\', \'inputOriginalsKnown\', \'toolOriginalsClosed\',\n                            \'generatedOutputsRetired\', \'shippingGraphCompiled\', \'installedQualified\',\n                            \'runtimeQualified\', \'launched\', \'signed\', \'pythonControllerPrepared\',\n                            \'pythonControllerPost\', \'pythonControllerRetired\')\n              conditions = (\'controller-record\', \'controller-base\', \'controller-row\', \'controller-roster\',\n                            \'controller-file\', \'controller-config\', \'controller-runtime\', \'controller-original-changed\',\n                            \'controller-total\', \'controller-directory\', \'controller-short-read\', \'controller-deadline\',\n                            \'controller-unexpected-process\', \'controller-work-root\', \'controller-template\',\n                            \'controller-publication\', \'controller-source-copy\', \'controller-operation\',\n                            \'cargo-output-bound\', \'cargo-line-bound\', \'cargo-document\', \'cargo-finished\',\n                            \'cargo-facade-count\', \'cargo-target-shape\', \'cargo-real-facade\', \'cargo-app-count\',\n                            \'cargo-shipping-feature\', \'compile-artifact-file\', \'compile-artifact-short\', \'compile-artifact-post\')\n              owner_reasons = (\'incomplete-output\', \'output-bound\', \'protocol-or-ownership\',\n                               \'command-failed-or-incomplete\', \'cleanup-unconfirmed\', \'exec-rejected\',\n                               \'stopped-before-exec\', \'parent-ended\', \'observer-ended\', \'fence-collision\', \'unknown\')\n              check(type(value) is dict and type(source) is str and re.fullmatch(r\'[0-9a-f]{40}\', source)\n                    and source != \'0\' * 40 and all(type(item) is str and re.fullmatch(r\'[1-9][0-9]{0,19}\', item)\n                                                 for item in (run_id, run_attempt)))\n              fixed = dict(schemaVersion=1, scope=\'fixed-arm-shipping-image-compile-only\', source=source,\n                           workflowSource=source, runId=run_id, runAttempt=run_attempt, target=\'aarch64-apple-darwin\')\n              check(type(value.get(\'schemaVersion\')) is int and all(value.get(key) == item for key, item in fixed.items()))\n              facts = {}\n              for name in fact_names:\n                  check(name not in value or type(value[name]) is bool)\n                  facts[name] = value.get(name)\n              check(type(facts[\'shippingGraphCompiled\']) is bool\n                    and all(facts[name] is False for name in (\'installedQualified\', \'runtimeQualified\', \'launched\', \'signed\')))\n              rows = value.get(\'commands\')\n              check(type(rows) is list and len(rows) <= len(roles))\n              commands = []\n              for index, row in enumerate(rows):\n                  check(type(row) is dict and row.get(\'role\') == roles[index]\n                        and type(row.get(\'returned\')) is bool and type(row.get(\'capturesSettled\')) is bool)\n                  out = integer(row.get(\'stdoutBytes\'), 0, 4096 if index < 4 else 4 * 1024 * 1024)\n                  err = integer(row.get(\'stderrBytes\'), 0, 4096 if index < 4 else 4 * 1024 * 1024)\n                  check(out + err <= (4096 if index < 4 else 4 * 1024 * 1024))\n                  commands.append(dict(role=roles[index], returned=row[\'returned\'], capturesSettled=row[\'capturesSettled\'],\n                                       returncode=integer(row.get(\'returncode\'), -(2**31), 2**31 - 1),\n                                       stdoutBytes=out, stderrBytes=err,\n                                       stdoutSha256=digest(row.get(\'stdoutSha256\')), stderrSha256=digest(row.get(\'stderrSha256\'))))\n              inventory = None\n              if \'sourceInventoryBytes\' in value or \'sourceInventorySha256\' in value:\n                  inventory = dict(bytes=integer(value.get(\'sourceInventoryBytes\'), 1, 2 * 1024 * 1024),\n                                   sha256=digest(value.get(\'sourceInventorySha256\')))\n              facade = None\n              if \'facadeArtifact\' in value:\n                  item = value[\'facadeArtifact\']\n                  check(type(item) is dict)\n                  facade = dict(bytes=integer(item.get(\'bytes\'), 1, 256 * 1024 * 1024), sha256=digest(item.get(\'sha256\')))\n              failure = None\n              if value.get(\'failure\') is not None:\n                  item = value[\'failure\']\n                  check(type(item) is dict)\n                  stages = (\'python-base\', \'python-create\', \'python-census\', \'python-publication\', \'admission\',\n                            \'source-tool-post\', \'generated-cleanup\', \'tool-close\', \'public-capture\') + roles\n                  stage, condition = item.get(\'stage\'), item.get(\'condition\')\n                  check(type(stage) is str and (condition is None or type(condition) is str))\n                  failure = dict(stage=stage if stage in stages else \'other\',\n                                 condition=condition if condition in conditions else None if condition is None else \'unclassified\',\n                                 ownerDiagnostic=None)\n                  if \'ownerDiagnostic\' in item:\n                      observed = item[\'ownerDiagnostic\']\n                      check(type(observed) is dict and type(observed.get(\'available\')) is bool)\n                      typed = observed.get(\'typedFacts\', [])\n                      check(type(typed) is list and len(typed) <= 16\n                            and (observed[\'available\'] or not typed))\n                      projected = []\n                      for row in typed:\n                          check(type(row) is dict and type(row.get(\'kind\')) is str and row[\'kind\'] in (\'process-error\', \'interrupted\')\n                                and type(row.get(\'reason\')) is str and row[\'reason\'] in owner_reasons)\n                          mask = row.get(\'ownerFailureMask\')\n                          check(mask is None or type(mask) is int and 1 <= mask <= 63)\n                          projected.append(dict(kind=row[\'kind\'], reason=row[\'reason\'], ownerFailureMask=mask,\n                                                **{key: nullable_bool(row.get(key)) for key in (\'dispatched\', \'contained\', \'cleanupComplete\')}))\n                      failure[\'ownerDiagnostic\'] = dict(available=observed[\'available\'], typedFacts=projected,\n                                                        chainTruncated=nullable_bool(observed.get(\'chainTruncated\')))\n              if facts[\'shippingGraphCompiled\']:\n                  check(len(commands) == len(roles) and all(row[\'returned\'] and row[\'capturesSettled\'] and row[\'returncode\'] == 0 for row in commands)\n                        and facts[\'originalPending\'] is False and failure is None and inventory is not None and facade is not None\n                        and all(facts[name] is True for name in (\'sourcePost\', \'toolsPost\', \'frontendGenerated\', \'facadeArtifactVerified\',\n                            \'inputOriginalsKnown\', \'toolOriginalsClosed\', \'generatedOutputsRetired\', \'pythonControllerPrepared\',\n                            \'pythonControllerPost\', \'pythonControllerRetired\')))\n              result = dict(kind=\'mrk-public-shipping-compile-evidence-v1\', **fixed, facts=facts,\n                            commands=commands, sourceInventory=inventory, facadeArtifact=facade, failure=failure)\n              check(len((json.dumps(result, sort_keys=True, separators=(\',\', \':\'), allow_nan=False) + \'\\n\').encode(\'ascii\')) <= 16384)\n              return result\n\n\n          TARGET = \'aarch64-apple-darwin\'\n          RUST_RELEASE = \'1.98.1\'\n'), ("publish_preparation('compile-receipt.json', failure, cleanup=True)", "publish_preparation('compile-receipt.json', compile_public_data(failure, source, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']), cleanup=True)"), ("publish('compile-receipt.json', (json.dumps(receipt, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\\n').encode('ascii'), 65536)", "publish('compile-receipt.json', (json.dumps(compile_public_data(receipt, source, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']), sort_keys=True, separators=(',', ':'), allow_nan=False) + '\\n').encode('ascii'), 65536)"), ('                  # Public fixed-source compiler output only; no binary/cache/runtime/signing upload.\n', '                  # Local captured compiler originals only; never included in the artifact.\n'), ('            ${{ steps.compile_work.outputs.root }}/source-inventory.json\n            ${{ steps.compile_work.outputs.root }}/compile-receipt.json\n            ${{ steps.compile_work.outputs.root }}/npm-ci.stdout\n            ${{ steps.compile_work.outputs.root }}/npm-ci.stderr\n            ${{ steps.compile_work.outputs.root }}/frontend-build.stdout\n            ${{ steps.compile_work.outputs.root }}/frontend-build.stderr\n            ${{ steps.compile_work.outputs.root }}/shipping-image-build.stdout\n            ${{ steps.compile_work.outputs.root }}/shipping-image-build.stderr\n', '            ${{ steps.compile_work.outputs.root }}/compile-receipt.json\n'))
+
+
+def without_shipping_compile_privacy_workflow(source):
+    marker = "  shipping-image-compile:\n"
+    if marker not in source:
+        if "compile_public_data(" in source:
+            raise AssertionError("partial shipping privacy workflow")
+        return source
+    states = []
+    for before, after in SHIPPING_COMPILE_PRIVACY_INVERSE:
+        if source.count(after) == 1 and source.count(before) == after.count(before):
+            states.append("new")
+        elif source.count(before) == 1 and source.count(after) == before.count(after):
+            states.append("old")
+        else:
+            raise AssertionError("shipping privacy region differs")
+    if states == ["old"] * len(states):
+        if "compile_public_data(" in source:
+            raise AssertionError("partial shipping privacy workflow")
+        return source
+    if states != ["new"] * len(states) or source.count("compile_public_data(") != 4:
+        raise AssertionError("mixed shipping privacy workflow")
+    for before, after in reversed(SHIPPING_COMPILE_PRIVACY_INVERSE):
+        if source.count(after) != 1:
+            raise AssertionError("duplicate shipping privacy workflow")
+        source = source.replace(after, before, 1)
+    if "compile_public_data(" in source:
+        raise AssertionError("unretired shipping privacy workflow")
+    return source
 
 
 def without_shipping_compile_workflow(source):
@@ -1288,6 +3771,634 @@ def inline_python(block: str, marker: str) -> str:
 
 
 class NormalDiagnosticsSourceTests(unittest.TestCase):
+    def test_positive_update_is_unconfigured_and_reverses_to_current_recovery_source(self):
+        root = Path(__file__).absolute().parents[2]
+        raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        self.assertEqual(json.loads((root / "desktop/macos-installed-inputs/update-predecessors.json").read_text()),
+                         {"schemaVersion": 1, "mode": "unconfigured"})
+        self.assertEqual(raw.count("macos_android_helper_package.py update-baseline --target"), 1)
+        self.assertEqual(raw.count("macos_android_helper_package.py package-install --target"), 1)
+        self.assertLess(raw.index("Refuse unconfigured update"), raw.index("Select fixed frontend compiler"))
+        self.assertLess(raw.index("id: update_baseline"), raw.index("id: package_install"))
+        baseline = raw.split("        id: update_baseline\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 9", baseline)
+        self.assertNotIn("secrets.", baseline)
+        self.assertIn("digest-mismatch: error", raw)
+        previous = without_positive_update_workflow(raw)
+        self.assertEqual(hashlib.sha256(previous.encode()).hexdigest(), "024cb67a62bbc1b7ba929c044a0edffc7f27731c8eeb508ca7e373924be4afc1")
+        self.assertEqual(without_positive_update_workflow(previous), previous)
+        self.assertNotIn("verify/desktop-macos-positive-update", previous)
+        for before, after in POSITIVE_UPDATE_WORKFLOW_INVERSE:
+            with self.assertRaises(AssertionError): without_positive_update_workflow(raw.replace(after, before, 1))
+        with self.assertRaises(AssertionError): without_positive_update_workflow(raw + POSITIVE_UPDATE_WORKFLOW_INVERSE[0][1])
+        # Current SOURCE S assertions remain raw; only this exact newer route
+        # is removed before the already-reviewed historical inverse chain.
+        self.assertEqual(raw.count("10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"), 2)
+        self.assertNotIn("c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09", raw)
+        self.assertEqual(previous.count("c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"), 2)
+        self.assertEqual(without_app_absence_workflow(raw), without_app_absence_workflow(previous))
+
+    def test_intel_android_ui_target_join_precedes_historical_projection(self):
+        root = Path(__file__).absolute().parents[2]
+        raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        pending_current = raw
+        self.assertEqual(raw.count("      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n"), 1)
+        self.assertIn("&& 'ios-pending-recovery' || 'disabled'", raw)
+        self.assertEqual(raw.count("        id: normal_ios_pending_ui_test\n"), 1)
+        self.assertEqual(raw.count("        id: normal_ios_pending_ui_summary\n"), 1)
+        self.assertIn("--normal-ios-pending-recovery-test", raw)
+        self.assertIn("--normal-ios-pending-recovery-summary", raw)
+        raw = without_normal_ios_pending_workflow(raw)
+        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), "b96a9fe68f93b9eceeaf4297cdc4e1f54cb70b9c5ef51c346c84519e83ab4e65")
+        self.assertEqual(without_normal_ios_pending_workflow(raw), raw)
+        for previous, current in NORMAL_IOS_PENDING_WORKFLOW_INVERSE:
+            with self.assertRaises(AssertionError):
+                without_normal_ios_pending_workflow(pending_current.replace(current, previous, 1))
+        with self.assertRaises(AssertionError):
+            without_normal_ios_pending_workflow(pending_current + "# unexpected pending recovery tail\n")
+        with self.assertRaises(AssertionError):
+            without_normal_ios_pending_workflow(pending_current.replace("timeout-minutes: 19", "timeout-minutes: 20", 1))
+        (old_android, new_android), (old_ios, new_ios) = INSTALLED_IOS_ACTIVATION_INVERSE
+        self.assertEqual(raw.count(new_android), 1)
+        self.assertEqual(raw.count(new_ios), 1)
+        self.assertEqual(raw.count("      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n"), 1)
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ios-unsigned-archive' || 'disabled'", new_ios)
+        self.assertIn("MRK_MACOS_SAVED_FILE_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'remaining-three' || 'ordinary-seven' }}", raw)
+        ios_prior = without_installed_ios_activation_workflow(raw)
+        self.assertEqual(ios_prior, raw.replace(new_android, old_android, 1).replace(new_ios, old_ios, 1))
+        self.assertEqual(hashlib.sha256(ios_prior.encode()).hexdigest(),
+                         "ec216ac8fceb8d35cd91f793c7e496c620f1ba212278026b8da883a88907a2dc")
+        self.assertEqual(without_installed_ios_activation_workflow(ios_prior), ios_prior)
+        for changed in (
+                raw.replace(new_ios, new_ios.replace("verify/desktop-macos-installed", "verify/desktop-macos-preview"), 1),
+                raw.replace(new_ios, new_ios.splitlines(keepends=True)[0] + "      MRK_MACOS_IOS_UI_SCOPE: ios-unsigned-archive\n", 1),
+                raw.replace(new_android, old_android, 1),
+                raw.replace(new_ios, old_ios, 1),
+                raw + new_ios,
+                raw + "# unexpected iOS activation tail\n"):
+            with self.assertRaises(AssertionError):
+                without_installed_ios_activation_workflow(changed)
+        raw = ios_prior
+        inactive, active = INSTALLED_ANDROID_ACTIVATION_INVERSE
+        self.assertEqual(raw.count(active), 1)
+        self.assertNotIn(inactive.splitlines(keepends=True)[1], raw)
+        activation_prior = without_installed_android_activation_workflow(raw)
+        self.assertEqual(activation_prior, raw.replace(active, inactive, 1))
+        self.assertEqual(hashlib.sha256(activation_prior.encode()).hexdigest(),
+                         "b5e5776a4922100d68691f06fb0d354eb8aa6b6b92305889bd03251529d843ef")
+        self.assertEqual(activation_prior.count("MRK_MACOS_ANDROID_UI_SCOPE: disabled"), 1)
+        self.assertEqual(without_installed_android_activation_workflow(activation_prior), activation_prior)
+        for changed in (
+                raw.replace(active, active.replace("verify/desktop-macos-installed", "verify/desktop-macos-preview"), 1),
+                raw.replace(active, active.splitlines(keepends=True)[0] + "      MRK_MACOS_ANDROID_UI_SCOPE: android-signed-build\n", 1),
+                raw.replace(active, active.splitlines(keepends=True)[1], 1),
+                raw.replace(active, active.splitlines(keepends=True)[0], 1),
+                raw + active,
+                raw + "# unexpected activation tail\n"):
+            with self.assertRaises(AssertionError):
+                without_installed_android_activation_workflow(changed)
+        selection = "github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build'"
+        self.assertEqual(raw.count(selection), 4)
+        self.assertNotIn("matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE", raw)
+        self.assertIn('case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$MRK_MACOS_HOSTED_JOB" in', raw)
+        self.assertIn('aarch64-apple-darwin/ARM64/github-hosted-macos26-arm64|x86_64-apple-darwin/X64/github-hosted-macos26-x86_64', raw)
+        self.assertIn("('build-release.json' if TARGET == 'aarch64-apple-darwin' else 'build-release-intel.json')", raw)
+        self.assertIn('N.android_signed_receipts(build, test, summary, facts, source=source, normal=normal, run=run, attempt=attempt, target=TARGET)', raw)
+        prior = without_intel_android_workflow(raw)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), '2363019ea613375c22473cb323adc4b5ee44fc42f5bedd1390fe05b524aeece8')
+        self.assertEqual(hashlib.sha256(without_positive_update_workflow(prior).encode()).hexdigest(),
+                         '024cb67a62bbc1b7ba929c044a0edffc7f27731c8eeb508ca7e373924be4afc1')
+        self.assertEqual(without_intel_android_workflow(prior), prior)
+        self.assertEqual(without_app_absence_workflow(raw), without_app_absence_workflow(prior))
+        # Entire predecessor equality also preserves removal ARM rows, all caps,
+        # default matrix, original exits, credential/ref and private-upload guards.
+        for previous, current in INTEL_ANDROID_WORKFLOW_INVERSE:
+            with self.subTest(region=current[:48]), self.assertRaises(AssertionError):
+                without_intel_android_workflow(raw.replace(current, current + '# corrupt\n', 1))
+        with self.assertRaises(AssertionError): without_intel_android_workflow(raw + INTEL_ANDROID_WORKFLOW_INVERSE[0][1])
+
+    def test_app_absence_fixed_route_has_exact_originals_and_current_predecessor(self):
+        root = Path(__file__).absolute().parents[2]
+        raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        raw = without_positive_update_workflow(raw)
+        prior = without_app_absence_workflow(raw)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), 'ce06d7acffac6e5d37b0bf2c3afbe86ab7cf58729e68b64408634908642b8f02')
+        self.assertEqual(without_app_absence_workflow(prior), prior)
+        self.assertEqual(without_same_package_workflow(raw), without_same_package_workflow(prior))
+        self.assertEqual(raw.count("id: app_absence_prepare"), 1)
+        self.assertEqual(raw.count("id: app_absence_restore"), 1)
+        for role, minutes in (("prepare-app-absence", 56), ("app-absence-restore", 13)):
+            label = "      - name: Fixed nonshipping app-absence " + role + "; no credentials or user artifact"
+            block = raw[raw.index(label):].split("\n      - name:", 1)[0]
+            self.assertIn("timeout-minutes: " + str(minutes), block)
+            self.assertIn("refs/heads/verify/desktop-macos-app-absence-fixture", block)
+            self.assertNotIn("secrets.", block)
+            self.assertIn('"$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py ' + role, block)
+            self.assertIn('phase_status=$?', block)
+            self.assertIn('if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi', block)
+        self.assertLess(raw.index("id: data_contracts"), raw.index("id: app_absence_prepare"))
+        self.assertLess(raw.index("id: app_absence_prepare"), raw.index("id: package_install"))
+        self.assertLess(raw.index("id: package_install"), raw.index("id: app_absence_restore"))
+        self.assertEqual(raw.count("MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}"), 1)
+        self.assertNotIn("app-absence-", raw[raw.index("      - name: Upload only the normal user preview package and guide"):])
+        adapter = (root / "desktop/tools/macos_app_absence_fixture.py").read_bytes()
+        helper = (root / "desktop/tools/macos_android_helper_package.py").read_bytes()
+        self.assertLessEqual(len(adapter), 65536)
+        self.assertLessEqual(len(helper), 512 * 1024)
+        tree = ast.parse(adapter)
+        assignments = {n.targets[0].id: n.value for n in tree.body if isinstance(n, ast.Assign)
+                       and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
+        self.assertEqual(ast.literal_eval(assignments["PREPARE_ROLES"]), ("app-absence-build", "app-absence-data-tests", "app-absence-adhoc",
+            "app-absence-verify-code", "app-absence-pkgbuild", "app-absence-tar", "app-absence-xar"))
+        self.assertEqual(ast.literal_eval(assignments["RESTORE_ROLES"]), ("app-absence-restore-attach", "app-absence-withdraw",
+            "app-absence-install", "app-absence-verify", "app-absence-restore-detach"))
+        self.assertIn(b'(3180, 3240) if op.phase == PREPARE else (660, 720)', adapter)
+        self.assertIn(b'else (1740, 1800)', adapter)
+        self.assertIn(b'expected_restore_previous=expected', adapter)
+        self.assertIn(b'MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT', (root / "desktop/src-tauri/build.rs").read_bytes())
+        for previous, current in APP_ABSENCE_WORKFLOW_INVERSE:
+            changed = raw.replace(current, previous, 1)
+            with self.assertRaises(AssertionError): without_app_absence_workflow(changed)
+        with self.assertRaises(AssertionError): without_app_absence_workflow(raw + APP_ABSENCE_WORKFLOW_INVERSE[0][1])
+        self.assertNotIn("prepare-app-absence", prior)
+
+    def test_same_package_noop_workflow_is_preview_scoped_and_exactly_reversible(self):
+        root = Path(__file__).absolute().parents[2]
+        source = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        owner_source = "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"
+        old_owner_source = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+        self.assertEqual(source.count(owner_source), 2)
+        self.assertNotIn(old_owner_source, source)
+        owner_normalized = without_primary_owner_runtime_source_pin(source)
+        self.assertEqual(owner_normalized, source.replace(owner_source, old_owner_source))
+        self.assertEqual(without_primary_owner_runtime_source_pin(owner_normalized), owner_normalized)
+        for damaged in (source.replace(owner_source, old_owner_source, 1),
+                        source.replace(owner_source, owner_source + owner_source, 1),
+                        source.replace(owner_source, "0" * 64, 1)):
+            with self.assertRaisesRegex(AssertionError, "^primary owner runtime SOURCE exact two-site delta differs$"):
+                without_primary_owner_runtime_source_pin(damaged)
+        source = owner_normalized
+        # The current signed-runtime composition must be proven before old inverses.
+        signed_source = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+        prior_source = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+        self.assertEqual(source.count(signed_source), 2)
+        self.assertNotIn(prior_source, source)
+        source = without_installed_android_activation_workflow(source)
+        signed_normalized = without_signed_android_runtime_source_pin(source)
+        self.assertEqual(signed_normalized, source.replace(signed_source, prior_source))
+        self.assertEqual(without_signed_android_runtime_source_pin(signed_normalized), signed_normalized)
+        for damaged in (source.replace(signed_source, prior_source, 1),
+                        source.replace(signed_source, signed_source + signed_source, 1),
+                        source.replace(signed_source, "0" * 64, 1)):
+            with self.assertRaisesRegex(AssertionError, "^signed Android runtime SOURCE exact two-site delta differs$"):
+                without_signed_android_runtime_source_pin(damaged)
+        source = signed_normalized
+        current_source = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+        previous_source = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
+        self.assertEqual(source.count(current_source), 2)
+        self.assertNotIn(previous_source, source)
+        normalized_source = without_command_terminal_runtime_source_pin(source)
+        self.assertEqual(normalized_source, source.replace(current_source, previous_source))
+        self.assertEqual(without_command_terminal_runtime_source_pin(normalized_source), normalized_source)
+        for damaged in (source.replace(current_source, previous_source, 1),
+                        source.replace(current_source, current_source + current_source, 1),
+                        source.replace(current_source, "0" * 64, 1)):
+            with self.assertRaisesRegex(AssertionError, "^command terminal runtime SOURCE exact two-site delta differs$"):
+                without_command_terminal_runtime_source_pin(damaged)
+        source = without_command_terminal_runtime_source_pin(without_app_absence_workflow(source))
+        active_scope = "      MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}\n"
+        self.assertEqual(source.count(active_scope), 1)
+        disabled_source = source.replace(active_scope, '      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled\n', 1)
+        self.assertEqual(hashlib.sha256(disabled_source.encode()).hexdigest(), '2211187a8a202d875b59e2118d80c75fd7480fbe0186e71807bb39f5db17be99')
+        self.assertEqual(disabled_source.count("      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled\n"), 1)
+        self.assertEqual(source.count("macos_android_helper_package.py same-package-noop --target"), 1)
+        phase = source.split("      - name: Observe one ordinary finalized-carrier same-package no-op\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("steps.package_install.outcome == 'success'", phase)
+        self.assertIn("steps.finalize_image.outcome == 'success'", phase)
+        self.assertNotIn("secrets.", phase)
+        self.assertNotIn("normal_ui", phase)
+        self.assertIn("timeout-minutes: 32", phase)
+        self.assertIn('"$noop_status" > "$MRK_MACOS_WORK/same-package-noop.status"', phase)
+        prior = without_same_package_workflow(source)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), 'cf880d883ee3f0337caf11d328356e9dff07265135a32c2edb7f4f532de0083d')
+        self.assertEqual(without_same_package_workflow(prior), prior)
+        for previous, current in SAME_PACKAGE_WORKFLOW_INVERSE:
+            with self.subTest(partial=current[:48]), self.assertRaises(AssertionError):
+                without_same_package_workflow(source.replace(current, previous, 1))
+        with self.assertRaises(AssertionError):
+            without_same_package_workflow(source + "\nMRK_MACOS_SAME_PACKAGE_SCOPE\n")
+        helper = (root / "desktop/tools/macos_android_helper_package.py").read_text()
+        tree = ast.parse(helper)
+        operation = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Operation")
+        body = ast.get_source_segment(helper, next(n for n in operation.body if isinstance(n, ast.FunctionDef) and n.name == "same_package_noop"))
+        for required in ("self.final_image_input()", "self.stager.final_image_receipt_data", 'self.package_stager_io("v2-readback", args)',
+                         'self.package_stager_io("same-package-readback", args)', 'self.package_stager_io("same-package-census", None)',
+                         "self.detach_package_mount()"):
+            self.assertIn(required, body)
+        self.assertNotIn("credential_scope(", body)
+        self.assertNotIn("self.prepare(", body)
+
+    def test_remaining_three_reuses_exact_singleton_bodies_and_closed_cleanup(self):
+        # Actual SOURCE and finite string/AST checks only, never workflow execution.
+        root = Path(__file__).absolute().parents[2]
+        with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
+            body = stream.read(512 * 1024 + 1)
+        self.assertLessEqual(len(body), 512 * 1024)
+        source = body.decode("utf-8", "strict")
+        source = without_intel_resident_prepare_budget_workflow(source)
+        for previous, current in REMAINING_THREE_WORKFLOW_INVERSE:
+            self.assertEqual(source.count(current), 1)
+        prior = without_remaining_three_workflow(source)
+        self.assertEqual(len(prior.encode()), 434907)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(),
+                         "db2867eab4cce915942e953f848b74a1ad4bfcd654a73459d6e07099a25980f7")
+        # Independently undo the orthogonal removal-case suffix, never refresh the historical hash.
+        bound_prior = without_removal_public_verification_workflow(prior)
+        self.assertEqual(hashlib.sha256(bound_prior.encode()).hexdigest(), "70f45b237ad1fee9466dafa427e661df2c8cd5bb96f513820eeacd5145c2bf32")
+        self.assertEqual(without_remaining_three_workflow(prior), prior)
+        blocks = {}
+        for text in source.split("      - name: ")[1:]:
+            block = "      - name: " + text
+            ids = [line.strip()[4:] for line in block.splitlines() if line.startswith("        id: ")]
+            if ids:
+                self.assertEqual(len(ids), 1)
+                self.assertNotIn(ids[0], blocks)
+                blocks[ids[0]] = block
+        first = blocks["normal_saved_version_recovery_ui_test"]
+        second = blocks["normal_saved_version_recovery_ui_result"]
+        bundle = blocks["normal_remaining_saved_file_ui"]
+        self.assertEqual(source.count(first), 1)
+        self.assertEqual(source.count(second), 1)
+        self.assertEqual(prior.count(first), 1)
+        self.assertEqual(prior.count(second), 1)
+        loop = ('          for MRK_MACOS_SAVED_FILE_UI_SCOPE in saved-version-recovery workflow-refusal release-evidence; do\n'
+                '          export MRK_MACOS_SAVED_FILE_UI_SCOPE\n')
+        run = bundle.split("        run: |\n", 1)[1]
+        self.assertEqual(run, loop + first.split("        run: |\n", 1)[1] + second.split("        run: |\n", 1)[1] + "          done\n")
+        self.assertEqual(bundle.count("        timeout-minutes: 42\n"), 1)
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-preview' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_diagnostics_ui_result.outcome == 'success'", bundle)
+        self.assertIn("          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n", bundle)
+        self.assertNotIn("remaining-three", first + second)
+        for forbidden in ("continue-on-error", "GITHUB_ENV", " || true", " &\n"):
+            self.assertNotIn(forbidden, bundle)
+        self.assertIn('[[ "$test_status" == 0 ]] || exit "$test_status"', run)
+        self.assertIn('[[ "$summary_status" == 0 ]] || exit "$summary_status"', run)
+        self.assertEqual(run.count("test-without-building"), 1)
+        self.assertEqual(run.count("--normal-summary"), 1)
+        self.assertIn('-maximum-test-execution-time-allowance 300', run)
+        self.assertIn("ordinary-ui-observed-original-saved-release-evidence-documents-only", run)
+        self.assertIn('"fullUIQualified": False', run)
+        self.assertIn('"allWorkerFinality": "not-established-by-XCTest-UI-state"', run)
+        scope = "      MRK_MACOS_SAVED_FILE_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'remaining-three' || 'ordinary-seven' }}\n"
+        self.assertEqual(source.count(scope), 1)
+        self.assertIn('saved-version-recovery|workflow-refusal|release-evidence|remaining-three) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;', source)
+        self.assertEqual(source.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0], prior.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0])
+        self.assertIn("&& 110 || 350 }}", source)
+        self.assertIn("no350min fit is claimed", source)
+        cleanup = source.split("      - name: Remove only this completed preview build's disposable compiler outputs\n", 1)[1]
+        guard = cleanup.split("        run: |\n", 1)[0]
+        self.assertIn("env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_remaining_saved_file_ui.outcome == 'success'", guard)
+        for prerequisite in ("preview_upload", "normal_ui_result", "normal_persistence_ui_result", "normal_project_ui_result", "normal_diagnostics_ui_result", "data_contracts", "evidence"):
+            self.assertIn("steps." + prerequisite + ".outcome == 'success'", guard)
+        self.assertIn('stems = (("saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else', cleanup)
+        self.assertIn('*saved_directories, root / "normal-ui/tmp"', cleanup)
+        self.assertIn('(stem + "-test.log", stem + "-summary.raw.json", stem + "-summary.stderr")', cleanup)
+        self.assertEqual(without_public_verification_workflow(source), without_public_verification_workflow(prior))
+        for previous, current in REMAINING_THREE_WORKFLOW_INVERSE:
+            for altered in (previous, current + current, current[:-1], current.replace(" ", "  ", 1)):
+                damaged = source.replace(current, altered, 1)
+                self.assertNotEqual(damaged, source)
+                with self.assertRaises(AssertionError):
+                    without_remaining_three_workflow(damaged)
+        self.assertEqual(without_remaining_three_workflow(source + "# unrelated mutation\n"), prior + "# unrelated mutation\n")
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(source + "# unrelated mutation\n")
+        for invalid in (None, b"DATA", "x" * (512 * 1024 + 1)):
+            with self.assertRaises(AssertionError):
+                without_remaining_three_workflow(invalid)
+        self.assertEqual(without_remaining_three_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+
+    def test_current_intel_app_build_budget_precedes_historical_projection(self):
+        root = Path(__file__).absolute().parents[2]
+        before_pins = {'desktop-macos-installed.yml': {'bytes': 474760, 'sha256': '7ca1cb29075ca0f14bd829f59f826e6da9830d61bb27a2cae5dd32bdb018c8f2'}, 'desktop-macos-aqua.yml': {'bytes': 133491, 'sha256': '36b53942b31b13337875fdd47872a2f54f0a285d746e071b33a42c157f74f57d'}}
+        for filename, pin in before_pins.items():
+            raw = (root / ".github/workflows" / filename).read_text()
+            self.assertEqual(raw.count("&& 26 || 10"), 1)
+            self.assertIn("cancel-in-progress: false", raw)
+            prior = without_intel_fetch_workflow(raw)
+            self.assertEqual((len(prior.encode()), hashlib.sha256(prior.encode()).hexdigest()), (pin["bytes"], pin["sha256"]))
+            self.assertEqual(without_intel_fetch_workflow(prior), prior)
+            self.assertEqual(without_intel_resident_prepare_budget_workflow(raw),
+                             without_intel_resident_prepare_budget_workflow(prior))
+            self.assertEqual(raw.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0],
+                             prior.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0])
+            for previous, current in dict(INTEL_FETCH_WORKFLOW_INVERSE)[raw.splitlines()[0]]:
+                for damaged in (previous, current + current, current[:-1], current.replace(" ", "  ", 1)):
+                    changed = raw.replace(current, damaged, 1)
+                    if changed == prior:
+                        self.assertEqual(without_intel_fetch_workflow(changed), prior)
+                        continue  # Complete exact predecessor is supported; partial mixtures are not.
+                    try: projected = without_intel_fetch_workflow(changed)
+                    except AssertionError: pass
+                    else: self.assertNotEqual(hashlib.sha256(projected.encode()).hexdigest(), pin["sha256"])
+        # Current SOURCE only: a larger finite allocation is not native completion.
+        root = Path(__file__).absolute().parents[2]
+        with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
+            body = stream.read(512 * 1024 + 1)
+        self.assertLessEqual(len(body), 512 * 1024)
+        source = without_intel_fetch_workflow(body.decode("utf-8", "strict"))
+        # This independent Intel resident allowance is not measured completion.
+        # Assert current raw callers, then retire exactly this delta before old tables.
+        resident_pins = {'desktop-macos-installed.yml': {'bytes': 457018, 'sha256': '0af1bc78d9201ccd77fdde2d3969af36641f940e0cc89a4c0b6744d34f4b5f1a'}, 'desktop-macos-aqua.yml': {'bytes': 132632, 'sha256': '16829e57ec783d368c11763bf3d5a5415fdd729c876aa6eb36367eb2a16033b0'}}
+        resident_expression = "${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}"
+        for resident_filename, resident_pin in resident_pins.items():
+            with (root / ".github/workflows" / resident_filename).open("rb") as resident_stream:
+                resident_body = resident_stream.read(512 * 1024 + 1)
+            self.assertLessEqual(len(resident_body), 512 * 1024)
+            resident_source = without_intel_fetch_workflow(resident_body.decode("utf-8", "strict"))
+            resident_rows = dict(INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_INVERSE)[resident_source.splitlines()[0]]
+            for previous, current in resident_rows:
+                self.assertEqual(resident_source.count(current), 1)
+                self.assertNotIn(previous, resident_source)
+            resident_name = "      - name: Build and sign the fixed resident image and C facades\n"
+            self.assertEqual(resident_source.count(resident_name), 1)
+            resident_step = resident_source.split(resident_name, 1)[1].split("      - name:", 1)[0]
+            self.assertEqual(re.findall(r"^        timeout-minutes: (.+)$", resident_step, re.M), [resident_expression])
+            self.assertEqual(resident_source.count(resident_expression), 1)
+            resident_prior = without_intel_resident_prepare_budget_workflow(resident_source)
+            self.assertEqual((len(resident_prior.encode()), hashlib.sha256(resident_prior.encode()).hexdigest()),
+                             (resident_pin["bytes"], resident_pin["sha256"]))
+            self.assertEqual(without_intel_resident_prepare_budget_workflow(resident_prior), resident_prior)
+            self.assertEqual(resident_source.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0],
+                             resident_prior.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0])
+            for previous, current in resident_rows:
+                damaged_values = ("", current + current, previous + current, current[:-1], current.replace(" ", "  ", 1))
+                if len(resident_rows) > 1:
+                    damaged_values += (previous,)  # Mixed new/old regions, not the accepted complete old caller.
+                for damaged in damaged_values:
+                    with self.subTest(resident=resident_filename, damaged=damaged):
+                        changed = resident_source.replace(current, damaged, 1)
+                        try:
+                            projected = without_intel_resident_prepare_budget_workflow(changed)
+                        except AssertionError:
+                            pass
+                        else:
+                            # Marker-free damaged text is not promoted to the exact prior workflow.
+                            self.assertNotEqual(hashlib.sha256(projected.encode()).hexdigest(), resident_pin["sha256"])
+            for changed_expression in (resident_expression.replace("24", "25"),
+                                       resident_expression.replace("10", "11"),
+                                       resident_expression.replace("x86_64-apple-darwin", "aarch64-apple-darwin")):
+                changed = resident_source.replace(resident_expression, changed_expression, 1)
+                try:
+                    projected = without_intel_resident_prepare_budget_workflow(changed)
+                except AssertionError:
+                    pass
+                else:
+                    self.assertNotEqual(hashlib.sha256(projected.encode()).hexdigest(), resident_pin["sha256"])
+            with self.assertRaises(AssertionError):
+                without_intel_resident_prepare_budget_workflow(resident_source.replace(resident_source.splitlines()[0], "name: foreign", 1))
+            if resident_filename == "desktop-macos-installed.yml":
+                # Current normal-iOS source is a complete pinned predecessor, not a loose textual inverse.
+                with self.assertRaisesRegex(AssertionError, "normal iOS pending workflow whole predecessor differs"):
+                    without_intel_resident_prepare_budget_workflow(resident_source + "# unrelated\n")
+            else:
+                self.assertEqual(without_intel_resident_prepare_budget_workflow(resident_source + "# unrelated\n"),
+                                 resident_prior + "# unrelated\n")
+        for invalid in (None, b"DATA", "x" * (512 * 1024 + 1)):
+            with self.assertRaises(AssertionError):
+                without_intel_resident_prepare_budget_workflow(invalid)
+        self.assertEqual(without_intel_resident_prepare_budget_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+        resident_helper = (root / "desktop/tools/macos_android_helper_package.py").read_text()
+        resident_tree = ast.parse(resident_helper)
+        resident_class = next(node for node in resident_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
+        resident_prepare = next(node for node in resident_class.body if isinstance(node, ast.FunctionDef) and node.name == "prepare")
+        resident_calls = [node for node in ast.walk(resident_prepare) if isinstance(node, ast.Call)
+                          and isinstance(node.func, ast.Attribute) and node.func.attr == "call"
+                          and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "build"]
+        self.assertEqual(len(resident_calls), 1)
+        resident_timeout = [item.value for item in resident_calls[0].keywords if item.arg == "timeout"]
+        self.assertEqual(len(resident_timeout), 1)
+        self.assertEqual(ast.dump(resident_timeout[0]), ast.dump(ast.parse("720 if self.target == INTEL_TARGET else 480", mode="eval").body))
+        resident_text = ast.get_source_segment(resident_helper, resident_prepare)
+        self.assertEqual(resident_text.count(INTEL_FETCH_PREPARE_PREFIX), 1)
+        self.assertEqual(resident_text.count(INTEL_FETCH_OFFLINE_REGION[1]), 1)
+        resident_text = resident_text.replace(INTEL_FETCH_PREPARE_PREFIX, "", 1)
+        resident_text = resident_text.replace(INTEL_FETCH_OFFLINE_REGION[1], INTEL_FETCH_OFFLINE_REGION[0], 1)
+        self.assertEqual(resident_text.count("timeout=720 if self.target == INTEL_TARGET else 480"), 1)
+        resident_old = resident_text.replace("timeout=720 if self.target == INTEL_TARGET else 480", "timeout=480", 1)
+        self.assertEqual(hashlib.sha256(resident_old.encode()).hexdigest(), '100f794aa060db73370a1ab8c789075f2ce03792a8ca270447b044b9632a9da3')
+        source = without_intel_resident_prepare_budget_workflow(source)
+        source = without_remaining_three_workflow(source)
+        for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE:
+            self.assertEqual(source.count(current), 1)
+            self.assertNotIn(previous, source)
+        expression = "${{ matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}"
+        name = "      - name: Build the ordinary selected-target desktop image and embedded frontend\n"
+        self.assertEqual(source.count(name), 1)
+        app = source.split(name, 1)[1].split("      - name:", 1)[0]
+        self.assertEqual(re.findall(r"^        timeout-minutes: (.+)$", app, re.M), [expression])
+        self.assertEqual(source.count(expression), 1)
+        containing = "    timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}\n"
+        self.assertEqual(source.count(containing), 1)
+        self.assertIn("        id: shipping_compile\n        timeout-minutes: 24\n",
+                      source.split("  shipping-image-compile:\n", 1)[1])
+        matrix = re.findall(r"^        include: (.+)$", source, re.M)
+        self.assertEqual(len(matrix), 1)
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'", matrix[0])
+        branches = re.findall(r"'(\[\{.*?\}\])'", matrix[0])
+        self.assertEqual(len(branches), 2)
+        self.assertEqual([(row["target"], row["removal_case"]) for row in json.loads(branches[0])],
+                         [("aarch64-apple-darwin", "ordinary"), ("aarch64-apple-darwin", "abrupt")])
+        self.assertEqual([(row["target"], row["runner"]) for row in json.loads(branches[1])],
+                         [("aarch64-apple-darwin", "macos-26"), ("x86_64-apple-darwin", "macos-26-intel")])
+        prior = without_intel_app_build_budget_workflow(source)
+        self.assertEqual(len(prior.encode()), 434739)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(),
+                         "1dc04737ea6298f34196adb7f71e4fb0f6b25b50dde30b4c95292d29efec4514")
+        self.assertEqual(without_intel_app_build_budget_workflow(prior), prior)
+        self.assertEqual(matrix, re.findall(r"^        include: (.+)$", prior, re.M))
+        old_app = prior.split(name, 1)[1].split("      - name:", 1)[0]
+        for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE[1:]:
+            app = app.replace(current, previous, 1)
+        self.assertEqual(app, old_app)  # Commands, environment and original status writes are unchanged.
+        self.assertEqual(without_app_signature_workflow(source), without_app_signature_workflow(prior))
+        for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE:
+            for altered in ("", previous, current + current, previous + current,
+                            current[:-1], current.replace(" ", "  ", 1)):
+                with self.subTest(altered=altered), self.assertRaises(AssertionError):
+                    without_intel_app_build_budget_workflow(source.replace(current, altered, 1))
+        for altered in (expression.replace("48", "49"), expression.replace("24", "25"),
+                        expression.replace("x86_64-apple-darwin", "aarch64-apple-darwin")):
+            with self.assertRaises(AssertionError):
+                without_intel_app_build_budget_workflow(source.replace(expression, altered, 1))
+        for old in ("unchanged historical DATA\n", "name: Historical Aqua qualification\n"):
+            self.assertEqual(without_intel_app_build_budget_workflow(old), old)
+        unrelated = source + "# unrelated mutation\n"
+        self.assertEqual(without_intel_app_build_budget_workflow(unrelated), prior + "# unrelated mutation\n")
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(unrelated)
+        # Erasing all new markers cannot bypass the unchanged whole-workflow hash.
+        erased = source
+        for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE:
+            erased = erased.replace(current, "", 1)
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(erased)
+        for invalid in (None, b"DATA", "x" * (512 * 1024 + 1),
+                        source.replace(source.splitlines()[0], "name: Historical Aqua qualification", 1)):
+            with self.assertRaises(AssertionError):
+                without_intel_app_build_budget_workflow(invalid)
+
+    def test_removal_public_evidence_case_is_current_before_historical_projection(self):
+        # Read actual current SOURCE, not the inverse view or a raw artifact.
+        root = Path(__file__).absolute().parents[2]
+        with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
+            body = stream.read(512 * 1024 + 1)
+        self.assertLessEqual(len(body), 512 * 1024)
+        source = body.decode("utf-8", "strict")
+        previous, current = REMOVAL_PUBLIC_VERIFICATION_WORKFLOW_INVERSE
+        self.assertEqual(source.count(current), 1)
+        self.assertNotIn(previous, source)
+        self.assertEqual(source.count('--removal-case "$MRK_MACOS_REMOVAL_CASE"'), 1)
+        prior = without_removal_public_verification_workflow(source)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(),
+                         "70f45b237ad1fee9466dafa427e661df2c8cd5bb96f513820eeacd5145c2bf32")
+        self.assertEqual(without_removal_public_verification_workflow(prior), prior)
+        self.assertEqual(without_public_verification_workflow(source), without_public_verification_workflow(prior))
+        self.assertEqual(without_app_signature_workflow(source), without_app_signature_workflow(prior))
+        for altered in ("", current + current, previous + current, current[:-1],
+                        current.replace("--removal-case", "--removal-case disabled", 1),
+                        current.replace("MRK_MACOS_REMOVAL_CASE", "MRK_OTHER_CASE", 1),
+                        current.replace('            --removal-case', '          --removal-case', 1),
+                        current.split('            --removal-case', 1)[0],
+                        current.replace("--profile installed", "--profile aqua", 1)):
+            damaged = source.replace(current, altered, 1)
+            self.assertNotEqual(damaged, source)
+            with self.subTest(altered=altered), self.assertRaises(AssertionError):
+                without_removal_public_verification_workflow(damaged)
+            with self.assertRaises(AssertionError):
+                without_public_verification_workflow(damaged)
+        self.assertEqual(without_removal_public_verification_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+        self.assertEqual(without_removal_public_verification_workflow(source + "# unrelated mutation\n"),
+                         prior + "# unrelated mutation\n")
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(source + "# unrelated mutation\n")
+        for invalid in (None, b"DATA", "x" * (512 * 1024 + 1), "--removal-case disabled\n"):
+            with self.assertRaises(AssertionError):
+                without_removal_public_verification_workflow(invalid)
+
+    def test_public_verification_exports_are_current_closed_data_before_projection(self):
+        # Fixed bounded SOURCE only. No historical module/product import or child.
+        root = Path(__file__).absolute().parents[2]
+        for path, header, prior_hash, replacements in PUBLIC_VERIFICATION_WORKFLOW_INVERSE:
+            with self.subTest(workflow=path):
+                with (root / path).open("rb") as stream:
+                    body = stream.read(512 * 1024 + 1)
+                self.assertLessEqual(len(body), 512 * 1024)
+                source = body.decode("utf-8", "strict")
+                self.assertTrue(source.startswith(header))
+                self.assertEqual(source.count("        id: public_evidence\n"), 1)
+                self.assertEqual(source.count("desktop/tools/macos_public_verification_evidence.py"), 1)
+                # Only the independently asserted current removal-case CLI suffix is projected here.
+                source = without_removal_public_verification_workflow(source)
+                upload_count = 0
+                for previous, current in replacements:
+                    self.assertEqual(source.count(current), 1)
+                    if current.startswith("      - name: Preserve"):
+                        upload_count += 1
+                        self.assertEqual([line for line in current.splitlines() if line.startswith("          path:")],
+                                         ["          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json"])
+                        self.assertIn("&& steps.public_evidence.outcome == 'success'\n", current)
+                        self.assertNotIn("          path: |", current)
+                    if current.startswith("      - name: Project closed public verification facts"):
+                        projector = current.split("      - name:", 2)[1]
+                        self.assertIn("        timeout-minutes: 1\n", projector)
+                        self.assertIn("/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC", projector)
+                        self.assertNotIn("secrets.", projector)
+                        self.assertNotIn("continue-on-error", projector)
+                    for altered in (current + current, current[:-1], current.replace(" ", "  ", 1)):
+                        with self.assertRaises(AssertionError):
+                            without_public_verification_workflow(source.replace(current, altered, 1))
+                    # No partial old/new export state is accepted.
+                    with self.assertRaises(AssertionError):
+                        without_public_verification_workflow(source.replace(current, previous, 1))
+                self.assertEqual(upload_count, 1 if "installed.yml" in path else 4)
+                prior = without_public_verification_workflow(source)
+                self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), prior_hash)
+                self.assertEqual(without_public_verification_workflow(prior), prior)
+                self.assertEqual(without_public_verification_workflow(source + "# unrelated mutation\n"),
+                                 prior + "# unrelated mutation\n")
+                if "installed.yml" in path:
+                    # Existing historical whole-workflow hash still rejects unrelated bytes.
+                    with self.assertRaises(AssertionError):
+                        without_app_signature_workflow(source + "# unrelated mutation\n")
+                    delivery_name = "      - name: Upload only the normal user preview package and guide\n"
+                    delivery = source.split(delivery_name, 1)[1].split("      - name:", 1)[0]
+                    old_delivery = prior.split(delivery_name, 1)[1].split("      - name:", 1)[0]
+                    self.assertEqual(delivery, old_delivery)
+                    self.assertEqual([line.strip() for line in delivery.splitlines()
+                                      if line.startswith("            ${{ steps.work.outputs.root }}/")],
+                                     ["${{ steps.work.outputs.root }}/" + leaf for leaf in
+                                      ("preview/MobileReleaseKit.dmg", "preview/README.md", "preview/PREVIEW.json",
+                                       "remove-preview/MobileReleaseKit-Remove.dmg", "remove-preview/REMOVE.md", "remove-preview/REMOVAL.json")])
+        self.assertEqual(without_public_verification_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+
+    def test_exact_recent_app_workflow_projection_preserves_historical_hashes(self):
+        # Bounded SOURCE DATA only; never import a stager or execute a workflow.
+        root = Path(__file__).absolute().parents[2]
+        with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
+            body = stream.read(512 * 1024 + 1)
+        self.assertLessEqual(len(body), 512 * 1024)
+        source = body.decode("utf-8", "strict")
+        source = without_intel_app_build_budget_workflow(source)
+        projected = without_recent_app_signature_workflow(source)
+        # Exact e1e4b36 bytes, not a refreshed historical app-predecessor hash.
+        self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(),
+                         "22ce8c9e9f53b9e5e7fd25c0cb11dc305c3780c204305cc326ec4df07b68033b")
+        self.assertEqual(without_recent_app_signature_workflow(projected), projected)
+        self.assertEqual(without_recent_app_signature_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+        app_prior = without_app_signature_workflow(source)
+        self.assertEqual(hashlib.sha256(app_prior.encode()).hexdigest(),
+                         "fdbe8fcc6595ce90cb5cab397b4050cf53c164132198252d6b6ada4be4b83081")
+        self.assertEqual(without_app_signature_workflow(app_prior), app_prior)
+        self.assertEqual(without_current_runtime_source_pin(source), app_prior.replace(
+            "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2",
+            "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"))
+        for label, markers, replacements in RECENT_APP_SIGNATURE_WORKFLOW_INVERSE:
+            with self.subTest(delta=label):
+                self.assertTrue(any(marker in source for marker in markers))
+                for current, previous in replacements:
+                    self.assertEqual(source.count(current), 1)
+                    # Keep recognized text while breaking a complete line/block.
+                    for altered in (current + current, current[:-1], current.replace(" ", "  ", 1)):
+                        broken = source.replace(current, altered, 1)
+                        with self.assertRaises(AssertionError):
+                            without_recent_app_signature_workflow(broken)
+                    if len(replacements) > 1:
+                        with self.assertRaises(AssertionError):
+                            without_recent_app_signature_workflow(source.replace(current, previous, 1))
+                # Exact older intermediate groups remain admissible, not partial groups.
+                intermediate = source
+                for current, previous in replacements:
+                    intermediate = intermediate.replace(current, previous, 1)
+                self.assertEqual(without_recent_app_signature_workflow(intermediate), projected)
+        enrolled = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
+        preceding = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
+        for broken in (source.replace(enrolled, preceding, 1),
+                       preceding.join(source.rsplit(enrolled, 1))):
+            for normalize in (without_app_signature_workflow, without_current_runtime_source_pin):
+                with self.assertRaisesRegex(AssertionError, "^current runtime source pin exact two-site delta differs$"):
+                    normalize(broken)
+        # An unrelated change survives companion projection and the old hash refuses it.
+        unrelated = source + "# unrelated mutation\n"
+        self.assertEqual(without_recent_app_signature_workflow(unrelated), projected + "# unrelated mutation\n")
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(unrelated)
+
     def restored_android_output_and_xml(self, swift: str) -> str:
         # Exact reviewed insertions only; never broaden historical owner hashes.
         # The separate existing native DATA case exercises the real Swift DFS.
@@ -2126,9 +5237,17 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertIn('"fullUIQualified": False', result)
         for flag in ('artifactBytesVerified', 'signingAuthenticated', 'githubAuthenticityEstablished', 'storeStateEstablished', 'releaseReadinessEstablished', 'recoverySafetyEstablished'):
             self.assertIn('"' + flag + '": False', result)
+        evidence = blocks['evidence']
+        self.assertIn("steps.public_evidence.outcome == 'success'", evidence)
+        self.assertEqual(evidence.count('          path:'), 1)
+        self.assertEqual(evidence.split('          path: ', 1)[1].split('          if-no-files-found:', 1)[0],
+                         '${{ steps.work.outputs.root }}/public-verification-evidence.json\n')
+        # Current privacy policy and historical evidence are separate contracts.
+        historical_uploads = without_public_verification_workflow(raw)
         for name in ('test-file-limit.status', 'test.status', 'test.runner-admission.json', 'test.failure-diagnostics.json',
                      'summary.status', 'summary.command-admission.json', 'summary.failure-diagnostics.json', 'result.json'):
-            self.assertEqual(raw.count('{0}/normal-ui/release-evidence-' + name), 1)
+            self.assertEqual(raw.count('{0}/normal-ui/release-evidence-' + name), 0)
+            self.assertEqual(historical_uploads.count('{0}/normal-ui/release-evidence-' + name), 1)
         self.assertIn('"release-evidence": "release-evidence"', raw.split("      - name: Remove only this completed preview build's disposable compiler outputs", 1)[1])
         # Remove only the accepted outer tool delta before historical evidence.
         tool_predecessor = without_tool_enrollment_workflow(raw)
@@ -2512,7 +5631,21 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             'test_android_build_tools.OwnerAndCommandDataTests.test_bundletool_requires_original_native_borrow_and_exact_snapshot',
         ])
         self.assertEqual(selected_digest(names), ROSTER_SHA256)
-        self.assertEqual(data.count(ROSTER_SHA256), 2)
+        self.assertEqual(data.count(ROSTER_SHA256), 3)
+        opening, closing = "<<'PY_DATA_CONTRACTS'\n", "\nPY_DATA_CONTRACTS\n"
+        self.assertEqual((data.count(opening), data.count(closing)), (1, 1))
+        self.assertTrue(data.endswith(closing))
+        data_python = data.split(opening, 1)[1].removesuffix(closing)
+        ci_admissions = [node for node in ast.parse(data_python).body
+                         if isinstance(node, ast.FunctionDef) and node.name == "ci_data_admission"]
+        self.assertEqual(len(ci_admissions), 1)
+        ci_admission = ast.get_source_segment(data_python, ci_admissions[0])
+        self.assertEqual(data.count(ci_admission), 1)
+        self.assertEqual(ci_admission.count(ROSTER_SHA256), 1)
+        ci_selection_guard = ast.parse('selected["selectionSha256"] != "' + ROSTER_SHA256 + '"', mode="eval").body
+        self.assertEqual(sum(isinstance(node, ast.Compare) and ast.dump(node) == ast.dump(ci_selection_guard)
+                             for node in ast.walk(ci_admissions[0])), 1)
+        self.assertEqual(data.replace(ci_admission, "", 1).count(ROSTER_SHA256), 2)
         sources = ast.literal_eval(re.search(r'\nsource_names = (\(\n.*?\n\))\n', data, re.S)[1])
         self.assertEqual(len(sources), 78)
         self.assertEqual(len(sources), len(set(sources)))

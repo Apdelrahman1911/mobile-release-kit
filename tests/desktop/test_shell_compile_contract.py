@@ -48,8 +48,8 @@ def mac_environment(target="aarch64-apple-darwin", mode="full4"):
              "MRK_DESKTOP_HOSTED_CHECKS": helper.MAC_COMPILE_SCOPE}
     if mode == "vault-only":
         value.update(GITHUB_EVENT_NAME="workflow_dispatch", MRK_COMPILE_SELECTION="remaining", MRK_EXPECTED_SHA="1" * 40)
-    if mode == "app-only":
-        value.update(GITHUB_EVENT_NAME="workflow_dispatch", MRK_COMPILE_SELECTION="app-only", MRK_EXPECTED_SHA="1" * 40)
+    if mode in ("app-only", "observer-only"):
+        value.update(GITHUB_EVENT_NAME="workflow_dispatch", MRK_COMPILE_SELECTION=mode, MRK_EXPECTED_SHA="1" * 40)
     return value
 
 
@@ -61,7 +61,8 @@ def mac_context(target="aarch64-apple-darwin", mode="full4"):
             "executionScope": helper.MAC_COMPILE_SCOPE,
             # Synthetic context only; never an admitted native/source receipt.
             "macCompile": {"target": target, "mode": mode, "release": helper.MAC_COMPILE_HOSTS[target][4] + "desktop-01",
-                           "sources": [], "graphs": ([["mac-normal-bin-compile-only", "desktop/src-tauri/Cargo.toml", "release",
+                           "sources": [], "graphs": ([["mac-observer-compile-only", "desktop/src-tauri/Cargo.toml", "test",
+                                        "desktop-shell,custom-protocol,macos-installed-observation", "installed-shell-observation"]] if mode == "observer-only" else [["mac-normal-bin-compile-only", "desktop/src-tauri/Cargo.toml", "release",
                                         "desktop-shell,custom-protocol", "mobile-release-kit-desktop"]] if mode == "app-only" else
                                       [vault, *([list(row) for row in helper.MAC_COMPILE_GRAPHS] if mode == "full4" else [])]),
                            "execution": "compile-only"}}
@@ -419,7 +420,678 @@ def history_app_receipt(target, phase):
     return value
 
 
+def observer_data_fixture():
+    """Real SOURCE rosters with inert metadata; never a native result witness."""
+    raw = (HELPER.parents[2] / "desktop/tools/macos_installed_data_contracts.sh").read_bytes()
+    body, sources, tests = helper.mac_observer_data_selection(raw)
+    rows = [{"path": name, "size": len(raw) if name == helper.MAC_OBSERVER_DATA_SCRIPT else 1,
+             "sha256": helper.hashlib.sha256(raw).hexdigest() if name == helper.MAC_OBSERVER_DATA_SCRIPT else "4" * 64}
+            for name in sorted(sources)]
+    inventory = helper.canonical_json({"files": rows}) + b"\n"
+    bound = mac_context()
+    bound["root"] = "/Users/runner/work/_temp/mrk-desktop-foundation-inert"
+    bound["source"] = "/Users/runner/work/mobile-release-kit/mobile-release-kit"
+    bound["macCompile"].update(mode="observer-data", execution="compile-and-fixed-data",
+        graphs=[["mac-observer-fixed-data", "desktop/src-tauri/Cargo.toml", "test",
+                 "desktop-shell,custom-protocol,macos-installed-observation", "installed-shell-observation"]],
+        data={"sourceCount": 78, "sourceInventorySha256": helper.hashlib.sha256(inventory).hexdigest(),
+              "scriptSha256": helper.hashlib.sha256(raw).hexdigest(), "pythonCount": 84,
+              "selectionSha256": "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94"})
+    private = {"schemaVersion": 1, "scope": "ci-observer-fixed-data-and-selected-host-python-regressions",
+        "sourceCommit": bound["sourceSha"], "sourceTree": bound["sourceTree"],
+        "sourceInventorySha256": bound["macCompile"]["data"]["sourceInventorySha256"],
+        "frozenSelectionSha256": bound["macCompile"]["data"]["selectionSha256"], "pythonExpectedCount": 84,
+        "ciContext": {key: bound[key] for key in ("workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")},
+        "sourceRows": rows, "pythonTestIds": list(tests),
+        "commands": [{"phase": phase, "originalReturned": True, "returnCode": 0, "outputComplete": True,
+                      "captureClosed": True, "timedOut": False, "outputOverflow": False}
+                     for phase in ("mount", "apfs", "build", "rust", "python")],
+        "artifact": {"sha256": "5" * 64, "identity": [1, 2, 0o100700, 1000, 1000, 1, 64, 3, 4],
+                     "unchangedAfterRun": True, "originalClosed": True},
+        "pythonCounts": {"testsRun": 84, "failures": 0, "errors": 0, "skipped": 0,
+                         "expectedFailures": 0, "unexpectedSuccesses": 0, "testIds": list(tests), "actualHostBeforeAndAfter": True},
+        "ciAggregatePassed": True, "ciSourcePost": True, "ciTemporaryEmpty": True, "passed": True, "failure": None}
+    return raw, body, bound, private
+
+
+def observer_data_child_functions(body):
+    # Compile only the three named pure definitions, never the SOURCE top-level,
+    # environment admission, subprocess imports, or the five original commands.
+    names = ("data_failure_json", "ci_data_admission", "ci_data_seconds")
+    parsed = helper.ast.parse(body)
+    selected = [node for node in parsed.body if isinstance(node, helper.ast.FunctionDef) and node.name in names]
+    if tuple(node.name for node in selected) != names:
+        raise AssertionError("fixed CI DATA pure definitions differ")
+    namespace = {"__builtins__": __builtins__, "json": json, "hashlib": helper.hashlib, "re": helper.re, "Path": Path}
+    exec(compile(helper.ast.Module(body=selected, type_ignores=[]), "<genuine-ci-data-admission>", "exec"), namespace)
+    return namespace
+
+
 class ShellCompileContractTests(unittest.TestCase):
+    def test_observer_data_selection_and_dispatch_are_source_fixed(self):
+        raw, body, bound, private = observer_data_fixture()
+        selected_body, sources, tests = helper.mac_observer_data_selection(raw)
+        self.assertEqual(selected_body, body)
+        self.assertEqual((len(sources), len(tests)), (78, 84))
+        self.assertEqual(tuple(private["pythonTestIds"]), tests)
+        self.assertEqual(helper.hashlib.sha256(json.dumps(list(tests), separators=(",", ":")).encode()).hexdigest(),
+                         "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94")
+        helper.mac_observer_data_binding(bound["macCompile"]["data"])
+        parsed = helper.ast.parse(body)
+        assignments = {node.targets[0].id: node for node in parsed.body if isinstance(node, helper.ast.Assign)
+                       and len(node.targets) == 1 and isinstance(node.targets[0], helper.ast.Name)}
+        lines = body.splitlines(keepends=True)
+        def altered(name, value):
+            node = assignments[name]
+            changed = "".join(lines[:node.lineno - 1]) + name + " = " + repr(value) + "\n" + "".join(lines[node.end_lineno:])
+            return b"<<'PY_DATA_CONTRACTS'\n" + changed.encode() + b"\nPY_DATA_CONTRACTS\n"
+        bad_sources = [tuple(sources[:-1]), (sources[0], *sources[:-1]), tuple("../escape" if i == 0 else name for i, name in enumerate(sources)),
+                       tuple(name.replace("macos_installed_data_contracts.sh", "unrelated.sh") for name in sources)]
+        malformed = [b"", raw + b"suffix", raw.replace(b"<<'PY_DATA_CONTRACTS'", b"<<'OTHER'"), b"x" * (128 * 1024 + 1),
+                     raw.replace(b"\nPY_DATA_CONTRACTS\n", b"\nnames = []\nPY_DATA_CONTRACTS\n"),
+                     *[altered("source_names", value) for value in bad_sources],
+                     altered("names", list(reversed(tests))), altered("names", list(tests[:-1]))]
+        for value in malformed:
+            with self.subTest(selection_bytes=len(value)), self.assertRaises((helper.CheckFailure, ValueError, SyntaxError)):
+                helper.mac_observer_data_selection(value)
+        env = mac_environment()
+        env.update(GITHUB_EVENT_NAME="workflow_dispatch", MRK_COMPILE_SELECTION="observer-data",
+                   MRK_MACOS_COMPILE_MODE="observer-data", MRK_EXPECTED_SHA=env["GITHUB_SHA"])
+        self.assertEqual(helper.mac_compile_mode(env, "aarch64-apple-darwin"), "observer-data")
+        self.assertEqual([list(row) for row in helper.mac_compile_graphs("aarch64-apple-darwin", "observer-data")], bound["macCompile"]["graphs"])
+        self.assertEqual(helper.mac_compile_checks("aarch64-apple-darwin", "observer-data")["compile"],
+                         ("rust-version-target", "mac-cargo-version", "node-version", "typescript-no-emit", "vite-assets", "mac-observer-fixed-data"))
+        for key, value in (("GITHUB_EVENT_NAME", "push"), ("MRK_COMPILE_SELECTION", "both"), ("MRK_MACOS_COMPILE_MODE", "observer-only"),
+                           ("MRK_MACOS_TARGET", "x86_64-apple-darwin"), ("GITHUB_RUN_ID", "0"), ("GITHUB_RUN_ATTEMPT", "01")):
+            with self.subTest(admission=key), self.assertRaises(helper.CheckFailure):
+                helper.mac_compile_mode({**env, key: value}, "aarch64-apple-darwin")
+        with self.assertRaises(helper.CheckFailure):
+            helper.mac_compile_graphs("x86_64-apple-darwin", "observer-data")
+        for key, value in (("GITHUB_REF", "refs/heads/main"), ("MRK_EXPECTED_SHA", "2" * 40), ("GITHUB_WORKFLOW_SHA", "2" * 40)):
+            with self.assertRaises(helper.CheckFailure):
+                helper.compile_workflow_binding({**env, key: value}, helper.MAC_COMPILE_SCOPE)
+        self.assertEqual(helper.mac_compile_graphs("aarch64-apple-darwin", "observer-only"), helper.MAC_COMPILE_GRAPHS[1:2])
+        self.assertEqual(helper.mac_compile_checks("aarch64-apple-darwin", "observer-only")["compile"][-1], "mac-observer-compile-only")
+
+        # Keep pure graph/receipt fixtures, but never start the unbound shortcut.
+        reason = ("Standalone observer-data lacks source-bound runtime anchors; "
+                  "use the genuine desktop-macos-installed preview Rust+84 DATA gate")
+        forbidden = ("Path", "compile_profile", "compile_workflow_binding", "load_context",
+                     "tools", "run", "phase_mac_compile", "clean_compile")
+        for selection, mode in [("observer-data", "observer-data"), ("observer-data", "full4"),
+                                ("both", "observer-data"), ("observer-data", "observer-only"),
+                                ("observer-only", "observer-data"), ("observer-data", None), (None, "observer-data")]:
+            blocked_env = dict(env)
+            for key, value in (("MRK_COMPILE_SELECTION", selection), ("MRK_MACOS_COMPILE_MODE", mode)):
+                if value is None:
+                    blocked_env.pop(key)
+                else:
+                    blocked_env[key] = value
+            with self.subTest(blocked_selection=selection, blocked_mode=mode), \
+                    patch.dict(helper.os.environ, blocked_env, clear=True), contextlib.ExitStack() as stack:
+                work = [stack.enter_context(patch.object(helper, name, side_effect=AssertionError("unexpected work: " + name)))
+                        for name in forbidden]
+                for operation in ("prepare", "acquire", "compile"):
+                    with self.assertRaises(helper.CheckFailure) as caught:
+                        if operation == "prepare":
+                            helper.prepare("macos", helper.MAC_COMPILE_SCOPE)
+                        else:
+                            helper.phase(operation, "macos", helper.MAC_COMPILE_SCOPE)
+                    self.assertEqual(str(caught.exception), reason)
+                for port in work:
+                    port.assert_not_called()
+
+        class NextBoundary(Exception):
+            pass
+        # Every other offered mode still reaches its unchanged next boundary.
+        rows = [("aarch64-apple-darwin", "vault-only"), ("aarch64-apple-darwin", "observer-only")]
+        rows += [(target, mode) for target in MAC_RUST_EXPECTED for mode in ("full4", "history-app4", "app-only")]
+        for target, mode in rows:
+            other = history_app_environment(target) if mode == "history-app4" else mac_environment(target, mode)
+            self.assertEqual(helper.mac_compile_mode(other, target), mode)
+            with self.subTest(unchanged_target=target, unchanged_mode=mode), patch.dict(helper.os.environ, other, clear=True), \
+                    patch.object(helper, "Path", side_effect=AssertionError("unexpected path")), \
+                    patch.object(helper, "run", side_effect=AssertionError("unexpected process")):
+                with patch.object(helper, "compile_profile", side_effect=NextBoundary) as profile:
+                    with self.assertRaises(NextBoundary):
+                        helper.prepare("macos", helper.MAC_COMPILE_SCOPE)
+                    profile.assert_called_once_with(helper.MAC_COMPILE_SCOPE)
+                for operation in ("acquire", "compile"):
+                    with patch.object(helper, "load_context", side_effect=NextBoundary) as load:
+                        with self.assertRaises(NextBoundary):
+                            helper.phase(operation, "macos", helper.MAC_COMPILE_SCOPE)
+                        load.assert_called_once_with("macos", helper.MAC_COMPILE_SCOPE)
+        # Stale environment fields do not broaden the guard to other scopes.
+        for scope, platform in [(helper.COMPILE_SCOPE, "linux"), (helper.SOURCE_SLOTS_SCOPE, "macos"),
+                                (helper.ENGINEERING_COMPILE_SCOPE, "macos")]:
+            with self.subTest(unchanged_scope=scope), patch.dict(helper.os.environ, env, clear=True), \
+                    patch.object(helper, "Path", side_effect=AssertionError("unexpected path")), \
+                    patch.object(helper, "run", side_effect=AssertionError("unexpected process")):
+                with patch.object(helper, "compile_profile", side_effect=NextBoundary) as profile:
+                    with self.assertRaises(NextBoundary):
+                        helper.prepare(platform, scope)
+                    profile.assert_called_once_with(scope)
+                for operation in ("acquire", "compile"):
+                    with patch.object(helper, "load_context", side_effect=NextBoundary) as load:
+                        with self.assertRaises(NextBoundary):
+                            helper.phase(operation, platform, scope)
+                        load.assert_called_once_with(platform, scope)
+        # Clean still forwards to its original handler; no cleanup is executed.
+        cleanup_context = {"inert": "original-context-only"}
+        with patch.dict(helper.os.environ, env, clear=True), \
+                patch.object(helper, "Path", side_effect=AssertionError("unexpected path")), \
+                patch.object(helper, "run", side_effect=AssertionError("unexpected process")), \
+                patch.object(helper, "load_context", return_value=cleanup_context) as load, \
+                patch.object(helper, "phase_mac_compile") as clean:
+            helper.phase("clean", "macos", helper.MAC_COMPILE_SCOPE)
+            load.assert_called_once_with("macos", helper.MAC_COMPILE_SCOPE)
+            clean.assert_called_once_with("clean", cleanup_context)
+        with patch.dict(helper.os.environ, env, clear=True):
+            with self.assertRaisesRegex(helper.CheckFailure, "Normal Mac compilation requires macOS"):
+                helper.prepare("linux", helper.MAC_COMPILE_SCOPE)
+            with self.assertRaisesRegex(helper.CheckFailure, "Compiler-only scope cannot execute a native phase"):
+                helper.phase("native", "macos", helper.MAC_COMPILE_SCOPE)
+
+        workflow = (HELPER.parents[2] / helper.MAC_COMPILE_WORKFLOW).read_text(encoding="utf-8")
+        checkout = "      - name: Check out exact source without persisted credentials\n"
+        admission = workflow.split("      - name: Require exact disposable verification source\n", 1)[1].split(checkout, 1)[0]
+        tombstone = "              observer-data) printf '%s\\n' '" + reason + "' >&2; exit 1 ;;\n"
+        self.assertEqual(admission.count(tombstone), 1)
+        self.assertLess(workflow.index(tombstone), workflow.index(checkout))
+        self.assertLess(workflow.index(checkout), workflow.index("      - name: Select fixed helper Python\n"))
+        self.assertIn("inputs.target == 'observer-data' && '[{\"platform\":\"macos\",\"os\":\"macos-26\",\"target\":\"aarch64-apple-darwin\",\"mode\":\"observer-data\"}]'", workflow)
+        self.assertIn("        options: [both, arm, intel, remaining, history-app4, app-only, observer-only]\n", workflow)
+        self.assertNotIn("observer-data", workflow.split("    inputs:\n", 1)[1].split("permissions:\n", 1)[0])
+
+    def test_observer_data_child_admission_and_containing_clock(self):
+        _, body, bound, private = observer_data_fixture()
+        functions = observer_data_child_functions(body)
+        admission, seconds = functions["ci_data_admission"], functions["ci_data_seconds"]
+        root = Path(bound["root"])
+        binary = "/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin"
+        env = {"MRK_MACOS_DATA_MODE": "ci-observer-data-v1", "MRK_MACOS_TARGET": "aarch64-apple-darwin",
+               "MRK_DESKTOP_CI_ROOT": str(root), "GITHUB_WORKSPACE": bound["source"],
+               "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": helper.MAC_COMPILE_REF,
+               "GITHUB_WORKFLOW_REF": bound["workflowRef"], "GITHUB_SHA": bound["sourceSha"], "GITHUB_WORKFLOW_SHA": bound["workflowSha"],
+               "GITHUB_RUN_ID": bound["runId"], "GITHUB_RUN_ATTEMPT": bound["attempt"], "MRK_EXPECTED_SHA": bound["sourceSha"],
+               "RUSTC": binary + "/rustc", "RUSTUP_AUTO_INSTALL": "0", "CARGO_BUILD_JOBS": "1",
+               "MRK_MACOS_INSTALL_SOURCE_COMMIT": bound["sourceSha"], "MRK_IMAGE_RELEASE_ID": bound["macCompile"]["release"],
+               **{key: str(root / leaf) for key, leaf in (("HOME", "home"), ("CARGO_HOME", "cargo"), ("RUSTUP_HOME", "rustup"),
+                                                          ("TMPDIR", "tmp"), ("CARGO_TARGET_DIR", "target"))}}
+        context_raw = helper.canonical_json(bound)
+        compiler = {**MAC_RUST_EXPECTED["aarch64-apple-darwin"], "cargo": binary + "/cargo", "rustc": binary + "/rustc"}
+        root_identity = [1, 2, 0o40700, 1000, 1000, 1, 0, 3, 4]
+        request = {"schemaVersion": 1, "admission": "ci-observer-data-v1", "contextSha256": helper.hashlib.sha256(context_raw).hexdigest(),
+                   "rootIdentity": [1, 2, 1000], "compiler": compiler, "inventory": {"files": private["sourceRows"]},
+                   "deadlineMonotonicNs": 101 * 1000000000}
+        result = admission(helper.canonical_json(request), context_raw, env, root_identity, 1000000000)
+        self.assertEqual(result[0]["source"], bound["sourceSha"])
+        self.assertEqual(result[1], helper.canonical_json(request["inventory"]) + b"\n")
+        self.assertEqual(result[2:], (compiler, request["deadlineMonotonicNs"], bound))
+        for key, value in (("admission", "installed"), ("schemaVersion", True), ("contextSha256", "0" * 64),
+                           ("rootIdentity", [1, 3, 1000]), ("compiler", {**compiler, "release": "1.98.0"}),
+                           ("deadlineMonotonicNs", 1000000000), ("deadlineMonotonicNs", 1802 * 1000000000),
+                           ("inventory", {"files": list(reversed(private["sourceRows"]))})):
+            with self.subTest(request=key), self.assertRaises(ValueError):
+                admission(helper.canonical_json({**request, key: value}), context_raw, env, root_identity, 1000000000)
+        for key, value in (("MRK_MACOS_DATA_MODE", ""), ("GITHUB_EVENT_NAME", "push"), ("GITHUB_REF", "refs/heads/main"),
+                           ("GITHUB_RUN_ATTEMPT", "3"), ("HOME", "/inert/foreign"), ("RUSTUP_AUTO_INSTALL", "1"),
+                           ("RUSTC", "/usr/bin/rustc"), ("CARGO_TARGET_DIR", "/inert/target"), ("MRK_EXPECTED_SHA", "2" * 40)):
+            with self.subTest(environment=key), self.assertRaises(ValueError):
+                admission(helper.canonical_json(request), context_raw, {**env, key: value}, root_identity, 1000000000)
+        for key, value in (("sourceTree", "bad"), ("workflowSha256", "bad"), ("runId", "0"), ("macCompile", {**bound["macCompile"], "execution": "compile-only"})):
+            bad_context = helper.canonical_json({**bound, key: value})
+            bad_request = {**request, "contextSha256": helper.hashlib.sha256(bad_context).hexdigest()}
+            with self.subTest(context=key), self.assertRaises(ValueError):
+                admission(helper.canonical_json(bad_request), bad_context, env, root_identity, 1000000000)
+        for malformed in (b'{"schemaVersion":1,"schemaVersion":1}', b'{"bad":NaN}', b"[" * 33 + b"]" * 33, b"x" * 65537):
+            with self.assertRaises(ValueError):
+                admission(malformed, context_raw, env, root_identity, 1000000000)
+        for cap in (15, 30, 120, 1440):
+            self.assertEqual(seconds(cap, 2000 * 1000000000, 1000000000, 2000000000), cap)
+            self.assertEqual(seconds(cap, 10 * 1000000000, 1000000000, 2500000000), 7)
+        for args in ((16, 10, 1, 2), (True, 10, 1, 2), (15, 10, 3, 2), (15, 10, 1, 10), (15, 999999999, 0, 0)):
+            with self.assertRaises(ValueError):
+                seconds(*args)
+        self.assertIn('ci_mode = os.environ.get("MRK_MACOS_DATA_MODE", "")', body)
+        self.assertIn('if ci_mode not in ("", "ci-observer-data-v1"):', body)
+        self.assertIn('root = Path(os.environ["MRK_MACOS_WORK"])', body)
+        self.assertIn('rust_binding = None', body)
+
+    def test_observer_data_result_keeps_original_prefix_and_cleanup_authority(self):
+        _, body, bound, private = observer_data_fixture()
+        complete = helper.mac_observer_data_result(private, bound, 0)
+        self.assertIs(helper.validate_mac_observer_data_result(complete), complete)
+        self.assertEqual([row["phase"] for row in complete["commands"]], ["mount", "apfs", "build", "rust", "python"])
+        self.assertEqual(complete["pythonCounts"]["testsRun"], 84)
+        for field in ("nativeVaultTestsExecuted", "uiExecutedByThisBatch", "nativeTlsQualified", "allWorkerFinalityEstablished"):
+            self.assertIs(complete[field], False)
+        written = []
+        with patch.object(helper, "write_json", side_effect=lambda path, value: written.append(deepcopy(value))):
+            helper.phase_receipt(bound, "compile", list(helper.MAC_OBSERVER_DATA_CHECKS["compile"]), node=helper.NODE, mac_observer_result=complete)
+        self.assertEqual(len(written), 1)
+        self.assertEqual(written[0]["scope"], "desktop-macos-observer-data-v1")
+        helper.validate_compile_receipt(written[0], bound, "compile")
+        with self.assertRaises(helper.CheckFailure):
+            helper.validate_compile_receipt(written[0], mac_context(mode="observer-only"), "compile")
+        self.assertIsNone(complete["guardCode"])
+        self.assertIsNone(complete["pythonFailure"])
+        for change in (lambda x: x.update(guardCode="unclassified"), lambda x: x.update(pythonFailure={}),
+                       lambda x: x.update(wrapperReturnCode=1), lambda x: x["commands"][3].update(returnCode=101),
+                       lambda x: x["commands"][3].update(captureClosed=False), lambda x: x["commands"][3].update(outputOverflow=True),
+                       lambda x: x["commands"].pop(), lambda x: x["artifact"].update(unchangedAfterRun=False),
+                       lambda x: x["artifact"].update(originalClosed=False), lambda x: x["pythonCounts"].update(testsRun=83),
+                       lambda x: x["pythonCounts"].update(skipped=1), lambda x: x.update(sourcePost=None),
+                       lambda x: x.update(temporaryEmpty=False), lambda x: x.update(allWorkerFinalityEstablished=True),
+                       lambda x: x.update(extra="not admitted")):
+            bad = deepcopy(written[0]); change(bad["dataResult"])
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_compile_receipt(bad, bound, "compile")
+        prefix = deepcopy(private)
+        prefix.update(commands=prefix["commands"][:4], pythonCounts=None, ciAggregatePassed=None, ciSourcePost=None,
+                      ciTemporaryEmpty=None, passed=False, failure="private inert failure text")
+        prefix["commands"][-1]["returnCode"] = 101
+        site = {"source": "desktop/src-tauri/tests/installed_shell_observation.rs", "line": 17, "column": 9}
+        self.assertIn(site["source"], [row["path"] for row in private["sourceRows"]])
+        failure = {"schemaVersion": 1, "kind": "mrk-native-data-contract-failure-diagnostics-v1", "phase": "rust",
+                   "originalReturncode": 101, **{key: prefix["commands"][-1][key] for key in ("originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow")},
+                   "diagnosticOnly": True, "productReady": False, "source": bound["sourceSha"], "workflowSource": bound["workflowSha"],
+                   "runId": bound["runId"], "runAttempt": bound["attempt"], "target": "aarch64-apple-darwin", "rustPanic": site,
+                   "guardCode": "command-not-complete", "python": None}
+        observed = helper.mac_observer_data_result(prefix, bound, 1, failure=failure)
+        self.assertEqual((observed["wrapperReturnCode"], observed["commands"][-1]["returnCode"]), (1, 101))
+        self.assertEqual(observed["rustPanic"], site)
+        self.assertEqual(observed["guardCode"], "command-not-complete")
+        self.assertIsNone(observed["pythonFailure"])
+        self.assertTrue(all(observed[key] is None for key in ("pythonCounts", "aggregatePassed", "sourcePost", "temporaryEmpty")))
+        self.assertNotIn("private inert failure text", json.dumps(observed))
+        with self.assertRaises(helper.CheckFailure):
+            helper.validate_mac_observer_data_result(observed)
+        # Execute only the genuine fixed pure reducers, never the native body.
+        parsed = helper.ast.parse(body)
+        wanted = {"DATA_FAILURE_GUARDS", "data_failure_json", "data_failure_python", "data_failure_cargo",
+                  "data_failure_rust_panic", "data_failure_rust_panic_diagnostic", "data_failure_document"}
+        nodes, found = [], set()
+        for node in parsed.body:
+            name = node.name if isinstance(node, helper.ast.FunctionDef) else (
+                node.targets[0].id if isinstance(node, helper.ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], helper.ast.Name) else None)
+            if name in wanted:
+                nodes.append(node); found.add(name)
+        self.assertEqual(found, wanted)
+        namespace = {"json": json, "hashlib": helper.hashlib, "re": helper.re}
+        exec(compile(helper.ast.Module(body=nodes, type_ignores=[]), "<genuine-observer-failure-data>", "exec"), namespace)
+        context = {"source": bound["sourceSha"], "workflowSource": bound["workflowSha"],
+                   "runId": bound["runId"], "runAttempt": bound["attempt"], "target": "aarch64-apple-darwin"}
+        sources = {row["path"] for row in private["sourceRows"]}
+        spelling = "tests/../src/installation.rs"
+        self.assertNotIn("desktop/src-tauri/src/installation.rs", sources)
+        opaque_result = None
+        for raw, state in ((b"\nthread 'main' (42) panicked at tests/../src/installation.rs:4271:9:\nPRIVATE_PANIC_PAYLOAD\n", "unmapped-source"),
+                           (b"thread 'main' panicked at tests/installed_shell_observation.rs:17:9:\nPRIVATE_PANIC_PAYLOAD\n", "observed"),
+                           (b"PRIVATE_PANIC_PAYLOAD without a header\n", "header-missing")):
+            genuine = json.loads(namespace["data_failure_document"](prefix["commands"][-1],
+                {"stdout": b"", "stderr": raw}, "command-not-complete", context, private["pythonTestIds"], sources, bound["source"]))
+            copied = helper.mac_observer_data_result(prefix, bound, 1, failure=genuine)
+            self.assertEqual(copied["rustPanicDiagnostic"]["parseState"], state)
+            self.assertEqual(copied["rustPanicDiagnostic"], genuine["rustPanicDiagnostic"])
+            self.assertEqual((copied["wrapperReturnCode"], copied["commands"][-1]["returnCode"]), (1, 101))
+            self.assertNotIn("PRIVATE_PANIC_PAYLOAD", json.dumps(copied))
+            if state == "unmapped-source":
+                opaque_result = copied
+                self.assertIsNone(copied["rustPanic"])
+                self.assertEqual(copied["rustPanicDiagnostic"], {"parseState": state,
+                    "spellingSha256": helper.hashlib.sha256(spelling.encode("ascii")).hexdigest(), "line": 4271, "column": 9})
+                self.assertNotIn(spelling, json.dumps(copied))
+            elif state == "observed":
+                self.assertEqual(copied["rustPanic"], site)
+            else:
+                self.assertIsNone(copied["rustPanic"])
+                self.assertTrue(all(copied["rustPanicDiagnostic"][key] is None for key in ("spellingSha256", "line", "column")))
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_mac_observer_data_result(copied)
+        opaque = opaque_result["rustPanicDiagnostic"]
+        unverified = {**failure, "rustPanic": None, "rustPanicDiagnostic": opaque}
+        self.assertIs(helper.validate_mac_observer_data_result({**complete, "rustPanicDiagnostic": None})["rustPanicDiagnostic"], None)
+        self.assertIsNone(helper.mac_observer_data_result(prefix, bound, 1, failure={**unverified, "rustPanicDiagnostic": None}).get("rustPanicDiagnostic"))
+        for state in ("input-invalid", "empty", "bounds", "header-missing", "header-multiple", "header-format", "coordinate-range"):
+            empty = {"parseState": state, "spellingSha256": None, "line": None, "column": None}
+            self.assertEqual(helper.mac_observer_data_result(prefix, bound, 1, failure={**unverified, "rustPanicDiagnostic": empty})["rustPanicDiagnostic"], empty)
+        for change in (lambda x: x.update(parseState="raw arbitrary prose"), lambda x: x.update(parseState=[]),
+                       lambda x: x.update(spellingSha256="F" * 64), lambda x: x.update(spellingSha256=True),
+                       lambda x: x.update(line=True), lambda x: x.update(line=0), lambda x: x.update(column=1000001),
+                       lambda x: x.update(raw="PRIVATE_PANIC_PAYLOAD"), lambda x: x.pop("column"),
+                       lambda x: x.update(parseState="header-format"), lambda x: x.update(parseState="observed")):
+            bad = deepcopy(opaque); change(bad)
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_observer_data_result(prefix, bound, 1, failure={**unverified, "rustPanicDiagnostic": bad})
+        for bad in ([], "PRIVATE_PANIC_PAYLOAD", False):
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_observer_data_result(prefix, bound, 1, failure={**unverified, "rustPanicDiagnostic": bad})
+        self.assertEqual(helper.mac_observer_data_result(prefix, bound, 1, failure={**unverified,
+            "rustPanicDiagnostic": {**opaque, "spellingSha256": "0" * 64}})["rustPanicDiagnostic"]["spellingSha256"], "0" * 64)
+        for diagnostic in (opaque, {**opaque, "parseState": "observed"}):
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_observer_data_result(prefix, bound, 1, failure={**failure, "rustPanicDiagnostic": diagnostic})
+        for key, bad in (("originalReturned", False), ("outputComplete", False), ("captureClosed", False),
+                         ("timedOut", True), ("outputOverflow", True), ("returnCode", 1)):
+            changed = deepcopy(prefix); changed["commands"][-1][key] = bad
+            sidecar = {**unverified, "originalReturncode" if key == "returnCode" else key: bad}
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_observer_data_result(changed, bound, 1, failure=sidecar)
+        with self.assertRaises(helper.CheckFailure):
+            helper.validate_mac_observer_data_result({**complete, "rustPanicDiagnostic": opaque})
+        for field, value in (("source", "2" * 40), ("phase", "build"), ("captureClosed", False),
+                             ("rustPanic", {**site, "source": "desktop/src-tauri/src/not-in-inventory.rs"}),
+                             ("rustPanic", {**site, "line": True}), ("rustPanic", {**site, "column": 1000001}),
+                             ("rustPanic", {**site, "raw": "never exported"})):
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_observer_data_result(prefix, bound, 1, failure={**failure, field: value})
+        for change in (lambda x: x.update(sourceCommit="2" * 40), lambda x: x["ciContext"].update(attempt="3"),
+                       lambda x: x["sourceRows"][0].update(sha256="6" * 64), lambda x: x["pythonTestIds"].reverse(),
+                       lambda x: x["commands"][0].update(phase="rust"), lambda x: x["commands"][0].update(returnCode=True),
+                       lambda x: x["pythonCounts"].update(actualHostBeforeAndAfter=False), lambda x: x.update(passed=False)):
+            bad = deepcopy(private); change(bad)
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_observer_data_result(bad, bound, 0)
+        python_private = deepcopy(private)
+        python_private.update(pythonCounts=None, ciAggregatePassed=True, ciSourcePost=None, ciTemporaryEmpty=None,
+                              passed=False, failure="private Python assertion prose")
+        python_private["commands"][-1]["returnCode"] = 1
+        # Use the16 longest actual84 identifiers, retained in fixed roster order.
+        longest = set(sorted(private["pythonTestIds"], key=len, reverse=True)[:16])
+        rows = [{"kind": "failure", "id": name} for name in private["pythonTestIds"] if name in longest]
+        python = {"testsRun": 84, "failures": 65535, "errors": 65535, "skipped": 65535,
+                  "expectedFailures": 65535, "unexpectedSuccesses": 65535, "actualHostBeforeAndAfter": True,
+                  "failureTests": rows, "classifiedTestCount": 168, "omittedTestCount": 152, "unclassifiedTestCount": 65535}
+        supplement = {**failure, "phase": "python", "originalReturncode": 1, "rustPanic": None, "python": python}
+        python_result = helper.mac_observer_data_result(python_private, bound, 1, failure=supplement)
+        self.assertEqual(python_result["pythonFailure"], python)
+        self.assertEqual(len(python_result["pythonFailure"]["failureTests"]), 16)
+        self.assertNotIn("private Python assertion prose", json.dumps(python_result))
+        self.assertIsNone(python_result["rustPanic"])
+        self.assertEqual(python_result["commands"][-1]["returnCode"], 1)
+        for change in (lambda x: x.update(guardCode="arbitrary raw prose"), lambda x: x.update(phase="rust"),
+                       lambda x: x.update(originalReturncode=101), lambda x: x.update(captureClosed=False),
+                       lambda x: x["python"].update(extra="raw"), lambda x: x["python"].update(testsRun=85),
+                       lambda x: x["python"].update(classifiedTestCount=167), lambda x: x["python"].update(omittedTestCount=153),
+                       lambda x: x["python"].update(unclassifiedTestCount=65536),
+                       lambda x: x["python"]["failureTests"].reverse(), lambda x: x["python"]["failureTests"].append(rows[0]),
+                       lambda x: x["python"]["failureTests"][0].update(id="unselected.test"),
+                       lambda x: x["python"]["failureTests"][0].update(kind="skipped")):
+            bad = deepcopy(supplement); change(bad)
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_observer_data_result(python_private, bound, 1, failure=bad)
+        # A conservative serialized-budget fixture, not SOURCE/native authority:
+        #13 compiler rows at their maximum path/size spelling plus dense16IDs.
+        dense_mac = deepcopy(bound["macCompile"])
+        dense_mac["sources"] = [{"path": str(i) + "/" + "p" * 237, "size": 1048576, "sha256": "f" * 64} for i in range(13)]
+        dense = {"schemaVersion": 1, "scope": "desktop-macos-observer-data-v1", "phase": "compile",
+                 "status": "failed-or-unknown", "lastFixedStage": "mac-observer-fixed-data", "originalCommandReturnCode": 1,
+                 "dataResult": python_result, "macCompile": dense_mac,
+                 **{key: bound[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")}}
+        self.assertLessEqual(len(helper.canonical_json(dense)) + 1, 16384)
+        dense["dataResult"] = opaque_result  # Real Rust-only shape; not a combined Python/Rust claim.
+        self.assertLessEqual(len(helper.canonical_json(dense)) + 1, 16384)
+        self.assertEqual(dense["dataResult"]["commands"][-1]["returnCode"], 101)
+        with self.assertRaises(helper.CheckFailure):
+            helper.validate_mac_observer_data_result(python_result)
+        forged = helper.mac_observer_data_result(private, bound, 1)
+        self.assertEqual(forged["wrapperReturnCode"], 1)
+        with self.assertRaises(helper.CheckFailure):
+            helper.validate_mac_observer_data_result(forged)
+        unknown = deepcopy(prefix)
+        unknown["commands"][-1].update(returnCode=None, originalReturned=None, captureClosed=None)
+        self.assertIsNone(helper.mac_observer_data_result(unknown, bound, 1)["commands"][-1]["returnCode"])
+
+    def test_observer_data_parent_preserves_first_return_and_source_post(self):
+        _, body, original, private_original = observer_data_fixture()
+        binary = "/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin"
+        for fault in ("none", "rust101", "opaque", "opaque-malformed", "unknown", "private-malformed", "source-post", "reserve", "publication"):
+            with self.subTest(fault=fault), helper.tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); root.chmod(0o700)
+                root_stat = root.lstat()
+                if fault == "none":
+                    # Only an inert Path port: no native path is opened. Feed
+                    # the real parent's request/env into the real child reducer.
+                    class OriginalRoot(type(root)):
+                        def lstat(self):
+                            return root_stat
+                    root = OriginalRoot(original["root"])
+                bound = deepcopy(original); bound["root"] = str(root)
+                private = deepcopy(private_original)
+                if fault in ("rust101", "opaque", "opaque-malformed", "publication"):
+                    private.update(commands=private["commands"][:4], pythonCounts=None, ciAggregatePassed=None,
+                                   ciSourcePost=None, ciTemporaryEmpty=None, passed=False, failure="private")
+                    private["commands"][-1]["returnCode"] = 101
+                context_raw = helper.canonical_json(bound)
+                selected = bound["macCompile"]["data"]
+                input_calls, reads, runs, writes, caps = [], [], [], [], []
+                primary = helper.CheckFailure("original child failed")
+                if fault in ("rust101", "opaque", "opaque-malformed", "publication"):
+                    primary._returned_command = ("mac-observer-fixed-data", 1)
+                def inputs(source):
+                    input_calls.append(str(source))
+                    changed = {**selected, "scriptSha256": "0" * 64} if fault == "source-post" and len(input_calls) == 2 else selected
+                    return changed, body.encode(), private["sourceRows"], tuple(private["pythonTestIds"])
+                def read(path, limit, **kw):
+                    reads.append((str(path), limit, kw))
+                    if path.name == "context.json": return context_raw
+                    if path.name == "result.json": return b"{}" if fault == "private-malformed" else helper.canonical_json(private)
+                    if path.name == "failure-diagnostics.json" and fault in ("opaque", "opaque-malformed"):
+                        diagnostic = {"parseState": "unmapped-source", "spellingSha256": "a" * 64, "line": 17, "column": 9}
+                        if fault == "opaque-malformed": diagnostic["spellingSha256"] = "PRIVATE_INVALID_DIAGNOSTIC"
+                        return helper.canonical_json({"schemaVersion": 1, "kind": "mrk-native-data-contract-failure-diagnostics-v1",
+                            "phase": "rust", "originalReturncode": 101, "source": bound["sourceSha"], "workflowSource": bound["workflowSha"],
+                            "runId": bound["runId"], "runAttempt": bound["attempt"], "target": "aarch64-apple-darwin",
+                            **{key: private["commands"][-1][key] for key in ("originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow")},
+                            "diagnosticOnly": True, "productReady": False, "guardCode": "command-not-complete", "python": None,
+                            "rustPanic": None, "rustPanicDiagnostic": diagnostic})
+                    raise OSError("optional sidecar absent")
+                def invoke(argv, **kw):
+                    runs.append((argv, kw))
+                    if fault in ("rust101", "opaque", "opaque-malformed", "unknown", "publication"): raise primary
+                    return ""
+                def publish(path, value):
+                    if fault == "publication" and path.name == "compile-checks.json": raise KeyboardInterrupt()
+                    writes.append((path.name, deepcopy(value)))
+                def remaining(cap):
+                    caps.append(cap)
+                    return 30 if fault == "reserve" else min(cap, 80)
+                with patch.object(helper, "mac_observer_data_inputs", side_effect=inputs), \
+                        patch.object(helper, "mac_observer_data_read", side_effect=read), \
+                        patch.object(helper, "run", side_effect=invoke), patch.object(helper, "write_json", side_effect=publish), \
+                        patch.object(helper.time, "monotonic_ns", return_value=1000000000), \
+                        patch.dict(helper.os.environ, {"PATH": "/inert/bin", "UNEXPECTED_SECRET": "inert forbidden value"}, clear=True):
+                    if fault == "none":
+                        result = helper.mac_observer_data_checks(binary + "/cargo", root, Path(bound["source"]),
+                            {"RUSTC": binary + "/rustc", "RUSTUP_AUTO_INSTALL": "0", "UNEXPECTED_SECRET": "inert forbidden value"}, remaining, bound)
+                        self.assertEqual(result["wrapperReturnCode"], 0)
+                    else:
+                        with self.assertRaises(helper.CheckFailure) as caught:
+                            helper.mac_observer_data_checks(binary + "/cargo", root, Path(bound["source"]),
+                                {"RUSTC": binary + "/rustc", "RUSTUP_AUTO_INSTALL": "0"}, remaining, bound)
+                        if fault in ("rust101", "opaque", "opaque-malformed", "unknown", "publication"): self.assertIs(caught.exception, primary)
+                self.assertEqual(len(runs), 0 if fault == "reserve" else 1)
+                if runs:
+                    argv, kw = runs[0]
+                    self.assertEqual(argv, [helper.sys.executable, "-I", "-S", "-B", "-c", body])
+                    self.assertEqual((kw["check"], kw["cwd"], kw["timeout"]), ("mac-observer-fixed-data", root, 80))
+                    self.assertEqual((kw["output"], kw["diagnostics"]), (helper.subprocess.DEVNULL, helper.subprocess.DEVNULL))
+                    self.assertNotIn("UNEXPECTED_SECRET", kw["env"])
+                    self.assertEqual(kw["env"]["MRK_MACOS_DATA_MODE"], "ci-observer-data-v1")
+                    self.assertEqual(kw["env"]["CARGO_TARGET_DIR"], str(root / "target"))
+                    self.assertEqual(kw["env"]["HOME"], str(root / "home"))
+                    request = next(value for name, value in writes if name == "observer-data-request.json")
+                    self.assertEqual(request["deadlineMonotonicNs"], 51 * 1000000000)
+                    self.assertEqual(request["contextSha256"], helper.hashlib.sha256(context_raw).hexdigest())
+                    self.assertEqual(request["compiler"], {**MAC_RUST_EXPECTED["aarch64-apple-darwin"], "cargo": binary + "/cargo", "rustc": binary + "/rustc"})
+                    if fault == "none":
+                        original_identity = [root_stat.st_dev, root_stat.st_ino, root_stat.st_mode, root_stat.st_uid,
+                                             root_stat.st_gid, root_stat.st_nlink, root_stat.st_size, root_stat.st_mtime_ns, root_stat.st_ctime_ns]
+                        admitted = observer_data_child_functions(body)["ci_data_admission"](
+                            helper.canonical_json(request), context_raw, kw["env"], original_identity, 1000000000)
+                        self.assertEqual(admitted[2], request["compiler"])
+                        self.assertEqual(admitted[3], request["deadlineMonotonicNs"])
+                        self.assertEqual(admitted[4], bound)
+                if fault == "unknown":
+                    self.assertEqual([Path(path).name for path, _, _ in reads], ["context.json"])
+                self.assertEqual(len(input_calls), 2 if fault in ("none", "source-post") else 1)
+                failures = [value for name, value in writes if name == "compile-checks.json"]
+                if fault not in ("none", "publication"):
+                    self.assertEqual(len(failures), 1)
+                    failed = failures[0]
+                    self.assertEqual(failed["status"], "failed-or-unknown")
+                    self.assertLessEqual(len(helper.canonical_json(failed)) + 1, 16384)
+                    self.assertEqual(failed["originalCommandReturnCode"], 1 if fault in ("rust101", "opaque", "opaque-malformed") else None if fault in ("unknown", "reserve") else 0)
+                    if fault in ("rust101", "opaque", "opaque-malformed"):
+                        self.assertEqual(failed["dataResult"]["commands"][-1]["returnCode"], 101)
+                        self.assertIsNone(failed["dataResult"]["sourcePost"])
+                        self.assertNotIn("PRIVATE_INVALID_DIAGNOSTIC", json.dumps(failed))
+                        if fault == "opaque":
+                            self.assertEqual(failed["dataResult"]["rustPanicDiagnostic"]["parseState"], "unmapped-source")
+                        else:
+                            self.assertIsNone(failed["dataResult"].get("rustPanicDiagnostic"))
+                    if fault in ("unknown", "private-malformed", "reserve"):
+                        self.assertIsNone(failed["dataResult"])
+                else:
+                    self.assertEqual(failures, [])
+
+    def test_observer_data_phase_routes_one_full_five_original(self):
+        _, _, bound, private = observer_data_fixture()
+        result = helper.mac_observer_data_result(private, bound, 0)
+        binary = "/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin"
+        for phase, failed in (("acquire", False), ("compile", False), ("compile", True)):
+            events, calls, writes, children = [], [], [], []
+            MemoryPath, _ = memory_paths(events)
+            primary = helper.CheckFailure("original fixed DATA wrapper failed")
+            def invoke(argv, **kw):
+                calls.append((list(map(str, argv)), kw))
+                return helper.NODE if kw["check"] == "node-version" else ""
+            def child(cargo, root, source, env, remaining, context):
+                children.append((cargo, root, source, dict(env), remaining(1680), deepcopy(context)))
+                self.assertEqual([kw["check"] for _, kw in calls], ["node-version", "typescript-no-emit", "vite-assets"])
+                if failed: raise primary
+                return deepcopy(result)
+            with patch.object(helper, "Path", MemoryPath), patch.object(helper, "source_unchanged"), \
+                    patch.object(helper, "mac_compile_source_guard"), patch.object(helper, "mac_compile_inputs", return_value=bound["macCompile"]), \
+                    patch.object(helper, "tools", return_value=(binary + "/cargo", None)), patch.object(helper, "ordinary"), \
+                    patch.object(helper.shutil, "which", return_value="/selected/bin/node"), patch.object(helper.time, "monotonic", return_value=100.0), \
+                    patch.object(helper, "run", side_effect=invoke), patch.object(helper, "mac_observer_data_checks", side_effect=child), \
+                    patch.object(helper, "mac_observer_compile", side_effect=AssertionError("duplicate compiler forbidden")), \
+                    patch.object(helper, "write_json", side_effect=lambda path, value: writes.append(deepcopy(value))), \
+                    patch.dict(helper.os.environ, {"PATH": "/inert/bin"}, clear=True):
+                if failed:
+                    with self.assertRaises(helper.CheckFailure) as caught:
+                        helper.phase_mac_compile(phase, bound)
+                    self.assertIs(caught.exception, primary)
+                else:
+                    helper.phase_mac_compile(phase, bound)
+            self.assertEqual(len(children), 0 if phase == "acquire" else 1)
+            self.assertEqual([kw["check"] for _, kw in calls],
+                             ["mac-normal-locked-metadata", "node-version", "npm-locked-no-scripts"] if phase == "acquire" else
+                             ["node-version", "typescript-no-emit", "vite-assets"])
+            if phase == "acquire":
+                self.assertEqual(calls[0][0][calls[0][0].index("--features") + 1], "desktop-shell,custom-protocol,macos-installed-observation")
+                self.assertIn("--ignore-scripts", calls[-1][0])
+            else:
+                self.assertEqual(children[0][4], 1680)
+            if failed:
+                self.assertEqual(writes, [])
+            else:
+                self.assertEqual(len(writes), 1)
+                helper.validate_compile_receipt(writes[0], bound, phase)
+                self.assertEqual(writes[0]["scope"], "desktop-macos-observer-data-v1")
+                self.assertEqual("dataResult" in writes[0], phase == "compile")
+
+    def test_observer_data_original_reads_are_bounded_and_closed(self):
+        raw, body, bound, private = observer_data_fixture()
+        # All78 names are the genuine SOURCE tuple, but these tiny fixture bytes
+        # are inert. Exercise the real inventory/selector join, not a stub.
+        with helper.tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for row in private["sourceRows"]:
+                path = root / row["path"]; path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(raw if row["path"] == helper.MAC_OBSERVER_DATA_SCRIPT else b"x")
+                path.chmod(0o600)
+            selected, actual_body, rows, tests = helper.mac_observer_data_inputs(root)
+            self.assertEqual(selected, {**bound["macCompile"]["data"],
+                "sourceInventorySha256": helper.hashlib.sha256(helper.canonical_json({"files": rows}) + b"\n").hexdigest()})
+            self.assertEqual(actual_body, body.encode())
+            self.assertEqual(tests, tuple(private["pythonTestIds"]))
+            self.assertEqual([row["path"] for row in rows], [row["path"] for row in private["sourceRows"]])
+            changed = root / next(row["path"] for row in rows if row["path"] != helper.MAC_OBSERVER_DATA_SCRIPT)
+            changed.write_bytes(b"xx")
+            self.assertNotEqual(helper.mac_observer_data_inputs(root)[0]["sourceInventorySha256"], selected["sourceInventorySha256"])
+            changed.unlink()
+            with self.assertRaises((helper.CheckFailure, OSError)):
+                helper.mac_observer_data_inputs(root)
+        with helper.tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source"; source.write_bytes(b"original")
+            source.chmod(0o600)
+            self.assertEqual(helper.mac_observer_data_read(source, 16384, private=True), b"original")
+            self.assertEqual(helper.mac_observer_data_read(source, 128 * 1024), b"original")
+            real_close, real_pread = helper.os.close, helper.os.pread
+            # Exercise both64KiB chunks and the EOF probe on the same original
+            # descriptor, without a second path open or an unbounded pass.
+            stable = b"s" * 65537
+            source.write_bytes(stable)
+            with patch.object(helper.os, "pread", wraps=real_pread) as reread:
+                self.assertEqual(helper.mac_observer_data_read(source, 128 * 1024, private=True), stable)
+            self.assertEqual([(call.args[1], call.args[2]) for call in reread.call_args_list],
+                             [(65536, 0), (1, 65536), (1, 65537)])
+            self.assertEqual(len({call.args[0] for call in reread.call_args_list}), 1)
+            for fault in ("mode", "empty", "bound", "link", "hardlink", "early", "changed",
+                          "same-metadata", "pread-error", "pread-early", "pread-extra"):
+                source.write_bytes(b"original"); source.chmod(0o600)
+                selected = source
+                with contextlib.ExitStack() as stack:
+                    closed = stack.enter_context(patch.object(helper.os, "close", wraps=real_close))
+                    if fault == "mode": source.chmod(0o644)
+                    if fault == "empty": source.write_bytes(b"")
+                    if fault == "bound": source.write_bytes(b"x" * 16385)
+                    if fault == "link":
+                        selected = root / "link"; selected.symlink_to(source)
+                    if fault == "hardlink": helper.os.link(source, root / "hardlink")
+                    if fault == "early": stack.enter_context(patch.object(helper.os, "read", return_value=b""))
+                    if fault == "changed":
+                        real_read = helper.os.read
+                        def changing(fd, size):
+                            value = real_read(fd, size)
+                            source.write_bytes(b"changed!")
+                            return value
+                        stack.enter_context(patch.object(helper.os, "read", side_effect=changing))
+                    if fault == "same-metadata":
+                        # Deterministic coarse-timestamp port: every other
+                        # identity field is genuine, only the two time fields
+                        # retain their original values during the real rewrite.
+                        identity = helper.source_slots_identity
+                        before = identity(source.stat())
+                        stack.enter_context(patch.object(helper, "source_slots_identity",
+                            side_effect=lambda info: identity(info)[:7] + before[7:]))
+                        real_read = helper.os.read
+                        def same_tick(fd, size):
+                            value = real_read(fd, size)
+                            source.write_bytes(b"changed!")
+                            self.assertEqual(helper.source_slots_identity(source.stat()), before)
+                            return value
+                        stack.enter_context(patch.object(helper.os, "read", side_effect=same_tick))
+                    if fault == "pread-error":
+                        stack.enter_context(patch.object(helper.os, "pread", side_effect=OSError("inert second-pass error")))
+                    if fault == "pread-early":
+                        stack.enter_context(patch.object(helper.os, "pread", return_value=b""))
+                    if fault == "pread-extra":
+                        stack.enter_context(patch.object(helper.os, "pread",
+                            side_effect=lambda fd, size, offset: b"x" if offset == 8 else real_pread(fd, size, offset)))
+                    with self.subTest(read=fault), self.assertRaises((helper.CheckFailure, OSError)) as refused:
+                        helper.mac_observer_data_read(selected, 16384, private=True)
+                    if fault == "same-metadata":
+                        self.assertIn("original input bytes changed", str(refused.exception))
+                    self.assertEqual(closed.call_count, 0 if fault == "link" else 1)
+                if fault == "hardlink": (root / "hardlink").unlink()
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_observer_data_read(source, 65536)
+
     def test_compile_scope_refuses_every_native_phase_before_context_or_tools(self):
         with patch.object(helper, "load_context", side_effect=AssertionError("context must not be opened")), \
                 patch.object(helper, "tools", side_effect=AssertionError("no tool may be selected")):
@@ -643,15 +1315,15 @@ class ShellCompileContractTests(unittest.TestCase):
         arm_row = '{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"full4"}'
         intel_row = '{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin","mode":"full4"}'
         arm_vault = '{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"vault-only"}'
-        matrix = ("        include: ${{ fromJSON(inputs.target == 'app-only' && '[" + arm_row.replace('full4', 'app-only') + ',' + intel_row.replace('full4', 'app-only') + "]' || inputs.target == 'history-app4' && '[" + arm_row.replace('full4', 'history-app4') + ',' + intel_row.replace('full4', 'history-app4') + "]' || inputs.target == 'remaining' && '[" + arm_vault + ',' + intel_row + "]' || "
+        matrix = ("        include: ${{ fromJSON(inputs.target == 'observer-data' && '[" + arm_row.replace('full4', 'observer-data') + "]' || inputs.target == 'observer-only' && '[" + arm_row.replace('full4', 'observer-only') + "]' || inputs.target == 'app-only' && '[" + arm_row.replace('full4', 'app-only') + ',' + intel_row.replace('full4', 'app-only') + "]' || inputs.target == 'history-app4' && '[" + arm_row.replace('full4', 'history-app4') + ',' + intel_row.replace('full4', 'history-app4') + "]' || inputs.target == 'remaining' && '[" + arm_vault + ',' + intel_row + "]' || "
                   "inputs.target == 'arm' && '[" + arm_row + "]' || inputs.target == 'intel' && '[" + intel_row + "]' || '[" + arm_row + ',' + intel_row + "]') }}\n")
         self.assertEqual(workflow.count(matrix), 1)
         self.assertIn("      target:\n"
-                      "        description: Fixed compiler rows; history-app4 DATA plus app, or app-only shipping compile, both architectures\n"
+                      "        description: Fixed compiler rows; History DATA, app-only both architectures, or observer-only ARM compile\n"
                       "        required: false\n"
                       "        type: choice\n"
                       "        default: both\n"
-                      "        options: [both, arm, intel, remaining, history-app4, app-only]\n", workflow)
+                      "        options: [both, arm, intel, remaining, history-app4, app-only, observer-only]\n", workflow)
         self.assertIn("      MRK_COMPILE_SELECTION: ${{ inputs.target || 'both' }}\n", workflow)
         self.assertIn("      MRK_MACOS_COMPILE_MODE: ${{ matrix.mode }}\n", workflow)
         admission = workflow.split("      - name: Require exact disposable verification source\n", 1)[1].split(
@@ -659,6 +1331,8 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertIn('          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then\n'
                       '            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]\n'
                       '            case "$MRK_COMPILE_SELECTION" in\n'
+                      "              observer-data) printf '%s\\n' 'Standalone observer-data lacks source-bound runtime anchors; use the genuine desktop-macos-installed preview Rust+84 DATA gate' >&2; exit 1 ;;\n"
+                      '              observer-only) [[ "$MRK_MACOS_COMPILE_MODE" == observer-only && "$MRK_MACOS_TARGET" == aarch64-apple-darwin ]] ;;\n'
                       '              app-only) [[ "$MRK_MACOS_COMPILE_MODE" == app-only && ( "$MRK_MACOS_TARGET" == aarch64-apple-darwin || "$MRK_MACOS_TARGET" == x86_64-apple-darwin ) ]] ;;\n'
                       '              history-app4) [[ "$MRK_MACOS_COMPILE_MODE" == history-app4 && ( "$MRK_MACOS_TARGET" == aarch64-apple-darwin || "$MRK_MACOS_TARGET" == x86_64-apple-darwin ) ]] ;;\n'
                       '              both) [[ "$MRK_MACOS_COMPILE_MODE" == full4 ]] ;;\n'
@@ -675,13 +1349,13 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertIn('[[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-normal-compile.yml@$GITHUB_REF" ]]', admission)
         self.assertIn('[[ "$RUNNER_ENVIRONMENT" == github-hosted ]]', admission)
         header = workflow.split('    steps:\n', 1)[0]
-        self.assertIn("    timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 120 || (matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only') && 50 || 45 }}\n", header)
+        self.assertIn("    timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 120 || (matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only' || matrix.mode == 'observer-only' || matrix.mode == 'observer-data') && 50 || 45 }}\n", header)
         self.assertIn('      fail-fast: false\n      max-parallel: 2\n', header)
         acquire = workflow.split('      - name: Acquire locked active-platform inputs without npm scripts\n', 1)[1].split('      - name:', 1)[0]
-        compile_step = workflow.split('      - name: Compile selected graphs and run only selected History DATA\n', 1)[1].split('      - name:', 1)[0]
+        compile_step = workflow.split('      - name: Compile selected graphs and only explicitly selected fixed DATA\n', 1)[1].split('      - name:', 1)[0]
         self.assertIn('        timeout-minutes: 15\n', acquire)
-        self.assertIn("        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 92 || (matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only') && 32 || 25 }}\n", compile_step)
-        self.assertIn("      - name: Select fixed frontend compiler\n        if: matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only'\n", workflow)
+        self.assertIn("        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 92 || (matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only' || matrix.mode == 'observer-only' || matrix.mode == 'observer-data') && 32 || 25 }}\n", compile_step)
+        self.assertIn("      - name: Select fixed frontend compiler\n        if: matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only' || matrix.mode == 'observer-only' || matrix.mode == 'observer-data'\n", workflow)
         self.assertIn("desktop-macos-normal-compile-${{ matrix.target }}-${{ matrix.mode }}-", workflow)
         self.assertNotIn("ubuntu-", workflow)
         self.assertNotIn("windows-2025", workflow)
@@ -1057,7 +1731,7 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertEqual(tuple(HISTORY_APP_CASES), helper.MAC_HISTORY_TESTS)
         self.assertEqual(HISTORY_APP_CASES, sorted(HISTORY_APP_CASES))
         workflow = (HELPER.parents[2] / ".github/workflows/desktop-macos-normal-compile.yml").read_text()
-        self.assertIn("options: [both, arm, intel, remaining, history-app4, app-only]", workflow)
+        self.assertIn("options: [both, arm, intel, remaining, history-app4, app-only, observer-only]", workflow)
         self.assertIn("history-app4) [[", workflow)
         for target in MAC_RUST_EXPECTED:
             env, bound = history_app_environment(target), history_app_context(target)
@@ -1150,10 +1824,32 @@ class ShellCompileContractTests(unittest.TestCase):
                 with self.assertRaises(helper.CheckFailure):
                     helper.compile_workflow_binding({**app_env, field: bad}, helper.MAC_COMPILE_SCOPE)
         self.assertIn('app-only) [[ "$MRK_MACOS_COMPILE_MODE" == app-only', workflow)
-        self.assertIn("matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only'", workflow)
+        self.assertIn("matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only' || matrix.mode == 'observer-only' || matrix.mode == 'observer-data'", workflow)
         self.assertIn('"target":"aarch64-apple-darwin","mode":"app-only"', workflow)
         self.assertIn('"target":"x86_64-apple-darwin","mode":"app-only"', workflow)
         self.assertIn('"$GITHUB_EVENT_NAME" == push && "$MRK_COMPILE_SELECTION" == both && "$MRK_MACOS_COMPILE_MODE" == full4', workflow)
+
+
+        # Exactly one manual ARM graph, never a new platform or runtime role.
+        observer_env = mac_environment("aarch64-apple-darwin", "observer-only")
+        observer = mac_context("aarch64-apple-darwin", "observer-only")
+        self.assertEqual(helper.mac_compile_mode(observer_env, "aarch64-apple-darwin"), "observer-only")
+        self.assertEqual([list(row) for row in helper.mac_compile_graphs("aarch64-apple-darwin", "observer-only")],
+                         observer["macCompile"]["graphs"])
+        self.assertEqual(observer["macCompile"]["execution"], "compile-only")
+        self.assertNotIn("tests", observer["macCompile"])
+        for key, value in (("GITHUB_EVENT_NAME", "push"), ("MRK_COMPILE_SELECTION", "both"),
+                           ("MRK_MACOS_COMPILE_MODE", "full4"), ("MRK_MACOS_TARGET", "x86_64-apple-darwin")):
+            with self.subTest(observer_binding=key), self.assertRaises(helper.CheckFailure):
+                helper.mac_compile_mode({**observer_env, key: value}, "aarch64-apple-darwin")
+        with self.assertRaises(helper.CheckFailure):
+            helper.mac_compile_graphs("x86_64-apple-darwin", "observer-only")
+        self.assertEqual(workflow.count('"target":"aarch64-apple-darwin","mode":"observer-only"'), 1)
+        self.assertNotIn('"target":"x86_64-apple-darwin","mode":"observer-only"', workflow)
+        self.assertNotIn("environment:", workflow)
+        self.assertEqual(workflow.count("/compile-checks.json"), 1)
+        self.assertNotIn("source-slots-compile.stdout", workflow)
+        self.assertNotIn("source-slots-compile.stderr", workflow)
 
     def test_compile_cleanup_requires_complete_matching_original_positive_receipts(self):
         for phase in helper.COMPILE_CHECKS:
@@ -1902,7 +2598,8 @@ class ShellCompileContractTests(unittest.TestCase):
 
         pairs = (("aarch64-apple-darwin", "full4"), ("x86_64-apple-darwin", "full4"),
                  ("aarch64-apple-darwin", "vault-only"),
-                 ("aarch64-apple-darwin", "app-only"), ("x86_64-apple-darwin", "app-only"))
+                 ("aarch64-apple-darwin", "app-only"), ("x86_64-apple-darwin", "app-only"),
+                 ("aarch64-apple-darwin", "observer-only"))
         for target, mode in pairs:
             expected_rust = MAC_RUST_EXPECTED[target]
             events, calls, written, guards, input_calls = [], [], [], [], []
@@ -1920,11 +2617,11 @@ class ShellCompileContractTests(unittest.TestCase):
                 if kw["check"] == "mac-cargo-version":
                     return "cargo 1.98.0 (abcdef123 2026-09-01)"
                 if kw["check"] == "node-version":
-                    self.assertIn(mode, ("full4", "app-only"))
+                    self.assertIn(mode, ("full4", "app-only", "observer-only"))
                     return helper.NODE
                 return ""
             def selected(name):
-                self.assertIn(name, ("git", "node") if mode in ("full4", "app-only") else ("git",))
+                self.assertIn(name, ("git", "node") if mode in ("full4", "app-only", "observer-only") else ("git",))
                 return "/usr/bin/git" if name == "git" else "/selected/bin/node"
             def selected_inputs(source, selected_target, selected_mode):
                 input_calls.append((str(source), selected_target, selected_mode))
@@ -1955,21 +2652,22 @@ class ShellCompileContractTests(unittest.TestCase):
                                     and "/inert/source/desktop/helpers" in paths for paths in guards))
                 helper.phase_mac_compile("acquire", prepared)
             self.assertTrue(input_calls and all(row == (bound["source"], target, mode) for row in input_calls))
-            if mode == "app-only":
+            if mode in ("app-only", "observer-only"):
                 self.assertIn("test-execution", public["notQualified"])
                 self.assertEqual(public["scope"], "desktop-macos-normal-compile-only-v1")
-            metadata_names = ("mac-vault-locked-metadata", "mac-normal-locked-metadata", "mac-image-locked-metadata") if mode == "full4" else ("mac-normal-locked-metadata",) if mode == "app-only" else ("mac-vault-locked-metadata",)
+            metadata_names = ("mac-vault-locked-metadata", "mac-normal-locked-metadata", "mac-image-locked-metadata") if mode == "full4" else ("mac-normal-locked-metadata",) if mode in ("app-only", "observer-only") else ("mac-vault-locked-metadata",)
             commands = [row for row in calls if row[1]["check"] in metadata_names]
             self.assertEqual([row[1]["check"] for row in commands], list(metadata_names))
             self.assertEqual([row[0][0] for row in commands],
                              ["/Users/runner/.rustup/toolchains/stable-" + target + "/bin/cargo"] * len(commands))
             expected_paths = ["desktop/helpers/macos-vault-helper/Cargo.toml"] + (["desktop/src-tauri/Cargo.toml", "desktop/helpers/macos-desktop-image/Cargo.toml"] if mode == "full4" else [])
-            if mode == "app-only":
+            if mode in ("app-only", "observer-only"):
                 expected_paths = ["desktop/src-tauri/Cargo.toml"]
             self.assertEqual([row[0][-1] for row in commands], [bound["source"] + "/" + path for path in expected_paths])
             self.assertEqual([row[0][1] for row in commands], ["metadata"] * len(commands))
-            if mode == "app-only":
-                self.assertEqual(commands[0][0][commands[0][0].index("--features") + 1], "desktop-shell,custom-protocol")
+            if mode in ("app-only", "observer-only"):
+                self.assertEqual(commands[0][0][commands[0][0].index("--features") + 1],
+                                 "desktop-shell,custom-protocol,macos-installed-observation" if mode == "observer-only" else "desktop-shell,custom-protocol")
             else:
                 self.assertNotIn("--features", commands[0][0])
             if mode == "full4":
@@ -1981,9 +2679,9 @@ class ShellCompileContractTests(unittest.TestCase):
                 self.assertEqual(kw["timeout"], 600)
             self.assertFalse(any("rustup" == Path(arg).name for row, _ in calls for arg in row))
             receipt_value = next(value for path, value in written if path.endswith("acquire-checks.json"))
-            expected_checks = ["rust-version-target", "mac-cargo-version", *metadata_names] + (["node-version", "npm-locked-no-scripts"] if mode in ("full4", "app-only") else [])
+            expected_checks = ["rust-version-target", "mac-cargo-version", *metadata_names] + (["node-version", "npm-locked-no-scripts"] if mode in ("full4", "app-only", "observer-only") else [])
             self.assertEqual(receipt_value["rust"], expected_rust)
-            self.assertEqual(receipt_value["node"], helper.NODE if mode in ("full4", "app-only") else None)
+            self.assertEqual(receipt_value["node"], helper.NODE if mode in ("full4", "app-only", "observer-only") else None)
             self.assertEqual(receipt_value["checks"], [{"check": name, "exitCode": 0} for name in expected_checks])
             output_names = ["target/mac-vault-metadata.json", "metadata.json", "target/mac-image-metadata.json"] if mode == "full4" else ["metadata.json"]
             for name in output_names:
@@ -2066,17 +2764,17 @@ class ShellCompileContractTests(unittest.TestCase):
             def reset_tree():
                 files.clear(); directories.clear(); symbolic.clear(); cleanup_events.clear()
                 directories.update(bound["root"] + "/" + name for name in helper.COMPILER_DIRECTORIES + helper.EMPTY_NATIVE_DIRECTORIES)
-                if mode in ("full4", "app-only"):
+                if mode in ("full4", "app-only", "observer-only"):
                     directories.update(source_outputs)
                 files.update({bound["root"] + "/" + name: b"inert data" for name in helper.COMPILER_PRIVATE_FILES + helper.COMPILE_PUBLIC_FILES})
                 for phase in ("acquire", "compile"):
                     checks = expected_checks if phase == "acquire" else ["rust-version-target", "mac-cargo-version", "mac-vault-bin-compile-only"] + (["node-version", "typescript-no-emit", "vite-assets", "mac-normal-bin-compile-only", "mac-observer-compile-only", "mac-image-compile-only"] if mode == "full4" else [])
-                    if mode == "app-only" and phase == "compile":
+                    if mode in ("app-only", "observer-only") and phase == "compile":
                         checks = ["rust-version-target", "mac-cargo-version", "node-version",
-                                  "typescript-no-emit", "vite-assets", "mac-normal-bin-compile-only"]
+                                  "typescript-no-emit", "vite-assets", "mac-observer-compile-only" if mode == "observer-only" else "mac-normal-bin-compile-only"]
                     frame = {"schemaVersion": 1, "scope": "desktop-macos-normal-compile-only-v1", "phase": phase, "status": "passed",
                              **{key: bound[key] for key in ("sourceSha", "platform", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt", "sourceTree", "macCompile")},
-                             "rust": deepcopy(expected_rust), "node": helper.NODE if mode in ("full4", "app-only") else None,
+                             "rust": deepcopy(expected_rust), "node": helper.NODE if mode in ("full4", "app-only", "observer-only") else None,
                              "checks": [{"check": check, "exitCode": 0} for check in checks]}
                     files[bound["root"] + "/" + phase + "-checks.json"] = json.dumps(frame).encode()
             def original_file(path):
@@ -3123,6 +3821,51 @@ class ShellCompileContractTests(unittest.TestCase):
                         helper.source_slots_writer(ReadPath("/inert/source-slots-test.stdout"), Writer())
             self.assertFalse(original.closes)  # The surrounding original stream owns close, not this check.
 
+        # Observer-only stdout uses the installed DATA graph's four-MiB budget.
+        # Default stdout and observer stderr stay at two/one MiB respectively.
+        observer_limit = 4 * 1024 * 1024
+        self.assertEqual(helper.MAC_OBSERVER_STDOUT_LIMIT, observer_limit)
+        for observer_mode, name, cap in ((False, "source-slots-compile.stdout", 2 * 1024 * 1024),
+                                         (True, "source-slots-compile.stdout", observer_limit),
+                                         (True, "source-slots-compile.stderr", 1024 * 1024)):
+            for extra in (0, 1):
+                original = OriginalOS(b"x" * (cap + extra), None)
+                expected = helper.source_slots_identity(original.info)
+                path = ReadPath("/inert/target") / name
+                with self.subTest(observer_budget=observer_mode, output=name, extra=extra), patch.object(helper, "os", original):
+                    if extra:
+                        with self.assertRaises(helper.CheckFailure) as refused:
+                            helper.source_slots_read(path, expected, observer=observer_mode)
+                        facts = refused.exception.__dict__["_source_slots_capture_admission"]
+                        self.assertEqual(facts, {"schemaVersion": 1, "output": name, "limitBytes": cap,
+                            "writerBytes": cap + 1, "openedBytes": cap + 1, "failedCheck": "byte-bound",
+                            "readerClosed": True, "partialObservation": True})
+                        self.assertEqual(original.position, 0)
+                        self.assertEqual(helper.source_slots_capture_admission(facts, observer=observer_mode), facts)
+                        if observer_mode and name.endswith("stdout"):
+                            self.assertIsNone(helper.source_slots_capture_admission(facts))
+                    else:
+                        self.assertEqual(helper.source_slots_read(path, expected, observer=observer_mode), b"")
+                        self.assertEqual(original.position, cap)
+                        self.assertEqual(original.fstats, 2)
+                self.assertEqual(original.closes, [77])
+                self.assertEqual(original.opened, [(str(path), actual_os.O_RDONLY | actual_os.O_NOFOLLOW | actual_os.O_CLOEXEC | actual_os.O_NONBLOCK)])
+        original = OriginalOS(b"x" * observer_limit, None)
+        with patch.object(helper, "os", original):
+            retained = helper.source_slots_read(ReadPath("/inert/source-slots-compile.stdout"),
+                helper.source_slots_identity(original.info), retain=True, observer=True)
+        self.assertEqual(retained, original.body)
+        self.assertEqual(original.position, observer_limit)
+        self.assertEqual(original.closes, [77])
+        for mode, name in ((1, "source-slots-compile.stdout"), (None, "source-slots-compile.stdout"),
+                           ("true", "source-slots-compile.stdout"), (True, "metadata.json"),
+                           (True, "source-slots-test.stdout")):
+            original = OriginalOS(b"inert", None)
+            with self.subTest(invalid_observer=mode, output=name), patch.object(helper, "os", original), self.assertRaises(helper.CheckFailure):
+                helper.source_slots_read(ReadPath("/inert") / name, helper.source_slots_identity(original.info), observer=mode)
+            self.assertEqual(original.opened, [])
+            self.assertEqual(original.closes, [])
+
         # Failed Cargo JSON is optional DATA, not a new success/cleanup path.
         # All path names below are inert; only a fixed Git metadata double is
         # consulted, never a SOURCE body, compiler, dependency or native API.
@@ -3193,6 +3936,60 @@ class ShellCompileContractTests(unittest.TestCase):
         for good_path in ("src/lib.rs", app + "/src/lib.rs", source + "/" + app + "/src/lib.rs"):
             row = helper.source_slots_diagnostic_records(cargo_bytes([message(spans=[primary(good_path)]), terminal]), b"", source)[0]
             self.assertEqual(row["spans"], [{"path": app + "/src/lib.rs", "line": 19, "column": 7}])
+        # The observed integration crate uses literal tests/../src imports.
+        # Bind this single known alias only for the explicit observer route;
+        # raw diagnostics, arbitrary parent traversal and foreign crates stay out.
+        aliases = ("tests/../src/lib.rs", app + "/tests/../src/lib.rs",
+                   source + "/" + app + "/tests/../src/lib.rs")
+        for alias in aliases:
+            raw = cargo_bytes([message(spans=[primary(alias)]), terminal])
+            self.assertEqual(helper.source_slots_diagnostic_records(raw, b"", source)[0]["unboundSpans"], 1)
+            row = helper.source_slots_diagnostic_records(raw, b"", source, observer=True)[0]
+            self.assertEqual(row["spans"], [{"path": app + "/src/lib.rs", "line": 19, "column": 7}])
+            self.assertEqual(row["unboundSpans"], 0)
+        for prefix in ("tests/", app + "/tests/", source + "/" + app + "/tests/"):
+            raw = cargo_bytes([message(spans=[primary(prefix + "installed_shell_observation.rs")]), terminal])
+            row = helper.source_slots_diagnostic_records(raw, b"", source, observer=True)[0]
+            self.assertEqual(row["spans"][0]["path"], app + "/tests/installed_shell_observation.rs")
+        for bad_path in ("tests/../../src/lib.rs", "tests/../src/../lib.rs", "tests/../src/./lib.rs",
+                         "tests/../src//lib.rs", "tests/../src/a\0.rs", "tests/../src/lib.txt",
+                         "tests/../src/" + "x" * 479 + ".rs", "tests/../../native/macos-installed-native/src/lib.rs"):
+            raw = cargo_bytes([message(spans=[primary(bad_path)]), terminal])
+            row = helper.source_slots_diagnostic_records(raw, b"", source, observer=True)[0]
+            self.assertEqual((row["spans"], row["unboundSpans"]), ([], 1))
+        exact_limit = "tests/../src/" + "x" * 478 + ".rs"
+        self.assertEqual(len(app + "/" + exact_limit), 512)
+        row = helper.source_slots_diagnostic_records(
+            cargo_bytes([message(spans=[primary(exact_limit)]), terminal]), b"", source, observer=True)[0]
+        self.assertEqual(row["unboundSpans"], 0)
+        self.assertEqual(row["spans"][0]["path"], app + "/src/" + "x" * 478 + ".rs")
+        for package in (native, "foreign"):
+            raw = cargo_bytes([message(spans=[primary(aliases[0])], package=package), terminal])
+            self.assertEqual(helper.source_slots_diagnostic_records(raw, b"", source, observer=True)[0]["unboundSpans"], 1)
+        for invalid in (1, None, "true"):
+            with self.assertRaises(helper.CheckFailure):
+                helper.source_slots_diagnostic_records(simple_raw, b"", source, observer=invalid)
+        observer_bound = dict(bound, executionScope=helper.MAC_COMPILE_SCOPE,
+                              workflowPath=helper.MAC_COMPILE_WORKFLOW, macCompile={"mode": helper.MAC_OBSERVER_MODE})
+        observer_raw = cargo_bytes([message(spans=[primary(aliases[0])]), terminal])
+        for present in (True, False):
+            calls.clear(); source_checks.clear()
+            with patch.object(helper, "source_unchanged", side_effect=lambda *a, **kw: source_checks.append("post")), \
+                    patch.object(helper, "run", side_effect=metadata_original if present else lambda *a, **kw: ""), \
+                    patch.dict(helper.os.environ, {"PATH": "/fixed/bin"}, clear=True):
+                result = helper.source_slots_compiler_diagnostic(observer_bound, observer_raw, b"", 101,
+                                                                  timeout_for=lambda cap: cap)
+            self.assertEqual(result["returnCode"], 101)
+            self.assertEqual(result["state"], "complete")
+            self.assertEqual(result["sources"], [{"path": app + "/src/lib.rs", "gitBlob": blob}] if present else [])
+            self.assertEqual(result["errors"][0]["unboundSpans"], 0 if present else 1)
+            if present:
+                self.assertEqual(calls[0][0][-1], app + "/src/lib.rs")
+                self.assertEqual(result["errors"][0]["spans"], [{"source": 0, "line": 19, "column": 7}])
+            else:
+                self.assertEqual(result["errors"][0]["spans"], [])
+            self.assertNotIn(private, json.dumps(result))
+            self.assertNotIn(source, json.dumps(result))
         malformed = [b"", simple_raw[:-1], simple_raw + b"\n", simple_raw + cargo_bytes([terminal]), b"\xff\n",
                      simple_raw.replace(b'"level":"error"', b'"level":"error","level":"error"'),
                      simple_raw.replace(b'"line_start":19', b'"line_start":NaN'),
@@ -3497,6 +4294,25 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertEqual(helper.source_slots_diagnostic_records(full_frames, b"", source),
                          helper.source_slots_diagnostic_records(short_frames, b"", source))
         self.assertEqual(helper.source_slots_diagnostic_records(short_frames, b"", source)[0]["code"], "E0433")
+        padded_warning = deepcopy(warning)
+        padded_warning["message"]["rendered"] = ""
+        padding = observer_limit - len(cargo_bytes([padded_warning, short_error, terminal]))
+        self.assertGreater(padding, 0)
+        padded_warning["message"]["rendered"] = "x" * padding
+        observer_frames = cargo_bytes([padded_warning, short_error, terminal])
+        self.assertEqual(len(observer_frames), observer_limit)
+        self.assertIn(b'"level":"warning"', observer_frames)
+        self.assertEqual(helper.source_slots_diagnostic_records(observer_frames, b"", source, observer=True),
+                         helper.source_slots_diagnostic_records(short_frames, b"", source, observer=True))
+        with self.assertRaises(helper.CheckFailure):
+            helper.source_slots_diagnostic_records(observer_frames, b"", source)
+        padded_warning["message"]["rendered"] += "x"
+        over_observer_frames = cargo_bytes([padded_warning, short_error, terminal])
+        self.assertEqual(len(over_observer_frames), observer_limit + 1)
+        with self.assertRaises(helper.CheckFailure):
+            helper.source_slots_diagnostic_records(over_observer_frames, b"", source, observer=True)
+        with self.assertRaises(helper.CheckFailure):
+            helper.source_slots_diagnostic_records(short_frames, b"x" * (1024 * 1024 + 1), source, observer=True)
 
         # Each actual reader predicate is distinguished without an extra lstat,
         # owner query, payload read or close. The original rejection stays identical.
@@ -3541,6 +4357,11 @@ class ShellCompileContractTests(unittest.TestCase):
             "readerClosed": True, "partialObservation": True}
         self.assertEqual(helper.source_slots_capture_admission(valid_facts), valid_facts)
         self.assertIsNot(helper.source_slots_capture_admission(valid_facts), valid_facts)
+        self.assertIsNone(helper.source_slots_capture_admission(valid_facts, observer=True))
+        for mode in (1, None, "true"):
+            self.assertIsNone(helper.source_slots_capture_admission(valid_facts, observer=mode))
+        self.assertIsNone(helper.source_slots_capture_admission(
+            {**valid_facts, "output": "metadata.json", "limitBytes": 16 * 1024 * 1024}, observer=True))
         for key, value in (("schemaVersion", True), ("output", "/private/unselected"), ("limitBytes", True),
                            ("limitBytes", 1024 * 1024), ("limitBytes", 16 * 1024 * 1024), ("writerBytes", True), ("writerBytes", -1),
                            ("openedBytes", 1 << 63), ("openedBytes", 1.0), ("failedCheck", "arbitrary-text"),
@@ -3660,11 +4481,12 @@ class ShellCompileContractTests(unittest.TestCase):
                     events, captures, calls, publications, run_failures, read_failures, closed = [], {}, [], [], [], [], []
                     SlotsPath, writer, memory_read = source_slots_paths(events, captures)
                     admission_calls = []
-                    def optional_interruption(value):
+                    def optional_interruption(value, *, observer=False):
+                        self.assertIs(observer, False)
                         admission_calls.append(value)
                         if len(admission_calls) == interruption_at:
                             raise secondary("inert secondary decoration interrupt")
-                        return actual_admission(value)
+                        return actual_admission(value, observer=observer)
                     with self.subTest(returned_code=code, secondary=secondary.__name__, optional_stage=interruption_at), contextlib.redirect_stdout(io.StringIO()), \
                             patch.object(helper, "Path", SlotsPath), patch.object(helper, "tools", return_value=("/fixed/cargo", None)), \
                             patch.object(helper, "source_unchanged"), patch.object(helper, "source_slots_source_guard"), \
@@ -3922,6 +4744,133 @@ class ShellCompileContractTests(unittest.TestCase):
                             self.assertIn(("closed", app_bound["root"] + "/metadata.json"), app_events)
                 with patch.object(helper, "write_json", side_effect=AssertionError("no DATA publication")), self.assertRaises(helper.CheckFailure):
                     helper.phase_receipt(app_bound, app_phase, checks, node=helper.NODE, mac_history_result=history_app_result())
+
+
+        # The same phase/decoder, with inert originals: same installed compilation
+        # graph/cwd and short JSON rendering, not identical diagnostic argv.
+        # No test execution; failed output can never authorize cleanup.
+        observer = mac_context("aarch64-apple-darwin", "observer-only")
+        raw_error = (json.dumps({"reason": "compiler-message", "manifest_path": observer["source"] + "/desktop/src-tauri/Cargo.toml",
+            "message": {"level": "error", "code": {"code": "E0433"}, "message": "synthetic private prose",
+                        "spans": [{"is_primary": True, "file_name": "src/bridge.rs", "line_start": 467, "column_start": 9}]}})
+            + '\n{"reason":"build-finished","success":false}\n').encode()
+        admission_faults = {"admission-byte", "admission-stderr", "returned101-admission", "malformed-admission",
+                            "noncompile-admission", "optional-admission", "returned101-optional", "returned101-publication"}
+        for fault in (None, "returned101", "unknown", "timeout", "returned101-close", "close", "reader", "overflow", "late",
+                      *sorted(admission_faults)):
+            events, captures, calls, publications, original_errors, reader_errors, reader_facts = [], {}, [], [], [], [], []
+            clock = [100.0]
+            ObserverPath, writer, read = source_slots_paths(events, captures)
+            original_open = ObserverPath.open
+            def opened(path, *args, **kwargs):
+                stream = original_open(path, *args, **kwargs)
+                original_exit = type(stream).__exit__
+                if fault in ("returned101-close", "close") and path.name == "source-slots-compile.stderr":
+                    class BadClose(type(stream)):
+                        def __exit__(self, *exc):
+                            original_exit(self, *exc)
+                            raise helper.CheckFailure("synthetic consuming close uncertainty")
+                    stream = BadClose(path)
+                return stream
+            def invoke_observer(argv, **kw):
+                check = kw["check"]
+                calls.append((list(argv), {k: v for k, v in kw.items() if k not in ("output", "diagnostics")}))
+                if check == "mac-observer-compile-only":
+                    kw["output"].write(raw_error.decode() if fault and fault.startswith("returned101") else '{"reason":"build-finished","success":true}\n')
+                    if fault in ("unknown", "timeout") or fault and fault.startswith("returned101"):
+                        error = helper.CheckFailure("synthetic first original failure")
+                        if fault.startswith("returned101"):
+                            error._returned_command = (check, 101)
+                        original_errors.append(error)
+                        raise error
+                    if fault == "late": clock[0] = 1900.0
+                if check == "source-slots-diagnostic-source":
+                    return "100644 blob " + "a" * 40 + "\tdesktop/src-tauri/src/bridge.rs\0"
+                return helper.NODE if check == "node-version" else ""
+            bound_observer = observer
+            def read_observer(path, expected, *, retain=False, observer=False):
+                self.assertIs(observer, True)
+                self.assertIn(("closed", str(path)), events)
+                self.assertIn(("closed", bound_observer["root"] + "/target/source-slots-compile.stdout"), events)
+                self.assertIn(("closed", bound_observer["root"] + "/target/source-slots-compile.stderr"), events)
+                if fault in ("reader", "overflow"):
+                    raise helper.CheckFailure("synthetic " + fault + " original admission")
+                if fault in admission_faults and (fault != "admission-stderr" or path.name == "source-slots-compile.stderr"):
+                    cap = 1024 * 1024 if path.name.endswith("stderr") else observer_limit
+                    facts = {"schemaVersion": 1, "output": path.name, "limitBytes": cap,
+                        "writerBytes": expected[6] if fault == "admission-stderr" else cap + 1,
+                        "openedBytes": expected[6] if fault == "admission-stderr" else cap + 1,
+                        "failedCheck": "named-identity" if fault == "admission-stderr" else "byte-bound",
+                        "readerClosed": True, "partialObservation": True}
+                    if fault == "malformed-admission": facts["readerClosed"] = False
+                    if fault == "noncompile-admission": facts.update(output="metadata.json", limitBytes=16 * 1024 * 1024)
+                    error = helper.CheckFailure("synthetic original capture refusal")
+                    error._source_slots_capture_admission = facts
+                    reader_errors.append(error); reader_facts.append(deepcopy(facts))
+                    raise error
+                return captures[str(path)] if retain else read(path, expected)
+            def publish_observer(path, value):
+                self.assertEqual(path.name, "compile-checks.json")
+                publications.append(deepcopy(value))
+                if fault == "returned101-publication": raise KeyboardInterrupt("synthetic optional publication failure")
+            with self.subTest(observer_fault=fault), contextlib.ExitStack() as stack:
+                for manager in (
+                    patch.object(helper, "Path", ObserverPath), patch.object(ObserverPath, "open", opened),
+                    patch.object(helper, "source_unchanged"), patch.object(helper, "mac_compile_source_guard"),
+                    patch.object(helper, "mac_compile_inputs", return_value=observer["macCompile"]),
+                    patch.object(helper, "tools", return_value=("/direct/cargo", "/direct/rustc")),
+                    patch.object(helper.shutil, "which", return_value="/selected/bin/node"),
+                    patch.object(helper, "run", side_effect=invoke_observer),
+                    patch.object(helper, "source_slots_writer", side_effect=writer),
+                    patch.object(helper, "source_slots_read", side_effect=read_observer),
+                    patch.object(helper, "write_json", side_effect=publish_observer),
+                    patch.object(helper.time, "monotonic", side_effect=lambda: clock[0]),
+                    patch.dict(helper.os.environ, {"PATH": "/selected/bin", "MRK_MACOS_DEVELOPER_ID_P12_BASE64": "synthetic-never-exported"}, clear=True),
+                ): stack.enter_context(manager)
+                if fault in ("optional-admission", "returned101-optional"):
+                    stack.enter_context(patch.object(helper, "source_slots_capture_admission",
+                        side_effect=SystemExit("synthetic optional fact validation failure")))
+                if fault is None:
+                    helper.phase_mac_compile("compile", observer)
+                else:
+                    with self.assertRaises(helper.CheckFailure) as failed:
+                        helper.phase_mac_compile("compile", observer)
+                    if original_errors: self.assertIs(failed.exception, original_errors[0])
+                    elif reader_errors: self.assertIs(failed.exception, reader_errors[0])
+            self.assertEqual([kw["check"] for _, kw in calls if kw["check"] != "source-slots-diagnostic-source"],
+                             ["node-version", "typescript-no-emit", "vite-assets", "mac-observer-compile-only"])
+            argv, call = next(row for row in calls if row[1]["check"] == "mac-observer-compile-only")
+            self.assertEqual(argv, ["/direct/cargo", "test", "--locked", "--no-default-features", "--features",
+                "desktop-shell,custom-protocol,macos-installed-observation", "--target", "aarch64-apple-darwin",
+                "--test", "installed-shell-observation", "--no-run", "--message-format=json,json-diagnostic-short"])
+            self.assertEqual(str(call["cwd"]), observer["source"] + "/desktop/src-tauri")
+            self.assertEqual(call["timeout"], 1440)
+            self.assertEqual(call["env"]["CARGO_TARGET_DIR"], observer["root"] + "/target")
+            self.assertNotIn("MRK_MACOS_DEVELOPER_ID_P12_BASE64", call["env"])
+            self.assertNotIn("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", call["env"])
+            self.assertEqual(len(publications), 1)
+            record = publications[0]
+            if fault is None:
+                self.assertEqual(helper.validate_compile_receipt(record, observer, "compile"), record)
+                self.assertEqual(record["checks"][-1], {"check": "mac-observer-compile-only", "exitCode": 0})
+                self.assertNotIn("testResult", record)
+            else:
+                self.assertEqual(record["status"], "failed-or-unknown")
+                with self.assertRaises(helper.CheckFailure): helper.validate_compile_receipt(record, observer, "compile")
+                self.assertEqual(record["originalCommandReturnCode"], 101 if fault.startswith("returned101") else None if fault in ("unknown", "timeout") else 0)
+                self.assertEqual(record["compilerDiagnostic"]["state"], "complete" if fault == "returned101" else "unavailable")
+                self.assertEqual("captureAdmission" in record,
+                    fault in {"admission-byte", "admission-stderr", "returned101-admission", "returned101-publication"})
+                if "captureAdmission" in record:
+                    self.assertEqual(record["captureAdmission"], reader_facts[0])
+                    self.assertEqual(record["captureAdmission"]["readerClosed"], True)
+                    self.assertEqual(record["captureAdmission"]["partialObservation"], True)
+                if fault == "returned101":
+                    self.assertEqual(record["compilerDiagnostic"]["errors"][0]["code"], "E0433")
+                    self.assertEqual(record["compilerDiagnostic"]["sources"][0]["gitBlob"], "a" * 40)
+                self.assertNotIn("synthetic", json.dumps(record))
+                self.assertNotIn("/inert", json.dumps(record["compilerDiagnostic"]))
+                self.assertLessEqual(len(json.dumps(record, separators=(",", ":")).encode()) + 1, 16384)
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,17 @@ BINDING = M.Binding("a" * 40, "123", "1")
 UID, GID = 501, 20
 
 
+def assert_public_verification_upload(test, block):
+    """Current raw upload policy; originals remain with their on-runner validators."""
+    test.assertEqual([line for line in block.splitlines() if line.startswith("          path:")],
+                     ["          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json"])
+    gates = [line for line in block.splitlines() if line.startswith("        if:")]
+    test.assertEqual(len(gates), 1)
+    test.assertTrue(gates[0].endswith(" && steps.public_evidence.outcome == 'success'"))
+    test.assertNotIn("          path: |", block)
+    test.assertIn("          if-no-files-found: error", block)
+
+
 def aqua_headless_source():
     """Fixed helper SOURCE with the actual same-shell caller, never execution."""
     workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text(encoding="utf-8")
@@ -388,6 +399,15 @@ class AquaDataTests(unittest.TestCase):
             self.assertEqual(len(values), 1, name)
             return values[0]
 
+        # The update reader extends only the fixed stager. Bind its genuine
+        # final bytes and exact existing-loader bound; ordinary UI/result schema
+        # is not replaced by an update-specific shortcut or another owner.
+        stager_relative = "desktop/tools/stage_macos_installed.py"
+        stager_body = (root / stager_relative).read_bytes()
+        loader_body = (root / "desktop/tools/macos_aqua_qualification.py").read_bytes()
+        self.assertIn(('"' + stager_relative + '": "' + M.digest(stager_body) + '"').encode(), loader_body)
+        self.assertIn(('limit = ' + str(len(stager_body)) + ' if relative == "' + stager_relative + '"').encode(), loader_body)
+        self.assertIn(b"expected_update_previous=None, update_facts=None", stager_body)
         loader_relative = "desktop/tools/macos_aqua_qualification.py"
         runner_relative = "desktop/tools/macos_normal_ui_runner.py"
         runner_tree = ast.parse((root / runner_relative).read_bytes())
@@ -628,12 +648,8 @@ class AquaDataTests(unittest.TestCase):
             self.assertIn(required, exporter)
         self.assertLess(exporter.index("status, status_meta = snapshot(status_name, 4)"),
                         exporter.index("data, metadata = snapshot(original, limit, tail)"))
-        upload = exporter.split("          path: |\n", 1)[1]
-        for output in ("headless-build.admitted.jsonl", "headless-build.stderr.tail.txt", "headless-build.status",
-                       "headless-tests.stdout", "headless-tests.stderr", "headless-tests.status",
-                       "headless-native-tests.stdout", "headless-native-tests.stderr", "headless-native-tests.status",
-                       "headless-tests.receipt.json"):
-            self.assertIn("${{ steps.work.outputs.root }}/" + output + "\n", upload)
+        upload = workflow.split("      - name: Preserve bounded Android lifecycle results and original workflow exit evidence\n", 1)[1].split("      - name:", 1)[0]
+        assert_public_verification_upload(self, upload)
         for unbounded in ("headless-build.jsonl\n", "headless-build.stderr\n", "cargo-target", "*", "**"):
             self.assertNotIn(unbounded, upload)
 
@@ -6707,11 +6723,8 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             self.assertLess(step.index(status_write), step.index("[[ $status == 0 ]]"))
             for unsafe in ("continue-on-error", "rm -", "|| true"):
                 self.assertNotIn(unsafe, step)
-        uploads = workflow.split("          path: |\n", 1)[1]
-        for name in ("aqua-project-fields-results.jsonl", "aqua-project-fields-failure.jsonl", "aqua-project-fields.status",
-                     "aqua-android-inputs-results.jsonl", "aqua-android-inputs-failure.jsonl", "aqua-android-inputs.status",
-                     "aqua-results.jsonl", "aqua-failure.jsonl", "aqua.status"):
-            self.assertIn("${{ steps.work.outputs.root }}/" + name + "\n", uploads)
+        uploads = workflow.split("      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n", 1)[1].split("      - name:", 1)[0]
+        assert_public_verification_upload(self, uploads)
         for preserved in ("Bind the complete reviewed first-party checkout before compilation",
                           "Prepare only the fixed disposable Xcode ancestor before any worker",
                           "Reuse accepted Mac supplier and prepare only the current source payload",
@@ -7179,6 +7192,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Check current owner pins before native preparation",
             "Fail fast on native Scripts ownership and package format (never Installer)",
             "Acquire and verify the two fixed Android support archives as DATA",
+            "Download the fixed once-signed Android support capsule",
             "Admit only a fresh independently pinned Python transport destination",
             "Download the independently accepted fresh Python transport",
             "Project the pinned fresh Python transport without executing it",
@@ -7204,13 +7218,13 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Recheck admitted classification/private-native source even after an incomplete observation":
                 "always() && (env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle') && steps.source.outcome == 'success'",
             "Preserve bounded classification DATA and original workflow exit evidence":
-                "always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome == 'success'",
+                "always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome == 'success' && steps.public_evidence.outcome == 'success'",
         }
         private = {
             "Compile native wrapping variants once and run fixed cohorts and creator-reader pair":
                 "success() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private'",
             "Preserve bounded private-cohort public facts and compiler-only diagnostics":
-                "always() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' && steps.source.outcome == 'success'",
+                "always() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' && steps.source.outcome == 'success' && steps.public_evidence.outcome == 'success'",
         }
         scoped = {
             "Prepare only the fixed disposable Xcode ancestor before any worker": "ios-current-synthetic",
@@ -7234,12 +7248,14 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Export bounded diagnostics without altering original command evidence":
                 "always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')",
             "Preserve bounded Android lifecycle results and original workflow exit evidence":
-                "always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome == 'success'",
+                "always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome == 'success' && steps.public_evidence.outcome == 'success'",
         }
+        projectors = {"Project closed public verification facts without raw originals":
+                      "always() && steps.work.outputs.root != ''"}
         legacy_exports = {
             "Preserve bounded original evidence; upload alone is not an Aqua pass",
         }
-        self.assertEqual(set(steps), admitted | legacy | set(toolchain) | set(classifiers) | set(private) | set(scoped) | set(lifecycle) | legacy_exports)
+        self.assertEqual(set(steps), admitted | legacy | set(toolchain) | set(classifiers) | set(private) | set(scoped) | set(lifecycle) | set(projectors) | legacy_exports)
         for name, body in steps.items():
             gates = [line.strip() for line in body.splitlines() if line.startswith("        if:")]
             if name in admitted:
@@ -7252,6 +7268,8 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
                 expected = ["if: " + private[name]]
             elif name in lifecycle:
                 expected = ["if: " + lifecycle[name]]
+            elif name in projectors:
+                expected = ["if: " + projectors[name]]
             elif name in scoped:
                 selection = "env.MRK_MACOS_AQUA_SCOPE == " + repr(scoped[name])
                 if scoped[name] in ("project-fields", "android-inputs"):
@@ -7262,6 +7280,8 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             else:
                 prefix = "always() && steps.work.outputs.root != ''" if name in legacy_exports else "success()"
                 expected = ["if: " + prefix + " && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')"]
+            if name in legacy_exports:
+                expected = [gate + " && steps.public_evidence.outcome == 'success'" for gate in expected]
             with self.subTest(step=name):
                 self.assertEqual(gates, expected)
         clock = steps["Admit the fixed image Rust tools without installing a distribution"]
@@ -7410,10 +7430,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         self.assertNotIn("success()", post)
         self.assertNotIn("rm -", post)
         upload = steps["Preserve bounded classification DATA and original workflow exit evidence"]
-        self.assertEqual([line.strip() for line in upload.splitlines() if "${{ steps.work.outputs.root }}/" in line], [
-            "${{ steps.work.outputs.root }}/source-inventory.json",
-            "${{ steps.work.outputs.root }}/xcode-installed-classification-result.json",
-        ])
+        assert_public_verification_upload(self, upload)
         self.assertIn("if-no-files-found: error", upload)
 
         # Nonpackage classifiers/private/lifecycle routes choose no protected
@@ -7480,15 +7497,8 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
                     for target in ("aarch64-apple-darwin", "x86_64-apple-darwin")]
         resolved.append(artifact_prefix + "wrapping-keychain-private")
         self.assertEqual(len(set(resolved)), 3)
-        private_leaves = ["source-inventory.json", "wrapping-native.receipt.json", "wrapping-native.report.json",
-                          "wrapping-before-add.report.json", "wrapping-before-lookup.report.json", "wrapping-creator.report.json",
-                          "wrapping-reader.report.json", "wrapping-pair.receipt.json", "wrapping-codec.receipt.json"]
-        private_leaves += ["wrapping-" + role + "-build." + suffix
-                           for role in ("codec", "normal", "observer", "qualification", "reader")
-                           for suffix in ("jsonl", "stderr", "status")]
-        self.assertEqual([line.strip() for line in private_upload.splitlines()
-                          if "${{ steps.work.outputs.root }}/" in line],
-                         ["${{ steps.work.outputs.root }}/" + leaf for leaf in private_leaves])
+        assert_public_verification_upload(self, primary_upload)
+        assert_public_verification_upload(self, private_upload)
         for upload in (primary_upload, private_upload):
             self.assertIn("if-no-files-found: error", upload)
         # Exact private leaves exclude native stdout/stderr, the fixture, binaries
@@ -7800,8 +7810,7 @@ class BeforeItemStopWorkflowTests(unittest.TestCase):
         self.assertIn('receipt["nativeReportAdmitted"] = all(row["reportAdmitted"] for row in receipt["nativeCohorts"])', private)
         self.assertLess(private.index('admit_native_report(result, entry)'), private.index('cohort["reportAdmitted"] = True'))
         upload = workflow.split("      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics\n", 1)[1]
-        for _, _, _, prefix in cohorts:
-            self.assertEqual(upload.count("${{ steps.work.outputs.root }}/" + prefix + ".report.json"), 1)
+        assert_public_verification_upload(self, upload)
         for forbidden in ("*.json", "*.keychain", "wrapping-native.stdout", "wrapping-native.stderr"):
             self.assertNotIn(forbidden, upload)
 
@@ -9357,8 +9366,7 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
         for forbidden in ('Popen(', 'threading.Timer(', 'os.kill(', 'killpg(', 'os.rename(', 'os.replace(', 'find_library('):
             self.assertNotIn(forbidden, body)
         upload = workflow.split("      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics\n", 1)[1]
-        for leaf in ("wrapping-creator.report.json", "wrapping-reader.report.json", "wrapping-pair.receipt.json"):
-            self.assertEqual(upload.count("${{ steps.work.outputs.root }}/" + leaf), 1)
+        assert_public_verification_upload(self, upload)
         for forbidden in ("wrapping-pair-control", "reader-settled", "*.json", ".keychain", "wrapping-reader.stdout", "wrapping-reader.stderr"):
             self.assertNotIn(forbidden, upload)
 
@@ -10034,6 +10042,7 @@ class AndroidRegistrationLifecycleWorkflowTests(unittest.TestCase):
         for name in ("Select fixed frontend compiler", "Record exact source and actual tool bindings only after route admission",
                      "Check current owner pins before native preparation", "Fail fast on native Scripts ownership and package format (never Installer)",
                      "Acquire and verify the two fixed Android support archives as DATA",
+                     "Download the fixed once-signed Android support capsule",
                      "Select the fixed configured signed runtime before any payload download",
                      "Download only the configured signed Python capsule",
                      "Project the configured capsule as DATA without executing it",
@@ -10868,7 +10877,7 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                 def source_file(fixture, name, parent, limit):
                     relative = Path(name).relative_to(PATH.parents[2]).as_posix()
                     self.assertIsNone(parent)
-                    self.assertEqual(limit, 345583 if relative == 'desktop/tools/stage_macos_installed.py' else 256 * 1024)
+                    self.assertEqual(limit, 354170 if relative == 'desktop/tools/stage_macos_installed.py' else 256 * 1024)
                     raw = Path(name).read_bytes()
                     self.assertLessEqual(len(raw), limit)
                     row = {'name': name, 'sha256': M.digest(raw)}; held.append(row)
@@ -10891,7 +10900,7 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
             held, posts = [], []
             def changed_source_file(fixture, name, parent, limit):
                 raw, row = source_file(fixture, name, parent, limit)
-                self.assertEqual(len(raw), 345583)
+                self.assertEqual(len(raw), 354170)
                 return bytes([raw[0] ^ 1]) + raw[1:], row
             with patch.dict(sys.modules), patch.object(M, '_gate_file', changed_source_file), \
                  patch.object(importlib.util, 'spec_from_file_location') as attempted_import:
@@ -10916,7 +10925,7 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
             # not 256KiB, and refuses one additional byte before capture/import.
             # These are private regular-file DATA originals, not native work.
             stager_body = PATH.with_name('stage_macos_installed.py').read_bytes()
-            self.assertEqual(len(stager_body), 345583)
+            self.assertEqual(len(stager_body), 354170)
             for extra in (b'', b'\n'):
                 with tempfile.TemporaryDirectory(prefix='mrk-gate-source-bound-') as temporary:
                     selected = Path(temporary) / 'stage_macos_installed.py'
@@ -10925,10 +10934,10 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                     try:
                         if extra:
                             with self.assertRaisesRegex(M.Refused, '^gate-original-file$'):
-                                M._gate_file(fixture, str(selected), None, 345583)
+                                M._gate_file(fixture, str(selected), None, 354170)
                             self.assertEqual(fixture.gate_files, [])
                         else:
-                            body, original = M._gate_file(fixture, str(selected), None, 345583)
+                            body, original = M._gate_file(fixture, str(selected), None, 354170)
                             self.assertEqual(body, stager_body)
                             self.assertEqual(original['sha256'], M.SHIPPING_GATE_SOURCE_PINS['desktop/tools/stage_macos_installed.py'])
                             M._gate_recheck(fixture)
@@ -11652,8 +11661,10 @@ class ShippingCapacityDataWiringTests(unittest.TestCase):
         self.assertNotIn('capacity', control)
         upload = blocks['Preserve bounded original evidence; upload alone is not an Aqua pass']
         unrelated = blocks['Preserve bounded Android lifecycle results and original workflow exit evidence']
+        assert_public_verification_upload(self, upload)
+        assert_public_verification_upload(self, unrelated)
         for name in (M.SHIPPING_CAPACITY_REPORT, M.SHIPPING_CAPACITY_STATUS):
-            self.assertEqual(upload.count('${{ steps.work.outputs.root }}/' + name), 1)
+            self.assertNotIn(name, upload)
             self.assertNotIn(name, unrelated)
         added = PATH.read_text().split('# Independent capacity DATA3', 1)[1].split('\ndef diagnostic(', 1)[0]
         for forbidden in ('os.unlink(', 'shutil.rmtree', 'subprocess.run(', '_gate_settle(', '_gate_dependencies('):

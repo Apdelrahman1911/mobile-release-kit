@@ -43,6 +43,12 @@ configuration, builtins, loader dependencies, actual C calls/callbacks, local TL
 relocation and cancellation are checked together by the native producer. A green
 Linux DATA test cannot replace those Mac results.
 
+The stdlib is projected as authenticated ordinary files under `python/lib/python3.14`.
+CPython still lists its optional `python/lib/python314.zip` search location when
+that archive does not exist; this supplier does not create an empty ZIP. The real
+`os.py` fallback and `lib-dynload` directory remain present, and actual original
+and relocated native import/loader probes must pass before supplier acceptance.
+
 The owner has one 45-minute work budget and a 120-second cleanup allowance; the
 job has 55 minutes including setup and transport. Build parallelism is limited to
 `make -j2`; no shared cache or other task's process is cleaned. Scratch is removed

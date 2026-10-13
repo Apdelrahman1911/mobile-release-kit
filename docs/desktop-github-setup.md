@@ -13,8 +13,13 @@ A qualified Mac runtime has a separate session-only GitHub connection. Its
 repository-settings card can review and apply two fixed settings: Actions
 enablement and default workflow token/pull-request approval policy. Each change
 requires its own fresh native review and explicit confirmation. Enabling Actions
-can allow configured workflows to run. Environment and secret provisioning and
-authenticated history remain unavailable. Neither this passive preview nor local
+can allow configured workflows to run. Current SOURCE also implements deployment-
+environment policy, assigned secrets/variables, and authenticated retained-history
+reads. These Mac paths are not yet native-qualified: availability depends on the
+original managed runtime, required admitted tools, and connected repository/session.
+History requires explicit read consent and appropriate repository access. Setup
+writes require separate reviewed confirmation and the applicable write permission.
+Neither this passive preview nor local
 caller installation authorizes remote changes. Nonpublishing preflight and
 protected release dispatch remain separate, independently gated actions, not
 release or Store readiness.

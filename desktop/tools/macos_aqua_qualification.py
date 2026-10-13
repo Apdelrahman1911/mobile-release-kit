@@ -1606,8 +1606,8 @@ IOS_WORKSPACE = b'''<?xml version="1.0" encoding="UTF-8"?>
 '''
 
 OWNER_PINS = {
-    "owned_process.py": "0c7c87c7eaf27629be2eb33c195a956b6c40b7b5883214a08e15f255ac4939b8",
-    "_command_process.py": "30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69",
+    "owned_process.py": 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59',
+    "_command_process.py": 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43',
     "_native_process.py": "70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4",
     "cancellation.py": "eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a",
 }
@@ -1993,6 +1993,29 @@ def _expected_ios_pending_report():
             "archiveOrExportRequested": False, "workMs": 120000, "cleanupMs": 240000, "hardMs": 250000,
             "observationMs": 515000, "outerInvocationMs": 525000, "shippingBinaryQualified": False}
 
+
+
+def normal_account_observation(value, binding):
+    """Closed normal-accessibility comparison DATA, not worker-finality facts."""
+    binding.checked()
+    keys = {"schemaVersion", "sourceCommit", "target", "runId", "runAttempt", "fixtureSha256", "inspect", "recover",
+            "sessionSha256", "inspectUnchecked", "recoverUnchecked", "ordinaryQuit"}
+    need(type(value) is dict and set(value) == keys and type(value["schemaVersion"]) is int
+         and value["schemaVersion"] == 1 and value["sourceCommit"] == binding.source
+         and value["target"] == binding.target and value["runId"] == binding.run and value["runAttempt"] == binding.attempt
+         and value["fixtureSha256"] == digest(str(binding.root() / IOS_ACCOUNT_CASE).encode("utf-8"))
+         and type(value["sessionSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", value["sessionSha256"])
+         and all(value[key] is True for key in ("inspectUnchecked", "recoverUnchecked", "ordinaryQuit")),
+         "normal-account-observation")
+    for name, status in (("inspect", "pending"), ("recover", "recovered")):
+        row = value[name]
+        need(type(row) is dict and set(row) == {"operationId", "ownerGeneration", "phase", "outcome", "reason", "accountStatus"}
+             and all(type(row[key]) is str and re.fullmatch(r"[0-9a-f]{32}", row[key]) for key in ("operationId", "ownerGeneration"))
+             and row["phase"] == "terminal" and row["outcome"] == "complete" and row["reason"] == "none"
+             and row["accountStatus"] == status, "normal-account-observation-operation")
+    need(all(value["inspect"][key] != value["recover"][key] for key in ("operationId", "ownerGeneration")),
+         "normal-account-observation-reused")
+    return value
 
 def _ios_pending_report(value):
     expected = _expected_ios_pending_report()
@@ -4478,6 +4501,8 @@ class Fixtures:
         self.recovery_runtime_originals, self.recovery_inventories = [], {}
         self.account_home = self.account_private = self.account_private_sha = self.account_private_file = None
         self.account_produced = self.account_app_returned = self.account_readback = False
+        self.normal_account_original = self.normal_account_observation_sha = None
+        self.normal_stager_registrations = []
         self.account_attempts = {"produce": False, "observe": False}
         self.account_producer_attestation = self.account_readback_attestation = self.account_lease = None
         self.account_fds, self.account_directories = set(), {}
@@ -4900,7 +4925,8 @@ class Fixtures:
         result["producer"] = self.recovery_attestation
         return result
 
-    def _recovery_read(self, parent, name, owner, limit, mode=None, *, retain=False):
+    def _recovery_read(self, parent, name, owner, limit, mode=None, *, retain=False, collect=False):
+        need(type(retain) is bool and type(collect) is bool and (not collect or type(limit) is int and 0 < limit <= 1024*1024), "recovery-runtime-collect-bound")
         before = signature(os.stat(name, dir_fd=parent, follow_symlinks=False))
         need(stat.S_ISREG(before[2]) and before[3] == owner and before[5] == 1 and 0 < before[6] <= limit
              and before[2] & 0o022 == 0 and (mode is None or before[2] == stat.S_IFREG | mode), "recovery-runtime-file")
@@ -4913,7 +4939,7 @@ class Fixtures:
                 if not chunk:
                     break
                 total += len(chunk); sha.update(chunk)
-                if not retain:
+                if not retain or collect:
                     chunks.append(chunk)
             need(total == before[6] and signature(os.fstat(fd)) == before
                  and signature(os.stat(name, dir_fd=parent, follow_symlinks=False)) == before, "recovery-runtime-read-race")
@@ -4954,6 +4980,9 @@ class Fixtures:
              and result.get("qualification") == "current-source-staged-no-native-execution"
              and type(result.get("sourceInputsSha256")) is str and re.fullmatch(r"[0-9a-f]{64}", result["sourceInputsSha256"])
              and result.get("successorManifestSha256") == manifest_sha, "recovery-current-runtime-binding")
+        self._admit_recovery_runtime_files(result, manifest_sha, manifest_body, release["release"])
+
+    def _admit_recovery_runtime_files(self, result, manifest_sha, manifest_body, release):
         manifest = json.loads(manifest_body, object_pairs_hook=_pairs)
         need(type(manifest) is dict and set(manifest) == {"schemaVersion", "protocol", "coreVersion", "target", "coreSha256", "protocolSha256", "inventorySha256", "files"}
              and type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1
@@ -4974,7 +5003,7 @@ class Fixtures:
         need(list(entries) == sorted(entries) and {"core.zip", "python/bin/python3"} <= entries.keys()
              and sum(row["size"] for row in entries.values()) <= 512*1024*1024
              and manifest["coreSha256"] == entries["core.zip"]["sha256"], "recovery-current-runtime-roster")
-        installed = Path("/Library/Application Support/MobileReleaseKit/versions") / release["release"] / "runtime"
+        installed = Path("/Library/Application Support/MobileReleaseKit/versions") / release / "runtime"
         current = self._open("/", directory=True)
         before = signature(os.fstat(current))
         need(stat.S_ISDIR(before[2]) and before[3] == 0 and before[2] & 0o022 == 0, "recovery-runtime-ancestor")
@@ -5156,6 +5185,88 @@ class Fixtures:
         self._roster(self.account_lease, () if after else ("session-"+private["token"],), "ios-account-lease-roster")
         if self.account_private_file is not None:
             self._account_hash(self.account_private_file)
+
+
+    def admit_normal_account_runtime(self, source, work):
+        """Current signed installed route; never relabel the old Aqua supplier."""
+        need(self.cases == (IOS_ACCOUNT_CASE,) and not self.inflight and self.recovery_runtime is None,
+             "normal-account-runtime-order")
+        need(isinstance(source, Path) and source == Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
+             and isinstance(work, Path) and work.parent == Path("/Users/runner/work/_temp")
+             and re.fullmatch(r"mrk-macos-installed\.[A-Za-z0-9]{8}", work.name), "normal-account-runtime-context")
+        self.binding.checked()
+        stager, release = _gate_load_stager(self, source, target=self.binding.target, registrations=self.normal_stager_registrations)
+        pins = (
+            ("desktop/macos-installed-inputs/python-signed-runtime-binding.json", 1503,
+             "6793b36697e04264c6f627317906a6f143e47adb3443132beba05c6d14147e53"),
+            ("desktop/packaging/macos-install-producer-signing.profile", 488,
+             "2f42e8e333ceb5dd96089c3dd7c38fbe4aaa1c79b6ae7369157c06179f0c08f2"),
+            ("desktop/packaging/macos-android-service-signing.profile", 219,
+             "7f1a96c30d75d915e84f1a45095170ba6e4b2870203efda199515c7260e98663"),
+        )
+        bodies = []
+        for name, size, expected in pins:
+            body, original = _gate_file(self, str(source / name), None, size)
+            need(len(body) == size and original["sha256"] == expected, "normal-account-runtime-source")
+            bodies.append(body)
+        chosen = stager.signed_runtime_binding_data(*bodies, target=self.binding.target)
+        _, _, raw = self._recovery_read(None, str(work / "runtime-result.json"), self.uid, 16384, retain=True, collect=True)
+        result = json.loads(raw, object_pairs_hook=_pairs)
+        _, manifest_sha, manifest_body = self._recovery_read(None, str(work / "runtime/manifest.json"), self.uid,
+                                                           1024*1024, retain=True, collect=True)
+        need(type(result) is dict and type(result.get("schemaVersion")) is int and result["schemaVersion"] == 1
+             and result.get("release") == release.release and result.get("target") == self.binding.target
+             and result.get("qualification") == "current-source-staged-no-native-execution"
+             and result.get("sourceInputsSha256") == chosen["sourceInputsSha256"]
+             and result.get("successorManifestSha256") == manifest_sha == chosen["runtimeManifestSha256"]
+             and result.get("signedRuntimeBindingSha256") == digest(bodies[0])
+             and all(result.get(key) == chosen[key] for key in ("signedPythonSha256", "signingReceiptSha256",
+                    "signingSourceCommit", "signingRunId", "signingRunAttempt", "signingArtifactId")),
+             "normal-account-current-signed-runtime")
+        self._admit_recovery_runtime_files(result, manifest_sha, manifest_body, release.release)
+        for original in self.gate_files:
+            need(_gate_file_read(original)[1] == original["sha256"], "normal-account-runtime-source-post")
+
+    def accept_normal_account_app(self, observation, original, runner_facts):
+        """Accept actual normal UI only after the runner's POST and closes."""
+        need(not self.inflight and self.last_returned and self.account_produced and not self.account_app_returned
+             and self.normal_account_observation_sha is None and original is self.normal_account_original
+             and type(original) is subprocess.CompletedProcess and type(original.returncode) is int
+             and original.returncode == 0, "normal-account-app-order")
+        need(type(runner_facts) is dict and runner_facts.get("originalProductsPrePostMatched") is True
+             and runner_facts.get("originalClosesCompleted") is True
+             and runner_facts.get("strictCodesignOriginalZero") is True
+             and runner_facts.get("reSignedOrRepaired") is False,
+             "normal-account-runner-finality")
+        normal_account_observation(observation, self.binding)
+        need(observation["sessionSha256"] == digest(self.account_private["token"].encode("ascii")),
+             "normal-account-ui-session")
+        self._account_current(after=True)
+        self.normal_account_observation_sha = digest(json.dumps(observation, sort_keys=True,
+            separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii"))
+        self.account_app_returned = True
+
+    def readback_normal_account(self, observation):
+        need(not self.inflight and self.last_returned and self.account_produced and self.account_app_returned
+             and self.account_readback and self.normal_account_observation_sha is not None,
+             "normal-account-final-readback-order")
+        normal_account_observation(observation, self.binding)
+        need(digest(json.dumps(observation, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                               allow_nan=False).encode("ascii")) == self.normal_account_observation_sha,
+             "normal-account-ui-observation-changed")
+        self.stage = "independent-normal-account-readback"
+        self._account_current(after=True)
+        self.readback(IOS_ACCOUNT_CASE)
+        account = {
+            "producer": self.account_producer_attestation, "nativeReadback": self.account_readback_attestation,
+            "exactPendingSessionRecovered": True, "originalOwnedNativeAndControlsRemoved": True,
+            "persistentOriginalLeaseRetained": True, "nativeBaselineMembers": len(self.account_baseline_files),
+            "baselineIdentitiesMatched": True, "baselinePreferencesMatched": True, "projectMarkerUnchanged": True,
+            "privateContentsExported": False, "foreignPreferenceConflictInjected": False,
+            "appleSigningMaterialUsed": False, "signedExportQualified": False}
+        need(len(json.dumps(account, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")) <= 8192,
+             "normal-account-public-bound")
+        return account
 
     def accept_account_app(self, report):
         need(not self.inflight and self.last_returned and self.account_produced and not self.account_app_returned,
@@ -5620,7 +5731,7 @@ def shipping_gate_compiler_argv(target=ARM_TARGET):
 
 
 SHIPPING_GATE_SOURCE_PINS = {
-    "desktop/tools/stage_macos_installed.py": "61e2817d6235d90432fc9e9e98f394dfffd17abe9add02ba383e214559e70cd9",
+    "desktop/tools/stage_macos_installed.py": '800143d5fc3ddf9d7d373c1cf71a44434010098ed662c64d456bdeacf90a7673',
     "desktop/macos-installed-inputs/build-release.json": "521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512",
     "desktop/macos-installed-inputs/build-release-intel.json": "5864c0efb2a66219cf7efa41d3863721327148ef7b4c6d6f3252de3ce20596e7",
 }
@@ -5945,12 +6056,13 @@ def _gate_recheck(fixtures):
         need(_gate_file_read(record)[1] == record["sha256"], "gate-original-hash-changed")
 
 
-def _gate_load_stager(fixtures, checkout, *, target=ARM_TARGET):
+def _gate_load_stager(fixtures, checkout, *, target=ARM_TARGET, registrations=None):
     import importlib.util
+    need(registrations is None or type(registrations) is list and not registrations, "gate-stager-registry-custody")
     target_row = target_data(target)
     selected, bodies = [], {}
     for relative, expected in SHIPPING_GATE_SOURCE_PINS.items():
-        limit = 345583 if relative == "desktop/tools/stage_macos_installed.py" else 256 * 1024
+        limit = 373689 if relative == "desktop/tools/stage_macos_installed.py" else 256 * 1024
         body, original = _gate_file(fixtures, str(checkout / relative), None, limit)
         need(digest(body) == expected, "gate-stager-source-pin")
         selected.append(original)
@@ -5961,6 +6073,8 @@ def _gate_load_stager(fixtures, checkout, *, target=ARM_TARGET):
     need(spec is not None and spec.loader is not None, "gate-stager-loader")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
+    if registrations is not None:
+        registrations.append(module)  # Actual original before any loader execution can fail.
     # ARM is mandatory import support even on Intel. Both release originals
     # remain in this same book; no second source_build_selection filesystem read.
     # No Installer, protected-installation readback or payload command is called.

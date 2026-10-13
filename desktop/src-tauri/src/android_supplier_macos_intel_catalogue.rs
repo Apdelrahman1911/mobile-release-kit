@@ -2,8 +2,8 @@
 // No IO, mutable runtime registration, reference digest or native qualification.
 use super::*;
 const CAT_H0_PREFIX: &[u8] = &[
-    202,254,186,190,0,0,0,2,0,0,0,7,0,0,0,3,0,0,16,0,0,1,84,200,0,0,0,12,1,0,0,7,
-    0,0,0,3,0,1,112,0,0,1,82,196,0,0,0,12,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    202,254,186,190,0,0,0,2,0,0,0,7,0,0,0,3,0,0,64,0,0,1,162,96,0,0,0,14,1,0,0,7,
+    0,0,0,3,0,2,0,0,0,1,160,96,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
@@ -132,7 +132,7 @@ const CAT_H0_PREFIX: &[u8] = &[
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 ];
 const CAT_H0_COMMANDS: &[u8] = &[
-    207,250,237,254,7,0,0,1,3,0,0,0,6,0,0,0,14,0,0,0,64,7,0,0,133,0,0,0,0,0,0,0,
+    207,250,237,254,7,0,0,1,3,0,0,0,6,0,0,0,15,0,0,0,80,7,0,0,133,0,0,0,0,0,0,0,
     25,0,0,0,40,2,0,0,95,95,84,69,88,84,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,32,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,1,0,0,0,0,0,7,0,0,0,5,0,0,0,
     6,0,0,0,0,0,0,0,95,95,116,101,120,116,0,0,0,0,0,0,0,0,0,0,95,95,84,69,88,84,0,0,
@@ -173,8 +173,8 @@ const CAT_H0_COMMANDS: &[u8] = &[
     95,95,98,115,115,0,0,0,0,0,0,0,0,0,0,0,95,95,68,65,84,65,0,0,0,0,0,0,0,0,0,0,
     16,37,1,0,0,0,0,0,100,7,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,
     1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,25,0,0,0,72,0,0,0,95,95,76,73,78,75,69,68,
-    73,84,0,0,0,0,0,0,0,48,1,0,0,0,0,0,196,34,0,0,0,0,0,0,0,48,1,0,0,0,0,0,
-    196,34,0,0,0,0,0,0,7,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,13,0,0,0,48,0,0,0,
+    73,84,0,0,0,0,0,0,0,48,1,0,0,0,0,0,0,128,0,0,0,0,0,0,0,48,1,0,0,0,0,0,
+    96,112,0,0,0,0,0,0,7,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,13,0,0,0,48,0,0,0,
     24,0,0,0,1,0,0,0,0,1,6,0,0,0,6,0,108,105,98,106,110,105,100,105,115,112,97,116,99,104,46,106,
     110,105,108,105,98,0,0,0,2,0,0,0,24,0,0,0,136,52,1,0,177,0,0,0,204,64,1,0,248,17,0,0,
     11,0,0,0,80,0,0,0,0,0,0,0,1,0,0,0,1,0,0,0,137,0,0,0,138,0,0,0,39,0,0,0,
@@ -191,10 +191,11 @@ const CAT_H0_COMMANDS: &[u8] = &[
     105,98,0,0,0,0,0,0,12,0,0,0,56,0,0,0,24,0,0,0,2,0,0,0,0,0,147,3,0,0,1,0,
     47,117,115,114,47,108,105,98,47,108,105,98,103,99,99,95,115,46,49,46,100,121,108,105,98,0,0,0,0,0,0,0,
     38,0,0,0,16,0,0,0,184,51,1,0,208,0,0,0,41,0,0,0,16,0,0,0,136,52,1,0,0,0,0,0,
+    29,0,0,0,16,0,0,0,208,82,1,0,144,77,0,0,
 ];
 const CAT_H1_PREFIX: &[u8] = &[
-    202,254,186,190,0,0,0,2,1,0,0,7,128,0,0,3,0,0,64,0,0,87,179,96,0,0,0,14,1,0,0,12,
-    0,0,0,0,0,88,0,0,0,82,176,192,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    202,254,186,190,0,0,0,2,1,0,0,7,128,0,0,3,0,0,64,0,0,87,181,208,0,0,0,14,1,0,0,12,
+    0,0,0,0,0,88,0,0,0,82,56,144,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
@@ -387,7 +388,7 @@ const CAT_H1_COMMANDS: &[u8] = &[
     0,0,0,0,0,0,0,0,200,241,67,0,1,0,0,0,24,36,0,0,0,0,0,0,0,0,0,0,3,0,0,0,
     0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,25,0,0,0,72,0,0,0,
     95,95,76,73,78,75,69,68,73,84,0,0,0,0,0,0,0,32,68,0,1,0,0,0,0,0,20,0,0,0,0,0,
-    0,208,67,0,0,0,0,0,96,227,19,0,0,0,0,0,1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,
+    0,208,67,0,0,0,0,0,208,229,19,0,0,0,0,0,1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,
     34,0,0,128,48,0,0,0,0,208,67,0,240,9,0,0,240,217,67,0,104,1,0,0,88,219,67,0,40,50,1,0,
     128,13,69,0,128,14,0,0,0,28,69,0,176,253,5,0,2,0,0,0,24,0,0,0,120,116,75,0,145,39,0,0,
     48,253,77,0,96,193,8,0,11,0,0,0,80,0,0,0,0,0,0,0,1,0,0,0,1,0,0,0,193,38,0,0,
@@ -401,7 +402,7 @@ const CAT_H1_COMMANDS: &[u8] = &[
     12,0,0,0,56,0,0,0,24,0,0,0,0,0,0,0,5,100,12,5,0,0,1,0,47,117,115,114,47,108,105,98,
     47,108,105,98,83,121,115,116,101,109,46,66,46,100,121,108,105,98,0,0,0,0,0,0,38,0,0,0,16,0,0,0,
     176,25,75,0,16,80,0,0,41,0,0,0,16,0,0,0,192,105,75,0,184,10,0,0,29,0,0,0,16,0,0,0,
-    144,190,86,0,208,244,0,0,
+    144,190,86,0,64,247,0,0,
 ];
 const CAT_H2_PREFIX: &[u8] = &[
     207,250,237,254,7,0,0,1,3,0,0,0,6,0,0,0,18,0,0,0,16,9,0,0,133,128,145,0,0,0,0,0,
@@ -1319,8 +1320,8 @@ const CAT_H6_COMMANDS: &[u8] = &[
     38,0,0,0,16,0,0,0,176,74,0,0,72,0,0,0,41,0,0,0,16,0,0,0,248,74,0,0,0,0,0,0,
 ];
 const CAT_H7_PREFIX: &[u8] = &[
-    202,254,186,190,0,0,0,2,1,0,0,7,128,0,0,3,0,0,16,0,0,87,132,72,0,0,0,12,1,0,0,12,
-    0,0,0,0,0,87,192,0,0,82,72,200,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    202,254,186,190,0,0,0,2,1,0,0,7,128,0,0,3,0,0,64,0,0,87,205,128,0,0,0,14,1,0,0,12,
+    0,0,0,0,0,88,64,0,0,82,23,128,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
@@ -1510,7 +1511,7 @@ const CAT_H7_COMMANDS: &[u8] = &[
     0,0,0,0,0,0,0,0,95,95,68,65,84,65,0,0,0,0,0,0,0,0,0,0,64,90,68,0,1,0,0,0,
     168,7,0,0,0,0,0,0,0,0,0,0,6,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,25,0,0,0,72,0,0,0,95,95,76,73,78,75,69,68,73,84,0,0,0,0,0,0,
-    0,112,68,0,1,0,0,0,0,80,19,0,0,0,0,0,0,64,68,0,0,0,0,0,72,68,19,0,0,0,0,0,
+    0,112,68,0,1,0,0,0,0,192,19,0,0,0,0,0,0,64,68,0,0,0,0,0,128,141,19,0,0,0,0,0,
     1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,34,0,0,128,48,0,0,0,0,64,68,0,0,11,0,0,
     0,75,68,0,32,1,0,0,32,76,68,0,16,247,0,0,48,67,69,0,208,14,0,0,0,82,69,0,160,254,5,0,
     2,0,0,0,24,0,0,0,40,157,75,0,241,38,0,0,208,26,78,0,56,187,8,0,11,0,0,0,80,0,0,0,
@@ -1528,7 +1529,7 @@ const CAT_H7_COMMANDS: &[u8] = &[
     224,18,0,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,56,0,0,0,24,0,0,0,0,0,0,0,
     0,0,31,5,0,0,1,0,47,117,115,114,47,108,105,98,47,108,105,98,83,121,115,116,101,109,46,66,46,100,121,108,
     105,98,0,0,0,0,0,0,38,0,0,0,16,0,0,0,160,80,75,0,208,64,0,0,41,0,0,0,16,0,0,0,
-    112,145,75,0,184,11,0,0,29,0,0,0,16,0,0,0,16,214,86,0,56,174,0,0,
+    112,145,75,0,184,11,0,0,29,0,0,0,16,0,0,0,16,214,86,0,112,247,0,0,
 ];
 const CAT_H8_PREFIX: &[u8] = &[
     207,250,237,254,7,0,0,1,3,0,0,0,2,0,0,0,23,0,0,0,80,7,0,0,133,0,32,0,0,0,0,0,
@@ -18627,7 +18628,7 @@ const CAT_H94_COMMANDS: &[u8] = &[
     168,66,3,0,24,0,0,0,29,0,0,0,16,0,0,0,208,185,3,0,80,79,0,0,
 ];
 const CAT_N0: &[NestedNative] = &[
-    NestedNative { member: "com/sun/jna/darwin/libjnidispatch.jnilib", bytes: 180932, sha256: "e8ad39879b107ed955388d29555ddbcff3ada41598780eef579246752dd96c75", mode: 0o0, kind: NativeResourceKind::CurrentX64, header: Some(NativeHeader { prefix: CAT_H0_PREFIX, commands: CAT_H0_COMMANDS }) },
+    NestedNative { member: "com/sun/jna/darwin/libjnidispatch.jnilib", bytes: 237664, sha256: "287f2e19f62834b151a3bc36fbe8bf12e026e314dfa6e8ce5e40bf9f4461359f", mode: 0o0, kind: NativeResourceKind::CurrentX64, header: Some(NativeHeader { prefix: CAT_H0_PREFIX, commands: CAT_H0_COMMANDS }) },
     NestedNative { member: "com/sun/jna/freebsd-x86-64/libjnidispatch.so", bytes: 112729, sha256: "38c4aa3bd608dd4c302dd0f264bb123c87d8772b4df0ad2414e4b0a0d1cba021", mode: 0o0, kind: NativeResourceKind::OtherPlatformElf, header: None },
     NestedNative { member: "com/sun/jna/freebsd-x86/libjnidispatch.so", bytes: 105753, sha256: "53e715c8b4369698dd208b48af825837a7668206ed384b303ff930ef912e7e7e", mode: 0o0, kind: NativeResourceKind::OtherPlatformElf, header: None },
     NestedNative { member: "com/sun/jna/linux-aarch64/libjnidispatch.so", bytes: 105088, sha256: "a9f3438531dca3fc4b4aa1604b717ded3d17c16f5d1324a02e5a3f64b30e77a9", mode: 0o0, kind: NativeResourceKind::OtherPlatformElf, header: None },
@@ -18648,7 +18649,7 @@ const CAT_N0: &[NestedNative] = &[
     NestedNative { member: "com/sun/jna/win32-x86-64/jnidispatch.dll", bytes: 246784, sha256: "a66959bec2ef5af730198db9f3b3f7cab0d4ae70ce01bec02bf1d738e6d1ee7a", mode: 0o0, kind: NativeResourceKind::OtherPlatformPe, header: None },
     NestedNative { member: "com/sun/jna/win32-x86/jnidispatch.dll", bytes: 207872, sha256: "04c9a8ab43d1eb616b84d0686c8ae1d881ef03fe4f3aa26511e5b19d35ef16af", mode: 0o0, kind: NativeResourceKind::OtherPlatformPe, header: None },
     NestedNative { member: "linux/aapt2", bytes: 6511488, sha256: "f2652fdbfcec58657ab718b28abf6b6d7ac90d61a8298341d86c8d837a6d7e98", mode: 0o100755, kind: NativeResourceKind::OtherPlatformElf, header: None },
-    NestedNative { member: "macos/aapt2", bytes: 11186368, sha256: "995cf1a04fb55045dd22ae3d6248f32d649bac9dfa7bf9357507499794051c6b", mode: 0o100755, kind: NativeResourceKind::CurrentX64, header: Some(NativeHeader { prefix: CAT_H1_PREFIX, commands: CAT_H1_COMMANDS }) },
+    NestedNative { member: "macos/aapt2", bytes: 11155600, sha256: "f92ad6590ec0af754fa653a8adf0d81744ccaf2bc1cd8c57b235d4cd797e120a", mode: 0o100755, kind: NativeResourceKind::CurrentX64, header: Some(NativeHeader { prefix: CAT_H1_PREFIX, commands: CAT_H1_COMMANDS }) },
     NestedNative { member: "windows/aapt2.exe", bytes: 4106240, sha256: "c8c138022012e577aa4d3d3808079e017c8746d876ceaf10decefdc0645508cb", mode: 0o100755, kind: NativeResourceKind::OtherPlatformPe, header: None },
 ];
 const CAT_N70: &[NestedNative] = &[
@@ -75599,13 +75600,13 @@ const CAT_BINDINGS: &[SourceBinding] = &[
     SourceBinding { provenance: SourceProvenance::Vendor { archive: 3, member: 322 }, disposition: SourceDisposition::Payload(3) },
 ];
 const CAT_SUPPORT: &[SupportOriginalSpec] = &[
-    SupportOriginalSpec { asset: SupportAsset::BundletoolJar, archive: ArchivePin { bytes: 32520401, sha256: "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29" }, modes: &[0o444] },
-    SupportOriginalSpec { asset: SupportAsset::Aapt2OsxJar, archive: ArchivePin { bytes: 4339472, sha256: "5d0aec6851fffbc9f6c8a8b50390c0bc976aa0ddf57a8a3a39061ed54b609ad1" }, modes: &[0o444] },
+    SupportOriginalSpec { asset: SupportAsset::BundletoolJar, archive: ArchivePin { bytes: 32494771, sha256: "b87fef6d0b3c7a6c43debb7b069639136af549d8b0f0bb7bac452328f0eb5a18" }, modes: &[0o444] },
+    SupportOriginalSpec { asset: SupportAsset::Aapt2OsxJar, archive: ArchivePin { bytes: 4328126, sha256: "8326ffc2288059ba6af3357ea96f5db93220e4c65ffd1909f9330951302fde21" }, modes: &[0o444] },
 ];
-const CAT_PROJECTED: ZipMemberSpec<'static> = ZipMemberSpec { name: "aapt2", method: ZipMethod::Deflate, flags: 2048, local_header_offset: 118, data_offset: 153, compressed_bytes: 4328503, bytes: 11143368, crc32: 1529443610, sha256: "213e3d049e2c85daa930ed777bbd5627c1c5479a8d6698029b8f9c0161ad0a7e" };
+const CAT_PROJECTED: ZipMemberSpec<'static> = ZipMemberSpec { name: "aapt2", method: ZipMethod::Deflate, flags: 2048, local_header_offset: 118, data_offset: 153, compressed_bytes: 4317157, bytes: 11163520, crc32: 741077440, sha256: "388f89156088e0b64416381af414e21604488c83df7f3aad2ae787f14347d820" };
 const CAT_SUPPORT_MEMBERS: &[SupportMemberSpec] = &[SupportMemberSpec { asset: SupportAsset::Aapt2OsxJar, member: CAT_PROJECTED }];
 const CAT_PAYLOAD: &[PayloadSource] = &[
-    PayloadSource { installed: CanonicalFile { path: "bundletool/bundletool.jar", size: 32520401, sha256: "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29", mode: 0o444 }, origin: PayloadOrigin::DirectOriginal(OriginalSource::Support(SupportAsset::BundletoolJar)) },
+    PayloadSource { installed: CanonicalFile { path: "bundletool/bundletool.jar", size: 32494771, sha256: "b87fef6d0b3c7a6c43debb7b069639136af549d8b0f0bb7bac452328f0eb5a18", mode: 0o444 }, origin: PayloadOrigin::DirectOriginal(OriginalSource::Support(SupportAsset::BundletoolJar)) },
     PayloadSource { installed: CanonicalFile { path: "gradle/LICENSE", size: 23622, sha256: "9536d88ea948603d18e232a13f5958d67807cd80828036b082bff171d2cf0703", mode: 0o444 }, origin: PayloadOrigin::DirectOriginal(OriginalSource::Picked { group: SourceGroup::Gradle, relative: "LICENSE" }) },
     PayloadSource { installed: CanonicalFile { path: "gradle/NOTICE", size: 868, sha256: "c2de5fd9adc7ccc4e1382a0e1f38ec6e14f8ca6e28d3c20289fe80353b019aa1", mode: 0o444 }, origin: PayloadOrigin::DirectOriginal(OriginalSource::Picked { group: SourceGroup::Gradle, relative: "NOTICE" }) },
     PayloadSource { installed: CanonicalFile { path: "gradle/README", size: 976, sha256: "1a0f6ed37315884484084f5c46e0c19570b3ecafb0aa79134395b939b4b4d74d", mode: 0o444 }, origin: PayloadOrigin::DirectOriginal(OriginalSource::Picked { group: SourceGroup::Gradle, relative: "README" }) },
@@ -75923,7 +75924,7 @@ const CAT_PAYLOAD: &[PayloadSource] = &[
     PayloadSource { installed: CanonicalFile { path: "gradle/lib/tomlj-1.0.0.jar", size: 157156, sha256: "32697c7567b2921c473678a820b13fc64700aa87bb14576eeb48d0ed5847cfd4", mode: 0o444 }, origin: PayloadOrigin::DirectOriginal(OriginalSource::Picked { group: SourceGroup::Gradle, relative: "lib/tomlj-1.0.0.jar" }) },
     PayloadSource { installed: CanonicalFile { path: "gradle/lib/trove4j-1.0.20200330.jar", size: 572985, sha256: "c5fd725bffab51846bf3c77db1383c60aaaebfe1b7fe2f00d23fe1b7df0a439d", mode: 0o444 }, origin: PayloadOrigin::DirectOriginal(OriginalSource::Picked { group: SourceGroup::Gradle, relative: "lib/trove4j-1.0.20200330.jar" }) },
     PayloadSource { installed: CanonicalFile { path: "gradle/lib/xml-apis-1.4.01.jar", size: 220536, sha256: "a840968176645684bb01aed376e067ab39614885f9eee44abe35a5f20ebe7fad", mode: 0o444 }, origin: PayloadOrigin::DirectOriginal(OriginalSource::Picked { group: SourceGroup::Gradle, relative: "lib/xml-apis-1.4.01.jar" }) },
-    PayloadSource { installed: CanonicalFile { path: "gradle/native/aapt2/aapt2", size: 11143368, sha256: "213e3d049e2c85daa930ed777bbd5627c1c5479a8d6698029b8f9c0161ad0a7e", mode: 0o555 }, origin: PayloadOrigin::MemberOfSameOriginalArchive { asset: SupportAsset::Aapt2OsxJar, archive: ArchivePin { bytes: 4339472, sha256: "5d0aec6851fffbc9f6c8a8b50390c0bc976aa0ddf57a8a3a39061ed54b609ad1" }, member: CAT_PROJECTED } },
+    PayloadSource { installed: CanonicalFile { path: "gradle/native/aapt2/aapt2", size: 11163520, sha256: "388f89156088e0b64416381af414e21604488c83df7f3aad2ae787f14347d820", mode: 0o555 }, origin: PayloadOrigin::MemberOfSameOriginalArchive { asset: SupportAsset::Aapt2OsxJar, archive: ArchivePin { bytes: 4328126, sha256: "8326ffc2288059ba6af3357ea96f5db93220e4c65ffd1909f9330951302fde21" }, member: CAT_PROJECTED } },
     PayloadSource { installed: CanonicalFile { path: "jdk/temurin-17.jdk/Contents/Home/NOTICE", size: 2400, sha256: "c02756bcd9fa8191bf0fda4451bc018414dd44ee35bf09922c24377a475e4b5a", mode: 0o444 }, origin: PayloadOrigin::DirectOriginal(OriginalSource::Picked { group: SourceGroup::Jdk, relative: "Contents/Home/NOTICE" }) },
     PayloadSource { installed: CanonicalFile { path: "jdk/temurin-17.jdk/Contents/Home/bin/jar", size: 70448, sha256: "00a877646ccc45c1dce5829618a2997dd4d17f9492af1be53647b520cdd315c0", mode: 0o555 }, origin: PayloadOrigin::DirectOriginal(OriginalSource::Picked { group: SourceGroup::Jdk, relative: "Contents/Home/bin/jar" }) },
     PayloadSource { installed: CanonicalFile { path: "jdk/temurin-17.jdk/Contents/Home/bin/jarsigner", size: 70464, sha256: "06dad8cff0f16c50feb388936fbc020e6135bfec8a4a6176ef9efbe0409ed49f", mode: 0o555 }, origin: PayloadOrigin::DirectOriginal(OriginalSource::Picked { group: SourceGroup::Jdk, relative: "Contents/Home/bin/jarsigner" }) },

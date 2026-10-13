@@ -32,7 +32,7 @@ ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
 PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
-LOADER_SHA = "7b53c155874177a413fd1df382543ba50540f769b6b0fbfddace002e7f257016"
+LOADER_SHA = "f4e6d49ab3fb3d146555d179eb60fce998299a8fcce68b4442732bcedf73e3be"
 LOADER_MODULE = "mrk_normal_ui_owner_loader"
 TARGET = "MRKNormalAppUITests"
 CLASS = TARGET + "/NormalAppUITests/"
@@ -378,59 +378,66 @@ class RunnerProducts:
         return False
 
 
-def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, removal_case=None):
+def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, ios_pending=False, removal_case=None):
     machine, _ = normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60)), "engineering-fixed-test-selection")
     need(type(output_data) is bool and (not output_data or (not engineering and target == ARM_TARGET
          and tuple(methods) == (OUTPUT_DATA_METHOD,) and allowance == 60)), "output-data-fixed-test-selection")
     need(type(android_positive) is bool and (not android_positive or (not engineering and not output_data
-         and target == ARM_TARGET and tuple(methods) == (CLASS + ANDROID_METHOD,) and allowance == 900
+         and tuple(methods) == (CLASS + ANDROID_METHOD,) and allowance == 900
          and Path(result).name == ANDROID_RESULT)), "android-signed-fixed-test-selection")
     need(type(ios_unsigned) is bool and (not ios_unsigned or (not engineering and not output_data and not android_positive
          and tuple(methods) == (CLASS + IOS_UNSIGNED_METHOD,) and allowance == 900 and Path(result).name == IOS_UNSIGNED_RESULT)),
          "ios-unsigned-fixed-test-selection")
+    need(type(ios_pending) is bool and (not ios_pending or (not any((engineering, output_data, android_positive, ios_unsigned))
+         and tuple(methods) == (CLASS + IOS_PENDING_METHOD,) and allowance == 525
+         and Path(result).name == IOS_PENDING_RESULT)), "ios-pending-fixed-test-selection")
     if removal_case is not None:
         selected, basename = removal_selection(removal_case)
-        need(not any((engineering, output_data, android_positive, ios_unsigned)) and target == ARM_TARGET
+        need(not any((engineering, output_data, android_positive, ios_unsigned, ios_pending)) and target == ARM_TARGET
              and tuple(methods) == (selected,) and allowance == 300 and Path(result).name == basename,
              "removal-fixed-test-selection")
-    need(removal_case is not None or ios_unsigned or android_positive or output_data or engineering or tuple(methods) == (PACKAGED_METHOD,) or
+    need(removal_case is not None or ios_pending or ios_unsigned or android_positive or output_data or engineering or tuple(methods) == (PACKAGED_METHOD,) or
          any(tuple(methods) == tuple(CLASS + method for method in selection[0])
              and allowance == selection[1] for selection in NORMAL_SELECTIONS.values()),
          "fixed-test-selection")
-    need(((android_positive or ios_unsigned) and allowance == 900 or not (android_positive or ios_unsigned) and allowance in (60, 300))
+    need((ios_pending and allowance == 525 or not ios_pending and ((android_positive or ios_unsigned) and allowance == 900 or not (android_positive or ios_unsigned) and allowance in (60, 300)))
          and (tuple(methods) != (PACKAGED_METHOD,) or allowance == 60), "test-allowance")
     return ["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", str(manifest),
-        "-destination", "platform=macOS,arch=" + machine, "-destination-timeout", "15",
-        "-resultBundlePath", str(result), *["-only-testing:" + method for method in methods],
+        "-destination", "platform=macOS" if target == INTEL_TARGET else "platform=macOS,arch=" + machine,
+        "-destination-timeout", "15", "-resultBundlePath", str(result), *["-only-testing:" + method for method in methods],
         "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
         "-default-test-execution-time-allowance", str(allowance),
         "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
 
 
-def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, removal_case=None):
+def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, ios_pending=False, removal_case=None):
     normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60 and timeout == 180)), "engineering-fixed-test-owner")
     need(type(output_data) is bool and (not output_data or (not engineering and target == ARM_TARGET
          and tuple(methods) == (OUTPUT_DATA_METHOD,) and allowance == 60 and timeout == 120)), "output-data-fixed-test-owner")
     need(type(android_positive) is bool and (not android_positive or (not engineering and not output_data
-         and target == ARM_TARGET and tuple(methods) == (CLASS + ANDROID_METHOD,) and allowance == 900
+         and tuple(methods) == (CLASS + ANDROID_METHOD,) and allowance == 900
          and timeout == 1020 and Path(result).name == ANDROID_RESULT)), "android-signed-fixed-test-owner")
     need(type(ios_unsigned) is bool and (not ios_unsigned or (not engineering and not output_data and not android_positive
          and tuple(methods) == (CLASS + IOS_UNSIGNED_METHOD,) and allowance == 900 and timeout == 1020
          and Path(result).name == IOS_UNSIGNED_RESULT)), "ios-unsigned-fixed-test-owner")
+    need(type(ios_pending) is bool and (not ios_pending or (not any((engineering, output_data, android_positive, ios_unsigned))
+         and tuple(methods) == (CLASS + IOS_PENDING_METHOD,) and allowance == 525 and timeout == 645
+         and Path(result).name == IOS_PENDING_RESULT)), "ios-pending-fixed-test-owner")
     if removal_case is not None:
         selected, basename = removal_selection(removal_case)
-        need(not any((engineering, output_data, android_positive, ios_unsigned)) and target == ARM_TARGET
+        need(not any((engineering, output_data, android_positive, ios_unsigned, ios_pending)) and target == ARM_TARGET
              and tuple(methods) == (selected,) and allowance == 300 and timeout == 420
              and Path(result).name == basename, "removal-fixed-test-owner")
     need(not os.path.lexists(result), "fresh-xcresult-required")
     with RunnerProducts(derived) as products:
         facts = products.admit(call)  # Actual generated runner, BEFORE xcodebuild can request any app.
         command = (xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, removal_case=removal_case)
-                   if removal_case is not None else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, ios_unsigned=True)
+                   if removal_case is not None else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, ios_pending=True)
+                   if ios_pending else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, ios_unsigned=True)
                    if ios_unsigned else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, android_positive=True)
                    if android_positive else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, engineering=True)
                    if engineering else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, output_data=True)
@@ -581,6 +588,11 @@ def normal_cli_arguments(arguments, *, target=ARM_TARGET):
 
 # This fixed opt-in route reuses the normal installed launch/original-command
 # owner. It neither enables a product feature nor substitutes an engineering app.
+IOS_PENDING_METHOD = "testInstalledIOSPendingAccountRecoveryThroughUI"
+IOS_PENDING_RESULT = "ios-pending-recovery-test.xcresult"
+IOS_PENDING_PREFIX = b"MRK_MACOS_UI_IOS_PENDING_RECOVERY="
+IOS_PENDING_RUN = "TEST_RUNNER_MRK_NORMAL_UI_IOS_RECOVERY_RUN_ID"
+IOS_PENDING_ATTEMPT = "TEST_RUNNER_MRK_NORMAL_UI_IOS_RECOVERY_RUN_ATTEMPT"
 IOS_UNSIGNED_METHOD = "testSyntheticProjectUnsignedIOSArchive"
 IOS_UNSIGNED_RESULT = "ios-unsigned-archive-test.xcresult"
 IOS_UNSIGNED_PREFIX = b"MRK_MACOS_IOS_UNSIGNED_ARCHIVE_UI="
@@ -635,7 +647,8 @@ SUMMARY_STEMS = {"test.xcresult": "summary", "project-test.xcresult": "project-s
     "workflow-refusal-test.xcresult": "workflow-refusal-summary",
     "release-evidence-test.xcresult": "release-evidence-summary",
     "saved-version-recovery-test.xcresult": "saved-version-recovery-summary",
-    IOS_UNSIGNED_RESULT: "ios-unsigned-archive-summary"}
+    IOS_UNSIGNED_RESULT: "ios-unsigned-archive-summary",
+    IOS_PENDING_RESULT: "ios-pending-recovery-summary"}
 TOOLCHAIN_QUERIES = (
     ("xcode", "xcode-version.txt", ("/usr/bin/xcodebuild", "-version")),
     ("sdkPath", "sdk-path.txt", ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path")),
@@ -659,7 +672,6 @@ def normal_request(arguments, temporary):
         value = dict(phase="build", derived=normal / "DerivedData", result=None,
                      methods=(), allowance=None, timeout=240, phaseSeconds=450)
     elif arguments in (["--normal-android-signed-build-test"], ["--normal-android-signed-build-summary"]):
-        need(target == ARM_TARGET, "android-signed-arm-only")
         testing = arguments[0].endswith("-test")
         value = dict(phase="test" if testing else "summary", derived=normal / "DerivedData", result=normal / ANDROID_RESULT,
             methods=(CLASS + ANDROID_METHOD,) if testing else (), allowance=900 if testing else None,
@@ -669,6 +681,11 @@ def normal_request(arguments, temporary):
         value = dict(phase="test" if testing else "summary", derived=normal / "DerivedData", result=normal / IOS_UNSIGNED_RESULT,
             methods=(CLASS + IOS_UNSIGNED_METHOD,) if testing else (), allowance=900 if testing else None,
             timeout=1020 if testing else 30, phaseSeconds=1245 if testing else 90, iosUnsigned=True)
+    elif arguments in (["--normal-ios-pending-recovery-test"], ["--normal-ios-pending-recovery-summary"]):
+        testing = arguments[0].endswith("-test")
+        value = dict(phase="test" if testing else "summary", derived=normal / "DerivedData", result=normal / IOS_PENDING_RESULT,
+            methods=(CLASS + IOS_PENDING_METHOD,) if testing else (), allowance=525 if testing else None,
+            timeout=645 if testing else 30, phaseSeconds=1080 if testing else 90, iosPending=True)
     elif arguments == ["--normal-output-data-test"]:
         need(target == ARM_TARGET, "output-data-arm-only")
         value = dict(phase="test", derived=normal / "DerivedData", result=normal / OUTPUT_DATA_RESULT,
@@ -814,15 +831,143 @@ def normal_toolchain(values):
 def normal_build_arguments(derived, *, target=ARM_TARGET):
     machine, _ = normal_target_data(target)
     return ["/usr/bin/xcodebuild", "build-for-testing", "-project", PROJECT, "-scheme", "MRKNormalAppUI",
-        "-configuration", "Debug", "-destination", "platform=macOS,arch=" + machine, "-destination-timeout", "15",
-        "-derivedDataPath", str(derived), "-jobs", "2", "-disableAutomaticPackageResolution",
+        "-configuration", "Debug", "-destination",
+        "platform=macOS" if target == INTEL_TARGET else "platform=macOS,arch=" + machine,
+        "-destination-timeout", "15", "-derivedDataPath", str(derived), "-jobs", "2", "-disableAutomaticPackageResolution",
         "COMPILER_INDEX_STORE_ENABLE=NO"] + (["ARCHS=x86_64"] if target == INTEL_TARGET else [])
+
+
+NORMAL_BUILD_SETTINGS = ("ARCHS", "VALID_ARCHS", "EXCLUDED_ARCHS", "NATIVE_ARCH_ACTUAL",
+    "NATIVE_ARCH_64_BIT", "SUPPORTED_PLATFORMS", "ONLY_ACTIVE_ARCH", "MACOSX_DEPLOYMENT_TARGET", "SDK_VERSION")
+NORMAL_BUILD_ARCHITECTURES = ("arm64", "arm64e", "x86_64", "x86_64h", "i386")
+NORMAL_BUILD_PLATFORMS = ("macosx", "iphoneos", "iphonesimulator", "appletvos", "appletvsimulator",
+    "watchos", "watchsimulator", "xros", "xrsimulator", "driverkit")
+DESTINATION_REJECTIONS = ("non-ascii-or-control", "row-envelope", "field-count", "field-format",
+    "duplicate-key", "missing-required-field")
+
+
+def normal_build_settings_arguments(derived):
+    # Separate read-only settings query, not a second build or a new destination.
+    return ["/usr/bin/xcodebuild", "-showBuildSettings", "-json", "-project", PROJECT,
+        "-scheme", "MRKNormalAppUI", "-configuration", "Debug", "-derivedDataPath", str(derived),
+        "-jobs", "2", "-disableAutomaticPackageResolution", "ARCHS=x86_64", "COMPILER_INDEX_STORE_ENABLE=NO", "build-for-testing"]
+
+
+def normal_build_settings_data(body):
+    """Bounded native JSON to nine fixed settings; all other values stay private."""
+    need(type(body) is bytes and 0 < len(body) <= 262144, "normal-settings-input-bound")
+    depth, quoted, escaped = 0, False, False
+    for byte in body:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 92:
+                escaped = True
+            elif byte == 34:
+                quoted = False
+        elif byte == 34:
+            quoted = True
+        elif byte in (91, 123):
+            depth += 1
+            need(depth <= 8, "normal-settings-depth")
+        elif byte in (93, 125):
+            depth -= 1
+            need(depth >= 0, "normal-settings-depth")
+    need(depth == 0 and not quoted, "normal-settings-json")
+    value = json.loads(body.decode("utf-8", "strict"), object_pairs_hook=pairs,
+        parse_constant=lambda _: (_ for _ in ()).throw(Refused("normal-settings-number")),
+        parse_float=lambda _: (_ for _ in ()).throw(Refused("normal-settings-number")))
+    pending, visited = [value], 0  # Byte/depth bounds precede parsing; node checks follow it.
+    while pending:
+        item = pending.pop(); visited += 1
+        need(visited <= 12000, "normal-settings-nodes")
+        if type(item) is dict:
+            need(len(item) <= 2048, "normal-settings-map")
+            pending.extend(item.keys()); pending.extend(item.values())
+        elif type(item) is list:
+            need(len(item) <= 2048, "normal-settings-list")
+            pending.extend(item)
+        elif type(item) is str:
+            need(len(item) <= 16384, "normal-settings-string")
+        else:
+            need(item is None or type(item) is bool or type(item) is int
+                 and -2147483648 <= item <= 2147483647, "normal-settings-scalar")
+    need(type(value) is list and 1 <= len(value) <= 8, "normal-settings-target-list")
+    selected = []
+    for row in value:
+        need(type(row) is dict and type(row.get("target")) is str and 0 < len(row["target"]) <= 256
+             and type(row.get("buildSettings")) is dict, "normal-settings-target-row")
+        if row["target"] == TARGET:
+            selected.append(row["buildSettings"])
+    need(len(selected) == 1, "normal-settings-one-target")
+    settings, result = selected[0], {}
+    for name in NORMAL_BUILD_SETTINGS:
+        if name not in settings:
+            result[name] = {"state": "absent", "value": None}
+            continue
+        raw, observed, good = settings[name], None, False
+        if type(raw) is str and len(raw) <= 1024:
+            if name in ("ARCHS", "VALID_ARCHS", "EXCLUDED_ARCHS", "SUPPORTED_PLATFORMS"):
+                tokens = [word for word in raw.split(" ") if word]
+                choices = NORMAL_BUILD_PLATFORMS if name == "SUPPORTED_PLATFORMS" else NORMAL_BUILD_ARCHITECTURES
+                cap = 8 if name == "SUPPORTED_PLATFORMS" else 5
+                good = len(tokens) <= cap and len(set(tokens)) == len(tokens) and all(word in choices for word in tokens)
+                observed = tokens
+            elif name in ("NATIVE_ARCH_ACTUAL", "NATIVE_ARCH_64_BIT"):
+                good = raw in ("x86_64", "x86_64h", "arm64", "arm64e")
+                observed = raw
+            elif name == "ONLY_ACTIVE_ARCH":
+                good, observed = raw in ("YES", "NO"), raw == "YES"
+            else:
+                good = re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){0,2}", raw) is not None
+                observed = raw
+        result[name] = {"state": "observed" if good else "unsupported", "value": observed if good else None}
+    return result
+
+
+def publish_normal_build_settings(phase, request, source, original, host_version):
+    """One same-owner follow-up; caller retains the already returned failed build."""
+    need(type(phase) is NormalPhase and type(phase.clock) is PhaseClock
+         and request["phase"] == "build" and request["target"] == INTEL_TARGET
+         and type(original) is subprocess.CompletedProcess and type(original.returncode) is int
+         and 1 <= original.returncode <= 255 and type(original.stdout) is bytes and type(original.stderr) is bytes
+         and len(original.stdout) + len(original.stderr) <= 1024 * 1024
+         and type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source), "normal-settings-failed-build")
+    value = {"schemaVersion": 1, "scope": "normal-macos-build-settings-diagnostic-only", "target": INTEL_TARGET,
+        "sourceCommit": source, "originalBuildReturncode": original.returncode,
+        "originalBuildStdoutSha256": sha(original.stdout), "originalBuildStderrSha256": sha(original.stderr),
+        "hostVersion": host_version if type(host_version) is str and len(host_version) <= 16
+            and re.fullmatch(r"26(?:\.[0-9]{1,3}){1,3}", host_version) else None,
+        "queryRole": "normal-build-settings", "queryState": "not-returned", "queryReturncode": None,
+        "stdoutBytes": None, "stderrBytes": None, "stdoutSha256": None, "stderrSha256": None,
+        "settingsState": "unavailable", "settings": None, "sourceBinding": "prior-build-source-pre-post-only",
+        "phaseFinality": "not-asserted", "nativeSuccessInferred": False, "productReady": False}
+    try:
+        query = phase.call("normal-build-settings", normal_build_settings_arguments(request["derived"]), 15, 262144)
+        value.update(queryState="returned", queryReturncode=query.returncode,
+            stdoutBytes=len(query.stdout), stderrBytes=len(query.stderr),
+            stdoutSha256=sha(query.stdout), stderrSha256=sha(query.stderr), settingsState="nonzero")
+        if query.returncode == 0:
+            value["settingsState"] = "malformed"
+            try:
+                value["settings"] = normal_build_settings_data(query.stdout)
+                value["settingsState"] = "observed"
+            except Exception:
+                pass  # Parse failure is not a usable settings observation.
+    finally:
+        try:
+            body = encoded(value) + b"\n"
+            need(len(body) <= 4096, "normal-settings-output-bound")
+            exclusive_output(request["derived"].parent / "build.settings-diagnostics.json", body, 4096)
+        except BaseException:
+            pass  # Optional publication cannot replace the primary build failure.
+    return value
 
 
 def normal_source_state(phase, source):
     arguments = ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
         "ls-tree", "-r", "-z", "--full-tree", source, "--", "desktop/native/macos-normal-ui",
-        "desktop/tools/macos_normal_ui_runner.py"]
+        "desktop/tools/macos_normal_ui_runner.py", "desktop/src/components/IOSArchive.tsx"]
     original = phase.call("normal-ui-source-roster", arguments, 15)
     need(original.returncode == 0 and len(original.stdout) <= 8192, "normal-ui-source-command")
     rows = original.stdout.split(b"\0")
@@ -833,7 +978,7 @@ def normal_source_state(phase, source):
         mode, kind, blob = header.split(b" ")
         name = raw_name.decode("utf-8", "strict")
         need(kind == b"blob" and mode in (b"100644", b"100755")
-             and (name.startswith("desktop/native/macos-normal-ui/") or name == "desktop/tools/macos_normal_ui_runner.py")
+             and (name.startswith("desktop/native/macos-normal-ui/") or name in ("desktop/tools/macos_normal_ui_runner.py", "desktop/src/components/IOSArchive.tsx"))
              and all(part not in ("", ".", "..") for part in name.split("/")) and name not in facts,
              "normal-ui-source-entry")
         fd = os.open(phase.root / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -844,7 +989,7 @@ def normal_source_state(phase, source):
             facts[name] = [decimal(identity), digest]
         finally:
             os.close(fd)
-    need("desktop/tools/macos_normal_ui_runner.py" in facts
+    need("desktop/src/components/IOSArchive.tsx" in facts and "desktop/tools/macos_normal_ui_runner.py" in facts
          and "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift" in facts,
          "normal-ui-source-complete")
     return facts
@@ -859,14 +1004,21 @@ ANDROID_REF = "refs/heads/verify/desktop-macos-installed"
 ANDROID_INPUT_ENV = "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_INPUT_FIXTURE"
 ANDROID_RUN_ENV = "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_RUN_ID"
 ANDROID_ATTEMPT_ENV = "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"
-ANDROID_CATALOGUE = "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"
+ANDROID_CATALOGUE = "24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5"
 ANDROID_ROOTS = {"jdk": "tools/jdk/temurin-17.jdk", "sdk": "tools/sdk", "gradle": "tools/gradle"}
 ANDROID_PRIVATE_FILES = ("upload.jks", "upload.der", "scalars.json")
 
 
-def android_input_document(body, *, source, run, attempt, root):
+def android_catalogue(target):
+    normal_target_data(target)
+    return (ANDROID_CATALOGUE if target == ARM_TARGET else
+            "0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb")
+
+
+def android_input_document(body, *, source, run, attempt, root, target=ARM_TARGET):
     """Closed PRIVATE DATA only; actual producer0 remains a separate owner gate."""
     need(type(body) is bytes and 0 < len(body) <= 16384, "android-input-document-bound")
+    catalogue = android_catalogue(target)
     value = document(body)
     need(set(value) == {"schemaVersion", "scope", "sourceCommit", "target", "runId", "runAttempt",
         "workflow", "ref", "root", "rootFacts", "credentialDirectoryFacts", "sourceCatalogueSha256",
@@ -876,11 +1028,11 @@ def android_input_document(body, *, source, run, attempt, root):
     need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
          and value["scope"] == "one-owned-android-ui-inputs" and value["sourceCommit"] == source
          and type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source)
-         and value["target"] == ARM_TARGET and value["workflow"] == ANDROID_WORKFLOW
+         and value["target"] == target and value["workflow"] == ANDROID_WORKFLOW
          and value["ref"] == ANDROID_REF and value["root"] == str(root)
          and value["runId"] == run and value["runAttempt"] == attempt
          and all(type(x) is str and re.fullmatch(r"[1-9][0-9]{0,19}", x) for x in (run, attempt))
-         and value["sourceCatalogueSha256"] == ANDROID_CATALOGUE
+         and value["sourceCatalogueSha256"] == catalogue
          and type(value["parentReturncodeRequired"]) is int and value["parentReturncodeRequired"] == 0,
          "android-input-current-context")
     def digest(item):
@@ -938,7 +1090,9 @@ def android_input_scalars(body):
 
 class AndroidPrivateInputs:
     """At most14 retained directories+4 leaves; no vendor traversal or execution."""
-    def __init__(self, phase, source, normal):
+    def __init__(self, phase, source, normal, *, target=ARM_TARGET):
+        normal_target_data(target)
+        self.target = target
         self.phase, self.source, self.normal = phase, source, Path(normal)
         self.root = self.normal / "android-inputs"
         self.fds, self.directories, self.files = [], [], {}
@@ -986,7 +1140,7 @@ class AndroidPrivateInputs:
             normal = fd
             body, _, _ = self.read(normal, "android-input-fixture.json", 16384)
             value = android_input_document(body, source=self.source,
-                run=self.phase.environment[ANDROID_RUN_ENV], attempt=self.phase.environment[ANDROID_ATTEMPT_ENV], root=self.root)
+                run=self.phase.environment[ANDROID_RUN_ENV], attempt=self.phase.environment[ANDROID_ATTEMPT_ENV], root=self.root, target=self.target)
             root, root_facts = self.adopt_directory(normal, "android-inputs", full=True, private=True)
             credentials, credential_facts = self.adopt_directory(root, "credentials", full=True, private=True)
             need(decimal(root_facts) == value["rootFacts"] and decimal(credential_facts) == value["credentialDirectoryFacts"],
@@ -1093,13 +1247,14 @@ def publish_android_signed_failure(request, stage, code):
     exclusive_output(request["derived"].parent / "android-signed-build.failure.json", body, 1024)
 
 
-def android_signed_facts(value, *, source, run, attempt):
+def android_signed_facts(value, *, source, run, attempt, target=ARM_TARGET):
     """Safe public fields only; command/credential relations remain PRIVATE."""
+    normal_target_data(target)
     need(type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source)
          and all(type(item) is str and re.fullmatch(r"[1-9][0-9]{0,19}", item) for item in (run, attempt)),
          "android-signed-public-context")
     fixed = dict(schemaVersion=1, scope=ANDROID_FACTS_SCOPE, sourceCommit=source,
-        target=ARM_TARGET, runId=run, runAttempt=attempt, sourceRegistrationObserved=False,
+        target=target, runId=run, runAttempt=attempt, sourceRegistrationObserved=False,
         nativeSigningVerified=True, privateOriginalsClosed=True, memorySessionDiscarded=True, parentReturncodeRequired=0,
         outputPostMatched=True, normalQuitObserved=True, releaseQualified=False)
     variable = {"operationId", "ownerGeneration", "publicCertificateSha256", "artifactSha256", "artifactBytes",
@@ -1119,7 +1274,7 @@ def android_signed_facts(value, *, source, run, attempt):
     return value
 
 
-def android_signed_marker(stdout, *, source, run, attempt, certificate):
+def android_signed_marker(stdout, *, source, run, attempt, certificate, target=ARM_TARGET):
     need(type(stdout) is bytes and len(stdout) <= 1048576, "android-signed-private-output-bound")
     lines = stdout.splitlines()
     selected = b"-[MRKNormalAppUITests.NormalAppUITests " + ANDROID_METHOD.encode("ascii") + b"]"
@@ -1130,7 +1285,7 @@ def android_signed_marker(stdout, *, source, run, attempt, certificate):
          and not any(b"MRK_MACOS_UI_FAILURE_CLEANUP=" in line for line in lines), "android-signed-one-original-attempt")
     markers = [line[len(ANDROID_FACTS_PREFIX):] for line in lines if line.startswith(ANDROID_FACTS_PREFIX)]
     need(len(markers) == 1 and 0 < len(markers[0]) <= 16384, "android-signed-one-public-marker")
-    facts = android_signed_facts(document(markers[0]), source=source, run=run, attempt=attempt)
+    facts = android_signed_facts(document(markers[0]), source=source, run=run, attempt=attempt, target=target)
     need(facts["publicCertificateSha256"] == certificate and encoded(facts) == markers[0], "android-signed-original-certificate")
     return facts
 
@@ -1150,12 +1305,12 @@ def execute_android_signed_phase(phase, request, source, file_limit):
     run, attempt = phase.environment[ANDROID_RUN_ENV], phase.environment[ANDROID_ATTEMPT_ENV]
     public = None
     if request["phase"] == "test":
-        with AndroidPrivateInputs(phase, source, normal) as inputs:
+        with AndroidPrivateInputs(phase, source, normal, target=request["target"]) as inputs:
             original, runner = run_admitted_test(phase.call, request["derived"], request["result"],
-                request["methods"], 900, 1020, target=ARM_TARGET, android_positive=True)
+                request["methods"], 900, 1020, target=request["target"], android_positive=True)
             if original.returncode == 0:
                 public = android_signed_marker(original.stdout, source=source, run=run, attempt=attempt,
-                                               certificate=inputs.public_certificate)
+                                               certificate=inputs.public_certificate, target=request["target"])
         # __exit__ performs private POST/all consuming closes/clock before this fact.
         facts = dict(schemaVersion=1, scope="android-signed-private-original-admission", phase="test",
             resultBundle=ANDROID_RESULT, originalCommandRole="one-admitted-ui-test", originalReturncode=original.returncode,
@@ -1174,7 +1329,7 @@ def execute_android_signed_phase(phase, request, source, file_limit):
             testCounts=counts)
         receipt = normal / "android-signed-build-summary.command-admission.json"
     need(normal_source_state(phase, source) == before, "android-signed-source-pre-post")
-    facts.update(sourceCommit=source, target=ARM_TARGET, runId=run, runAttempt=attempt,
+    facts.update(sourceCommit=source, target=request["target"], runId=run, runAttempt=attempt,
         sourceRosterSha256=sha(encoded(before)), sourcePrePostMatched=True, originalCommandReturned=True,
         commands=phase.records, fileLimitBytes=list(file_limit), phaseClock=phase.clock.before_publication(),
         receiptPolicy="exclusive0600-readback-consuming-close")
@@ -1186,17 +1341,17 @@ def execute_android_signed_phase(phase, request, source, file_limit):
     return original
 
 
-def android_signed_receipts(build, test, summary, facts, *, source, normal, run, attempt):
+def android_signed_receipts(build, test, summary, facts, *, source, normal, run, attempt, target=ARM_TARGET):
     """Read-only local PRIVATE receipt join. Actual step statuses0 remain separate."""
     normal = Path(normal)
-    android_signed_facts(facts, source=source, run=run, attempt=attempt)
+    android_signed_facts(facts, source=source, run=run, attempt=attempt, target=target)
     need(type(build) is dict and type(build.get("sourceRosterSha256")) is str
          and re.fullmatch(r"[0-9a-f]{64}", build["sourceRosterSha256"]), "android-signed-build-roster")
     roster = build["sourceRosterSha256"]
-    output_data_build_receipt(build, source, normal, roster)
+    output_data_build_receipt(build, source, normal, roster, target=target)
     source_command = ("normal-ui-source-roster", 15, 1048576, output_data_source_argv(source))
     common = dict(schemaVersion=1, scope="android-signed-private-original-admission", resultBundle=ANDROID_RESULT,
-        sourceCommit=source, target=ARM_TARGET, runId=run, runAttempt=attempt, sourceRosterSha256=roster,
+        sourceCommit=source, target=target, runId=run, runAttempt=attempt, sourceRosterSha256=roster,
         sourcePrePostMatched=True, originalCommandReturned=True, originalReturncode=0,
         fileLimitBytes=[1024**3] * 2, receiptPolicy="exclusive0600-readback-consuming-close")
     for receipt, mode, cap in ((test, "test", 1245), (summary, "summary", 90)):
@@ -1229,7 +1384,7 @@ def android_signed_receipts(build, test, summary, facts, *, source, normal, run,
              and type(row[2]) is str and re.fullmatch(r"[0-9a-f]{64}", row[2]), "android-signed-runner-original")
     need(all(type(runner[k]) is str and re.fullmatch(r"[0-9a-f]{64}", runner[k])
              for k in ("productRosterSha256", "entitlementsSha256")), "android-signed-runner-roster")
-    command = xcode_test_arguments(Path(manifest), normal / ANDROID_RESULT, (CLASS + ANDROID_METHOD,), 900, android_positive=True)
+    command = xcode_test_arguments(Path(manifest), normal / ANDROID_RESULT, (CLASS + ANDROID_METHOD,), 900, target=target, android_positive=True)
     output_data_records(test["commands"], [source_command,
         ("verify-generated-runner", 30, 1048576, ["/usr/bin/codesign", "--verify", "--strict", runner["runnerPath"]]),
         ("generated-runner-entitlements", 30, 1048576, ["/usr/bin/codesign", "-d", "--entitlements", ":-", runner["runnerPath"]]),
@@ -1245,7 +1400,7 @@ SAVED_VERSION_RESULT = "saved-version-recovery-test.xcresult"
 SAVED_VERSION_TEMPORARY = Path("/private/tmp")
 SAVED_VERSION_PRODUCER = "tests/desktop/test_saved_text_recovery.py"
 SAVED_VERSION_DATA = "desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-project-v1.json"
-SAVED_VERSION_SOURCE = "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"
+SAVED_VERSION_SOURCE = "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"
 SAVED_VERSION_PATH = "project/release/version.properties"
 SAVED_VERSION_JOURNAL = "project/.mobile-release-version"
 SAVED_VERSION_ENV = "TEST_RUNNER_MRK_NORMAL_UI_SAVED_VERSION_FIXTURE"
@@ -1328,6 +1483,184 @@ def normal_saved_version_markers(stdout):
     return True
 
 
+
+def ios_pending_marker(stdout, *, binding, loader):
+    need(type(stdout) is bytes and 0 < len(stdout) <= 1048576, "ios-pending-original-output-bound")
+    lines = stdout.splitlines()
+    selected = b"-[MRKNormalAppUITests.NormalAppUITests " + IOS_PENDING_METHOD.encode("ascii") + b"]"
+    attempts = [line for line in lines if line.startswith(b"Test Case ")]
+    need(len(attempts) == 2 and attempts[0] == b"Test Case '" + selected + b"' started."
+         and re.fullmatch(rb"Test Case '" + re.escape(selected) + rb"' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.", attempts[1])
+         and lines.count(ORIGINAL_MARKER.encode("ascii")) == 1
+         and sum(line.startswith(b"MRK_MACOS_UI_ORIGINAL=") for line in lines) == 1
+         and not any(b"MRK_MACOS_UI_FAILURE_CLEANUP=" in line for line in lines), "ios-pending-one-original-attempt")
+    markers = [line[len(IOS_PENDING_PREFIX):] for line in lines if line.startswith(IOS_PENDING_PREFIX)]
+    need(len(markers) == 1 and 0 < len(markers[0]) <= 4096, "ios-pending-one-closed-marker")
+    need(lines.index(attempts[0]) < lines.index(ORIGINAL_MARKER.encode("ascii"))
+         < lines.index(IOS_PENDING_PREFIX + markers[0]) < lines.index(attempts[1]), "ios-pending-original-terminal-order")
+    value = loader.normal_account_observation(document(markers[0]), binding)
+    need(encoded(value) == markers[0], "ios-pending-canonical-marker")
+    return value
+
+
+def ios_pending_summary(body):
+    value = document(body)
+    counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+    need(all(type(value.get(key)) is int and value[key] == count for key, count in counts.items()), "ios-pending-exact-one-pass")
+    return counts
+
+
+class NormalIOSRecoveryFixture:
+    """One genuine same-account fixture, original UI and independent readback."""
+    def __init__(self, phase, source, request):
+        self.phase, self.source, self.request = phase, source, request
+        self.loader = sys.modules.get(LOADER_MODULE)
+        need(self.loader is not None and self.loader.__file__ == str(phase.root / LOADER), "ios-pending-loader-binding")
+        self.binding = self.loader.Binding(source, phase.environment[IOS_PENDING_RUN], phase.environment[IOS_PENDING_ATTEMPT],
+                                           request["target"]).checked()
+        self.fixtures = self.loader.Fixtures(self.binding, os.getuid(), os.getgid(), self.loader.IOS_ACCOUNT_CASE)
+        self.loader_fd = None
+        self.loader_original = None
+        self.stager = None
+        self.started = False
+        self.prepared = False
+        self.cleanup_errors = []
+
+    def check_sources(self):
+        self.phase.clock.check()
+        need(sys.modules.get(LOADER_MODULE) is self.loader and self.loader_fd is not None,
+             "ios-pending-loader-registry")
+        need(original_body(self.loader_fd, 1024*1024)[1:] == self.loader_original
+             and full9(os.stat(self.phase.root / LOADER, follow_symlinks=False)) == self.loader_original[0],
+             "ios-pending-loader-original-changed")
+        if self.stager is not None:
+            need(sys.modules.get("_mrk_shipping_gate_stager") is self.stager, "ios-pending-stager-registry")
+        for original in self.fixtures.gate_files:
+            need(self.loader._gate_file_read(original)[1] == original["sha256"], "ios-pending-source-original-changed")
+        if self.fixtures.recovery_runtime is not None:
+            self.fixtures.recovery_runtime_paths()
+
+    def __enter__(self):
+        try:
+            self.loader_fd = os.open(self.phase.root / LOADER, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            _, identity, digest = original_body(self.loader_fd, 1024*1024)
+            need(digest == LOADER_SHA, "ios-pending-loader-pin")
+            self.loader_original = (identity, digest)
+            self.check_sources()
+            self.fixtures.prepare()
+            need(self.fixtures.account_home == self.phase.environment["HOME"] == "/Users/runner", "ios-pending-same-account-home")
+            self.fixtures.admit_normal_account_runtime(self.phase.root, self.request["derived"].parent.parent)
+            self.stager = sys.modules.get("_mrk_shipping_gate_stager")
+            need(self.stager is not None, "ios-pending-stager-original")
+            self.prepared = True
+            self.check_sources()
+            return self
+        except BaseException as error:
+            if self.close() is not None:
+                error.add_note("normal recovery fixture also had a consuming-close refusal")
+            raise
+
+    def account_call(self, argv, *, environ, cwd, timeout, capture, text, output_limit):
+        fixtures, phase = self.fixtures, self.phase
+        mode = "produce" if fixtures.stage == "account-produce" else "observe" if fixtures.stage == "account-observe" else None
+        need(mode is not None and fixtures.inflight and not fixtures.last_returned, "ios-pending-account-call-state")
+        limit, cap = (16384, 180) if mode == "produce" else (2048, 90)
+        state = fixtures.path / "state" / self.loader.IOS_ACCOUNT_CASE
+        executable, core = fixtures.recovery_runtime
+        need(type(argv) is list and len(argv) == 12 and argv[:7] == [executable, "-I", "-S", "-B", "-c", self.loader.IOS_ACCOUNT_CORE_PROGRAM, core]
+             and argv[7] == mode and argv[8] == str(state) and all(type(arg) is str for arg in argv)
+             and all(re.fullmatch(r"[1-9][0-9]{0,19}", argv[i]) for i in (9, 10))
+             and int(argv[10]) - int(argv[9]) == 25_000_000_000
+             and argv[11] == ("-" if mode == "produce" else fixtures.account_private_sha)
+             and timeout == cap and capture is True and text is False and output_limit == limit
+             and cwd == state and environ == self.loader._account_environment(state, fixtures.uid, "runner")
+             and "HOME" not in environ, "ios-pending-account-call-contract")
+        # argv also carries its existing final deadline and private-hash argument;
+        # caller validation below checks those before entering the actual owner.
+        return self._account_original(argv, environ, cwd, cap, limit, mode)
+
+    def _account_original(self, argv, environ, cwd, cap, limit, mode):
+        phase = self.phase
+        try:
+            actual = phase.clock.allowance(cap)
+            need(actual == cap, "ios-pending-fixed-child-window")
+            value = phase.owner.run_owned(argv, environ=environ, cwd=cwd, timeout=actual,
+                                          capture=True, text=False, output_limit=limit)
+            original_command(value, argv, limit)
+            if phase.first_nonzero is None and value.returncode != 0:
+                phase.first_nonzero = value
+            phase.records.append({"role": "ios-account-" + mode, "returncode": value.returncode,
+                "timeoutSeconds": actual, "roleCapSeconds": cap, "outputLimitBytes": limit,
+                "argvSha256": sha(encoded(argv)), "stdoutBytes": len(value.stdout), "stdoutSha256": sha(value.stdout),
+                "stderrBytes": len(value.stderr), "stderrSha256": sha(value.stderr)})
+            phase.clock.check()
+            return value
+        except BaseException:
+            phase.clock.failed = True
+            raise
+
+    def ui_call(self, role, argv, seconds, limit=1048576):
+        need(self.prepared and not self.started, "ios-pending-ui-order")
+        self.check_sources()
+        if role != "one-admitted-ui-test":
+            need(role in ("verify-generated-runner", "generated-runner-entitlements") and seconds == 30,
+                 "ios-pending-runner-admission-role")
+            return self.phase.call(role, argv, seconds, limit)
+        need(seconds == 645 and limit == 1048576 and [row["role"] for row in self.phase.records]
+             == ["normal-ui-source-roster", "verify-generated-runner", "generated-runner-entitlements"]
+             and all(row["returncode"] == 0 for row in self.phase.records), "ios-pending-prior-originals")
+        self.started = True
+        self.phase.clock.allowance(180)
+        self.loader._run_ios_account_child(self.fixtures, self.account_call, self.fixtures.uid, "runner", "produce")
+        self.check_sources()
+        self.fixtures.case, self.fixtures.stage = self.loader.IOS_ACCOUNT_CASE, "normal-ui-original"
+        self.fixtures.inflight, self.fixtures.last_returned = True, False
+        original = self.phase.call(role, argv, seconds, limit)
+        self.fixtures.inflight, self.fixtures.last_returned = False, True
+        self.fixtures.normal_account_original = original
+        return original
+
+    def recovered(self, original, runner_facts):
+        need(self.started and original is self.fixtures.normal_account_original, "ios-pending-original-identity")
+        self.check_sources()
+        observation = ios_pending_marker(original.stdout, binding=self.binding, loader=self.loader)
+        self.fixtures.accept_normal_account_app(observation, original, runner_facts)
+        self.phase.clock.allowance(90)
+        self.loader._run_ios_account_child(self.fixtures, self.account_call, self.fixtures.uid, "runner", "observe")
+        self.check_sources()
+        account = self.fixtures.readback_normal_account(observation)
+        return {"schemaVersion": 1, "scope": "normal-ui-pending-account-recovery-v1", "observation": observation,
+                "account": account, "originalClosesCompleted": False}
+
+    def close(self):
+        failure = None
+        try:
+            self.fixtures.close()  # Refuses unknown originals; never deletes account state.
+        except BaseException as error:
+            failure = error
+            self.cleanup_errors.append(type(error).__name__)
+        if self.loader_fd is not None:
+            fd, self.loader_fd = self.loader_fd, None
+            try:
+                os.close(fd)
+            except BaseException as error:
+                self.cleanup_errors.append(type(error).__name__)
+                if failure is None:
+                    failure = error
+        for module in self.fixtures.normal_stager_registrations:
+            if sys.modules.get("_mrk_shipping_gate_stager") is module:
+                del sys.modules["_mrk_shipping_gate_stager"]
+        return failure
+
+    def __exit__(self, exc_type, exc, tb):
+        failure = self.close()
+        if failure is not None and exc is None:
+            raise failure
+        if failure is not None and exc is not None:
+            exc.add_note("normal recovery fixture also had a consuming-close refusal")
+        return False
+
+
 class SavedVersionFixture:
     """Retained fixed SOURCE/fixture originals, borrowed by exactly one XCTest.
 
@@ -1364,7 +1697,8 @@ class SavedVersionFixture:
 
     def _sources(self):
         fixed = {"desktop/" + name for name in SAVED_VERSION_BOOTSTRAPS}
-        fixed.update(("desktop/cpython-source-inputs/github-ca.pem", "desktop/tools/prepare_runtime.py"))
+        fixed.update(("desktop/cpython-source-inputs/github-ca.pem", "desktop/tools/prepare_runtime.py",
+                      "desktop/packaging/macos-history-provider.profile"))
         selected = sorted(fixed | {"src/mobile_release", SAVED_VERSION_PRODUCER, SAVED_VERSION_DATA})
         args = ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
                 "ls-tree", "-r", "-z", "--full-tree", self.source, "--", *selected]
@@ -1686,13 +2020,14 @@ def output_data_records(commands, expected):
 def output_data_source_argv(source):
     return ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
         "ls-tree", "-r", "-z", "--full-tree", source, "--", "desktop/native/macos-normal-ui",
-        "desktop/tools/macos_normal_ui_runner.py"]
+        "desktop/tools/macos_normal_ui_runner.py", "desktop/src/components/IOSArchive.tsx"]
 
 
-def output_data_build_receipt(value, source, normal, roster):
+def output_data_build_receipt(value, source, normal, roster, *, target=ARM_TARGET):
+    normal_target_data(target)
     expected = dict(schemaVersion=1, scope="normal-ui-original-command-admission-only", phase="build",
         resultBundle=None, originalCommandRole="normal-ui-build", originalReturncode=0,
-        target=ARM_TARGET, sourceCommit=source, sourceRosterSha256=roster, sourcePrePostMatched=True,
+        target=target, sourceCommit=source, sourceRosterSha256=roster, sourcePrePostMatched=True,
         originalCommandReturned=True, fileLimitBytes=[32 * 1024**3] * 2,
         receiptPolicy="exclusive0600-readback-consuming-close")
     need(type(value) is dict and set(value) == set(expected) | {"commands", "phaseClock"}, "output-data-build-fields")
@@ -1700,7 +2035,7 @@ def output_data_build_receipt(value, source, normal, roster):
     output_data_clock(value["phaseClock"], 450)
     source_command = ("normal-ui-source-roster", 15, 1048576, output_data_source_argv(source))
     commands = [source_command, *[("normal-toolchain-" + key, 15, 4096, list(argv)) for key, _, argv in TOOLCHAIN_QUERIES],
-                ("normal-ui-build", 240, 1048576, normal_build_arguments(normal / "DerivedData")), source_command]
+                ("normal-ui-build", 240, 1048576, normal_build_arguments(normal / "DerivedData", target=target)), source_command]
     output_data_records(value["commands"], commands)
 
 
@@ -2156,6 +2491,8 @@ def execute_normal_phase(phase, request, source, file_limit):
                  "resultBundle": result.name, "originalCommandRole": "normal-ui-summary", "originalReturncode": original.returncode}
         if request.get("iosUnsigned") is True and original.returncode == 0:
             facts["iosUnsignedTestCounts"] = ios_unsigned_summary(original.stdout)
+        if request.get("iosPending") is True and original.returncode == 0:
+            facts["iosPendingRecoveryTestCounts"] = ios_pending_summary(original.stdout)
         receipt = result.parent / (SUMMARY_STEMS[result.name] + ".command-admission.json")
     else:
         need(mode == "test", "normal-phase-selection")
@@ -2170,6 +2507,16 @@ def execute_normal_phase(phase, request, source, file_limit):
                     facts["savedVersionRecovery"] = fixture.restored()
             if original.returncode == 0:
                 facts["savedVersionRecovery"]["originalClosesCompleted"] = True
+        elif request.get("iosPending") is True:
+            with NormalIOSRecoveryFixture(phase, source, request) as fixture:
+                original, facts = run_admitted_test(fixture.ui_call, derived, result, request["methods"],
+                    request["allowance"], request["timeout"], target=target, ios_pending=True)
+                if original.returncode == 0:
+                    # The actual RunnerProducts POST and consuming closes completed
+                    # before this normal acceptance and independent native readback.
+                    facts["iosPendingRecovery"] = fixture.recovered(original, facts)
+            if original.returncode == 0:
+                facts["iosPendingRecovery"]["originalClosesCompleted"] = True
         elif request.get("iosUnsigned") is True:
             original, facts = run_admitted_test(phase.call, derived, result, request["methods"],
                 request["allowance"], request["timeout"], target=target, ios_unsigned=True)
@@ -2194,6 +2541,9 @@ def execute_normal_phase(phase, request, source, file_limit):
                  phaseClock=phase.clock.before_publication(), receiptPolicy="exclusive0600-readback-consuming-close")
     exclusive_output(receipt, encoded(facts) + b"\n", 32768)
     phase.clock.check()  # Includes actual original receipt close, never inferred from a persisted flag.
+    if request.get("iosPending") is True and mode == "test" and original.returncode == 0:
+        exclusive_output(derived.parent / "ios-pending-recovery.facts.json", encoded(facts["iosPendingRecovery"]) + b"\n", 16384)
+        phase.clock.check()
     if request.get("iosUnsigned") is True and mode == "test" and original.returncode == 0:
         exclusive_output(derived.parent / "ios-unsigned-archive.facts.json", encoded(facts["iosUnsignedObservation"]) + b"\n", 16384)
         phase.clock.check()
@@ -2223,6 +2573,9 @@ def failure_base(phase, selection, original, *, engineering=False):
         value["engineeringFirstFailure"] = None
     if not engineering and phase == "build":
         value["compilerDiagnostics"] = []
+        value["buildFailureReasons"] = []
+        value["destinationTable"] = {"state": "unavailable", "unknownRowObserved": False,
+            "malformedRowObserved": False, "rowsTruncated": False, "rows": []}
         value["markers"]["buildFailed"] = False
     if not engineering and phase == "test" and selection == OUTPUT_DATA_RESULT:
         value["outputDataFailure"] = None
@@ -2277,6 +2630,20 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     ) if compiler_eligible else ()
     if compiler_eligible:
         markers["buildFailed"] = rb"(?m)^\*\* BUILD FAILED \*\*\r?$"
+        table = value["destinationTable"]
+        table["state"] = "absent"  # No exact header observed, not an eligible-destination count.
+        # Lexical observations only, never an Apple error grammar or cause claim.
+        destination_error_terms = (
+            ("architecture", ("architecture", "architectures")), ("platform", ("platform", "platforms")),
+            ("macos", ("macos",)), ("xcode", ("xcode",)), ("sdk", ("sdk", "sdks")),
+            ("deployment", ("deployment",)), ("version", ("version", "versions")),
+            ("support", ("support", "supports", "supported")), ("install", ("install", "installed", "installation")))
+        destination_header = (rb'[ \t]{0,32}(Available|Ineligible) destinations for the '
+                              rb'"MRKNormalAppUI" scheme:[ \t]{0,32}')
+        destination_row = rb"[ \t]{0,32}\{([\x20-\x7e\x80-\xff]{1,4094})\}[ \t]{0,32}"
+        atom = rb"[\x21-\x2b\x2d-\x7a\x7c\x7e\x80-\xff]"  # Neither comma nor braces.
+        destination_field = (rb" {0,8}([A-Za-z]{1,8}) {0,8}: {0,8}(" + atom
+            + rb"(?:[\x20-\x2b\x2d-\x7a\x7c\x7e\x80-\xff]{0,1022}" + atom + rb")?) {0,8}")
     if methods:
         markers.update(selectedCaseStarted=rb"(?m)^Test Case '" + case + rb"' started\.\r?$",
             selectedCaseFailed=rb"(?m)^Test Case '" + case + rb"' failed(?: \([0-9]{1,6}(?:\.[0-9]{1,9})? seconds\))?\.\r?$")
@@ -2525,6 +2892,7 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                 value["findingsTruncated"] = True
 
     for stream, body in (("stdout", original.stdout), ("stderr", original.stderr)):
+        destination_section = None  # A header never lends authority across streams.
         for key, pattern in markers.items():
             value["markers"][key] = value["markers"][key] or re.search(pattern, body) is not None
         for match in re.finditer(codes, body):
@@ -2548,7 +2916,88 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             if complete and record.endswith(b"\r"):
                 record = record[:-1]
             if compiler_eligible:
+                bounded = complete and len(record) <= 4096
+                header = re.fullmatch(destination_header, record) if bounded else None
+                if header is not None:
+                    destination_section = "available" if header.group(1) == b"Available" else "ineligible"
+                    table["state"] = "observed"
+                elif destination_section is not None and record.lstrip(b" \t").startswith(b"{"):
+                    if not bounded:
+                        table["rowsTruncated"] = value["findingsTruncated"] = True
+                    else:
+                        row_match = re.fullmatch(destination_row, record)
+                        fields = row_match.group(1).split(b",", 5) if row_match is not None else []
+                        parts, malformed = {}, not 1 <= len(fields) <= 5
+                        rejection = ("non-ascii-or-control" if any(byte < 32 or byte > 126
+                            for byte in record.strip(b" \t")) else "row-envelope") if row_match is None else "field-count"
+                        for field in fields if not malformed else ():
+                            item = re.fullmatch(destination_field, field)
+                            if item is None or item.group(1) in parts:
+                                malformed = True
+                                rejection = "field-format" if item is None else "duplicate-key"
+                                break
+                            # Only discarded opaque values may contain printable UTF-8.
+                            # Structural keys/platform/architecture remain ASCII, not normalized.
+                            try:
+                                printable = (item.group(2).decode("utf-8").isprintable()
+                                    if item.group(1) in (b"name", b"id", b"error") else item.group(2).isascii())
+                            except UnicodeDecodeError:
+                                printable = False
+                            if not printable:
+                                malformed = True
+                                rejection = "non-ascii-or-control"
+                                break
+                            parts[item.group(1)] = item.group(2)
+                        if malformed or not {b"platform", b"name"} <= parts.keys():
+                            table["malformedRowObserved"] = True
+                            rejection = rejection if malformed else "missing-required-field"
+                            if "rejections" not in table:
+                                table.update(rejections=[], rejectionDetailsTruncated=False)
+                            finding = {"stream": stream, "section": destination_section, "reason": rejection}
+                            if finding not in table["rejections"]:
+                                if len(table["rejections"]) < 8:
+                                    table["rejections"].append(finding)
+                                else:
+                                    table["rejectionDetailsTruncated"] = True
+                        elif (not parts.keys() <= {b"platform", b"arch", b"id", b"name", b"error"}
+                              or parts[b"platform"] != b"macOS"
+                              or parts.get(b"arch") not in (None, b"arm64", b"arm64e", b"x86_64", b"x86_64h", b"i386")):
+                            table["unknownRowObserved"] = True
+                            if "unknownRows" not in table:
+                                table.update(unknownRows=[], unknownRowsTruncated=False)
+                            if len(table["unknownRows"]) < 8:
+                                architecture = parts.get(b"arch")
+                                table["unknownRows"].append({"stream": stream, "section": destination_section,
+                                    "platform": "macos" if parts[b"platform"] == b"macOS" else "unrecognized",
+                                    "architecture": None if architecture is None else architecture.decode("ascii")
+                                        if architecture in (b"arm64", b"arm64e", b"x86_64", b"x86_64h", b"i386")
+                                        else "unrecognized",
+                                    "unsupportedKeyPresent": not parts.keys() <= {b"platform", b"arch", b"id", b"name", b"error"},
+                                    "errorPresent": b"error" in parts})
+                            else:
+                                table["unknownRowsTruncated"] = value["findingsTruncated"] = True
+                        elif len(table["rows"]) == 8:
+                            table["rowsTruncated"] = value["findingsTruncated"] = True
+                        else:
+                            # Opaque id/name/error fields never escape as text or per-value hashes.
+                            table["rows"].append({"stream": stream, "section": destination_section,
+                                "platform": "macos", "architecture": parts[b"arch"].decode("ascii")
+                                if b"arch" in parts else None, "errorPresent": b"error" in parts})
+                            if b"error" in parts:
+                                # ASCII spelling only with Unicode word boundaries; no Unicode case folding.
+                                words = {word.lower() for word in re.findall(r"(?<!\w)[A-Za-z]+(?!\w)",
+                                    parts[b"error"].decode("utf-8", "strict"))}
+                                table["rows"][-1]["errorTerms"] = [term for term, spellings in destination_error_terms
+                                    if any(spelling in words for spelling in spellings)]
+                elif record.strip(b" \t"):
+                    destination_section = None
                 if complete and len(record) <= 4096:
+                    # Fixed diagnostic categories only: do not publish scheme names,
+                    # destination identifiers, variable message tails, or raw text.
+                    if record == b"xcodebuild: error: Unable to find a destination matching the provided destination specifier:":
+                        retain("buildFailureReasons", {"stream": stream, "code": "destination-not-found"}, 4)
+                    elif re.fullmatch(rb"xcodebuild: error: Found no destinations for the scheme [\x20-\x7e]{1,256} and action [\x20-\x7e]{1,32}\.", record):
+                        retain("buildFailureReasons", {"stream": stream, "code": "no-eligible-destination"}, 4)
                     site = re.fullmatch(compiler_site, record)
                     if site is not None and int(site.group(1)) <= 65535 and int(site.group(2)) <= 4096:
                         message = site.group(4).lower()  # Local only; never returned or logged.
@@ -2704,12 +3153,39 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     if compiler_eligible:
         # New optional observations cannot displace old findings or their cap.
         # Reserve two bytes for the final status string below.
+        for row in reversed(table["rows"]):
+            if "errorTerms" in row and len(encoded(value)) + 1 > 4094:
+                del row["errorTerms"]
+                value["findingsTruncated"] = True
+        if "unknownRows" in table:
+            while table["unknownRows"] and len(encoded(value)) + 1 > 4094:
+                table["unknownRows"].pop()
+                table["unknownRowsTruncated"] = value["findingsTruncated"] = True
+            if len(encoded(value)) + 1 > 4094:
+                del table["unknownRows"], table["unknownRowsTruncated"]
+                value["findingsTruncated"] = True
+        if "rejections" in table:
+            while table["rejections"] and len(encoded(value)) + 1 > 4094:
+                table["rejections"].pop()
+                table["rejectionDetailsTruncated"] = value["findingsTruncated"] = True
+            if len(encoded(value)) + 1 > 4094:
+                del table["rejections"], table["rejectionDetailsTruncated"]
+                value["findingsTruncated"] = True
+        while table["rows"] and len(encoded(value)) + 1 > 4094:
+            table["rows"].pop()
+            table["rowsTruncated"] = value["findingsTruncated"] = True
+        if len(encoded(value)) + 1 > 4094:
+            del value["destinationTable"]  # Even optional metadata cannot displace old facts.
+            value["findingsTruncated"] = True
+        while value["buildFailureReasons"] and len(encoded(value)) + 1 > 4094:
+            value["buildFailureReasons"].pop()
+            value["findingsTruncated"] = True
         while value["compilerDiagnostics"] and len(encoded(value)) + 1 > 4094:
             value["compilerDiagnostics"].pop()
             value["findingsTruncated"] = True
     value["status"] = ("unavailable" if require_invalid or guide_invalid or artifact_invalid or first_invalid or output_invalid else "classified" if any(value[key]
         for key in ("errorCodes", "sourceFailures", "queryObservations", "requireObservations"))
-        or value.get("engineeringFirstFailure") is not None or value.get("outputDataFailure") is not None or value.get("compilerDiagnostics") else "unclassified")
+        or value.get("engineeringFirstFailure") is not None or value.get("outputDataFailure") is not None or value.get("compilerDiagnostics") or value.get("buildFailureReasons") else "unclassified")
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
     return value
 
@@ -2793,8 +3269,21 @@ ADMISSION_EXCEPTION_TYPES = (Refused, AttributeError, TypeError, ValueError, Imp
 ADMISSION_EXCEPTION_LABELS = tuple(kind.__name__ for kind in ADMISSION_EXCEPTION_TYPES) + (
     "ProcessError", "ProcessInterrupted", "other")
 ADMISSION_SOURCE_FILES = ("desktop/tools/macos_normal_ui_runner.py", LOADER,
-                          "src/mobile_release/owned_process.py")
-ADMISSION_COMMAND_ROLES = ("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary",
+                          "src/mobile_release/owned_process.py", "src/mobile_release/_command_process.py")
+# Exact existing owner labels only, never an exception message or capture export.
+ADMISSION_OWNER_REASONS = {
+    "owned command produced incomplete output": "incomplete-output",
+    "owned command output exceeds its bound": "output-bound",
+    "owned command protocol or original ownership is incomplete": "protocol-or-ownership",
+    "owned command failed, timed out, or produced incomplete output": "command-failed-or-incomplete",
+    "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
+    "owned command executable could not be started": "exec-rejected",
+    "owned command was stopped before execution": "stopped-before-exec",
+    "owned command original parent ended": "parent-ended",
+    "owned command original observer ended": "observer-ended",
+    "owned command fence name already exists": "fence-collision",
+}
+ADMISSION_COMMAND_ROLES = ("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary", "normal-build-settings",
     "saved-version-source-roster", "saved-version-core-interrupt",
     "verify-generated-runner", "generated-runner-entitlements", "one-admitted-ui-test", "normal-ui-test-tree",
     *("normal-toolchain-" + key for key, _, _ in TOOLCHAIN_QUERIES))
@@ -2804,25 +3293,40 @@ def normal_admission_failure(stage, error, owner, records):
     """Closed exception facts only: no messages, locals, paths or native output."""
     label = next((kind.__name__ for kind in ADMISSION_EXCEPTION_TYPES if type(error) is kind), "other")
     owner_failure = dict(dispatched=None, contained=None, cleanupComplete=None)
+    owner_diagnostic = None
     if owner is not None and isinstance(error, (owner.ProcessError, owner.ProcessInterrupted)):
         label = "ProcessInterrupted" if isinstance(error, owner.ProcessInterrupted) else "ProcessError"
         owner_failure = {name: value if type(value := getattr(error, attribute, None)) is bool else None
             for name, attribute in (("dispatched", "dispatched"), ("contained", "contained"),
                                     ("cleanupComplete", "cleanup_complete"))}
+        if type(error) in tuple(getattr(owner, name, None) for name in (
+                "ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown")):
+            args = BaseException.args.__get__(error)
+            reason = (ADMISSION_OWNER_REASONS.get(args[0], "unknown") if len(args) == 1
+                      and type(args[0]) is str and len(args[0]) <= 128 else "unknown")
+            mask = getattr(error, "owner_failure_mask", None)
+            # Existing simultaneous terminal predicates, not a cause/finality claim.
+            owner_diagnostic = {"reason": reason, "failureMask": mask if type(mask) is int
+                                and (mask == 32 or 48 <= mask <= 63) else None}
     root = Path(__file__).absolute().parents[2]
     allowed = {str(root / name): Path(name).name for name in ADMISSION_SOURCE_FILES}
-    frames = []
+    frames, omitted = [], False
     current = error.__traceback__
     for _ in range(64):
-        if current is None or len(frames) == 4:
+        if current is None:
             break
         filename, line = current.tb_frame.f_code.co_filename, current.tb_lineno
         if filename in allowed and type(line) is int and 1 <= line <= 1_000_000:
+            if len(frames) == 4:
+                del frames[1]  # First caller plus last three observed fixed-source frames.
+                omitted = True
             frames.append({"source": allowed[filename], "line": line})
         current = current.tb_next
     result = {"schemaVersion": 1, "scope": "generated-ui-runner-refused", "productReady": False,
         "error": "runner-admission-or-owner-error", "stage": stage, "exceptionClass": label,
-        "sourceFrames": frames, "commands": records, "ownerFailure": owner_failure, "unknownStateRetained": True}
+        "sourceFrames": frames, "sourceFramesTruncated": omitted or current is not None,
+        "commands": records, "ownerFailure": owner_failure, "ownerDiagnostic": owner_diagnostic,
+        "unknownStateRetained": True}
     if stage == "execute" and type(error) is Refused and error.args == ("output-data-result-post",):
         try:
             result["resultPost"] = admit_output_data_result_post(
@@ -2841,7 +3345,8 @@ def classify_normal_admission_failure(body):
         value = document(body)
         fields = {"schemaVersion", "scope", "productReady", "error", "stage", "exceptionClass",
                   "sourceFrames", "commands", "ownerFailure", "unknownStateRetained"}
-        need(set(value) in (fields, fields | {"resultPost"}), "admission-fields")
+        need(fields <= set(value) <= fields | {"resultPost", "ownerDiagnostic", "sourceFramesTruncated"},
+             "admission-fields")
         need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
              and value["scope"] == "generated-ui-runner-refused" and value["productReady"] is False
              and value["error"] == "runner-admission-or-owner-error" and value["unknownStateRetained"] is True
@@ -2856,6 +3361,16 @@ def classify_normal_admission_failure(body):
         owner = value["ownerFailure"]
         need(type(owner) is dict and set(owner) == {"dispatched", "contained", "cleanupComplete"}
              and all(item is None or type(item) is bool for item in owner.values()), "admission-owner")
+        if "ownerDiagnostic" in value and (diagnostic := value["ownerDiagnostic"]) is not None:
+            need(value["exceptionClass"] == "ProcessError" and type(diagnostic) is dict
+                 and set(diagnostic) == {"reason", "failureMask"}
+                 and type(diagnostic["reason"]) is str
+                 and diagnostic["reason"] in (*ADMISSION_OWNER_REASONS.values(), "unknown")
+                 and (diagnostic["failureMask"] is None or type(diagnostic["failureMask"]) is int
+                      and (diagnostic["failureMask"] == 32 or 48 <= diagnostic["failureMask"] <= 63)),
+                 "admission-owner-diagnostic")
+        if "sourceFramesTruncated" in value:
+            need(type(value["sourceFramesTruncated"]) is bool, "admission-frames-truncated")
         commands = value["commands"]
         need(type(commands) is list and len(commands) <= 16, "admission-commands")
         projected = []
@@ -2876,17 +3391,25 @@ def classify_normal_admission_failure(body):
             projected.append({key: command[key] for key in ("role", "returncode", "stdoutBytes", "stderrBytes")})
         result = dict(unavailable, status="observed-exception-only", stage=value["stage"],
             exceptionClass=value["exceptionClass"], sourceFrames=frames, ownerFailure=owner, commands=projected)
+        for key in ("ownerDiagnostic", "sourceFramesTruncated"):
+            if key in value:
+                result[key] = value[key]
         if "resultPost" in value:
             need(value["stage"] == "execute" and value["exceptionClass"] == "Refused",
                  "output-data-post-exception-context")
             result["resultPost"] = admit_output_data_result_post(value["resultPost"], commands)
+        if len(encoded(result)) + 1 > 4096:
+            # Optional diagnostics never displace an otherwise admitted old record.
+            result.pop("ownerDiagnostic", None)
+            result.pop("sourceFramesTruncated", None)
         need(len(encoded(result)) + 1 <= 4096, "admission-projection-bound")
         return result
     except Exception:
         return unavailable
 
 
-def normal_context(request):
+def normal_context(request, *, diagnostics=None):
+    need(diagnostics is None or type(diagnostics) is dict and not diagnostics, "normal-context-diagnostic-collector")
     machine, hosted_job = normal_target_data(request["target"])
     source = os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE", "")
     need(re.fullmatch(r"[0-9a-f]{40}", source)
@@ -2894,7 +3417,7 @@ def normal_context(request):
          and os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB") == hosted_job,
          "normal-same-build-only")
     import resource  # Native CLI only; inert helper import stays portable.
-    need(sys.platform == "darwin" and platform.machine() == machine and platform.mac_ver()[0].startswith("26.")
+    need(sys.platform == "darwin" and platform.machine() == machine and (host_version := platform.mac_ver()[0]).startswith("26.")
          and os.environ.get("DEVELOPER_DIR") == DEVELOPER, "normal-host-developer-file-budget")
     file_limit = normal_file_limit(request["phase"], resource.getrlimit(resource.RLIMIT_FSIZE))
     import pwd
@@ -2914,22 +3437,27 @@ def normal_context(request):
     need(all(environment[key] == value for key, value in {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
          "HOME": "/Users/runner", "USER": "runner", "LOGNAME": "runner", "LANG": "en_US.UTF-8",
          "LC_ALL": "en_US.UTF-8", "TZ": "UTC"}.items()), "normal-clean-environment")
-    if request.get("androidPositive") is True:
+    if request.get("androidPositive") is True or request.get("iosPending") is True:
         env = os.environ
-        need(request["target"] == ARM_TARGET and sys.version_info[:3] == (3, 14, 7)
+        need(sys.version_info[:3] == (3, 14, 7)
              and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
              and env.get("GITHUB_REPOSITORY") == "Apdelrahman1911/mobile-release-kit"
              and env.get("GITHUB_EVENT_NAME") == "push" and env.get("GITHUB_REF") == ANDROID_REF
              and env.get("GITHUB_SHA") == source == env.get("GITHUB_WORKFLOW_SHA")
              and env.get("GITHUB_WORKFLOW_REF") == "Apdelrahman1911/mobile-release-kit/" + ANDROID_WORKFLOW + "@" + ANDROID_REF
              and env.get("GITHUB_WORKSPACE") == str(root) and env.get("RUNNER_ENVIRONMENT") == "github-hosted"
-             and env.get("RUNNER_OS") == "macOS" and env.get("RUNNER_ARCH") == "ARM64"
+             and env.get("RUNNER_OS") == "macOS" and env.get("RUNNER_ARCH") == ("ARM64" if request["target"] == ARM_TARGET else "X64")
              and all(re.fullmatch(r"[1-9][0-9]{0,19}", env.get(k, "")) for k in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
              "android-signed-fixed-installed-context")
-        handoff = str(derived.parent / "android-input-fixture.json")
-        # Derived from this admitted fixed work, never a caller-supplied private path.
-        environment.update({ANDROID_INPUT_ENV: handoff, ANDROID_RUN_ENV: env["GITHUB_RUN_ID"],
-                            ANDROID_ATTEMPT_ENV: env["GITHUB_RUN_ATTEMPT"]})
+        if request.get("androidPositive") is True:
+            handoff = str(derived.parent / "android-input-fixture.json")
+            # Derived from this admitted fixed work, never a caller-supplied private path.
+            environment.update({ANDROID_INPUT_ENV: handoff, ANDROID_RUN_ENV: env["GITHUB_RUN_ID"],
+                                ANDROID_ATTEMPT_ENV: env["GITHUB_RUN_ATTEMPT"]})
+        else:
+            environment.update({IOS_PENDING_RUN: env["GITHUB_RUN_ID"], IOS_PENDING_ATTEMPT: env["GITHUB_RUN_ATTEMPT"]})
+    if diagnostics is not None:
+        diagnostics["hostVersion"] = host_version
     return root, source, environment, file_limit
 
 
@@ -3517,6 +4045,8 @@ def publish_engineering_failure(request, failure):
 
 
 def main():
+    retained_intel_build = None
+    context_diagnostics = {}
     owner = None
     phase = None
     request = None
@@ -3530,12 +4060,14 @@ def main():
                    else normal_request(sys.argv[1:], os.environ.get("TMPDIR", "")))
         clock = PhaseClock(request["phaseSeconds"], started=started)
         stage = "context"
-        root, source, environment, file_limit = engineering_context(request) if engineering else normal_context(request)
+        root, source, environment, file_limit = (engineering_context(request) if engineering else
+            normal_context(request, diagnostics=context_diagnostics)
+            if request["phase"] == "build" and request["target"] == INTEL_TARGET else normal_context(request))
         stage = "loader"
         owner = load_normal_owner(root)
         stage = "phase"
         phase = (NormalPhase(owner, environment, root, clock, retain_nonzero=True)
-                 if request.get("outputData") is True or request.get("androidPositive") is True or request.get("iosUnsigned") is True else NormalPhase(owner, environment, root, clock))
+                 if request.get("outputData") is True or request.get("androidPositive") is True or request.get("iosUnsigned") is True or request.get("iosPending") is True else NormalPhase(owner, environment, root, clock))
         records = phase.records
         try:
             stage = "execute"
@@ -3559,6 +4091,8 @@ def main():
             clock.finish()
             return failure.original.returncode
         if original.returncode != 0:
+            if not engineering and request["phase"] == "build" and request["target"] == INTEL_TARGET:
+                retained_intel_build = original  # Before any optional diagnostic/publication can fail.
             stage = "diagnostic"
             if request.get("androidPositive") is True:
                 publish_android_signed_failure(request, stage, original.returncode)
@@ -3571,13 +4105,24 @@ def main():
         sys.stderr.buffer.write(original.stderr)
         sys.stdout.buffer.flush()
         sys.stderr.buffer.flush()
+        if retained_intel_build is not None:
+            stage = "diagnostic"
+            publish_normal_build_settings(phase, request, source, retained_intel_build,
+                                          context_diagnostics.get("hostVersion"))
         stage = "finalize"
         clock.finish()
         return original.returncode
     except BaseException as error:
         if phase is not None:
             phase.clock.failed = True
-        if request is not None and request.get("iosUnsigned") is True:
+        if retained_intel_build is not None:
+            try:
+                failure = normal_admission_failure(stage, error, owner, records)
+                sys.stderr.write(encoded(failure).decode("ascii") + "\n")
+            except BaseException:
+                pass
+            return retained_intel_build.returncode  # Query/final-clock errors cannot replace original70.
+        if request is not None and (request.get("iosUnsigned") is True or request.get("iosPending") is True):
             code = phase.first_nonzero.returncode if phase is not None and phase.first_nonzero is not None else 1
             try:
                 # Optional closed diagnostics cannot replace an original return or

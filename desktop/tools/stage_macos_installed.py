@@ -76,6 +76,8 @@ ANDROID_SERVICE_PLIST = PAYLOAD_CONTENTS + "Library/LaunchDaemons/dev.mobile-rel
 ANDROID_SERVICE_LABEL = "dev.mobile-release-kit.desktop.android-register"
 ANDROID_SUPPORT_PREFIX = "Contents/Resources/android-support/"
 ANDROID_SUPPORT_MANIFEST = DESKTOP / "macos-installed-inputs/android-support.json"
+ANDROID_SIGNED_MANIFEST_SHA = "64c77de1505c4d8a71b848349609d26c2bef49a1bc61f277ce5d5a0a31ad59a9"
+ANDROID_SIGNED_REDUCER_SHA = "c944c670b3083909d8db2b25020fabb74891ebaff8e9890ec33873edeaf0f431"
 ANDROID_SUPPORT_LAYOUT = (
     ("bundletool", "bundletool-all-1.18.3.jar",
      "https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar",
@@ -1918,7 +1920,7 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
     need(all(mount[key] is True for key in ("attachEntered", "originalKnown", "detached"))
          and all(mount[key] is False for key in ("retained", "installerEntered", "systemServiceExitClaimed")), "final-image-mount-finality")
     roles = ("resolve-notarytool", "resolve-stapler", "signature-before", "submit", "log", "staple", "validate", "signature-after",
-             "verify", "attach", "detach")
+             "verify", "attach", "detach", "policy-status", "policy-assess")
     calls = value["originalCalls"]
     need(type(calls) is list and len(calls) == len(roles), "final-image-original-count")
     for row, role in zip(calls, roles):
@@ -1932,7 +1934,8 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
         "signatureBytes", "signatureSha256", "producerProfileSha256", "serviceProfileSha256", "originalImageBytes", "originalImageSha256",
         "submittedSha256", "imageBytes", "imageSha256", "imageMode", "notaryProfileSha256", "submissionId", "status", "sha256Compared",
         "errorCount", "warningCount", "ticketRowCount", "logSha256", "strictSignatureBeforeAndAfter", "actualStaplerValidation",
-        "actualImageVerification", "finalMountReadOnly", "finalMountOriginalsMatch", "originalMountDetached", "assurance"), "final-image-fields")
+        "actualImageVerification", "finalMountReadOnly", "finalMountOriginalsMatch", "originalMountDetached",
+        "assessmentSubsystemEnabledBefore", "actualDiskImagePolicyAssessment", "assurance"), "final-image-fields")
     need(type(final["schemaVersion"]) is int and final["schemaVersion"] == 1 and final["kind"] == ("mrk-final-removal-image" if remove else "mrk-final-user-image")
          and (final["target"], final["release"], final["packageVersion"]) == (selection.target, selection.release, selection.package_version)
          and (request is None if remove else maintenance_hex(request, 32) and final["requestId"] == request), "final-image-current-binding")
@@ -1965,7 +1968,8 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
          and maintenance_hex(final["logSha256"], 64)
          and value["notarySubmission"] == {"id": final["submissionId"], "status": "Accepted"}, "final-image-notary-observation")
     need(all(final[key] is True for key in ("strictSignatureBeforeAndAfter", "actualStaplerValidation", "actualImageVerification",
-                                          "finalMountReadOnly", "finalMountOriginalsMatch", "originalMountDetached"))
+                                          "finalMountReadOnly", "finalMountOriginalsMatch", "originalMountDetached",
+                                          "assessmentSubsystemEnabledBefore", "actualDiskImagePolicyAssessment"))
          and final["assurance"] == "final-carrier-observation-not-downloaded-install-or-gatekeeper-authority", "final-image-scoped-observation")
     return final
 
@@ -2063,7 +2067,7 @@ def preview_command(args):
     need(type(audit) is dict and audit.get("packageSha256") == digest(package)
          and type(audit.get("packageSize")) is int and audit["packageSize"] == len(package)
          and audit.get("packageIdentifier") == "dev.mobile-release-kit.desktop.installed"
-         and audit.get("qualification") == "scripts-only-package-audited-not-installed-or-GUI-qualified",
+         and audit.get("qualification") == INSTALL_PRODUCT_QUALIFICATION,
          "preview-original-audited-package")
     descriptor = read(work / "producer-root/producer.json", PRODUCER_DESCRIPTOR_BYTES)
     signed = read(work / "producer-root/producer.sig", PRODUCER_SIGNATURE_BYTES)
@@ -2195,7 +2199,10 @@ def remove_preview_command(args):
 
 def android_support_manifest():
     # Reviewed source DATA, not a user recipe, runtime network grant or sidecar.
-    body = read(ANDROID_SUPPORT_MANIFEST, 16384)
+    return android_support_manifest_data(read(ANDROID_SUPPORT_MANIFEST, 16384))
+
+
+def android_support_manifest_data(body):
     value = decode(body)
     need(type(value) is dict and set(value) == {"schemaVersion", "platform", "archives"}
          and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
@@ -2224,13 +2231,117 @@ def android_support_manifest():
     return digest(body), value["archives"]
 
 
-def android_support_files(args):
-    manifest_sha, rows = android_support_manifest()
+@contextlib.contextmanager
+def android_signed_source():
+    """Read fixed reviewed DATA, retaining only the captured passive loader.
+
+    Each smaller fixed input is authenticated, re-read and closed before use;
+    it remains immutable bytes. This avoids retaining duplicate parent chains
+    for all seven SOURCE leaves while the three transport originals are held.
+    """
+    source = DESKTOP / "tools/macos_android_support_signed.py"
+    module_name = "mrk_android_signed_support_data"
+    with github_tool_leaf(source, 17486) as body:
+        need(len(body) == 17486 and digest(body) == ANDROID_SIGNED_REDUCER_SHA,
+             "android-support-source-loader")
+        need(module_name not in sys.modules, "android-support-loader-collision")
+        spec = importlib.util.spec_from_file_location(module_name, source)
+        need(spec is not None, "android-support-source-loader")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            # Dataclasses need the ordinary temporary module binding; execute
+            # only the authenticated capture, never loader re-resolution.
+            exec(compile(body, str(source), "exec"), module.__dict__)
+            need(sys.modules.get(module_name) is module, "android-support-loader-binding")
+            captured = []
+            for path, size, expected in (
+                (ANDROID_SUPPORT_MANIFEST, 3023, "3450a83882cecdc9d8e402380ccf21e6dc5cec65382cbc7c18b4e6ff6a9aeb8f"),
+                (DESKTOP / "macos-installed-inputs/android-support-signed.json", 3942, ANDROID_SIGNED_MANIFEST_SHA),
+                (PRODUCER_PROFILE, 488, "2f42e8e333ceb5dd96089c3dd7c38fbe4aaa1c79b6ae7369157c06179f0c08f2"),
+                (SERVICE_PROFILE, 219, "7f1a96c30d75d915e84f1a45095170ba6e4b2870203efda199515c7260e98663"),
+            ):
+                with github_tool_leaf(path, size) as original:
+                    need(len(original) == size and digest(original) == expected, "android-support-source-pin")
+                    captured.append(original)
+            upstream, signed, producer, service = captured
+            relation = module.nomination(signed, upstream)
+            manifest_sha, rows = android_support_manifest_data(upstream)
+            yield module, relation, manifest_sha, rows, producer, service
+        except module.Refused as error:
+            raise Refused("android-support-signed-data") from error
+        finally:
+            # Consume only our own temporary binding; never clear another one.
+            own = sys.modules.get(module_name) is module
+            if own:
+                del sys.modules[module_name]
+            need(own, "android-support-loader-binding")
+
+
+@contextlib.contextmanager
+def android_signed_transport(args, relation):
+    paths = (getattr(args, "bundletool_archive", None), getattr(args, "aapt2_archive", None),
+             getattr(args, "android_support_signed_receipt", None))
+    names = tuple(a.file_name for a in relation.archives) + ("android-support-signed-receipt.json",)
+    need(all(isinstance(path, Path) and path.is_absolute() and path.name == name
+             for path, name in zip(paths, names))
+         and len({path.parent for path in paths}) == 1, "android-support-transport-paths")
+    root = paths[0].parent
+    owner = packager_ids()
+    with _parent_originals(root / "unopened-roster-sentinel") as (parents, parts):
+        fd = parents[-1]
+        identities = tuple(current_directory_identity(os.fstat(item)) for item in parents)
+        original = os.fstat(fd)
+        need((original.st_uid, original.st_gid) == owner and stat.S_IMODE(original.st_mode) in (0o700, 0o755)
+             and getattr(original, "st_flags", 0) == 0, "android-support-transport-owner")
+        def post():
+            for index, held in enumerate(parents):
+                named = (os.stat("/", follow_symlinks=False) if index == 0 else
+                         os.stat(parts[index - 1], dir_fd=parents[index - 1], follow_symlinks=False))
+                need(current_directory_identity(os.fstat(held)) == current_directory_identity(named)
+                     == identities[index], "android-support-transport-parent-changed")
+            need(signature(os.fstat(fd)) == signature(original), "android-support-transport-changed")
+            no_xattrs(fd)
+            with os.scandir(fd) as entries:
+                # At most four names allocated; extras reject before reading.
+                roster = []
+                for entry in entries:
+                    roster.append(entry.name)
+                    need(len(roster) <= 3, "android-support-transport-roster")
+            need(set(roster) == set(names), "android-support-transport-roster")
+        post()
+        try:
+            with contextlib.ExitStack() as originals:
+                limits = tuple(a.derived.size for a in relation.archives) + (relation.receipt.size,)
+                bodies = tuple(originals.enter_context(github_tool_leaf(path, limit, owner=owner))
+                               for path, limit in zip(paths, limits))
+                yield dict(zip(names[:2], bodies[:2])), bodies[2]
+                post()
+            post()
+        finally:
+            # Refusals also close all held originals and check the same root.
+            post()
+
+
+@contextlib.contextmanager
+def android_signed_capsule(args):
+    with android_signed_source() as (module, relation, manifest_sha, rows, producer, service):
+        with android_signed_transport(args, relation) as (archives, receipt):
+            # Exact whole-archive pins and the complete receipt envelope precede
+            # any ZIP/notice parsing. Reviewed source enrollment is separate
+            # from the DATA reducer's intentionally non-authoritative result.
+            module.admit_capsule(relation, receipt, archives,
+                producer_profile_raw=producer, service_profile_raw=service)
+            yield manifest_sha, rows, archives, relation
+
+
+def android_support_notice_files(rows, archives, derived):
+    """Pure notice projection after full caller admission, also inert-testable."""
+    need(len(rows) == len(derived) == 2 and set(archives) == {r["fileName"] for r in rows}, "android-support-archive")
     files = {}
-    for row, path in zip(rows, (args.bundletool_archive, args.aapt2_archive)):
-        body = read(path, row["size"])
-        # Authenticate the complete original before parsing even its directory.
-        need(len(body) == row["size"] and digest(body) == row["sha256"], "android-support-archive")
+    for row, pin in zip(rows, derived):
+        body = archives[row["fileName"]]
+        need(type(body) is bytes and len(body) == pin.size and digest(body) == pin.sha256, "android-support-archive")
         files[row["resourcePath"]] = (body, 0o644)
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
             entries = archive.infolist()
@@ -2247,26 +2358,35 @@ def android_support_files(args):
                      and b"\0" not in text, "android-support-notice")
                 text.decode("utf-8", "strict")
                 files[notice["resourcePath"]] = (text, 0o644)
+    return files
+
+
+def android_support_files(args):
+    with android_signed_capsule(args) as (manifest_sha, rows, archives, relation):
+        files = android_support_notice_files(rows, archives, tuple(a.derived for a in relation.archives))
     return manifest_sha, files
 
 
 def android_support_input(app):
-    manifest_sha, rows = android_support_manifest()
-    expected = {PAYLOAD_RELATIVE + "/" + row["resourcePath"]: row for row in rows}
-    expected.update({PAYLOAD_RELATIVE + "/" + notice["resourcePath"]: notice for row in rows for notice in row["notices"]})
-    need({name for name in app if name.startswith(PAYLOAD_RELATIVE + "/" + ANDROID_SUPPORT_PREFIX)} == set(expected), "android-support-roster")
-    for name, row in expected.items():
-        body, mode = app[name]
-        need(mode in (0o444, 0o644) and len(body) == row["size"] and digest(body) == row["sha256"],
-             "android-support-resource")
+    with android_signed_source() as (_module, relation, manifest_sha, rows, _producer, _service):
+        expected = {PAYLOAD_RELATIVE + "/" + row["resourcePath"]:
+                    {"size": signed.derived.size, "sha256": signed.derived.sha256}
+                    for row, signed in zip(rows, relation.archives)}
+        expected.update({PAYLOAD_RELATIVE + "/" + notice["resourcePath"]: notice for row in rows for notice in row["notices"]})
+        need({name for name in app if name.startswith(PAYLOAD_RELATIVE + "/" + ANDROID_SUPPORT_PREFIX)} == set(expected), "android-support-roster")
+        for name, row in expected.items():
+            body, mode = app[name]
+            need(mode in (0o444, 0o644) and len(body) == row["size"] and digest(body) == row["sha256"],
+                 "android-support-resource")
     return manifest_sha
 
 
 def android_support_command(args):
     manifest_sha, files = android_support_files(args)
     return {"schemaVersion": 1, "androidSupportManifestSha256": manifest_sha,
+            "androidSupportSignedManifestSha256": ANDROID_SIGNED_MANIFEST_SHA,
             "fileCount": len(files), "payloadBytes": sum(len(body) for body, _ in files.values()),
-            "qualification": "original-archive-and-notice-data-only-no-vendor-execution"}
+            "qualification": "source-pinned-signed-derivative-and-original-notices-data-only-no-vendor-execution"}
 
 
 def source_app_info(*, selection=None):
@@ -2342,7 +2462,7 @@ GITHUB_SEAL_LIMIT = 16 * 1024 * 1024
 
 
 @contextlib.contextmanager
-def github_tool_leaf(path, limit, *, executable=False):
+def github_tool_leaf(path, limit, *, executable=False, owner=None):
     """Retain this exact leaf and complete parent chain through the caller."""
     with _parent_originals(path) as (parents, parts):
         outer, leaf = parents[-1], parts[-1]
@@ -2357,6 +2477,8 @@ def github_tool_leaf(path, limit, *, executable=False):
         before = os.stat(leaf, dir_fd=outer, follow_symlinks=False)
         need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 < before.st_size <= limit
              and stat.S_IMODE(before.st_mode) & 0o7022 == 0 and getattr(before, "st_flags", 0) == 0, "github-tool-original")
+        if owner is not None:
+            need((before.st_uid, before.st_gid) == owner, "github-tool-owner")
         if executable:
             need(stat.S_IMODE(before.st_mode) == 0o555 and before.st_uid == os.getuid()
                  and before.st_gid == os.getgid(), "github-tool-executable")
@@ -2508,6 +2630,7 @@ def app_with_github_seal(args, seal):
               "removerSha256": digest(remover), "removerCargoArtifact": remover_compiled,
               "entryBinarySha256BeforeSigning": digest(entry), "entryBundleIdentifier": ENTRY_BUNDLE_ID,
               "payloadBundleIdentifier": BUNDLE_ID, "androidSupportManifestSha256": support_sha,
+              "androidSupportSignedManifestSha256": ANDROID_SIGNED_MANIFEST_SHA,
               "androidHelperSha256": digest(android_service[ANDROID_HELPER][0]),
               "residentImageSha256": digest(android_service[RESIDENT_IMAGE][0]),
               "androidServicePlistSha256": digest(android_service[ANDROID_SERVICE_PLIST][0]),
@@ -2636,6 +2759,7 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
     write_tree(args.output, files)
     result = {"schemaVersion": 1, "packageRole": role, "inventorySha256": digest(inventory),
               "runtimeManifestSha256": args.expected_manifest, "androidSupportManifestSha256": support_sha,
+              "androidSupportSignedManifestSha256": ANDROID_SIGNED_MANIFEST_SHA,
               "residentImageSha256": expected_resident, "removerSha256": args.expected_remover, "fileCount": len(rows),
               "qualification": "fresh-install-input-not-installed"}
     if role == "ordinary-image":
@@ -2759,10 +2883,12 @@ def cpio_members(body):
     return _cpio_members(body, (0, 0))
 
 
-def package_info(body, *, fixture=False, selection=None, remove=False):
+def package_info(body, *, fixture=False, selection=None, remove=False, app_absence=False):
     selection = selected_build(selection)
-    need(type(fixture) is bool and type(remove) is bool and not (fixture and remove), "fixed-package-kind")
-    identifier = REMOVE_PACKAGE_ID if remove else PACKAGE_ID + ("-fixture" if fixture else "")
+    need(type(fixture) is bool and type(remove) is bool and type(app_absence) is bool
+         and sum((fixture, remove, app_absence)) <= 1, "fixed-package-kind")
+    identifier = (PACKAGE_ID + "-app-absence-fixture" if app_absence else
+                  REMOVE_PACKAGE_ID if remove else PACKAGE_ID + ("-fixture" if fixture else ""))
     info = ET.fromstring(body)
     need(info.tag == "pkg-info" and info.get("identifier") == identifier
          and info.get("version") == selection.package_version and info.get("install-location") == "/" and info.get("auth") == "root", "scripts-package-identity")
@@ -2776,7 +2902,7 @@ def package_info(body, *, fixture=False, selection=None, remove=False):
 
 
 def original_package(scripts_path, package_path, *, fixture=False, selection=None, remove=False, expected_remover=None,
-                     removal_fixture_role=None, removal_fixture_correlation=None, removal_fixture_binding=None):
+                     removal_fixture_role=None, removal_fixture_correlation=None, removal_fixture_binding=None, app_absence=False):
     selection = selected_build(selection)
     owner = packager_ids()
     scripts = tree(scripts_path, packager=True)
@@ -2801,7 +2927,7 @@ def original_package(scripts_path, package_path, *, fixture=False, selection=Non
         need((info.st_uid, info.st_gid) == owner, "original-package-owner")
     members = xar_members(package)
     need(set(members) == {"PackageInfo", "Scripts"}, "original-package-roster")
-    identifier = package_info(members["PackageInfo"], fixture=fixture, selection=selection, remove=remove)
+    identifier = package_info(members["PackageInfo"], fixture=fixture, selection=selection, remove=remove, app_absence=app_absence)
     archive = members["Scripts"]
     if archive[:2] == b"\x1f\x8b":
         archive = inflate(archive, MAX_BYTES, gzip=True)
@@ -2809,6 +2935,65 @@ def original_package(scripts_path, package_path, *, fixture=False, selection=Non
     expected = {**scripts, **{name: (None, 0o555) for name in directories(scripts)}}
     need(actual == expected, "complete-original-scripts-correspondence")
     return scripts, package, members, identifier, owner
+
+
+def app_absence_scripts_data(scripts, expected_program, expected_inventory):
+    """One nonshipping role, never arbitrary scripts or an ordinary parser exception."""
+    need(type(scripts) is dict and sha(expected_program) and sha(expected_inventory), "app-absence-scripts-shape")
+    fixed = b'#!/bin/sh\nset -eu\nd="${0%/*}"\nexec "$d/mrk-macos-app-absence-fixture" "$d/input" "$1"\n'
+    need(scripts.get("postinstall") == (fixed, 0o555)
+         and set(name for name in scripts if not name.startswith("input/")) == {"postinstall", "mrk-macos-app-absence-fixture"},
+         "app-absence-scripts-roster")
+    program, mode = scripts["mrk-macos-app-absence-fixture"]
+    need(type(program) is bytes and 0 < len(program) <= 64 * 1024 * 1024 and mode == 0o555
+         and digest(program) == expected_program, "app-absence-program-correspondence")
+    inventory = scripts.get("input/" + INSTALLATION_INVENTORY_NAME)
+    need(type(inventory) is tuple and inventory[1] == 0o444
+         and digest(inventory[0]) == expected_inventory, "app-absence-inventory-correspondence")
+
+
+def app_absence_original_command(args):
+    """Genuine original decoder, compacted before the independent final pass."""
+    selection = source_build_selection(command_target(args))
+    scripts, original, members, identifier, owner = original_package(args.scripts, args.original_package,
+        selection=selection, app_absence=True)
+    app_absence_scripts_data(scripts, args.expected_program, args.expected_inventory)
+    macho(scripts["mrk-macos-app-absence-fixture"][0], target=selection.target)
+    rows = {name: {"size": len(body), "sha256": digest(body), "mode": mode} for name, (body, mode) in scripts.items()}
+    rows.update({name: {"size": None, "sha256": None, "mode": 0o555} for name in directories(scripts)})
+    need(len(rows) <= MAX_FILES, "app-absence-script-count")
+    # No full original/scripts/member collection escapes this call. The next
+    # genuine decoder starts only after these local payloads have been released.
+    return {"rows": rows, "packageInfo": members["PackageInfo"], "packageIdentifier": identifier,
+            "originalPackageSha256": digest(original), "originalPackageSize": len(original),
+            "scriptFileCount": len(scripts), "packagerUid": owner[0], "packagerGid": owner[1]}
+
+
+def app_absence_final_command(args, compact):
+    """Same decoder/strict root ownership; only compact original facts remain."""
+    need(type(compact) is dict and set(compact) == {"rows", "packageInfo", "packageIdentifier", "originalPackageSha256",
+         "originalPackageSize", "scriptFileCount", "packagerUid", "packagerGid"}, "app-absence-original-facts")
+    selection = source_build_selection(command_target(args))
+    package = read(args.package, MAX_BYTES)
+    members = xar_members(package)
+    need(set(members) == {"PackageInfo", "Scripts"} and members["PackageInfo"] == compact["packageInfo"],
+         "app-absence-final-members")
+    identifier = package_info(members["PackageInfo"], selection=selection, app_absence=True)
+    need(identifier == compact["packageIdentifier"], "app-absence-final-identifier")
+    archive = members["Scripts"]
+    if archive[:2] == b"\x1f\x8b":
+        archive = inflate(archive, MAX_BYTES, gzip=True)
+    actual = cpio_members(archive)
+    need(set(actual) == set(compact["rows"]), "app-absence-final-script-roster")
+    for name, (body, mode) in actual.items():
+        row = compact["rows"][name]
+        need(mode == row["mode"] and (body is None and row["size"] is row["sha256"] is None
+             or type(body) is bytes and len(body) == row["size"] and digest(body) == row["sha256"]),
+             "app-absence-final-script-correspondence")
+    return {"schemaVersion": 1, "packageSha256": digest(package), "packageSize": len(package),
+            "originalPackageSha256": compact["originalPackageSha256"], "packageInfoSha256": digest(members["PackageInfo"]),
+            "packageIdentifier": identifier, "scriptFileCount": compact["scriptFileCount"],
+            "finalDestinationPayloadEntries": 0, "qualification": "nonshipping-app-absence-fixture-not-installed"}
 
 
 def prepare_package_command(args):
@@ -2864,6 +3049,118 @@ INSTALL_PRESENTATION = ("Distribution.xml", "InstallerReadMe.html")
 INSTALL_PRESENTATION_LIMIT = 8192
 
 
+def package_staple_observation():
+    """Finite observations only; neither branch selection nor exit0 is proof."""
+    return {name: None for name in ("heldPreIdentityMatched", "namedPreIdentityMatched",
+        "fdNameIdentityMatched", "fdNameMetadataMatched", "namedShapeExpected")} | {
+        "heldLinkState": "unavailable", "selectedBranch": "unavailable", "transitionComplete": False}
+
+
+def package_staple_preimage_post(operation, guard, *, work=True, record=None):
+    """The retained unlinked PRE is checked by fd only, never by its old name."""
+    if record is None:
+        record = operation.final_package_preimage
+    if record is None:
+        return
+    entry, expected, sha = record
+    guard(operation.entry_registry.get(id(entry)) is entry and entry["kind"] == "file"
+          and type(entry["fd"]) is int and not entry["closed"] and expected[3] == 0,
+          "final-package-preimage-unavailable")
+    operation.recheck_directory(entry["parent_entry"])
+    operation.notary_clock(work=work)
+    guard(signature(os.fstat(entry["fd"])) == expected, "final-package-preimage-metadata")
+    no_xattrs(entry["fd"])
+    whole, offset = hashlib.sha256(), 0
+    while offset < expected[6]:
+        operation.notary_clock(work=work)
+        block = os.pread(entry["fd"], min(1024 * 1024, expected[6] - offset), offset)
+        guard(block and len(block) <= expected[6] - offset, "final-package-preimage-short-read")
+        whole.update(block)
+        offset += len(block)
+    guard(whole.hexdigest() == sha and os.pread(entry["fd"], 1, offset) == b"",
+          "final-package-preimage-content")
+    guard(signature(os.fstat(entry["fd"])) == expected, "final-package-preimage-post")
+    operation.recheck_directory(entry["parent_entry"])
+    operation.notary_clock(work=work)
+
+
+def package_staple_appended(operation, before, before_sha, guard):
+    """Admit one predeclared returned output, not a failed-check reopen."""
+    guard(operation.notary_mutation_pending and operation.final_package_preimage is None,
+          "final-package-ticket-transition-state")
+    observed = operation.receipt["packageStapleObservation"]
+    entry = operation.final_package_output
+    parent = entry["parent_entry"]
+    operation.recheck_directory(parent)
+    guard(os.listdir(parent["fd"]) == [entry["name"]], "final-package-directory-census")
+    held = signature(os.fstat(entry["fd"]))
+    observed["heldPreIdentityMatched"] = held[:2] == before[:2]
+    observed["heldLinkState"] = "unlinked" if held[3] == 0 else "single" if held[3] == 1 else "other"
+    named = signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False))
+    observed.update(namedPreIdentityMatched=named[:2] == before[:2],
+        fdNameIdentityMatched=held[:2] == named[:2], fdNameMetadataMatched=held[2:] == named[2:],
+        namedShapeExpected=(stat.S_ISREG(named[2]) and named[2] == before[2] and named[3] == 1
+                            and named[4:6] == before[4:6]))
+    same = held[:2] == named[:2]
+    observed["selectedBranch"] = "same-original" if same else "returned-output"
+    preimage = None
+    if same:
+        guard(held == named, "final-package-ticket-binding")
+        guard(held[:6] == before[:6], "final-package-ticket-metadata")
+        after = held
+    else:
+        # An unlink may change nlink/ctime only. PRE bytes remain retained and
+        # are rechecked through every later validation/audit/publication POST.
+        guard(held[:3] == before[:3] and held[3] == 0 and held[4:8] == before[4:8],
+              "final-package-preimage-transition")
+        guard(observed["namedShapeExpected"], "final-package-returned-shape")
+        after = named
+        preimage = (entry, held, before_sha)
+    guard(before[6] < after[6] <= before[6] + 1024 * 1024 and after[6] <= MAX_BYTES,
+          "final-package-ticket-growth")
+    if preimage is not None:
+        package_staple_preimage_post(operation, guard, record=preimage)
+        # Registry registration occurs inside original(), before its first
+        # fallible observation. Nothing closes/retries an uncertain candidate.
+        candidate = operation.original(parent, entry["name"], "final-package-returned-original",
+                                       MAX_BYTES, (stat.S_IMODE(before[2]),))
+        guard(candidate["identity"] == after, "final-package-returned-acquisition")
+        entry = candidate
+        guard(signature(os.fstat(entry["fd"])) == after
+              == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
+              "final-package-returned-binding")
+        operation.recheck_directory(parent)
+    whole, prefix, offset = hashlib.sha256(), hashlib.sha256(), 0
+    no_xattrs(entry["fd"])
+    while offset < after[6]:
+        operation.notary_clock()
+        block = os.pread(entry["fd"], min(1024 * 1024, after[6] - offset), offset)
+        guard(block and len(block) <= after[6] - offset, "final-package-ticket-short-read")
+        whole.update(block)
+        if offset < before[6]:
+            prefix.update(block[:before[6] - offset])
+        offset += len(block)
+    guard(prefix.hexdigest() == before_sha, "final-package-signed-prefix-changed")
+    guard(os.pread(entry["fd"], 1, offset) == b"", "final-package-ticket-eof")
+    guard(signature(os.fstat(entry["fd"])) == after, "final-package-ticket-fd-post")
+    guard(after == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
+          "final-package-ticket-name-post")
+    operation.recheck_directory(parent)
+    guard(os.listdir(parent["fd"]) == [entry["name"]], "final-package-directory-census")
+    if preimage is not None:
+        package_staple_preimage_post(operation, guard, record=preimage)
+    # Commit the dedicated book and output while still pending; a thrown
+    # first POST never becomes known completion. Both descriptors stay owned.
+    operation.final_package_preimage = preimage
+    entry["identity"] = after
+    operation.final_package_output, operation.final_package_sha = entry, whole.hexdigest()
+    # First narrow committed POST precedes completion and clearing the latch.
+    package_staple_preimage_post(operation, guard)
+    guard(operation.notary_stream(entry) == operation.final_package_sha, "final-package-output-changed")
+    observed["transitionComplete"] = True
+    operation.notary_mutation_pending = False
+
+
 def install_product_sources(selection):
     selection = selected_build(selection)
     definition, readme = (read(DESKTOP / "macos-installed-inputs" / name, INSTALL_PRESENTATION_LIMIT)
@@ -2917,6 +3214,46 @@ def install_product_distribution(body, expected):
         if (reference.text or "").strip() == "#" + INSTALL_COMPONENT:
             reference.text = INSTALL_COMPONENT
     need(tree(actual) == tree(install_product_xml(expected)), "install-product-distribution")
+
+
+# Closed diagnostic vocabulary; no arbitrary exception text is public authority.
+INSTALL_PRODUCT_QUALIFICATION = 'fixed-install-product-and-scripts-audited-not-installed-or-GUI-qualified'
+
+
+INSTALL_PRODUCT_AUDIT_REASONS = frozenset((
+    'complete-root-owned-scripts-correspondence',
+    'fixed-install-product-purpose',
+    'install-product-component',
+    'install-product-distribution',
+    'install-product-readme',
+    'install-product-source-bound',
+    'install-product-source-version',
+    'install-product-xar-bound',
+    'install-product-xar-checksum',
+    'install-product-xar-count',
+    'install-product-xar-data',
+    'install-product-xar-directory',
+    'install-product-xar-duplicate',
+    'install-product-xar-encoding',
+    'install-product-xar-file',
+    'install-product-xar-header',
+    'install-product-xar-id',
+    'install-product-xar-member-checksum',
+    'install-product-xar-metadata',
+    'install-product-xar-metadata-tags',
+    'install-product-xar-finder-shape',
+    'install-product-xar-finder-time',
+    'install-product-xar-finder-nanoseconds',
+    'install-product-xar-scalar-shape',
+    'install-product-xar-inode-value',
+    'install-product-xar-deviceno-value',
+    'install-product-xar-name',
+    'install-product-xar-range',
+    'install-product-xar-roster',
+    'install-product-xar-size',
+    'install-product-xar-toc',
+    'install-product-xml',
+))
 
 
 def install_product_members(body):
@@ -2978,12 +3315,18 @@ def install_product_members(body):
         identifiers.add(file_id)
         metadata = {"name", "type", "data", "file", "mode", "uid", "gid", "user", "group",
                     "atime", "ctime", "mtime", "inode", "deviceno", "FinderCreateTime"}
-        need(all(child.tag in metadata for child in element), "install-product-xar-metadata")
+        need(all(child.tag in metadata for child in element), "install-product-xar-metadata-tags")
         names, types = element.findall("name"), element.findall("type")
-        repeated = (len(names) == 2 and len(types) == 1 and types[0].text == "file"
-                    and len(element.findall("data")) == 1 and not element.findall("file")
+        # xar_add_from_archive constructs a named node then copies all original
+        # properties. One copy of the audited product (file names<=2, dirs=1)
+        # can therefore have file names<=3 and dirs=2, always identical/bare.
+        repeated = (len(types) == 1
+                    and ((types[0].text == "file" and 2 <= len(names) <= 3
+                          and len(element.findall("data")) == 1 and not element.findall("file"))
+                         or (types[0].text == "directory" and len(names) == 2
+                             and not element.findall("data")))
                     and all(not node.attrib and not list(node) and not (node.tail or "").strip() for node in names)
-                    and type(names[0].text) is str and names[0].text == names[1].text
+                    and type(names[0].text) is str and all(node.text == names[0].text for node in names)
                     and parent + names[0].text in allowed)
         need(len(types) == 1 and (len(names) == 1 or repeated)
              and all(len(element.findall(tag)) <= 1 for tag in metadata - ({"file", "name"} if repeated else {"file"})),
@@ -2992,17 +3335,19 @@ def install_product_members(body):
             if child.tag == "FinderCreateTime":
                 need(not child.attrib and not (child.text or "").strip() and not (child.tail or "").strip()
                      and len(child) == 2 and {item.tag for item in child} == {"time", "nanoseconds"}
-                     and all(not item.attrib and not list(item) and not (item.tail or "").strip() for item in child)
-                     and type(child.findtext("time")) is str
-                     and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}", child.findtext("time"))
-                     and type(child.findtext("nanoseconds")) is str
+                     and all(not item.attrib and not list(item) and not (item.tail or "").strip() for item in child),
+                     "install-product-xar-finder-shape")
+                need(type(child.findtext("time")) is str
+                     and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}", child.findtext("time")),
+                     "install-product-xar-finder-time")
+                need(type(child.findtext("nanoseconds")) is str
                      and re.fullmatch(r"0|[1-9][0-9]{0,8}", child.findtext("nanoseconds")),
-                     "install-product-xar-metadata")
+                     "install-product-xar-finder-nanoseconds")
             elif child.tag not in ("file", "data"):
-                need(not child.attrib and not list(child), "install-product-xar-metadata")
+                need(not child.attrib and not list(child), "install-product-xar-scalar-shape")
             if child.tag in ("inode", "deviceno"):
                 need(type(child.text) is str and re.fullmatch(r"0|-?[1-9][0-9]{0,19}", child.text),
-                     "install-product-xar-metadata")
+                     "install-product-xar-inode-value" if child.tag == "inode" else "install-product-xar-deviceno-value")
         name, kind = element.findtext("name"), element.findtext("type")
         need(type(name) is str and name and "/" not in name and "\\" not in name and name not in (".", ".."),
              "install-product-xar-name")
@@ -3089,7 +3434,7 @@ def audit_install_product_command(args):
             "originalPackageSha256": digest(original), "packageInfoSha256": digest(component["PackageInfo"]),
             "packageIdentifier": identifier, "scriptFileCount": len(scripts), "finalDestinationPayloadEntries": 0,
             "productDistributionSha256": digest(members["Distribution"]), "productReadMeSha256": digest(readme),
-            "qualification": "fixed-install-product-and-scripts-audited-not-installed-or-GUI-qualified"}
+            "qualification": INSTALL_PRODUCT_QUALIFICATION}
 
 
 def remove_scripts_command(args):
@@ -4363,6 +4708,40 @@ def installer_channel_parent(path, *, private=None):
             raise Refused("installer-channel-parent-close-unknown")
 
 
+def same_package_result_census():
+    """One dedicated-host public export namespace, not arbitrary file discovery."""
+    prefix = "MobileReleaseKit-InstallerResult-v2-"
+    rows = {}
+    with installer_channel_parent(INSTALL_ROOT) as (fd, _name):
+        with os.scandir(fd) as entries:
+            for count, entry in enumerate(entries, 1):
+                need(count <= 4096, "same-package-parent-entry-bound")
+                name = entry.name
+                if not name.startswith(prefix):
+                    continue
+                request = name[len(prefix):-5] if name.endswith(".json") else ""
+                need(maintenance_hex(request, 32) and name == prefix + request + ".json"
+                     and request not in rows and len(rows) < 2, "same-package-result-namespace")
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                need(stat.S_ISREG(before.st_mode) and before.st_uid == before.st_gid == 0
+                     and before.st_nlink == 1 and stat.S_IMODE(before.st_mode) == 0o444
+                     and 0 < before.st_size <= INSTALLER_RESULT_BYTES, "installer-export-file-policy")
+                body, actual = read_at(fd, name, INSTALLER_RESULT_BYTES)
+                need(signature(actual) == signature(before), "installer-export-file-changed")
+                rows[request] = {"bytes": len(body), "sha256": digest(body), "identity": list(signature(actual))}
+        # Parent identity/close checks remain in the SAME original context.
+    return rows
+
+
+def same_package_new_request(before, after, baseline):
+    need(type(before) is dict and type(after) is dict and maintenance_hex(baseline, 32)
+         and set(before) == {baseline} and len(after) == 2 and baseline in after
+         and after[baseline] == before[baseline], "same-package-result-delta")
+    new = next(key for key in after if key != baseline)
+    need(maintenance_hex(new, 32), "same-package-result-delta")
+    return new
+
+
 def installer_result_absent_command(args):
     need(not args.fixture or getattr(args, "request_id", None) is None, "separate-installer-outcomes-required")
     request_id = None if args.fixture else getattr(args, "request_id", None)
@@ -4796,8 +5175,77 @@ def maintenance_generation_readback(root_fd, versions_fd, root_identity, generat
             "historicalOuterExit": "unverified"}
 
 
-def observation_command(args):
-    selection = source_build_selection(command_target(args))
+def same_package_previous_data(result, parsed, expected):
+    need(type(expected) is dict and set(expected) == {"invocation", "sha256"}
+         and maintenance_hex(expected["invocation"], 32) and maintenance_hex(expected["sha256"], 64),
+         "same-package-previous-shape")
+    need(result["action"] == "same-package-noop"
+         and parsed[result["invocation"]][0]["previousState"] == expected, "same-package-immediate-predecessor")
+
+
+def restore_previous_data(result, parsed, expected):
+    need(type(expected) is dict and set(expected) == {"invocation", "sha256"}
+         and maintenance_hex(expected["invocation"], 32) and maintenance_hex(expected["sha256"], 64),
+         "restore-previous-shape")
+    need(result["action"] == "restore-fixed-app" and result["writerState"] == "restored-app"
+         and parsed[result["invocation"]][0]["previousState"] == expected, "restore-immediate-predecessor")
+
+
+def update_predecessor_selection(args, nomination):
+    # Only the fixed checked-out SOURCE nomination may select historical P0.
+    # It never changes current source_build_selection or the command-line API.
+    document = maintenance_json(read(DESKTOP / "macos-installed-inputs/update-predecessors.json", 16384), 16384)
+    need(type(document) is dict and set(document) == {"schemaVersion", "mode", "targets"}
+         and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+         and document["mode"] == "configured" and type(document["targets"]) is dict
+         and set(document["targets"]) == set(MAC_TARGETS), "update-source-nomination")
+    target = command_target(args)
+    need(type(nomination) is dict and nomination == document["targets"][target], "update-source-nomination")
+    old = maintenance_release_data(nomination["release"], target)
+    need((args.expected_source, args.expected_inventory, args.expected_manifest, args.expected_package)
+         == tuple(old[k] for k in ("sourceCommit", "inventorySha256", "runtimeManifestSha256", "packageSha256")),
+         "update-baseline-source-binding")
+    return selected_build(BuildSelection(target, old["packageVersion"], old["release"]))
+
+
+def update_previous_data(result, current, parsed, root_identity, expected):
+    need(type(expected) is dict and set(expected) == {"previous", "rootIdentity", "generation"},
+         "update-previous-shape")
+    previous = expected["previous"]
+    need(type(previous) is dict and set(previous) == {"invocation", "sha256"}
+         and maintenance_hex(previous["invocation"], 32) and maintenance_hex(previous["sha256"], 64),
+         "update-previous-shape")
+    need(result["action"] == "update" and parsed[current["invocation"]][0]["previousState"] == previous
+         and root_identity == expected["rootIdentity"] and previous["invocation"] in parsed,
+         "update-immediate-predecessor")
+    old = parsed[previous["invocation"]][1]
+    need(old["intendedAction"] == "fresh-install" and not old["retained"]
+         and old["current"] == expected["generation"] and len(current["retained"]) == 1,
+         "update-initial-fresh-generation")
+    retained = dict(expected["generation"])
+    retained["app"] = dict(retained["app"], location="retained", invocation=current["invocation"])
+    need(current["retained"] == [retained]
+         and current["current"]["instance"] != retained["instance"]
+         and current["current"]["release"] != retained["release"], "update-distinct-generation")
+
+
+def observation_command(args, *, expected_previous=None, expected_restore_previous=None,
+                        nominated_update_predecessor=None, expected_update_previous=None, update_facts=None):
+    need(expected_previous is None or type(expected_previous) is dict
+         and set(expected_previous) == {"invocation", "sha256"}
+         and maintenance_hex(expected_previous["invocation"], 32)
+         and maintenance_hex(expected_previous["sha256"], 64), "same-package-previous-shape")
+    need(expected_restore_previous is None or expected_previous is None
+         and type(expected_restore_previous) is dict and set(expected_restore_previous) == {"invocation", "sha256"}
+         and maintenance_hex(expected_restore_previous["invocation"], 32)
+         and maintenance_hex(expected_restore_previous["sha256"], 64), "restore-previous-shape")
+    update = nominated_update_predecessor is not None or expected_update_previous is not None
+    need(not update or expected_previous is None and expected_restore_previous is None
+         and (nominated_update_predecessor is None) != (expected_update_previous is None)
+         and type(update_facts) is dict and not update_facts, "update-exclusive-readback-purpose")
+    need(update or update_facts is None, "update-exclusive-readback-purpose")
+    selection = (update_predecessor_selection(args, nominated_update_predecessor)
+                 if nominated_update_predecessor is not None else source_build_selection(command_target(args)))
     # The same-run original Installer0 is first. No export/file can certify its
     # own future close, kernel-retained gate lifetime or original outer return.
     result, exported = installer_result_readback(args)
@@ -4820,6 +5268,16 @@ def observation_command(args):
                 capsule = maintenance_metadata_leaf(root_fd, ".maintenance-" + invocation + ".capsule.json", 64 * 1024, budget)
                 records[invocation] = (intent, state, capsule)
             current, parsed = maintenance_history_data(result, records, producer)
+            if expected_previous is not None:
+                same_package_previous_data(result, parsed, expected_previous)
+            if expected_restore_previous is not None:
+                restore_previous_data(result, parsed, expected_restore_previous)
+            if expected_update_previous is not None:
+                update_previous_data(result, current, parsed, root_identity, expected_update_previous)
+            if nominated_update_predecessor is not None:
+                need(result["action"] == "fresh-install" and current["intendedAction"] == "fresh-install"
+                     and not current["retained"] and not current["previousEvidence"] and len(parsed) == 1,
+                     "update-baseline-not-fresh")
             names, stages = maintenance_roster_data(current, parsed, selection.target)
             need(set(os.listdir(root_fd)) == names, "maintenance-root-roster")
             stage_originals = []
@@ -4853,6 +5311,9 @@ def observation_command(args):
                 need(signature(final) == original, "maintenance-root-roster-changed")
             need(set(os.listdir(root_fd)) == names, "maintenance-root-roster-changed")
     # No result is returned until every acquired original above has closed.
+    if update:
+        update_facts.update(previous={"invocation": current["invocation"], "sha256": digest(current_body)},
+                            rootIdentity=root_identity, generation=current["current"])
     return {"schemaVersion": 2, "sourceCommit": args.expected_source, "inventorySha256": args.expected_inventory,
             "runtimeManifestSha256": args.expected_manifest, "completedPackageSha256": args.expected_package, "release": selection.release,
             "requestId": args.request_id, "invocation": current["invocation"], "originalInstallerReturnedZero": True,
@@ -4860,7 +5321,9 @@ def observation_command(args):
             "originalInstallerResult": result, "installerResultExport": exported, "installationMetadata": generation_results,
             "maintenanceGate": gate, "registrationReservation": reservation, "producerSignatureAuthority": "native-parent-and-application-checks-separate",
             "historicalOuterExit": "unverified", "applicationLaunched": False, "guiSaveQualified": False,
-            "aquaGate": "required-separate-actual-session", "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
+            "aquaGate": "required-separate-actual-session", "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance",
+            **({} if expected_previous is None else {"samePackagePredecessorMatched": True}),
+            **({} if expected_restore_previous is None else {"restorePredecessorMatched": True})}
 
 
 def visible_occupant(case, *, selection=None):
@@ -5078,9 +5541,11 @@ def main(argv=None):
     app.add_argument("--output", required=True, type=Path)
     app.add_argument("--bundletool-archive", required=True, type=Path)
     app.add_argument("--aapt2-archive", required=True, type=Path)
-    support = commands.add_parser("android-support", help="Verify only the two fixed original support archives and notices; never execute them")
+    app.add_argument("--android-support-signed-receipt", required=True, type=Path)
+    support = commands.add_parser("android-support", help="Verify the fixed signed support capsule and original notices; never execute them")
     support.add_argument("--bundletool-archive", required=True, type=Path)
     support.add_argument("--aapt2-archive", required=True, type=Path)
+    support.add_argument("--android-support-signed-receipt", required=True, type=Path)
     preview = commands.add_parser("preview")
     preview.add_argument("--work", required=True, type=Path)
     preview.add_argument("--expected-source", required=True)

@@ -19,6 +19,10 @@ from . import android_build_tools as common
 
 PROFILE = "android-registered-macos-arm64-v1"
 INTEL_PROFILE = "android-registered-macos-x86_64-v1"
+# The Mac-only signed derivative is enrolled in android-support-signed.json.
+# Common CLI/Linux policy still requires the original upstream publication.
+BUNDLETOOL_SIGNED_SHA256 = "b87fef6d0b3c7a6c43debb7b069639136af549d8b0f0bb7bac452328f0eb5a18"
+BUNDLETOOL_SIGNED_BYTES = 32494771
 PREFIX = "/Library/Application Support/MobileReleaseKit/android"
 OS_PROFILE = "macos26-arm64-sealed-system-v1"
 INTEL_OS_PROFILE = "macos26-x86_64-sealed-system-v1"
@@ -165,14 +169,14 @@ def parse_profile(raw: bytes, provider_raw: bytes, record_raw: bytes, selected: 
         f"https://{host}/distributions/gradle-{versions['gradleVersion']}-bin.zip"
         for host in ("services.gradle.org", "downloads.gradle.org")} and _text(distribution["sha256"], common._SHA))
     _need(_keys(value["bundletool"], {"version", "sha256"}) ==
-          {"version": common.BUNDLETOOL_VERSION, "sha256": common.BUNDLETOOL_SHA256})
+          {"version": common.BUNDLETOOL_VERSION, "sha256": BUNDLETOOL_SIGNED_SHA256})
     files = _files(value["files"])
     members = {f.path: f for f in files}
     launch = (roles["java"], roles["javac"], roles["gradle"], common.AAPT2_PATH, f"{home}/bin/jarsigner", f"{home}/bin/keytool")
     _need(all(path in members and members[path].mode == 0o555 and members[path].size > 0 for path in launch))
     jar = members.get(roles["bundletool"])
-    _need(jar is not None and jar.mode == 0o444 and 0 < jar.size <= common.BUNDLETOOL_MAX_BYTES
-          and jar.sha256 == common.BUNDLETOOL_SHA256 and any(f.path.startswith("sdk/") for f in files))
+    _need(jar is not None and jar.mode == 0o444 and jar.size == BUNDLETOOL_SIGNED_BYTES
+          and jar.sha256 == BUNDLETOOL_SIGNED_SHA256 and any(f.path.startswith("sdk/") for f in files))
     bundle = "/".join(java[:2]) + "/"
     _need(all(not f.path.startswith("jdk/") or f.path.startswith(bundle) for f in files))
     aliases = _aliases(value["aliases"], files, home)
@@ -229,7 +233,7 @@ class MacAdmission:
         expected_machine = _profile(self.tools.binding.profile)[3]
         _need(sys.platform == "darwin" and os.uname().machine == expected_machine
               and (expected_machine != "x86_64" or sys.maxsize == 2**63 - 1)
-              and hasattr(os.stat_result, "st_flags") and hasattr(os, "listxattr"), "toolchain-unavailable")
+              and hasattr(os.stat_result, "st_flags"), "toolchain-unavailable")
         import resource
         soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
         _need(soft == resource.RLIM_INFINITY or soft >= 256, "toolchain-unavailable")

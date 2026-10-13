@@ -58,34 +58,435 @@ def digest_original(fd, path, before):
         raise ValueError("original test artifact changed")
     return digest.hexdigest()
 
+# Optional failure DATA only; no subprocess, input read or acceptance authority.
+DATA_FAILURE_GUARDS = {
+    **{"original fixed command did not completely pass: " + phase: "command-not-complete"
+       for phase in ("mount", "apfs", "build", "rust", "python")},
+    "one fixed df header and filesystem row required": "filesystem-header",
+    "one local disk device and bounded mountpoint required": "filesystem-row",
+    "one diskutil volume dictionary required": "filesystem-volume",
+    "actual writable ownership-aware local APFS volume required": "filesystem-volume",
+    "actual writable ownership-aware local APFS required": "filesystem-native-volume",
+    "original Cargo build-finished": "cargo-build-finished",
+    "one original debug actual-main test artifact": "cargo-debug-artifact",
+    "fixed original test artifact path": "cargo-artifact-path",
+    "original artifact type/owner/bound": "cargo-artifact-shape",
+    "original test artifact changed": "cargo-artifact-original",
+    "artifact EOF": "cargo-artifact-eof",
+    "original artifact postimage": "cargo-artifact-postimage",
+    "one closed aggregate success marker required": "rust-aggregate-marker",
+    "exact native Python original counts required": "python-counts",
+    "selected source changed during batch": "source-post",
+    "original temporary root changed": "temporary-post",
+    "selected tests did not retire disposable fixtures": "temporary-nonempty",
+    "fixed DATA input shape": "fixed-input-shape",
+    "original DATA input changed": "fixed-input-changed",
+    "fixed output bound": "output-bound",
+    "output original changed": "output-changed",
+}
+
+
+def data_failure_guard(error):
+    if type(error) is ValueError and len(error.args) == 1 and type(error.args[0]) is str:
+        return DATA_FAILURE_GUARDS.get(error.args[0], "unclassified")
+    return "unclassified"
+
+
+def data_failure_json(raw):
+    if type(raw) is not bytes or not 0 < len(raw) <= 65536:
+        raise ValueError("failure-data-json-bound")
+    text = raw.decode("utf-8", "strict")
+    depth, nodes, quoted, escaped = 0, 1, False, False
+    for character in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
+        elif character in "[{":
+            depth += 1; nodes += 1
+        elif character in "]}":
+            depth -= 1
+        elif character in ",:":
+            nodes += 1
+        if not 0 <= depth <= 32 or nodes > 8192:
+            raise ValueError("failure-data-json-structure")
+    if quoted or depth:
+        raise ValueError("failure-data-json-structure")
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("failure-data-json-duplicate")
+            result[key] = value
+        return result
+    def constant(value):
+        raise ValueError("failure-data-json-nonfinite")
+    def number(value):
+        result = float(value)
+        if not -1.7976931348623157e308 <= result <= 1.7976931348623157e308:
+            raise ValueError("failure-data-json-nonfinite")
+        return result
+    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=number)
+
+
+def data_failure_python(raw, names):
+    try:
+        value = data_failure_json(raw)
+        counts = ("testsRun", "failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")
+        extra = ("failureTests", "classifiedTestCount", "omittedTestCount", "unclassifiedTestCount")
+        if (type(value) is not dict or set(value) != set(counts + extra + ("testIds", "actualHostBeforeAndAfter"))
+                or value["testIds"] != names or len(names) != 84 or len(set(names)) != 84
+                or type(value["actualHostBeforeAndAfter"]) is not bool):
+            return None
+        if any(type(value[key]) is not int or not 0 <= value[key] <= (84 if key == "testsRun" else 65535) for key in counts):
+            return None
+        rows = value["failureTests"]
+        if type(rows) is not list or len(rows) > 16:
+            return None
+        keys = []
+        for row in rows:
+            if (type(row) is not dict or set(row) != {"kind", "id"} or type(row["id"]) is not str
+                    or row["id"] not in names or row["kind"] not in ("failure", "error")):
+                return None
+            keys.append((row["kind"], row["id"]))
+        expected = [(kind, name) for name in names for kind in ("failure", "error") if (kind, name) in keys]
+        if keys != expected or len(set(keys)) != len(keys):
+            return None
+        classified, omitted, unknown = (value[key] for key in extra[1:])
+        if (type(classified) is not int or not 0 <= classified <= 168
+                or type(omitted) is not int or not 0 <= omitted <= 152
+                or type(unknown) is not int or not 0 <= unknown <= 65535
+                or classified != len(rows) + omitted
+                or classified + unknown > value["failures"] + value["errors"]
+                or any(sum(row["kind"] == kind for row in rows) > value[field]
+                       for kind, field in (("failure", "failures"), ("error", "errors")))):
+            return None
+        return {key: value[key] for key in counts + ("actualHostBeforeAndAfter",) + extra}
+    except (ValueError, TypeError, KeyError, RecursionError, OverflowError):
+        return None
+
+
+def data_failure_cargo(raw, source_paths, checkout):
+    try:
+        if type(raw) is not bytes or not 0 < len(raw) <= 4 * 1024 * 1024:
+            return None
+        lines = raw.splitlines()
+        if not lines or len(lines) > 4096:
+            return None
+        errors, seen, unknown, omitted = [], set(), 0, 0
+        for line in lines:
+            row = data_failure_json(line)
+            if type(row) is not dict:
+                return None
+            if row.get("reason") != "compiler-message":
+                continue
+            message = row.get("message")
+            if type(message) is not dict:
+                return None
+            if message.get("level") != "error":
+                continue
+            code = message.get("code")
+            if type(code) is not dict or type(code.get("code")) is not str or re.fullmatch(r"E[0-9]{4}", code["code"]) is None:
+                unknown += 1
+                continue
+            source, line_number, column = None, None, None
+            spans = message.get("spans")
+            primary = [span for span in spans if type(span) is dict and span.get("is_primary") is True] if type(spans) is list and len(spans) <= 128 else []
+            if len(primary) == 1:
+                span = primary[0]; filename = span.get("file_name")
+                if type(filename) is str:
+                    relative = filename[len(checkout) + 1:] if filename.startswith(checkout + "/") else filename
+                    if relative not in source_paths and row.get("manifest_path") == checkout + "/desktop/src-tauri/Cargo.toml":
+                        relative = "desktop/src-tauri/" + filename
+                    if (relative in source_paths and len(relative) <= 240 and re.fullmatch(r"[A-Za-z0-9_./-]+", relative)
+                            and all(part not in ("", ".", "..") for part in relative.split("/"))
+                            and type(span.get("line_start")) is int and 1 <= span["line_start"] <= 1000000
+                            and type(span.get("column_start")) is int and 1 <= span["column_start"] <= 1000000):
+                        source, line_number, column = relative, span["line_start"], span["column_start"]
+            key = (code["code"], source, line_number, column)
+            if key in seen:
+                continue
+            seen.add(key)
+            if len(errors) < 8:
+                errors.append(dict(code=key[0], source=source, line=line_number, column=column))
+            else:
+                omitted += 1
+        return dict(errors=errors, unclassifiedErrors=unknown, omittedErrors=omitted)
+    except (ValueError, TypeError, KeyError, RecursionError, OverflowError):
+        return None
+
+
+def data_failure_rust_panic(raw, source_paths, checkout):
+    """One lexical panic-site observation; no payload, stack or cause authority."""
+    try:
+        if (type(raw) is not bytes or not 0 < len(raw) <= 65536
+                or type(source_paths) not in (dict, set, frozenset)
+                or type(checkout) is not str or not checkout.startswith("/") or checkout.endswith("/")):
+            return None
+        lines = raw.split(b"\n")
+        nonempty = [line for line in lines if line]
+        if (len(lines) > 256 or not nonempty or len(nonempty[0]) > 1024
+                or sum(line.startswith(b"thread '") and b" panicked at " in line for line in lines) != 1):
+            return None
+        match = re.fullmatch(
+            r"thread '[\x20-\x26\x28-\x7e]{1,128}'(?: \([1-9][0-9]{0,19}\))? panicked at "
+            r"([A-Za-z0-9_./-]{1,512}):([1-9][0-9]{0,6}):([1-9][0-9]{0,6}):",
+            nonempty[0].decode("ascii", "strict"))
+        if match is None:
+            return None
+        source = match[1]
+        if source.startswith(checkout + "/"):
+            source = source[len(checkout) + 1:]
+        # Only the actual observer's fixed #[path="../src/..."] spelling.
+        # No general traversal resolution or dependency-relative cwd prefix.
+        if source.startswith("desktop/src-tauri/tests/../src/"):
+            source = "desktop/src-tauri/src/" + source[len("desktop/src-tauri/tests/../src/"):]
+        elif source.startswith("tests/../src/"):
+            source = "desktop/src-tauri/src/" + source[len("tests/../src/"):]
+        elif source == "tests/installed_shell_observation.rs":
+            source = "desktop/src-tauri/tests/installed_shell_observation.rs"
+        line, column = int(match[2]), int(match[3])
+        if (not 0 < len(source) <= 240 or not source.endswith(".rs")
+                or not (source.startswith("desktop/src-tauri/src/")
+                        or source == "desktop/src-tauri/tests/installed_shell_observation.rs")
+                or any(part in ("", ".", "..") for part in source.split("/"))
+                or source not in source_paths or not 1 <= line <= 1000000 or not 1 <= column <= 1000000):
+            return None
+        return {"source": source, "line": line, "column": column}
+    except (UnicodeError, ValueError, TypeError, OverflowError):
+        return None
+
+
+def data_failure_rust_panic_diagnostic(raw, source_paths, checkout):
+    """Opaque lexical observation, not verified source attribution or a cause."""
+    value = {"parseState": "input-invalid", "spellingSha256": None, "line": None, "column": None}
+    if (type(raw) is not bytes or type(source_paths) not in (dict, set, frozenset)
+            or type(checkout) is not str or not checkout.startswith("/") or checkout.endswith("/")):
+        return value
+    if not raw:
+        return {**value, "parseState": "empty"}
+    if len(raw) > 65536:
+        return {**value, "parseState": "bounds"}
+    lines = raw.split(b"\n")
+    nonempty = [line for line in lines if line]
+    if len(lines) > 256 or (nonempty and len(nonempty[0]) > 1024):
+        return {**value, "parseState": "bounds"}
+    if not nonempty:
+        return {**value, "parseState": "empty"}
+    count = sum(line.startswith(b"thread '") and b" panicked at " in line for line in lines)
+    if count != 1:
+        return {**value, "parseState": "header-missing" if count == 0 else "header-multiple"}
+    try:
+        match = re.fullmatch(
+            r"thread '[\x20-\x26\x28-\x7e]{1,128}'(?: \([1-9][0-9]{0,19}\))? panicked at "
+            r"([A-Za-z0-9_./-]{1,512}):([1-9][0-9]{0,6}):([1-9][0-9]{0,6}):",
+            nonempty[0].decode("ascii", "strict"))
+    except UnicodeError:
+        match = None
+    if match is None:
+        return {**value, "parseState": "header-format"}
+    line, column = int(match[2]), int(match[3])
+    if not 1 <= line <= 1000000 or not 1 <= column <= 1000000:
+        return {**value, "parseState": "coordinate-range"}
+    spelling = match[1]
+    if spelling.startswith(checkout + "/"):
+        spelling = spelling[len(checkout) + 1:]
+    # BEFORE fixed aliases. No normpath, basename lookup, filesystem access,
+    # or private path export. This digest intentionally permits offline guesses.
+    return {"parseState": "observed" if data_failure_rust_panic(raw, source_paths, checkout) is not None else "unmapped-source",
+            "spellingSha256": hashlib.sha256(spelling.encode("ascii")).hexdigest(), "line": line, "column": column}
+
+
+def data_failure_document(command, output, guard, context, names, source_paths, checkout):
+    if (type(context) is not dict or set(context) != {"source", "workflowSource", "runId", "runAttempt", "target"}
+            or context["source"] != context["workflowSource"]
+            or any(type(context[key]) is not str or re.fullmatch(r"[0-9a-f]{40}", context[key]) is None for key in ("source", "workflowSource"))
+            or any(type(context[key]) is not str or re.fullmatch(r"[1-9][0-9]{0,15}", context[key]) is None
+                   or int(context[key]) > 9007199254740991 for key in ("runId", "runAttempt"))
+            or context["target"] not in ("aarch64-apple-darwin", "x86_64-apple-darwin")
+            or guard not in set(DATA_FAILURE_GUARDS.values()) | {"unclassified"}
+            or type(command) is not dict or command.get("phase") not in ("mount", "apfs", "build", "rust", "python")
+            or type(output) is not dict or set(output) != {"stdout", "stderr"}):
+        raise ValueError("failure-data-context")
+    flags = ("originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow")
+    if any(type(command.get(key)) is not bool for key in flags):
+        raise ValueError("failure-data-flags")
+    code = command.get("returnCode")
+    if code is not None and (type(code) is not int or not -65536 <= code <= 65535):
+        raise ValueError("failure-data-status")
+    captures = {}
+    for key in ("stdout", "stderr"):
+        if type(output[key]) not in (bytes, bytearray) or len(output[key]) > 4 * 1024 * 1024:
+            raise ValueError("failure-data-capture-bound")
+        captures[key] = bytes(output[key])
+    phase = command["phase"]
+    classified = command["originalReturned"] and command["outputComplete"] and command["captureClosed"] and not command["timedOut"] and not command["outputOverflow"]
+    value = dict(schemaVersion=1, kind="mrk-native-data-contract-failure-diagnostics-v1", **context,
+        phase=phase, originalReturncode=code, **{key: command[key] for key in flags},
+        stdoutBytes=len(captures["stdout"]), stdoutSha256=hashlib.sha256(captures["stdout"]).hexdigest(),
+        stderrBytes=len(captures["stderr"]), stderrSha256=hashlib.sha256(captures["stderr"]).hexdigest(),
+        guardCode=guard, python=data_failure_python(captures["stdout"], names) if classified and phase == "python" else None,
+        cargo=data_failure_cargo(captures["stdout"], source_paths, checkout) if classified and phase == "build" else None,
+        rustPanic=data_failure_rust_panic(captures["stderr"], source_paths, checkout) if classified and phase == "rust" and code == 101 else None,
+        diagnosticOnly=True, productReady=False)
+    if classified and phase == "rust" and code == 101:
+        try:
+            value["rustPanicDiagnostic"] = data_failure_rust_panic_diagnostic(captures["stderr"], source_paths, checkout)
+        except BaseException:
+            pass  # Optional observation must not replace the original failure/old facts.
+    body = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
+    if len(body) > 16384 and "rustPanicDiagnostic" in value:
+        del value["rustPanicDiagnostic"]
+        body = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
+    if len(body) > 16384:
+        raise ValueError("failure-data-output-bound")
+    return body
+
+
+def ci_data_admission(request_raw, context_raw, environment, root_before, now_ns):
+    """This mode consumes genuine CI originals, never an installed-build receipt."""
+    request, context = data_failure_json(request_raw), data_failure_json(context_raw)
+    if (type(request) is not dict or set(request) != {"schemaVersion", "admission", "contextSha256", "rootIdentity", "compiler", "inventory", "deadlineMonotonicNs"}
+            or type(request.get("schemaVersion")) is not int or request["schemaVersion"] != 1
+            or request.get("admission") != "ci-observer-data-v1" or type(context) is not dict
+            or request.get("contextSha256") != hashlib.sha256(context_raw).hexdigest()
+            or type(root_before) is not list or len(root_before) != 9
+            or request.get("rootIdentity") != [root_before[0], root_before[1], root_before[3]]):
+        raise ValueError("ci-data-original-context")
+    root, checkout = Path(environment["MRK_DESKTOP_CI_ROOT"]), Path(environment["GITHUB_WORKSPACE"])
+    if (environment.get("MRK_MACOS_DATA_MODE") != "ci-observer-data-v1"
+            or environment.get("MRK_MACOS_TARGET") != "aarch64-apple-darwin"
+            or environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+            or environment.get("GITHUB_REF") != "refs/heads/verify/desktop-macos-normal-compile"
+            or root.parent != Path("/Users/runner/work/_temp") or not root.name.startswith("mrk-desktop-foundation-")
+            or checkout != Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
+            or context.get("root") != str(root) or context.get("source") != str(checkout)
+            or context.get("platform") != "macos" or context.get("executionScope") != "macos-normal-compile-v1"
+            or type(context.get("macCompile")) is not dict or context["macCompile"].get("mode") != "observer-data"
+            or context["macCompile"].get("target") != "aarch64-apple-darwin"
+            or context["macCompile"].get("execution") != "compile-and-fixed-data"
+            or context.get("workflowPath") != ".github/workflows/desktop-macos-normal-compile.yml"
+            or context.get("workflowRef") != environment.get("GITHUB_WORKFLOW_REF")
+            or context.get("sourceSha") != environment.get("GITHUB_SHA")
+            or context.get("workflowSha") != environment.get("GITHUB_WORKFLOW_SHA")
+            or context.get("sourceSha") != context.get("workflowSha")
+            or context.get("runId") != environment.get("GITHUB_RUN_ID")
+            or context.get("attempt") != environment.get("GITHUB_RUN_ATTEMPT")
+            or environment.get("MRK_EXPECTED_SHA") != context.get("sourceSha")):
+        raise ValueError("ci-data-source-workflow-context")
+    if (any(type(context.get(key)) is not str or re.fullmatch(r"[0-9a-f]{40}", context[key]) is None for key in ("sourceSha", "sourceTree", "workflowSha"))
+            or type(context.get("workflowSha256")) is not str or re.fullmatch(r"[0-9a-f]{64}", context["workflowSha256"]) is None
+            or any(type(context.get(key)) is not str or re.fullmatch(r"[1-9][0-9]{0,15}", context[key]) is None
+                   or int(context[key]) > 9007199254740991 for key in ("runId", "attempt"))
+            or type(context.get("workflowRef")) is not str
+            or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/desktop-macos-normal-compile\.yml@refs/heads/verify/desktop-macos-normal-compile", context["workflowRef"]) is None):
+        raise ValueError("ci-data-source-identity")
+    binary = "/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin"
+    compiler = {"release": "1.98.1", "commitHash": "48a229ceaefd4985c50990b14116b6d856af0985", "target": "aarch64-apple-darwin",
+                "cargo": binary + "/cargo", "rustc": binary + "/rustc"}
+    if (request.get("compiler") != compiler
+            or any(environment.get(key) != str(root / leaf) for key, leaf in
+                   (("HOME", "home"), ("CARGO_HOME", "cargo"), ("RUSTUP_HOME", "rustup"), ("TMPDIR", "tmp"), ("CARGO_TARGET_DIR", "target")))
+            or environment.get("RUSTC") != compiler["rustc"] or environment.get("RUSTUP_AUTO_INSTALL") != "0"
+            or environment.get("CARGO_BUILD_JOBS") != "1"
+            or environment.get("MRK_MACOS_INSTALL_SOURCE_COMMIT") != context["sourceSha"]
+            or environment.get("MRK_IMAGE_RELEASE_ID") != context["macCompile"].get("release")):
+        raise ValueError("ci-data-compiler-binding")
+    inventory = request.get("inventory")
+    selected = context["macCompile"].get("data")
+    if (type(inventory) is not dict or set(inventory) != {"files"} or type(inventory["files"]) is not list
+            or len(inventory["files"]) != 78 or type(selected) is not dict
+            or set(selected) != {"sourceCount", "sourceInventorySha256", "scriptSha256", "pythonCount", "selectionSha256"}
+            or type(selected["sourceCount"]) is not int or selected["sourceCount"] != 78
+            or type(selected["pythonCount"]) is not int or selected["pythonCount"] != 84
+            or selected["selectionSha256"] != "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94"):
+        raise ValueError("ci-data-selection")
+    rows, total, names = inventory["files"], 0, []
+    for row in rows:
+        if (type(row) is not dict or set(row) != {"path", "size", "sha256"}
+                or type(row["path"]) is not str or not 0 < len(row["path"]) <= 240
+                or re.fullmatch(r"[A-Za-z0-9_./+-]+", row["path"]) is None or row["path"].startswith("/")
+                or any(part in ("", ".", "..") for part in row["path"].split("/"))
+                or type(row["size"]) is not int or not 0 < row["size"] <= 2 * 1024 * 1024
+                or type(row["sha256"]) is not str or re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is None):
+            raise ValueError("ci-data-source-row")
+        names.append(row["path"]); total += row["size"]
+    inventory_bytes = (json.dumps(inventory, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
+    if (names != sorted(set(names)) or total > 32 * 1024 * 1024
+            or hashlib.sha256(inventory_bytes).hexdigest() != selected["sourceInventorySha256"]
+            or not any(row["path"] == "desktop/tools/macos_installed_data_contracts.sh" and row["sha256"] == selected["scriptSha256"] for row in rows)):
+        raise ValueError("ci-data-source-inventory")
+    endpoint = request["deadlineMonotonicNs"]
+    if type(now_ns) is not int or type(endpoint) is not int or not 0 < endpoint - now_ns <= 1800 * 1000000000:
+        raise ValueError("ci-data-containing-deadline")
+    binding = {"source": context["sourceSha"], "workflowSource": context["workflowSha"], "tree": context["sourceTree"],
+               "target": "aarch64-apple-darwin", "workDirectory": request["rootIdentity"], "tools": compiler}
+    return binding, inventory_bytes, compiler, endpoint, context
+
+
+def ci_data_seconds(cap, endpoint, previous_ns, now_ns):
+    if (type(cap) is not int or cap not in (15, 30, 120, 1440)
+            or any(type(value) is not int for value in (endpoint, previous_ns, now_ns))
+            or not previous_ns <= now_ns < endpoint):
+        raise ValueError("ci-data-containing-deadline")
+    remaining = min(cap, (endpoint - now_ns) // 1000000000)
+    if remaining <= 0:
+        raise ValueError("ci-data-containing-deadline")
+    return remaining
+
+
 if (sys.platform != "darwin" or os.name != "posix" or os.uname().sysname != "Darwin"
         or os.uname().machine != native_machine or os.getuid() == 0 or os.geteuid() != os.getuid()
         or sys.version_info[:3] != (3, 14, 7) or not sys.flags.isolated or not sys.flags.no_site or not sys.dont_write_bytecode):
     raise ValueError("actual selected native Darwin LP64 isolated Python required")
-root = Path(os.environ["MRK_MACOS_WORK"])
-checkout = Path(os.environ["GITHUB_WORKSPACE"])
-if (root.parent != Path("/Users/runner/work/_temp") or not root.name.startswith("mrk-macos-installed.")
-        or checkout != Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
-        or os.environ["CARGO_TARGET_DIR"] != str(root / "cargo-target")):
-    raise ValueError("same original job/source/Cargo cache required")
-root_before = sig(os.lstat(root))
-if not stat.S_ISDIR(root_before[2]) or root_before[3] != os.getuid() or root_before[2] & 0o077:
-    raise ValueError("original private work root required")
-binding = json.loads(read(root / "source-binding.json", 65536))
-inventory_bytes = read(root / "source-inventory.json", 2 * 1024 * 1024)
-inventory = json.loads(inventory_bytes)
-if (binding["source"] != os.environ["GITHUB_SHA"] or binding["workflowSource"] != os.environ["GITHUB_WORKFLOW_SHA"]
-        or binding["source"] != binding["workflowSource"] or inventory["source"] != binding["source"]
-        or binding.get("target") != build_target
-        or inventory["tree"] != binding["tree"] or binding["workDirectory"] != [root_before[0], root_before[1], root_before[3]]):
-    raise ValueError("original checkout/source binding")
-rust_binding = json.loads(read(root / "effective-rust-toolchain.json", 16384))
-if (rust_binding["source"] != binding["source"] or rust_binding["workflowSource"] != binding["workflowSource"]
-        or rust_binding["runId"] != os.environ["GITHUB_RUN_ID"]
-        or rust_binding["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
-        or rust_binding.get("target") != build_target
-        or rust_binding["cwd"] != "desktop/src-tauri" or rust_binding["autoInstall"] is not False):
-    raise ValueError("effective Rust toolchain is not bound to this original build")
+ci_mode = os.environ.get("MRK_MACOS_DATA_MODE", "")
+if ci_mode not in ("", "ci-observer-data-v1"):
+    raise ValueError("ci-data-mode")
+ci_endpoint = ci_previous_ns = ci_compiler = ci_context = None
+if ci_mode:
+    root = Path(os.environ["MRK_DESKTOP_CI_ROOT"])
+    checkout = Path(os.environ["GITHUB_WORKSPACE"])
+    root_before = sig(os.lstat(root))
+    if not stat.S_ISDIR(root_before[2]) or root_before[3] != os.getuid() or root_before[2] & 0o077:
+        raise ValueError("original private work root required")
+    context_raw = read(root / "context.json", 65536)
+    request_raw = read(root / "target/observer-data-request.json", 65536)
+    ci_previous_ns = time.monotonic_ns()
+    binding, inventory_bytes, ci_compiler, ci_endpoint, ci_context = ci_data_admission(
+        request_raw, context_raw, os.environ, root_before, ci_previous_ns)
+    inventory = json.loads(inventory_bytes)
+    rust_binding = None
+else:
+    root = Path(os.environ["MRK_MACOS_WORK"])
+    checkout = Path(os.environ["GITHUB_WORKSPACE"])
+    if (root.parent != Path("/Users/runner/work/_temp") or not root.name.startswith("mrk-macos-installed.")
+            or checkout != Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
+            or os.environ["CARGO_TARGET_DIR"] != str(root / "cargo-target")):
+        raise ValueError("same original job/source/Cargo cache required")
+    root_before = sig(os.lstat(root))
+    if not stat.S_ISDIR(root_before[2]) or root_before[3] != os.getuid() or root_before[2] & 0o077:
+        raise ValueError("original private work root required")
+    binding = json.loads(read(root / "source-binding.json", 65536))
+    inventory_bytes = read(root / "source-inventory.json", 2 * 1024 * 1024)
+    inventory = json.loads(inventory_bytes)
+    if (binding["source"] != os.environ["GITHUB_SHA"] or binding["workflowSource"] != os.environ["GITHUB_WORKFLOW_SHA"]
+            or binding["source"] != binding["workflowSource"] or inventory["source"] != binding["source"]
+            or binding.get("target") != build_target
+            or inventory["tree"] != binding["tree"] or binding["workDirectory"] != [root_before[0], root_before[1], root_before[3]]):
+        raise ValueError("original checkout/source binding")
+    rust_binding = json.loads(read(root / "effective-rust-toolchain.json", 16384))
+    if (rust_binding["source"] != binding["source"] or rust_binding["workflowSource"] != binding["workflowSource"]
+            or rust_binding["runId"] != os.environ["GITHUB_RUN_ID"]
+            or rust_binding["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
+            or rust_binding.get("target") != build_target
+            or rust_binding["cwd"] != "desktop/src-tauri" or rust_binding["autoInstall"] is not False):
+        raise ValueError("effective Rust toolchain is not bound to this original build")
+cargo_target = root / ("target" if ci_mode else "cargo-target")
 source_rows = {row["path"]: row for row in inventory["files"]}
 if len(source_rows) != len(inventory["files"]): raise ValueError("duplicate source row")
 source_names = (
@@ -158,6 +559,8 @@ source_names = (
     "desktop/tools/macos_installed_data_contracts.sh",
 )
 source_bodies = {}
+if ci_mode and set(source_rows) != set(source_names):
+    raise ValueError("ci-data-exact-source-roster")
 for name in source_names:
     row = source_rows[name]
     body = read(checkout / name, 2 * 1024 * 1024)
@@ -260,7 +663,7 @@ names = [
 if len(names) != 84 or len(set(names)) != 84: raise ValueError("fixed selection")
 if hashlib.sha256(json.dumps(names, separators=(",", ":")).encode()).hexdigest() != "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94":
     raise ValueError("fixed selected IDs digest")
-data = root / "data-contracts"
+data = (root / "target" if ci_mode else root) / "data-contracts"
 os.mkdir(data, 0o700)
 temporary = data / "tmp"
 os.mkdir(temporary, 0o700)
@@ -299,24 +702,49 @@ for name in NAMES:
     suite.addTest(getattr(importlib.import_module(module), cls)(method))
 if suite.countTestCases() != 84 or [case.id() for case in suite] != NAMES:
     raise ValueError("exact original test IDs/count required")
+def data_failed_test_rows(failures, errors, names):
+    # Only exact roster IDs; subtest labels/tracebacks never enter public DATA.
+    classified, unknown = set(), 0
+    for kind, rows in (("failure", failures), ("error", errors)):
+        for test, ignored_traceback in rows:
+            try: name = test.id()
+            except Exception: name = None
+            if type(name) is str and name in names:
+                classified.add((kind, name))
+            else:
+                unknown += 1
+    ordered = [(kind, name) for name in names for kind in ("failure", "error") if (kind, name) in classified]
+    return {"failureTests": [dict(kind=kind, id=name) for kind, name in ordered[:16]],
+            "classifiedTestCount": len(ordered), "omittedTestCount": max(0, len(ordered) - 16),
+            "unclassifiedTestCount": unknown}
+
+
 result = unittest.TextTestRunner(verbosity=2, failfast=False).run(suite)
 facts = {"testsRun": result.testsRun, "failures": len(result.failures), "errors": len(result.errors),
          "skipped": len(result.skipped), "expectedFailures": len(result.expectedFailures),
          "unexpectedSuccesses": len(result.unexpectedSuccesses), "testIds": NAMES, "actualHostBeforeAndAfter": bool(original_host())}
+try:
+    facts.update(data_failed_test_rows(result.failures, result.errors, NAMES))
+except BaseException:
+    pass
 print(json.dumps(facts, sort_keys=True, separators=(",", ":")), flush=True)
 raise SystemExit(0 if result.wasSuccessful() and facts["testsRun"] == 84 and facts["actualHostBeforeAndAfter"]
                  and not any(facts[key] for key in ("failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")) else 1)
 '''
-receipt = {"schemaVersion": 1, "scope": "fixed-native-data-contracts-and-selected-host-python-regressions",
+receipt = {"schemaVersion": 1, "scope": ("ci-observer-fixed-data-and-selected-host-python-regressions" if ci_mode
+                                      else "fixed-native-data-contracts-and-selected-host-python-regressions"),
            "sourceCommit": binding["source"], "sourceTree": binding["tree"],
            "sourceInventorySha256": hashlib.sha256(inventory_bytes).hexdigest(),
-           "sourceRows": [source_rows[name] for name in source_names], "toolBindings": binding["tools"], "effectiveRustToolchain": rust_binding,
+           "sourceRows": [source_rows[name] for name in source_names], "toolBindings": binding["tools"],
+           **({"ciRustToolchain": ci_compiler} if ci_mode else {"effectiveRustToolchain": rust_binding}),
            "python": {"executable": sys.executable, "version": sys.version, "actualPlatform": sys.platform, "actualMachine": os.uname().machine, "target": build_target},
            "cargoTargetDir": os.environ["CARGO_TARGET_DIR"], "temporaryOriginal": temporary_before,
-           "buildBindings": {key: os.environ[key] for key in ("CARGO_TARGET_DIR", "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256",
+            "buildBindings": ({key: os.environ[key] for key in ("CARGO_TARGET_DIR", "RUSTC", "RUSTUP_AUTO_INSTALL", "CARGO_BUILD_JOBS",
+                                "MRK_MACOS_INSTALL_SOURCE_COMMIT", "MRK_IMAGE_RELEASE_ID")}
+                              if ci_mode else {key: os.environ[key] for key in ("CARGO_TARGET_DIR", "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256",
                              "MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "MRK_BUNDLED_PROTOCOL_SHA256",
                              "MRK_MACOS_INSTALL_SOURCE_COMMIT", "MRK_GITHUB_PREFLIGHT_TOOLING_SHA",
-                             "MRK_GITHUB_RELEASE_TOOLING_SHA", "MACOSX_DEPLOYMENT_TARGET", "DEVELOPER_DIR")},
+                             "MRK_GITHUB_RELEASE_TOOLING_SHA", "MACOSX_DEPLOYMENT_TARGET", "DEVELOPER_DIR")}),
            "pythonTestIds": names, "pythonExpectedCount": 84, "workflowFilesystemCount": 2, "imageFilesystemCount": 18, "evidenceReaderCount": 37,
            "githubActionCount": 22, "normalDiagnosticsSourceCount": 3, "androidBuildToolsCallerCount": 2,
            "frozenSelectionSha256": "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94",
@@ -324,8 +752,13 @@ receipt = {"schemaVersion": 1, "scope": "fixed-native-data-contracts-and-selecte
                          "sourceSha256": hashlib.sha256((start + aggregate).encode()).hexdigest(), "directSourceContractCalls": contract_calls},
            "commands": [], "passed": False, "nativeVaultTestsExecuted": False, "uiExecutedByThisBatch": False,
            "nativeTlsQualified": False, "allWorkerFinalityEstablished": False}
+if ci_mode:
+    receipt.update(ciContext={key: ci_context[key] for key in ("workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")},
+                   ciAggregatePassed=None, ciSourcePost=None, ciTemporaryEmpty=None)
 artifact_fd = None
 failure = None
+failure_guard = "unclassified"
+diagnostic_output = None
 def filesystem_device(raw):
     # Apple df(path) resolves the containing filesystem. diskutil info
     # accepts its device/mountpoint, not an arbitrary subdirectory.
@@ -360,6 +793,7 @@ def filesystem_volume(raw, selected):
 try:
     # A closed five-command batch, not a configurable execution helper.
     for phase in ("mount", "apfs", "build", "rust", "python"):
+        diagnostic_output = None
         if phase == "mount":
             # -P alone does not suppress inode columns in modern Darwin
             # mode. Explicit -k and -I fix units and the documented shape.
@@ -372,7 +806,7 @@ try:
             argv = [rust_bin + "/cargo", "test", "--locked", "--no-default-features",
                     "--features", "desktop-shell,custom-protocol,macos-installed-observation",
                     "--target", build_target, "--test", "installed-shell-observation", "--no-run", "--message-format=json"]
-            environment = dict(os.environ, PATH=rust_bin + ":/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC=rust_bin + "/rustc", RUSTUP_AUTO_INSTALL="0")
+            environment = (dict(os.environ) if ci_mode else dict(os.environ, PATH=rust_bin + ":/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC=rust_bin + "/rustc", RUSTUP_AUTO_INSTALL="0"))
             cwd, seconds, limit = checkout / "desktop/src-tauri", 1440, 4 * 1024 * 1024
         elif phase == "rust":
             argv = [str(artifact), "data-contracts"]
@@ -380,14 +814,19 @@ try:
         else:
             argv = [sys.executable, "-I", "-S", "-B", "-c", child_code, str(checkout), str(temporary), *map(str, temporary_before[:5])]
             cwd, environment, seconds, limit = temporary, clean, 120, 1024 * 1024
+        if ci_mode:
+            now_ns = time.monotonic_ns()
+            seconds = ci_data_seconds(seconds, ci_endpoint, ci_previous_ns, now_ns)
+            ci_previous_ns = now_ns
         command = {"phase": phase, "argv": argv, "cwd": str(cwd), "seconds": seconds, "bytesPerStream": limit,
-                   "environmentPolicy": "original-job-build" if phase == "build" else "fixed-clean-noncredential",
+                   "environmentPolicy": ("ci-source-bound-build" if ci_mode else "original-job-build") if phase == "build" else "fixed-clean-noncredential",
                    "originalReturned": False, "returnCode": None, "outputComplete": False, "captureClosed": False,
                    "timedOut": False, "outputOverflow": False}
         receipt["commands"].append(command)
         process = None
         selector = selectors.DefaultSelector()
         output = {"stdout": bytearray(), "stderr": bytearray()}
+        diagnostic_output = output
         capture_error = None
         deadline = time.monotonic() + seconds
         stop_at = None
@@ -465,7 +904,7 @@ try:
                     or targets[0]["target"].get("src_path") != str(checkout / "desktop/src-tauri/tests/installed_shell_observation.rs")):
                 raise ValueError("one original debug actual-main test artifact")
             artifact = Path(targets[0]["executable"])
-            if (artifact.parent != root / "cargo-target" / build_target / "debug/deps"
+            if (artifact.parent != cargo_target / build_target / "debug/deps"
                     or not re.fullmatch(r"installed_shell_observation-[0-9a-f]+", artifact.name)):
                 raise ValueError("fixed original test artifact path")
             artifact_fd = os.open(artifact, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -485,6 +924,7 @@ try:
             fd, artifact_fd = artifact_fd, None
             os.close(fd)
             receipt["artifact"]["originalClosed"] = True
+            if ci_mode: receipt["ciAggregatePassed"] = True
         else:
             counts = json.loads(raw)
             if (counts.get("testsRun") != 84 or counts.get("testIds") != names or counts.get("actualHostBeforeAndAfter") is not True
@@ -495,13 +935,16 @@ try:
     for name in source_names:
         if read(checkout / name, 2 * 1024 * 1024) != source_bodies[name]:
             raise ValueError("selected source changed during batch")
+    if ci_mode: receipt["ciSourcePost"] = True
     temporary_after = sig(os.fstat(temporary_fd))
     if temporary_before[:5] != temporary_after[:5] or temporary_after != sig(os.lstat(temporary)):
         raise ValueError("original temporary root changed")
     with os.scandir(temporary_fd) as children:
         if next(children, None) is not None: raise ValueError("selected tests did not retire disposable fixtures")
     receipt["temporaryAfter"] = temporary_after
+    if ci_mode: receipt["ciTemporaryEmpty"] = True
 except BaseException as exc:
+    failure_guard = data_failure_guard(exc)
     failure = type(exc).__name__ + ": " + str(exc)[:200]
 finally:
     if artifact_fd is not None:
@@ -512,6 +955,16 @@ finally:
     except BaseException as exc: failure = failure or "temporary-close-" + type(exc).__name__
     receipt["passed"] = failure is None
     receipt["failure"] = failure
+    if failure is not None and diagnostic_output is not None:
+        try:
+            # Optional DATA from the same buffers; failure remains the original.
+            supplement = data_failure_document(receipt["commands"][-1], diagnostic_output, failure_guard,
+                {"source": binding["source"], "workflowSource": binding["workflowSource"],
+                 "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"], "target": build_target},
+                names, source_rows, str(checkout))
+            put("failure-diagnostics.json", supplement)
+        except BaseException:
+            pass
     put("result.json", (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
 if failure is not None: raise SystemExit(1)
 print("One native aggregate and 84 exact host-Python tests passed; no UI, TLS or ignored vault-test qualification.")

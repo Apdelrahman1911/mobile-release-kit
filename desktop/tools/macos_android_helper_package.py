@@ -47,7 +47,14 @@ PACKAGE_SCOPES = (
     "installation-inspection", "vault-helper-shipping-installation-inspection",
     "project-recovery-pending", "ios-recovery-pending", "doctor-preflight2", "local-edits3",
 )
-PHASES = ("prepare", "verify-before", "verify-after", "package-install", "package-remove")
+APP_ABSENCE_REF = "refs/heads/verify/desktop-macos-app-absence-fixture"
+APP_ABSENCE_PHASES = ("prepare-app-absence", "app-absence-restore")
+UPDATE_REF = "refs/heads/verify/desktop-macos-positive-update"
+UPDATE_PHASE = "update-baseline"
+UPDATE_ROLES = ("update-baseline-attach", "update-baseline-installer", "update-baseline-detach")
+SAME_PACKAGE_PHASE = "same-package-noop"
+SAME_PACKAGE_ROLES = ("distribution-attach", "installer", "distribution-detach")
+PHASES = ("prepare", "verify-before", "verify-after", "package-install", "package-remove", SAME_PACKAGE_PHASE, UPDATE_PHASE) + APP_ABSENCE_PHASES
 REMOVE_PHASES = ("finalize-remove-package", "package-remove", "finalize-remove-image")
 REMOVE_PACKAGE_ROLES = ("producer-build", "producer-emitter", "distribution-create", "distribution-sign",
                         "distribution-verify-signature", "distribution-verify-image")
@@ -58,16 +65,16 @@ MAX_HELPER = 32 * 1024 * 1024
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
+SUPPORT_PHASES = ("android-support-shipping",)
+SUPPORT_REF = "refs/heads/verify/desktop-macos-android-support-signing"
+SUPPORT_IDENTIFIERS = tuple("dev.mobile-release-kit.desktop.android-support." + role
+                            for role in ("bundletool-aapt2", "bundletool-jna", "agp-aapt2"))
 PYTHON_PHASES = ("python-engineering", "python-shipping")
 PYTHON_IDENTIFIER = "dev.mobile-release-kit.desktop.python"
 PYTHON_ROLES = ("python-sign", "python-verify", "python-modules", "python-loader", "python-tls", "python-cancellation")
 PYTHON_SUPPLIERS = {
-    ARM_TARGET: {"receiptSha256": "2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d",
-        "tarSha256": "ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695",
-        "sourceCommit": "158cdff422e3837f7ab5e6192af76a578faf6fab", "runId": "37467019389", "runAttempt": "1", "artifactId": "11415902210"},
-    INTEL_TARGET: {"receiptSha256": "a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b",
-        "tarSha256": "739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd",
-        "sourceCommit": "079ab2a2c8fef88f01bf909e7669c685f07e1375", "runId": "37476532238", "runAttempt": "1", "artifactId": "11419502465"},
+    ARM_TARGET: {'receiptSha256': '1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809', 'tarSha256': '2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5', 'sourceCommit': '52485f9fd837f0dacb8dc9621e5a1bee30803506', 'runId': '38343324660', 'runAttempt': '1', 'artifactId': '11788410124'},
+    INTEL_TARGET: {'receiptSha256': 'afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8', 'tarSha256': 'ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c', 'sourceCommit': 'a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa', 'runId': '38343340695', 'runAttempt': '1', 'artifactId': '11787588635'},
 }
 
 
@@ -356,8 +363,11 @@ def notary_key_data(environment):
     except ValueError:
         raise Refused("notary-key-base64") from None
     need(0 < len(body) <= 8192 and base64.b64encode(body).decode("ascii") == value
-         and body.isascii() and b"\0" not in body
-         and re.fullmatch(rb"-----BEGIN PRIVATE KEY-----\n(?:[A-Za-z0-9+/=]{1,64}\n)+-----END PRIVATE KEY-----\n", body),
+         and body.isascii() and b"\0" not in body, "notary-key-pem-shape")
+    # RFC 7468 standard EOLs and optional final EOL, for validation only.
+    # The original credential bytes remain unchanged for custody and Apple.
+    view = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    need(re.fullmatch(rb"-----BEGIN PRIVATE KEY-----\n(?:[A-Za-z0-9+/=]{1,64}\n)+-----END PRIVATE KEY-----\n?", view),
          "notary-key-pem-shape")
     return body  # Bounded PEM shape only. Apple performs actual authentication.
 
@@ -418,14 +428,17 @@ def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP
         errors += row["severity"] == "error"
         warnings += row["severity"] == "warning"
     need(tickets is None or type(tickets) is list and len(tickets) <= 2048, "notary-log-tickets-bound")
-    # Carrier-null architecture is bounded diagnostic metadata only, not
-    # a native slice, certificate, ticket or current-package authority.
+    # Finite Apple ticket annotations include nested signed i386 slices;
+    # they never grant native execution, target or provenance authority.
+    # An absent or null carrier architecture is diagnostic metadata only,
+    # not a native slice, certificate, ticket or current-package authority.
     for row in tickets or ():
-        need(type(row) is dict and set(row) == {"path", "digestAlgorithm", "cdhash", "arch"}
+        need(type(row) is dict and {"path", "digestAlgorithm", "cdhash"} <= set(row)
+             <= {"path", "digestAlgorithm", "cdhash", "arch"}
              and notary_text(row["path"], 4096) and row["digestAlgorithm"] in ("SHA-1", "SHA-256")
              and type(row["cdhash"]) is str and re.fullmatch(r"[0-9a-fA-F]{40}", row["cdhash"])
-             and (row["arch"] in ("arm64", "x86_64") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg")
-                  and row["path"] == archive_name and row["arch"] is None), "notary-log-ticket-shape")
+             and (row.get("arch") in ("arm64", "x86_64", "i386") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg")
+                  and row["path"] == archive_name and row.get("arch") is None), "notary-log-ticket-shape")
     need(submission["status"] != "Accepted" or errors == 0, "notary-log-success-with-errors")
     return {"sha256Compared": "sha256" in value, "errorCount": errors, "warningCount": warnings,
             "ticketRowCount": len(tickets or ()), "logSha256": digest(body)}
@@ -434,7 +447,8 @@ def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP
 FINAL_IMAGE_PHASES = ("finalize-image", "finalize-remove-image")
 FINAL_IMAGE_ROLES = ("final-image-resolve-notarytool", "final-image-resolve-stapler", "final-image-signature-before",
                      "final-image-submit", "final-image-log", "final-image-staple", "final-image-validate",
-                     "final-image-signature-after", "final-image-verify", "final-image-attach", "final-image-detach")
+                     "final-image-signature-after", "final-image-verify", "final-image-attach", "final-image-detach",
+                     "final-image-policy-status", "final-image-policy-assess")
 
 FINAL_PACKAGE_PHASES = ("finalize-package", "finalize-remove-package")
 INSTALLER_PROFILE = "desktop/packaging/macos-installer-signing.json"
@@ -547,7 +561,7 @@ def package_signature_data(body, selection, certificates, path):
     """Closed pkgutil trust/timestamp/complete-chain projection; no raw output."""
     need(type(body) is bytes and 0 < len(body) <= 65536 and body.endswith(b"\n")
          and type(selection) is dict and type(certificates) is tuple and len(certificates) == 3
-         and isinstance(path, Path) and path.name == "MobileReleaseKit.pkg", "package-signature-bound")
+         and isinstance(path, Path) and path.name in ("MobileReleaseKit.pkg", "Remove.pkg"), "package-signature-bound")
     try:
         text = body.decode("utf-8")
     except UnicodeError:
@@ -557,7 +571,8 @@ def package_signature_data(body, selection, certificates, path):
     need(0 < len(lines) <= 256 and all(len(line) <= 1024 for line in lines)
          and lines[0] in ('Package "' + path.name + '":', 'Package "' + str(path) + '":'),
          "package-signature-header")
-    trusted = ("Status: signed by a certificate trusted by macOS", "Status: signed by a certificate trusted by Mac OS X")
+    trusted = ("Status: signed by a certificate trusted by macOS", "Status: signed by a certificate trusted by Mac OS X",
+               "Status: signed by a developer certificate issued by Apple for distribution")
     need(len(lines) > 4 and lines[1] in trusted
          and lines[2].startswith("Signed with a trusted timestamp on: ")
          and 0 < len(lines[2][len("Signed with a trusted timestamp on: "):]) <= 128
@@ -611,6 +626,25 @@ INSTALLER_CREDENTIAL_ROSTER = (
 )
 
 
+def package_staple_observation_data(value):
+    flags = {"heldPreIdentityMatched", "namedPreIdentityMatched", "fdNameIdentityMatched",
+             "fdNameMetadataMatched", "namedShapeExpected"}
+    need(type(value) is dict and set(value) == flags | {"heldLinkState", "selectedBranch", "transitionComplete"}
+         and all(value[key] is None or type(value[key]) is bool for key in flags)
+         and type(value["transitionComplete"]) is bool
+         and type(value["heldLinkState"]) is str and value["heldLinkState"] in ("unavailable", "single", "unlinked", "other")
+         and type(value["selectedBranch"]) is str and value["selectedBranch"] in ("unavailable", "same-original", "returned-output"),
+         "final-package-staple-observation")
+    need(not value["transitionComplete"] or all(type(value[key]) is bool for key in flags)
+         and value["heldPreIdentityMatched"] and value["namedShapeExpected"]
+         and ((value["selectedBranch"], value["heldLinkState"], value["namedPreIdentityMatched"],
+               value["fdNameIdentityMatched"], value["fdNameMetadataMatched"])
+              in (("same-original", "single", True, True, True),
+                  ("returned-output", "unlinked", False, False, False))),
+         "final-package-staple-observation")
+    return dict(value)
+
+
 def final_package_receipt(body, environment, target, selection, profile_sha, notary_sha, package_size, package_sha,
                           image_release, release_sha, *, remove=False):
     """Closed preceding original observation AND the current immutable P.
@@ -626,6 +660,9 @@ def final_package_receipt(body, environment, target, selection, profile_sha, not
             "originalClosesKnown", "passed", "outerFinalityRequired", "androidServiceAuthenticated", "androidRegisteredCopyQualified",
             "androidBuildQualified", "developerIdOrNotarizationQualified", "productReady", "notaryAuthentication", "notarySubmission",
             "finalPackage", "directStagerIOPending", "cleanupErrors", "imageSourceCommit", "imageReleaseId", "imageReleaseSourceSha256"}
+    if type(value) is dict and "packageStapleObservation" in value:
+        package_staple_observation_data(value["packageStapleObservation"])
+        keys.add("packageStapleObservation")
     need(type(value) is dict and set(value) == keys and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
          and value["phase"] == ("finalize-remove-package" if remove else "finalize-package") and value["target"] == target and target in (ARM_TARGET, INTEL_TARGET)
          and value["source"] == environment["GITHUB_SHA"] == value["workflowSource"]
@@ -896,7 +933,7 @@ def build_profile(target):
 
 def entrypoint(argv):
     need(type(argv) is list and len(argv) in (2, 4) and all(type(value) is str for value in argv)
-         and argv[1] in (APP_SIGNATURE_SUMMARY,) + PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
+         and argv[1] in (APP_SIGNATURE_SUMMARY,) + PHASES + SUPPORT_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
     target = ARM_TARGET if len(argv) == 2 else argv[3]
     build_profile(target)
     return argv[1], target
@@ -980,6 +1017,11 @@ def direct_rust_tools(target=ARM_TARGET):
     return directory + "/cargo", directory + "/rustc"
 
 
+def prepare_roles(target):
+    build_profile(target)
+    return (("resident-fetch",) if target == INTEL_TARGET else ()) + PREPARE_ROLES
+
+
 def rust_toolchain(target=ARM_TARGET):
     """Expected current hosted label only; the original tool query is separate."""
     build_profile(target)
@@ -1056,15 +1098,428 @@ def original_failure(error, owner, checkout, timeout, limit):
               "outputLimitBytes": limit, "captureMode": "bytes", "frames": frames,
               "visitedFrames": visited, "omittedFrames": visited - len(frames),
               "foreignFrames": foreign, "tracebackTruncated": trace is not None}
+    observed = error.__dict__.get("owner_finality_diagnostic") if error_type != "other" else None
+    valid = (type(observed) is tuple and len(observed) == 5
+             and all(type(value) is int for value in observed[:4]) and observed[0] == 1
+             and observed[1] in (0, 1) and 0 <= observed[2] <= (1023 if observed[1] == 0 else 1048575)
+             and 0 <= observed[3] <= 15 and (observed[4] is None or type(observed[4]) is int
+             and observed[1] == 1 and (observed[4] in (0, 32) or 48 <= observed[4] <= 63)))
+    result["ownerFinality"] = list(observed) if valid else None
     need(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")) <= 2048,
          "original-failure-diagnostic-bound")
     return result
 
 
-def package_timeout_data(now, endpoint, requested):
+# Public failure DATA only. SOURCE-selected labels, never exception text or a
+# diagnostic grant of command/cleanup/signature authority. Unknown labels stay
+# unclassified; in particular exact Refused class alone is not a sanitizer.
+_FAILURE_REASONS = frozenset((
+    'same-package-baseline-export', 'same-package-case', 'same-package-census', 'same-package-final-carrier', 'same-package-final-carrier-bytes', 'same-package-final-carrier-root', 'same-package-final-carrier-roster', 'same-package-finalizer-original', 'same-package-fixed-purpose', 'same-package-fresh-baseline', 'same-package-immediate-predecessor', 'same-package-input-', 'same-package-inventory', 'same-package-inventory-binding', 'same-package-inventory-input', 'same-package-live-readback', 'same-package-noop', 'same-package-notary-source', 'same-package-original-boundary', 'same-package-original-input', 'same-package-originals-unknown', 'same-package-parent-entry-bound', 'same-package-previous-shape', 'same-package-readback', 'same-package-readonly-mount', 'same-package-result-delta', 'same-package-result-namespace', 'same-package-result-post', 'same-package-source-scope', 'same-package-status-absence', 'same-package-status-post', 'same-package-status-purpose',
+    'app-signature-fixed-native-phase', 'app-signature-summary-ref', 'application-no-installer-secret',
+    'build-release-identity', 'build-release-shape', 'build-release-size',
+    'build-release-version', 'build-target', 'closed-build-target',
+    'closed-entrypoint', 'closed-workflow-route', 'compiler-alias-directory-bound',
+    'compiler-alias-original', 'compiler-artifact-close-unknown', 'compiler-artifact-shape',
+    'compiler-bound', 'compiler-duplicate-key', 'compiler-finish',
+    'compiler-json', 'compiler-original-copy-changed', 'compiler-rows',
+    'compiler-terminal-order', 'credential-ancestor-mode', 'credential-base64',
+    'credential-callback-deadline', 'credential-callback-purpose', 'credential-callback-reserve',
+    'credential-callback-roster', 'credential-census-close-unknown', 'credential-certificate-format',
+    'credential-child-environment', 'credential-close-unknown', 'credential-code-purpose',
+    'credential-created-searchlist', 'credential-directory-original', 'credential-dispatch-reserve',
+    'credential-dispatch-unknown', 'credential-finality-incomplete', 'credential-fixed-original',
+    'credential-fixed-purpose', 'credential-identity-bound', 'credential-identity-format',
+    'credential-input-bound', 'credential-original-clock', 'credential-original-deadline',
+    'credential-original-nonzero', 'credential-original-return', 'credential-original-unknown',
+    'credential-p12-after-close', 'credential-p12-close-unknown', 'credential-p12-original',
+    'credential-p12-readback', 'credential-private-census', 'credential-private-file',
+    'credential-private-file-post', 'credential-private-parent', 'credential-private-query-stderr',
+    'credential-private-root-not-empty', 'credential-private-root-remains', 'credential-private-storage-reserve',
+    'credential-producer-admission', 'credential-producer-callback-post', 'credential-producer-import-post',
+    'credential-producer-original', 'credential-profile-identity', 'credential-root-exclusive',
+    'credential-root-mode', 'credential-search-format', 'credential-search-stderr',
+    'credential-search-value-changed', 'credential-short-write', 'credential-source-certificate',
+    'credential-source-certificates', 'credential-source-identity', 'credential-source-leaf',
+    'credential-source-post', 'credential-unwind-original-unknown', 'credential-user-domain',
+    'descriptor-relative-cleanup-required', 'direct-rust-source-route', 'directory-owner-mode',
+    'entry-compiler-original-changed', 'entry-library-command', 'entry-library-offset',
+    'entry-library-padding', 'entry-library-termination', 'entry-libsystem-only',
+    'entry-loader-command', 'entry-main-command', 'entry-native-initializer',
+    'entry-pie-no-executable-stack', 'entry-segment-command', 'entry-segment-sections',
+    'entry-source-changed', 'exact-detached-checkout', 'exclusive-output-original',
+    'facade-compiler-artifact-close-unknown', 'facade-compiler-original-changed', 'facade-source-changed',
+    'file-original-changed', 'file-original-read-changed', 'file-original-shape',
+    'fixed-facade-role', 'fixed-signing-requirement', 'fixed-source-driver',
+    'full-package-scope-only', 'helper-absolute-apple-system-dependency', 'helper-dyld-command',
+    'helper-dyld-offset', 'helper-dyld-terminated', 'helper-dylib-command',
+    'helper-dylib-name-offset', 'helper-dylib-terminated', 'helper-loader-override-refused',
+    'helper-one-library', 'helper-package-artifact', 'helper-package-incomplete',
+    'helper-release-graph', 'helper-release-profile', 'helper-separate-library-features',
+    'helper-system-dyld-only', 'hosted-native-platform', 'hosted-source-bindings',
+    'image-absolute-apple-system-dependency', 'image-build-version', 'image-command',
+    'image-dylib-target', 'image-fixed-install-name-and-system-closure', 'image-library-command',
+    'image-library-offset', 'image-library-padding', 'image-library-termination',
+    'image-loader-command', 'image-role-header', 'image-segment-command',
+    'image-segment-sections', 'image-source-release', 'macho-build-version',
+    'macho-command', 'macho-command-bound', 'macho-header',
+    'macho-minimum-macos26', 'macho-target', 'one-compiler-alias',
+    'one-resident-image', 'original-nonzero-resident-fetch', 'original-nonzero-build', 'original-nonzero-desktop-facade-build',
+    'original-nonzero-entry-build', 'original-nonzero-resident-facade-build', 'original-nonzero-resident-image-sign',
+    'original-nonzero-resident-image-verify-signed', 'original-nonzero-sign', 'original-nonzero-verify-signed',
+    'original-operation-refused', 'original-return-contract', 'output-close-unknown',
+    'output-readback', 'output-short-write', 'owned-work-route',
+    'receipt-bound', 'receipt-readback', 'receipt-short-write',
+    'receipt-work-changed', 'receipt-work-unavailable', 'resident-image-only-graph',
+    'run-identity', 'source-image-binding', 'source-image-release-changed',
+    'source-original-changed', 'source-producer-correspondence', 'source-producer-profile',
+    'source-producer-unconfigured', 'source-service-profile', 'source-signing-profile-changed',
+    'strict-original-verification', 'work-original',
+))
+_FAILURE_STAGES = (
+    "same-package-noop",
+    "owned-directory-admission", "source-image-binding", "resident-dependency-fetch", "separate-resident-image-compiler",
+    "compiler-original-copy", "resident-image-source-selected-signing", "resident-image-verify-signed",
+    "fixed-installed-entry-compiler", "desktop-facade-compiler", "resident-facade-compiler",
+    "helper-source-selected-signing", "verify-signed",
+)
+_FAILURE_MAIN_STAGES = (
+    "entrypoint", "data-phase", "admission", "stager-load", "source-check", "profile-check",
+    "owner-load", "operation-create", "operation-execute", "success-output",
+)
+_FAILURE_TYPES = (
+    "helper-refused", "stager-refused", "os-error", "value-error", "type-error", "runtime-error",
+    "assertion-error", "memory-error", "recursion-error", "unicode-error", "json-error",
+    "keyboard-interrupt", "system-exit", "other",
+)
+_FAILURE_OWNER_CLASSES = ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown", "other")
+_FAILURE_OWNER_REASONS = (
+    "output-bound", "deadline", "protocol-or-original-ownership", "original-parent-ended",
+    "cleanup-unconfirmed", "failed-timeout-or-incomplete-output", "exec-rejected",
+    "stopped-before-execution", "incomplete-output", "unclassified",
+)
+
+
+# Only these SOURCE crate identities can disambiguate relative compiler spans.
+_COMPILER_PACKAGES = {
+    "mrk-android-register": ("desktop/helpers/macos-android-register", "0.1.0"),
+    "mobile-release-kit-desktop": ("desktop/src-tauri", "0.1.1"),
+    "mrk-macos-installed-native": ("desktop/native/macos-installed-native", "0.1.0"),
+}
+_COMPILER_ROOTS = tuple(value[0] for value in _COMPILER_PACKAGES.values()) + ("desktop/native/macos-installed-entry",)
+_COMPILER_NATIVE_FILES = (
+    "src/native.m", "src/android_registration.m", "src/android_service_management.m",
+    "src/wrapping_keychain.m", "src/vault_filesystem.m", "src/vault_helper_control.m",
+    "src/wrapping_interaction_policy.h", "src/vault_helper_control.h", "src/vault_helper_auth.m",
+)
+_COMPILER_CLASSES = (
+    "locked-update", "missing-package", "offline", "download-failed", "network-failed",
+    "unsupported-rustc", "no-space", "build-script-failed", "linker-failed", "unclassified",
+)
+
+
+def compiler_source(path, checkout, package=None):
+    """Lexical SOURCE location only. Never resolve/stat/read a diagnostic path."""
+    if type(path) is not str or not 0 < len(path) <= 4096 or re.fullmatch(r"[A-Za-z0-9_./+-]+", path) is None:
+        return None
+    if path.startswith(checkout + "/"):
+        parts = path[len(checkout) + 1:].split("/")
+    elif path.startswith("/"):
+        return None
+    elif path.startswith("desktop/"):
+        parts = path.split("/")
+    elif package is not None:
+        if type(package) is not str or package not in _COMPILER_ROOTS:
+            return None
+        parts = package.split("/") + path.split("/")
+    elif path in _COMPILER_NATIVE_FILES:
+        parts = ["desktop", "native", "macos-installed-native"] + path.split("/")
+    elif path.startswith(("../../src-tauri/", "../../native/macos-installed-native/")):
+        # Explicit helper Cargo cwd, not a guessed base for src/lib.rs/build.rs.
+        parts = ["desktop", "helpers", "macos-android-register"] + path.split("/")
+    else:
+        return None
+    normalized = []
+    for part in parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not normalized:
+                return None
+            normalized.pop()
+        else:
+            normalized.append(part)
+    result = "/".join(normalized)
+    return result if (len(result) <= 160 and result.endswith((".rs", ".m", ".c", ".h"))
+                      and any(result.startswith(root + "/") for root in _COMPILER_ROOTS)) else None
+
+
+def compiler_diagnostic(stdout, stderr, checkout):
+    """Sanitize SAME failed Cargo captures. Never export messages or commands."""
+    result = {"rows": [], "rowsOmitted": False, "scanComplete": True,
+              "rustMessages": 0, "clangErrors": 0, "buildScriptPanics": 0, "classifications": []}
+    if (type(stdout) is not bytes or type(stderr) is not bytes or len(stdout) + len(stderr) > 4 * 1024 * 1024
+            or type(checkout) is not str or not checkout.startswith("/") or len(checkout) > 4096):
+        result.update(scanComplete=False, classifications=["unclassified"])
+        return result
+    def position(value, maximum):
+        return value if type(value) is int and 0 < value <= maximum else None
+    def add(kind, code, path, line, column, package):
+        row = {"kind": kind, "code": code if type(code) is str and re.fullmatch(r"E[0-9]{4}", code) else None,
+               "source": compiler_source(path, checkout, package),
+               "line": position(line, 1000000), "column": position(column, 65535)}
+        if row not in result["rows"]:
+            if len(result["rows"]) < 8:
+                result["rows"].append(row)
+            else:
+                result["rowsOmitted"] = True
+    classes, lines_seen = set(), 0
+    for body in (stdout, stderr):
+        offset, package = 0, None
+        while offset < len(body):
+            if lines_seen == 65536:
+                result["scanComplete"] = False
+                break
+            lines_seen += 1
+            end = body.find(b"\n", offset)
+            end = len(body) if end < 0 else end
+            start, offset = offset, end + 1
+            if end - start > 256 * 1024:
+                result["scanComplete"] = False
+                continue
+            raw = body[start:end]
+            # Text searches have a smaller bound than Cargo JSON. The left
+            # path boundary below also prevents retries at each path character.
+            if not raw.startswith(b"{") and len(raw) > 8192:
+                result["scanComplete"] = False
+                continue
+            try:
+                text = raw.decode("utf-8", "strict").rstrip("\r")
+            except UnicodeError:
+                result["scanComplete"] = False
+                continue
+            if text.startswith("{"):
+                if '"compiler-message"' not in text:
+                    continue
+                try:
+                    message = json.loads(text)
+                except (ValueError, RecursionError):
+                    result["scanComplete"] = False
+                    continue
+                if type(message) is not dict or message.get("reason") != "compiler-message":
+                    continue
+                detail = message.get("message")
+                if type(detail) is not dict or detail.get("level") != "error":
+                    continue
+                result["rustMessages"] += 1
+                context = ""  # Unknown/contradictory package is not the helper cwd.
+                for name, (root, version) in _COMPILER_PACKAGES.items():
+                    manifest = checkout + "/" + root + "/Cargo.toml"
+                    prefix = "path+file://" + checkout + "/" + root + "#"
+                    identities = (prefix + name + "@" + version, prefix + version)
+                    supplied_manifest, supplied_id = message.get("manifest_path"), message.get("package_id")
+                    if ((supplied_manifest == manifest and (supplied_id is None or supplied_id in identities))
+                            or supplied_manifest is None and supplied_id in identities):
+                        context = root
+                        break
+                code = detail.get("code")
+                code = code.get("code") if type(code) is dict else None
+                spans = detail.get("spans")
+                primary = False
+                if type(spans) is list:
+                    if len(spans) > 64:
+                        result["scanComplete"] = False
+                    for span in spans[:64]:
+                        if type(span) is dict and span.get("is_primary") is True:
+                            primary = True
+                            add("rust", code, span.get("file_name"), span.get("line_start"), span.get("column_start"), context)
+                if not primary:
+                    add("rust", code, None, None, None, context)
+                continue  # Never mine rendered/message JSON text as stderr.
+            lower = text.lower()
+            if "lock file" in lower and "--locked" in lower and ("update" in lower or "updated" in lower): classes.add("locked-update")
+            if "no matching package named" in lower or "no matching version" in lower: classes.add("missing-package")
+            if "offline mode" in lower or "--offline" in lower: classes.add("offline")
+            if "failed to download" in lower or ("failed to get" in lower and "as a dependency" in lower): classes.add("download-failed")
+            if any(token in lower for token in ("could not resolve host", "failed to connect", "network failure", "timed out", "ssl connect error")): classes.add("network-failed")
+            if "requires rustc" in lower or "rustc is not supported" in lower or "requires rust version" in lower: classes.add("unsupported-rustc")
+            if "no space left on device" in lower: classes.add("no-space")
+            if "failed to run custom build command" in lower:
+                classes.add("build-script-failed")
+                package = ""
+                heading = re.match(r"error: failed to run custom build command for `([A-Za-z0-9_-]+) v([0-9.]+)(?: |`)", text)
+                if heading:
+                    pair = _COMPILER_PACKAGES.get(heading[1])
+                    if pair is not None and heading[2] == pair[1]:
+                        package = pair[0]
+            if ("linking with" in lower and "failed" in lower) or "linker command failed" in lower: classes.add("linker-failed")
+            line_package = package
+            warning = re.match(r"warning: ([A-Za-z0-9_-]+)@([0-9.]+):", text)
+            if warning:
+                pair = _COMPILER_PACKAGES.get(warning[1])
+                line_package = pair[0] if pair is not None and warning[2] == pair[1] else ""
+            clang = re.search(r"(?<![A-Za-z0-9_./+:-])([A-Za-z0-9_./+-]{1,4096}):([1-9][0-9]{0,6})(?::([1-9][0-9]{0,4}))?: (?:fatal )?error:", text)
+            if clang:
+                result["clangErrors"] += 1
+                add("clang", None, clang[1], int(clang[2]), int(clang[3]) if clang[3] else None, line_package)
+            panic = re.search(r"panicked at ([A-Za-z0-9_./+-]{1,4096}):([1-9][0-9]{0,6}):([1-9][0-9]{0,4}):", text)
+            if panic:
+                result["buildScriptPanics"] += 1
+                add("build-script-panic", None, panic[1], int(panic[2]), int(panic[3]), line_package)
+    result["classifications"] = [value for value in _COMPILER_CLASSES if value in classes] or ["unclassified"]
+    return result
+
+
+def compiler_diagnostic_data(value):
+    """Only the parser's closed passive fields can enter the public line."""
+    if type(value) is not dict:
+        return None
+    rows, classes = value.get("rows"), value.get("classifications")
+    if (type(rows) is not list or len(rows) > 8 or type(classes) is not list or len(classes) > len(_COMPILER_CLASSES)
+            or any(type(item) is not str or item not in _COMPILER_CLASSES for item in classes)
+            or any(type(value.get(key)) is not bool for key in ("rowsOmitted", "scanComplete"))
+            or any(type(value.get(key)) is not int or not 0 <= value[key] <= 65536
+                   for key in ("rustMessages", "clangErrors", "buildScriptPanics"))):
+        return None
+    output = []
+    for row in rows:
+        if type(row) is not dict or set(row) != {"kind", "code", "source", "line", "column"}:
+            return None
+        kind, code, source = row["kind"], row["code"], row["source"]
+        if (type(kind) is not str or kind not in ("rust", "clang", "build-script-panic")
+                or code is not None and (type(code) is not str or re.fullmatch(r"E[0-9]{4}", code) is None)
+                or source is not None and (type(source) is not str or compiler_source(source, "/") != source)
+                or any(row[key] is not None and (type(row[key]) is not int or not 0 < row[key] <= maximum)
+                       for key, maximum in (("line", 1000000), ("column", 65535)))):
+            return None
+        output.append(dict(row))
+    return {"rows": output, "classifications": list(classes),
+            **{key: value[key] for key in ("rowsOmitted", "scanComplete", "rustMessages", "clangErrors", "buildScriptPanics")}}
+
+
+def failure_exception(error, stager=None):
+    """Classify the original object without rendering it or trusting its name."""
+    selected = type(error)
+    stager_class = stager.__dict__.get("Refused") if type(stager) is type(sys) else None
+    kind = ("helper-refused" if selected is Refused else
+            "stager-refused" if selected is stager_class else "other")
+    reason, number = "unclassified", None
+    if kind in ("helper-refused", "stager-refused"):
+        values = BaseException.args.__get__(error)
+        if (type(values) is tuple and len(values) == 1 and type(values[0]) is str
+                and len(values[0]) <= 96 and values[0] in _FAILURE_REASONS):
+            reason = values[0]
+    else:
+        known = ((ValueError, "value-error"), (TypeError, "type-error"), (RuntimeError, "runtime-error"),
+                 (AssertionError, "assertion-error"), (MemoryError, "memory-error"),
+                 (RecursionError, "recursion-error"), (UnicodeDecodeError, "unicode-error"),
+                 (UnicodeEncodeError, "unicode-error"), (json.JSONDecodeError, "json-error"),
+                 (KeyboardInterrupt, "keyboard-interrupt"), (SystemExit, "system-exit"))
+        kind = next((label for cls, label in known if selected is cls), "other")
+        if any(selected is cls for cls in (OSError, PermissionError, FileNotFoundError, FileExistsError, IsADirectoryError,
+                  NotADirectoryError, InterruptedError, BlockingIOError, TimeoutError,
+                  ChildProcessError, BrokenPipeError, ConnectionError, ConnectionAbortedError,
+                  ConnectionRefusedError, ConnectionResetError, ProcessLookupError)):
+            kind = "os-error"
+            value = OSError.errno.__get__(error)
+            if type(value) is int and 0 < value < 65536:
+                number = value
+    return {"type": kind, "reason": reason, "errno": number}
+
+
+def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, operation=None, stager=None):
+    """Bounded passive DATA; no owner callbacks, file reads, or state changes."""
+    def row(value):
+        return value if type(value) is dict else {}
+    def token(value, allowed):
+        return value if type(value) is str and len(value) <= 96 and value in allowed else "unclassified"
+    def flag(value):
+        return value if type(value) is bool else None
+    def integer(value, lower=0, upper=4096):
+        return value if type(value) is int and lower <= value <= upper else None
+    def count(value, maximum):
+        return len(value) if type(value) is list and len(value) <= maximum else None
+    def last(value, maximum):
+        return row(value[-1]) if type(value) is list and 0 < len(value) <= maximum else {}
+
+    state = object.__getattribute__(operation, "__dict__") if type(operation) is Operation else {}
+    receipt = row(state.get("receipt"))
+    original = row(receipt.get("failure"))
+    captured = row(state.get("diagnostic_failure"))
+    native = last(state.get("calls"), 4096)
+    owned = row(native.get("originalFailure"))
+    credential = last(state.get("credential_calls"), 64)
+    context = last(state.get("credential_contexts"), 64)
+    purposes = ("python", "resident-image", "helper", "producer", "installer", "observer-program",
+                "distribution-image", "observation-image") + SIGNING_PHASES + TOOL_SIGNING_PHASES
+    phases = ((APP_SIGNATURE_SUMMARY,) + PHASES + SUPPORT_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES
+              + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES
+              + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
+    pending = receipt.get("directStagerIOPending")
+    return {
+        "schemaVersion": 1, "kind": "android-helper-failure", "outcome": "failure",
+        "diagnosticOnly": True, "productReady": False,
+        "phase": token(phase, phases), "target": token(target, (ARM_TARGET, INTEL_TARGET)),
+        "mainStage": token(main_stage, _FAILURE_MAIN_STAGES), "terminal": failure_exception(error, stager),
+        "compiler": compiler_diagnostic_data(state.get("compiler_failure")),
+        "originalFailure": {
+            "recorded": type(receipt.get("failure")) is dict if state else None,
+            "stage": token(original.get("stage"), _FAILURE_STAGES),
+            "type": token(captured.get("type"), _FAILURE_TYPES),
+            "reason": token(captured.get("reason", original.get("reason")), _FAILURE_REASONS),
+            "errno": integer(captured.get("errno", original.get("errno")), 1, 65535),
+        },
+        "lastRecordedNative": {
+            "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES),
+            **{key: flag(native.get(key)) for key in ("entered", "returned", "capturesSettled", "dispatched", "contained", "cleanup_complete")},
+            "returncode": integer(native.get("returncode"), -65536, 65535),
+            "originalFailure": {"available": flag(owned.get("available")),
+                "ownerErrorType": token(owned.get("ownerErrorType"), _FAILURE_OWNER_CLASSES),
+                "classification": token(owned.get("classification"), _FAILURE_OWNER_REASONS)},
+        },
+        "lastRecordedCredential": {
+            "role": token(credential.get("role"), CREDENTIAL_ROLES),
+            **{key: flag(credential.get(key)) for key in ("entered", "returned", "settled")},
+            "status": integer(credential.get("status"), -65536, 65535),
+        },
+        "lastRecordedContext": {"purpose": token(context.get("purpose"), purposes),
+            **{key: flag(context.get(key)) for key in ("closed", "retired", "searchRestored", "defaultUnchanged")}},
+        "counts": {"native": count(state.get("calls"), 4096), "credential": count(state.get("credential_calls"), 64),
+                   "contexts": count(state.get("credential_contexts"), 64), "cleanupErrors": count(state.get("errors"), 4096)},
+        "cleanup": {"targetRetired": flag(receipt.get("targetRetired")),
+            "originalClosesKnown": flag(receipt.get("originalClosesKnown")),
+            "credentialUnknown": flag(state.get("credential_unknown")),
+            "directStagerIOPending": (False if pending is None else True if type(pending) is str else None)
+                if "directStagerIOPending" in receipt else None},
+    }
+
+
+def emit_failure_diagnostic(error, **context):
+    """Best effort only: diagnostic failure cannot replace the original exit1."""
+    try:
+        value = failure_diagnostic(error, **context)
+        body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+        # Retain the existing primary diagnosis within its unchanged whole-line
+        # bound. Only a fresh diagnostic row copy is trimmed, never owner state.
+        while len(body) > 4096 and value["compiler"] is not None and value["compiler"]["rows"]:
+            value["compiler"]["rows"].pop()
+            value["compiler"]["rowsOmitted"] = True
+            body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+        if body.isascii() and len(body) <= 4096:
+            written = sys.stderr.write(body)
+            if type(written) is int and written == len(body):
+                sys.stderr.flush()
+    except BaseException:
+        pass
+
+
+def package_timeout_data(now, endpoint, requested, *, phase=None, role=None):
     """Leave the existing owner's three-second settlement inside this group."""
+    need((phase is None and role is None) or (type(phase) is str and type(role) is str),
+         "package-group-clock")
+    maximum = (1440 if phase == "prepare-app-absence" and role in
+               ("app-absence-build", "app-absence-data-tests") else 480)
     need(type(now) is int and type(endpoint) is int and 0 <= now < endpoint
-         and type(requested) is int and 0 < requested <= 480, "package-group-clock")
+         and type(requested) is int and 0 < requested <= maximum, "package-group-clock")
     remaining = (endpoint - now - 3_000_000_000) // 1_000_000_000
     need(remaining >= 1, "package-group-settlement-reserve")
     return min(requested, remaining)
@@ -1077,7 +1532,7 @@ def signing_requirement(identity, identifier):
          and identifier in (IDENTIFIER, IDENTIFIER + ".image", "dev.mobile-release-kit.desktop.distribution",
                             "dev.mobile-release-kit.desktop.observation", "dev.mobile-release-kit.desktop.remove-distribution", PYTHON_IDENTIFIER,
                              "dev.mobile-release-kit.desktop", "dev.mobile-release-kit.desktop.entry",
-                             "dev.mobile-release-kit.desktop.remove", *[row[1] for row in TOOL_FIXED.values()]), "fixed-signing-requirement")
+                             "dev.mobile-release-kit.desktop.remove", *SUPPORT_IDENTIFIERS, *[row[1] for row in TOOL_FIXED.values()]), "fixed-signing-requirement")
     return ('identifier "' + identifier + '" and anchor apple generic'
             ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
             ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
@@ -1308,8 +1763,8 @@ def removal_prepared_data(value, environment, target, case, correlation):
 class Operation:
     """Custody for this one fixed packaging operation and its finite outputs."""
 
-    def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET):
-        need(phase in PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES, "closed-phase")
+    def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET, support_started=None):
+        need(phase in PHASES + SUPPORT_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES, "closed-phase")
         self.arch, self.runner_arch, self.release_input = build_profile(target)
         self.target = target
         self.owner, self.checkout, self.work = owner, checkout, work
@@ -1348,6 +1803,8 @@ class Operation:
         self.removal_pending_outputs = set()
         self.removal_requests = None
         self.entries, self.calls, self.errors = [], [], []
+        self.diagnostic_failure = None  # Private finite DATA, never a completion/ownership latch.
+        self.compiler_failure = None  # Only a failed, returned, capture-settled build may populate this.
         self.entry_registry = {}  # Same originals, retained even after consumed/unknown closes.
         self.credential_calls, self.credential_contexts = [], []
         self.credential_active = None
@@ -1361,6 +1818,7 @@ class Operation:
         self.installer_selection = self.installer_certificates = self.installer_profile_sha = None
         self.final_package_roots, self.final_package_inputs = [], []
         self.final_package_output_root = self.final_package_output = self.final_package_sha = None
+        self.final_package_preimage = None
         self.final_package_complete = False
         self.install_presentation_sources = []
         self.install_product_root = self.install_product_output_root = self.install_product_original = None
@@ -1390,6 +1848,12 @@ class Operation:
         self.mount_entered = self.mount_known = self.mount_detached = False
         self.installer_entered = self.installer_zero = self.installation_readback = False
         self.removal_package_complete = False
+        self.android_support = self.android_support_module = None
+        self.support_started = support_started
+        self.app_absence = self.app_absence_module = self.app_absence_api = None
+        self.update = self.update_module = self.update_api = None
+        self.same_package_complete = False
+        self.same_package_case = None
         self.entry_sha256 = self.desktop_facade_sha256 = self.resident_image_sha256 = None
         self.image_release = self.image_source = self.release_entry = None
         self.receipt = {"schemaVersion": 1, "phase": phase, "target": target, "source": environment["GITHUB_SHA"],
@@ -1405,13 +1869,61 @@ class Operation:
                         "developerIdOrNotarizationQualified": False, "productReady": False}
         if phase in FINAL_IMAGE_PHASES:
             self.receipt["distributionQualified"] = False
-        if phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or phase == "prepare-removal-observers":
+        if phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             self.receipt.update(notaryAuthentication={"created": False, "closed": False, "retired": False},
                                 toolchain=None, helperIdentifier=None)
+
+    def android_support_load(self):
+        entry = self.source_original("desktop/tools/macos_android_support_signing.py", "source-support-adapter", 65536)
+        body = self.read(entry)
+        path = self.checkout / "desktop/tools/macos_android_support_signing.py"
+        spec = importlib.util.spec_from_file_location("mrk_android_support_adapter", path)
+        module = importlib.util.module_from_spec(spec)
+        need(spec.name not in sys.modules, "support-adapter-module-collision")
+        sys.modules[spec.name] = module
+        try:
+            exec(compile(body, str(path), "exec"), module.__dict__)
+            module.Refused = Refused
+            need(self.read(entry) == body, "support-source-changed")
+            self.package_sources.append((entry, body))
+            self.android_support_module = module
+            module.start(self, sys.modules[__name__], self.support_started)
+        finally:
+            need(sys.modules.get(spec.name) is module, "support-adapter-module-rebound")
+            del sys.modules[spec.name]
+
+    def update_load(self):
+        entry = self.source_original("desktop/tools/macos_update_verification.py", "source-update-adapter", 65536)
+        body = self.read(entry)
+        path = self.checkout / "desktop/tools/macos_update_verification.py"
+        spec = importlib.util.spec_from_file_location("mrk_update_adapter", path)
+        module = importlib.util.module_from_spec(spec)
+        exec(compile(body, str(path), "exec"), module.__dict__)
+        need(self.read(entry) == body, "update-source-changed")
+        self.package_sources.append((entry, body))
+        self.update_module = module
+        module.start(self, sys.modules[__name__])
+
+    def app_absence_load(self):
+        # One fixed current SOURCE leaf, held before loading any definitions.
+        # Not a plug-in resolver or a new process owner.
+        entry = self.source_original("desktop/tools/macos_app_absence_fixture.py", "source-app-absence-adapter", 65536)
+        body = self.read(entry)
+        path = self.checkout / "desktop/tools/macos_app_absence_fixture.py"
+        spec = importlib.util.spec_from_file_location("mrk_app_absence_adapter", path)
+        module = importlib.util.module_from_spec(spec)
+        exec(compile(body, str(path), "exec"), module.__dict__)
+        need(self.read(entry) == body, "app-absence-source-changed")
+        self.package_sources.append((entry, body))
+        self.app_absence_module = module
+        module.start(self, sys.modules[__name__])
 
     def register(self, fd, role, kind, parent=None, name=None):
         entry = {"fd": fd, "role": role, "kind": kind, "parent": parent, "name": name, "closed": False}
         self.entries.append(entry)  # Before any fallible identity/content observation.
+        if self.app_absence is not None or self.update is not None:
+            need(len(self.entries) <= 24576 and sum(e["fd"] is not None for e in self.entries) <= 96,
+                 "app-absence-original-ledger-bound")
         self.entry_registry[id(entry)] = entry  # History retains the FD if this insertion raises.
         return entry
 
@@ -1500,9 +2012,14 @@ class Operation:
         self.recheck_directory(entry["parent_entry"])
         return value
 
-    def publish(self, name, data, *, mode=0o600):
+    def publish(self, name, data, *, mode=0o600, parent=None):
+        if parent is not None:
+            need((self.phase == SAME_PACKAGE_PHASE and parent is self.same_package_case
+                  or self.phase == UPDATE_PHASE and self.update is not None and parent is self.update["case"])
+                 and name == "installer-output.status" and mode == 0o600, "same-package-status-purpose")
+            self.recheck_directory(parent)
         fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                     mode, dir_fd=self.work_entry["fd"])
+                     mode, dir_fd=(self.work_entry if parent is None else parent)["fd"])
         entry = self.register(fd, "output-" + name, "file")
         offset = 0
         while offset < len(data):
@@ -1515,6 +2032,8 @@ class Operation:
         os.fchmod(fd, mode)
         os.fsync(fd)
         need(os.pread(fd, len(data) + 1, 0) == data, "output-readback")
+        if self.android_support is not None:
+            self.android_support_module.output_record(self, name, entry)
         self.close(entry)
         need(entry["closed"], "output-close-unknown")
 
@@ -1583,6 +2102,12 @@ class Operation:
                  and all(c.get("returned") is True and c.get("capturesSettled") is True for c in self.calls),
                  "tool-original-dispatch-boundary")
             self.tool_clock()
+        if self.android_support is not None:
+            self.android_support_module.dispatch(self, role)
+        if self.app_absence is not None:
+            self.app_absence_module.dispatch(self, role)
+        if self.update is not None:
+            self.update_module.dispatch(self, role, argv)
         recorded_role = self.removal_recorded_role(role)
         if self.phase == "prepare-removal-observers":
             roles = removal_preparation_roles(self.removal_case)
@@ -1595,12 +2120,22 @@ class Operation:
             need(not self.removal_unknown and len(self.calls) < len(roles) and role == roles[len(self.calls)],
                  "removal-runtime-original-order")
             self.package_clock()
+        if self.phase == SAME_PACKAGE_PHASE:
+            need(not self.errors and self.stager_io_pending is None and self.credential_active is None
+                 and not self.credential_calls and not self.credential_contexts and self.notary_key is None
+                 and len(self.calls) < len(SAME_PACKAGE_ROLES)
+                 and (role == SAME_PACKAGE_ROLES[len(self.calls)] or role == "distribution-detach"
+                      and len(self.calls) == 1 and self.calls[0].get("role") == "distribution-attach"
+                      and self.calls[0].get("returncode") == 0 and self.mount_known and not self.installer_entered)
+                 and all(c.get("returned") is True and c.get("capturesSettled") is True for c in self.calls),
+                 "same-package-original-boundary")
+            self.notary_clock()
         record = {"role": recorded_role, "entered": True, "returned": False, "capturesSettled": False}
         self.calls.append(record)
         try:
             # This is the SAME owner invocation, after package clock/reserve
             # admission. An unknown dispatch remains conservatively entered.
-            if self.phase == "package-install":
+            if self.phase in ("package-install", SAME_PACKAGE_PHASE):
                 if role == "distribution-attach":
                     self.mount_entered = True
                 elif role == "installer":
@@ -1626,22 +2161,38 @@ class Operation:
              and type(result.args) in (list, tuple) and tuple(result.args) == tuple(argv)
              and type(result.stdout) is bytes and type(result.stderr) is bytes
              and len(result.stdout) + len(result.stderr) <= limit, "original-return-contract")
+        need(self.android_support is None or 0 <= result.returncode <= 255, "support-native-return-unknown")
         if self.phase == "package-install" and role == "installer":
             # Save the actual original status before any diagnostics/readback.
             self.publish("installer-output.status", (str(result.returncode) + "\n").encode("ascii"))
+        if self.phase == SAME_PACKAGE_PHASE and role == "installer":
+            self.same_package_save_status(result.returncode)
+        if self.phase == UPDATE_PHASE and role == UPDATE_ROLES[1]:
+            self.update_module.status(self, result.returncode)
+        if self.app_absence is not None and role == "app-absence-install":
+            self.app_absence_module.save_restore_status(self, result.returncode)
         record.update(returned=True, returncode=result.returncode,
                       stdoutSha256=digest(result.stdout), stderrSha256=digest(result.stderr))
-        prefix = "android-helper-" + ((self.phase + "-") if self.removal else "") + recorded_role
+        prefix = "android-helper-" + ((self.phase + "-") if self.removal or self.phase == SAME_PACKAGE_PHASE else "") + recorded_role
         self.publish(prefix + (".jsonl" if role == "build" else ".stdout"), result.stdout)
         self.publish(prefix + ".stderr", result.stderr)
         self.publish(prefix + ".status", (str(result.returncode) + "\n").encode("ascii"))
         if self.phase == "package-install" and role == "installer":
             self.publish("installer-output.txt", result.stdout + result.stderr)
         record["capturesSettled"] = True  # All original output/readback/closes returned.
+        if self.phase == "prepare" and role == "build" and result.returncode != 0:
+            try:
+                self.compiler_failure = compiler_diagnostic(result.stdout, result.stderr, str(self.checkout))
+            except BaseException:
+                pass  # No diagnostic failure may replace the SAME nonzero result.
         diagnostic = self.phase == "package-install" and role in ("installer-log-cursor", "installer-log-capture")
         need(result.returncode == 0 or diagnostic and result.returncode == 1
              or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, role, result.returncode),
              "original-nonzero-" + role)
+        if self.android_support is not None:
+            self.android_support_module.returned(self, role)
+        if self.app_absence is not None:
+            self.app_absence_module.returned(self, role)
         if self.credential_active is not None:
             self.credential_clock(self.credential_active)
             self.credential_census(self.credential_active)
@@ -1655,13 +2206,15 @@ class Operation:
         need(type(now) is int and context["observed"] <= now < context["endpoint"] - (0 if cleanup else 30_000_000_000),
              "credential-original-deadline")
         context["observed"] = now
-        if self.phase in PYTHON_PHASES:
+        if self.android_support is not None:
+            self.android_support_module.clock(self, work=not cleanup)
+        elif self.phase in PYTHON_PHASES:
             self.python_clock(work=not cleanup)
         elif self.phase in TOOL_SIGNING_PHASES:
             self.tool_clock(work=not cleanup)
         elif self.package_endpoint is not None:
             self.package_clock()
-        elif self.phase in FINAL_PACKAGE_PHASES or self.phase == "prepare-removal-observers":
+        elif self.phase in FINAL_PACKAGE_PHASES or self.phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             self.notary_clock(work=not cleanup)
         return now
 
@@ -1669,7 +2222,10 @@ class Operation:
         now = time.monotonic_ns()
         need(type(now) is int, "credential-original-clock")
         endpoint = now + 240_000_000_000
-        if self.phase in PYTHON_PHASES:
+        if self.android_support is not None:
+            _observed, outer = self.android_support_module.clock(self)
+            endpoint = min(endpoint, outer)
+        elif self.phase in PYTHON_PHASES:
             _observed, outer = self.python_clock()
             endpoint = min(endpoint, outer)
         elif self.phase in TOOL_SIGNING_PHASES:
@@ -1678,7 +2234,7 @@ class Operation:
         elif self.package_endpoint is not None:
             self.package_clock()
             endpoint = min(endpoint, self.package_endpoint)
-        elif self.phase in FINAL_PACKAGE_PHASES or self.phase == "prepare-removal-observers":
+        elif self.phase in FINAL_PACKAGE_PHASES or self.phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             _observed, outer = self.notary_clock()
             endpoint = min(endpoint, outer)
         return {"observed": now, "endpoint": endpoint, "ready": False, "retiring": False, "pending": None,
@@ -1776,6 +2332,7 @@ class Operation:
                  and type(result.args) in (tuple, list) and tuple(result.args) == tuple(argv)
                  and type(result.stdout) is bytes and type(result.stderr) is bytes
                  and len(result.stdout) + len(result.stderr) <= 16384, "credential-original-return")
+            need(self.android_support is None or 0 <= result.returncode <= 255, "support-credential-return-unknown")
             record.update(returned=True, settled=True, status=result.returncode)
             self.removal_credential_records_post()
             self.credential_clock(context, cleanup=context["retiring"])
@@ -1898,13 +2455,15 @@ class Operation:
         pairs = {"python": PYTHON_ROLES[:2], "resident-image": ("resident-image-sign", "resident-image-verify-signed"),
                  "helper": ("sign", "verify-signed"), "producer": ("producer-emitter",),
                  "installer": ("final-package-sign",), "observer-program": ("program-sign", "program-verify"), **IMAGE_CREDENTIAL_ROLES,
-                 **{phase: (phase, phase + "-verify") for phase in SIGNING_PHASES + TOOL_SIGNING_PHASES}}
+                 **{phase: (phase, phase + "-verify") for phase in SIGNING_PHASES + TOOL_SIGNING_PHASES},
+                 **{role: (role + "-sign", role + "-verify") for role in ("bundletool-aapt2", "bundletool-jna", "agp-aapt2")}}
         need((purpose == "python" and self.phase in PYTHON_PHASES or purpose in ("resident-image", "helper") and self.phase == "prepare"
               or purpose in ("producer", "distribution-image", "observation-image") and self.phase == "package-install"
               or purpose in ("producer", "distribution-image") and self.phase == "package-remove"
               or purpose == "installer" and self.phase in FINAL_PACKAGE_PHASES
               or self.phase == "prepare-removal-observers" and purpose in ("observer-program", "installer", "producer", "distribution-image")
-              or purpose in SIGNING_PHASES + TOOL_SIGNING_PHASES and self.phase == purpose)
+              or purpose in SIGNING_PHASES + TOOL_SIGNING_PHASES and self.phase == purpose
+              or self.phase in SUPPORT_PHASES and purpose in ("bundletool-aapt2", "bundletool-jna", "agp-aapt2"))
              and self.credential_active is None and not self.credential_failed and self.credential_known(), "credential-fixed-purpose")
         if self.phase == "python-engineering" or self.phase == "prepare" and self.signing is None:
             yield  # No secret read, directory, keychain or auxiliary call.
@@ -1973,12 +2532,15 @@ class Operation:
             need(not identities.stderr and not certs.stderr, "credential-private-query-stderr")
             if purpose == "installer":
                 installer_identity(identities.stdout, certs.stdout, self.installer_selection, certificates)
-                # This explicitly anchored local check does NOT establish system
-                # trust. Independent pkgutil trust/timestamp/chain and Accepted
-                # remain required after signing the actual package.
+                # Exact SOURCE-enrolled DER binds the reviewed Installer role;
+                # this is not a live semantic EKU parser. pkgSign requires a
+                # different CodeSigning EKU, so use basic for the local anchored
+                # crypto/time chain. It proves neither system trust nor revocation.
+                # Actual productsign, pkgutil trust/timestamp/chain and Accepted
+                # remain mandatory after signing the actual package.
                 paths = [str(self.checkout / "desktop/packaging/macos-installer-certificates" / (name + ".der"))
                          for name in ("leaf", "issuer", "root")]
-                self.credential_call(context, "installer-chain", ["/usr/bin/security", "verify-cert", "-p", "pkgSign", "-N", "-L",
+                self.credential_call(context, "installer-chain", ["/usr/bin/security", "verify-cert", "-p", "basic", "-N", "-L",
                     "-c", paths[0], "-c", paths[1], "-r", paths[2]], timeout=30)
             else:
                 credential_identity(identities.stdout, certs.stdout, self.signing, certificates)
@@ -2510,11 +3072,15 @@ class Operation:
             info = path.lstat()
             selected_alias = stat.S_ISLNK(info.st_mode) and path == NOTARY_XCODE.parent.parent
             above_applications = path in applications.parents
+            # Existing macOS directory trust, confined to this exact fixed ancestor.
+            trusted_applications_group = (path == applications and stat.S_ISDIR(info.st_mode)
+                and info.st_uid == 0 and info.st_gid in (0, 80) and not info.st_mode & 0o002)
             need((info.st_uid == 0 and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
                   and not info.st_mode & 0o022) if name == "productbuild" else
                  info.st_uid in (0, os.getuid())
                  and (selected_alias or (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
-                      and (above_applications or not info.st_mode & 0o022)), "notary-selected-tool-ancestry")
+                      and (above_applications or not info.st_mode & 0o022 or trusted_applications_group)),
+                 "notary-selected-tool-ancestry")
             originals.append((path, signature(info), os.readlink(path) if stat.S_ISLNK(info.st_mode) else None))
         fd = os.open(canonical, READ_FLAGS)
         entry = self.register(fd, "notary-system-tool", "notary-system-tool")
@@ -3132,7 +3698,7 @@ class Operation:
         audit = self.stager.maintenance_json(audit_body, 16384)
         need(type(audit) is dict and audit.get("packageSha256") == digest(package) and type(audit.get("packageSize")) is int
              and audit["packageSize"] == len(package) and audit.get("packageIdentifier") == "dev.mobile-release-kit.desktop.installed"
-             and audit.get("qualification") == "scripts-only-package-audited-not-installed-or-GUI-qualified", "final-image-package-audit")
+             and audit.get("qualification") == self.stager.INSTALL_PRODUCT_QUALIFICATION, "final-image-package-audit")
         root = self.directory(self.work_entry, "producer-root", "final-image-producer-root")
         names = {"Install.pkg", "producer.json", "producer.sig"}
         need(set(os.listdir(root["fd"])) == names, "final-image-producer-roster")
@@ -3231,7 +3797,8 @@ class Operation:
         need((self.notary_key is not None) == (role in ("final-image-submit", "final-image-log")), "final-image-private-role")
         bounds = {"final-image-resolve-notarytool": (30, 4096), "final-image-resolve-stapler": (30, 4096),
                   "final-image-submit": (1200, 65536), "final-image-log": (30, 1024 * 1024),
-                  "final-image-verify": (120, 65536), "final-image-attach": (60, 65536)}
+                  "final-image-verify": (120, 65536), "final-image-attach": (60, 65536),
+                  "final-image-policy-status": (30, 4096)}
         need((maximum, limit) == bounds.get(role, (30, 65536)), "final-image-original-bound")
         self.notary_post()
         now, endpoint = self.notary_clock()
@@ -3360,6 +3927,12 @@ class Operation:
         self.final_image_mount_verified = True
         self.detach_package_mount()
         self.notary_post()
+        # Policy observation on this SAME finalized copy, not a quarantined
+        # download or first-launch claim. Never change global policy or xattrs.
+        result = self.final_image_call("final-image-policy-status", ["/usr/sbin/spctl", "--status"], limit=4096)
+        need(result.stdout == b"assessments enabled\n" and not result.stderr, "final-image-policy-status-format")
+        self.final_image_call("final-image-policy-assess", ["/usr/sbin/spctl", "--assess", "--type", "open",
+            "--context", "context:primary-signature", "--ignore-cache", "--no-cache", str(path)])
         self.final_image_publish()
         self.notary_post()
         self.sha256 = self.final_image_sha
@@ -3368,6 +3941,7 @@ class Operation:
             "imageMode": 0o444, "notaryProfileSha256": digest(profile_body), "submissionId": submission["id"], "status": submission["status"], **log,
             "strictSignatureBeforeAndAfter": True, "actualStaplerValidation": True, "actualImageVerification": True,
             "finalMountReadOnly": True, "finalMountOriginalsMatch": True, "originalMountDetached": self.mount_detached,
+            "assessmentSubsystemEnabledBefore": True, "actualDiskImagePolicyAssessment": True,
             "assurance": "final-carrier-observation-not-downloaded-install-or-gatekeeper-authority"}
         self.final_image_complete = True
         self.notary_clock()
@@ -3422,6 +3996,7 @@ class Operation:
     def final_package_post(self, *, work=True):
         """The S2 post/clock supplies SOURCE, scripts, selected tools and P8."""
         self.notary_clock(work=work)
+        self.stager.package_staple_preimage_post(self, need, work=work)
         for root, names in self.final_package_roots:
             self.recheck_directory(root)
             need(set(os.listdir(root["fd"])) == names, "final-package-directory-census")
@@ -3449,10 +4024,18 @@ class Operation:
         self.notary_post()
         size, sha = entry["identity"][6], self.notary_stream(entry)
         audit = self.stager.audit_install_product_command if self.install_product else self.stager.audit_command
-        result = self.final_package_io("final-package-original-audit", audit,
-            argparse.Namespace(target=self.target, fixture=False, scripts=self.work / self.scripts_name, package=path,
-                               original_package=self.work / self.packager_filename,
-                               **self.removal_package_audit_arguments()))
+        try:
+            result = self.final_package_io("final-package-original-audit", audit,
+                argparse.Namespace(target=self.target, fixture=False, scripts=self.work / self.scripts_name, package=path,
+                                   original_package=self.work / self.packager_filename,
+                                   **self.removal_package_audit_arguments()))
+        except self.stager.Refused as error:
+            values = BaseException.args.__get__(error)
+            if (self.install_product is True and type(error) is self.stager.Refused
+                    and type(values) is tuple and len(values) == 1 and type(values[0]) is str
+                    and len(values[0]) <= 96 and values[0] in self.stager.INSTALL_PRODUCT_AUDIT_REASONS):
+                raise Refused(values[0]) from error
+            raise  # Preserve unknown failures and the pending original-audit latch.
         need(type(result) is dict and result.get("packageSize") == size and type(result["packageSize"]) is int
              and result.get("packageSha256") == sha and self.notary_stream(entry) == sha,
              "final-package-audit-original")
@@ -3476,32 +4059,7 @@ class Operation:
         self.signing_mutation_pending = False
 
     def final_package_appended(self, before, before_sha):
-        """Bind the POST prefix to the PRE whole hash, never two POST reads."""
-        entry = self.final_package_output
-        self.recheck_directory(entry["parent_entry"])
-        after = signature(os.fstat(entry["fd"]))
-        need(after == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False))
-             and after[:6] == before[:6] and before[6] < after[6] <= before[6] + 1024 * 1024
-             and after[6] <= self.stager.MAX_BYTES, "final-package-ticket-original")
-        # Only size/mtime/ctime may change during stapling. Mode/owner/link/
-        # identity and both original directories are unchanged throughout.
-        whole, prefix, offset = hashlib.sha256(), hashlib.sha256(), 0
-        self.stager.no_xattrs(entry["fd"])
-        while offset < after[6]:
-            self.notary_clock()
-            block = os.pread(entry["fd"], min(1024 * 1024, after[6] - offset), offset)
-            need(block and len(block) <= after[6] - offset, "final-package-ticket-short-read")
-            whole.update(block)
-            if offset < before[6]:
-                prefix.update(block[:before[6] - offset])
-            offset += len(block)
-        need(prefix.hexdigest() == before_sha and os.pread(entry["fd"], 1, offset) == b""
-             and signature(os.fstat(entry["fd"])) == after
-             == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
-             "final-package-signed-prefix-changed")
-        self.recheck_directory(entry["parent_entry"])
-        entry["identity"], self.final_package_sha = after, whole.hexdigest()
-        self.notary_mutation_pending = False  # Only after full same-original POST.
+        self.stager.package_staple_appended(self, before, before_sha, need)
 
     def final_package_call(self, role, argv, *, maximum=30, limit=65536, developer=False):
         roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"])
@@ -3527,6 +4085,8 @@ class Operation:
         changing = role == "final-package-staple"
         before = self.final_package_output["identity"] if changing else None
         before_sha = self.final_package_sha if changing else None
+        if changing:
+            self.receipt["packageStapleObservation"] = self.stager.package_staple_observation()
         self.notary_mutation_pending = changing or role == "final-package-productbuild"
         self.signing_mutation_pending = role == "final-package-sign"
         try:
@@ -4202,12 +4762,20 @@ class Operation:
         return body
 
     def prepare(self):
+        if self.target == INTEL_TARGET:
+            self.stage = "resident-dependency-fetch"
+            # Separate acquisition from the unchanged compiler deadline. The
+            # same original call must return0 with settled captures first.
+            self.call("resident-fetch", [direct_rust_tools(self.target)[0], "fetch", "--manifest-path",
+                      str(self.checkout / WORKSPACE / "Cargo.toml"), "--locked", "--target", self.target],
+                      build_environment(self.environment, self.work, self.image_release, target=self.target),
+                      cwd=self.checkout / WORKSPACE, timeout=120, limit=4 * 1024 * 1024)
         self.stage = "separate-resident-image-compiler"
         result = self.call("build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(self.checkout / WORKSPACE / "Cargo.toml"),
-                           "--locked", "--release", "--jobs", "1", "--target", self.target,
+                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--jobs", "1", "--target", self.target,
                            "--lib", "--message-format=json-render-diagnostics"],
                            build_environment(self.environment, self.work, self.image_release, target=self.target),
-                           cwd=self.checkout / WORKSPACE, timeout=480, limit=4 * 1024 * 1024)
+                           cwd=self.checkout / WORKSPACE, timeout=720 if self.target == INTEL_TARGET else 480, limit=4 * 1024 * 1024)
         artifact(result.stdout, self.checkout, self.work / self.target_name, build_target=self.target)
         self.stage = "compiler-original-copy"
         release = self.descend(self.target_entry, (self.target, "release"))
@@ -4736,6 +5304,7 @@ class Operation:
         self.target_entry, self.target_name = parent_target, parent_name
         self.notary_roots, self.notary_tools, self.final_package_roots, self.final_package_inputs = [], {}, [], []
         self.final_package_output_root = self.final_package_output = self.final_package_sha = None
+        self.final_package_preimage = None
         self.final_package_complete = False
         self.removal_prep_phase = None
         return expected
@@ -5642,7 +6211,11 @@ class Operation:
         self.removal_directory_post(self.removal_slash)
 
     def package_clock(self):
-        if self.phase in FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
+        if self.app_absence is not None:
+            return self.app_absence_module.clock(self)
+        if self.phase == UPDATE_PHASE and self.update is not None:
+            return self.update_module.clock(self)
+        if self.phase in FINAL_IMAGE_PHASES or self.phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             return self.notary_clock()[0]  # Same clock; never the package-install990s endpoint.
         now = time.monotonic_ns()
         need(type(now) is int and type(self.package_endpoint) is int
@@ -5657,11 +6230,13 @@ class Operation:
                 and all(entry["closed"] for entry in self.entries if entry["role"].startswith("output-")))
 
     def package_stager_io(self, operation, args):
-        # Only the three existing direct stager I/O boundaries. A thrown parse
+        # Closed direct stager I/O boundaries, including the fixed no-op census. A thrown parse
         # refusal can mask that stager's local finally/close uncertainty; only a
         # normal return proves completion. Never infer it from an error token.
         need(operation in ("final-audit", "result-absence", "v2-readback")
-             or operation == "remove-input" and self.phase == "package-remove", "closed-stager-io")
+             or operation == "remove-input" and self.phase == "package-remove"
+             or operation in ("same-package-census", "same-package-readback") and self.phase == SAME_PACKAGE_PHASE,
+             "closed-stager-io")
         need(self.package_settled(), "package-io-finality-unknown")
         self.package_clock()
         self.stager_io_pending = operation
@@ -5673,6 +6248,10 @@ class Operation:
                 result = self.stager.remove_input_command(args)
             elif operation == "result-absence":
                 result = self.stager.installer_result_absent_command(args)
+            elif operation == "same-package-census":
+                result = self.stager.same_package_result_census()
+            elif operation == "same-package-readback":
+                result = self.stager.observation_command(args, expected_previous=args.expected_previous)
             else:
                 result = self.stager.observation_command(args)
         except BaseException:
@@ -5691,7 +6270,8 @@ class Operation:
                  "final-image-fixed-detach-route")
             return self.final_image_call("final-image-detach", argv)
         need(self.package_settled(), "package-io-finality-unknown")
-        timeout = package_timeout_data(self.package_clock(), self.package_endpoint, timeout)
+        endpoint = self.notary_clock()[1] if self.phase == SAME_PACKAGE_PHASE else self.package_endpoint
+        timeout = package_timeout_data(self.package_clock(), endpoint, timeout, phase=self.phase, role=role)
         result = self.call(role, argv, self.native_environment() if environment is None else environment,
                            cwd=self.work if cwd is None else cwd, timeout=timeout, limit=limit)
         self.package_clock()  # Original return AND the existing capture/status closes.
@@ -5846,7 +6426,8 @@ class Operation:
                 need(entry["closed"], "package-mount-close-unknown")
         # The original reported device is used once, without force/fallback or
         # adopting unrelated OS services. Closing our FDs precedes detach.
-        self.package_call("distribution-detach", ["/usr/bin/hdiutil", "detach", self.mount_device], timeout=30)
+        self.package_call(UPDATE_ROLES[2] if self.phase == UPDATE_PHASE else "distribution-detach",
+                          ["/usr/bin/hdiutil", "detach", self.mount_device], timeout=60 if self.phase == UPDATE_PHASE else 30)
         if self.removal_baseline_mount is not None:
             self.removal_baseline_detached()
         else:
@@ -5856,10 +6437,144 @@ class Operation:
         self.mount_detached = True
         self.package_clock()
 
+    def same_package_save_status(self, code):
+        need(self.phase == SAME_PACKAGE_PHASE and type(code) is int and self.same_package_case is not None,
+             "same-package-status-purpose")
+        self.recheck_directory(self.same_package_case)
+        need(set(os.listdir(self.same_package_case["fd"])) == {"input"}, "same-package-status-absence")
+        # Fixed owned ancestry; never overwrite/copy the first Installer status.
+        self.publish("installer-output.status", (str(code) + "\n").encode("ascii"), parent=self.same_package_case)
+        self.recheck_directory(self.same_package_case)
+        need(set(os.listdir(self.same_package_case["fd"])) == {"input", "installer-output.status"}, "same-package-status-post")
+        self.package_roots = [(root, {"input", "installer-output.status"} if root is self.same_package_case else names)
+                              for root, names in self.package_roots]
+
+    def same_package_post(self):
+        self.package_post()
+        self.final_image_post()
+        need(self.notary_known() and not self.credential_calls and not self.credential_contexts
+             and self.notary_key is None, "same-package-originals-unknown")
+        if self.mount_known and not self.mount_detached:
+            self.mounted_post()
+
+    def same_package_noop(self):
+        self.stage = SAME_PACKAGE_PHASE
+        need(self.phase == SAME_PACKAGE_PHASE and self.signing is not None
+             and self.environment.get("MRK_MACOS_SAME_PACKAGE_SCOPE") == SAME_PACKAGE_PHASE
+             and self.environment.get("GITHUB_REF") == "refs/heads/verify/desktop-macos-preview"
+             and self.environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image"
+             and not any(k in self.environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
+                         + (NOTARY_KEY_VARIABLE,)), "same-package-fixed-purpose")
+        expected, binding = self.final_image_input()
+        def retained(parent, name, maximum, modes=(0o600, 0o444)):
+            entry = self.original(parent, name, "same-package-input-" + name, maximum, modes)
+            body = self.read(entry)
+            self.final_image_inputs.append((entry, digest(body)))
+            return body
+        need(retained(self.work_entry, "image-finalization.status", 4) == b"0\n", "same-package-finalizer-original")
+        owner_body = retained(self.work_entry, "android-helper-package-install.json", 16384)
+        final_package = retained(self.work_entry, "android-helper-finalize-package.json", 16384)
+        final_body = retained(self.work_entry, "android-helper-finalize-image.json", 16384)
+        notary_profile = self.source_original(NOTARY_PROFILE, "same-package-notary-source", 1024)
+        profile_body = self.read(notary_profile)
+        self.package_sources.append((notary_profile, profile_body))
+        selection = self.stager.BuildSelection(self.target, binding["packageVersion"], binding["release"])
+        final = self.stager.final_image_receipt_data(final_body, selection=selection,
+            binding={"source": self.image_source, "runId": self.environment["GITHUB_RUN_ID"],
+                     "runAttempt": self.environment["GITHUB_RUN_ATTEMPT"]}, request=binding["requestId"],
+            package=expected["Install.pkg"], descriptor=expected["producer.json"], signed=expected["producer.sig"],
+            original_image={"file": "MobileReleaseKit.dmg", "bytes": binding["originalImageBytes"],
+                            "sha256": binding["originalImageSha256"]},
+            package_owner=owner_body, final_package=final_package, release_body=self.read(self.release_entry),
+            profiles=(self.producer_profile, self.service_profile, profile_body))
+        root = self.directory(self.work_entry, "distribution-final", "same-package-final-carrier-root")
+        need(os.listdir(root["fd"]) == ["MobileReleaseKit.dmg"], "same-package-final-carrier-roster")
+        self.final_image_roots.append((root, {"MobileReleaseKit.dmg"}))
+        image = self.original(root, "MobileReleaseKit.dmg", "same-package-final-carrier", self.stager.MAX_BYTES, (0o444,))
+        need(image["identity"][6] == final["imageBytes"] and self.notary_stream(image) == final["imageSha256"],
+             "same-package-final-carrier-bytes")
+        self.final_image_inputs.append((image, final["imageSha256"]))
+        self.package_name = "Install.pkg"
+        self.mount_placeholder = self.package_directory("package-mount")
+        self.same_package_post()
+        mounted = self.package_call("distribution-attach", ["/usr/bin/hdiutil", "attach",
+            str(self.work / "distribution-final/MobileReleaseKit.dmg"), "-readonly", "-nobrowse", "-noautoopen",
+            "-mountpoint", str(self.work / "package-mount"), "-plist"], timeout=60)
+        self.mount_device = self.stager.distribution_mount_data(mounted.stdout, mounted.stderr, mounted.returncode,
+                                                               self.work / "package-mount")
+        fd = os.open("package-mount", READ_FLAGS | os.O_DIRECTORY, dir_fd=self.work_entry["fd"])
+        self.mount_entry = self.register(fd, "same-package-readonly-mount", "mount", self.work_entry["fd"], "package-mount")
+        info = os.fstat(fd)
+        self.mount_entry["identity"] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+        self.mount_known = True
+        self.mount_inputs(expected, "Install.pkg")
+        args = argparse.Namespace(target=self.target, fixture=False, input=self.work / "input",
+            expected_source=self.image_source, expected_inventory=self.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"],
+            expected_manifest=self.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"], request_id=binding["requestId"],
+            expected_package=binding["packageSha256"], producer_descriptor=self.work / "package-mount/producer.json",
+            producer_signature=self.work / "package-mount/producer.sig", installer_status=self.work / "installer-output.status",
+            package=self.work / "package-mount/Install.pkg")
+        self.same_package_post()
+        baseline = self.package_stager_io("v2-readback", args)
+        need(baseline["originalInstallerResult"]["action"] == "fresh-install", "same-package-fresh-baseline")
+        before = self.package_stager_io("same-package-census", None)
+        baseline_request = binding["requestId"]
+        need(set(before) == {baseline_request} and before[baseline_request] == {
+            k: baseline["installerResultExport"][k] for k in ("bytes", "sha256", "identity")}, "same-package-baseline-export")
+        self.same_package_case = self.package_directory("same-package-case")
+        os.mkdir("input", 0o700, dir_fd=self.same_package_case["fd"])
+        projected = self.directory(self.same_package_case, "input", "same-package-inventory-input")
+        source_input = self.directory(self.work_entry, "input", "same-package-original-input")
+        inventory = self.original(source_input, self.stager.INSTALLATION_INVENTORY_NAME, "same-package-inventory", 1024 * 1024, (0o444,))
+        inventory_body = self.read(inventory)
+        need(digest(inventory_body) == args.expected_inventory, "same-package-inventory-binding")
+        self.package_sources.append((inventory, inventory_body))
+        self.package_file(projected, self.stager.INSTALLATION_INVENTORY_NAME, inventory_body)
+        self.package_roots.extend(((self.same_package_case, {"input"}), (projected, {self.stager.INSTALLATION_INVENTORY_NAME})))
+        args.input = self.work / "same-package-case/input"
+        args.installer_status = self.work / "same-package-case/installer-output.status"
+        args.expected_previous = {"invocation": baseline["invocation"], "sha256": baseline["originalInstallerResult"]["stateSha256"]}
+        self.same_package_post()
+        need(package_timeout_data(self.package_clock(), self.notary_clock()[1], 123) == 123,
+             "installer-original-clock-reserve")
+        original = self.package_call("installer", ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg", str(args.package),
+            "-target", "/", "-dumplog", "-verboseR"], timeout=123, limit=256 * 1024)
+        self.installer_zero = original.returncode == 0
+        self.same_package_post()
+        after = self.package_stager_io("same-package-census", None)
+        args.request_id = self.stager.same_package_new_request(before, after, baseline_request)
+        observed = self.package_stager_io("same-package-readback", args)
+        need(observed["samePackagePredecessorMatched"] is True and observed["invocation"] != baseline["invocation"]
+             and observed["installationMetadata"] == baseline["installationMetadata"]
+             and observed["nonrootReadbackFileCount"] == baseline["nonrootReadbackFileCount"]
+             and after[args.request_id] == {k: observed["installerResultExport"][k] for k in ("bytes", "sha256", "identity")},
+             "same-package-live-readback")
+        need(self.package_stager_io("same-package-census", None) == after, "same-package-result-post")
+        self.publish("same-package-observation.json", self.stager.canonical(observed) + b"\n")
+        self.installation_readback = True
+        self.same_package_post()
+        self.detach_package_mount()
+        self.same_package_post()
+        self.receipt["samePackageObservation"] = {"schemaVersion": 1, "kind": "final-carrier-same-package-noop",
+            "finalImageReceiptSha256": digest(final_body), "imageSha256": final["imageSha256"],
+            "packageSha256": binding["packageSha256"], "inventorySha256": args.expected_inventory,
+            "runtimeManifestSha256": args.expected_manifest,
+            "baselineResultSha256": before[baseline_request]["sha256"], "resultSha256": after[args.request_id]["sha256"],
+            "beforeExportCount": 1, "afterExportCount": 2, "newExportCount": 1,
+            "payloadWriteCount": 0, "payloadWriteBytes": 0, "verifiedCurrentFiles": observed["nonrootReadbackFileCount"],
+            "samePackageNoopObserved": True, "immediatePredecessorMatched": True, "currentObjectsPreserved": True,
+            "retainedGenerationsPreserved": True, "currentBytesVerified": True, "baselineExportUnchanged": True,
+            "originalInstallerReturnedZero": self.installer_zero, "mountReadOnly": True, "mountOriginalsMatch": True,
+            "originalMountDetached": self.mount_detached, "systemServiceExitClaimed": False, "productReady": False}
+        self.sha256 = final["imageSha256"]
+        self.same_package_complete = True
+        self.notary_clock()
+
     def package_install(self):
         self.stage = "package-final-audit"
-        self.package_started = self.package_observed = time.monotonic_ns()
-        self.package_endpoint = self.package_started + 990_000_000_000
+        if self.app_absence is None:
+            self.package_started = self.package_observed = time.monotonic_ns()
+            self.package_endpoint = self.package_started + 990_000_000_000
         self.package_clock()
         if self.environment.get("GITHUB_REF") == REMOVAL_REF:
             self.removal_baseline_admit()
@@ -5927,6 +6642,8 @@ class Operation:
             need(actual_descriptor == descriptor, "producer-exact-descriptor-emission")
             summary = self.stager.emitted_package_data(emitted.stdout, emitted.stderr, emitted.returncode, body, actual_descriptor, signed, target=self.target)
             self.package_outputs.extend(((signed_entry, digest(signed)), (descriptor_entry, digest(descriptor))))
+        if self.app_absence is not None:
+            self.app_absence_module.image_prepare(self, root)
         expected = {"Install.pkg": body, "producer.json": descriptor, "producer.sig": signed}
         self.stager.distribution_layout_data(os.listdir(root["fd"]), "Install.pkg", expected,
             {name: (value, 0o444) for name, value in expected.items()})
@@ -5963,9 +6680,13 @@ class Operation:
             installer_status=self.work / "installer-output.status", package=mount_path / self.package_name,
             run_id=self.environment["GITHUB_RUN_ID"], run_attempt=self.environment["GITHUB_RUN_ATTEMPT"])
         self.package_stager_io("result-absence", args)
+        if self.update is not None:
+            self.update_module.before_current(self, actual_descriptor)
         self.package_diagnostic(args, capture=False)
         self.package_post()
         self.mounted_post()
+        if self.app_absence is not None:
+            self.app_absence_module.baseline(self)
         self.stage = "standard-original-installer"
         # Require the unchanged inner120s plus this owner's existing3s reserve;
         # neither starts a renewed package-group deadline.
@@ -5987,7 +6708,10 @@ class Operation:
         self.package_post()
         self.mounted_post()
         self.stage = "package-nonroot-v2-readback"
-        observed = self.package_stager_io("v2-readback", args)
+        observed = (self.update_module.current_readback(self, args) if self.update is not None
+                    else self.package_stager_io("v2-readback", args))
+        if self.app_absence is not None:
+            self.app_absence_module.initial_readback(self, observed)
         self.package_clock()
         self.publish("installation-observation.json", self.stager.canonical(observed) + b"\n")
         self.installation_readback = True
@@ -5996,6 +6720,10 @@ class Operation:
         self.mounted_post()
         self.detach_package_mount()
         self.package_post()
+        if self.app_absence is not None:
+            self.app_absence_module.package_complete(self)
+        if self.update is not None:
+            self.update_module.current_complete(self)
         self.receipt["distribution"] = {"schemaVersion": 1, "kind": "mrk-ordinary-package-observed-v2", "target": self.target,
             "packageVersion": selection.package_version, "release": selection.release, "requestId": request_id,
             "packageSha256": digest(body), "packageBytes": len(body), "descriptorSha256": digest(descriptor), "signatureSha256": digest(signed),
@@ -6153,12 +6881,20 @@ class Operation:
         self.package_clock()
 
     def finish(self):
+        if self.android_support is not None:
+            try:
+                self.android_support_module.retire(self)
+            except BaseException as error:
+                self.errors.append({"stage": "support-retirement", "type": type(error).__name__})
         if self.phase in TOOL_SIGNING_PHASES and self.tool_started is not None:
             try:
                 self.tool_clock(work=False)
             except BaseException as error:
                 self.errors.append({"stage": "tool-retirement-clock", "type": type(error).__name__})
-        if not self.removal_finish_ready():
+        if (not self.removal_finish_ready()
+                or self.android_support is not None and not self.android_support_module.finish_ready(self)
+                or self.app_absence is not None and not self.app_absence_module.finish_ready(self)
+                or self.update is not None and not self.update_module.finish_ready(self)):
             # SAME unresolved originals/mounts/thread remain retained. A
             # generic finally/known output close cannot grant fixture custody.
             self.receipt.update(originalClosesKnown=False, targetRetired=False,
@@ -6192,14 +6928,14 @@ class Operation:
                 if self.phase in PYTHON_PHASES:
                     need(self.python_retiring, "python-retirement-not-admitted")
                     self.python_clock(work=False)
-                if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
+                if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
                     self.notary_clock(work=False)
                 if self.phase in TOOL_SIGNING_PHASES:
                     self.tool_clock(work=False)
                 shutil.rmtree(self.target_name, dir_fd=work_fd)
                 if self.phase in TOOL_SIGNING_PHASES:
                     self.tool_clock(work=False)
-                if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
+                if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
                     self.notary_clock(work=False)
                 if self.phase in PYTHON_PHASES:
                     self.python_clock(work=False)
@@ -6216,7 +6952,7 @@ class Operation:
         for entry in (self.target_entry, self.work_entry):
             if entry:
                 self.close(entry)
-        if self.phase == "package-install":
+        if self.phase in ("package-install", SAME_PACKAGE_PHASE):
             self.receipt["packageMount"] = {"attachEntered": self.mount_entered, "originalKnown": self.mount_known,
                 "detached": self.mount_detached, "retained": self.mount_entered and not self.mount_detached,
                 "installerEntered": self.installer_entered, "installerOriginalZero": self.installer_zero,
@@ -6241,6 +6977,11 @@ class Operation:
                                                and (self.phase not in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or not self.notary_unknown
                                                     and not self.notary_mutation_pending and self.notary_key is None)
                                                and all(entry["closed"] for entry in self.entries))
+        if self.app_absence is not None:
+            try:
+                self.app_absence_module.clock(self, work=False)
+            except BaseException as error:
+                self.errors.append({"stage": "app-absence-post-close-clock", "type": type(error).__name__})
         self.receipt["cleanupErrors"] = self.errors
 
     def execute(self, expected=None):
@@ -6249,7 +6990,7 @@ class Operation:
                 self.tool_started = self.tool_observed = time.monotonic_ns()
                 self.tool_clock()
                 self.receipt.update(toolchain=None, helperIdentifier=None)
-            if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
+            if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
                 self.notary_started = self.notary_observed = time.monotonic_ns()
                 self.notary_clock()
             if self.phase in PYTHON_PHASES:
@@ -6257,17 +6998,25 @@ class Operation:
                 self.python_clock()
                 self.receipt.update(toolchain=None, helperIdentifier=None, pythonIdentifier=PYTHON_IDENTIFIER)
             self.open()
+            if self.phase in SUPPORT_PHASES:
+                self.android_support_load()
+            if self.environment.get("GITHUB_REF") == UPDATE_REF and self.phase in (UPDATE_PHASE, "package-install"):
+                self.update_load()
+            if self.phase in APP_ABSENCE_PHASES or self.phase == "package-install" and self.environment.get("GITHUB_REF") == APP_ABSENCE_REF:
+                self.app_absence_load()
             self.profile_entry = self.source_original(PROFILE, "source-signing-profile", 1024)
             self.service_profile = self.read(self.profile_entry)
             self.signing = self.stager.service_signing_data(self.service_profile)
             self.producer_profile_entry = self.source_original(PRODUCER_PROFILE, "source-producer-profile", 1024)
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
-                allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
-                and self.environment.get("GITHUB_REF") != APP_SIGNATURE_REF)
+                allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
+                and self.environment.get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF))
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
-            if self.phase in PYTHON_PHASES:
+            if self.phase in SUPPORT_PHASES:
+                self.android_support_module.prepare(self)
+            elif self.phase in PYTHON_PHASES:
                 self.python_prepare()
             elif self.phase in TOOL_SIGNING_PHASES:
                 self.tool_prepare()
@@ -6275,10 +7024,17 @@ class Operation:
                 need(self.environment.get("MRK_MACOS_PACKAGE_ROLE") in self.stager.PACKAGE_ROLES, "source-package-role")
                 release_body = self.image_binding()
                 self.package_sources.append((self.release_entry, release_body))
-                if self.phase == "prepare":
+                if self.phase in APP_ABSENCE_PHASES:
+                    (self.app_absence_module.prepare if self.phase == APP_ABSENCE_PHASES[0]
+                     else self.app_absence_module.restore)(self)
+                elif self.phase == UPDATE_PHASE:
+                    self.update_module.baseline(self)
+                elif self.phase == "prepare":
                     self.prepare()
                 elif self.phase == "package-install":
                     self.package_install()
+                elif self.phase == SAME_PACKAGE_PHASE:
+                    self.same_package_noop()
                 elif self.phase == "package-remove":
                     self.package_remove()
                 elif self.phase == "prepare-removal-observers":
@@ -6297,9 +7053,13 @@ class Operation:
                     self.verify_staged(expected, self.environment.get("MRK_MACOS_RESIDENT_IMAGE_SHA256"))
             need(self.read(self.profile_entry) == self.service_profile
                  and self.read(self.producer_profile_entry) == self.producer_profile, "source-signing-profile-changed")
-            if self.phase not in PYTHON_PHASES + TOOL_SIGNING_PHASES:
+            if self.phase not in SUPPORT_PHASES + PYTHON_PHASES + TOOL_SIGNING_PHASES:
                 need(self.read(self.release_entry) == release_body, "source-image-release-changed")
         except BaseException as error:
+            try:
+                self.diagnostic_failure = failure_exception(error, self.stager)
+            except BaseException:
+                pass  # Do not replace the same original failure or its cleanup.
             self.receipt["failure"] = {"stage": self.stage, "type": type(error).__name__,
                                        "reason": str(error) if type(error) is Refused else "original-operation-refused"}
             if isinstance(error, OSError):
@@ -6307,7 +7067,7 @@ class Operation:
                 if type(number) is int and 0 < number < 65536:
                     self.receipt["failure"]["errno"] = number
         finally:
-            if (self.phase in ("package-install",) + FINAL_IMAGE_PHASES and self.mount_known and not self.mount_detached
+            if (self.phase in ("package-install", SAME_PACKAGE_PHASE) + FINAL_IMAGE_PHASES and self.mount_known and not self.mount_detached
                     and not self.installer_entered and self.package_settled()
                     and (self.phase not in FINAL_IMAGE_PHASES or self.final_image_known())):
                 try:
@@ -6315,7 +7075,11 @@ class Operation:
                 except BaseException as error:
                     self.errors.append({"stage": "package-mount-retained", "type": type(error).__name__})
             self.finish()
-        roles = ((removal_preparation_roles(self.removal_case) if self.removal_case in REMOVAL_CASES else ()) if self.phase == "prepare-removal-observers" else
+        roles = (self.android_support_module.ROLES if self.android_support is not None else
+                 UPDATE_ROLES if self.phase == UPDATE_PHASE else
+                 self.app_absence_module.roles(self) if self.app_absence is not None else
+                 SAME_PACKAGE_ROLES if self.phase == SAME_PACKAGE_PHASE else
+                 (removal_preparation_roles(self.removal_case) if self.removal_case in REMOVAL_CASES else ()) if self.phase == "prepare-removal-observers" else
                  (removal_runtime_roles(self.removal_case) if self.removal_case in REMOVAL_CASES else ()) if self.phase == "package-removal-fixture" else
                  FINAL_IMAGE_ROLES if self.phase in FINAL_IMAGE_PHASES else
                  final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"]) if self.phase in FINAL_PACKAGE_PHASES else
@@ -6323,7 +7087,7 @@ class Operation:
                  PYTHON_ROLES if self.phase in PYTHON_PHASES else
                  self.stager.PACKAGING_CALL_ROLES if self.phase == "package-install" else
                  REMOVE_PACKAGE_ROLES if self.phase == "package-remove" else
-                 PREPARE_ROLES if self.phase == "prepare" else
+                 prepare_roles(self.target) if self.phase == "prepare" else
                  (self.phase, self.phase + "-verify") if self.phase in SIGNING_PHASES + TOOL_SIGNING_PHASES else (self.phase, self.phase + "-resident-image") + self.tool_staged_roles)
         self.receipt["passed"] = ("failure" not in self.receipt and not self.errors and self.credential_known()
                                   and not self.credential_failed and self.credential_active is None
@@ -6349,17 +7113,31 @@ class Operation:
                                         and self.notary_result is not None and self.notary_key is None
                                         and not self.credential_calls and not self.credential_contexts
                                         and self.receipt["notaryAuthentication"] == {"created": True, "closed": True, "retired": True})
-                                  and ((self.phase in PYTHON_PHASES and self.python_signed is not None and self.python_known())
+                                  and ((self.phase in SUPPORT_PHASES and self.android_support is not None
+                                        and self.android_support_module.success(self))
+                                       or (self.phase in PYTHON_PHASES and self.python_signed is not None and self.python_known())
                                        or (self.phase in TOOL_SIGNING_PHASES and self.tool_complete and self.tool_quote_ready)
-                                       or (self.phase not in PYTHON_PHASES + TOOL_SIGNING_PHASES
-                                            and (self.phase in ("package-install", "package-remove") + REMOVAL_OWNER_PHASES or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
+                                       or (self.phase not in SUPPORT_PHASES + PYTHON_PHASES + TOOL_SIGNING_PHASES
+                                            and (self.phase in ("package-install", "package-remove", SAME_PACKAGE_PHASE, UPDATE_PHASE) + REMOVAL_OWNER_PHASES + APP_ABSENCE_PHASES or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
                                                  or self.phase in SIGNING_PHASES and self.fixed_sign_complete)
                                            and self.image_source is not None and self.image_release is not None
                                            and (self.phase != "prepare" or self.entry_sha256 is not None
                                                 and self.desktop_facade_sha256 is not None))))
+        if self.app_absence is not None:
+            self.receipt["passed"] = (self.receipt["passed"] and self.app_absence["complete"]
+                and self.app_absence_module.finish_ready(self)
+                and (self.phase == "package-install" or not self.credential_calls and not self.credential_contexts))
+        if self.update is not None:
+            self.receipt["passed"] = self.receipt["passed"] and self.update_module.finish_ready(self)
+            if self.phase == UPDATE_PHASE:
+                self.update_module.clock(self, work=False)
         if self.phase in TOOL_SIGNING_PHASES:
             self.receipt["toolFinal"] = self.receipt["passed"] and self.tool_complete
             self.tool_clock(work=False)
+        if self.phase == SAME_PACKAGE_PHASE:
+            self.receipt["passed"] = (self.receipt["passed"] and self.same_package_complete and self.notary_known()
+                and self.installer_zero and self.installation_readback and self.mount_detached
+                and not self.credential_calls and not self.credential_contexts and self.notary_key is None)
         if self.phase in REMOVAL_OWNER_PHASES:
             self.receipt["passed"] = self.receipt["passed"] and self.removal_finish_ready()
         if self.phase == "package-remove":
@@ -6381,10 +7159,10 @@ class Operation:
                 self.python_publish_final("python3", self.python_signed, 0o555)
                 capsule = (json.dumps(self.python_capsule(), sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
                 self.python_publish_final("python-signed-receipt.json", capsule, 0o444)
-        if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
+        if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             self.notary_clock(work=False)
         self.publish_receipt()
-        if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
+        if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             self.notary_clock(work=False)
         if self.phase in PYTHON_PHASES and self.receipt["passed"]:
             self.python_clock(work=False)
@@ -6392,6 +7170,12 @@ class Operation:
             self.package_clock()  # Receipt write/readback/closes are inside the SAME original group.
         if self.phase in TOOL_SIGNING_PHASES:
             self.tool_clock(work=False)
+        if self.app_absence is not None:
+            self.app_absence_module.clock(self, work=False)
+        if self.phase in SUPPORT_PHASES and self.receipt["passed"]:
+            self.android_support_module.publish_final(self)
+        if self.phase == UPDATE_PHASE and self.update is not None:
+            self.update_module.clock(self, work=False)
         need(self.receipt["passed"], "helper-package-incomplete")
         return self.sha256
 
@@ -6442,6 +7226,25 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "hosted-native-platform")
     need(Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py", "fixed-source-driver")
     ref = environment.get("GITHUB_REF")
+    scope = environment.get("MRK_MACOS_SAME_PACKAGE_SCOPE", "disabled")
+    need(scope in ("disabled", SAME_PACKAGE_PHASE)
+         and (scope == "disabled" or ref == "refs/heads/verify/desktop-macos-preview"), "same-package-source-scope")
+    if phase == SAME_PACKAGE_PHASE:
+        need(scope == SAME_PACKAGE_PHASE and ref == "refs/heads/verify/desktop-macos-preview"
+             and not any(k in environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
+                         + (NOTARY_KEY_VARIABLE,)), "same-package-fixed-purpose")
+    if ref == UPDATE_REF:
+        need(scope == "disabled" and phase in APP_SIGNATURE_PHASES + ("notarize-payload", "sign-root-installer",
+             "finalize-package", "package-install", UPDATE_PHASE), "update-fixed-native-route")
+    if phase == UPDATE_PHASE:
+        need(ref == UPDATE_REF and not any(k in environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
+             + (NOTARY_KEY_VARIABLE,)), "update-fixed-credential-free-baseline")
+    if phase in APP_ABSENCE_PHASES:
+        need(ref == APP_ABSENCE_REF and not any(k in environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
+             + (NOTARY_KEY_VARIABLE,)), "app-absence-fixed-native-phase")
+    if ref == APP_ABSENCE_REF:
+        need(scope == "disabled" and phase in APP_SIGNATURE_PHASES + ("notarize-payload", "sign-root-installer", "finalize-package", "package-install")
+             + APP_ABSENCE_PHASES, "app-absence-fixed-native-route")
     if ref == APP_SIGNATURE_REF:
         need(phase in APP_SIGNATURE_PHASES, "app-signature-fixed-native-phase")
     if ref == REMOVAL_REF:
@@ -6451,6 +7254,11 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
         raise Refused("removal-fixture-fixed-ref-only")
     if (phase in FINAL_IMAGE_PHASES or phase in REMOVE_PHASES) and ref != REMOVAL_REF:
         need(ref == "refs/heads/verify/desktop-macos-preview", "final-image-preview-ref-only")
+    support_phase = phase in SUPPORT_PHASES
+    if support_phase or ref == SUPPORT_REF:
+        need(support_phase and ref == SUPPORT_REF and target == ARM_TARGET
+             and not any(k in environment for k in INSTALLER_CREDENTIAL_VARIABLES + (NOTARY_KEY_VARIABLE,)),
+             "support-fixed-purpose-ref")
     tool_phase = phase in TOOL_SIGNING_PHASES
     if tool_phase:
         need(ref == TOOL_REF, "closed-tool-purpose-ref")
@@ -6458,9 +7266,10 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     if python_phase:
         need(ref == "refs/heads/verify/desktop-macos-python-runtime-signing-" + phase[len("python-"):],
              "closed-python-purpose-ref")
-    workflow = ("desktop-macos-python-runtime-signing.yml" if python_phase or tool_phase else
+    workflow = ("desktop-macos-android-support-signing.yml" if support_phase else
+                "desktop-macos-python-runtime-signing.yml" if python_phase or tool_phase else
                 "desktop-macos-aqua.yml" if ref == "refs/heads/verify/desktop-macos-aqua" else
-                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF) else None)
+                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF) else None)
     need(workflow is not None, "closed-workflow-route")
     sha = environment.get("GITHUB_SHA", "")
     required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": runner_arch,
@@ -6470,7 +7279,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
                 "MRK_EXPECTED_SHA": sha, "MRK_MACOS_INSTALL_SOURCE_COMMIT": sha,
                 "MRK_MACOS_PACKAGE_ROLE": "installed-shell-observation" if workflow == "desktop-macos-aqua.yml" else "ordinary-image",
                 "RUSTUP_TOOLCHAIN": rust_toolchain(target), "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET": "26.0"}
-    if python_phase or tool_phase:
+    if python_phase or tool_phase or support_phase:
         del required["MRK_MACOS_PACKAGE_ROLE"]
         del required["RUSTUP_TOOLCHAIN"]
         need(environment.get("MRK_MACOS_PACKAGE_ROLE") is None, "python-no-install-package-role")
@@ -6480,7 +7289,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     if workflow == "desktop-macos-aqua.yml":
         need(environment.get("MRK_MACOS_AQUA_SCOPE") in PACKAGE_SCOPES, "full-package-scope-only")
     work = Path(environment.get("MRK_MACOS_WORK", ""))
-    prefix = "mrk-macos-tool-signing" if tool_phase else "mrk-macos-python-signing" if python_phase else "mrk-macos-aqua" if workflow == "desktop-macos-aqua.yml" else "mrk-macos-installed"
+    prefix = "mrk-macos-android-support-signing" if support_phase else "mrk-macos-tool-signing" if tool_phase else "mrk-macos-python-signing" if python_phase else "mrk-macos-aqua" if workflow == "desktop-macos-aqua.yml" else "mrk-macos-installed"
     need(work.parent == WORK_PARENT and re.fullmatch(re.escape(prefix) + r"\.[A-Za-z0-9]{8}", work.name), "owned-work-route")
     return work
 
@@ -6511,7 +7320,7 @@ def app_signature_receipt(value, phase, target, environment, selected):
          and "failure" not in value and value.get("cleanupErrors") == []
          and value.get("directStagerIOPending", False) is None,
          "app-signature-phase-finality")
-    roles = (PREPARE_ROLES if phase == "prepare" else
+    roles = (prepare_roles(target) if phase == "prepare" else
              (phase, phase + "-verify") if phase in SIGNING_PHASES else
              (phase, phase + "-resident-image") + tuple(phase + "-" + p for p in TOOL_FIXED if selected[p] is not None))
     calls = value.get("originalCalls")
@@ -6735,11 +7544,11 @@ def tool_data_context(environment, phase, target):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "tool-data-platform")
     ref = environment.get("GITHUB_REF")
     build_selection = phase in TOOL_SELECTION_PHASES[:2]
-    if ref == APP_SIGNATURE_REF:
+    if ref in (APP_SIGNATURE_REF, APP_ABSENCE_REF):
         need(phase in APP_SIGNATURE_DATA, "app-signature-fixed-data-phase")
     workflow = "desktop-macos-python-runtime-signing.yml" if build_selection else "desktop-macos-installed.yml"
     need(ref == TOOL_REF if build_selection else ref in
-         ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF), "tool-data-ref")
+         ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF), "tool-data-ref")
     sha = environment.get("GITHUB_SHA")
     need(tool_hex(sha, 40) and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py"
          and all(environment.get(k) == v for k, v in {
@@ -6841,28 +7650,51 @@ def tool_data_main(phase, target):
 
 
 def main():
+    phase = target = stager = operation = None
+    main_stage = "entrypoint"
     try:
         phase, target = entrypoint(sys.argv)
+        support_started = time.monotonic_ns() if phase in SUPPORT_PHASES else None
         if phase in TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES:
+            main_stage = "data-phase"
             return tool_data_main(phase, target)
         if phase == APP_SIGNATURE_SUMMARY:
             need(os.environ.get("GITHUB_REF") == APP_SIGNATURE_REF, "app-signature-summary-ref")
+            main_stage = "admission"
             work = admit(os.environ, target=target, phase="verify-after")
+            main_stage = "stager-load"
             stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_app_signature_stager")
+            main_stage = "source-check"
             need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "exact-detached-checkout")
+            main_stage = "data-phase"
             return app_signature_summary(target, os.environ, stager, work)
+        main_stage = "admission"
         work = admit(os.environ, target=target, phase=phase)
+        main_stage = "stager-load"
         stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_android_helper_stager")
+        main_stage = "source-check"
         need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "exact-detached-checkout")
+        if os.environ.get("GITHUB_REF") == UPDATE_REF:
+            nomination = tool_json(stager.read(CHECKOUT / "desktop/macos-installed-inputs/update-predecessors.json", 16384))
+            need(type(nomination) is dict and nomination.get("mode") == "configured",
+                 "update-qualified-predecessor-unconfigured")
+        main_stage = "profile-check"
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
-                                     allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
+                                     allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
                                      and os.environ.get("GITHUB_REF") != APP_SIGNATURE_REF)
-        if phase in FINAL_PACKAGE_PHASES or phase == "prepare-removal-observers":
+        if phase in FINAL_PACKAGE_PHASES or phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             need(installer_profile(stager.read(CHECKOUT / INSTALLER_PROFILE, 1024)) is not None, "installer-source-unconfigured")
+        main_stage = "owner-load"
         qualification = load_data(CHECKOUT, "macos_aqua_qualification.py", "_mrk_android_helper_owner_loader")
         owner = qualification.load_owner(CHECKOUT)
-        operation = Operation(owner, CHECKOUT, work, phase, os.environ, stager, target=target)
+        main_stage = "operation-create"
+        if support_started is not None:
+            need(type(support_started) is int and support_started <= time.monotonic_ns() < support_started + 960_000_000_000,
+                 "support-admission-deadline")
+        operation = Operation(owner, CHECKOUT, work, phase, os.environ, stager, target=target, support_started=support_started)
+        main_stage = "operation-execute"
         result = operation.execute(os.environ.get("MRK_MACOS_ANDROID_HELPER_SHA256"))
+        main_stage = "success-output"
         if phase == "prepare":
             print("sha256=" + result, flush=True)
             print("entry-sha256=" + operation.entry_sha256, flush=True)
@@ -6883,10 +7715,15 @@ def main():
             sys.stdout.flush()
             operation.notary_clock(work=False)
         return 0
-    except BaseException:
-        # Native/owner messages can contain local paths. Exact bounded command
-        # outputs and typed failures are retained in the private work evidence.
-        print("Fixed Android helper packaging refused; see its bounded work receipt.", file=sys.stderr)
+    except BaseException as error:
+        # Raw originals/credentials remain private. Even stderr failure must
+        # preserve exit1; the finite second line is never success evidence.
+        try:
+            print("Fixed Android helper packaging refused; see its bounded work receipt.", file=sys.stderr)
+        except BaseException:
+            pass
+        emit_failure_diagnostic(error, phase=phase, target=target, main_stage=main_stage,
+                                operation=operation, stager=stager)
         return 1
 
 

@@ -59,7 +59,7 @@ MAVEN_BYTES = 256 << 20
 PHASE_SECONDS = 1200
 ACQUISITION_SECONDS = 900
 # Filled below from immutable current SOURCE, not an historical body store.
-PINS = {'desktop/tools/macos_android_supplier_preparation.py': [64306, '1d16d1e6af1d6d7795f36bef1bef89efbc7f05f80ac5e869216ad5225e536808'], 'desktop/tools/macos_android_supplier_correspondence.py': [53703, 'f0234fa1f56f9e5ba81a5619b6a8ae4605eefbd13e5157dd991657f7703faf29'], 'desktop/tools/macos_normal_ui_runner.py': [230130, 'd563f07e532d2d1c74b82c994211a7bbcd3e7cd9d624ac1698710eb957860d54']}
+PINS = {'desktop/tools/macos_android_supplier_preparation.py': [64306, '1d16d1e6af1d6d7795f36bef1bef89efbc7f05f80ac5e869216ad5225e536808'], 'desktop/tools/macos_android_supplier_correspondence.py': [53703, 'f0234fa1f56f9e5ba81a5619b6a8ae4605eefbd13e5157dd991657f7703faf29'], 'desktop/tools/macos_normal_ui_runner.py': [266010, 'eb3754d1e009156c7dd5e927fad44c569b43c1ce82df18da8be854293195cd43']}
 ARCHIVES = [{'role': 'jdk', 'bytes': 185851019, 'sha256': '196d13ba5f10414bef7f6a05a9b3f00edacb18ebacef2b99485db9e2ee18f0e8', 'url': 'https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.20.1_1.tar.gz', 'archivePrefix': 'jdk-17.0.20.1+1'}, {'role': 'sdk-platform', 'bytes': 64273788, 'sha256': '0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0', 'url': 'https://dl.google.com/android/repository/platform-35_r02.zip', 'archivePrefix': 'android-35'}, {'role': 'sdk-build-tools', 'bytes': 76857898, 'sha256': '530cdbd1ec315e1477624d7ed2f0f2962108d69f36eddba5894cef9ea2cedb48', 'url': 'https://dl.google.com/android/repository/build-tools_r35_macosx.zip', 'archivePrefix': 'android-15'}, {'role': 'gradle', 'bytes': 138068841, 'sha256': '6f74b601422d6d6fc4e1f9a1ab6522f642c2fdcbc15ae33ebd30ba3d7198e854', 'url': 'https://github.com/gradle/gradle-distributions/releases/download/v8.14.5/gradle-8.14.5-bin.zip', 'archivePrefix': 'gradle-8.14.5'}, {'role': 'aapt2', 'bytes': 4339472, 'sha256': '5d0aec6851fffbc9f6c8a8b50390c0bc976aa0ddf57a8a3a39061ed54b609ad1', 'url': 'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar', 'archivePrefix': '8.9.2-12782657-osx'}]
 RESOURCES = {'desktop/tools/android_dependency_preparation_data/project-v1.json': [5761, '17aaefbea83fb4b389e10d1ac01f9926562712b95253f7af5f2c6fab546b1dd4'], 'desktop/tools/android_dependency_preparation_data/verification-v1.xml': [90045, '5d00856c785363da964e00da72ad38571cfd088da915ebe86cf20640bb1c7545']}
 SDK_METADATA = [{'bytes': 17832, 'origin': 'committed-generated-sdk-package-metadata-not-vendor-archive-member-not-acceptance', 'path': 'desktop/macos-installed-inputs/android-sdk/platform-35-package.xml', 'sha256': '385364dad6ba50838ec90abc8e4593976e0e0c54c87cf703857ba0a1aad63fe2', 'target': 'sdk/platforms/android-35/package.xml'}, {'bytes': 17719, 'origin': 'committed-generated-sdk-package-metadata-not-vendor-archive-member-not-acceptance', 'path': 'desktop/macos-installed-inputs/android-sdk/build-tools-35-package.xml', 'sha256': '6f7a9969f1bb25e39ae22fa5690b878e6806217453acf3b534712fb3a76ad1d4', 'target': 'sdk/build-tools/35.0.0/package.xml'}]
@@ -869,9 +869,9 @@ UI_SCOPE = 'prepare-ui-inputs'
 UI_WORKFLOW = '.github/workflows/desktop-macos-installed.yml'
 UI_REF = 'refs/heads/verify/desktop-macos-installed'
 UI_TARGET = 'aarch64-apple-darwin'
-UI_NORMAL_PIN = [230130, 'd563f07e532d2d1c74b82c994211a7bbcd3e7cd9d624ac1698710eb957860d54']
+UI_NORMAL_PIN = [266010, 'eb3754d1e009156c7dd5e927fad44c569b43c1ce82df18da8be854293195cd43']
 UI_CATALOGUE = 'desktop/src-tauri/src/android_supplier_macos_catalogue.rs'
-UI_CATALOGUE_PIN = [20409741, '1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203']
+UI_CATALOGUE_PIN = [20409744, '24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5']
 UI_ALIAS = 'mrk-disposable-android-ui'  # Public disposable identifier, not a password.
 UI_INPUT_ENV = 'TEST_RUNNER_MRK_NORMAL_UI_ANDROID_INPUT_FIXTURE'
 UI_PASSWORD_ENV = ('MRK_ANDROID_UI_STORE_PASSWORD', 'MRK_ANDROID_UI_KEY_PASSWORD')
@@ -879,9 +879,26 @@ UI_ROOTS = {'jdk': 'jdk/temurin-17.jdk', 'sdk': 'sdk', 'gradle': 'gradle'}
 UI_WRAPPERS = ('jdk', 'jdk/temurin-17.jdk', 'sdk', 'sdk/build-tools', 'sdk/platforms', 'gradle')
 
 
+def ui_selection(target):
+    """Only the two existing installed-UI targets; ordinary A/B stays ARM."""
+    need(type(target) is str and target in (UI_TARGET, 'x86_64-apple-darwin'), 'ui-fixed-target')
+    if target == UI_TARGET:
+        return ('arm64', 'ARM64', UI_CATALOGUE, UI_CATALOGUE_PIN, ARCHIVES[:4],
+                {'Jdk': 550, 'Sdk': 14197, 'Gradle': 322}, 773497465)
+    jdk = {'role': 'jdk', 'bytes': 180578248,
+        'sha256': 'c01975da12ed4235250ff891fe8bba73a9e73037d444b269c9d0922b5dbc8e0a',
+        'url': 'https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_mac_hotspot_17.0.20.1_1.tar.gz',
+        'archivePrefix': 'jdk-17.0.20.1+1'}
+    return ('x86_64', 'X64', 'desktop/src-tauri/src/android_supplier_macos_intel_catalogue.rs',
+            [20434472, '0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb'],
+            [jdk, *ARCHIVES[1:4]], {'Jdk': 548, 'Sdk': 14197, 'Gradle': 322}, 750044172)
+
+
 def ui_context():
     env = os.environ
-    need(RUN_SCOPE == UI_SCOPE and sys.platform == 'darwin' and os.uname().machine == 'arm64'
+    target = env.get('MRK_MACOS_TARGET')
+    machine, runner_arch, *_ = ui_selection(target)
+    need(RUN_SCOPE == UI_SCOPE and sys.platform == 'darwin' and os.uname().machine == machine
          and os.getuid() > 0 and os.geteuid() == os.getuid()
          and sys.version_info[:3] == (3, 14, 7)
          and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode, 'ui-fixed-python-host')
@@ -892,8 +909,7 @@ def ui_context():
          and env.get('GITHUB_WORKFLOW_REF') == env['GITHUB_REPOSITORY'] + '/' + UI_WORKFLOW + '@' + UI_REF
          and env.get('GITHUB_WORKSPACE') == str(SOURCE) and Path.cwd() == SOURCE
          and env.get('RUNNER_ENVIRONMENT') == 'github-hosted'
-         and env.get('RUNNER_OS') == 'macOS' and env.get('RUNNER_ARCH') == 'ARM64'
-         and env.get('MRK_MACOS_TARGET') == UI_TARGET
+         and env.get('RUNNER_OS') == 'macOS' and env.get('RUNNER_ARCH') == runner_arch
          and all(re.fullmatch('[1-9][0-9]{0,19}', env.get(k, '')) for k in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')),
          'ui-fixed-installed-context')
     value = env.get('MRK_ANDROID_PREPARATION_WORK', '')
@@ -910,14 +926,15 @@ def ui_context():
         try: close_chain(*held)
         except BaseException:
             if primary is None: raise
-    return work
+    return work, target
 
 
-def ui_source_roster(clock):
+def ui_source_roster(clock, *, target=UI_TARGET):
     # A closed reader of this one checksum-pinned emitted SOURCE section, not a
     # Rust parser or a replacement for SourceSlots' later original admission.
-    raw, _ = read(SOURCE / UI_CATALOGUE, UI_CATALOGUE_PIN[0], clock=clock)
-    need([len(raw), digest(raw)] == UI_CATALOGUE_PIN, 'ui-catalogue-source-pin')
+    _, _, catalogue, pin, _, wanted_counts, wanted_total = ui_selection(target)
+    raw, _ = read(SOURCE / catalogue, pin[0], clock=clock)
+    need([len(raw), digest(raw)] == pin, 'ui-catalogue-source-pin')
     text = raw.decode('utf-8', 'strict')
     start = 'const CAT_SOURCES: &[SourceMemberSpec] = &[\n'
     stop = '];\nconst CAT_BINDINGS:'
@@ -944,8 +961,8 @@ def ui_source_roster(clock):
         need(count <= 512 << 20 and total <= TOOL_BYTES, 'ui-catalogue-file-bound')
         expected[target] = ('directory' if directory_mode else 'file', mode, count, sha)
         counts[group] += 1
-    need(counts == {'Jdk': 550, 'Sdk': 14197, 'Gradle': 322}
-         and total == 773497465, 'ui-catalogue-complete')
+    need(counts == wanted_counts
+         and total == wanted_total, 'ui-catalogue-complete')
     for path in UI_WRAPPERS:
         need(path not in expected, 'ui-wrapper-collision')
         expected[path] = ('directory', 0o755, 0, None)
@@ -998,15 +1015,16 @@ def ui_roster_match(rows, directories, expected, *, sealed):
 
 class UiAcquisition(Acquisition):
     """Only the fresh four-archive supplier-source projection; no A/B mutation."""
-    def __init__(self, work):
+    def __init__(self, work, *, target=UI_TARGET):
+        _, _, _, pin, self.archives, _, _ = ui_selection(target)
         super().__init__(work)
-        self.expected = ui_source_roster(self.clock)
-        for at in range(0, UI_CATALOGUE_PIN[0], CHUNK):
-            self.charge_read(min(CHUNK, UI_CATALOGUE_PIN[0] - at))
+        self.expected = ui_source_roster(self.clock, target=target)
+        for at in range(0, pin[0], CHUNK):
+            self.charge_read(min(CHUNK, pin[0] - at))
         self.charge_read(1)
 
     def target(self, name):
-        need(self.role in ARCHIVES[:4], 'ui-fixed-four-archives')
+        need(self.role in self.archives, 'ui-fixed-four-archives')
         return super().target(name)
 
     def append_row(self, row):
@@ -1113,11 +1131,12 @@ def ui_tool_post(work, clock, expected):
     return digest(raw + dirs_raw), total, len(rows), len(directories)
 
 
-def acquire_ui_inputs(work, *, private=None):
+def acquire_ui_inputs(work, *, private=None, target=UI_TARGET):
+    _, _, _, pin, archives, _, _ = ui_selection(target)
     need(RUN_SCOPE == UI_SCOPE and private is not None
          and os.environ.get('MRK_ANDROID_ACQUISITION_CHILD') == '1', 'ui-acquisition-original-required')
     stage = work / 'normal-ui/android-inputs'
-    a = UiAcquisition(stage)
+    a = UiAcquisition(stage, target=target)
     recheck_chain(private['fds'], private['originals'])
     for _ in range((1 << 20) // CHUNK): a.charge_read(CHUNK)
     a.charge_read(1)
@@ -1129,15 +1148,15 @@ def acquire_ui_inputs(work, *, private=None):
     tls.load_verify_locations(cadata=ca.decode('ascii'))
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), P.NoRedirect(),
                                         urllib.request.HTTPSHandler(context=tls))
-    for item in ARCHIVES[:4]: a.capture(item, opener)
+    for item in archives: a.capture(item, opener)
     a.project_sdk_metadata()
     roster_sha = a.seal()
     a.charge_read(16384); a.charge_read(1)
     value = {'schemaVersion': 1, 'scope': 'four-supplier-sources-no-native-execution',
         'status': 'closed-awaiting-original-caller', 'sourceCommit': os.environ['GITHUB_SHA'],
-        'target': UI_TARGET, 'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
-        'workflow': UI_WORKFLOW, 'ref': UI_REF, 'archives': ARCHIVES[:4],
-        'archiveBytes': sum(item['bytes'] for item in ARCHIVES[:4]), 'catalogueSha256': UI_CATALOGUE_PIN[1],
+        'target': target, 'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+        'workflow': UI_WORKFLOW, 'ref': UI_REF, 'archives': archives,
+        'archiveBytes': sum(item['bytes'] for item in archives), 'catalogueSha256': pin[1],
         'toolRosterSha256': roster_sha, 'sdkMetadata': SDK_METADATA, 'toolBytes': a.writes,
         'readBytes': a.reads, 'files': a.files, 'entries': a.entries, 'directoryCount': len(a.directories),
         'stockCaSha256': digest(ca), 'pythonExecutable': observed_python_executable(),
@@ -1147,7 +1166,8 @@ def acquire_ui_inputs(work, *, private=None):
     return a.clock
 
 
-def ui_acquisition_receipt(work, clock):
+def ui_acquisition_receipt(work, clock, *, target=UI_TARGET):
+    _, _, _, pin, archives, _, _ = ui_selection(target)
     raw, state = read(work / 'acquisition.json', 16384, clock=clock)
     value = N.document(raw)
     fields = {'schemaVersion', 'scope', 'status', 'sourceCommit', 'target', 'runId', 'runAttempt',
@@ -1157,11 +1177,11 @@ def ui_acquisition_receipt(work, clock):
     need(set(value) == fields and type(value['schemaVersion']) is int and value['schemaVersion'] == 1
          and value['scope'] == 'four-supplier-sources-no-native-execution'
          and value['status'] == 'closed-awaiting-original-caller'
-         and value['sourceCommit'] == os.environ['GITHUB_SHA'] and value['target'] == UI_TARGET
+         and value['sourceCommit'] == os.environ['GITHUB_SHA'] and value['target'] == target
          and value['runId'] == os.environ['GITHUB_RUN_ID'] and value['runAttempt'] == os.environ['GITHUB_RUN_ATTEMPT']
          and value['workflow'] == UI_WORKFLOW and value['ref'] == UI_REF
-         and value['archives'] == ARCHIVES[:4] and value['archiveBytes'] == 465051546
-         and value['catalogueSha256'] == UI_CATALOGUE_PIN[1] and value['sdkMetadata'] == SDK_METADATA
+         and value['archives'] == archives and value['archiveBytes'] == sum(item['bytes'] for item in archives)
+         and value['catalogueSha256'] == pin[1] and value['sdkMetadata'] == SDK_METADATA
          and value['protectedRegistration'] is False and value['uiQualification'] is False
          and value['pythonExecutable'] == observed_python_executable()
          and state[3] == os.getuid() and stat.S_IMODE(state[2]) == 0o600, 'ui-acquisition-bindings')
@@ -1261,7 +1281,8 @@ def ui_key_arguments(stage, passwords):
     return env, generate, export
 
 
-def prepare_ui_inputs(work, *, private=None):
+def prepare_ui_inputs(work, *, private=None, target=UI_TARGET):
+    _, _, _, pin, archives, _, _ = ui_selection(target)
     need(RUN_SCOPE == UI_SCOPE and private is not None and private['path'] == work,
          'ui-preparation-original-required')
     clock = N.PhaseClock(PHASE_SECONDS)  # One1200s endpoint: acquisition + both key originals + all POST/close.
@@ -1289,6 +1310,7 @@ def prepare_ui_inputs(work, *, private=None):
                     'GITHUB_WORKFLOW_REF', 'GITHUB_WORKSPACE', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT',
                     'RUNNER_ENVIRONMENT', 'RUNNER_OS', 'RUNNER_ARCH', 'MRK_MACOS_TARGET', 'MRK_ANDROID_PREPARATION_WORK'):
             child_env[key] = os.environ[key]
+        need(child_env['MRK_MACOS_TARGET'] == target, 'ui-acquisition-target-post')
         child_env['MRK_ANDROID_ACQUISITION_CHILD'] = '1'
         acquisition = N.NormalPhase(owner, child_env, SOURCE, clock)
         source_original(acquisition, 'pre')
@@ -1297,14 +1319,14 @@ def prepare_ui_inputs(work, *, private=None):
             ACQUISITION_SECONDS, 16384)
         need(result.returncode == 0, 'ui-acquisition-original-return')
         need(nine(os.stat(stage, follow_symlinks=False))[:5] == stage_identity, 'ui-stage-acquisition-post')
-        acquired = ui_acquisition_receipt(stage, clock)
+        acquired = ui_acquisition_receipt(stage, clock, target=target)
         # Reserve all three complete parent source reads, both catalogue reads,
         # roster EOFs, fixed private readbacks and source metadata before key entry.
         # An unknown read consumes this allowance; no refund or renewed8GiB budget.
         reserved_reads = (3 * (TOOL_BYTES + FILES + 2 * ((4 << 20) + 1))
-                          + 2 * (UI_CATALOGUE_PIN[0] + 1) + (8 << 20))
+                          + 2 * (pin[0] + 1) + (8 << 20))
         need(acquired['readBytes'] + reserved_reads <= READ_BYTES, 'ui-whole-preparation-read-bound')
-        expected = ui_source_roster(clock)
+        expected = ui_source_roster(clock, target=target)
         tools = ui_tool_post(stage, clock, expected)
         need(tools == (acquired['toolRosterSha256'], acquired['toolBytes'], acquired['files'],
                        acquired['directoryCount']), 'ui-live-acquisition-roster')
@@ -1335,7 +1357,7 @@ def prepare_ui_inputs(work, *, private=None):
             need(originals.names() == ['scalars.json', 'upload.der', 'upload.jks'],
                  'ui-private-input-namespace')
             originals.recheck()
-            need(ui_tool_post(stage, clock, expected) == tools and ui_source_roster(clock) == expected,
+            need(ui_tool_post(stage, clock, expected) == tools and ui_source_roster(clock, target=target) == expected,
                  'ui-supplier-source-post')
             source_original(acquisition, 'post')
             recheck_chain(private['fds'], private['originals'])
@@ -1361,12 +1383,12 @@ def prepare_ui_inputs(work, *, private=None):
             need(stage_facts == N.saved_version_facts(os.stat('android-inputs', dir_fd=originals.held[0][-3],
                                                            follow_symlinks=False)), 'ui-handoff-stage-original')
             handoff = {'schemaVersion': 1, 'scope': 'one-owned-android-ui-inputs',
-                'sourceCommit': os.environ['GITHUB_SHA'], 'target': UI_TARGET,
+                'sourceCommit': os.environ['GITHUB_SHA'], 'target': target,
                 'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
                 'workflow': UI_WORKFLOW, 'ref': UI_REF, 'root': str(stage),
                 'rootFacts': [str(v) for v in stage_facts],
                 'credentialDirectoryFacts': [str(v) for v in N.saved_version_facts(os.fstat(originals.held[0][-1]))],
-                'sourceCatalogueSha256': UI_CATALOGUE_PIN[1], 'sourceRosterSha256': tools[0], 'roots': roots,
+                'sourceCatalogueSha256': pin[1], 'sourceRosterSha256': tools[0], 'roots': roots,
                 'files': {name: {'relative': 'credentials/' + name, 'facts': [str(v) for v in row[2]], 'sha256': row[3]}
                           for name, row in sorted(originals.files.items())},
                 'publicCertificateSha256': certificate[3], 'keyCommands': phase.records,
@@ -2449,7 +2471,7 @@ def main():
         need(len(sys.argv) == 2 and ((RUN_SCOPE == 'observe-sdk' and sys.argv[1] == 'observe-sdk')
              or (RUN_SCOPE == 'prepare-b' and sys.argv[1] in ('prepare-b', 'acquire', 'cleanup'))
              or (ui and sys.argv[1] in ('prepare-ui-inputs', 'acquire-ui-inputs'))), 'fixed-source-scope')
-        work = ui_context() if ui else context()
+        work, target = ui_context() if ui else (context(), None)
         need(work == private['path'], 'private-work-context')
         recheck_chain(private['fds'], private['originals'])
         stage = 'normal-helper-load'
@@ -2464,9 +2486,11 @@ def main():
             report = observe_sdk_current_use(work, private=private)
             need(report['status'] == 'observed-not-admitted' and 'reason' not in report
                  and report.get('originalsClosed') is True, 'sdk-observation-refused')
+        elif ui:
+            final_clock = {'prepare-ui-inputs': prepare_ui_inputs, 'acquire-ui-inputs': acquire_ui_inputs}[sys.argv[1]](
+                work, private=private, target=target)
         else:
-            final_clock = {'prepare-b': prepare, 'acquire': acquire, 'cleanup': cleanup,
-                'prepare-ui-inputs': prepare_ui_inputs, 'acquire-ui-inputs': acquire_ui_inputs}[sys.argv[1]](work, private=private)
+            final_clock = {'prepare-b': prepare, 'acquire': acquire, 'cleanup': cleanup}[sys.argv[1]](work, private=private)
         recheck_chain(private['fds'], private['originals'])
         result = 0
     except BaseException as error:

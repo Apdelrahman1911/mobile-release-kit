@@ -2,6 +2,19 @@
 //! into the final app/runtime destinations. One original parent admits the
 //! completed package; its exact self-worker owns the existing copy writer.
 //! No Python, app, daemon or general publisher runs as root.
+// A separately compiled test role must never enable a shipping or other
+// native observation/producer role through Cargo feature unification.
+#[cfg(all(feature="macos-installed-app-absence-fixture", any(
+    feature="macos-installed-installer", feature="macos-installed-remover",
+    feature="macos-installed-installer-fixture", feature="macos-installed-removal-abrupt-fixture",
+    feature="macos-installed-removal-observer", feature="macos-installed-observation",
+    feature="desktop-shell", feature="custom-protocol", feature="development-runtime",
+    feature="macos-installed-desktop-image",
+    feature="macos-installed-resident-image", feature="macos-android-registration-helper",
+    feature="macos-package-producer", feature="macos-remove-producer",
+    feature="macos-remove-observer-producer"
+)))]
+compile_error!("app-absence fixture requires its exclusive nonshipping binary role");
 #[cfg(any(
     all(feature="macos-remove-observer-producer",any(feature="macos-installed-installer",feature="macos-installed-remover",
         feature="macos-installed-installer-fixture",feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer")),
@@ -116,6 +129,18 @@ mod installer {
     }
     fn installed_root_roster_child_data(name:&str,actual_root_alias:bool)->bool {
         component(name) || actual_root_alias && name==paths::APP_NAME
+    }
+    // Only freshly created public receipt originals may inherit their protected
+    // system parent's group. Never normalize an existing or shared object.
+    fn public_receipt_writer_private_data(id:Identity)->bool {
+        id.mode==0o100600 && id.uid==0 && id.links==1 && id.size==0
+    }
+    fn public_receipt_writer_normalized_data(before:Identity,actual:Identity,named:Identity,result:Result<()>)->Result<()> {
+        result?; // Preserve the original fchown refusal before any later use.
+        check(public_receipt_writer_private_data(before) && public_receipt_writer_private_data(actual)
+            && actual==named && actual.dev==before.dev && actual.ino==before.ino && actual.gid==0
+            && actual.mtime==before.mtime && actual.mtime_ns==before.mtime_ns,
+            "public-receipt-normalized-original")
     }
     fn created_directory_private(id: Identity) -> bool {
         id.mode & 0o170000 == 0o040000 && id.uid == 0 && id.mode & 0o7077 == 0
@@ -487,6 +512,30 @@ mod installer {
                 else { fcntl::open(Path::new("/"), flags(directory), Mode::empty()) };
             self.adopt(n, opened)?;
             let id = Identity::of(&before); self.originals[n].identity = Some(id); self.check_name(n, true)?; Ok(n)
+        }
+        fn create_public_receipt_file(&mut self,parent:usize,name:&str)->Result<usize> {
+            check(component(name),"public-receipt-component")?;
+            self.clock()?;let writer=self.reserve(Some(parent),name,Role::ReceiptWriter)?;
+            self.originals[writer].state=State::Acquiring;
+            let opened=fcntl::openat(self.fd(parent)?,name,OFlag::O_WRONLY|OFlag::O_CREAT|OFlag::O_EXCL
+                |OFlag::O_NOFOLLOW|OFlag::O_CLOEXEC|OFlag::O_NONBLOCK,Mode::from_bits_truncate(0o600));
+            self.adopt(writer,opened)?;
+            let before=Identity::of(&stat::fstat(self.fd(writer)?).map_err(|_|"public-receipt-created-stat")?);
+            check(public_receipt_writer_private_data(before),"public-receipt-private-original")?;
+            self.originals[writer].identity=Some(before);
+            self.check_name(writer,true)?;self.protected(writer,false,None)?;
+            native::no_xattrs(self.fd(writer)?.as_fd()).map_err(|_|"public-receipt-attributes")?;
+            check(stat::fstat(self.fd(writer)?).map_err(|_|"public-receipt-flags")?.st_flags==0,"public-receipt-flags")?;
+            self.clock()?;
+            let returned=unistd::fchown(self.fd(writer)?,Some(unistd::Uid::from_raw(0)),Some(unistd::Gid::from_raw(0)))
+                .map_err(|_|"public-receipt-owner");
+            returned?;self.clock()?; // No later write/normalization after refusal or expiry.
+            let actual=Identity::of(&stat::fstat(self.fd(writer)?).map_err(|_|"public-receipt-normalized-stat")?);
+            let named=Identity::of(&self.named(Some(parent),name).map_err(|_|"public-receipt-normalized-name")?);
+            public_receipt_writer_normalized_data(before,actual,named,returned)?;
+            self.originals[writer].identity=Some(actual);
+            self.check_name(writer,true)?;self.protected(writer,false,Some(0o600))?;
+            Ok(writer)
         }
         fn create_file(&mut self, parent: usize, name: &str, role: Role) -> Result<usize> {
             check(component(name), "file-component")?;
@@ -10689,6 +10738,72 @@ mod installer {
             })();
             RenameReturn { returned, result }
         }
+        // Fixed nonshipping fixture seams. Ordinary observe, writer and rename
+        // paths are unchanged; none admits a caller-selected app destination.
+        #[cfg(feature="macos-installed-app-absence-fixture")]
+        pub(super) fn app_absence_snapshot(book:&mut Install,observed:&Observed)->Result<serde_json::Value> {
+            check(observed.action==ActionData::SamePackageNoop && observed.intent.is_none()
+                && observed.intent_original.is_none(),"app-absence-current-required")?;
+            observed.controls_post(book)?;
+            let history=observed.history.as_ref().ok_or("app-absence-history-required")?;
+            check(history.originals.len()<=1 && history.current.state.retained_data().next().is_none()
+                && history.current.state.current_data().release_data()==observed.selected.current_data(),
+                "app-absence-history-bound")?;
+            held_bytes(book,history.state_original,&history.state_bytes)?;
+            let app=observed.old_app.ok_or("app-absence-current-app")?;
+            let release=observed.old_release.ok_or("app-absence-current-runtime")?;
+            book.check_name(app,true)?;book.check_name(release,true)?;
+            let runtime=book.open(Some(release),"runtime",true)?;
+            book.protected(runtime,true,Some(0o555))?;
+            let runtime_id=worker::identity_data(book.identity(runtime)?);
+            book.forward_close(runtime,"app-absence-runtime-reader-close")?;
+            let rows=history.originals.values().chain(std::iter::once(&history.current)).map(|r|
+                serde_json::json!({"invocation":r.intent.invocation_data(),"requestId":r.intent.request_id_data(),
+                    "intentSha256":r.intent.digest_data(),"stateSha256":r.state.digest_data(),
+                    "capsuleSha256":r.capsule.digest_data()})).collect::<Vec<_>>();
+            Ok(serde_json::json!({"root":book.recorded_directory(observed.prepared.destination)?,
+                "versions":book.recorded_directory(observed.prepared.versions)?,
+                "release":worker::identity_data(book.identity(release)?),"runtime":runtime_id,
+                "app":worker::identity_data(book.identity(app)?),
+                "instance":history.current.state.current_data().instance_data(),
+                "invocation":history.current.intent.invocation_data(),"requestId":history.current.intent.request_id_data(),
+                "action":history.current.intent.action_data(),"stateSha256":history.current.state.digest_data(),
+                "intentSha256":history.current.intent.digest_data(),"capsuleSha256":history.current.capsule.digest_data(),
+                "previous":history.current.intent.previous_state_data(),"history":rows}))
+        }
+        #[cfg(feature="macos-installed-app-absence-fixture")]
+        pub(super) fn app_absence_initial_history(observed:&Observed)->Result<()> {
+            let h=observed.history.as_ref().ok_or("app-absence-history-required")?;
+            check(h.originals.is_empty() && h.current.intent.action_data()==ActionData::FreshInstall
+                && h.current.state.action_data()==ActionData::FreshInstall && h.current.state.mutation_recorded_data()
+                && h.current.intent.previous_data().is_none() && h.current.intent.previous_state_data().is_none()
+                && h.current.state.evidence_data().next().is_none(),"app-absence-initial-fresh-required")
+        }
+        #[cfg(feature="macos-installed-app-absence-fixture")]
+        pub(super) fn app_absence_retained_audit(book:&mut Install,observed:&Observed,private:usize)->Result<usize> {
+            let app=book.open(Some(private),"app",true)?;
+            let index=observed.prepared.inventory.index()?;
+            audit_tree(book,app,"app",&index,0)?;
+            Ok(app)
+        }
+        #[cfg(feature="macos-installed-app-absence-fixture")]
+        pub(super) fn app_absence_withdraw(book:&mut Install,observed:&Observed,private:usize)
+            ->(ReturnedData,Result<()>) {
+            let Some(app)=observed.old_app else{return(ReturnedData::KnownRefusal,Err("app-absence-current-app"));};
+            // move_app latches the actual syscall return BEFORE its POST/fsync.
+            let moved=move_app(book,app,observed.prepared.destination,paths::APP_NAME,private,"app");
+            (moved.returned,moved.result)
+        }
+        #[cfg(feature="macos-installed-app-absence-fixture")]
+        pub(super) fn app_absence_state_post(book:&Install,observed:&Observed)->Result<()> {
+            observed.controls_post(book)?;
+            let h=observed.history.as_ref().ok_or("app-absence-history-required")?;
+            held_bytes(book,h.state_original,&h.state_bytes)?;
+            for n in [observed.prepared.destination,observed.prepared.versions] {book.check_name(n,false)?;}
+            book.check_name(observed.old_release.ok_or("app-absence-current-runtime")?,true)?;
+            book.check_name(observed.old_app.ok_or("app-absence-current-app")?,true)
+        }
+
         fn publish_state(book: &mut Install, observed: &Observed, bytes: Vec<u8>, inverse: bool) -> Result<()> {
             let state = data(StateData::parse_data(&bytes,&observed.selected))?;
             let root = observed.prepared.destination;
@@ -11124,6 +11239,14 @@ mod installer {
                 for held in &self.held{count=count.checked_add(held.mount.kind.capacity()).ok_or("producer-source-memory")?;}
                 Ok(count)
             }
+            #[cfg(feature="macos-installed-app-absence-fixture")]
+            pub(super) fn app_absence_readonly_parent(&self, book:&Install) -> Result<usize> {
+                self.post(book)?;
+                check(self.purpose==InputPurpose::Install,"app-absence-product-purpose")?;
+                let held=self.held.iter().rev().find(|h|h.directory).ok_or("app-absence-carrier-parent")?;
+                check(held.readonly,"app-absence-readonly-carrier-required")?;
+                Ok(held.original)
+            }
             pub(super) fn descriptor_data(&self) -> &[u8] { &self.descriptor_body }
             pub(super) fn signature_data(&self) -> &[u8] { &self.signature_body }
             pub(super) fn package_sha256_data(&self) -> &str { &self.package_sha256 }
@@ -11498,6 +11621,10 @@ mod installer {
             script: usize, image: usize, input: usize, image_sha: String,
             executable: String, directory: String, source: String,
         }
+        #[cfg(feature="macos-installed-app-absence-fixture")]
+        pub(super) mod app_absence_fixture {
+            include!("../macos_app_absence_fixture.rs");
+        }
         impl Install {
             fn worker_source(&mut self, source: &str, input: usize) -> Result<Source> {
                 self.clock()?;
@@ -11786,7 +11913,7 @@ mod installer {
                     && book.originals[support].name == "Application Support", "maintenance-request-parent")?;
                 book.check_name(support, false)?;
                 book.protected_as(support,true,None,AclRole::SystemSupport)?;
-                let writer = book.create_file(support,&name,Role::ReceiptWriter)?;
+                let writer = book.create_public_receipt_file(support,&name)?;
                 Ok(Self { request_id:request_id.into(),name,support,writer,attempted:false,sealed_record:false })
             }
             fn empty_original(&self, book: &Install) -> Result<()> {
@@ -18802,17 +18929,18 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         }
         const ARGUMENT_LIMIT: usize = 1024;
         const ARGUMENT_BYTES_LIMIT: usize = 4096;
+        const ARGUMENT_COUNT_LIMIT: usize = if cfg!(feature = "macos-installed-removal-observer") { 7 } else { 4 };
         #[derive(Debug,Clone,Copy,PartialEq,Eq)]
         enum CompiledEntryRole { Installer, Remover }
         #[derive(Debug,PartialEq,Eq)]
         enum EntryKind { CompletedPackage, PrivateWriter, Removal, RemovalResume }
         fn entry_arguments_data(values: impl IntoIterator<Item=std::ffi::OsString>) -> Result<Vec<String>> {
-            let mut result = Vec::with_capacity(4); let mut total = 0usize;
-            // Read at most the four admitted values plus one refusal sentinel.
+            let mut result = Vec::with_capacity(ARGUMENT_COUNT_LIMIT); let mut total = 0usize;
+            // Read at most the compiled role's admitted values plus one refusal sentinel.
             // Never collect an unbounded iterator or replace invalid UTF-8.
-            for value in values.into_iter().take(5) {
+            for value in values.into_iter().take(ARGUMENT_COUNT_LIMIT + 1) {
                 let bytes = value.as_encoded_bytes();
-                check(result.len() < 4 && !bytes.is_empty() && bytes.len() <= ARGUMENT_LIMIT
+                check(result.len() < ARGUMENT_COUNT_LIMIT && !bytes.is_empty() && bytes.len() <= ARGUMENT_LIMIT
                     && !bytes.iter().any(|b| b.is_ascii_control()),"entry-argument-bound")?;
                 total = total.checked_add(bytes.len()).filter(|n| *n <= ARGUMENT_BYTES_LIMIT).ok_or("entry-argument-bound")?;
                 result.push(value.into_string().map_err(|_| "entry-argument-utf8")?);
@@ -19318,7 +19446,15 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     };
                     assert_eq!(entry_kind_data(input),expected);
                 }
-                for values in [vec!["a";5],vec![""],vec!["a\nb"],vec!["a\0b"]] { assert!(args(&values).is_err()); }
+                let expected_count = if cfg!(feature = "macos-installed-removal-observer") { 7 } else { 4 };
+                assert_eq!(ARGUMENT_COUNT_LIMIT, expected_count);
+                assert_eq!(args(&vec!["a";expected_count]).unwrap().len(), expected_count);
+                assert!(args(&vec!["a";expected_count+1]).is_err());
+                let bounded = "x".repeat(ARGUMENT_LIMIT);
+                assert!(args(&[bounded.as_str();4]).is_ok());
+                #[cfg(feature = "macos-installed-removal-observer")]
+                assert!(args(&[bounded.as_str(),bounded.as_str(),bounded.as_str(),bounded.as_str(),"x"]).is_err());
+                for values in [vec![""],vec!["a\nb"],vec!["a\0b"]] { assert!(args(&values).is_err()); }
                 assert!(entry_arguments_data([std::ffi::OsString::from("x".repeat(ARGUMENT_LIMIT+1))]).is_err());
                 use std::os::unix::ffi::OsStringExt;
                 assert!(entry_arguments_data([std::ffi::OsString::from_vec(vec![0xff])]).is_err());
@@ -19492,12 +19628,15 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         path.clone(),"2".repeat(64),"3".repeat(64),"4".repeat(64)];
                     for phase in ["before","after-cancel","after-cut","terminal"] {
                         args[1]=format!("--fixture-observe-{phase}");
-                        let (_,invocation)=removal_observer_arguments_data(&args).unwrap();
+                        let admitted=entry_arguments_data(args.iter().cloned().map(std::ffi::OsString::from)).unwrap();
+                        assert_eq!(admitted,args);
+                        let (_,invocation)=removal_observer_arguments_data(&admitted).unwrap();
                         let script=invocation.script().unwrap();assert!(script.len()<=1024);
                         assert!(std::str::from_utf8(&script).unwrap().ends_with(&format!("--fixture-observe-{phase} \"$1\" '{path}' '{}' '{}' '{}'\n",args[4],args[5],args[6])));
                     }
                     for n in 0..7 {assert!(removal_observer_arguments_data(&args[..n]).is_err());}
                     let mut wrong=args.clone();wrong.push("x".into());assert!(removal_observer_arguments_data(&wrong).is_err());
+                    assert!(entry_arguments_data(wrong.iter().cloned().map(std::ffi::OsString::from)).is_err());
                     for flag in ["--resume","--fixture-supervise","--fixture-observe-unknown"] {
                         let mut wrong=args.clone();wrong[1]=flag.into();assert!(removal_observer_arguments_data(&wrong).is_err());
                     }
@@ -20311,8 +20450,11 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             }
         }
     }
-    #[cfg(not(feature = "macos-installed-installer-fixture"))]
+    #[cfg(not(any(feature = "macos-installed-installer-fixture",
+        feature = "macos-installed-app-absence-fixture")))]
     pub(super) fn run() -> i32 { worker::entry() }
+    #[cfg(feature="macos-installed-app-absence-fixture")]
+    pub(super) fn run() -> i32 { worker::app_absence_fixture::entry() }
     #[cfg(feature = "macos-installed-installer-fixture")]
     pub(super) fn run() -> i32 { fixture::run() }
 

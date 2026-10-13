@@ -3259,11 +3259,16 @@ class _Outer:
             self.protocol_failed = True
             raise ProcessError(ERROR)
 
-    def _until(self, predicate: Callable[[], bool]) -> None:
+    def _until(self, predicate: Callable[[], bool], *, drain_outputs_after_terminal: bool = False) -> None:
         while not predicate():
             self.ctx.check()
             self._pump()
-            _require(self.wire is not None and (not self.wire.eof or predicate()))
+            # Final control EOF does not order this reader's stdout/stderr
+            # EOF observations. Only the final RUNNING caller may keep draining
+            # after an accepted terminal; all earlier handshakes still refuse.
+            _require(self.wire is not None and (not self.wire.eof or predicate()
+                     or drain_outputs_after_terminal is True and self.phase == "RUNNING"
+                     and self.sealed and self.terminal is not None))
             self.ctx.check()
             if not predicate():
                 readers = tuple(reader for reader, eof in (
@@ -3328,7 +3333,8 @@ class _Outer:
         _require(not self.sealed and not self.run_route.retired)
         self.phase = "RUNNING"
         _send(self.wire, Tag.RUN_TOOL, _scalar(self.nonce), self._pump, route=self.run_route)
-        self._until(lambda: self.terminal is not None and self.wire.eof and all(self.output_eof))
+        self._until(lambda: self.terminal is not None and self.wire.eof and all(self.output_eof),
+                    drain_outputs_after_terminal=True)
         _require(not self.protocol_failed and not self.output_failed)
 
     def _safe_pump(self) -> None:
@@ -3446,6 +3452,75 @@ class _Outer:
         return outcome
 
 
+def _owner_finality_diagnostic(engine: _Outer) -> tuple | None:
+    """Bounded stored observations after publication; never finality authority.
+
+    Bits denote failed predicates. Missing wait/terminal/wire makes their child
+    bits inapplicable, not passed. No native queries, clocks, cleanup or locks.
+    """
+    ctx = engine.ctx
+    if (type(ctx.acquisitions) is not list or len(ctx.acquisitions) > 64
+            or type(ctx.tasks) is not list or len(ctx.tasks) > 64):
+        return None
+    # Bounded copies also cap allocation if an original worker appends later.
+    acquisitions, tasks = tuple(ctx.acquisitions[:65]), tuple(ctx.tasks[:65])
+    if len(acquisitions) > 64 or len(tasks) > 64:
+        return None
+    leases, total = [], 0
+    for acquisition in acquisitions:
+        original = acquisition._leases
+        if type(original) is not list or len(original) > 512 - total:
+            return None
+        held = tuple(original[:513 - total])
+        total += len(held)
+        if total > 512:
+            return None
+        leases.append(held)
+    # Do not call Acquisition.cleanup_unknown/.leases: they traverse/allocate
+    # the live collection without our diagnostic ceiling. Read the same fields
+    # against the bounded original leases instead. This is not an atomic proof.
+    states = {}
+    cleanup = 0
+    for acquisition, held in zip(acquisitions, leases):
+        settled = not acquisition._create_running and acquisition._active_calls == 0
+        unknown = (acquisition._creation_unknown or acquisition._resource_unknown
+                   or any(lease.unknown for lease in held))
+        states[id(acquisition)] = (settled, unknown)
+        cleanup |= (0 if settled else 1) | (2 if unknown else 0)
+        if any(lease.state not in ("NEW", "CLOSED") for lease in held):
+            cleanup |= 4
+    for task in tasks:
+        state = states.get(id(task.acquisition))
+        if state is not None and (not task.joined or not state[0] or state[1]):
+            cleanup |= 8
+    child_state = states.get(id(ctx.child_acquisition))
+    if child_state is None:
+        return None
+    outer = ((0 if engine.handlers_complete else 1)
+             | (0 if engine.local_cleanup_complete else 2) | (4 if ctx.cleanup_unknown else 0))
+    if engine.child is None:
+        failed = (ctx.child_acquisition.attempted, child_state[1], any(not task.joined for task in tasks),
+                  engine.create_route.attempted, engine.run_route.attempted,
+                  not engine.create_route.retired, not engine.run_route.retired)
+        return (1, 0, outer | sum(int(value) << (index + 3) for index, value in enumerate(failed)), cleanup, None)
+    wait, terminal, wire = engine.wait, engine.terminal, engine.wire
+    failed = (wait is None, wait is not None and wait is not engine.child.receipt,
+              wait is not None and wait.status_kind != "exit",
+              wait is not None and wait.status_code not in (HELPER_OK, HELPER_FAILED),
+              terminal is None, terminal is not None and not terminal["producer"], not engine.sealed,
+              wire is None, wire is not None and not wire.eof, wire is not None and wire.poisoned,
+              engine.protocol_failed, len(engine.readers) != 2, not engine.output_eof[0],
+              not engine.output_eof[1], engine.output_failed,
+              terminal is not None and len(engine.outputs[0]) != terminal["stdout"],
+              terminal is not None and len(engine.outputs[1]) != terminal["stderr"])
+    mask = None
+    if terminal is not None and terminal["producer"] and engine.sealed:
+        observed = terminal["failure_mask"]
+        if type(observed) is int and (observed in (0, 32) or 48 <= observed <= 63):
+            mask = observed
+    return (1, 1, outer | sum(int(value) << (index + 3) for index, value in enumerate(failed)), cleanup, mask)
+
+
 def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: Path | None,
                 timeout: int, capture: bool, output_limit: int,
                 cancellation: DefaultCancellation | None, on_start: Callable[[int], None] | None,
@@ -3533,6 +3608,12 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
             # conservative direction and retain the original typed object.
             preserve_lifetime_error(primary, dispatched=dispatched, contained=final)
             primary.cleanup_complete = primary.cleanup_complete and final
+            try:
+                if type(primary) in (ProcessError, ProcessCleanupError, ProcessOutcomeUnknown):
+                    primary.owner_finality_diagnostic = None
+                    primary.owner_finality_diagnostic = _owner_finality_diagnostic(engine)
+            except BaseException:
+                pass  # Optional DATA allocation/observation cannot replace the original.
             raise primary
         if isinstance(primary, (KeyboardInterrupt, SystemExit)):
             # Keep the exact original object. The actual guard's monotonic
@@ -3543,9 +3624,20 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
                  if final else ProcessCleanupError("owned command cleanup could not be confirmed",
                                                    dispatched=dispatched, contained=False))
         preserve_lifetime_error(error, previous=primary, dispatched=dispatched, contained=final)
+        try:
+            error.owner_finality_diagnostic = None
+            error.owner_finality_diagnostic = _owner_finality_diagnostic(engine)
+        except BaseException:
+            pass
         raise error from None
     if not final:
-        raise ProcessCleanupError("owned command cleanup could not be confirmed", dispatched=dispatched, contained=False)
+        error = ProcessCleanupError("owned command cleanup could not be confirmed", dispatched=dispatched, contained=False)
+        try:
+            error.owner_finality_diagnostic = None
+            error.owner_finality_diagnostic = _owner_finality_diagnostic(engine)
+        except BaseException:
+            pass
+        raise error
     if outcome.no_target is not None:
         raise ProcessError("owned command executable could not be started" if outcome.no_target.kind == "EXEC_REJECTED"
                            else "owned command was stopped before execution", dispatched=False)

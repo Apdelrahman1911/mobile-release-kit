@@ -34,6 +34,13 @@ name = "mrk-macos-remove"
 path = "src/bin/macos_install.rs"
 required-features = ["macos-installed-remover"]
 
+# NONSHIPPING: fixed app-absence verification; not an installed program.
+# The shared source selects an exclusive role, never an ordinary Installer flag.
+[[bin]]
+name = "mrk-macos-app-absence-fixture"
+path = "src/bin/macos_install.rs"
+required-features = ["macos-installed-app-absence-fixture"]
+
 # Explicit external packaging child only; never a packaged application target.
 [[example]]
 name = "macos_package_producer"
@@ -73,6 +80,8 @@ development-runtime = []
 ubuntu-runtime-publisher = []
 windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
 macos-installed-installer = []
+# Exclusive nonshipping role; the fixed root fixture owns its own baseline/restore proof.
+macos-installed-app-absence-fixture = []
 macos-installed-remover = []
 # Private-key signing is isolated to the explicit nonshipping example graph.
 macos-package-producer = ["mrk-macos-installed-native/package-producer-signing"]

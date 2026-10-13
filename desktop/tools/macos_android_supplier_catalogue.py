@@ -1,7 +1,7 @@
 """Pure, bounded observation-DATA to private Rust catalogue SOURCE projection.
 
-No filesystem, archive, network, native tool, subprocess, selected-root or Store
-access. An external owner supplies already admitted original DATA bytes and owns
+No filesystem, network, native tool, subprocess, selected-root or Store
+access. The explicit signed-support route reads bounded authenticated archive DATA. An external owner supplies already admitted original DATA bytes and owns
 all output custody, limits, original clocks and finality. A generated table is
 proposed SOURCE, never supplier/native/runtime qualification. Rust's existing
 reference_digest remains the sole reference commitment implementation.
@@ -2603,3 +2603,196 @@ def generate_intel(documents: Mapping[str, bytes], sink: Callable[[bytes], None]
     summary["inputs"] = [{"path": name, "bytes": size, "sha256": digest} for name, size, digest in data.commitments]
     summary["output"] = render(projection, sink, profile="x86_64")
     return summary
+
+# This route consumes the fixed publicly signed capsule, not original vendor
+# observation documents. Only the enumerated installed-support regions change;
+# original official arrays and REFERENCES remain byte-for-byte unchanged.
+SIGNED_CATALOGUES = {
+    "arm64": (20409741, "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"),
+    "x86_64": (20434427, "e88c50067e1b7f70b33d2d6f31abaa11e9f3c8f020b0b74294836984e1fa1b9a"),
+}
+SIGNED_NOMINATION = (3942, "64c77de1505c4d8a71b848349609d26c2bef49a1bc61f277ce5d5a0a31ad59a9")
+SIGNED_INPUT_NAMES = frozenset(("android-support.json", "android-support-signed.json",
+    "android-support-signed-receipt.json", "producer-profile.json", "service-profile.json",
+    "bundletool-all-1.18.3.jar", "aapt2-8.9.2-12782657-osx.jar"))
+
+
+def _signed_pin(raw, pin):
+    return type(raw) is bytes and len(raw) == pin[0] and hashlib.sha256(raw).hexdigest() == pin[1]
+
+
+def _signed_native(raw, expected_cpus):
+    """Finite byte windows only; Rust's native parser remains authoritative."""
+    import struct
+    need(type(raw) is bytes and 4096 <= len(raw) <= 16 * 1024 * 1024
+         and raw[:8] == b"\xca\xfe\xba\xbe\0\0\0\2", "signed-native-fat")
+    rows, end = [], 48
+    for index, expected in enumerate(expected_cpus):
+        cpu, subtype, offset, size, alignment = struct.unpack_from(">iiIII", raw, 8 + 20 * index)
+        need((cpu, subtype) == expected and 2 <= alignment <= 20 and offset % (1 << alignment) == 0
+             and end <= offset and 28 <= size and offset + size <= len(raw), "signed-native-slice")
+        magic, selected_cpu, selected_subtype, file_type, count, commands = struct.unpack_from("<IiiIII", raw, offset)
+        header_size = 28 if cpu == 7 else 32
+        need(magic == (0xfeedface if cpu == 7 else 0xfeedfacf) and (selected_cpu, selected_subtype) == expected
+             and file_type in (2, 6) and 0 < count <= 128 and count * 8 <= commands <= 16384
+             and header_size + commands <= size, "signed-native-header")
+        data = raw[offset:offset + header_size + commands]
+        at = header_size
+        for _ in range(count):
+            need(at + 8 <= len(data), "signed-native-command")
+            _, length = struct.unpack_from("<II", data, at)
+            need(length >= 8 and length % 4 == 0 and at + length <= len(data), "signed-native-command")
+            at += length
+        need(at == len(data), "signed-native-command-tail")
+        rows.append((cpu, subtype, offset, size, data))
+        end = offset + size
+    need(end == len(raw), "signed-native-fat-tail")
+    return raw[:4096], tuple(rows)
+
+
+def _signed_member(archive, member):
+    import io
+    import struct
+    import zipfile
+    # The caller authenticated the complete fixed archive before ZIP parsing.
+    # At most one <=16MiB member is expanded at a time; there is no whole extract.
+    with zipfile.ZipFile(io.BytesIO(archive)) as source:
+        entries = source.infolist()
+        need(len(entries) <= 16384 and sum(item.filename == member.path for item in entries) == 1,
+             "signed-native-member-roster")
+        info = source.getinfo(member.path)
+        need(not info.is_dir() and info.file_size == member.derived.size <= 16 * 1024 * 1024
+             and info.compress_type in (0, 8) and info.flag_bits == 2048 and not info.extra
+             and not info.comment and 0 <= info.header_offset <= len(archive) - 30,
+             "signed-native-member")
+        local = struct.unpack_from("<IHHHHHIIIHH", archive, info.header_offset)
+        need(local[0] == 0x04034b50 and local[2] == info.flag_bits and local[3] == info.compress_type
+             and local[6:9] == (info.CRC, info.compress_size, info.file_size)
+             and local[10] == 0, "signed-native-local-header")
+        data_offset = info.header_offset + 30 + local[9]
+        need(archive[info.header_offset + 30:data_offset] == member.path.encode("utf-8")
+             and data_offset + info.compress_size <= source.start_dir, "signed-native-local-name")
+        with source.open(info) as stream:
+            raw = stream.read(member.derived.size + 1)
+            need(len(raw) == member.derived.size and not stream.read(1)
+                 and hashlib.sha256(raw).hexdigest() == member.derived.sha256, "signed-native-bytes")
+        prefix, slices = _signed_native(raw, member.slices)
+        return {"member": member, "prefix": prefix, "slices": slices,
+                "local": info.header_offset, "data": data_offset, "compressed": info.compress_size,
+                "method": info.compress_type, "flags": info.flag_bits, "crc32": info.CRC}
+
+
+def _signed_array(name, raw):
+    need(type(name) is str and name.startswith("CAT_H") and len(raw) <= 16416, "signed-array")
+    return ("const " + name + ": &[u8] = &[\n" + "".join(
+        "    " + ",".join(map(str, raw[at:at + 32])) + ",\n" for at in range(0, len(raw), 32)) + "];\n").encode("ascii")
+
+
+def _signed_regions(source, rows, archives, profile):
+    """Fixed regional templates; no supplied patch, Rust expression or selector."""
+    need(profile in SIGNED_CATALOGUES and type(source) is bytes, "signed-region-profile")
+    changes = []
+
+    def region(marker, tail, replacement, *, within=None):
+        begin, limit = (0, len(source)) if within is None else within
+        need(source.count(marker, begin, limit) == 1, "signed-region-cardinality")
+        start = source.index(marker, begin, limit)
+        end = source.find(tail, start, limit)
+        need(end >= start, "signed-region-tail")
+        end += len(tail)
+        before = source[start:end]
+        after = replacement(before) if callable(replacement) else replacement
+        need(type(after) is bytes and 0 < len(after) <= 65536 and after.isascii(), "signed-region-output")
+        changes.append((start, end, after))
+
+    def block(name):
+        marker = ("const " + name + ":").encode("ascii")
+        need(source.count(marker) == 1, "signed-block-cardinality")
+        begin = source.index(marker)
+        end = source.find(b"\n];\n", begin)
+        need(end >= begin, "signed-block-tail")
+        return begin, end + 4
+
+    def replace_pin(before, field, old, new):
+        old_bytes = (field + ": " + str(old.size) + ", sha256: " + rust_string(old.sha256)).encode("ascii")
+        new_bytes = (field + ": " + str(new.size) + ", sha256: " + rust_string(new.sha256)).encode("ascii")
+        need(before.count(old_bytes) == 1, "signed-original-pin")
+        return before.replace(old_bytes, new_bytes)
+
+    selected = {"arm64": (("bundletool-aapt2", 0), ("agp-aapt2", 5)),
+                "x86_64": (("bundletool-jna", 0), ("bundletool-aapt2", 1), ("agp-aapt2", 7))}[profile]
+    cpu = ARM64 if profile == "arm64" else 0x01000007
+    for role, index in selected:
+        row = rows[role]
+        matches = [item for item in row["slices"] if item[0] == cpu]
+        need(len(matches) == 1, "signed-selected-slice")
+        for suffix, raw in (("PREFIX", row["prefix"]), ("COMMANDS", matches[0][4])):
+            name = f"CAT_H{index}_{suffix}"
+            region(("const " + name + ":").encode("ascii"), b"\n];\n", _signed_array(name, raw))
+    native_scope, payload_scope = block("CAT_N0"), block("CAT_PAYLOAD")
+    for role in ("bundletool-jna", "bundletool-aapt2"):
+        member = rows[role]["member"]
+        region(("    NestedNative { member: " + rust_string(member.path) + ",").encode("ascii"), b"\n",
+               lambda before, m=member: replace_pin(before, "bytes", m.upstream, m.derived), within=native_scope)
+    for identity, asset in (("bundletool", "BundletoolJar"), ("aapt2", "Aapt2OsxJar")):
+        archive = archives[identity]
+        region(("    SupportOriginalSpec { asset: SupportAsset::" + asset + ",").encode("ascii"), b"\n",
+               lambda before, a=archive: replace_pin(before, "bytes", a.upstream, a.derived), within=block("CAT_SUPPORT"))
+    row = rows["agp-aapt2"]
+    projected = ("const CAT_PROJECTED: ZipMemberSpec<'static> = ZipMemberSpec { name: \"aapt2\", method: ZipMethod::"
+        + ("Stored" if row["method"] == 0 else "Deflate") + ", flags: " + str(row["flags"])
+        + ", local_header_offset: " + str(row["local"]) + ", data_offset: " + str(row["data"])
+        + ", compressed_bytes: " + str(row["compressed"]) + ", bytes: " + str(row["member"].derived.size)
+        + ", crc32: " + str(row["crc32"]) + ", sha256: " + rust_string(row["member"].derived.sha256) + " };\n")
+    region(b"const CAT_PROJECTED:", b"\n", projected.encode("ascii"))
+    archive = archives["bundletool"]
+    region(b'    PayloadSource { installed: CanonicalFile { path: "bundletool/bundletool.jar",', b"\n",
+           lambda before: replace_pin(before, "size", archive.upstream, archive.derived), within=payload_scope)
+    archive, member = archives["aapt2"], row["member"]
+    region(b'    PayloadSource { installed: CanonicalFile { path: "gradle/native/aapt2/aapt2",', b"\n",
+           lambda before: replace_pin(replace_pin(before, "size", member.upstream, member.derived),
+                                      "bytes", archive.upstream, archive.derived), within=payload_scope)
+    changes.sort()
+    need(len(changes) == (11 if profile == "arm64" else 13)
+         and all(left[1] <= right[0] for left, right in zip(changes, changes[1:])), "signed-regions-overlap")
+    return tuple(changes)
+
+
+def derive_signed_support(original_source, signed_inputs, sink, *, profile):
+    """Reproducible proposed SOURCE, not native or shipping authorization.
+
+    The external owner binds this module and its fixed passive sibling import,
+    owns input/output custody and deadlines, and supplies all seven DATA values.
+    No path, filesystem extraction, subprocess or original supplier rerun occurs.
+    """
+    need(type(profile) is str and profile in SIGNED_CATALOGUES
+         and _signed_pin(original_source, SIGNED_CATALOGUES[profile]), "signed-catalogue-preimage")
+    need(type(signed_inputs) is dict and set(signed_inputs) == SIGNED_INPUT_NAMES
+         and all(type(value) is bytes for value in signed_inputs.values())
+         and sum(map(len, signed_inputs.values())) <= 48 * 1024 * 1024 + 5 * 16384,
+         "signed-input-roster")
+    need(_signed_pin(signed_inputs["android-support-signed.json"], SIGNED_NOMINATION), "signed-source-nomination")
+    import macos_android_support_signed as signed
+    relation = signed.nomination(signed_inputs["android-support-signed.json"], signed_inputs["android-support.json"])
+    archive_bytes = {a.file_name: signed_inputs[a.file_name] for a in relation.archives}
+    signed.admit_capsule(relation, signed_inputs["android-support-signed-receipt.json"], archive_bytes,
+        producer_profile_raw=signed_inputs["producer-profile.json"], service_profile_raw=signed_inputs["service-profile.json"])
+    rows = {member.role: _signed_member(archive_bytes[next(a.file_name for a in relation.archives
+                                                       if a.identity == member.archive_id)], member)
+            for member in relation.members}
+    changes = _signed_regions(original_source, rows, {a.identity: a for a in relation.archives}, profile)
+    output, previous = Emitter(sink), 0
+    for start, end, replacement in (*changes, (len(original_source), len(original_source), b"")):
+        for at in range(previous, start, 65536):
+            output.put(original_source[at:min(at + 65536, start)].decode("ascii"))
+        if replacement:
+            output.put(replacement.decode("ascii"))
+        previous = end
+    result = output.finish()
+    return {"schemaVersion": 1, "kind": "signed-support-catalogue-source-projection-v1", "profile": profile,
+            "before": {"bytes": len(original_source), "sha256": hashlib.sha256(original_source).hexdigest()},
+            "output": result, "nominationSha256": relation.sha256,
+            "regions": [{"start": start, "end": end, "beforeSha256": hashlib.sha256(original_source[start:end]).hexdigest(),
+                         "afterSha256": hashlib.sha256(replacement).hexdigest(), "afterBytes": len(replacement)}
+                        for start, end, replacement in changes],
+            "nativeExecuted": False, "supplierAuthority": False, "shippingEnrollment": False}

@@ -9,16 +9,19 @@ Rust, Node.js or the CLI to try the application.
 
 ## Before installing
 
-- **Supported preview machine:** Apple Silicon (ARM64), macOS 26.
-  Intel Macs, older macOS releases, upgrades and moving the installation are
-  not qualified by this package.
+- **Verification targets:** Apple Silicon (ARM64) and Intel (x86_64), macOS 26.
+  The workflow checks separate architecture-specific packages; a configured
+  target or running job is not a supported-delivery claim. Use only the exact
+  target whose required completed checks and distribution evidence are accepted.
+  Older macOS releases, upgrades and moving the installation remain unqualified.
 - Use a disposable/synthetic mobile project. Do not provide production signing
   material, live Store credentials or private release data for this early test.
 - **Ordinary V2 installation requires the configured, SOURCE-selected producer
   identity:** its genuine Developer ID Application certificate/key, completed
-  package signature and the native app-purpose checks. The shipping profiles
-  are currently unconfigured, so no qualified ordinary installed preview is
-  available from them. Credential-free engineering fixtures do **not** satisfy
+  package signature and the native app-purpose checks. The public Application,
+  Installer and notary configurations are enrolled. Current-package Installer-key,
+  notarization and installed-preview verification remain pending; configuration
+  is not native qualification. Credential-free engineering fixtures do **not** satisfy
   this requirement; an unsigned/ad-hoc fixture is not an ordinary V2 package.
 - This delivery route additionally requires the separate SOURCE-selected
   Developer ID Installer identity and Apple notary authentication. It admits
@@ -38,7 +41,9 @@ Rust, Node.js or the CLI to try the application.
   same-package no-op, missing-app restore or explicitly SOURCE-authorized
   update. Missing/unknown records, unlisted predecessors or retained failures
   are refused, not repaired by deleting files. These paths still need genuine
-  native qualification; no old-version pruning or uninstall is provided.
+  native qualification; no old-version pruning is provided. Removal uses the
+  separate removal disk image and its accompanying guide; its execution and recovery
+  remain unqualified here.
 
 The adjacent **PREVIEW.json** identifies the exact source commit/tree,
 GitHub workflow/run/attempt, DMG/package/producer-sidecar SHA-256 values,
@@ -48,6 +53,29 @@ signing-account or complete distribution acceptance. Its final-carrier fields
 bind the raw preceding receipt, original/final image hashes, original0 and
 scoped native verification/mount observations. They do not turn synthetic DATA
 checks into native notarization, downloaded-install or Gatekeeper evidence.
+
+## Retrieve the matching temporary artifacts
+
+In GitHub Actions, open the exact reviewed run and attempt, then its **Artifacts**.
+Use `<target>` = `aarch64-apple-darwin` for Apple Silicon or
+`x86_64-apple-darwin` for Intel, matching the actual package and reviewed job.
+Neither target is qualified merely because its artifact exists.
+Download the two separate artifacts with the same target, full source commit,
+run ID and run attempt:
+
+- `mobile-release-kit-macos26-<target>-preview-<source>-<run-id>-<run-attempt>`
+  contains the delivery, guide and **PREVIEW.json**.
+- `desktop-macos-installed-<target>-<source>-<run-id>-<run-attempt>`
+  contains **public-verification-evidence.json**, not raw local logs or native results.
+
+Keep both reports together and check their source/workflow, run/attempt and target
+bindings. Do not substitute another target, run, attempt or removal-lifecycle artifact.
+These temporary artifacts have **14-day retention** and can expire or be unavailable;
+missing evidence is not a pass or permission to use an older package.
+The delivery can be uploaded before later GUI checks complete: review the actual
+completed job and check outcomes, not just artifact availability.
+Preserve downloaded-file quarantine and macOS security policy while extracting
+and opening the files; report any refusal without removing quarantine or bypassing it.
 
 ## Install and open without a terminal
 
@@ -71,15 +99,18 @@ against the exact ordinary app, without instrumentation: launch through the
 entry, render, open/Cancel the real project picker, Cancel the genuine Quit sheet,
 navigate safely, then genuinely Quit. One permanent-gate observation checks
 exclusion while the app/picker is live and availability after observed Quit. Look for the
-separate exact-source `normal-ui/result.json` engineering evidence; only an
-actual successful test/count receipt establishes that narrow UI observation.
-A missing, failed or skipped check is not a pass.
+matching **public-verification-evidence.json** in the separate evidence artifact.
+Its `normal-ui/test.status` and `normal-ui/summary.status` are scalar original-return
+observations, not the original XCTest counts or full UI proof. A zero scalar status
+alone does not establish the narrow UI observation: the actual completed check and
+its exact-source qualification still require review. Raw native results are not
+published in that artifact. A missing, failed or skipped check is not a pass.
 
 This check does not prove POSIX exit status or every worker's finality, direct
 payload pre-main exclusion, Finder/Installer interaction, Gatekeeper or full
 feature journeys. The root maintenance gate is permanent; never remove or replace
-it as troubleshooting. Update/restore evidence and any future uninstall
-remain separate obligations. Physical/manual observations of this exact
+it as troubleshooting. Update/restore evidence and the separate removal
+carrier's execution/recovery remain separate obligations. Physical/manual observations of this exact
 distribution and the checklist below remain separate.
 
 ## What this source currently exposes on macOS
@@ -95,20 +126,24 @@ Subject to the existing per-request runtime, document and ownership checks:
   release-version editing through the existing scoped transaction owners.
 - Evidence-folder selection and session-only GitHub read-only integration.
 - Supported session-only signing-input selection/assessment.
-- The unsigned iOS archive path, which still needs a compatible Xcode/build
-  environment and all existing admission checks.
+- The Android build/source-selection and unsigned iOS archive paths. Android
+  still requires its admitted external toolchain, license acknowledgments and
+  signing inputs; iOS requires a compatible Xcode/build environment. All existing
+  admission checks and journey-specific native qualification remain required.
 
 This is source-selected scope, **not acceptance of those journeys on this new
 normal binary**. External Android/iOS build tools are not bundled; tool
 requirements and native qualification still apply.
 
-The newly integrated edit/evidence/GitHub paths above still need real normal-app
-journey verification; source integration and Linux checks are not Mac acceptance.
-Still unavailable or not qualified here: project-relative field-picker journeys;
-image selection/import; persistent credentials; authenticated release dispatch;
-active doctor; offline preflight; project recovery; signed iOS export and iOS
-recovery. No Store mutation, public release, promotion, complete Android/iOS
-lifecycle or full feature parity is claimed.
+The paths above still need real normal-app journey verification; source
+integration and Linux checks are not Mac acceptance. Source also contains gated
+candidates for project-relative field-picker journeys, image selection/import,
+persistent credentials, build-tool diagnostics, offline preflight and project
+recovery. These implemented paths remain unqualified for this delivery; their
+presence does not establish an accepted UI journey or permission to bypass a refusal.
+Authenticated release dispatch, signed iOS export and iOS recovery are not
+claimed by this preview. No Store mutation, public release, promotion, complete
+Android/iOS lifecycle or full feature parity is claimed.
 
 ## Small manual acceptance checklist
 

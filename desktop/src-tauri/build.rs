@@ -177,6 +177,29 @@ fn github_release_tooling() {
     }
 }
 
+fn app_absence_fixture_data(target: &str, target_os: &str) {
+    const NAMES: [&str; 3] = ["MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT",
+        "MRK_APP_ABSENCE_FIXTURE_RUN_ID", "MRK_APP_ABSENCE_FIXTURE_RUN_ATTEMPT"];
+    for name in NAMES { println!("cargo:rerun-if-env-changed={name}"); }
+    let values = NAMES.map(env::var_os);
+    if !cfg!(feature = "macos-installed-app-absence-fixture") {
+        assert!(values.iter().all(Option::is_none), "fixture compile tuple on ordinary graph");
+        return;
+    }
+    assert!(target_os == "macos" && matches!(target, "aarch64-apple-darwin" | "x86_64-apple-darwin")
+        && env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() == Ok("64"), "fixture target differs");
+    let values = values.map(|v| v.expect("complete fixture compile tuple required")
+        .into_string().expect("fixture compile tuple must be UTF-8"));
+    assert!(values[0].len() == 40 && values[0].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && values[0].bytes().any(|b| b != b'0')
+        && env::var("MRK_MACOS_INSTALL_SOURCE_COMMIT").as_deref() == Ok(values[0].as_str()), "fixture same source differs");
+    for (value, limit) in [(&values[1], 20usize), (&values[2], 10usize)] {
+        assert!(!value.is_empty() && value.len() <= limit && !value.starts_with('0')
+            && value.bytes().all(|b| b.is_ascii_digit()), "fixture run tuple differs");
+    }
+    for (name, value) in NAMES.into_iter().zip(values) { println!("cargo:rustc-env={name}={value}"); }
+}
+
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification)");
     println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification_native)");
@@ -184,6 +207,7 @@ fn main() {
     let target = env::var("TARGET").expect("Cargo target required");
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Cargo target OS required");
     macos_build_release_data(&target, &target_os);
+    app_absence_fixture_data(&target, &target_os);
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DEVELOPMENT_RUNTIME");
     println!("cargo:rerun-if-env-changed=PROFILE");
     if env::var_os("CARGO_FEATURE_DEVELOPMENT_RUNTIME").is_some()

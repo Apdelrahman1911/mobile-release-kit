@@ -645,7 +645,17 @@ mod inert_arm_tests {
         // Control DATA only: no SnapshotBook constructor/native API is called.
         assert_eq!(current_native_profile().ok(), crate::android_build_protocol::Profile::current()
             .filter(|profile|policy::native_catalog_supports(*profile)));
-        assert!(crate::android_native_macos_profile::authority(crate::android_build_protocol::Profile::MacX64).is_none());
+        // Compiled catalogue DATA is not current-host or native-execution proof.
+        for (profile, architecture) in [
+            (crate::android_build_protocol::Profile::MacArm64, policy::MachArchitecture::Arm64),
+            (crate::android_build_protocol::Profile::MacX64, policy::MachArchitecture::X86_64),
+        ] {
+            let authority=crate::android_native_macos_profile::authority(profile)
+                .expect("compiled macOS profile DATA authority");
+            assert_eq!(authority.profile(),profile);
+            assert_eq!(authority.architecture(),architecture);
+        }
+        assert!(crate::android_native_macos_profile::authority(crate::android_build_protocol::Profile::LinuxX64).is_none());
         let end=Instant::now()+Duration::from_secs(30);
         let (_send,read)=watch::channel(end);
         let mut catalog=AndroidCatalogSlots::new(read);

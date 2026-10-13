@@ -175,6 +175,30 @@ const recoveryStates: Record<IOSRecoveryRowState, string> = {
   'cleanup-only': 'The exact project session retains cleanup-only state. Review the offered ordinary action; do not delete its controls manually.',
   'not-inspected': 'Project inspection was not entered after account attention or failure. No project recovery state is established.',
 };
+// Parsed current native identity/status only: not consent, file authority or a
+// claim that every worker lifetime settled. Recovery needs no saved inputs.
+function RecoveryDetails({ state }: { state: IOSArchiveState }) {
+  const op = state.status?.operation, project = state.project, consent = state.consent;
+  if (state.mode !== 'native' || !op || !isIOSRecoveryOperation(op) ||
+      state.historical || state.integrityFailed || state.nativeBlocked || state.originalUnconfirmed ||
+      state.generationLost || state.selectionPending || state.observationIssue !== null ||
+      !project || op.context.projectId !== project.projectId) return null;
+  if (consent && (op.phase !== 'awaiting-consent' || !op.intentUsable ||
+      !sameIOSArchiveIdentity(op, consent) || !sameIOSArchiveData(op.context, consent.binding.context) ||
+      consent.binding.connectionGeneration !== state.connectionGeneration ||
+      consent.binding.selectionGeneration !== state.selectionGeneration ||
+      consent.binding.contextGeneration !== state.contextGeneration ||
+      consent.binding.requestGeneration !== state.requestGeneration)) return null;
+  return <div className="save-note" role="group" aria-label="Recovery details">
+    <p><strong>Recovery request details.</strong> These IDs help support distinguish inspection from recovery. They do not authorize another action or prove that every worker finished cleanup.</p>
+    <p>Recovery operation ID: {op.operationId}</p>
+    <p>Recovery owner generation: {op.ownerGeneration}</p>
+    <p>Recovery phase: {op.phase}</p>
+    <p>Recovery outcome: {op.outcome ?? 'not-observed'}</p>
+    <p>Recovery reason: {op.reason}</p>
+  </div>;
+}
+
 export function IOSRecovery({ state, controller, projectName, operationProjectName, onHelp }: {
   state: IOSArchiveState; controller: IOSArchiveController; projectName: string | null; operationProjectName: string | null;
   onHelp?: (help: HelpContent) => void;
@@ -203,6 +227,7 @@ export function IOSRecovery({ state, controller, projectName, operationProjectNa
       <button type="button" className="button" data-mrk-ios-recovery-action="start" disabled={startReason !== null} onClick={() => void controller.start(consent.operationId, consent.ownerGeneration)}>{choice.action === 'inspect' ? 'Inspect local state once' : `Recover inspected ${choice.action} session`}</button>
       {startReason && <p className="review-caution">{startReason}</p>}
     </div>}
+    <RecoveryDetails state={state} />
     {state.error && <ErrorNotice error={state.error} title="No new local recovery outcome was confirmed" />}
     {state.originalUnconfirmed && <p className="review-caution">Do not repeat Start. Check the original iOS owner status to settle or cancel the unconfirmed request; no observation can rearm its consent.</p>}
     {recovery && <div className="session-progress" role="status" aria-live="polite"><h3>{operationProjectName ?? recovery.context.projectId} · {phases[recovery.phase]}</h3>
@@ -213,7 +238,7 @@ export function IOSRecovery({ state, controller, projectName, operationProjectNa
     {report && recovery && <div className="session-review" aria-label="Original native local recovery report">
       {(['account', 'project'] as const).map((domain) => { const row = report[domain]; if (!row) return null;
         const actionReason = controller.recoveryReason(domain, recovery);
-        return <div key={domain}><h4>{domain === 'account' ? 'Account signing state' : 'Project build-input state'} · {row.status}</h4><p>{recoveryStates[row.status]}</p>
+        return <div key={domain} role="group" aria-label={domain === 'account' ? 'Account signing recovery state' : 'Project build-input recovery state'}><h4>{domain === 'account' ? 'Account signing state' : 'Project build-input state'} · {row.status}</h4><p>{recoveryStates[row.status]}</p>
           {row.session && <p>Exact inspected session: <code>{row.session}</code>.</p>}
           {recovery.context.recovery.action === 'inspect' && <><button type="button" className="button secondary small" disabled={actionReason !== null} onClick={() => void controller.prepareRecovery(domain, recovery)}>Review ordinary {domain} recovery</button>{actionReason && <p className="save-note">{actionReason}</p>}</>}
         </div>;

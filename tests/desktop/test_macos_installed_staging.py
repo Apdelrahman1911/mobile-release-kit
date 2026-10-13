@@ -23,6 +23,7 @@ import tomllib
 from types import FunctionType, SimpleNamespace
 import unittest
 from unittest import mock
+import warnings
 
 TOOL = None
 ANDROID_HELPER = None
@@ -308,7 +309,1952 @@ RELEASE_EVIDENCE_WORKFLOW_INVERSE = ((8803,
 
 APP_SIGNATURE_WORKFLOW_INVERSE = ((273, 43, '7fce308b4a7080ff7750eac96f2d9b4cffbb3783b4122ba8cba542498acb5bfd', ''), (711, 65, '41559436d557d14e00f7d258f8c4e12dbe18d63c9fa21299122ea4ef10cecc72', ''), (1535, 196, '19f9ce6b7d1ec6a940317d1ab55b2a8098cd4c1dc4888103cf0534954547c57f', 'timeout-minutes: 350'), (8496, 346, '007ec8dc2b6263d463042cde185b2b11532cd97452239be023a87962e7dec487', ') ]] || exit 1'), (22387, 392, '140f1114a37be725631dc52ff0d6e6d7bc70c25a2643c3ede69bcadaa9f7435d', ''), (28064, 404, 'f02b9ddfefd341e9b719b357cfefbd9e153c83ca836d04b6e334969e895d37ce', ''), (6090, 106, 'e2d105aeb112cfd2bd59cf0647c033334694eb6acce215f761c44f7138231cc7', ''), (12337, 106, 'd50f52c13a8a19f68b2c33b50d5b25e6dd20d369fe17756888f8b9bbdc25d5b2', ''), (12803, 106, '7ee78366225f739c169111fbefed37f411bcbbd3cc2690ce927f99a229829b0a', ''), (16823, 106, '7ee78366225f739c169111fbefed37f411bcbbd3cc2690ce927f99a229829b0a', ''), (17177, 106, '7ee78366225f739c169111fbefed37f411bcbbd3cc2690ce927f99a229829b0a', ''), (25310, 106, 'd50f52c13a8a19f68b2c33b50d5b25e6dd20d369fe17756888f8b9bbdc25d5b2', ''), (46887, 22, '7c17228c1639da37cc0cb9c729e8fa369e145457f66dbca110e45efa0b5b819a', ''), (47906, 24, '4bd7d18a6ab921647f28b9f705afce990e7be141983b0261a1bd78a2027b46cd', ''), (49834, 569, '0cb195b9032334ab1fde6250bd5a506aa55210401354052606487836d0941e5d', "== 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'"), (56371, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (59904, 113, 'f5a33c75c6ce8fc9ab4318b9ff1c9c73431c21443fda21b6e7c5c4dd7aec9064', "== 'refs/heads/verify/desktop-macos-installed'"), (73979, 26, '597f8c7b070b180f75b720d5e0ed56c9d8516121f2362472835a8d2ca9f62a3f', ''), (77317, 22, '1ff00fb090aa18879ebc52e6139b586ab4df0a1f8ae2bf554349f760fd5d4971', ''), (81724, 22, '26477eb4b9b1e9f4e33d895f3a8078a3c0dd77bf259f688adef6a71076ccc3d6', ''), (86995, 25, '77ab554b279f18d90fa1e1c00e32cc72ccd74339ab1691df1db5c4813a45c27f', ''), (91240, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (91584, 25, '5cc48d8e6d98662ab3c2aab2df255eae1e5ec11f1feda55fd65b35debb50f20d', ''), (99092, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (101598, 113, 'f5a33c75c6ce8fc9ab4318b9ff1c9c73431c21443fda21b6e7c5c4dd7aec9064', "== 'refs/heads/verify/desktop-macos-installed'"), (109317, 85, '2644bb6d6cdfe3a94764f272420ae678b46e191a59addb024a0e7bb20d1991f0', "removal-lifecycle'"), (113961, 85, '2644bb6d6cdfe3a94764f272420ae678b46e191a59addb024a0e7bb20d1991f0', "removal-lifecycle'"), (116948, 85, '2644bb6d6cdfe3a94764f272420ae678b46e191a59addb024a0e7bb20d1991f0', "removal-lifecycle'"), (117883, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (122676, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (125088, 74, 'bad463f354b2a866e9cf26c7a6d2e05a0a489eec8c9f6e744e83f2a8efb2b615', ''), (127216, 308, 'ab9cdf74283bafd177c5d7f4f3f00fecc8d0e2e1afd617e17e6dec40263465c8', "== 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'"), (130098, 314, 'ed4d8df25865bb2efa1affa1aae5e6735d5fdcc45207f0f28dd32b27e8979442', "== 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_inputs.outcome == 'success' && steps.package_install.outcome == 'success'"), (132865, 315, 'c7db2067611ed9836dea7e55cd0efdbcdca216304f6aef8d00395619e34bf015', "== 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_ui_test.outcome == 'success' && steps.package_install.outcome == 'success'"), (157373, 366, 'eea4d991941793cc3ff538b64e95b890df2522d3461df258b3bccc68b244918f', "== 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'"), (160117, 415, 'b91605221b6e03330e1de20fec73ff21c41bf31c8851e403dc87eaec309db3d6', "== 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'"), (162951, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (164606, 180, '8c4abdb5c61de686aec61b6587e7bcf2c5111317be45104dfcd69d973594f235', "== 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'"), (168336, 180, '8c4abdb5c61de686aec61b6587e7bcf2c5111317be45104dfcd69d973594f235', "== 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'"), (170714, 180, '8c4abdb5c61de686aec61b6587e7bcf2c5111317be45104dfcd69d973594f235', "== 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'"), (172776, 213, '43ed53d5845b014b6ed81e99151694b3ecd71ce09e89d25f19f2aa373b92db13', "== 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_package.outcome == 'success' && steps.normal_ui_build.outcome == 'success'"), (175646, 215, 'f90633631773d375f84c5b8e75e7e2f4a4a0125844ec4e11a37514f56b489aeb', "== 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_observers.outcome == 'success' && steps.normal_ui_build.outcome == 'success'"), (177434, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (179130, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (180189, 149, 'c9f8c1b898ebe47511fc19a92d4779c383cf0fd9bdd3add2fe114ea267529845', "== 'refs/heads/verify/desktop-macos-preview' && steps.preview.outcome == 'success'"), (181255, 202, '80a104c2c0efbbebaecb3357f952d702096bd2ec9274733a50e9889e055086bc', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success' && steps.preview_upload.outcome == 'success'"), (185986, 156, '04803e48fbef0bb42a74922ce1f3f1d52ed0d93229d52140c613b22c3aa02bbd', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_test.outcome == 'success'"), (200721, 158, '22a1be5e5346d3f9463dbcbec338a30f1612bae9eb3aab8ed6f9347c44767cee', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'"), (205582, 164, 'ec40c206029f6e512ed2542530214ccd1c2b27ae228b6eb636c4a5edb22d50aa', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success'"), (221342, 158, '22a1be5e5346d3f9463dbcbec338a30f1612bae9eb3aab8ed6f9347c44767cee', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'"), (229607, 168, 'e84aa7b7c1c39bcca3049d9454603cbdb2f1329bec45cc9c04d7a74bdbb41aab', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == 'success'"), (248219, 170, 'd1cf60824d1d2edbaada6b17cc0cb4b260eaa273653bd503a4b1ea9b8827f85f', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == 'success'"), (256538, 168, '04d55d596e2237f5bb1673b6f5eca44367d66a3a05b8595d55d127d7f5a2b3f2', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_test.outcome == 'success'"), (275763, 227, 'af714bbb5dd50503c6e50c46cad8b225faa61d5b41d5009163553cfe33a05429', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'"), (284537, 169, '8a205d64a41a2fb50e9668e96d3f1dc3cf06cfd29505d360f916c4781c664ce7', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_checks_ui_test.outcome == 'success'"), (306585, 354, '98d0f1fff12aee1fdc4d912ff203420fb5ecbaaba63381407e1992308e8fe322', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence'"), (310167, 363, 'b77a50fe6b42263b79e7c5c58bbcc09478e6af96e7f7acc5158cc2d0e6942dfb', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_version_recovery_ui_test.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence'"), (328621, 108, '5c417bb5e050744e16fefbeb795e9f68f08a699c1f2e2e4245c922c3e43f96f8', "always() && steps.work.outputs.root != ''"), (348311, 802, '4a646c829e8f95a14c43b2abf5d5ad076e9284d64a7a10f1f330002887c0482c', "always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'"), (99000, 6360, '1fd61cebe258aef7e40106cf2093ea57d052bf385053c294bbd41d23ef25faac', ''))
 
+# Exact recent SOURCE deltas only; the historical tables and their final
+# predecessor hashes below remain authoritative for every other byte.
+RECENT_APP_SIGNATURE_WORKFLOW_INVERSE = (('prebuild',
+  ('Check fixed optional-array argv before native preparation',
+   'tests/desktop/test_macos_optional_arrays.py',
+   '# App-signature:82 timed preparation +14 bounded setup'),
+  (('    # App-signature:82 timed preparation +14 bounded setup +7 summary/cleanup/upload;7 overhead.\n',
+    '    # App-signature:82 timed preparation +13 bounded setup +7 summary/cleanup/upload;8 overhead.\n'),
+   ('      - name: Check fixed optional-array argv before native preparation\n'
+    '        timeout-minutes: 1\n'
+    '        shell: bash\n'
+    '        run: |\n'
+    '          set -euo pipefail\n'
+    '          /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C "$MRK_PYTHON" -I -S -B \\\n'
+    '            tests/desktop/test_macos_optional_arrays.py \\\n'
+    '            MacOSOptionalArraysTests.test_optional_arrays_preserve_empty_and_quoted_argv_under_nounset '
+    '-v\n',
+    ''))),
+ ('optional arrays',
+  ('${history_provider_arguments[@]+', '${removal_arguments[@]+', '${github_seal_arguments[@]+'),
+  (('            --target "$MRK_MACOS_TARGET" '
+    '${history_provider_arguments[@]+"${history_provider_arguments[@]}"} \\\n',
+    '            --target "$MRK_MACOS_TARGET" "${history_provider_arguments[@]}" \\\n'),
+   ('          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" '
+    '${removal_arguments[@]+"${removal_arguments[@]}"} '
+    '${github_seal_arguments[@]+"${github_seal_arguments[@]}"} \\\n',
+    '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" '
+    '"${removal_arguments[@]}" "${github_seal_arguments[@]}" \\\n'),
+   ('          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py remove-scripts --target '
+    '"$MRK_MACOS_TARGET" ${removal_arguments[@]+"${removal_arguments[@]}"} \\\n',
+    '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py remove-scripts --target '
+    '"$MRK_MACOS_TARGET" "${removal_arguments[@]}" \\\n'),
+   ('          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-remove-package --target '
+    '"$MRK_MACOS_TARGET" ${removal_arguments[@]+"${removal_arguments[@]}"} --expected-remover '
+    '"$MRK_MACOS_REMOVER_SHA256" \\\n',
+    '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-remove-package --target '
+    '"$MRK_MACOS_TARGET" "${removal_arguments[@]}" --expected-remover "$MRK_MACOS_REMOVER_SHA256" \\\n'))),
+ ('confidential diagnostics',
+  ('confidential_compiler',
+   'macos_resident_confidential_capture.py',
+   'Encrypt only the settled failed ARM compiler captures',
+   'Retain ciphertext and finite transport receipt only',
+   'confidential-resident-compiler-'),
+  (('      # TEMPORARY verification-only diagnostic. Never copy to product workflows.\n'
+    '      - name: Encrypt only the settled failed ARM compiler captures\n'
+    '        id: confidential_compiler\n'
+    "        if: failure() && github.ref == 'refs/heads/verify/desktop-macos-app-signature' && matrix.target "
+    "== 'aarch64-apple-darwin' && steps.work.outcome == 'success' && steps.android_helper.outcome == "
+    "'failure'\n"
+    '        timeout-minutes: 2\n'
+    '        shell: bash\n'
+    '        env:\n'
+    '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+    '        run: |\n'
+    '          set +x\n'
+    '          set -euo pipefail\n'
+    '          umask 077\n'
+    '          ulimit -c 0\n'
+    '          "$MRK_PYTHON" -I -S -B desktop/tools/macos_resident_confidential_capture.py\n'
+    '      - name: Retain ciphertext and finite transport receipt only\n'
+    "        if: always() && github.ref == 'refs/heads/verify/desktop-macos-app-signature' && matrix.target == "
+    "'aarch64-apple-darwin' && steps.confidential_compiler.outcome == 'success'\n"
+    '        timeout-minutes: 2\n'
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: confidential-resident-compiler-${{ github.sha }}-${{ github.run_id }}-${{ '
+    'github.run_attempt }}\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/resident-compiler-confidential/cargo-capture.cms\n'
+    '            ${{ steps.work.outputs.root }}/resident-compiler-confidential/receipt.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 1\n'
+    '          compression-level: 0\n',
+    ''),)))
+
+
+# Exact public-evidence/export-only successor. Never refresh the historical
+# workflow hashes or treat reconstructed private capture paths as upload policy.
+PUBLIC_VERIFICATION_WORKFLOW_INVERSE = (('.github/workflows/desktop-macos-installed.yml',
+  'name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n',
+  'f6a2aae527c8daceb01621195f127d83fdb5e33a0de59e1d27744d79462bd071',
+  (('            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/vault-helper-build.stderr" >&2\n'
+    '            /usr/bin/tail -c 32768 "$MRK_MACOS_WORK/vault-helper-build.jsonl" >&2\n',
+    "            printf 'Fixed vault helper compiler failed with original status %s; originals remain local.\\n' "
+    '"$status" >&2 || :\n'),
+   ('          if [[ "$remover_status" != 0 ]]; then\n'
+    '            # Optional diagnostics cannot replace the original compiler status.\n'
+    '            set +e\n'
+    "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+    'retained.\\n\' "$remover_status" >&2\n'
+    '            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/remover-build.stderr" >&2\n'
+    '            exit "$remover_status"\n'
+    '          fi\n',
+    '          if [[ "$remover_status" != 0 ]]; then\n'
+    '            # Optional diagnostics cannot replace the original compiler status.\n'
+    '            set +e\n'
+    "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+    'retained.\\n\' "$remover_status" >&2\n'
+    '            exit "$remover_status"\n'
+    '          fi\n'),
+   ('            "$@" 2>&1 | /usr/bin/tee /dev/stderr | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/$label.log"\n',
+    '            "$@" 2>&1 | /usr/bin/tee /dev/null | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/$label.log"\n'),
+   ('      - name: Preserve bounded originals; upload success is never GUI/native acceptance\n',
+    '      - name: Project closed public verification facts without raw originals\n'
+    '        id: public_evidence\n'
+    "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && "
+    "steps.work.outputs.root != '')\n"
+    '        timeout-minutes: 1\n'
+    '        shell: bash\n'
+    '        run: |\n'
+    '          set -euo pipefail\n'
+    '          umask 077\n'
+    '          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \\\n'
+    '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_public_verification_evidence.py \\\n'
+    '            --profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n'
+    '            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n'
+    '            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"\n'
+    '      - name: Preserve bounded originals; upload success is never GUI/native acceptance\n'),
+   ('      - name: Preserve bounded originals; upload success is never GUI/native acceptance\n'
+    '        id: evidence\n'
+    "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && "
+    "steps.work.outputs.root != '')\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-installed-${{ matrix.target }}${{ matrix.removal_case && '
+    "format('-removal-{0}', matrix.removal_case) || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ "
+    'github.run_attempt }}\n'
+    '          path: |\n'
+    "            ${{ format('{0}/source-binding.json\n"
+    '            {0}/removal-observer-build.status\n'
+    '            {0}/removal-observers.status\n'
+    '            {0}/android-helper-prepare-removal-observers.json\n'
+    '            {0}/package-removal-fixture.status\n'
+    '            {0}/android-helper-package-removal-fixture.json\n'
+    '            {0}/normal-ui/removal-ordinary-test.runner-admission.json\n'
+    '            {0}/normal-ui/removal-abrupt-test.runner-admission.json\n'
+    '            {0}/normal-ui/android-inputs.status\n'
+    '            {0}/normal-ui/android-input-status.json\n'
+    '            {0}/prepare-ui-inputs-failure.json\n'
+    '            {0}/normal-ui/android-signed-build-test.status\n'
+    '            {0}/normal-ui/android-signed-build-summary.status\n'
+    '            {0}/normal-ui/android-signed-build-result.status\n'
+    '            {0}/normal-ui/android-signed-build.facts.json\n'
+    '            {0}/normal-ui/android-signed-build-result.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-test.status\n'
+    '            {0}/normal-ui/ios-unsigned-archive-summary.status\n'
+    '            {0}/normal-ui/ios-unsigned-archive.facts.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-test.runner-admission.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-summary.command-admission.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-summary.failure-diagnostics.json\n'
+    '            {0}/effective-rust-toolchain.json\n'
+    '            {0}/source-inventory.json\n'
+    '            {0}/data-contracts/mount.stdout\n'
+    '            {0}/data-contracts/mount.stderr\n'
+    '            {0}/data-contracts/mount.status\n'
+    '            {0}/data-contracts/apfs.stdout\n'
+    '            {0}/data-contracts/apfs.stderr\n'
+    '            {0}/data-contracts/apfs.status\n'
+    '            {0}/data-contracts/build.stdout\n'
+    '            {0}/data-contracts/build.stderr\n'
+    '            {0}/data-contracts/build.status\n'
+    '            {0}/data-contracts/rust.stdout\n'
+    '            {0}/data-contracts/rust.stderr\n'
+    '            {0}/data-contracts/rust.status\n'
+    '            {0}/data-contracts/python.stdout\n'
+    '            {0}/data-contracts/python.stderr\n'
+    '            {0}/data-contracts/python.status\n'
+    '            {0}/data-contracts/result.json\n'
+    '            {0}/normal-build.jsonl\n'
+    '            {0}/normal-build.status\n'
+    '            {0}/normal-build.stderr.tail.txt\n'
+    '            {0}/preview-result.json\n'
+    '            {0}/normal-ui/build-file-limit.status\n'
+    '            {0}/normal-ui/build-file-budget.status\n'
+    '            {0}/normal-ui/build-file-budget.json\n'
+    '            {0}/normal-ui/test-file-limit.status\n'
+    '            {0}/normal-ui/test-file-budget.status\n'
+    '            {0}/normal-ui/test-file-budget.json\n'
+    '            {0}/normal-ui/project-test-file-limit.status\n'
+    '            {0}/normal-ui/project-test-file-budget.status\n'
+    '            {0}/normal-ui/project-test-file-budget.json\n'
+    '            {0}/normal-ui/persistence-test-file-limit.status\n'
+    '            {0}/normal-ui/persistence-test-file-budget.status\n'
+    '            {0}/normal-ui/persistence-test-file-budget.json\n'
+    '            {0}/normal-ui/toolchain.failure-diagnostics.json\n'
+    '            {0}/normal-ui/build.failure-diagnostics.json\n'
+    '            {0}/normal-ui/build.admission-diagnostics.json\n'
+    '            {0}/normal-ui/build.command-admission.json\n'
+    '            {0}/normal-ui/test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/summary.command-admission.json\n'
+    '            {0}/normal-ui/project-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/project-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/project-summary.command-admission.json\n'
+    '            {0}/normal-ui/persistence-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/persistence-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/persistence-summary.command-admission.json\n'
+    '            {0}/normal-ui/diagnostics-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/diagnostics-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/diagnostics-summary.command-admission.json\n'
+    '            {0}/normal-ui/saved-checks-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/saved-checks-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/saved-checks-summary.command-admission.json\n'
+    '            {0}/normal-ui/saved-version-recovery-test-file-limit.status\n'
+    '            {0}/normal-ui/saved-version-recovery-test.status\n'
+    '            {0}/normal-ui/saved-version-recovery-test.runner-admission.json\n'
+    '            {0}/normal-ui/saved-version-recovery-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/saved-version-recovery-summary.status\n'
+    '            {0}/normal-ui/saved-version-recovery-summary.command-admission.json\n'
+    '            {0}/normal-ui/saved-version-recovery-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/saved-version-recovery-result.json\n'
+    '            {0}/normal-ui/workflow-refusal-test-file-limit.status\n'
+    '            {0}/normal-ui/workflow-refusal-test.status\n'
+    '            {0}/normal-ui/workflow-refusal-test.runner-admission.json\n'
+    '            {0}/normal-ui/workflow-refusal-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/workflow-refusal-summary.status\n'
+    '            {0}/normal-ui/workflow-refusal-summary.command-admission.json\n'
+    '            {0}/normal-ui/workflow-refusal-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/workflow-refusal-result.json\n'
+    '            {0}/normal-ui/release-evidence-test-file-limit.status\n'
+    '            {0}/normal-ui/release-evidence-test.status\n'
+    '            {0}/normal-ui/release-evidence-test.runner-admission.json\n'
+    '            {0}/normal-ui/release-evidence-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/release-evidence-summary.status\n'
+    '            {0}/normal-ui/release-evidence-summary.command-admission.json\n'
+    '            {0}/normal-ui/release-evidence-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/release-evidence-result.json\n'
+    '            {0}/normal-ui/build.status\n'
+    '            {0}/normal-ui/test.status\n'
+    '            {0}/normal-ui/test.runner-admission.json\n'
+    '            {0}/normal-ui/summary.status\n'
+    '            {0}/normal-ui/xcode-version.txt\n'
+    '            {0}/normal-ui/sdk-path.txt\n'
+    '            {0}/normal-ui/sdk-version.txt\n'
+    '            {0}/normal-ui/sdk-build.txt\n'
+    '            {0}/normal-ui/result.json\n'
+    '            {0}/normal-ui/persistence-test.status\n'
+    '            {0}/normal-ui/persistence-test.runner-admission.json\n'
+    '            {0}/normal-ui/persistence-diagnostics.json\n'
+    '            {0}/normal-ui/persistence-summary.status\n'
+    '            {0}/normal-ui/persistence-result.json\n'
+    '            {0}/normal-ui/project-test.status\n'
+    '            {0}/normal-ui/project-test.runner-admission.json\n'
+    '            {0}/normal-ui/project-summary.status\n'
+    '            {0}/normal-ui/project-result.json\n'
+    '            {0}/normal-ui/diagnostics-test-file-limit.status\n'
+    '            {0}/normal-ui/diagnostics-test-file-budget.status\n'
+    '            {0}/normal-ui/diagnostics-test-file-budget.json\n'
+    '            {0}/normal-ui/diagnostics-test.status\n'
+    '            {0}/normal-ui/diagnostics-test.runner-admission.json\n'
+    '            {0}/normal-ui/diagnostics-safe-facts.json\n'
+    '            {0}/normal-ui/diagnostics-summary.status\n'
+    '            {0}/normal-ui/diagnostics-result.json\n'
+    '            {0}/normal-ui/saved-checks-test-file-limit.status\n'
+    '            {0}/normal-ui/saved-checks-test-file-budget.status\n'
+    '            {0}/normal-ui/saved-checks-test-file-budget.json\n'
+    '            {0}/normal-ui/saved-checks-test.status\n'
+    '            {0}/normal-ui/saved-checks-test.runner-admission.json\n'
+    '            {0}/normal-ui/saved-checks-safe-facts.json\n'
+    '            {0}/normal-ui/saved-checks-summary.status\n'
+    '            {0}/normal-ui/saved-checks-result.json\n'
+    '            {0}/package-format-input.json\n'
+    '            {0}/PackageFormat-original.pkg\n'
+    '            {0}/package-format-prepare.json\n'
+    '            {0}/package-format-tar.status\n'
+    '            {0}/package-format-xar.status\n'
+    '            {0}/package-format-audit.json\n'
+    '            {0}/package-format-final/PackageFormat.pkg\n'
+    '            {0}/native-acl-compile.log\n'
+    '            {0}/native-acl-compile.status\n'
+    '            {0}/native-acl-probe.log\n'
+    '            {0}/native-acl-probe.status\n'
+    '            {0}/native-acl-cleanup.status\n'
+    '            {0}/native-acl-probe-result.json\n'
+    '            {0}/runtime-result.json\n'
+    '            {0}/fresh-python-transport-result.json\n'
+    '            {0}/android-support-result.json\n'
+    '            {0}/vault-helper-build.status\n'
+    '            {0}/vault-helper-build.jsonl\n'
+    '            {0}/vault-helper-build.stderr\n'
+    '            {0}/vault-helper-signing.json\n'
+    '            {0}/android-helper-prepare.json\n'
+    '            {0}/android-helper-build.jsonl\n'
+    '            {0}/android-helper-build.stderr\n'
+    '            {0}/android-helper-build.status\n'
+    '            {0}/android-helper-resident-image-sign.stdout\n'
+    '            {0}/android-helper-resident-image-sign.stderr\n'
+    '            {0}/android-helper-resident-image-sign.status\n'
+    '            {0}/android-helper-resident-image-verify-signed.stdout\n'
+    '            {0}/android-helper-resident-image-verify-signed.stderr\n'
+    '            {0}/android-helper-resident-image-verify-signed.status\n'
+    '            {0}/android-helper-entry-build.stdout\n'
+    '            {0}/android-helper-entry-build.stderr\n'
+    '            {0}/android-helper-entry-build.status\n'
+    '            {0}/android-helper-desktop-facade-build.stdout\n'
+    '            {0}/android-helper-desktop-facade-build.stderr\n'
+    '            {0}/android-helper-desktop-facade-build.status\n'
+    '            {0}/android-helper-resident-facade-build.stdout\n'
+    '            {0}/android-helper-resident-facade-build.stderr\n'
+    '            {0}/android-helper-resident-facade-build.status\n'
+    '            {0}/android-helper-verify-before-resident-image.stdout\n'
+    '            {0}/android-helper-verify-before-resident-image.stderr\n'
+    '            {0}/android-helper-verify-before-resident-image.status\n'
+    '            {0}/android-helper-verify-after-resident-image.stdout\n'
+    '            {0}/android-helper-verify-after-resident-image.stderr\n'
+    '            {0}/android-helper-verify-after-resident-image.status\n'
+    '            {0}/android-helper-sign.stdout\n'
+    '            {0}/android-helper-sign.stderr\n'
+    '            {0}/android-helper-sign.status\n'
+    '            {0}/android-helper-verify-signed.stdout\n'
+    '            {0}/android-helper-verify-signed.stderr\n'
+    '            {0}/android-helper-verify-signed.status\n'
+    '            {0}/android-helper-verify-before.stdout\n'
+    '            {0}/android-helper-verify-before.stderr\n'
+    '            {0}/android-helper-verify-before.status\n'
+    '            {0}/android-helper-verify-after.stdout\n'
+    '            {0}/android-helper-verify-after.stderr\n'
+    '            {0}/android-helper-verify-after.status\n'
+    '            {0}/android-helper-verify-before.json\n'
+    '            {0}/android-helper-verify-after.json\n'
+    '            {0}/android-helper-sign-vault-helper.json\n'
+    '            {0}/android-helper-sign-desktop-image.json\n'
+    '            {0}/android-helper-sign-desktop-payload.json\n'
+    '            {0}/android-helper-sign-root-app.json\n'
+    '            {0}/android-helper-sign-root-installer.json\n'
+    '            {0}/remover-build.jsonl\n'
+    '            {0}/remover-build.stderr\n'
+    '            {0}/remover-build.status\n'
+    '            {0}/android-helper-sign-remover.json\n'
+    '            {0}/app-result.json\n'
+    '            {0}/input-result.json\n'
+    '            {0}/dialog-regressions.log\n'
+    '            {0}/dialog-regressions.status\n'
+    '            {0}/installer-finalizer-regression.log\n'
+    '            {0}/installer-finalizer-regression.status\n'
+    '            {0}/native-abi-regression.log\n'
+    '            {0}/native-abi-regression.status\n'
+    '            {0}/focused-regressions.json\n'
+    '            {0}/scripts-fixture-result.json\n'
+    '            {0}/package-fixture-audit.json\n'
+    '            {0}/installer-fixture-output.txt\n'
+    '            {0}/installer-fixture-output.status\n'
+    '            {0}/installer-fixture-log-cursor.json\n'
+    '            {0}/installer-fixture-log-cursor.status\n'
+    '            {0}/installer-fixture-log-capture.json\n'
+    '            {0}/installer-fixture-log-capture.status\n'
+    '            {0}/installer-fixture-log-selected.txt\n'
+    '            {0}/installer-fixture-observation.json\n'
+    '            {0}/MobileReleaseKit-InstallerFixture-original.pkg\n'
+    '            {0}/package-fixture-prepare.json\n'
+    '            {0}/package-fixture-tar.status\n'
+    '            {0}/package-fixture-xar.status\n'
+    '            {0}/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg\n'
+    '            {0}/scripts-result.json\n'
+    '            {0}/package-audit.json\n'
+    '            {0}/installation-observation.json\n'
+    '            {0}/installer-output.txt\n'
+    '            {0}/installer-output.status\n'
+    '            {0}/installer-log-cursor.json\n'
+    '            {0}/installer-log-cursor.status\n'
+    '            {0}/installer-log-capture.json\n'
+    '            {0}/installer-log-capture.status\n'
+    '            {0}/installer-log-selected.txt\n'
+    '            {0}/MobileReleaseKit-original.pkg\n'
+    '            {0}/package-prepare.json\n'
+    '            {0}/package-tar.status\n'
+    '            {0}/package-xar.status\n'
+    '            {0}/package-final/MobileReleaseKit.pkg\n'
+    '            {0}/packaging-selection.json\n'
+    '            {0}/producer-root/Install.pkg\n'
+    '            {0}/producer-root/producer.json\n'
+    '            {0}/producer-root/producer.sig\n'
+    '            {0}/distribution/MobileReleaseKit.dmg\n'
+    '            {0}/distribution/MobileReleaseKit-Observation.dmg\n'
+    '            {0}/package-request-id.txt\n'
+    '            {0}/android-helper-package-install.json\n'
+    '            {0}/remove-scripts-result.json\n'
+    '            {0}/remove-package-prepare.json\n'
+    '            {0}/remove-package-tar.status\n'
+    '            {0}/remove-package-xar.status\n'
+    '            {0}/remove-package-finalization.status\n'
+    '            {0}/package-remove.status\n'
+    '            {0}/remove-image-finalization.status\n'
+    '            {0}/android-helper-finalize-remove-package.json\n'
+    '            {0}/android-helper-package-remove.json\n'
+    '            {0}/android-helper-finalize-remove-image.json\n'
+    '            {0}/remove-preview-result.json\n'
+    '            {0}/android-helper-notarize-payload.json\n'
+    '            {0}/android-helper-finalize-package.json\n'
+    '            {0}/package-finalization.status\n'
+    '            {0}/image-finalization.status\n'
+    '            {0}/image-finalization.stdout\n'
+    '            {0}/image-finalization.stderr\n'
+    '            {0}/android-helper-finalize-image.json\n'
+    '            {0}/android-helper-final-image-resolve-notarytool.stdout\n'
+    '            {0}/android-helper-final-image-resolve-notarytool.stderr\n'
+    '            {0}/android-helper-final-image-resolve-notarytool.status\n'
+    '            {0}/android-helper-final-image-resolve-stapler.stdout\n'
+    '            {0}/android-helper-final-image-resolve-stapler.stderr\n'
+    '            {0}/android-helper-final-image-resolve-stapler.status\n'
+    '            {0}/android-helper-final-image-signature-before.stdout\n'
+    '            {0}/android-helper-final-image-signature-before.stderr\n'
+    '            {0}/android-helper-final-image-signature-before.status\n'
+    '            {0}/android-helper-final-image-submit.stdout\n'
+    '            {0}/android-helper-final-image-submit.stderr\n'
+    '            {0}/android-helper-final-image-submit.status\n'
+    '            {0}/android-helper-final-image-log.stdout\n'
+    '            {0}/android-helper-final-image-log.stderr\n'
+    '            {0}/android-helper-final-image-log.status\n'
+    '            {0}/android-helper-final-image-staple.stdout\n'
+    '            {0}/android-helper-final-image-staple.stderr\n'
+    '            {0}/android-helper-final-image-staple.status\n'
+    '            {0}/android-helper-final-image-validate.stdout\n'
+    '            {0}/android-helper-final-image-validate.stderr\n'
+    '            {0}/android-helper-final-image-validate.status\n'
+    '            {0}/android-helper-final-image-signature-after.stdout\n'
+    '            {0}/android-helper-final-image-signature-after.stderr\n'
+    '            {0}/android-helper-final-image-signature-after.status\n'
+    '            {0}/android-helper-final-image-verify.stdout\n'
+    '            {0}/android-helper-final-image-verify.stderr\n'
+    '            {0}/android-helper-final-image-verify.status\n'
+    '            {0}/android-helper-final-image-attach.stdout\n'
+    '            {0}/android-helper-final-image-attach.stderr\n'
+    '            {0}/android-helper-final-image-attach.status\n'
+    '            {0}/android-helper-final-image-detach.stdout\n'
+    '            {0}/android-helper-final-image-detach.stderr\n'
+    '            {0}/android-helper-final-image-detach.status\n'
+    '            {0}/package-install.stdout\n'
+    '            {0}/package-install.stderr\n'
+    '            {0}/package-install.status\n'
+    '            {0}/android-helper-producer-build.stdout\n'
+    '            {0}/android-helper-producer-build.stderr\n'
+    '            {0}/android-helper-producer-build.status\n'
+    '            {0}/android-helper-producer-emitter.stdout\n'
+    '            {0}/android-helper-producer-emitter.stderr\n'
+    '            {0}/android-helper-producer-emitter.status\n'
+    '            {0}/android-helper-distribution-create.stdout\n'
+    '            {0}/android-helper-distribution-create.stderr\n'
+    '            {0}/android-helper-distribution-create.status\n'
+    '            {0}/android-helper-distribution-sign.stdout\n'
+    '            {0}/android-helper-distribution-sign.stderr\n'
+    '            {0}/android-helper-distribution-sign.status\n'
+    '            {0}/android-helper-distribution-verify-signature.stdout\n'
+    '            {0}/android-helper-distribution-verify-signature.stderr\n'
+    '            {0}/android-helper-distribution-verify-signature.status\n'
+    '            {0}/android-helper-distribution-verify-image.stdout\n'
+    '            {0}/android-helper-distribution-verify-image.stderr\n'
+    '            {0}/android-helper-distribution-verify-image.status\n'
+    '            {0}/android-helper-observation-create.stdout\n'
+    '            {0}/android-helper-observation-create.stderr\n'
+    '            {0}/android-helper-observation-create.status\n'
+    '            {0}/android-helper-observation-sign.stdout\n'
+    '            {0}/android-helper-observation-sign.stderr\n'
+    '            {0}/android-helper-observation-sign.status\n'
+    '            {0}/android-helper-observation-verify-signature.stdout\n'
+    '            {0}/android-helper-observation-verify-signature.stderr\n'
+    '            {0}/android-helper-observation-verify-signature.status\n'
+    '            {0}/android-helper-observation-verify-image.stdout\n'
+    '            {0}/android-helper-observation-verify-image.stderr\n'
+    '            {0}/android-helper-observation-verify-image.status\n'
+    '            {0}/android-helper-distribution-attach.stdout\n'
+    '            {0}/android-helper-distribution-attach.stderr\n'
+    '            {0}/android-helper-distribution-attach.status\n'
+    '            {0}/android-helper-installer-log-cursor.stdout\n'
+    '            {0}/android-helper-installer-log-cursor.stderr\n'
+    '            {0}/android-helper-installer-log-cursor.status\n'
+    '            {0}/android-helper-installer.stdout\n'
+    '            {0}/android-helper-installer.stderr\n'
+    '            {0}/android-helper-installer.status\n'
+    '            {0}/android-helper-installer-log-capture.stdout\n'
+    '            {0}/android-helper-installer-log-capture.stderr\n'
+    '            {0}/android-helper-installer-log-capture.status\n'
+    '            {0}/android-helper-distribution-detach.stdout\n'
+    '            {0}/android-helper-distribution-detach.stderr\n'
+    "            {0}/android-helper-distribution-detach.status', steps.work.outputs.root) }}\n"
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'
+    '          compression-level: 0\n'
+    '      # Do not start a payload build, host scan, notice-only task, service,\n'
+    '      # publication of a release, Store workflow, or synthetic GUI success here.\n'
+    '      # The focused real Aqua/Save procedure and separate command/result gates\n'
+    '      # are in desktop/packaging/macos-installed.md.\n',
+    '      - name: Preserve bounded originals; upload success is never GUI/native acceptance\n'
+    '        id: evidence\n'
+    "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && "
+    "steps.work.outputs.root != '') && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-installed-${{ matrix.target }}${{ matrix.removal_case && '
+    "format('-removal-{0}', matrix.removal_case) || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ "
+    'github.run_attempt }}\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'
+    '          compression-level: 0\n'
+    '      # Do not start a payload build, host scan, notice-only task, service,\n'
+    '      # publication of a release, Store workflow, or synthetic GUI success here.\n'
+    '      # The focused real Aqua/Save procedure and separate command/result gates\n'
+    '      # are in desktop/packaging/macos-installed.md.\n'))),
+ ('.github/workflows/desktop-macos-aqua.yml',
+  'name: Desktop macOS genuine Aqua engineering verification\n',
+  '3ada5fb2ddacbc22ab11e039e9028cc729e7383cb3467f19977ddf17a1d4f258',
+  (('            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/vault-helper-build.stderr" >&2\n'
+    '            /usr/bin/tail -c 32768 "$MRK_MACOS_WORK/vault-helper-build.jsonl" >&2\n',
+    "            printf 'Fixed vault helper compiler failed with original status %s; originals remain local.\\n' "
+    '"$status" >&2 || :\n'),
+   ('          if [[ "$remover_status" != 0 ]]; then\n'
+    '            # Optional diagnostics cannot replace the original compiler status.\n'
+    '            set +e\n'
+    "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+    'retained.\\n\' "$remover_status" >&2\n'
+    '            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/remover-build.stderr" >&2\n'
+    '            exit "$remover_status"\n'
+    '          fi\n',
+    '          if [[ "$remover_status" != 0 ]]; then\n'
+    '            # Optional diagnostics cannot replace the original compiler status.\n'
+    '            set +e\n'
+    "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+    'retained.\\n\' "$remover_status" >&2\n'
+    '            exit "$remover_status"\n'
+    '          fi\n'),
+   ('      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n',
+    '      - name: Project closed public verification facts without raw originals\n'
+    '        id: public_evidence\n'
+    "        if: always() && steps.work.outputs.root != ''\n"
+    '        timeout-minutes: 1\n'
+    '        shell: bash\n'
+    '        run: |\n'
+    '          set -euo pipefail\n'
+    '          umask 077\n'
+    '          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \\\n'
+    '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_public_verification_evidence.py \\\n'
+    '            --profile aqua --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n'
+    '            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n'
+    '            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"\n'
+    '      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n'),
+   ('      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n'
+    "        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == "
+    "'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE "
+    "== 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' "
+    "|| env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ '
+    'env.MRK_MACOS_AQUA_SCOPE }}-${{ matrix.target }}\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/source-binding.json\n'
+    '            ${{ steps.work.outputs.root }}/package-format-input.json\n'
+    '            ${{ steps.work.outputs.root }}/PackageFormat-original.pkg\n'
+    '            ${{ steps.work.outputs.root }}/package-format-prepare.json\n'
+    '            ${{ steps.work.outputs.root }}/package-format-tar.status\n'
+    '            ${{ steps.work.outputs.root }}/package-format-xar.status\n'
+    '            ${{ steps.work.outputs.root }}/package-format-audit.json\n'
+    '            ${{ steps.work.outputs.root }}/package-format-final/PackageFormat.pkg\n'
+    '            ${{ steps.work.outputs.root }}/source-inventory.json\n'
+    '            ${{ steps.work.outputs.root }}/xcode-host-preparation-intent.json\n'
+    '            ${{ steps.work.outputs.root }}/xcode-host-preparation-result.json\n'
+    '            ${{ steps.work.outputs.root }}/runtime-result.json\n'
+    '            ${{ steps.work.outputs.root }}/fresh-python-transport-result.json\n'
+    '            ${{ steps.work.outputs.root }}/android-support-result.json\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.admitted.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.stderr.tail.txt\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-catalogue-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-catalogue-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-catalogue-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/shipping-gate-control.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/shipping-gate-control.status\n'
+    '            ${{ steps.work.outputs.root }}/shipping-capacity-data.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/shipping-capacity-data.status\n'
+    '            ${{ steps.work.outputs.root }}/frontend-data.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/frontend-data-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/frontend-data-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/observer-build.admitted.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/observer-build.stderr.tail.txt\n'
+    '            ${{ steps.work.outputs.root }}/bounded-diagnostics.json\n'
+    '            ${{ steps.work.outputs.root }}/observer-build.status\n'
+    '            ${{ steps.work.outputs.root }}/vault-helper-build.status\n'
+    '            ${{ steps.work.outputs.root }}/vault-helper-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/vault-helper-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/vault-helper-signing.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-prepare.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-entry-build.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-entry-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-entry-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-signed.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-vault-helper.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-desktop-payload.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-root-app.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-root-installer.json\n'
+    '            ${{ steps.work.outputs.root }}/remover-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/remover-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/remover-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-remover.json\n'
+    '            ${{ steps.work.outputs.root }}/app-result.json\n'
+    '            ${{ steps.work.outputs.root }}/input-result.json\n'
+    '            ${{ steps.work.outputs.root }}/scripts-result.json\n'
+    '            ${{ steps.work.outputs.root }}/package-audit.json\n'
+    '            ${{ steps.work.outputs.root }}/installation-observation.json\n'
+    '            ${{ steps.work.outputs.root }}/installer-output.tail.txt\n'
+    '            ${{ steps.work.outputs.root }}/installer-output.status\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-cursor.json\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-cursor.status\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-capture.json\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-capture.status\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-selected.txt\n'
+    '            ${{ steps.work.outputs.root }}/MobileReleaseKit-original.pkg\n'
+    '            ${{ steps.work.outputs.root }}/package-prepare.json\n'
+    '            ${{ steps.work.outputs.root }}/package-tar.status\n'
+    '            ${{ steps.work.outputs.root }}/package-xar.status\n'
+    '            ${{ steps.work.outputs.root }}/package-final/MobileReleaseKit.pkg\n'
+    '            ${{ steps.work.outputs.root }}/packaging-selection.json\n'
+    '            ${{ steps.work.outputs.root }}/producer-root/Install.pkg\n'
+    '            ${{ steps.work.outputs.root }}/producer-root/producer.json\n'
+    '            ${{ steps.work.outputs.root }}/producer-root/producer.sig\n'
+    '            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit.dmg\n'
+    '            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit-Observation.dmg\n'
+    '            ${{ steps.work.outputs.root }}/package-request-id.txt\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-package-install.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-notarize-payload.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-finalize-package.json\n'
+    '            ${{ steps.work.outputs.root }}/package-finalization.status\n'
+    '            ${{ steps.work.outputs.root }}/package-install.stdout\n'
+    '            ${{ steps.work.outputs.root }}/package-install.stderr\n'
+    '            ${{ steps.work.outputs.root }}/package-install.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-build.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-create.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-create.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-create.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-create.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-create.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-create.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-sign.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-fields-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-fields-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-fields.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-android-inputs-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-android-inputs-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-android-inputs.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-local-edits3-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-local-edits3-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-local-edits3.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-doctor-preflight2-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-doctor-preflight2-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-doctor-preflight2.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-vault-helper-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-vault-helper-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-vault-helper.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-installation-inspection-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-installation-inspection-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-installation-inspection.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-recovery-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-recovery-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-recovery.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-ios-account-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-ios-account-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-ios-account.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua.status\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'
+    '          compression-level: 0\n'
+    '      # Instrumented engineering evidence only. No release, Store mutation,\n'
+    '      # shipping-binary equivalence, notarization or physical-device claim.\n'
+    '      # On uncertainty retain originals; runner disposal is not observed here.\n',
+    '      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n'
+    "        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == "
+    "'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE "
+    "== 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' "
+    "|| env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'local-edits3') && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ '
+    'env.MRK_MACOS_AQUA_SCOPE }}-${{ matrix.target }}\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'
+    '          compression-level: 0\n'
+    '      # Instrumented engineering evidence only. No release, Store mutation,\n'
+    '      # shipping-binary equivalence, notarization or physical-device claim.\n'
+    '      # On uncertainty retain originals; runner disposal is not observed here.\n'),
+   ('      - name: Preserve bounded Android lifecycle results and original workflow exit evidence\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome "
+    "== 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-android-registration-lifecycle\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/source-inventory.json\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.admitted.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.stderr.tail.txt\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/bounded-diagnostics.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n',
+    '      - name: Preserve bounded Android lifecycle results and original workflow exit evidence\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome "
+    "== 'success' && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-android-registration-lifecycle\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'),
+   ('      - name: Preserve bounded classification DATA and original workflow exit evidence\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome "
+    "== 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-xcode-installed-classification\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/source-inventory.json\n'
+    '            ${{ steps.work.outputs.root }}/xcode-installed-classification-result.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 7\n',
+    '      - name: Preserve bounded classification DATA and original workflow exit evidence\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome "
+    "== 'success' && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-xcode-installed-classification\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 7\n'),
+   ('      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' && steps.source.outcome == "
+    "'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-wrapping-keychain-private\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/source-inventory.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-native.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-native.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-before-add.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-before-lookup.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-creator.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-reader.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-pair.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-codec.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-codec-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-codec-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-codec-build.status\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-normal-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-normal-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-normal-build.status\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-observer-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-observer-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-observer-build.status\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-qualification-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-qualification-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-qualification-build.status\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-reader-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-reader-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-reader-build.status\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 7\n'
+    '          compression-level: 0\n'
+    '      # Never upload native stdout/stderr, a private Keychain, task-root contents\n'
+    '      # or a diagnostic filesystem sweep. Uncertainty has no fixture cleanup.\n',
+    '      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' && steps.source.outcome == "
+    "'success' && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-wrapping-keychain-private\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 7\n'
+    '          compression-level: 0\n'
+    '      # Never upload native stdout/stderr, a private Keychain, task-root contents\n'
+    '      # or a diagnostic filesystem sweep. Uncertainty has no fixture cleanup.\n'))))
+PUBLIC_VERIFICATION_WORKFLOW_MARKERS = ('public_evidence',
+ 'public-verification-evidence.json',
+ 'macos_public_verification_evidence.py',
+ 'Fixed vault helper compiler failed with original status',
+ '          if [[ "$remover_status" != 0 ]]; then\n'
+ '            # Optional diagnostics cannot replace the original compiler status.\n'
+ '            set +e\n'
+ "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+ 'retained.\\n\' "$remover_status" >&2\n'
+ '            exit "$remover_status"\n'
+ '          fi\n',
+ '            "$@" 2>&1 | /usr/bin/tee /dev/null | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/$label.log"\n')
+
+
+# Exact Intel-only app-build allocation, before every historical workflow layer.
+# Marker-free old intermediates stay unchanged; whole-predecessor hashes remain authoritative.
+INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE = (('    # Raw timed-step union535min; disjoint scopes retain the350min hard job cap.\n'
+  '    # Pre-Remove baseline preview345 / recovery339 / installed210, plus5 overhead.\n'
+  '    # Remove preview adds90 nominal step maxima; this sum establishes no fit.\n'
+  '    # Dormant Android272 / iOS248 include5 overhead; no native qualification claimed.\n'
+  '    # Fixed removal uses its own two fresh ARM rows, the same350min ceiling,\n'
+  '    # separate baseline Install/UI-build preparation, O3 work1740/hard1800,\n'
+  '    # then one removal owner990 (fixed segment sum963); no budget restart.\n'
+  '    # App-signature:82 timed preparation +14 bounded setup +7 summary/cleanup/upload;7 overhead.\n',
+  '    # Raw timed-step union535min (ARM) /559min (Intel); no job fit is established.\n'
+  '    # Historical pre-Remove baselines: preview345 / recovery339 / installed210, plus5 overhead.\n'
+  '    # Remove preview adds90 nominal step maxima; Intel app-build adds24 to the old allocation.\n'
+  '    # Dormant Android272 / iOS248 include5 overhead; historical baselines, not fit proofs.\n'
+  '    # Fixed removal uses its own two fresh ARM rows, the same350min ceiling,\n'
+  '    # separate baseline Install/UI-build preparation, O3 work1740/hard1800,\n'
+  '    # then one removal owner990 (fixed segment sum963); no budget restart.\n'
+  '    # App-signature: ARM82 / Intel106 timed preparation +14 bounded setup\n'
+  '    # +7 summary/cleanup/upload;7 overhead. Independent110 hard cap takes precedence.\n'),
+ ('        id: app_build\n        timeout-minutes: 24\n',
+  '        id: app_build\n'
+  "        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}\n"),
+ ('          # Same24-minute app-build budget; no independent timeout entitlement.\n',
+  '          # Same architecture-selected app-build budget; no independent timeout entitlement.\n'))
+INTEL_APP_BUILD_BUDGET_WORKFLOW_MARKERS = ('Raw timed-step union535min (ARM) /559min (Intel)', "matrix.target == 'x86_64-apple-darwin' && 48 || 24", 'Same architecture-selected app-build budget')
+
+
+REMAINING_THREE_WORKFLOW_INVERSE = (
+    ('    # Raw timed-step union535min (ARM) /559min (Intel); no job fit is established.\n', '    # Raw timed-step union577min (ARM) /601min (Intel) includes the retained42min alternative.\n    # Remaining-three adds28 nominal minutes versus one singleton; no350min fit is claimed.\n    # The unchanged350min job cap is containing authority, never renewed per case.\n'),
+    ('      MRK_MACOS_SAVED_FILE_UI_SCOPE: ordinary-seven\n', "      MRK_MACOS_SAVED_FILE_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'remaining-three' || 'ordinary-seven' }}\n"),
+    ('            saved-version-recovery|workflow-refusal|release-evidence) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;\n', '            saved-version-recovery|workflow-refusal|release-evidence|remaining-three) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;\n'),
+    ('      - name: Project closed public verification facts without raw originals\n', '      - name: Exercise and bind each remaining saved-file journey once in fixed order\n        id: normal_remaining_saved_file_ui\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\' && (github.ref == \'refs/heads/verify/desktop-macos-preview\' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == \'remaining-three\' && steps.normal_diagnostics_ui_result.outcome == \'success\')\n        timeout-minutes: 42\n        shell: bash\n        env:\n          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n        run: |\n          for MRK_MACOS_SAVED_FILE_UI_SCOPE in saved-version-recovery workflow-refusal release-evidence; do\n          export MRK_MACOS_SAVED_FILE_UI_SCOPE\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in\n            saved-version-recovery) singleton=saved-version-recovery; singleton_method=testSyntheticProjectSavedVersionRecovery ;;\n            workflow-refusal) singleton=workflow-refusal; singleton_method=testSyntheticProjectManagedWorkflowRefusal ;;\n            release-evidence) singleton=release-evidence; singleton_method=testSyntheticProjectSavedReleaseEvidence ;;\n            *) exit 1 ;;\n          esac\n          # Finite per-file logical size only; not RAM, total disk, service limits or finality.\n          set +e\n          ulimit -f 1048576\n          file_limit_status=$?\n          set -e\n          printf \'%s\\n\' "$file_limit_status" > "$MRK_MACOS_WORK/normal-ui/${singleton}-test-file-limit.status" || exit $?\n          [[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"\n          # normal_context freshly verifies both actual RLIMIT_FSIZE values;\n          # its original receipt/status, not a prior budget report, gates acceptance.\n          clean() {\n            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \\\n              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \\\n              LANG=en_US.UTF-8 TZ=UTC LC_ALL=en_US.UTF-8 "DEVELOPER_DIR=$DEVELOPER_DIR" \\\n              "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \\\n              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \\\n              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"\n          }\n          # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.\n          # One selected300s journey; unchanged420s command/585s phase. Only recovery runs its fixed20s producer.\n          set +e\n          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building \\\n            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \\\n            -configuration Debug -destination "platform=macOS,arch=$MRK_MACOS_MACHINE" -destination-timeout 15 \\\n            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \\\n            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/${singleton}-test.xcresult" \\\n            -only-testing:MRKNormalAppUITests/NormalAppUITests/"$singleton_method" \\\n            -parallel-testing-enabled NO -test-timeouts-enabled YES \\\n            -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \\\n            -disableAutomaticPackageResolution \\\n            > "$MRK_MACOS_WORK/normal-ui/${singleton}-test.log" 2>&1\n          test_status=$?\n          set -e\n          printf \'%s\\n\' "$test_status" > "$MRK_MACOS_WORK/normal-ui/${singleton}-test.status"\n          [[ "$test_status" == 0 ]] || exit "$test_status"\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in\n            saved-version-recovery) singleton=saved-version-recovery; singleton_method=testSyntheticProjectSavedVersionRecovery ;;\n            workflow-refusal) singleton=workflow-refusal; singleton_method=testSyntheticProjectManagedWorkflowRefusal ;;\n            release-evidence) singleton=release-evidence; singleton_method=testSyntheticProjectSavedReleaseEvidence ;;\n            *) exit 1 ;;\n          esac\n          # Each summary has its own finite one-GiB file limit and original owner phase.\n          ulimit -f 1048576\n          set +e\n          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \\\n            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \\\n            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \\\n            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-summary "${singleton}-test.xcresult" \\\n            > "$MRK_MACOS_WORK/normal-ui/${singleton}-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/${singleton}-summary.stderr"\n          summary_status=$?\n          set -e\n          printf \'%s\\n\' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/${singleton}-summary.status"\n          [[ "$summary_status" == 0 ]] || exit "$summary_status"\n          "$MRK_PYTHON" -I -S -B - <<\'PY_SAVED_VERSION_RECOVERY_RESULT\'\n          import hashlib, json, os, re, stat\n          from pathlib import Path\n          root = Path(os.environ["MRK_MACOS_WORK"])\n          source, target = os.environ["GITHUB_SHA"], os.environ["MRK_MACOS_TARGET"]\n          if source != os.environ["GITHUB_WORKFLOW_SHA"] or source != os.environ["MRK_EXPECTED_SHA"]:\n              raise ValueError("singleton result SOURCE differs")\n          def need(value):\n              if not value: raise ValueError("original selected singleton binding refused")\n          def singleton_selection(scope):\n              need(type(scope) is str and scope in ("saved-version-recovery", "workflow-refusal", "release-evidence"))\n              return (scope, {"saved-version-recovery": "testSyntheticProjectSavedVersionRecovery",\n                  "workflow-refusal": "testSyntheticProjectManagedWorkflowRefusal",\n                  "release-evidence": "testSyntheticProjectSavedReleaseEvidence"}[scope])\n          selected_scope = os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"]\n          stem, method = singleton_selection(selected_scope)\n          def read(name, limit):\n              path = root / name\n              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)\n              try:\n                  facts = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)\n                  before = os.fstat(fd)\n                  need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1\n                       and not before.st_mode & 0o022 and 0 <= before.st_size <= limit)\n                  with os.fdopen(fd, "rb", closefd=False) as stream: body = stream.read(limit + 1)\n                  need(len(body) == before.st_size and facts(before) == facts(os.fstat(fd)) == facts(os.stat(path, follow_symlinks=False)))\n                  return body\n              finally: os.close(fd)\n          def unique(rows):\n              result = {}\n              for key, value in rows:\n                  need(key not in result); result[key] = value\n              return result\n          def decode(body):\n              value = json.loads(body, object_pairs_hook=unique)\n              need(type(value) is dict)\n              return value\n          def digest(body): return hashlib.sha256(body).hexdigest()\n          def hex64(value): return type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None\n          preview = decode(read("preview/PREVIEW.json", 65536))\n          platforms = {"aarch64-apple-darwin": "macOS26-arm64", "x86_64-apple-darwin": "macOS26-x86_64"}\n          need(target in platforms and preview.get("platform") == platforms[target]\n               and preview.get("scope") == "normal-macos-early-preview" and preview.get("instrumented") is False\n               and preview.get("sourceCommit") == source and preview.get("runId") == os.environ["GITHUB_RUN_ID"]\n               and preview.get("runAttempt") == os.environ["GITHUB_RUN_ATTEMPT"]\n               and all(preview.get(key) == "passed" for key in ("normalBuild", "packageAudit", "installationReadback")))\n          prior_bytes = read("normal-ui/diagnostics-result.json", 65536)\n          prior = decode(prior_bytes)\n          need(prior.get("scope") == "ordinary-ui-observed-original-diagnostics-report-and-settled-projection"\n               and prior.get("target") == target and prior.get("applicationSourceCommit") == prior.get("harnessSourceCommit") == source\n               and prior.get("workflow") == ".github/workflows/desktop-macos-installed.yml"\n               and all(prior.get(key) == preview[key] for key in ("sourceTree", "runId", "runAttempt", "platform", "packageSha256", "packageSize",\n                   "signedAppBinarySha256", "normalBinaryBeforeSigningSha256", "runtimeManifestSha256", "installerInventorySha256")))\n          # Reuse only this source-bound prerequisite\'s unchanged build/tool-version DATA.\n          # Its success is never a substitute for this case\'s fresh input/original owners.\n          build_bytes = read("normal-ui/build.command-admission.json", 32768)\n          need(digest(build_bytes) == prior.get("buildCommandAdmissionSha256") and type(prior.get("toolchain")) is dict)\n          for name in ("build", stem + "-test-file-limit", stem + "-test", stem + "-summary"):\n              need(read("normal-ui/" + name + ".status", 16) == b"0\\n")\n          roster = ("normal-ui-source-roster", 15, 1048576, 0)\n          def admitted(name, phase, seconds, roles):\n              raw = read("normal-ui/" + name, 32768); value = decode(raw)\n              need(value.get("schemaVersion") == 1 and type(value["schemaVersion"]) is int\n                   and value.get("scope") == ("actual-generated-xctrunner-admission-only" if phase == "test" else "normal-ui-original-command-admission-only")\n                   and value.get("sourceCommit") == source and value.get("target") == target and value.get("resultBundle") == stem + "-test.xcresult"\n                   and value.get("normalPhase" if phase == "test" else "phase") == phase\n                   and value.get("originalCommandReturned") is True and value.get("sourcePrePostMatched") is True\n                   and hex64(value.get("sourceRosterSha256")) and value.get("fileLimitBytes") == [1073741824, 1073741824]\n                   and all(type(n) is int for n in value["fileLimitBytes"]) and value.get("receiptPolicy") == "exclusive0600-readback-consuming-close"\n                   and type(value.get("originalTestReturncode" if phase == "test" else "originalReturncode")) is int\n                   and value["originalTestReturncode" if phase == "test" else "originalReturncode"] == 0)\n              clock = value.get("phaseClock")\n              need(type(clock) is dict and set(clock) == {"startNs", "deadlineNs", "beforePublicationNs", "postCloseDeadlineRequired"}\n                   and clock["postCloseDeadlineRequired"] is True and all(type(clock[k]) is str and re.fullmatch(r"0|[1-9][0-9]{0,19}", clock[k])\n                       for k in ("startNs", "deadlineNs", "beforePublicationNs")))\n              start, end, before_close = (int(clock[k]) for k in ("startNs", "deadlineNs", "beforePublicationNs"))\n              need(end - start == seconds * 1000000000 and start <= before_close < end)\n              commands = value.get("commands"); need(type(commands) is list and len(commands) == len(roles))\n              for row, (role, cap, limit, code) in zip(commands, roles):\n                  need(type(row) is dict and row.get("role") == role and type(row.get("returncode")) is int and row["returncode"] == code\n                       and type(row.get("roleCapSeconds")) is int and row["roleCapSeconds"] == cap\n                       and type(row.get("timeoutSeconds")) is int and 1 <= row["timeoutSeconds"] <= cap\n                       and type(row.get("outputLimitBytes")) is int and row["outputLimitBytes"] == limit\n                       and all(type(row.get(k)) is int and 0 <= row[k] <= limit for k in ("stdoutBytes", "stderrBytes"))\n                       and row["stdoutBytes"] + row["stderrBytes"] <= limit\n                       and all(hex64(row.get(k)) for k in ("argvSha256", "stdoutSha256", "stderrSha256")))\n              return value, raw\n          def singleton_test_roles(scope):\n              singleton_selection(scope)\n              prefix = [("normal-ui-source-roster", 15, 1048576, 0)]\n              if scope == "saved-version-recovery":\n                  prefix += [("saved-version-source-roster", 15, 65536, 0), ("saved-version-core-interrupt", 20, 65536, 86)]\n              return prefix + [("verify-generated-runner", 30, 1048576, 0),\n                  ("generated-runner-entitlements", 30, 1048576, 0), ("one-admitted-ui-test", 420, 1048576, 0),\n                  ("normal-ui-source-roster", 15, 1048576, 0)]\n          runner, runner_bytes = admitted(stem + "-test.runner-admission.json", "test", 585,\n              singleton_test_roles(selected_scope))\n          summary_owner, summary_owner_bytes = admitted(stem + "-summary.command-admission.json", "summary", 90,\n              [roster, ("normal-ui-summary", 30, 262144, 0), roster])\n          need(summary_owner.get("originalCommandRole") == "normal-ui-summary"\n               and runner.get("appSandboxEntitlement") in ("absent", "false") and runner.get("strictCodesignOriginalZero") is True\n               and runner.get("originalProductsPrePostMatched") is True and runner.get("originalClosesCompleted") is True\n               and runner.get("reSignedOrRepaired") is False\n               and runner["sourceRosterSha256"] == summary_owner["sourceRosterSha256"] == decode(build_bytes)["sourceRosterSha256"])\n          summary_bytes = read("normal-ui/" + stem + "-summary.raw.json", 262144)\n          need(len(summary_bytes) == summary_owner["commands"][1]["stdoutBytes"] and digest(summary_bytes) == summary_owner["commands"][1]["stdoutSha256"])\n          summary = decode(summary_bytes)\n          counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}\n          need(all(type(summary.get(k)) is int and summary[k] == v for k, v in counts.items()))\n          def singleton_case_data(scope, runner, preview, expected_inputs, runtime_digest):\n              singleton_selection(scope)\n              if scope == "release-evidence":\n                  need(runner.get("savedReleaseEvidenceMarkerObserved") is True\n                       and "managedWorkflowRefusalMarkerObserved" not in runner\n                       and "savedVersionRecovery" not in runner and runtime_digest is None)\n                  return {"scope": "ordinary-ui-observed-original-saved-release-evidence-documents-only",\n                      "savedReleaseEvidenceUI": "passed", "nativeEvidencePickerObserved": True,\n                      "candidateDocumentsAgreeObserved": True, "sharedCandidateGuidanceObserved": True,\n                      "stageChangeRetainsCandidateObserved": True, "replacementCancelStaleObserved": True,\n                      "releaseInputsUnpopulatedObserved": True, "fixtureOriginalsPreserved": True,\n                      "remoteGitHubOperationObserved": False, "releasePromotionObserved": False,\n                      "artifactBytesVerified": False, "signingAuthenticated": False,\n                      "githubAuthenticityEstablished": False, "storeStateEstablished": False,\n                      "releaseReadinessEstablished": False, "recoverySafetyEstablished": False}\n              need("savedReleaseEvidenceMarkerObserved" not in runner)\n              if scope == "workflow-refusal":\n                  need(runner.get("managedWorkflowRefusalMarkerObserved") is True\n                       and "savedVersionRecovery" not in runner and runtime_digest is None)\n                  return {"scope": "ordinary-ui-observed-original-managed-workflow-refusal",\n                      "managedWorkflowRefusalUI": "passed", "managedWorkflowBundleRefused": True,\n                      "fixtureOriginalsPreserved": True, "workflowMutationObserved": False,\n                      "remoteGitHubOperationObserved": False, "releasePromotionObserved": False,\n                      "coreOutcomeObserved": {"effect": "not_started", "journal": "not_created", "resources": "settled"},\n                      "nativeProjectionObserved": {"finality": "settled"}}\n              need("managedWorkflowRefusalMarkerObserved" not in runner)\n              recovery = runner.get("savedVersionRecovery")\n              digests = ("sourceInputsSha256", "runtimeManifestSha256", "runtimeResultSha256", "sourceClosureSha256", "fixtureDataSha256", "producerSha256", "producerFramesSha256", "handoffSha256")\n              positives = ("originalFixtureRestored", "unrelatedOriginalsUnchanged", "readyJournalRemoved", "sourcePrePostMatched", "uiOriginalMarkersObserved", "originalClosesCompleted")\n              need(type(recovery) is dict and set(recovery) == set(digests) | set(positives) | {"producerReturncode", "publicOriginalCount", "readyJournalFileCount", "interruptedGuiSaveObserved"}\n                   and all(hex64(recovery[k]) for k in digests) and all(recovery[k] is True for k in positives)\n                   and recovery["interruptedGuiSaveObserved"] is False\n                   and all(type(recovery[k]) is int and recovery[k] == n for k, n in (("producerReturncode", 86), ("publicOriginalCount", 13), ("readyJournalFileCount", 6)))\n                   and recovery["sourceInputsSha256"] == expected_inputs\n                   and recovery["runtimeManifestSha256"] == preview["runtimeManifestSha256"]\n                   and recovery["runtimeResultSha256"] == runtime_digest\n                   and recovery["producerFramesSha256"] == runner["commands"][2]["stdoutSha256"]\n                   and runner["commands"][2]["stderrBytes"] == 0 and runner["commands"][2]["stderrSha256"] == digest(b""))\n              return {"scope": "ordinary-ui-observed-original-saved-version-rollback-and-fresh-load",\n                  "savedVersionRecoveryUI": "passed", "savedVersionRecovery": recovery,\n                  "coreOutcomeObserved": {"effect": "rolled_back", "journal": "clean", "resources": "settled", "reason": "none"},\n                  "nativeProjectionObserved": {"finality": "settled", "reason": "none"}, "freshSavedVersionObserved": {"name": "1.2.3", "build": "7"},\n                  "inspectionClosedWithoutApply": True, "explicitFreshRecoveryConfirmation": True, "interruptedGuiSaveObserved": False,\n                  "configurationTextImagesRecoveryObserved": False}\n          case_data = singleton_case_data(selected_scope, runner, preview,\n              os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"],\n              digest(read("runtime-result.json", 65536)) if selected_scope == "saved-version-recovery" else None)\n          result = {"schemaVersion": 1, **case_data,\n              "applicationSourceCommit": source, "harnessSourceCommit": source, "workflow": ".github/workflows/desktop-macos-installed.yml",\n              **{key: preview[key] for key in ("sourceTree", "runId", "runAttempt", "platform", "packageSha256", "packageSize", "runtimeManifestSha256",\n                  "installerInventorySha256", "normalBinaryBeforeSigningSha256", "signedAppBinarySha256")}, "target": target,\n              "toolchain": prior["toolchain"], "buildCommandAdmissionSha256": digest(build_bytes), "priorResultSha256": digest(prior_bytes),\n              "generatedRunnerAdmissionSha256": digest(runner_bytes), "summaryCommandAdmissionSha256": digest(summary_owner_bytes),\n              "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/" + method, "testCounts": counts,\n              "nativeSummarySha256": digest(summary_bytes),\n              "selectedSavedFileScope": selected_scope, "savedOfflineAndEmptyBuildInputCohortObserved": False,\n              "applicationStateAfterNormalQuit": "notRunning", "originalReferenceAndGateTerminalObserved": True,\n              "cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state", "independentOwnerResourceProof": False,\n              "fullUIQualified": False, "distributionQualified": False, "productReady": False}\n          body = json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False).encode() + b"\\n"\n          need(len(body) <= 65536)\n          fd = os.open(root / ("normal-ui/" + stem + "-result.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)\n          try:\n              with os.fdopen(fd, "wb", closefd=False) as output:\n                  output.write(body); output.flush(); os.fsync(fd)\n          finally: os.close(fd)\n          print("One ordinary saved-version recovery passed after original core interrupt86; interrupted GUI Save, other domains and all-worker finality remain unproved."\n                if selected_scope == "saved-version-recovery" else\n                "One preview-packaged GitHub local bundle refusal observed; remote GitHub, promotion, default-seven and independent all-worker finality remain unproved.")\n          PY_SAVED_VERSION_RECOVERY_RESULT\n          done\n      - name: Project closed public verification facts without raw originals\n'),
+    ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success')\n", "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success')\n"),
+    ('          if scope not in ("ordinary-seven", "saved-version-recovery", "workflow-refusal", "release-evidence"):\n              raise ValueError("task cleanup SOURCE scope refused")\n          stem = {"ordinary-seven": "saved-checks", "saved-version-recovery": "saved-version-recovery",\n                  "workflow-refusal": "workflow-refusal", "release-evidence": "release-evidence"}[scope]\n          test_stem, summary_stem = stem + "-test", stem + "-summary"\n          # The skipped cohort supplies no finality or cleanup authority.\n          saved_directory = root / ("normal-ui/" + test_stem + ".xcresult")\n          saved_logs = (test_stem + ".log", summary_stem + ".raw.json", summary_stem + ".stderr")\n', '          if scope not in ("ordinary-seven", "saved-version-recovery", "workflow-refusal", "release-evidence", "remaining-three"):\n              raise ValueError("task cleanup SOURCE scope refused")\n          stems = (("saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else\n                   ({"ordinary-seven": "saved-checks", "saved-version-recovery": "saved-version-recovery",\n                     "workflow-refusal": "workflow-refusal", "release-evidence": "release-evidence"}[scope],))\n          # The skipped cohort supplies no finality or cleanup authority.\n          # remaining-three reaches this step only after all three original binders returned0.\n          saved_directories = tuple(root / ("normal-ui/" + stem + "-test.xcresult") for stem in stems)\n          saved_logs = tuple(name for stem in stems for name in\n                             (stem + "-test.log", stem + "-summary.raw.json", stem + "-summary.stderr"))\n'),
+    ('                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/persistence-test.xcresult", root / "normal-ui/project-test.xcresult", root / "normal-ui/diagnostics-test.xcresult", saved_directory, root / "normal-ui/tmp",\n', '                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/persistence-test.xcresult", root / "normal-ui/project-test.xcresult", root / "normal-ui/diagnostics-test.xcresult", *saved_directories, root / "normal-ui/tmp",\n'),
+)
+
+
+INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_INVERSE = (('name: Desktop Mac normal package and limited early preview (Aqua gate separate)', (('    # Raw timed-step union577min (ARM) /601min (Intel) includes the retained42min alternative.\n', '    # Raw timed-step union577min (ARM) /615min (Intel) includes the retained42min alternative.\n'), ('    # App-signature: ARM82 / Intel106 timed preparation +14 bounded setup\n', '    # App-signature: ARM82 / Intel120 timed preparation +14 bounded setup\n'), ('      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        timeout-minutes: 10\n', "      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}\n"))), ('name: Desktop macOS genuine Aqua engineering verification', (("      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n        timeout-minutes: 10\n", "      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}\n"),)))
+INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_MARKERS = ("${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}", '    # Raw timed-step union577min (ARM) /615min (Intel)', '    # App-signature: ARM82 / Intel120 timed preparation')
+
+
+SAME_PACKAGE_WORKFLOW_INVERSE = (("      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}\n", "      # Separate reviewed activation only; baseline and later UI remain independent.\n      MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}\n      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}\n"), ('          case "$MRK_MACOS_ANDROID_UI_SCOPE" in\n', '          case "$MRK_MACOS_SAME_PACKAGE_SCOPE" in\n            disabled) ;;\n            same-package-noop) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;\n            *) exit 1 ;;\n          esac\n          case "$MRK_MACOS_ANDROID_UI_SCOPE" in\n'), ('      - name: Notarize, staple and verify only the final user image\n', '      - name: Notarize, staple and verify only the final user image\n        id: finalize_image\n'), ('      - name: Prepare the fixed two-file removal package without executing it\n', '      - name: Observe one ordinary finalized-carrier same-package no-op\n        id: same_package_noop\n        if: github.ref == \'refs/heads/verify/desktop-macos-preview\' && env.MRK_MACOS_SAME_PACKAGE_SCOPE == \'same-package-noop\' && steps.package_install.outcome == \'success\' && steps.finalize_image.outcome == \'success\'\n        timeout-minutes: 32\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          # The existing baseline is immutable. Only one ordinary Install.pkg\n          # original follows it; no build, sign, notary or privileged Python.\n          # This 32-minute optional step shares a1740s work/1800s hard owner;\n          # it adds32 nominal minutes, not a350-minute job fit guarantee.\n          [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == same-package-noop && "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py same-package-noop --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/same-package-noop.stdout" 2> "$MRK_MACOS_WORK/same-package-noop.stderr"\n          noop_status=$?\n          printf \'%s\\n\' "$noop_status" > "$MRK_MACOS_WORK/same-package-noop.status"\n          noop_status_saved=$?\n          set -e\n          if [[ "$noop_status" != 0 ]]; then exit "$noop_status"; fi\n          [[ "$noop_status_saved" == 0 ]] || exit "$noop_status_saved"\n          # Actual0, closed originals and live linked-state readback are all\n          # mandatory. This is not restore/update/GUI/service-exit evidence.\n\n      - name: Prepare the fixed two-file removal package without executing it\n'), ("&& steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success')", "&& steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))"))
+
+
+POSITIVE_UPDATE_WORKFLOW_INVERSE = (('      - verify/desktop-macos-app-absence-fixture\n\n',
+  '      - verify/desktop-macos-app-absence-fixture\n      - verify/desktop-macos-positive-update\n\n'),
+ ('  engineering-install:\n'
+  "    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || "
+  "github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '    environment: macos-developer-id\n',
+  '  engineering-install:\n'
+  "    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || "
+  "github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == "
+  "'refs/heads/verify/desktop-macos-positive-update')\n"
+  '    environment: macos-developer-id\n'),
+ ('          esac\n'
+  '          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || '
+  '"$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == '
+  'refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature '
+  '|| "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ) ]] || exit 1\n'
+  '          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ]]; then\n'
+  '            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && '
+  '"$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n',
+  '          esac\n'
+  '          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || '
+  '"$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == '
+  'refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature '
+  '|| "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == '
+  'refs/heads/verify/desktop-macos-positive-update ) ]] || exit 1\n'
+  '          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == '
+  'refs/heads/verify/desktop-macos-positive-update ]]; then\n'
+  '            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && '
+  '"$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n'),
+ ("          python-version: '3.14.7'\n"
+  '      - name: Select the fixed configured signed runtime before any payload download\n',
+  "          python-version: '3.14.7'\n"
+  '      - name: Refuse unconfigured update before any artifact download or native preparation\n'
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'\n"
+  '        id: update_selection\n'
+  '        timeout-minutes: 1\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          MRK_PYTHON: ${{ steps.python.outputs.python-path }}\n'
+  '        run: |\n'
+  '          set -euo pipefail\n'
+  '          umask 077\n'
+  '          selection=$("$MRK_PYTHON" -I -S -B desktop/tools/macos_update_verification.py select --target '
+  '"$MRK_MACOS_TARGET")\n'
+  '          [[ ${#selection} -le 1024 && "$HOME" == /* ]] || exit 1\n'
+  '          "$MRK_PYTHON" -I -S -B - "$selection" <<\'PY_UPDATE_SELECT\'\n'
+  '          import json, os, re, sys\n'
+  '          value = json.loads(sys.argv[1])\n'
+  '          if set(value) != {"artifactId", "runId", "artifactBytes", "additionalDiskBytes"}: raise '
+  'ValueError("update selection")\n'
+  '          rows = {}\n'
+  '          for field, key in (("artifactId", "MRK_UPDATE_ARTIFACT_ID"), ("runId", "MRK_UPDATE_RUN_ID")):\n'
+  '              v = value[field]\n'
+  '              if type(v) is not str or re.fullmatch(r"[1-9][0-9]{0,19}", v) is None: raise ValueError("update '
+  'identity")\n'
+  '              rows[key] = v\n'
+  '          for key in ("artifactBytes", "additionalDiskBytes"):\n'
+  '              if type(value[key]) is not int or not 0 < value[key] <= 8 * 1024**3: raise ValueError("update '
+  'quote")\n'
+  '          rows["MRK_UPDATE_DISK_BYTES"] = str(value["additionalDiskBytes"])\n'
+  '          home = os.environ["HOME"]\n'
+  '          if not home.startswith("/") or any(c in home for c in "\\r\\n\\0"): raise ValueError("update GUI home")\n'
+  '          rows["MRK_MACOS_GUI_HOME"] = home\n'
+  '          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:\n'
+  '              for key, value in rows.items(): output.write(key + "=" + value + "\\n")\n'
+  '          PY_UPDATE_SELECT\n'
+  '\n'
+  '      - name: Select the fixed configured signed runtime before any payload download\n'),
+ ('        id: data_contracts\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '        timeout-minutes: 28\n',
+  '        id: data_contracts\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || "
+  "github.ref == 'refs/heads/verify/desktop-macos-positive-update')\n"
+  '        timeout-minutes: 28\n'),
+ ('      - name: Build the separate fixed eight-case Installer package from the same completed input\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '        timeout-minutes: 8\n',
+  '      - name: Build the separate fixed eight-case Installer package from the same completed input\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != "
+  "'refs/heads/verify/desktop-macos-positive-update')\n"
+  '        timeout-minutes: 8\n'),
+ ('      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '        timeout-minutes: 18\n',
+  '      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != "
+  "'refs/heads/verify/desktop-macos-positive-update')\n"
+  '        timeout-minutes: 18\n'),
+ ('      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '        timeout-minutes: 3\n',
+  '      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != "
+  "'refs/heads/verify/desktop-macos-positive-update')\n"
+  '        timeout-minutes: 3\n'),
+ ('          # Closed receipt never certifies its own future original exit.\n\n'
+  '      - name: Standard Installer only is privileged; never execute the app or Python as root\n',
+  '          # Closed receipt never certifies its own future original exit.\n'
+  '\n'
+  '      - name: Admit only the reviewed update artifact incremental disk allocation\n'
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'\n"
+  '        timeout-minutes: 1\n'
+  '        shell: bash\n'
+  '        run: |\n'
+  '          set -euo pipefail\n'
+  '          umask 077\n'
+  '          "$MRK_PYTHON" -I -S -B - <<\'PY_UPDATE_SPACE\'\n'
+  '          import os, pathlib, stat\n'
+  '          root = pathlib.Path(os.environ["MRK_MACOS_WORK"])\n'
+  '          info = root.lstat()\n'
+  '          if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700: '
+  'raise ValueError("update work")\n'
+  '          budget = int(os.environ["MRK_UPDATE_DISK_BYTES"])\n'
+  '          capacity = os.statvfs(root)\n'
+  '          if not 0 < budget <= 8 * 1024**3 or capacity.f_bavail * capacity.f_frsize < budget + 64 * 1024**2: raise '
+  'ValueError("update disk")\n'
+  '          (root / "update-predecessor").mkdir(mode=0o700)\n'
+  '          PY_UPDATE_SPACE\n'
+  '\n'
+  '      - name: Download only SOURCE-nominated qualified predecessor DATA\n'
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'\n"
+  '        timeout-minutes: 5\n'
+  '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c\n'
+  '        with:\n'
+  '          artifact-ids: ${{ env.MRK_UPDATE_ARTIFACT_ID }}\n'
+  '          run-id: ${{ env.MRK_UPDATE_RUN_ID }}\n'
+  '          repository: Apdelrahman1911/mobile-release-kit\n'
+  '          github-token: ${{ github.token }}\n'
+  '          path: ${{ env.MRK_MACOS_WORK }}/update-predecessor\n'
+  "          merge-multiple: 'true'\n"
+  '          digest-mismatch: error\n'
+  "          skip-decompress: 'false'\n"
+  '\n'
+  '      - name: Install the exact qualified predecessor once before the existing current Installer original\n'
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'\n"
+  '        id: update_baseline\n'
+  '        timeout-minutes: 9\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          set +e\n'
+  '          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py update-baseline --target '
+  '"$MRK_MACOS_TARGET" \\\n'
+  '            > "$MRK_MACOS_WORK/update-baseline.stdout" 2> "$MRK_MACOS_WORK/update-baseline.stderr"\n'
+  '          phase_status=$?\n'
+  '          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/update-baseline.status"\n'
+  '          save_status=$?\n'
+  '          set -e\n'
+  '          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n'
+  '          [[ "$save_status" == 0 ]] || exit "$save_status"\n'
+  '          # P1 remains the existing one package-install original, not a replay.\n'
+  '\n'
+  '      - name: Standard Installer only is privileged; never execute the app or Python as root\n'))
+
+def without_positive_update_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("positive-update SOURCE bound differs")
+    source = without_intel_android_workflow(source)
+    if "verify/desktop-macos-positive-update" not in source:
+        if "update-baseline --target" in source or "MRK_UPDATE_ARTIFACT_ID" in source:
+            raise AssertionError("partial positive-update workflow")
+        return source
+    for before, after in POSITIVE_UPDATE_WORKFLOW_INVERSE:
+        if source.count(after) != 1 or source.count(before) != after.count(before):
+            raise AssertionError("positive-update exact region differs")
+    for before, after in reversed(POSITIVE_UPDATE_WORKFLOW_INVERSE):
+        source = source.replace(after, before, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "024cb67a62bbc1b7ba929c044a0edffc7f27731c8eeb508ca7e373924be4afc1":
+        raise AssertionError("positive-update whole predecessor differs")
+    return source
+
+
+APP_ABSENCE_WORKFLOW_INVERSE = (('      - verify/desktop-macos-removal-lifecycle\n      - verify/desktop-macos-app-signature\n\npermissions:\n', '      - verify/desktop-macos-removal-lifecycle\n      - verify/desktop-macos-app-signature\n      - verify/desktop-macos-app-absence-fixture\n\npermissions:\n'), ("jobs:\n  engineering-install:\n    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature')\n    environment: macos-developer-id\n    name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}\n", "jobs:\n  engineering-install:\n    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture')\n    environment: macos-developer-id\n    name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}\n"), ('            *) exit 1 ;;\n          esac\n          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ) ]] || exit 1\n          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then\n            [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n', '            *) exit 1 ;;\n          esac\n          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ) ]] || exit 1\n          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ]]; then\n            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n          fi\n          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then\n            [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n'), ("      - name: Compile and run only fixed native DATA contracts and exact host-Python regressions\n        id: data_contracts\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview')\n        timeout-minutes: 28\n        shell: bash\n", "      - name: Compile and run only fixed native DATA contracts and exact host-Python regressions\n        id: data_contracts\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture')\n        timeout-minutes: 28\n        shell: bash\n"), ("          PY\n      - name: Build the separate fixed eight-case Installer package from the same completed input\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle')\n        timeout-minutes: 8\n        shell: bash\n", "          PY\n      - name: Build the separate fixed eight-case Installer package from the same completed input\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture')\n        timeout-minutes: 8\n        shell: bash\n"), ('            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"\n      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\' && (github.ref != \'refs/heads/verify/desktop-macos-removal-lifecycle\')\n        timeout-minutes: 18\n        shell: bash\n', '            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"\n      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\' && (github.ref != \'refs/heads/verify/desktop-macos-removal-lifecycle\' && github.ref != \'refs/heads/verify/desktop-macos-app-absence-fixture\')\n        timeout-minutes: 18\n        shell: bash\n'), ("          # Any unexpected native failure/Unknown stops subsequent cases. No retry.\n      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle')\n        timeout-minutes: 3\n        shell: bash\n", "          # Any unexpected native failure/Unknown stops subsequent cases. No retry.\n      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture')\n        timeout-minutes: 3\n        shell: bash\n"), ("          # actual original0/status and the retained closed receipt, not a flag.\n\n      - name: Standard Installer only is privileged; never execute the app or Python as root\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'\n        id: package_install\n        timeout-minutes: 18\n        shell: bash\n        env:\n", '          # actual original0/status and the retained closed receipt, not a flag.\n\n      - name: Fixed nonshipping app-absence prepare-app-absence; no credentials or user artifact\n        id: app_absence_prepare\n        if: github.ref == \'refs/heads/verify/desktop-macos-app-absence-fixture\'\n        timeout-minutes: 56\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare-app-absence --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/prepare-app-absence.stdout" 2> "$MRK_MACOS_WORK/prepare-app-absence.stderr"\n          phase_status=$?\n          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/app-absence-preparation.status"\n          save_status=$?\n          set -e\n          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n          [[ "$save_status" == 0 ]] || exit "$save_status"\n          # Closed receipt never certifies its own future original exit.\n\n      - name: Standard Installer only is privileged; never execute the app or Python as root\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\'\n        id: package_install\n        timeout-minutes: ${{ github.ref == \'refs/heads/verify/desktop-macos-app-absence-fixture\' && 32 || 18 }}\n        shell: bash\n        env:\n'), ('          # One original existing owner: final archive audit, explicit producer,\n          # two fixed signed images, readonly mount, standard Installer and V2\n          # nonroot readback. Its one990s group includes known mount retirement.\n          # Previous pkgbuild/tar/xar construction is not relabeled as owned.\n          set +e\n', '          # One original existing owner: final archive audit, explicit producer,\n          # two fixed signed images, readonly mount, standard Installer and V2\n          # nonroot readback. Ordinary one990s remains unchanged. The fixed\n          # app-absence route alone adds baseline/image originals within1740s\n          # work/1800s hard; the job350min cap is never renewed.\n          # Previous pkgbuild/tar/xar construction is not relabeled as owned.\n          set +e\n'), ('          # Unknown resources remain retained; no forced detach or root Python.\n          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD\n      - name: Prepare fresh private Android UI suppliers and disposable key inputs\n        id: normal_android_inputs\n', '          # Unknown resources remain retained; no forced detach or root Python.\n          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD\n      - name: Fixed nonshipping app-absence app-absence-restore; no credentials or user artifact\n        id: app_absence_restore\n        if: github.ref == \'refs/heads/verify/desktop-macos-app-absence-fixture\'\n        timeout-minutes: 13\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py app-absence-restore --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/app-absence-restore.stdout" 2> "$MRK_MACOS_WORK/app-absence-restore.stderr"\n          phase_status=$?\n          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/app-absence-restore.status"\n          save_status=$?\n          set -e\n          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n          [[ "$save_status" == 0 ]] || exit "$save_status"\n          # Closed receipt never certifies its own future original exit.\n\n      - name: Prepare fresh private Android UI suppliers and disposable key inputs\n        id: normal_android_inputs\n'))
+
+SIGNED_ANDROID_SUPPORT_WORKFLOW_REGIONS = (('      - name: Acquire and verify the two fixed Android support archives as DATA\n        timeout-minutes: 4\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          set -o noclobber\n          umask 077\n          work=\'${{ steps.work.outputs.root }}\'\n          target=\'${{ matrix.target }}\'\n          [[ "$work" == /Users/runner/work/_temp/mrk-macos-installed.* && -d "$work" && ! -L "$work" ]] || exit 1\n          # Fresh outputs, no inherited credentials/proxy/curlrc, no retry or fallback.\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \\\n            --proto \'=https\' --proto-redir \'=https\' --connect-timeout 20 --max-time 90 --max-filesize 32520401 \\\n            --url \'https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar\' \\\n            > "$work/bundletool-all-1.18.3.jar"\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \\\n            --proto \'=https\' --proto-redir \'=https\' --connect-timeout 20 --max-time 90 --max-filesize 4339472 \\\n            --url \'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar\' \\\n            > "$work/aapt2-8.9.2-12782657-osx.jar"\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            \'${{ steps.python.outputs.python-path }}\' -I -S -B desktop/tools/stage_macos_installed.py android-support --target "$target" \\\n            --bundletool-archive "$work/bundletool-all-1.18.3.jar" --aapt2-archive "$work/aapt2-8.9.2-12782657-osx.jar" \\\n            > "$work/android-support-result.json"\n', '      - name: Download the fixed once-signed Android support capsule\n        timeout-minutes: 3\n        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8\n        with:\n          artifact-ids: \'11691308054\'\n          run-id: \'38109802320\'\n          repository: Apdelrahman1911/mobile-release-kit\n          github-token: ${{ github.token }}\n          path: ${{ steps.work.outputs.root }}/signed-android-transport\n          merge-multiple: \'false\'\n          digest-mismatch: error\n          skip-decompress: \'false\'\n      - name: Acquire and verify the two fixed Android support archives as DATA\n        timeout-minutes: 1\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          set -o noclobber\n          umask 077\n          work=\'${{ steps.work.outputs.root }}\'\n          target=\'${{ matrix.target }}\'\n          [[ "$work" == /Users/runner/work/_temp/mrk-macos-installed.* && -d "$work" && ! -L "$work" ]] || exit 1\n          # No native execution or credentials in DATA admission. Exact SOURCE\n          # joins all three originals to the successful once-signed producer.\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            \'${{ steps.python.outputs.python-path }}\' -I -S -B desktop/tools/stage_macos_installed.py android-support --target "$target" \\\n            --bundletool-archive "$work/signed-android-transport/bundletool-all-1.18.3.jar" \\\n            --aapt2-archive "$work/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \\\n            --android-support-signed-receipt "$work/signed-android-transport/android-support-signed-receipt.json" \\\n            > "$work/android-support-result.json"\n'), ('      - name: Acquire and verify the two fixed Android support archives as DATA\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == \'project-fields\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-current-synthetic\' || env.MRK_MACOS_AQUA_SCOPE == \'android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'project-fields-android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping\' || env.MRK_MACOS_AQUA_SCOPE == \'installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping-installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'project-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'doctor-preflight2\' || env.MRK_MACOS_AQUA_SCOPE == \'local-edits3\')\n        timeout-minutes: 4\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          set -o noclobber\n          umask 077\n          work=\'${{ steps.work.outputs.root }}\'\n          [[ "$work" == /Users/runner/work/_temp/mrk-macos-aqua.* && -d "$work" && ! -L "$work" ]] || exit 1\n          # Fresh outputs, no inherited credentials/proxy/curlrc, no retry or fallback.\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \\\n            --proto \'=https\' --proto-redir \'=https\' --connect-timeout 20 --max-time 90 --max-filesize 32520401 \\\n            --url \'https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar\' \\\n            > "$work/bundletool-all-1.18.3.jar"\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \\\n            --proto \'=https\' --proto-redir \'=https\' --connect-timeout 20 --max-time 90 --max-filesize 4339472 \\\n            --url \'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar\' \\\n            > "$work/aapt2-8.9.2-12782657-osx.jar"\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            \'${{ steps.python.outputs.python-path }}\' -I -S -B desktop/tools/stage_macos_installed.py android-support \\\n            --target \'${{ matrix.target }}\' \\\n            --bundletool-archive "$work/bundletool-all-1.18.3.jar" --aapt2-archive "$work/aapt2-8.9.2-12782657-osx.jar" \\\n            > "$work/android-support-result.json"\n', '      - name: Download the fixed once-signed Android support capsule\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == \'project-fields\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-current-synthetic\' || env.MRK_MACOS_AQUA_SCOPE == \'android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'project-fields-android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping\' || env.MRK_MACOS_AQUA_SCOPE == \'installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping-installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'project-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'doctor-preflight2\' || env.MRK_MACOS_AQUA_SCOPE == \'local-edits3\')\n        timeout-minutes: 3\n        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8\n        with:\n          artifact-ids: \'11691308054\'\n          run-id: \'38109802320\'\n          repository: Apdelrahman1911/mobile-release-kit\n          github-token: ${{ github.token }}\n          path: ${{ steps.work.outputs.root }}/signed-android-transport\n          merge-multiple: \'false\'\n          digest-mismatch: error\n          skip-decompress: \'false\'\n      - name: Acquire and verify the two fixed Android support archives as DATA\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == \'project-fields\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-current-synthetic\' || env.MRK_MACOS_AQUA_SCOPE == \'android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'project-fields-android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping\' || env.MRK_MACOS_AQUA_SCOPE == \'installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping-installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'project-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'doctor-preflight2\' || env.MRK_MACOS_AQUA_SCOPE == \'local-edits3\')\n        timeout-minutes: 1\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          set -o noclobber\n          umask 077\n          work=\'${{ steps.work.outputs.root }}\'\n          target=\'${{ matrix.target }}\'\n          [[ "$work" == /Users/runner/work/_temp/mrk-macos-aqua.* && -d "$work" && ! -L "$work" ]] || exit 1\n          # No native execution or credentials in DATA admission. Exact SOURCE\n          # joins all three originals to the successful once-signed producer.\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            \'${{ steps.python.outputs.python-path }}\' -I -S -B desktop/tools/stage_macos_installed.py android-support --target "$target" \\\n            --bundletool-archive "$work/signed-android-transport/bundletool-all-1.18.3.jar" \\\n            --aapt2-archive "$work/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \\\n            --android-support-signed-receipt "$work/signed-android-transport/android-support-signed-receipt.json" \\\n            > "$work/android-support-result.json"\n'))
+SIGNED_ANDROID_SUPPORT_WORKFLOW_COMMON = (('          [[ ! -e "$MRK_MACOS_WORK/signed-python-transport" && ! -L "$MRK_MACOS_WORK/signed-python-transport" ]] || exit 1\n', '          [[ ! -e "$MRK_MACOS_WORK/signed-python-transport" && ! -L "$MRK_MACOS_WORK/signed-python-transport" ]] || exit 1\n          [[ ! -e "$MRK_MACOS_WORK/signed-android-transport" && ! -L "$MRK_MACOS_WORK/signed-android-transport" ]] || exit 1\n'), ('            --bundletool-archive "$MRK_MACOS_WORK/bundletool-all-1.18.3.jar" \\\n            --aapt2-archive "$MRK_MACOS_WORK/aapt2-8.9.2-12782657-osx.jar" \\\n', '            --bundletool-archive "$MRK_MACOS_WORK/signed-android-transport/bundletool-all-1.18.3.jar" \\\n            --aapt2-archive "$MRK_MACOS_WORK/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \\\n            --android-support-signed-receipt "$MRK_MACOS_WORK/signed-android-transport/android-support-signed-receipt.json" \\\n'))
+
+
+def without_signed_android_runtime_source_pin(source):
+    # Fresh Mac core composition only; all older workflow oracles stay fixed.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("signed Android runtime SOURCE bound differs")
+    current = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+    previous = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+    if current not in source:
+        return source
+    configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + current + "\n"
+    guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + current + ' ]] || exit 1\n'
+    if (source.count(current) != 2 or previous in source
+            or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
+        raise AssertionError("signed Android runtime SOURCE exact two-site delta differs")
+    for line in (configured, guard):
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
+INSTALLED_ANDROID_ACTIVATION_INVERSE = (
+    '      # SOURCE-owned and OFF: legal/signing/current protected-copy prerequisites remain.\n      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n',
+    "      # SOURCE-owned: signed Android journey only on the fixed installed verification ref.\n      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'android-signed-build' || 'disabled' }}\n",
+)
+
+NORMAL_IOS_PENDING_WORKFLOW_INVERSE = (('      # SOURCE-owned: unsigned iOS journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'ios-unsigned-archive' || 'disabled' }}\n",
+  '      # SOURCE-owned: pending iOS recovery journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'ios-pending-recovery' || 'disabled' }}\n"),
+ ('            ios-unsigned-archive)\n', '            ios-unsigned-archive|ios-pending-recovery)\n'),
+ ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' "
+  "&& env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n",
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' "
+  "&& env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && (env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' || "
+  "env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery') && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && "
+  "env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n"),
+ ('      - name: Exercise one ordinary unsigned iOS archive and normal Quit\n'
+  '        id: normal_ios_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-test \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.log" 2>&1\n'
+  '          ios_test_status=$?\n'
+  '          printf \'%s\\n\' "$ios_test_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.status"\n'
+  '          ios_test_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi\n'
+  '          [[ "$ios_test_status_saved" == 0 ]] || exit 1\n'
+  '          # One900s case /1020s original /1245s phase; success observation must\n'
+  '          # latch by750s. The same original reserve is for failure/cancel/close,\n'
+  '          # not a replacement Start. Raw log, xcresult and archive stay PRIVATE.\n'
+  '\n'
+  '      - name: Observe the single unsigned iOS XCTest summary under the same source\n'
+  '        id: normal_ios_ui_summary\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 2\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-summary \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.json" 2> '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.stderr"\n'
+  '          ios_summary_status=$?\n'
+  '          printf \'%s\\n\' "$ios_summary_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.status"\n'
+  '          ios_summary_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi\n'
+  '          [[ "$ios_summary_status_saved" == 0 ]] || exit 1\n'
+  '          # The existing summary owner requires actual1/1 with no failure/skip.\n'
+  '          # Its closed source/command receipt plus the separately retained test0\n'
+  '          # and facts are evidence, never IPA/signing/distribution qualification.\n'
+  '\n',
+  '      - name: Exercise one ordinary unsigned iOS archive and normal Quit\n'
+  '        id: normal_ios_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-test \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.log" 2>&1\n'
+  '          ios_test_status=$?\n'
+  '          printf \'%s\\n\' "$ios_test_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.status"\n'
+  '          ios_test_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi\n'
+  '          [[ "$ios_test_status_saved" == 0 ]] || exit 1\n'
+  '          # One900s case /1020s original /1245s phase; success observation must\n'
+  '          # latch by750s. The same original reserve is for failure/cancel/close,\n'
+  '          # not a replacement Start. Raw log, xcresult and archive stay PRIVATE.\n'
+  '\n'
+  '      - name: Observe the single unsigned iOS XCTest summary under the same source\n'
+  '        id: normal_ios_ui_summary\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 2\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-summary \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.json" 2> '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.stderr"\n'
+  '          ios_summary_status=$?\n'
+  '          printf \'%s\\n\' "$ios_summary_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.status"\n'
+  '          ios_summary_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi\n'
+  '          [[ "$ios_summary_status_saved" == 0 ]] || exit 1\n'
+  '          # The existing summary owner requires actual1/1 with no failure/skip.\n'
+  '          # Its closed source/command receipt plus the separately retained test0\n'
+  '          # and facts are evidence, never IPA/signing/distribution qualification.\n'
+  '\n'
+  '      - name: Recover one genuine pending iOS account session through the ordinary app\n'
+  '        id: normal_ios_pending_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 19\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-pending-recovery ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # The same installed normal app, real console account, fixed fixture\n'
+  '          # and original runner are required. No signing material/Store action.\n'
+  '          # Never clean account state or private pending controls after failure.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \\\n'
+  '            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" '
+  '\\\n'
+  '            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \\\n'
+  '            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \\\n'
+  '            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" '
+  '\\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-pending-recovery-test \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-test.log" 2>&1\n'
+  '          ios_test_status=$?\n'
+  '          printf \'%s\\n\' "$ios_test_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-test.status"\n'
+  '          ios_test_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi\n'
+  '          [[ "$ios_test_status_saved" == 0 ]] || exit 1\n'
+  '          # Seven originals: sourcePRE/runner-signature/entitlements/producer180/\n'
+  '          # XCTest645 (525case)/observer90/sourcePOST, one1080s phase. The real\n'
+  '          # producer/UI/readback all must settle; logs and private baseline stay PRIVATE.\n'
+  '\n'
+  '      - name: Observe the one pending iOS recovery XCTest summary under the same source\n'
+  '        id: normal_ios_pending_ui_summary\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ios_pending_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 2\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-pending-recovery ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # The same installed normal app, real console account, fixed fixture\n'
+  '          # and original runner are required. No signing material/Store action.\n'
+  '          # Never clean account state or private pending controls after failure.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \\\n'
+  '            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" '
+  '\\\n'
+  '            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \\\n'
+  '            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \\\n'
+  '            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" '
+  '\\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-pending-recovery-summary \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.json" 2> '
+  '"$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.stderr"\n'
+  '          ios_summary_status=$?\n'
+  '          printf \'%s\\n\' "$ios_summary_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.status"\n'
+  '          ios_summary_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi\n'
+  '          [[ "$ios_summary_status_saved" == 0 ]] || exit 1\n'
+  '          # The existing summary owner requires actual1/1 with no failure/skip.\n'
+  '          # Its closed source/command receipt plus the separately retained test0\n'
+  '          # and facts are evidence, never IPA/signing/distribution qualification.\n'
+  '\n'))
+
+
+INTEL_FETCH_WORKFLOW_INVERSE = (('name: Desktop Mac normal package and limited early preview (Aqua gate separate)', [("      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}", "      # Intel fetch120 is separate; compile720 and containing job caps are unchanged.\n      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 26 || 10 }}"), ('Raw timed-step union577min (ARM) /615min (Intel)', 'Raw timed-step union577min (ARM) /617min (Intel)'), ('App-signature: ARM82 / Intel120 timed preparation', 'App-signature: ARM82 / Intel122 timed preparation')]), ('name: Desktop macOS genuine Aqua engineering verification', [("      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}", "      # Intel fetch120 is separate; compile720 and containing job caps are unchanged.\n      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 26 || 10 }}")]))
+
+INTEL_FETCH_PREPARE_PREFIX = '        if self.target == INTEL_TARGET:\n            self.stage = "resident-dependency-fetch"\n            # Separate acquisition from the unchanged compiler deadline. The\n            # same original call must return0 with settled captures first.\n            self.call("resident-fetch", [direct_rust_tools(self.target)[0], "fetch", "--manifest-path",\n                      str(self.checkout / WORKSPACE / "Cargo.toml"), "--locked", "--target", self.target],\n                      build_environment(self.environment, self.work, self.image_release, target=self.target),\n                      cwd=self.checkout / WORKSPACE, timeout=120, limit=4 * 1024 * 1024)\n'
+INTEL_FETCH_OFFLINE_REGION = ('                           "--locked", "--release", "--jobs", "1", "--target", self.target,', '                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--jobs", "1", "--target", self.target,')
+
+def without_primary_owner_runtime_source_pin(source):
+    # Exact current SOURCE nomination only; all historical oracles stay fixed.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("primary owner runtime SOURCE bound differs")
+    current = "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"
+    previous = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+    if current not in source:
+        return source
+    configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + current + "\n"
+    guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + current + ' ]] || exit 1\n'
+    if (source.count(current) != 2 or previous in source
+            or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
+        raise AssertionError("primary owner runtime SOURCE exact two-site delta differs")
+    for line in (configured, guard):
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
+def without_intel_fetch_workflow(source):
+    source = without_primary_owner_runtime_source_pin(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("Intel fetch workflow SOURCE bound differs")
+    markers = ("Intel fetch120 is separate", "&& 26 || 10")
+    if not any(marker in source for marker in markers):
+        return source
+    selected = [rows for route, rows in INTEL_FETCH_WORKFLOW_INVERSE if source.startswith(route + "\n")]
+    if len(selected) != 1:
+        raise AssertionError("Intel fetch workflow route differs")
+    for previous, current in selected[0]:
+        if source.count(current) != 1 or source.count(previous) != current.count(previous):
+            raise AssertionError("Intel fetch workflow complete exact delta differs")
+    for previous, current in reversed(selected[0]):
+        source = source.replace(current, previous, 1)
+    if any(marker in source for marker in markers):
+        raise AssertionError("Intel fetch workflow partial delta remains")
+    return source
+
+
+def without_normal_ios_pending_workflow(source):
+    source = without_intel_fetch_workflow(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("normal iOS pending workflow SOURCE bound differs")
+    if "ios-pending-recovery" not in source and "normal_ios_pending_ui_" not in source:
+        return source
+    for previous, current in reversed(NORMAL_IOS_PENDING_WORKFLOW_INVERSE):
+        if source.count(current) != 1:
+            raise AssertionError("normal iOS pending workflow exact SOURCE differs")
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "b96a9fe68f93b9eceeaf4297cdc4e1f54cb70b9c5ef51c346c84519e83ab4e65":
+        raise AssertionError("normal iOS pending workflow whole predecessor differs")
+    return source
+
+
+INSTALLED_IOS_ACTIVATION_INVERSE = (('      # SOURCE-owned: signed Android journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'android-signed-build' || 'disabled' }}\n",
+  '      # This installed verification run exercises iOS; Android keeps its separate qualification.\n'
+  '      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n'),
+ ('      # Separately reviewed unsigned archive UI; an installed app is still mandatory.\n'
+  '      MRK_MACOS_IOS_UI_SCOPE: disabled\n',
+  '      # SOURCE-owned: unsigned iOS journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'ios-unsigned-archive' || 'disabled' }}\n"))
+
+def without_installed_ios_activation_workflow(source):
+    source = without_normal_ios_pending_workflow(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("installed iOS activation SOURCE bound differs")
+    (old_android, new_android), (old_ios, new_ios) = INSTALLED_IOS_ACTIVATION_INVERSE
+    android_scopes = [line for line in source.splitlines(keepends=True)
+                      if line.startswith("      MRK_MACOS_ANDROID_UI_SCOPE:")]
+    ios_scopes = [line for line in source.splitlines(keepends=True)
+                  if line.startswith("      MRK_MACOS_IOS_UI_SCOPE:")]
+    if new_android not in source and new_ios not in source:
+        # Historical scope mutations belong to their unchanged exact inverse;
+        # only this new activation's own incomplete markers are refused here.
+        if (new_android.splitlines()[0] in source or new_ios.splitlines()[0] in source
+                or new_ios.splitlines(keepends=True)[1] in ios_scopes):
+            raise AssertionError("installed iOS activation partial SOURCE differs")
+        return source
+    if (source.count(new_android) != 1 or source.count(new_ios) != 1
+            or old_android in source or old_ios in source
+            or android_scopes != [new_android.splitlines(keepends=True)[1]]
+            or ios_scopes != [new_ios.splitlines(keepends=True)[1]]):
+        raise AssertionError("installed iOS activation exact SOURCE differs")
+    for previous, current in reversed(INSTALLED_IOS_ACTIVATION_INVERSE):
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "ec216ac8fceb8d35cd91f793c7e496c620f1ba212278026b8da883a88907a2dc":
+        raise AssertionError("installed iOS activation whole predecessor differs")
+    return source
+
+
+def without_installed_android_activation_workflow(source):
+    source = without_installed_ios_activation_workflow(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("installed Android activation SOURCE bound differs")
+    previous, current = INSTALLED_ANDROID_ACTIVATION_INVERSE
+    old_scope = previous.splitlines(keepends=True)[1]
+    new_scope = current.splitlines(keepends=True)[1]
+    scopes = [line for line in source.splitlines(keepends=True)
+              if line.startswith("      MRK_MACOS_ANDROID_UI_SCOPE:")]
+    if current not in source:
+        if (len(scopes) > 1 or any(line != old_scope for line in scopes)
+                or current.splitlines()[0] in source):
+            raise AssertionError("installed Android activation partial SOURCE differs")
+        return source
+    if source.count(current) != 1 or previous in source or scopes != [new_scope]:
+        raise AssertionError("installed Android activation exact SOURCE differs")
+    source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "b5e5776a4922100d68691f06fb0d354eb8aa6b6b92305889bd03251529d843ef":
+        raise AssertionError("installed Android activation whole predecessor differs")
+    return source
+
+
+def without_signed_android_support_workflow(source):
+    source = without_installed_android_activation_workflow(source)
+    source = without_signed_android_runtime_source_pin(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("signed Android support workflow SOURCE bound differs")
+    if "signed-android-transport" not in source:
+        return source
+    matches = [(old, new) for old, new in SIGNED_ANDROID_SUPPORT_WORKFLOW_REGIONS if new in source]
+    if len(matches) != 1:
+        raise AssertionError("signed Android support workflow exact download/admission differs")
+    regions = (*matches, *SIGNED_ANDROID_SUPPORT_WORKFLOW_COMMON)
+    for old, new in regions:
+        if source.count(new) != 1 or source.count(old) != new.count(old):
+            raise AssertionError("signed Android support workflow exact delta differs")
+    for old, new in reversed(regions):
+        source = source.replace(new, old, 1)
+    if any(marker in source for marker in ("signed-android-transport", "--android-support-signed-receipt",
+                                           "Download the fixed once-signed Android support capsule")):
+        raise AssertionError("signed Android support workflow extra delta differs")
+    return source
+
+
+INTEL_ANDROID_WORKFLOW_INVERSE = (('        id: normal_ui_build\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' "
+  "|| (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n"
+  '        timeout-minutes: 9\n',
+  '        id: normal_ui_build\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' "
+  "|| (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == "
+  "'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && "
+  "env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n"
+  '        timeout-minutes: 9\n'),
+ ('        id: normal_android_inputs\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n',
+  '        id: normal_android_inputs\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n'),
+ ('          umask 077\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == android-signed-build && "$MRK_MACOS_TARGET" == '
+  'aarch64-apple-darwin ]] || exit 1\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == '
+  '"$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1\n',
+  '          umask 077\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == android-signed-build ]] || exit 1\n'
+  '          case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$MRK_MACOS_HOSTED_JOB" in\n'
+  '            '
+  'aarch64-apple-darwin/ARM64/github-hosted-macos26-arm64|x86_64-apple-darwin/X64/github-hosted-macos26-x86_64) '
+  ';;\n'
+  '            *) exit 1 ;;\n'
+  '          esac\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == '
+  '"$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1\n'),
+ ('        id: normal_android_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_inputs.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 23\n',
+  '        id: normal_android_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && "
+  "steps.normal_android_inputs.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 23\n'),
+ ('        id: normal_android_ui_result\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_ui_test.outcome == 'success' "
+  "&& steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 3\n',
+  '        id: normal_android_ui_result\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && "
+  "steps.normal_android_ui_test.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 3\n'),
+ ("          SOURCE = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')\n"
+  "          TARGET = 'aarch64-apple-darwin'\n"
+  '          env = dict(os.environ)\n'
+  "          root = Path(env['MRK_MACOS_WORK'])\n",
+  "          SOURCE = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')\n"
+  '          env = dict(os.environ)\n'
+  "          TARGET = env['MRK_MACOS_TARGET']\n"
+  "          if TARGET not in ('aarch64-apple-darwin', 'x86_64-apple-darwin'): raise "
+  "ValueError('ui-fixed-target')\n"
+  "          root = Path(env['MRK_MACOS_WORK'])\n"),
+ ('              N, S, P = modules\n'
+  "              release_raw = source_body('desktop/macos-installed-inputs/build-release.json')\n"
+  '              release = S.build_release_data(release_raw, target=TARGET)\n',
+  '              N, S, P = modules\n'
+  "              release_raw = source_body('desktop/macos-installed-inputs/' +\n"
+  "                  ('build-release.json' if TARGET == 'aarch64-apple-darwin' else 'build-release-intel.json'))\n"
+  '              release = S.build_release_data(release_raw, target=TARGET)\n'),
+ ("              facts = N.android_signed_facts(document(original(normal / 'android-signed-build.facts.json', "
+  '16384)),\n'
+  '                                             source=source, run=run, attempt=attempt)\n'
+  "              build = document(original(normal / 'build.command-admission.json', 32768))\n",
+  "              facts = N.android_signed_facts(document(original(normal / 'android-signed-build.facts.json', "
+  '16384)),\n'
+  '                                             source=source, run=run, attempt=attempt, target=TARGET)\n'
+  "              build = document(original(normal / 'build.command-admission.json', 32768))\n"),
+ ("              summary = document(original(normal / 'android-signed-build-summary.command-admission.json', "
+  '32768))\n'
+  '              N.android_signed_receipts(build, test, summary, facts, source=source, normal=normal, run=run, '
+  'attempt=attempt)\n'
+  "              summary_raw = original(normal / 'android-signed-build-summary.json', 262144)\n",
+  "              summary = document(original(normal / 'android-signed-build-summary.command-admission.json', "
+  '32768))\n'
+  '              N.android_signed_receipts(build, test, summary, facts, source=source, normal=normal, run=run, '
+  'attempt=attempt, target=TARGET)\n'
+  "              summary_raw = original(normal / 'android-signed-build-summary.json', 262144)\n"))
+
+
+def without_intel_android_workflow(source):
+    if type(source) is not str or len(source.encode()) > 524288:
+        raise AssertionError("Intel Android source bound differs")
+    source = without_signed_android_support_workflow(source)
+    if "TARGET = env['MRK_MACOS_TARGET']" not in source:
+        return source
+    for previous, current in INTEL_ANDROID_WORKFLOW_INVERSE:
+        if source.count(current) != 1:
+            raise AssertionError("Intel Android exact source region differs")
+    for previous, current in reversed(INTEL_ANDROID_WORKFLOW_INVERSE):
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != '2363019ea613375c22473cb323adc4b5ee44fc42f5bedd1390fe05b524aeece8':
+        raise AssertionError("Intel Android source predecessor differs")
+    return source
+
+def without_app_absence_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("app-absence workflow source bound differs")
+    source = without_positive_update_workflow(source)
+    if "refs/heads/verify/desktop-macos-app-absence-fixture" not in source and "prepare-app-absence" not in source:
+        return source
+    for previous, current in APP_ABSENCE_WORKFLOW_INVERSE:
+        if source.count(current) != 1 or source.count(previous) != current.count(previous):
+            raise AssertionError("app-absence workflow exact delta differs")
+    for previous, current in reversed(APP_ABSENCE_WORKFLOW_INVERSE):
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != 'ce06d7acffac6e5d37b0bf2c3afbe86ab7cf58729e68b64408634908642b8f02':
+        raise AssertionError("app-absence workflow predecessor differs")
+    return source
+
+
+def without_command_terminal_runtime_source_pin(source):
+    # Only current core changed; preserve every older SOURCE inverse and hash.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("command terminal runtime SOURCE bound differs")
+    current = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+    previous = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
+    if current not in source:
+        return source
+    configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + current + "\n"
+    guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + current + ' ]] || exit 1\n'
+    if (source.count(current) != 2 or previous in source
+            or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
+        raise AssertionError("command terminal runtime SOURCE exact two-site delta differs")
+    for line in (configured, guard):
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
+def without_same_package_workflow(source):
+    source = without_app_absence_workflow(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("same-package workflow source bound differs")
+    source = without_command_terminal_runtime_source_pin(source)
+    if "MRK_MACOS_SAME_PACKAGE_SCOPE" not in source:
+        return source
+    for previous, current in SAME_PACKAGE_WORKFLOW_INVERSE:
+        if source.count(current) != 1 or source.count(previous) != current.count(previous):
+            raise AssertionError("same-package workflow exact delta differs")
+    for previous, current in reversed(SAME_PACKAGE_WORKFLOW_INVERSE):
+        source = source.replace(current, previous, 1)
+    if "MRK_MACOS_SAME_PACKAGE_SCOPE" in source or hashlib.sha256(source.encode()).hexdigest() != 'cf880d883ee3f0337caf11d328356e9dff07265135a32c2edb7f4f532de0083d':
+        raise AssertionError("same-package workflow predecessor differs")
+    return source
+
+
+def without_intel_resident_prepare_budget_workflow(source):
+    source = without_same_package_workflow(source)
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("Intel resident prepare budget workflow source bound differs")
+    if not any(marker in source for marker in INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_MARKERS):
+        return source
+    selected = [rows for route, rows in INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_INVERSE
+                if source.startswith(route + "\n")]
+    if len(selected) != 1:
+        raise AssertionError("Intel resident prepare budget workflow route differs")
+    for previous, current in selected[0]:
+        if source.count(current) != 1 or source.count("\n" + current) != 1 or previous in source:
+            raise AssertionError("Intel resident prepare budget workflow exact delta differs")
+    for previous, current in reversed(selected[0]):
+        source = source.replace("\n" + current, "\n" + previous, 1)
+    if any(marker in source for marker in INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_MARKERS):
+        raise AssertionError("Intel resident prepare budget workflow partial delta remains")
+    return source
+
+
+def without_remaining_three_workflow(source):
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("remaining-three workflow source bound differs")
+    source = without_intel_resident_prepare_budget_workflow(source)
+    markers = ("remaining-three", "normal_remaining_saved_file_ui")
+    if not any(marker in source for marker in markers):
+        return source
+    for previous, current in reversed(REMAINING_THREE_WORKFLOW_INVERSE):
+        if source.count(current) != 1 or source.count("\n" + current) != 1:
+            raise AssertionError("remaining-three workflow exact delta differs")
+        source = source.replace("\n" + current, "\n" + previous, 1)
+    if any(marker in source for marker in markers):
+        raise AssertionError("remaining-three workflow partial delta remains")
+    return source
+
+
+def without_intel_app_build_budget_workflow(source):
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("Intel app-build budget workflow source bound differs")
+    source = without_remaining_three_workflow(source)
+    if not any(marker in source for marker in INTEL_APP_BUILD_BUDGET_WORKFLOW_MARKERS):
+        return source
+    if not source.startswith("name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n"):
+        raise AssertionError("Intel app-build budget workflow route differs")
+    for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE:
+        if source.count(current) != 1 or source.count("\n" + current) != 1 or previous in source:
+            raise AssertionError("Intel app-build budget workflow exact delta differs")
+    for previous, current in reversed(INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE):
+        source = source.replace("\n" + current, "\n" + previous, 1)
+    if any(marker in source for marker in INTEL_APP_BUILD_BUDGET_WORKFLOW_MARKERS):
+        raise AssertionError("Intel app-build budget workflow partial delta remains")
+    return source
+
+
+# One exact optional removal-case CLI suffix, before the original privacy inverse.
+# This is SOURCE normalization only, never removal or original-finality evidence.
+REMOVAL_PUBLIC_VERIFICATION_WORKFLOW_INVERSE = ('            --profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"\n', '            --profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \\\n            --removal-case "$MRK_MACOS_REMOVAL_CASE"\n')
+
+
+def without_removal_public_verification_workflow(source):
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("removal public verification workflow source bound differs")
+    source = without_intel_app_build_budget_workflow(source)
+    # Retire the independent outer shipping-privacy delta before historical hashes.
+    source = without_shipping_compile_privacy_workflow(source)
+    installed = "name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n"
+    if "desktop/tools/macos_public_verification_evidence.py" not in source or not source.startswith(installed):
+        if "--removal-case" in source:
+            raise AssertionError("removal public verification workflow route differs")
+        return source
+    previous, current = REMOVAL_PUBLIC_VERIFICATION_WORKFLOW_INVERSE
+    anchor = '--profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET"'
+    if source.count(anchor) != 1:
+        raise AssertionError("removal public verification workflow anchor differs")
+    if source.count(previous) == 1 and source.count("\n" + previous) == 1 and "--removal-case" not in source:
+        return source
+    if (source.count(current) != 1 or source.count("\n" + current) != 1
+            or previous in source or source.count("--removal-case") != 1):
+        raise AssertionError("removal public verification workflow exact delta differs")
+    return source.replace("\n" + current, "\n" + previous, 1)
+
+
+def without_public_verification_workflow(source):
+    source = without_removal_public_verification_workflow(source)
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("public verification workflow source bound differs")
+    if not any(marker in source for marker in PUBLIC_VERIFICATION_WORKFLOW_MARKERS):
+        return source
+    selected = [rows for path, header, prior_hash, rows in PUBLIC_VERIFICATION_WORKFLOW_INVERSE
+                if source.startswith(header)]
+    if len(selected) != 1:
+        raise AssertionError("public verification workflow exact route differs")
+    for previous, current in reversed(selected[0]):
+        if source.count(current) != 1 or source.count("\n" + current) != 1:
+            raise AssertionError("public verification workflow exact delta differs")
+        source = source.replace("\n" + current, "\n" + previous, 1)
+    if any(marker in source for marker in PUBLIC_VERIFICATION_WORKFLOW_MARKERS):
+        raise AssertionError("public verification workflow partial delta remains")
+    return source
+
+
+def without_recent_app_signature_workflow(source):
+    source = without_public_verification_workflow(source)
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("recent app signature workflow source bound differs")
+    for label, markers, replacements in RECENT_APP_SIGNATURE_WORKFLOW_INVERSE:
+        if not any(marker in source for marker in markers):
+            continue
+        if any(source.count(current) != 1 or source.count("\n" + current) != 1
+               or (previous and previous in source) for current, previous in replacements):
+            raise AssertionError("recent app signature workflow " + label + " exact delta differs")
+        for current, previous in replacements:
+            source = source.replace("\n" + current, "\n" + previous, 1)
+        if any(marker in source for marker in markers):
+            raise AssertionError("recent app signature workflow " + label + " partial delta remains")
+    return source
+
+
+def without_enrolled_runtime_source_pin(source):
+    # The configured gh profile adds one real SOURCE row. Undo only the
+    # installed workflow's new two-site pin before its exact app-scope inverse.
+    # Unchanged Aqua still uses the old 177-row pin and bypasses this layer.
+    enrolled = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
+    preceding = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
+    if enrolled in source:
+        configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + enrolled + "\n"
+        guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + enrolled + ' ]] || exit 1\n'
+        if (source.count(enrolled) != 2 or preceding in source
+                or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
+            raise AssertionError("current runtime source pin exact two-site delta differs")
+        for line in (configured, guard):
+            source = source.replace("\n" + line, "\n" + line.replace(enrolled, preceding), 1)
+    return source
+
+
 def without_app_signature_workflow(source):
+    source = without_recent_app_signature_workflow(source)
+    source = without_enrolled_runtime_source_pin(source)
     if "verify/desktop-macos-app-signature" not in source:
         return source
     value = source.encode()
@@ -437,6 +2383,38 @@ def without_tool_enrollment_workflow(source):
     if hashlib.sha256(value).hexdigest() != "c68a194c08d209e19f6f7028a590a6d39619c6b2f276a24a2dc334ad49dfba00":
         raise AssertionError("tool enrollment workflow inverse changed original")
     return value.decode()
+
+
+SHIPPING_COMPILE_PRIVACY_INVERSE = (('          prep_start = time.monotonic()\n', '          def compile_public_data(value, source, run_id, run_attempt):\n              """Closed prior compile observations, never receipt-publication authority."""\n              def check(ok):\n                  need(ok, \'compile-public-data\')\n\n              def digest(item):\n                  check(type(item) is str and re.fullmatch(r\'[0-9a-f]{64}\', item) is not None)\n                  return item\n\n              def integer(item, low, high):\n                  check(type(item) is int and low <= item <= high)\n                  return item\n\n              def nullable_bool(item):\n                  check(item is None or type(item) is bool)\n                  return item\n\n              roles = (\'node-version\', \'npm-version\', \'rustc-version\', \'cargo-version\',\n                       \'npm-ci\', \'frontend-build\', \'shipping-image-build\')\n              fact_names = (\'originalPending\', \'sourcePost\', \'toolsPost\', \'frontendGenerated\',\n                            \'facadeArtifactVerified\', \'inputOriginalsKnown\', \'toolOriginalsClosed\',\n                            \'generatedOutputsRetired\', \'shippingGraphCompiled\', \'installedQualified\',\n                            \'runtimeQualified\', \'launched\', \'signed\', \'pythonControllerPrepared\',\n                            \'pythonControllerPost\', \'pythonControllerRetired\')\n              conditions = (\'controller-record\', \'controller-base\', \'controller-row\', \'controller-roster\',\n                            \'controller-file\', \'controller-config\', \'controller-runtime\', \'controller-original-changed\',\n                            \'controller-total\', \'controller-directory\', \'controller-short-read\', \'controller-deadline\',\n                            \'controller-unexpected-process\', \'controller-work-root\', \'controller-template\',\n                            \'controller-publication\', \'controller-source-copy\', \'controller-operation\',\n                            \'cargo-output-bound\', \'cargo-line-bound\', \'cargo-document\', \'cargo-finished\',\n                            \'cargo-facade-count\', \'cargo-target-shape\', \'cargo-real-facade\', \'cargo-app-count\',\n                            \'cargo-shipping-feature\', \'compile-artifact-file\', \'compile-artifact-short\', \'compile-artifact-post\')\n              owner_reasons = (\'incomplete-output\', \'output-bound\', \'protocol-or-ownership\',\n                               \'command-failed-or-incomplete\', \'cleanup-unconfirmed\', \'exec-rejected\',\n                               \'stopped-before-exec\', \'parent-ended\', \'observer-ended\', \'fence-collision\', \'unknown\')\n              check(type(value) is dict and type(source) is str and re.fullmatch(r\'[0-9a-f]{40}\', source)\n                    and source != \'0\' * 40 and all(type(item) is str and re.fullmatch(r\'[1-9][0-9]{0,19}\', item)\n                                                 for item in (run_id, run_attempt)))\n              fixed = dict(schemaVersion=1, scope=\'fixed-arm-shipping-image-compile-only\', source=source,\n                           workflowSource=source, runId=run_id, runAttempt=run_attempt, target=\'aarch64-apple-darwin\')\n              check(type(value.get(\'schemaVersion\')) is int and all(value.get(key) == item for key, item in fixed.items()))\n              facts = {}\n              for name in fact_names:\n                  check(name not in value or type(value[name]) is bool)\n                  facts[name] = value.get(name)\n              check(type(facts[\'shippingGraphCompiled\']) is bool\n                    and all(facts[name] is False for name in (\'installedQualified\', \'runtimeQualified\', \'launched\', \'signed\')))\n              rows = value.get(\'commands\')\n              check(type(rows) is list and len(rows) <= len(roles))\n              commands = []\n              for index, row in enumerate(rows):\n                  check(type(row) is dict and row.get(\'role\') == roles[index]\n                        and type(row.get(\'returned\')) is bool and type(row.get(\'capturesSettled\')) is bool)\n                  out = integer(row.get(\'stdoutBytes\'), 0, 4096 if index < 4 else 4 * 1024 * 1024)\n                  err = integer(row.get(\'stderrBytes\'), 0, 4096 if index < 4 else 4 * 1024 * 1024)\n                  check(out + err <= (4096 if index < 4 else 4 * 1024 * 1024))\n                  commands.append(dict(role=roles[index], returned=row[\'returned\'], capturesSettled=row[\'capturesSettled\'],\n                                       returncode=integer(row.get(\'returncode\'), -(2**31), 2**31 - 1),\n                                       stdoutBytes=out, stderrBytes=err,\n                                       stdoutSha256=digest(row.get(\'stdoutSha256\')), stderrSha256=digest(row.get(\'stderrSha256\'))))\n              inventory = None\n              if \'sourceInventoryBytes\' in value or \'sourceInventorySha256\' in value:\n                  inventory = dict(bytes=integer(value.get(\'sourceInventoryBytes\'), 1, 2 * 1024 * 1024),\n                                   sha256=digest(value.get(\'sourceInventorySha256\')))\n              facade = None\n              if \'facadeArtifact\' in value:\n                  item = value[\'facadeArtifact\']\n                  check(type(item) is dict)\n                  facade = dict(bytes=integer(item.get(\'bytes\'), 1, 256 * 1024 * 1024), sha256=digest(item.get(\'sha256\')))\n              failure = None\n              if value.get(\'failure\') is not None:\n                  item = value[\'failure\']\n                  check(type(item) is dict)\n                  stages = (\'python-base\', \'python-create\', \'python-census\', \'python-publication\', \'admission\',\n                            \'source-tool-post\', \'generated-cleanup\', \'tool-close\', \'public-capture\') + roles\n                  stage, condition = item.get(\'stage\'), item.get(\'condition\')\n                  check(type(stage) is str and (condition is None or type(condition) is str))\n                  failure = dict(stage=stage if stage in stages else \'other\',\n                                 condition=condition if condition in conditions else None if condition is None else \'unclassified\',\n                                 ownerDiagnostic=None)\n                  if \'ownerDiagnostic\' in item:\n                      observed = item[\'ownerDiagnostic\']\n                      check(type(observed) is dict and type(observed.get(\'available\')) is bool)\n                      typed = observed.get(\'typedFacts\', [])\n                      check(type(typed) is list and len(typed) <= 16\n                            and (observed[\'available\'] or not typed))\n                      projected = []\n                      for row in typed:\n                          check(type(row) is dict and type(row.get(\'kind\')) is str and row[\'kind\'] in (\'process-error\', \'interrupted\')\n                                and type(row.get(\'reason\')) is str and row[\'reason\'] in owner_reasons)\n                          mask = row.get(\'ownerFailureMask\')\n                          check(mask is None or type(mask) is int and 1 <= mask <= 63)\n                          projected.append(dict(kind=row[\'kind\'], reason=row[\'reason\'], ownerFailureMask=mask,\n                                                **{key: nullable_bool(row.get(key)) for key in (\'dispatched\', \'contained\', \'cleanupComplete\')}))\n                      failure[\'ownerDiagnostic\'] = dict(available=observed[\'available\'], typedFacts=projected,\n                                                        chainTruncated=nullable_bool(observed.get(\'chainTruncated\')))\n              if facts[\'shippingGraphCompiled\']:\n                  check(len(commands) == len(roles) and all(row[\'returned\'] and row[\'capturesSettled\'] and row[\'returncode\'] == 0 for row in commands)\n                        and facts[\'originalPending\'] is False and failure is None and inventory is not None and facade is not None\n                        and all(facts[name] is True for name in (\'sourcePost\', \'toolsPost\', \'frontendGenerated\', \'facadeArtifactVerified\',\n                            \'inputOriginalsKnown\', \'toolOriginalsClosed\', \'generatedOutputsRetired\', \'pythonControllerPrepared\',\n                            \'pythonControllerPost\', \'pythonControllerRetired\')))\n              result = dict(kind=\'mrk-public-shipping-compile-evidence-v1\', **fixed, facts=facts,\n                            commands=commands, sourceInventory=inventory, facadeArtifact=facade, failure=failure)\n              check(len((json.dumps(result, sort_keys=True, separators=(\',\', \':\'), allow_nan=False) + \'\\n\').encode(\'ascii\')) <= 16384)\n              return result\n\n\n          prep_start = time.monotonic()\n'), ("          TARGET = 'aarch64-apple-darwin'\n          RUST_RELEASE = '1.98.1'\n", '          def compile_public_data(value, source, run_id, run_attempt):\n              """Closed prior compile observations, never receipt-publication authority."""\n              def check(ok):\n                  need(ok, \'compile-public-data\')\n\n              def digest(item):\n                  check(type(item) is str and re.fullmatch(r\'[0-9a-f]{64}\', item) is not None)\n                  return item\n\n              def integer(item, low, high):\n                  check(type(item) is int and low <= item <= high)\n                  return item\n\n              def nullable_bool(item):\n                  check(item is None or type(item) is bool)\n                  return item\n\n              roles = (\'node-version\', \'npm-version\', \'rustc-version\', \'cargo-version\',\n                       \'npm-ci\', \'frontend-build\', \'shipping-image-build\')\n              fact_names = (\'originalPending\', \'sourcePost\', \'toolsPost\', \'frontendGenerated\',\n                            \'facadeArtifactVerified\', \'inputOriginalsKnown\', \'toolOriginalsClosed\',\n                            \'generatedOutputsRetired\', \'shippingGraphCompiled\', \'installedQualified\',\n                            \'runtimeQualified\', \'launched\', \'signed\', \'pythonControllerPrepared\',\n                            \'pythonControllerPost\', \'pythonControllerRetired\')\n              conditions = (\'controller-record\', \'controller-base\', \'controller-row\', \'controller-roster\',\n                            \'controller-file\', \'controller-config\', \'controller-runtime\', \'controller-original-changed\',\n                            \'controller-total\', \'controller-directory\', \'controller-short-read\', \'controller-deadline\',\n                            \'controller-unexpected-process\', \'controller-work-root\', \'controller-template\',\n                            \'controller-publication\', \'controller-source-copy\', \'controller-operation\',\n                            \'cargo-output-bound\', \'cargo-line-bound\', \'cargo-document\', \'cargo-finished\',\n                            \'cargo-facade-count\', \'cargo-target-shape\', \'cargo-real-facade\', \'cargo-app-count\',\n                            \'cargo-shipping-feature\', \'compile-artifact-file\', \'compile-artifact-short\', \'compile-artifact-post\')\n              owner_reasons = (\'incomplete-output\', \'output-bound\', \'protocol-or-ownership\',\n                               \'command-failed-or-incomplete\', \'cleanup-unconfirmed\', \'exec-rejected\',\n                               \'stopped-before-exec\', \'parent-ended\', \'observer-ended\', \'fence-collision\', \'unknown\')\n              check(type(value) is dict and type(source) is str and re.fullmatch(r\'[0-9a-f]{40}\', source)\n                    and source != \'0\' * 40 and all(type(item) is str and re.fullmatch(r\'[1-9][0-9]{0,19}\', item)\n                                                 for item in (run_id, run_attempt)))\n              fixed = dict(schemaVersion=1, scope=\'fixed-arm-shipping-image-compile-only\', source=source,\n                           workflowSource=source, runId=run_id, runAttempt=run_attempt, target=\'aarch64-apple-darwin\')\n              check(type(value.get(\'schemaVersion\')) is int and all(value.get(key) == item for key, item in fixed.items()))\n              facts = {}\n              for name in fact_names:\n                  check(name not in value or type(value[name]) is bool)\n                  facts[name] = value.get(name)\n              check(type(facts[\'shippingGraphCompiled\']) is bool\n                    and all(facts[name] is False for name in (\'installedQualified\', \'runtimeQualified\', \'launched\', \'signed\')))\n              rows = value.get(\'commands\')\n              check(type(rows) is list and len(rows) <= len(roles))\n              commands = []\n              for index, row in enumerate(rows):\n                  check(type(row) is dict and row.get(\'role\') == roles[index]\n                        and type(row.get(\'returned\')) is bool and type(row.get(\'capturesSettled\')) is bool)\n                  out = integer(row.get(\'stdoutBytes\'), 0, 4096 if index < 4 else 4 * 1024 * 1024)\n                  err = integer(row.get(\'stderrBytes\'), 0, 4096 if index < 4 else 4 * 1024 * 1024)\n                  check(out + err <= (4096 if index < 4 else 4 * 1024 * 1024))\n                  commands.append(dict(role=roles[index], returned=row[\'returned\'], capturesSettled=row[\'capturesSettled\'],\n                                       returncode=integer(row.get(\'returncode\'), -(2**31), 2**31 - 1),\n                                       stdoutBytes=out, stderrBytes=err,\n                                       stdoutSha256=digest(row.get(\'stdoutSha256\')), stderrSha256=digest(row.get(\'stderrSha256\'))))\n              inventory = None\n              if \'sourceInventoryBytes\' in value or \'sourceInventorySha256\' in value:\n                  inventory = dict(bytes=integer(value.get(\'sourceInventoryBytes\'), 1, 2 * 1024 * 1024),\n                                   sha256=digest(value.get(\'sourceInventorySha256\')))\n              facade = None\n              if \'facadeArtifact\' in value:\n                  item = value[\'facadeArtifact\']\n                  check(type(item) is dict)\n                  facade = dict(bytes=integer(item.get(\'bytes\'), 1, 256 * 1024 * 1024), sha256=digest(item.get(\'sha256\')))\n              failure = None\n              if value.get(\'failure\') is not None:\n                  item = value[\'failure\']\n                  check(type(item) is dict)\n                  stages = (\'python-base\', \'python-create\', \'python-census\', \'python-publication\', \'admission\',\n                            \'source-tool-post\', \'generated-cleanup\', \'tool-close\', \'public-capture\') + roles\n                  stage, condition = item.get(\'stage\'), item.get(\'condition\')\n                  check(type(stage) is str and (condition is None or type(condition) is str))\n                  failure = dict(stage=stage if stage in stages else \'other\',\n                                 condition=condition if condition in conditions else None if condition is None else \'unclassified\',\n                                 ownerDiagnostic=None)\n                  if \'ownerDiagnostic\' in item:\n                      observed = item[\'ownerDiagnostic\']\n                      check(type(observed) is dict and type(observed.get(\'available\')) is bool)\n                      typed = observed.get(\'typedFacts\', [])\n                      check(type(typed) is list and len(typed) <= 16\n                            and (observed[\'available\'] or not typed))\n                      projected = []\n                      for row in typed:\n                          check(type(row) is dict and type(row.get(\'kind\')) is str and row[\'kind\'] in (\'process-error\', \'interrupted\')\n                                and type(row.get(\'reason\')) is str and row[\'reason\'] in owner_reasons)\n                          mask = row.get(\'ownerFailureMask\')\n                          check(mask is None or type(mask) is int and 1 <= mask <= 63)\n                          projected.append(dict(kind=row[\'kind\'], reason=row[\'reason\'], ownerFailureMask=mask,\n                                                **{key: nullable_bool(row.get(key)) for key in (\'dispatched\', \'contained\', \'cleanupComplete\')}))\n                      failure[\'ownerDiagnostic\'] = dict(available=observed[\'available\'], typedFacts=projected,\n                                                        chainTruncated=nullable_bool(observed.get(\'chainTruncated\')))\n              if facts[\'shippingGraphCompiled\']:\n                  check(len(commands) == len(roles) and all(row[\'returned\'] and row[\'capturesSettled\'] and row[\'returncode\'] == 0 for row in commands)\n                        and facts[\'originalPending\'] is False and failure is None and inventory is not None and facade is not None\n                        and all(facts[name] is True for name in (\'sourcePost\', \'toolsPost\', \'frontendGenerated\', \'facadeArtifactVerified\',\n                            \'inputOriginalsKnown\', \'toolOriginalsClosed\', \'generatedOutputsRetired\', \'pythonControllerPrepared\',\n                            \'pythonControllerPost\', \'pythonControllerRetired\')))\n              result = dict(kind=\'mrk-public-shipping-compile-evidence-v1\', **fixed, facts=facts,\n                            commands=commands, sourceInventory=inventory, facadeArtifact=facade, failure=failure)\n              check(len((json.dumps(result, sort_keys=True, separators=(\',\', \':\'), allow_nan=False) + \'\\n\').encode(\'ascii\')) <= 16384)\n              return result\n\n\n          TARGET = \'aarch64-apple-darwin\'\n          RUST_RELEASE = \'1.98.1\'\n'), ("publish_preparation('compile-receipt.json', failure, cleanup=True)", "publish_preparation('compile-receipt.json', compile_public_data(failure, source, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']), cleanup=True)"), ("publish('compile-receipt.json', (json.dumps(receipt, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\\n').encode('ascii'), 65536)", "publish('compile-receipt.json', (json.dumps(compile_public_data(receipt, source, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']), sort_keys=True, separators=(',', ':'), allow_nan=False) + '\\n').encode('ascii'), 65536)"), ('                  # Public fixed-source compiler output only; no binary/cache/runtime/signing upload.\n', '                  # Local captured compiler originals only; never included in the artifact.\n'), ('            ${{ steps.compile_work.outputs.root }}/source-inventory.json\n            ${{ steps.compile_work.outputs.root }}/compile-receipt.json\n            ${{ steps.compile_work.outputs.root }}/npm-ci.stdout\n            ${{ steps.compile_work.outputs.root }}/npm-ci.stderr\n            ${{ steps.compile_work.outputs.root }}/frontend-build.stdout\n            ${{ steps.compile_work.outputs.root }}/frontend-build.stderr\n            ${{ steps.compile_work.outputs.root }}/shipping-image-build.stdout\n            ${{ steps.compile_work.outputs.root }}/shipping-image-build.stderr\n', '            ${{ steps.compile_work.outputs.root }}/compile-receipt.json\n'))
+
+
+def without_shipping_compile_privacy_workflow(source):
+    marker = "  shipping-image-compile:\n"
+    if marker not in source:
+        if "compile_public_data(" in source:
+            raise AssertionError("partial shipping privacy workflow")
+        return source
+    states = []
+    for before, after in SHIPPING_COMPILE_PRIVACY_INVERSE:
+        if source.count(after) == 1 and source.count(before) == after.count(before):
+            states.append("new")
+        elif source.count(before) == 1 and source.count(after) == before.count(after):
+            states.append("old")
+        else:
+            raise AssertionError("shipping privacy region differs")
+    if states == ["old"] * len(states):
+        if "compile_public_data(" in source:
+            raise AssertionError("partial shipping privacy workflow")
+        return source
+    if states != ["new"] * len(states) or source.count("compile_public_data(") != 4:
+        raise AssertionError("mixed shipping privacy workflow")
+    for before, after in reversed(SHIPPING_COMPILE_PRIVACY_INVERSE):
+        if source.count(after) != 1:
+            raise AssertionError("duplicate shipping privacy workflow")
+        source = source.replace(after, before, 1)
+    if "compile_public_data(" in source:
+        raise AssertionError("unretired shipping privacy workflow")
+    return source
 
 
 def without_shipping_compile_workflow(source):
@@ -609,6 +2587,63 @@ def packaging_fixture(target="aarch64-apple-darwin", *, package=b"synthetic comp
 class MacAndroidHelperPackagingData(unittest.TestCase):
     """No compiler/codesign/helper/owner execution; every child is a DATA double."""
 
+    def test_primary_owner_finality_failure_data_is_closed_bounded_and_private(self):
+        module = ANDROID_HELPER
+        class ProcessErrorData(RuntimeError):
+            def __str__(self):
+                raise AssertionError("error text must not be rendered")
+        class Foreign(ProcessErrorData):
+            @property
+            def owner_finality_diagnostic(self):
+                raise AssertionError("foreign attributes must not be consulted")
+        owner = SimpleNamespace(ProcessError=ProcessErrorData)
+        checkout = Path("/public-synthetic-checkout")
+        def emit(observed):
+            error = ProcessErrorData("owned command exceeded its original deadline")
+            error.owner_finality_diagnostic = observed
+            result = module.original_failure(error, owner, checkout, 720, 2147483647)
+            self.assertEqual(result["classification"], "deadline")
+            self.assertNotIn("contained", result)
+            self.assertNotIn("cleanup_complete", result)
+            return result
+        for observation in ((1, 0, 1023, 15, None), (1, 1, 0, 0, 0),
+                            (1, 1, (1 << 3) | (1 << 7) | (1 << 10), 15, None),
+                            *((1, 1, 0, 0, mask) for mask in (32, *range(48, 64)))):
+            self.assertEqual(emit(observation)["ownerFinality"], list(observation))
+        for invalid in (None, "PRIVATE_SENTINEL", {}, [], (1,), (True, 1, 0, 0, 0),
+                        (1, True, 0, 0, None), (1, 1, False, 0, None), (1, 1, 0, False, None),
+                        (2, 1, 0, 0, None), (1, 2, 0, 0, None), (1, 0, 1024, 0, None),
+                        (1, 1, 1048576, 0, None), (1, 1, -1, 0, None), (1, 1, 0, 16, None),
+                        (1, 1, 0, -1, None), (1, 0, 0, 0, 0), (1, 1, 0, 0, True),
+                        (1, 1, 0, 0, 1), (1, 1, 0, 0, 47), (1, 1, 0, 0, 64),
+                        (1, 1, 0, 0, "PRIVATE_SENTINEL")):
+            result = emit(invalid)
+            self.assertIsNone(result["ownerFinality"])
+            self.assertNotIn("PRIVATE_SENTINEL", json.dumps(result))
+        for error in (ProcessErrorData("unclassified"), Foreign("PRIVATE_SENTINEL"), RuntimeError("PRIVATE_SENTINEL")):
+            result = module.original_failure(error, owner, checkout, 720, 1024)
+            self.assertIsNone(result["ownerFinality"])
+            self.assertNotIn("PRIVATE_SENTINEL", json.dumps(result))
+        # Maximal admitted retained frame names/counts plus diagnostic bounds.
+        def template(depth, recurse, error):
+            if depth:
+                return recurse(depth - 1, recurse, error)
+            raise error
+        code = template.__code__.replace(co_filename=str(checkout / "src/mobile_release/_command_process.py"),
+                                         co_name="x" * 64, co_firstlineno=999990)
+        recurse = FunctionType(code, {})
+        error = ProcessErrorData("owned command exceeded its original deadline")
+        error.owner_finality_diagnostic = (1, 1, 1048575, 15, 63)
+        try:
+            recurse(30, recurse, error)
+        except ProcessErrorData as caught:
+            result = module.original_failure(caught, owner, checkout, 2147483647, 2147483647)
+        self.assertEqual(len(result["frames"]), 8)
+        self.assertEqual(result["ownerFinality"], [1, 1, 1048575, 15, 63])
+        self.assertLessEqual(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
+        self.assertLessEqual((Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py").stat().st_size,
+                             524288)
+
     def notary_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None):
         """Actual copy/FD/parser code, inert app/runtime/key and native doubles.
 
@@ -629,10 +2664,14 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 (source / "desktop/macos-installed-inputs" / name).read_bytes())
         for name in ("macos_android_helper_package.py", "stage_macos_installed.py"):
             put(checkout / "desktop/tools" / name, (source / "desktop/tools" / name).read_bytes())
-        # The real stager reads this SOURCE even when both tools are unconfigured.
-        put(checkout / module.TOOL_NOMINATION, (source / module.TOOL_NOMINATION).read_bytes())
-        # Current runtime_tree also reads the real unconfigured provider profile.
-        put(checkout / TOOL.HISTORY_PROVIDER_PROFILE, (source / TOOL.HISTORY_PROVIDER_PROFILE).read_bytes())
+        # This inert runtime deliberately has neither tool. Declare that DATA
+        # scenario explicitly; deployed SOURCE may legitimately enroll both.
+        put(checkout / module.TOOL_NOMINATION, TOOL.canonical({"schemaVersion": 1, "tools": {
+            purpose: {name: {"build": {"state": "unconfigured"}, "signed": {"state": "unconfigured"}}
+                      for name in TOOL.MAC_TARGETS} for purpose in module.TOOL_FIXED}}))
+        put(checkout / TOOL.HISTORY_PROVIDER_PROFILE, TOOL.canonical({"schemaVersion": 1,
+            "version": TOOL.HISTORY_PROVIDER_VERSION, "sourceManifestSha256": None,
+            "targets": {name: None for name in TOOL.MAC_TARGETS}}))
         notary_profile = {"schemaVersion": 1, "mode": "app-store-connect-team-key", "teamId": "TEST000001",
                           "keyId": "DATA000001", "issuerId": "11111111-2222-3333-4444-555555555555"}
         put(checkout / module.NOTARY_PROFILE, TOOL.canonical(notary_profile))
@@ -818,6 +2857,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         try:
             with (mock.patch.object(TOOL, "DESKTOP", operation.checkout / "desktop"),
                   mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", state.support.manifest_path),
+                  synthetic_android_support(state.support),
                   mock.patch.object(module, "NOTARY_XCODE", state.xcode),
                   mock.patch.object(module, "WORK_PARENT", operation.work.parent),
                   mock.patch.object(module.time, "monotonic_ns", new=lambda: state.clock[0]),
@@ -1010,7 +3050,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             elif argv[1] == "verify-cert":
                 self.assertIsNotNone(installer)
                 paths_ = [str(checkout / "desktop/packaging/macos-installer-certificates" / (name + ".der")) for name in ("leaf", "issuer", "root")]
-                self.assertEqual(argv, ["/usr/bin/security", "verify-cert", "-p", "pkgSign", "-N", "-L", "-c", paths_[0], "-c", paths_[1], "-r", paths_[2]])
+                self.assertEqual(argv, ["/usr/bin/security", "verify-cert", "-p", "basic", "-N", "-L", "-c", paths_[0], "-c", paths_[1], "-r", paths_[2]])
                 if state.failure == "installer-chain":
                     return CompletedProcess(argv, 1, b"", b"INERT wrong Installer certificate purpose")
             elif argv[1] == "delete-keychain":
@@ -1092,7 +3132,558 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         compressed = TOOL.zlib.compress(toc)
         return struct.pack('>IHHQQI', 0x78617221, 28, 1, len(compressed), len(toc), 0) + compressed + b''.join(heap)
 
-    def final_package_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None):
+    def test_install_product_single_copy_names_preserve_exact_members(self):
+        # Published XAR copy semantics, not an assertion about a native run.
+        expected = {"Distribution": b"fixed distribution", "Resources/InstallerReadMe.html": b"fixed readme",
+                    TOOL.INSTALL_COMPONENT + "/PackageInfo": b"fixed package info",
+                    TOOL.INSTALL_COMPONENT + "/Scripts": b"fixed scripts"}
+        original = self.final_package_xar(expected, product=True, signed=True)
+        header = struct.unpack_from(">IHHQQI", original)
+        original_heap = original[28 + header[3]:]
+        original_toc = TOOL.zlib.decompress(original[28:28 + header[3]])
+        def encoded(file_count=3, directory_count=2, mutation=None):
+            tree = TOOL.ET.fromstring(original_toc)
+            nodes = tree.findall(".//file")
+            for node in nodes:
+                name = node.find("name")
+                count = file_count if node.findtext("type") == "file" else directory_count
+                for _ in range(count - 1):
+                    node.insert(1, copy.deepcopy(name))
+            if mutation is not None:
+                mutation(nodes)
+            body = TOOL.ET.tostring(tree, encoding="utf-8")
+            compressed = TOOL.zlib.compress(body)
+            return (struct.pack(">IHHQQI", *header[:3], len(compressed), len(body), header[5])
+                    + compressed + hashlib.sha1(compressed).digest() + original_heap[20:])
+        for counts in ((1, 1), (2, 1), (3, 2)):
+            with self.subTest(accepted_counts=counts):
+                self.assertEqual(TOOL.install_product_members(encoded(*counts)), expected)
+        for counts in ((4, 2), (3, 3)):
+            with self.subTest(rejected_counts=counts), self.assertRaises(TOOL.Refused):
+                TOOL.install_product_members(encoded(*counts))
+        def node_of_kind(nodes, kind):
+            return next(node for node in nodes if node.findtext("type") == kind)
+        # Only finite failure labels change. Metadata spelling/shape remains
+        # the same passive policy; no annotation becomes filesystem authority.
+        metadata_reasons = {
+            "tags": "install-product-xar-metadata-tags",
+            "finder-shape": "install-product-xar-finder-shape",
+            "finder-time": "install-product-xar-finder-time",
+            "finder-nanoseconds": "install-product-xar-finder-nanoseconds",
+            "scalar-shape": "install-product-xar-scalar-shape",
+            "inode-value": "install-product-xar-inode-value",
+            "deviceno-value": "install-product-xar-deviceno-value",
+        }
+        for case in ("valid", *metadata_reasons):
+            def annotated(nodes, case=case):
+                node = node_of_kind(nodes, "file")
+                finder = TOOL.ET.SubElement(node, "FinderCreateTime")
+                # Existing bounded spelling accepts this non-calendar value;
+                # the parser must neither normalize nor apply a birth time.
+                TOOL.ET.SubElement(finder, "time").text = "1900-01-00T22:06:56"
+                TOOL.ET.SubElement(finder, "nanoseconds").text = "999999999"
+                TOOL.ET.SubElement(node, "inode").text = "-9223372036854775808"
+                TOOL.ET.SubElement(node, "deviceno").text = "0"
+                TOOL.ET.SubElement(node, "mode").text = "0644"
+                if case == "tags": TOOL.ET.SubElement(node, "unreviewed-metadata")
+                elif case == "finder-shape": finder.set("unreviewed", "value")
+                elif case == "finder-time": finder.find("time").text += "Z"
+                elif case == "finder-nanoseconds": finder.find("nanoseconds").text = "-1"
+                elif case == "scalar-shape": node.find("mode").set("unreviewed", "value")
+                elif case == "inode-value": node.find("inode").text = "+1"
+                elif case == "deviceno-value": node.find("deviceno").text = "01"
+            with self.subTest(metadata_diagnostic=case):
+                if case == "valid":
+                    self.assertEqual(TOOL.install_product_members(encoded(mutation=annotated)), expected)
+                else:
+                    with self.assertRaises(TOOL.Refused) as caught:
+                        TOOL.install_product_members(encoded(mutation=annotated))
+                    self.assertEqual(caught.exception.args, (metadata_reasons[case],))
+        # Every repeated position is checked, not only first/second XML names.
+        for kind, count in (("file", 3), ("directory", 2)):
+            for index in range(count):
+                def mismatched(nodes, kind=kind, index=index):
+                    node_of_kind(nodes, kind).findall("name")[index].text = "different"
+                with self.subTest(kind=kind, alias_position=index), self.assertRaises(TOOL.Refused):
+                    TOOL.install_product_members(encoded(mutation=mismatched))
+            for marker in ("attribute", "child", "tail"):
+                def decorated(nodes, kind=kind, marker=marker):
+                    node = node_of_kind(nodes, kind).findall("name")[-1]
+                    if marker == "attribute": node.set("enctype", "base64")
+                    elif marker == "child": TOOL.ET.SubElement(node, "hidden")
+                    else: node.tail = "unexpected"
+                with self.subTest(kind=kind, decoration=marker), self.assertRaises(TOOL.Refused):
+                    TOOL.install_product_members(encoded(mutation=decorated))
+        for unsafe in ("../Distribution", "Resources/InstallerReadMe.html", "..", "\\", "other"):
+            def aliased(nodes, unsafe=unsafe):
+                for node in node_of_kind(nodes, "file").findall("name"): node.text = unsafe
+            with self.subTest(unsafe_alias=unsafe), self.assertRaises(TOOL.Refused):
+                TOOL.install_product_members(encoded(mutation=aliased))
+        for tag in ("type", "data", "mode"):
+            def duplicated(nodes, tag=tag):
+                node = node_of_kind(nodes, "file")
+                child = node.find(tag)
+                if child is None:
+                    child = TOOL.ET.SubElement(node, tag); child.text = "0644"
+                node.append(copy.deepcopy(child))
+            with self.subTest(duplicate_metadata=tag), self.assertRaises(TOOL.Refused):
+                TOOL.install_product_members(encoded(mutation=duplicated))
+        def overlapping(nodes):
+            files = [node for node in nodes if node.findtext("type") == "file"]
+            files[1].find("data/offset").text = files[0].findtext("data/offset")
+        with self.assertRaises(TOOL.Refused):
+            TOOL.install_product_members(encoded(mutation=overlapping))
+        valid = encoded(); compressed_length = struct.unpack_from(">IHHQQI", valid)[3]
+        corrupted = bytearray(valid); corrupted[28 + compressed_length] ^= 1
+        with self.assertRaises(TOOL.Refused): TOOL.install_product_members(bytes(corrupted))
+        # An existing permitted numeric reference is decoded, not a new alias.
+        tree = original_toc.replace(b"<name>Distribution</name>", b"<name>&#68;istribution</name>")
+        packed = TOOL.zlib.compress(tree)
+        numeric = (struct.pack(">IHHQQI", *header[:3], len(packed), len(tree), header[5])
+                   + packed + hashlib.sha1(packed).digest() + original_heap[20:])
+        self.assertEqual(TOOL.install_product_members(numeric), expected)
+
+    def test_final_package_append_diagnostics_preserve_original_checks_and_pending(self):
+        module = ANDROID_HELPER
+        prefix, ticket = b"ORIGINAL", b"TICKET"
+        body = prefix + ticket
+        before = (1, 2, stat.S_IFREG | 0o600, 1, 501, 20, len(prefix), 10, 11)
+        after = before[:6] + (len(body), 12, 13)
+        fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
+        def changed(row, index, value):
+            values = list(row); values[index] = value; return tuple(values)
+        complete = ["directory", "census", "fstat", "stat", "xattrs", "clock", "read", "eof", "fstat", "stat", "directory", "census", "stream"]
+        cases = (
+            ('success', None, 13),
+            ('binding', 'final-package-ticket-binding', 4),
+            ('metadata', 'final-package-ticket-metadata', 4),
+            ('no-growth', 'final-package-ticket-growth', 4),
+            ('excess-growth', 'final-package-ticket-growth', 4),
+            ('max-bytes', 'final-package-ticket-growth', 4),
+            ('short-read', 'final-package-ticket-short-read', 7),
+            ('prefix', 'final-package-signed-prefix-changed', 7),
+            ('eof', 'final-package-ticket-eof', 8),
+            ('fd-post', 'final-package-ticket-fd-post', 9),
+            ('name-post', 'final-package-ticket-name-post', 10),
+            ('parent-post', 'directory-post', 11),
+        )
+        for case, reason, observations in cases:
+            with self.subTest(case=case):
+                events = []; counts = {"fstat": 0, "stat": 0}
+                current = after
+                if case == "metadata": current = changed(after, 4, 502)
+                if case == "no-growth": current = changed(after, 6, len(prefix))
+                if case == "excess-growth": current = changed(after, 6, len(prefix) + 1024 * 1024 + 1)
+                operation = object.__new__(module.Operation)
+                parent = {"synthetic": True, "fd": 90}
+                entry = {"parent_entry": parent, "parent": 90, "fd": 91, "name": "synthetic.pkg", "identity": before}
+                operation.final_package_output = entry
+                operation.final_package_sha = hashlib.sha256(prefix).hexdigest()
+                operation.notary_mutation_pending = True
+                operation.final_package_preimage = None
+                operation.receipt = {"packageStapleObservation": TOOL.package_staple_observation()}
+                operation.notary_stream = lambda value: (events.append("stream"), hashlib.sha256(body).hexdigest())[1]
+                operation.stager = TOOL
+                def directory(value):
+                    self.assertIs(value, parent); events.append("directory")
+                    if case == "parent-post" and events.count("directory") == 2: raise module.Refused("directory-post")
+                operation.recheck_directory = directory
+                operation.notary_clock = lambda: events.append("clock")
+                def observed(kind):
+                    events.append(kind); counts[kind] += 1; row = current
+                    if case == "binding" and kind == "stat": row = changed(row, 8, 99)
+                    if case == "fd-post" and kind == "fstat" and counts[kind] == 2: row = changed(row, 7, 99)
+                    if case == "name-post" and kind == "stat" and counts[kind] == 2: row = changed(row, 8, 99)
+                    return SimpleNamespace(**dict(zip(fields, row)))
+                def fstat(fd):
+                    self.assertEqual(fd, 91); return observed("fstat")
+                def named(name, *, dir_fd, follow_symlinks):
+                    self.assertEqual((name, dir_fd, follow_symlinks), ("synthetic.pkg", 90, False))
+                    return observed("stat")
+                def pread(fd, size, offset):
+                    self.assertEqual(fd, 91)
+                    if offset == len(body):
+                        self.assertEqual(size, 1); events.append("eof")
+                        return b"x" if case == "eof" else b""
+                    self.assertEqual((size, offset), (len(body), 0)); events.append("read")
+                    return b"" if case == "short-read" else b"X" + body[1:] if case == "prefix" else body
+                with (mock.patch.object(TOOL, "MAX_BYTES", len(body)-1 if case == "max-bytes" else 2*1024*1024),
+                      mock.patch.object(TOOL, "no_xattrs", side_effect=lambda fd: (self.assertEqual(fd, 91), events.append("xattrs"))),
+                      mock.patch.object(module.os, "listdir", side_effect=lambda fd: (self.assertEqual(fd, 90), events.append("census"), ["synthetic.pkg"])[2]),
+                      mock.patch.object(module.os, "fstat", side_effect=fstat),
+                      mock.patch.object(module.os, "stat", side_effect=named),
+                      mock.patch.object(module.os, "pread", side_effect=pread)):
+                    if reason is None:
+                        operation.final_package_appended(before, hashlib.sha256(prefix).hexdigest())
+                    else:
+                        with self.assertRaises(module.Refused) as caught:
+                            operation.final_package_appended(before, hashlib.sha256(prefix).hexdigest())
+                        self.assertEqual(caught.exception.args, (reason,))
+                self.assertEqual(events, complete[:observations])
+                if reason is None:
+                    self.assertEqual(entry["identity"], after)
+                    self.assertEqual(operation.final_package_sha, hashlib.sha256(body).hexdigest())
+                    self.assertFalse(operation.notary_mutation_pending)
+                else:
+                    self.assertEqual(entry["identity"], before)
+                    self.assertEqual(operation.final_package_sha, hashlib.sha256(prefix).hexdigest())
+                    self.assertTrue(operation.notary_mutation_pending)
+                observation = operation.receipt["packageStapleObservation"]
+                self.assertEqual(observation["transitionComplete"], reason is None)
+                self.assertEqual(observation["selectedBranch"], "same-original")
+                self.assertIsNone(operation.final_package_preimage)
+                module.package_staple_observation_data(observation)
+
+        # Tiny owned filesystem fixtures exercise the actual register/openat,
+        # stream and consuming-close functions, without native tools or owners.
+        cases = ("success", "pre-linked", "pre-mode", "pre-identity", "pre-owner", "pre-size", "pre-mtime",
+                 "pre-content", "pre-short", "pre-eof", "pre-xattrs",
+                 "new-mode", "new-owner", "new-linked", "new-symlink", "no-growth", "over-growth",
+                 "prefix", "candidate-short", "candidate-eof", "candidate-xattrs", "open-race",
+                 "read-race", "pre-during-read", "first-post", "later-pre", "close-unknown")
+        for case in cases:
+            with self.subTest(returnedOutput=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); path = root / "owned"; path.mkdir(mode=0o700)
+                named = path / "synthetic.pkg"; named.write_bytes(prefix); named.chmod(0o600)
+                operation = object.__new__(module.Operation)
+                operation.entries = []; operation.entry_registry = {}; operation.errors = []
+                operation.app_absence = operation.update = None
+                operation.stager = TOOL; operation.notary_clock = lambda **kwargs: None
+                parent = operation.register(os.open(path, module.READ_FLAGS | os.O_DIRECTORY), "parent", "directory")
+                parent["identity"] = module.directory_identity(os.fstat(parent["fd"]))
+                operation.work_entry = parent; operation.source_entry = None; operation.work = path
+                old = operation.original(parent, named.name, "signed", TOOL.MAX_BYTES, (0o600,))
+                operation.final_package_output = old
+                operation.final_package_sha = before_sha = hashlib.sha256(prefix).hexdigest()
+                operation.final_package_preimage = None; operation.notary_mutation_pending = True
+                operation.receipt = {"packageStapleObservation": TOOL.package_staple_observation()}
+                operation.final_package_roots = [(parent, {named.name})]
+                operation.final_package_inputs = []; operation.target_entry = None
+                before = old["identity"]; old_fd = old["fd"]
+                native_pread, native_stat, native_fstat, native_close = os.pread, os.stat, os.fstat, os.close
+                events = []; changed_pre = [False]
+                try:
+                    if case == "pre-linked": os.link(named, root / "alias")
+                    if case == "pre-mode": os.fchmod(old_fd, 0o644)
+                    candidate = root / "returned.pkg"
+                    candidate.write_bytes(prefix if case == "no-growth" else
+                        b"X" + body[1:] if case == "prefix" else body)
+                    candidate.chmod(0o644 if case == "new-mode" else 0o600)
+                    if case == "new-linked": os.link(candidate, root / "new-alias")
+                    if case == "new-symlink":
+                        named.unlink(); named.symlink_to(candidate)
+                    else:
+                        candidate.replace(named)
+                    different_ino = max(native_fstat(old_fd).st_ino, native_stat(named).st_ino) + 1
+                    def read_original(fd, size, offset):
+                        events.append(("read", fd, offset))
+                        if fd == old_fd:
+                            if case == "pre-content" and offset == 0: return b"X" + prefix[1:]
+                            if case == "pre-short" and offset == 0: return b""
+                            if case == "pre-eof" and offset == len(prefix): return b"x"
+                        else:
+                            if case == "candidate-short" and offset == 0: return b""
+                            if case == "candidate-eof" and offset == len(body): return b"x"
+                            if offset == 0 and not changed_pre[0]:
+                                changed_pre[0] = True
+                                if case == "read-race":
+                                    other = root / "raced.pkg"; other.write_bytes(body); other.chmod(0o600); other.replace(named)
+                                if case == "pre-during-read": os.fchmod(old_fd, 0o644)
+                        return native_pread(fd, size, offset)
+                    def fstat_original(fd):
+                        row = native_fstat(fd)
+                        field = {"pre-identity": "st_ino", "pre-owner": "st_uid", "pre-size": "st_size",
+                                 "pre-mtime": "st_mtime_ns"}.get(case) if fd == old_fd else None
+                        if field is not None:
+                            values = {key: getattr(row, key) + (1 if key == field else 0) for key in fields}
+                            if field == "st_ino": values[field] = different_ino
+                            return SimpleNamespace(**values)
+                        return row
+                    def stat_original(name, *args, **kwargs):
+                        row = native_stat(name, *args, **kwargs)
+                        if case in ("new-owner", "over-growth") and name == named.name:
+                            # Growth is rejected from the named observation before
+                            # candidate admission/read; keep the real fixture tiny.
+                            values = {key: getattr(row, key) for key in fields}
+                            if case == "new-owner": values["st_uid"] += 1
+                            else: values["st_size"] = len(prefix) + 1024 * 1024 + 1
+                            return SimpleNamespace(**values)
+                        return row
+                    original = operation.original
+                    def admit(*args, **kwargs):
+                        events.append(("admit",))
+                        self.assertTrue(operation.notary_mutation_pending)
+                        self.assertFalse(operation.receipt["packageStapleObservation"]["transitionComplete"])
+                        self.assertTrue(any(row[0] == "read" and row[1] == old_fd for row in events))
+                        if case == "open-race":
+                            other = root / "raced.pkg"; other.write_bytes(body); other.chmod(0o600); other.replace(named)
+                        return original(*args, **kwargs)
+                    def xattrs(fd):
+                        if (case == "candidate-xattrs" and fd != old_fd or case == "pre-xattrs" and fd == old_fd):
+                            raise TOOL.Refused("synthetic-xattrs")
+                    operation.original = admit
+                    stream = operation.notary_stream
+                    def committed_post(entry, **kwargs):
+                        self.assertIs(operation.final_package_output, entry)
+                        self.assertIs(operation.final_package_preimage[0], old)
+                        self.assertTrue(operation.notary_mutation_pending)
+                        self.assertFalse(operation.receipt["packageStapleObservation"]["transitionComplete"])
+                        return "0" * 64 if case == "first-post" else stream(entry, **kwargs)
+                    operation.notary_stream = committed_post
+                    success = case in ("success", "later-pre", "close-unknown")
+                    with (mock.patch.object(module.os, "fstat", side_effect=fstat_original),
+                          mock.patch.object(module.os, "pread", side_effect=read_original),
+                          mock.patch.object(module.os, "stat", side_effect=stat_original),
+                          mock.patch.object(TOOL, "no_xattrs", side_effect=xattrs)):
+                        if success:
+                            operation.final_package_appended(before, before_sha)
+                        else:
+                            with self.assertRaises((module.Refused, TOOL.Refused)):
+                                operation.final_package_appended(before, before_sha)
+                    observation = operation.receipt["packageStapleObservation"]
+                    self.assertEqual(observation["selectedBranch"], "returned-output")
+                    self.assertFalse(observation["fdNameIdentityMatched"])
+                    self.assertEqual(observation["transitionComplete"], success)
+                    self.assertEqual(operation.notary_mutation_pending, not success)
+                    self.assertIs(operation.entry_registry[id(old)], old)
+                    self.assertEqual(old["fd"], old_fd); self.assertFalse(old["closed"])
+                    self.assertNotIn("finalPackage", operation.receipt)
+                    self.assertLessEqual(len([v for v in events if v[0] == "admit"]), 1)
+                    self.assertLessEqual(len(operation.entries), 3)
+                    if success:
+                        self.assertIsNot(operation.final_package_output, old)
+                        self.assertIs(operation.final_package_preimage[0], old)
+                        self.assertEqual(operation.final_package_sha, hashlib.sha256(body).hexdigest())
+                        self.assertEqual(native_pread(old_fd, len(prefix), 0), prefix)
+                        self.assertEqual(os.fstat(old_fd).st_nlink, 0)
+                        operation.notary_stream = stream
+                        operation.final_package_post()
+                        if case == "later-pre":
+                            os.fchmod(old_fd, 0o644)
+                            with self.assertRaisesRegex(module.Refused, "final-package-preimage-metadata"):
+                                operation.final_package_post()
+                        if case == "close-unknown":
+                            def uncertain(fd):
+                                native_close(fd)
+                                raise OSError("synthetic uncertain close")
+                            with mock.patch.object(module.os, "close", side_effect=uncertain) as closing:
+                                operation.close(old); operation.close(old)
+                                closing.assert_called_once_with(old_fd)
+                            self.assertIsNone(old["fd"]); self.assertFalse(old["closed"])
+                            self.assertEqual(operation.errors, [{"stage": "close", "role": "signed", "type": "OSError"}])
+                    else:
+                        self.assertFalse(observation["transitionComplete"])
+                        if case != "first-post":
+                            self.assertIs(operation.final_package_output, old)
+                            self.assertEqual(operation.final_package_sha, before_sha)
+                finally:
+                    for entry in reversed(operation.entries): operation.close(entry)
+
+        # Strict closed optional DATA consumer: absent legacy receipt remains
+        # accepted by final_package_receipt; present malformed DATA never does.
+        value = TOOL.package_staple_observation()
+        self.assertEqual(module.package_staple_observation_data(value), value)
+        value.update(heldPreIdentityMatched=True, namedPreIdentityMatched=False, fdNameIdentityMatched=False,
+                     fdNameMetadataMatched=False, namedShapeExpected=True, heldLinkState="unlinked",
+                     selectedBranch="returned-output", transitionComplete=True)
+        self.assertEqual(module.package_staple_observation_data(value), value)
+        for key in value:
+            for bad in ("PRIVATE/path", [], 1):
+                broken = dict(value); broken[key] = bad
+                with self.assertRaises(module.Refused): module.package_staple_observation_data(broken)
+            broken = dict(value); del broken[key]
+            with self.assertRaises(module.Refused): module.package_staple_observation_data(broken)
+        for broken in (dict(value, unexpected="PRIVATE/path"), dict(value, heldLinkState="single"),
+                       dict(value, heldPreIdentityMatched=False), dict(value, namedShapeExpected=None)):
+            with self.assertRaises(module.Refused): module.package_staple_observation_data(broken)
+
+    def test_install_product_audit_failure_is_static_and_preserves_pending(self):
+        module = ANDROID_HELPER
+        root = Path(__file__).absolute().parents[2]
+        spec = importlib.util.spec_from_file_location("mrk_replicate_public_data",
+            root / "desktop/tools/macos_public_verification_evidence.py")
+        public = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(public)
+        self.assertEqual(public.INSTALL_PRODUCT_AUDIT_REASONS, TOOL.INSTALL_PRODUCT_AUDIT_REASONS)
+        self.assertEqual(len(TOOL.INSTALL_PRODUCT_AUDIT_REASONS), 32)
+        # Literal-only diagnostics never publish arbitrary local values or success.
+        self.assertEqual(public.FINAL_PACKAGE_POST_REASONS, frozenset(('final-package-ticket-transition-state', 'final-package-preimage-unavailable', 'final-package-preimage-metadata', 'final-package-preimage-short-read', 'final-package-preimage-content', 'final-package-preimage-post', 'final-package-preimage-transition', 'final-package-returned-shape', 'final-package-returned-acquisition', 'final-package-returned-binding', 'final-package-ticket-binding', 'final-package-ticket-metadata', 'final-package-ticket-growth', 'final-package-ticket-short-read', 'final-package-signed-prefix-changed', 'final-package-ticket-eof', 'final-package-ticket-fd-post', 'final-package-ticket-name-post', 'final-package-directory-census', 'final-package-input-changed', 'final-package-output-changed', 'final-package-target-census', 'final-package-original-settlement-reserve', 'final-package-fixed-role-order', 'final-package-private-role', 'final-package-original-bound')))
+        for reason in sorted(public.FINAL_PACKAGE_POST_REASONS):
+            projected = public.project_failure({"stage": "final-package-staple", "type": "Refused", "reason": reason})
+            self.assertEqual(projected, {"stage": "final-package-staple", "type": "Refused", "reason": reason, "errno": None})
+        for reason in ("final-package-private/local/path", "final-package-ticket-binding-extra", "final-package-unknown"):
+            projected = public.project_failure({"stage": "final-package-staple", "type": "Refused", "reason": reason})
+            self.assertEqual(projected["reason"], "final-package-refused")
+            self.assertNotIn(reason, json.dumps(projected))
+        # Genuine boundary/IO functions, with no process, file or credential work.
+        operation = object.__new__(module.Operation)
+        operation.stager = TOOL; operation.install_product = True
+        operation.work = Path("/synthetic-fixed-product")
+        operation.target = "aarch64-apple-darwin"
+        operation.scripts_name = "scripts"; operation.packager_filename = "original.pkg"
+        operation.notary_retiring = False
+        operation.removal_final_active = lambda: True
+        operation.final_package_known = lambda: True
+        operation.notary_post = lambda: None
+        operation.notary_clock = lambda: None
+        operation.notary_stream = lambda _entry: "1" * 64
+        operation.removal_package_audit_arguments = lambda: {}
+        entry = {"identity": (0, 0, 0, 0, 0, 0, 17)}
+        path = operation.work / "fixed.pkg"
+        for reason in sorted(TOOL.INSTALL_PRODUCT_AUDIT_REASONS):
+            original = TOOL.Refused(reason)
+            operation.stager_io_pending = None
+            with self.subTest(reason=reason), mock.patch.object(TOOL, "audit_install_product_command", side_effect=original):
+                with self.assertRaises(module.Refused) as caught:
+                    operation.final_package_audit(entry, path)
+                self.assertIs(caught.exception.__cause__, original)
+                self.assertEqual(BaseException.args.__get__(caught.exception), (reason,))
+                self.assertEqual(operation.stager_io_pending, "final-package-original-audit")
+                self.assertEqual(public.project_failure({"stage": operation.stage, "type": "Refused", "reason": reason}),
+                    {"stage": "final-package-original-audit", "type": "Refused", "reason": reason, "errno": None})
+        class Unrenderable(TOOL.Refused):
+            def __str__(self): raise AssertionError("exception rendering forbidden")
+        class Lookalike(Exception):
+            def __str__(self): raise AssertionError("exception rendering forbidden")
+        class UnsafeString(str):
+            def __str__(self): raise AssertionError("value rendering forbidden")
+            def __eq__(self, other): raise AssertionError("value comparison forbidden")
+        unknowns = (TOOL.Refused("private-local-value"), TOOL.Refused("x" * 97), TOOL.Refused(b"private"),
+                    TOOL.Refused(), TOOL.Refused("install-product-xar-duplicate", "extra"),
+                    TOOL.Refused(UnsafeString("install-product-xar-duplicate")),
+                    Unrenderable("install-product-xar-duplicate"), Lookalike("install-product-xar-duplicate"))
+        for index, original in enumerate(unknowns):
+            operation.stager_io_pending = None
+            with self.subTest(unknown=index), mock.patch.object(TOOL, "audit_install_product_command", side_effect=original):
+                with self.assertRaises(type(original)) as caught:
+                    operation.final_package_audit(entry, path)
+                self.assertIs(caught.exception, original)
+                self.assertEqual(operation.stager_io_pending, "final-package-original-audit")
+        for value in (False, 1):
+            operation.install_product = value
+            original = TOOL.Refused("install-product-xar-duplicate")
+            audit_name = "audit_install_product_command" if value else "audit_command"
+            with self.subTest(nonexact_install=value), mock.patch.object(TOOL, audit_name, side_effect=original):
+                with self.assertRaises(TOOL.Refused) as caught:
+                    operation.final_package_audit(entry, path)
+                self.assertIs(caught.exception, original)
+        operation.install_product = True
+        result = {"packageSize": 17, "packageSha256": "1" * 64}
+        with mock.patch.object(TOOL, "audit_install_product_command", return_value=result):
+            self.assertIs(operation.final_package_audit(entry, path), result)
+        self.assertIsNone(operation.stager_io_pending)
+        self.assertNotIn("receipt", operation.__dict__)  # No invented pass/finality authority.
+        projected = public.project_failure({"stage": "final-package-original-audit", "type": "Refused",
+                                           "reason": "private-local-value"})
+        self.assertEqual(projected["reason"], "unclassified")
+        self.assertNotIn("private-local-value", json.dumps(projected))
+
+    def test_final_image_rejects_scripts_or_unknown_product_audit_qualification(self):
+        module = ANDROID_HELPER
+        for qualification in ("scripts-only-package-audited-not-installed-or-GUI-qualified", "not-a-product-audit"):
+            with self.subTest(qualification=qualification), tempfile.TemporaryDirectory() as directory:
+                state = self.final_image_fixture(Path(directory))
+                audit_path = state.work / "package-audit.json"
+                audit = json.loads(audit_path.read_bytes())
+                self.assertEqual(audit["qualification"], TOOL.INSTALL_PRODUCT_QUALIFICATION)
+                audit["qualification"] = qualification
+                audit_path.write_bytes(TOOL.canonical(audit) + b"\n")
+                with self.final_image_fixture_call(state), self.assertRaises(module.Refused):
+                    state.operation.execute()
+                self.assertEqual(state.operation.receipt["failure"]["reason"], "final-image-package-audit")
+                self.assertFalse(state.operation.receipt["passed"])
+                self.assertEqual(state.observations, [])
+                self.assertFalse((state.work / "distribution-final").exists())
+
+    def test_returned_package_preimage_survives_full_finalization_and_late_failure(self):
+        module = ANDROID_HELPER
+        for late in (False, True):
+            with self.subTest(latePreimageChange=late), tempfile.TemporaryDirectory() as directory:
+                fixture = self.final_package_fixture(Path(directory), returned_output=True,
+                    failure="retained-preimage-at-validate" if late else None)
+                operation = fixture.operation
+                observed, consumed = [], []
+                call, audit, publish, close = (operation.call, operation.final_package_audit,
+                                              operation.final_package_publish, operation.close)
+                def retained(label):
+                    original, identity, sha = operation.final_package_preimage
+                    self.assertIs(operation.entry_registry[id(original)], original)
+                    self.assertIsNot(original, operation.final_package_output)
+                    self.assertIsNotNone(original["fd"]); self.assertFalse(original["closed"])
+                    self.assertEqual(module.signature(os.fstat(original["fd"])), identity)
+                    self.assertEqual(identity[3], 0)
+                    self.assertEqual(os.pread(original["fd"], len(fixture.signed) + 1, 0), fixture.signed)
+                    self.assertEqual(sha, module.digest(fixture.signed))
+                    observed.append(label)
+                def original_call(role, *args, **kwargs):
+                    if role in ("final-package-validate", "final-package-signature-after"):
+                        retained(role)
+                    return call(role, *args, **kwargs)
+                def original_audit(*args, **kwargs):
+                    changed = operation.final_package_preimage is not None
+                    if changed: retained("audit-before")
+                    result = audit(*args, **kwargs)
+                    if changed: retained("audit-after")
+                    return result
+                def original_publish():
+                    retained("publication-before")
+                    result = publish()
+                    retained("publication-after")
+                    return result
+                def original_close(entry):
+                    if operation.final_package_preimage is not None and (entry is operation.final_package_preimage[0]
+                            or entry is operation.final_package_output):
+                        self.assertIsNotNone(entry["fd"])
+                        self.assertNotIn(id(entry), consumed); consumed.append(id(entry))
+                    return close(entry)
+                with (self.final_package_fixture_call(fixture), mock.patch.object(operation, "call", new=original_call),
+                      mock.patch.object(operation, "final_package_audit", new=original_audit),
+                      mock.patch.object(operation, "final_package_publish", new=original_publish),
+                      mock.patch.object(operation, "close", new=original_close)):
+                    if late:
+                        with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"):
+                            operation.execute()
+                        self.assertEqual(operation.receipt["failure"], {"stage": "final-package-validate",
+                            "type": "Refused", "reason": "final-package-preimage-metadata"})
+                    else:
+                        operation.execute()
+                old = operation.final_package_preimage[0]
+                self.assertEqual(consumed, [id(old), id(operation.final_package_output)])
+                self.assertTrue(old["closed"] and operation.final_package_output["closed"])
+                self.assertTrue(operation.receipt["packageStapleObservation"]["transitionComplete"])
+                self.assertEqual(operation.receipt["packageStapleObservation"]["selectedBranch"], "returned-output")
+                if late:
+                    self.assertEqual(observed, ["final-package-validate"])
+                    self.assertFalse(operation.receipt["passed"] or operation.receipt["targetRetired"])
+                    self.assertNotIn("finalPackage", operation.receipt)
+                    self.assertFalse((fixture.work / "package-final").exists())
+                    self.assertEqual(fixture.observations[-1][0], "final-package-validate")
+                else:
+                    self.assertEqual(observed, ["final-package-validate", "final-package-signature-after",
+                        "audit-before", "audit-after", "publication-before", "publication-after"])
+                    self.assertTrue(operation.receipt["passed"] and operation.receipt["targetRetired"]
+                                    and operation.receipt["originalClosesKnown"])
+                    self.assertTrue(all(entry["closed"] for entry in operation.entries))
+                    published = fixture.work / "package-final/MobileReleaseKit.pkg"
+                    final_body = published.read_bytes()
+                    self.assertEqual(final_body, fixture.signed + fixture.ticket)
+                    self.assertEqual(stat.S_IMODE(published.stat().st_mode), 0o444)
+                    self.assertTrue(operation.receipt["finalPackage"]["actualStaplerValidation"])
+                    record_body = (fixture.work / "android-helper-finalize-package.json").read_bytes()
+                    record = json.loads(record_body)
+                    release_body = (fixture.checkout / operation.release_input).read_bytes()
+                    arguments = (fixture.environment, module.ARM_TARGET, fixture.credentials.installer,
+                        module.digest((fixture.checkout / module.INSTALLER_PROFILE).read_bytes()),
+                        module.digest((fixture.checkout / module.NOTARY_PROFILE).read_bytes()),
+                        len(final_body), module.digest(final_body),
+                        TOOL.build_release_data(release_body, target=module.ARM_TARGET)["release"], module.digest(release_body))
+                    self.assertEqual(module.final_package_receipt(record_body, *arguments), record["finalPackage"])
+                    legacy = copy.deepcopy(record); del legacy["packageStapleObservation"]
+                    self.assertEqual(module.final_package_receipt(TOOL.canonical(legacy), *arguments), record["finalPackage"])
+                    with self.assertRaises(module.Refused):
+                        module.final_package_receipt(TOOL.canonical(dict(record, packageStapleObservation=None)), *arguments)
+
+    def final_package_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None, returned_output=False):
         """Real original files/audits/auth custody; only native returns are DATA."""
         module = ANDROID_HELPER
         checkout, work, environment, _owner, _observations = self.fixture(root, build_target=target)
@@ -1238,9 +3829,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual(argv, [str(state.tools["stapler"]["path"]), "staple" if called.endswith("-staple") else "validate", str(path)])
                 if called == "final-package-staple":
                     before = path.stat()
-                    if failure == "ticket-replaced":
+                    if returned_output or failure == "ticket-replaced-prefix":
                         replacement = path.with_suffix(".replacement")
-                        replacement.write_bytes(signed + ticket); replacement.chmod(0o600); replacement.replace(path)
+                        replacement.write_bytes((b"X" + signed[1:] if failure == "ticket-replaced-prefix" else signed) + ticket)
+                        replacement.chmod(0o600); replacement.replace(path)
                     else:
                         with path.open("ab") as output_file:
                             output_file.write(ticket if failure != "ticket-oversize" else b"x" * (1024 * 1024 + 1))
@@ -1250,6 +3842,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         elif failure == "ticket-mode":
                             path.chmod(0o644)
                         self.assertEqual(path.stat().st_ino, before.st_ino)
+                elif failure == "retained-preimage-at-validate":
+                    self.assertIsNotNone(operation.final_package_preimage)
+                    os.fchmod(operation.final_package_preimage[0]["fd"], 0o644)
             return CompletedProcess(argv, 0, output, b"")
 
         state.operation = module.Operation(SimpleNamespace(run_owned=command), checkout, work, "finalize-package", environment, TOOL, target=target)
@@ -1290,7 +3885,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(state.operation.notary_tool, original_tool)
         self.assertEqual((module.NOTARY_FREE_FLOOR, module.NOTARY_STORAGE_RESERVE), (3 * 1024 * 1024 * 1024, 2 * 1024 * 1024 * 1024))
 
-    def final_image_fixture(self, root, *, target="aarch64-apple-darwin", failure=None):
+    def final_image_fixture(self, root, *, target="aarch64-apple-darwin", failure=None, inventory_body=None):
         """Same real S3 handoff/book and S4 files; no tool or mount executes.
 
         Preceding Installer/producer/mount observations below are explicitly
@@ -1298,10 +3893,11 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         S4's exact three mounted file reads, POSTs and consuming closes are real.
         """
         module = ANDROID_HELPER
+        inventory_sha = "d" * 64 if inventory_body is None else TOOL.digest(inventory_body)
         state = self.final_package_fixture(root, target=target)
         state.environment.update(GITHUB_REF="refs/heads/verify/desktop-macos-preview",
             GITHUB_WORKFLOW_REF="Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview",
-            MRK_MACOS_INSTALL_INVENTORY_SHA256="d" * 64, MRK_BUNDLED_RUNTIME_MANIFEST_SHA256="c" * 64)
+            MRK_MACOS_INSTALL_INVENTORY_SHA256=inventory_sha, MRK_BUNDLED_RUNTIME_MANIFEST_SHA256="c" * 64)
         state.operation.receipt["workflow"] = state.environment["GITHUB_WORKFLOW_REF"]  # Before any S3 dispatch.
         with self.final_package_fixture_call(state):
             state.operation.execute()
@@ -1319,7 +3915,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         policy_sha = TOOL.digest(json.dumps(policy, separators=(",", ":")).encode("ascii"))
         descriptor["signingPolicies"][0]["sha256"] = policy_sha
         descriptor["releaseSet"]["current"].update(packageVersion=selected.package_version,
-            release=selected.release, signingPolicySha256=policy_sha)
+            release=selected.release, signingPolicySha256=policy_sha, inventorySha256=inventory_sha)
         descriptor = TOOL.canonical(descriptor) + b"\n"
         signed = b"INERT RAW PRODUCER SIGNATURE DATA; NOT A NATIVE SIGNATURE"
         image = b"INERT SIGNED UDIF-LIKE DATA; NOT A REAL IMAGE\n" + bytes(512)
@@ -1338,7 +3934,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             "requestId": request, "invocation": invocation, "originalInstallerReturnedZero": True, "originalWriterJoined": True,
             "historicalOuterExit": "unverified", "applicationLaunched": False, "guiSaveQualified": False,
             "completedPackageSha256": TOOL.digest(package), "runtimeManifestSha256": "c" * 64,
-            "inventorySha256": "d" * 64, "originalInstallerResult": result}
+            "inventorySha256": inventory_sha, "originalInstallerResult": result}
         emitted = {"schemaVersion": 1, "kind": "mrk-package-producer-emitted", "packageSha256": TOOL.digest(package),
             "descriptorSha256": TOOL.digest(descriptor), "signatureSha256": TOOL.digest(signed),
             "descriptorBytes": len(descriptor), "signatureBytes": len(signed)}
@@ -1367,8 +3963,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 for purpose in ("producer", "distribution-image", "observation-image")],
             "packageMount": {"attachEntered": True, "originalKnown": True, "detached": True, "retained": False,
                 "installerEntered": True, "installerOriginalZero": True, "sameRequestV2Readback": True, "systemServiceExitClaimed": False}}
-        audit = {"packageSha256": TOOL.digest(package), "packageSize": len(package), "packageIdentifier": TOOL.PACKAGE_ID,
-                 "qualification": "scripts-only-package-audited-not-installed-or-GUI-qualified"}
+        # Actual DATA producer result reaches the ordinary image consumer;
+        # never a hand-written scripts-only qualification for a product archive.
+        audit = TOOL.audit_install_product_command(SimpleNamespace(target=target, fixture=False,
+            scripts=state.work / "scripts", package=state.work / "package-final/MobileReleaseKit.pkg",
+            original_package=state.work / "MobileReleaseKit-original.pkg"))
+        self.assertEqual(audit["qualification"], TOOL.INSTALL_PRODUCT_QUALIFICATION)
         files = {"package-install.status": (b"0\n", 0o600), "installer-output.status": (b"0\n", 0o600),
             "package-finalization.status": (b"0\n", 0o600), "package-request-id.txt": ((request + "\n").encode(), 0o600),
             "android-helper-package-install.json": (TOOL.canonical(owner) + b"\n", 0o600),
@@ -1378,6 +3978,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             "producer-root/producer.json": (descriptor, 0o444), "producer-root/producer.sig": (signed, 0o444),
             "distribution/MobileReleaseKit.dmg": (image, 0o444),
             "distribution/MobileReleaseKit-Observation.dmg": (b"INERT REQUEST-SPECIFIC OBSERVATION IMAGE", 0o444)}
+        if inventory_body is not None:
+            files["input/" + TOOL.INSTALLATION_INVENTORY_NAME] = (inventory_body, 0o444)
         for relative, (body, mode) in files.items():
             path = state.work / relative
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1449,6 +4051,27 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         if failure == "ticket-mode": path.chmod(0o644)
             elif role == "final-image-verify":
                 self.assertEqual(argv, ["/usr/bin/hdiutil", "verify", str(path)])
+            elif role in ("final-image-policy-status", "final-image-policy-assess"):
+                self.assertIsNone(operation.notary_key)
+                self.assertTrue(operation.mount_detached and operation.final_image_mount_verified)
+                self.assertFalse((work / "distribution-final").exists())
+                self.assertEqual(path.read_bytes(), final_image)
+                self.assertEqual(operation.receipt["notaryAuthentication"], {"created": True, "closed": True, "retired": True})
+                if role == "final-image-policy-status":
+                    self.assertEqual(argv, ["/usr/sbin/spctl", "--status"])
+                    self.assertEqual(options["output_limit"], 4096)
+                    output = b"assessments enabled\n"
+                    if failure == "policy-disabled": return CompletedProcess(argv, 1, b"assessments disabled\n", b"")
+                    if failure == "policy-disabled-zero": output = b"assessments disabled\n"
+                    if failure == "policy-status-extra": output += b"INERT extra output\n"
+                    if failure == "policy-status-stderr": return CompletedProcess(argv, 0, output, b"INERT status warning")
+                else:
+                    self.assertEqual(argv, ["/usr/sbin/spctl", "--assess", "--type", "open", "--context",
+                        "context:primary-signature", "--ignore-cache", "--no-cache", str(path)])
+                    self.assertEqual(options["output_limit"], 65536)
+                    if failure == "policy-denied": return CompletedProcess(argv, 3, b"", b"INERT policy denial")
+                    if failure == "policy-changed": path.write_bytes(b"X" + final_image[1:])
+                if failure == role + "-overflow": output = b"x" * (options["output_limit"] + 1)
             elif role == "final-image-attach":
                 self.assertEqual(argv, ["/usr/bin/hdiutil", "attach", str(path), "-readonly", "-nobrowse", "-noautoopen",
                     "-mountpoint", str(work / "package-mount"), "-plist"])
@@ -1506,6 +4129,323 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(operation.recheck_mount, original_mount)
         self.assertEqual(operation.notary_tool, original_tool)
         self.assertEqual((module.NOTARY_FREE_FLOOR, module.NOTARY_STORAGE_RESERVE), (3 * 1024 ** 3, 2 * 1024 ** 3))
+
+    def test_update_baseline_existing_owner_preserves_original_failure_and_closes(self):
+        # Only baseline content/readback is an inert phase port. Actual source
+        # loading, nomination parsing, fixed dispatch, native-result capture,
+        # status, clock, POST and consuming retirement use the genuine owner.
+        module = ANDROID_HELPER
+        nomination = {"schemaVersion": 1, "mode": "configured", "targets": {}}
+        for target in TOOL.MAC_TARGETS:
+            producer, _records, _result = maintenance_documents(("fresh-install",), target=target)
+            release = producer["releaseSet"]["current"]
+            member = lambda name, digest: {"name": name, "bytes": 100, "sha256": digest}
+            image = member("MobileReleaseKit.dmg", "1" * 64)
+            nomination["targets"][target] = {"source": release["sourceCommit"], "runId": "123", "runAttempt": "1",
+                "jobId": "456", "artifactId": "789", "artifactBytes": 200, "artifactSha256": "2" * 64,
+                "members": [image], "image": image, "package": member("Install.pkg", release["packageSha256"]),
+                "descriptor": member("producer.json", "4" * 64), "signature": member("producer.sig", "5" * 64),
+                "inventory": member(TOOL.INSTALLATION_INVENTORY_NAME, release["inventorySha256"]),
+                "release": release, "signingPolicy": producer["signingPolicies"][0], "qualificationEvidenceSha256": "8" * 64,
+                "resources": {"reviewed": True, "additionalDiskBytes": 300 + 512 * 1024**2 + 4 * 1024**2,
+                              "rawPayloadBytes": 6 * 512 * 1024**2 + 80 * 1024**2, "maximumOriginals": 96}}
+        for target in TOOL.MAC_TARGETS:
+            for fault in (None, "installer-nonzero", "installer-unknown"):
+                with self.subTest(target=target, fault=fault), tempfile.TemporaryDirectory() as directory:
+                    checkout, work, environment, _owner, _events = self.fixture(Path(directory), build_target=target)
+                    producer, service, _selection, _history, _descriptor = packaging_fixture(target)
+                    (checkout / module.PROFILE).write_bytes(service)
+                    (checkout / module.PRODUCER_PROFILE).write_bytes(producer)
+                    path = checkout / "desktop/tools/macos_update_verification.py"
+                    path.parent.mkdir(parents=True)
+                    path.write_bytes((Path(__file__).absolute().parents[2] / "desktop/tools/macos_update_verification.py").read_bytes())
+                    path.chmod(0o644)
+                    nomination_path = checkout / "desktop/macos-installed-inputs/update-predecessors.json"
+                    nomination_path.write_bytes(TOOL.canonical(nomination))
+                    nomination_path.chmod(0o644)
+                    self.assertEqual(stat.S_IMODE(nomination_path.stat().st_mode), 0o644)
+                    environment.update(GITHUB_REF=module.UPDATE_REF, MRK_MACOS_SAME_PACKAGE_SCOPE="disabled")
+                    events = []
+                    def command(argv, **options):
+                        role = operation.calls[-1]["role"]; events.append(role)
+                        self.assertEqual(options["timeout"], 123 if role == module.UPDATE_ROLES[1] else 60)
+                        self.assertFalse(set(module.CREDENTIAL_VARIABLES + module.INSTALLER_CREDENTIAL_VARIABLES
+                            + (module.NOTARY_KEY_VARIABLE,)) & set(options["environ"]))
+                        if role == module.UPDATE_ROLES[1] and fault == "installer-unknown": raise RuntimeError("INERT unknown")
+                        return CompletedProcess(argv, 1 if role == module.UPDATE_ROLES[1] and fault else 0, b"", b"")
+                    operation = module.Operation(SimpleNamespace(run_owned=command), checkout, work, module.UPDATE_PHASE, environment, TOOL, target=target)
+                    original_load = operation.update_load
+                    def phase_port(op):
+                        op.update["case"] = op.package_directory("update-baseline-case")
+                        commands = (["/usr/bin/hdiutil", "attach", str(work / "update-predecessor/MobileReleaseKit.dmg"),
+                            "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", str(work / "package-mount"), "-plist"],
+                            ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg", str(work / "package-mount/Install.pkg"),
+                            "-target", "/", "-dumplog", "-verboseR"], ["/usr/bin/hdiutil", "detach", "/dev/disk99"])
+                        for index, role in enumerate(module.UPDATE_ROLES):
+                            op.package_call(role, commands[index], timeout=123 if index == 1 else 60, limit=262144)
+                            if index == 0: op.mount_known = True; op.mount_device = "/dev/disk99"
+                            elif index == 1: op.installer_zero = True; op.installation_readback = True
+                            else: op.mount_detached = True
+                        op.sha256 = "a" * 64
+                        op.update["complete"] = True  # Inert phase only, not native qualification.
+                    def load():
+                        original_load(); operation.update_module.baseline = phase_port
+                    try:
+                        with mock.patch.dict(sys.modules, {module.__name__: module}), mock.patch.object(operation, "update_load", side_effect=load):
+                            if fault is None:
+                                try:
+                                    operation.execute()
+                                except module.Refused:
+                                    failure = operation.receipt.get("failure")
+                                    values = [failure.get(key) if type(failure) is dict else None
+                                              for key in ("stage", "type", "reason")]
+                                    details = tuple(value if type(value) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value)
+                                                    else "unclassified" for value in values)
+                                    self.fail(("positive-update-fixture-refused", details))
+                            else:
+                                with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"): operation.execute()
+                        self.assertEqual(operation.credential_calls, [])
+                        self.assertEqual(operation.credential_contexts, [])
+                        if fault is None:
+                            self.assertEqual(tuple(events), module.UPDATE_ROLES)
+                            self.assertTrue(operation.receipt["passed"] and operation.receipt["originalClosesKnown"] and operation.receipt["targetRetired"])
+                            self.assertEqual((work / "update-baseline-case/installer-output.status").read_bytes(), b"0\n")
+                        else:
+                            self.assertEqual(tuple(events), module.UPDATE_ROLES[:2])
+                            self.assertFalse(operation.receipt["passed"] or operation.receipt["originalClosesKnown"] or operation.receipt["targetRetired"])
+                            self.assertFalse(operation.mount_detached)
+                            if fault == "installer-nonzero":
+                                self.assertEqual((work / "update-baseline-case/installer-output.status").read_bytes(), b"1\n")
+                    finally:
+                        for entry in reversed(operation.entries): operation.close(entry)
+                    self.assertTrue(all(entry["closed"] for entry in operation.entries))
+
+    def test_app_absence_existing_owner_dispatch_capture_and_unknown_retirement(self):
+        # A phase-body DATA port isolates the SAME Operation dispatch/capture/
+        # close contract. It is not a mock of archive/marker/history validation;
+        # those genuine reducers have separate focused cases. No native child.
+        module = ANDROID_HELPER
+        for role in ("app-absence-build", "app-absence-data-tests"):
+            self.assertEqual(module.package_timeout_data(0, 1_443_000_000_000, 1440,
+                phase="prepare-app-absence", role=role), 1440)
+            self.assertEqual(module.package_timeout_data(0, 100_000_000_000, 1440,
+                phase="prepare-app-absence", role=role), 97)
+            for requested in (False, 0, 1441):
+                with self.assertRaises(module.Refused):
+                    module.package_timeout_data(0, 2_000_000_000_000, requested,
+                        phase="prepare-app-absence", role=role)
+            with self.assertRaises(module.Refused):
+                module.package_timeout_data(0, 3_999_999_999, 1440,
+                    phase="prepare-app-absence", role=role)
+        for phase, role in ((None, None), ("package-install", "app-absence-build"),
+                            ("app-absence-restore", "app-absence-data-tests"),
+                            ("prepare-app-absence", "app-absence-adhoc")):
+            self.assertEqual(module.package_timeout_data(0, 2_000_000_000_000, 480,
+                phase=phase, role=role), 480)
+            with self.assertRaises(module.Refused):
+                module.package_timeout_data(0, 2_000_000_000_000, 481, phase=phase, role=role)
+        for target in TOOL.MAC_TARGETS:
+            for phase, fault in (("prepare-app-absence", None), ("prepare-app-absence", "tests-nonzero"),
+                                 ("prepare-app-absence", "tests-unknown"), ("app-absence-restore", None),
+                                 ("app-absence-restore", "withdraw-nonzero"), ("app-absence-restore", "withdraw-unknown")):
+                with self.subTest(target=target, phase=phase, fault=fault), tempfile.TemporaryDirectory() as directory:
+                    checkout, work, environment, _owner, _events = self.fixture(Path(directory), build_target=target)
+                    producer, service, _selection, _history, _descriptor = packaging_fixture(target)
+                    (checkout / module.PROFILE).write_bytes(service)
+                    (checkout / module.PRODUCER_PROFILE).write_bytes(producer)
+                    path = checkout / "desktop/tools/macos_app_absence_fixture.py"
+                    path.parent.mkdir(parents=True)
+                    path.write_bytes((Path(__file__).absolute().parents[2] / "desktop/tools/macos_app_absence_fixture.py").read_bytes())
+                    path.chmod(0o644)
+                    environment.update(GITHUB_REF=module.APP_ABSENCE_REF, MRK_MACOS_SAME_PACKAGE_SCOPE="disabled")
+                    events, returned = [], []
+                    def command(argv, **options):
+                        role = operation.calls[-1]["role"]
+                        events.append(role)
+                        self.assertEqual(argv, ["/inert/fixed-data-port", role])
+                        expected_timeout = 1440 if phase == "prepare-app-absence" and role in (
+                            "app-absence-build", "app-absence-data-tests") else 30
+                        self.assertEqual(options["timeout"], expected_timeout)
+                        self.assertFalse(set(module.CREDENTIAL_VARIABLES + module.INSTALLER_CREDENTIAL_VARIABLES
+                            + (module.NOTARY_KEY_VARIABLE,)) & set(options["environ"]))
+                        selected = "app-absence-data-tests" if phase == "prepare-app-absence" else "app-absence-withdraw"
+                        if role == selected and fault and fault.endswith("unknown"):
+                            raise RuntimeError("INERT original uncertainty")
+                        returned.append(role)
+                        return CompletedProcess(argv, 1 if role == selected and fault else 0, b"", b"")
+                    operation = module.Operation(SimpleNamespace(run_owned=command), checkout, work, phase, environment, TOOL, target=target)
+                    original_load = operation.app_absence_load
+                    def phase_port(op):
+                        adapter = op.app_absence_module
+                        expected = adapter.roles(op)
+                        if phase == "app-absence-restore":
+                            op.app_absence["case"] = op.package_directory("app-absence-case")
+                            op.app_absence["mount"] = {"entered": False, "detached": False}
+                        for role in expected:
+                            maximum = 1440 if phase == "prepare-app-absence" and role in (
+                                "app-absence-build", "app-absence-data-tests") else 30
+                            op.package_call(role, ["/inert/fixed-data-port", role], timeout=maximum, limit=65536)
+                            if role == "app-absence-restore-detach": op.app_absence["mount"]["detached"] = True
+                        op.sha256 = "a" * 64
+                        op.app_absence["complete"] = True  # Inert phase port, not product acceptance.
+                    def load():
+                        original_load()
+                        adapter = operation.app_absence_module
+                        setattr(adapter, "prepare" if phase == "prepare-app-absence" else "restore", phase_port)
+                    try:
+                        with (mock.patch.dict(sys.modules, {module.__name__: module}),
+                              mock.patch.object(operation, "app_absence_load", side_effect=load),
+                              mock.patch.object(os, "fstatvfs", return_value=SimpleNamespace(f_bavail=100*1024*1024, f_frsize=4096))):
+                            if fault is None: operation.execute()
+                            else:
+                                with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"): operation.execute()
+                        self.assertEqual(operation.credential_calls, [])
+                        self.assertEqual(operation.credential_contexts, [])
+                        if fault is None:
+                            self.assertEqual(tuple(events), operation.app_absence_module.roles(operation))
+                            self.assertTrue(operation.receipt["passed"] and operation.receipt["originalClosesKnown"] and operation.receipt["targetRetired"])
+                            if phase == "app-absence-restore":
+                                self.assertEqual((work / "app-absence-case/installer-output.status").read_bytes(), b"0\n")
+                        else:
+                            self.assertFalse(operation.receipt["passed"])
+                            last = "app-absence-data-tests" if phase == "prepare-app-absence" else "app-absence-withdraw"
+                            self.assertEqual(events[-1], last)
+                            self.assertNotIn("app-absence-adhoc", events)
+                            self.assertNotIn("app-absence-install", events)
+                            self.assertNotIn("app-absence-restore-detach", events)
+                            if phase == "app-absence-restore":
+                                self.assertEqual(operation.app_absence["pendingRoot"], last)
+                                self.assertFalse(operation.receipt["originalClosesKnown"] or operation.receipt["targetRetired"])
+                            elif fault.endswith("unknown"):
+                                self.assertFalse(operation.receipt["targetRetired"])
+                        self.assertEqual(len(returned), sum(row["returned"] for row in operation.calls))
+                    finally:
+                        # The DATA port has no surviving native process. Close
+                        # test-owned originals only AFTER checking that genuine
+                        # production refused to grant unknown-root retirement.
+                        for entry in reversed(operation.entries): operation.close(entry)
+                    self.assertTrue(all(entry["closed"] for entry in operation.entries))
+
+    def test_same_package_owner_uses_final_carrier_once_and_retains_unknown_installer(self):
+        # Native mount/Installer/readback responses are explicit DATA ports.
+        # Real S3/S4 originals, strict handoff parsers, copy/status, POST/close,
+        # ordered dispatch and retirement run unchanged; no host Installer.
+        module = ANDROID_HELPER
+        for target, fault in ((TOOL.ARM_TARGET, None), (TOOL.INTEL_TARGET, None),
+                              (TOOL.ARM_TARGET, "installer-nonzero"), (TOOL.ARM_TARGET, "installer-unknown"),
+                              (TOOL.ARM_TARGET, "readback-unknown"), (TOOL.ARM_TARGET, "installer-late"),
+                              (TOOL.ARM_TARGET, "status-close"), (TOOL.ARM_TARGET, "final-receipt")):
+            with self.subTest(target=target, fault=fault), tempfile.TemporaryDirectory() as directory:
+                inventory_body = b"INERT INVENTORY DATA; real inventory parser is tested separately\n"
+                state = self.final_image_fixture(Path(directory), target=target, inventory_body=inventory_body)
+                with self.final_image_fixture_call(state):
+                    state.operation.execute()
+                self.assertTrue(state.operation.receipt["passed"])
+                work = state.work
+                for key in module.CREDENTIAL_VARIABLES + module.INSTALLER_CREDENTIAL_VARIABLES + (module.NOTARY_KEY_VARIABLE,):
+                    state.environment.pop(key, None)
+                state.environment["MRK_MACOS_SAME_PACKAGE_SCOPE"] = module.SAME_PACKAGE_PHASE
+                (work / "image-finalization.status").write_bytes(b"0\n")
+                (work / "image-finalization.status").chmod(0o600)
+                original_status = (work / "installer-output.status").read_bytes()
+                original_observation = (work / "installation-observation.json").read_bytes()
+                if fault == "final-receipt":
+                    value = json.loads((work / "android-helper-finalize-image.json").read_bytes())
+                    value["originalCalls"][-1]["returncode"] = 1
+                    (work / "android-helper-finalize-image.json").write_bytes(TOOL.canonical(value) + b"\n")
+                baseline = json.loads(original_observation)
+                baseline.update(installerResultExport={"bytes": 100, "sha256": "b" * 64, "identity": [1] * 9},
+                    installationMetadata=[{"verifiedCurrentFiles": 1}], nonrootReadbackFileCount=1)
+                observed = copy.deepcopy(baseline)
+                observed.update(requestId="7" * 32, invocation="8" * 32, samePackagePredecessorMatched=True,
+                    installerResultExport={"bytes": 101, "sha256": "e" * 64, "identity": [2] * 9})
+                observed["originalInstallerResult"].update(action="same-package-noop", payloadWriteCount=0, payloadWriteBytes=0)
+                before = {state.request: baseline["installerResultExport"]}
+                after = {**before, "7" * 32: observed["installerResultExport"]}
+                events = []
+                def command(argv, **options):
+                    operation = state.operation
+                    role = operation.calls[-1]["role"]
+                    events.append(role)
+                    self.assertFalse(set(module.CREDENTIAL_VARIABLES + module.INSTALLER_CREDENTIAL_VARIABLES
+                        + (module.NOTARY_KEY_VARIABLE,)) & set(options["environ"]))
+                    self.assertEqual(options["output_limit"], 256 * 1024 if role == "installer" else 65536)
+                    if role == "distribution-attach":
+                        self.assertEqual(argv, ["/usr/bin/hdiutil", "attach", str(work / "distribution-final/MobileReleaseKit.dmg"),
+                            "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", str(work / "package-mount"), "-plist"])
+                        for name, body in (("Install.pkg", state.package), ("producer.json", state.descriptor),
+                                           ("producer.sig", state.producer_signature)):
+                            path = work / "package-mount" / name
+                            path.write_bytes(body); path.chmod(0o444)
+                        output = TOOL.plistlib.dumps({"system-entities": [{"dev-entry": "/dev/disk99s1",
+                            "mount-point": str(work / "package-mount"), "potentially-mountable": True}]})
+                        return CompletedProcess(argv, 0, output, b"")
+                    if role == "installer":
+                        self.assertEqual(argv, ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg",
+                            str(work / "package-mount/Install.pkg"), "-target", "/", "-dumplog", "-verboseR"])
+                        self.assertTrue(operation.installer_entered)
+                        if fault == "installer-unknown": raise RuntimeError("INERT original uncertainty")
+                        if fault == "installer-late": state.clock[0] += 1740_000_000_000
+                        return CompletedProcess(argv, 1 if fault == "installer-nonzero" else 0, b"", b"")
+                    self.assertEqual(role, "distribution-detach")
+                    self.assertTrue(operation.installation_readback)
+                    self.assertEqual(argv, ["/usr/bin/hdiutil", "detach", "/dev/disk99s1"])
+                    self.assertTrue(all(e["closed"] for e in operation.entries if e["kind"] in ("mount", "mounted-file")))
+                    for path in (work / "package-mount").iterdir(): path.unlink()
+                    return CompletedProcess(argv, 0, b"", b"")
+                operation = state.operation = module.Operation(SimpleNamespace(run_owned=command), state.checkout,
+                    work, module.SAME_PACKAGE_PHASE, state.environment, TOOL, target=target)
+                def readonly_mount_port():
+                    entry = operation.mount_entry
+                    self.assertTrue(operation.mount_known and not operation.mount_detached and not entry["closed"])
+                    info = os.fstat(entry["fd"])
+                    self.assertEqual((info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid), entry["identity"])
+                def readback(args, *, expected_previous=None):
+                    if expected_previous is None:
+                        self.assertEqual(args.installer_status, work / "installer-output.status")
+                        self.assertEqual(args.request_id, state.request)
+                        return copy.deepcopy(baseline)
+                    self.assertEqual(expected_previous, {"invocation": baseline["invocation"],
+                        "sha256": baseline["originalInstallerResult"]["stateSha256"]})
+                    self.assertEqual((args.installer_status.read_bytes(), args.request_id), (b"0\n", "7" * 32))
+                    self.assertEqual((args.input / TOOL.INSTALLATION_INVENTORY_NAME).read_bytes(), inventory_body)
+                    if fault == "readback-unknown": raise RuntimeError("INERT consuming-read uncertainty")
+                    return copy.deepcopy(observed)
+                actual_close = operation.close
+                def consuming_close(entry):
+                    actual_close(entry)
+                    if fault == "status-close" and entry["role"] == "output-installer-output.status" and not getattr(state, "status_close_thrown", False):
+                        state.status_close_thrown = True
+                        raise OSError("INERT consumed status close uncertainty")
+                with (self.credential_fixture_call(operation, state), mock.patch.object(operation, "close", side_effect=consuming_close),
+                      mock.patch.object(operation, "recheck_mount", side_effect=readonly_mount_port),
+                      mock.patch.object(TOOL, "observation_command", side_effect=readback),
+                      mock.patch.object(TOOL, "same_package_result_census", side_effect=[before, after, after])):
+                    if fault is None:
+                        operation.execute()
+                    else:
+                        with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"):
+                            operation.execute()
+                self.assertEqual((work / "installer-output.status").read_bytes(), original_status)
+                self.assertEqual((work / "installation-observation.json").read_bytes(), original_observation)
+                self.assertEqual(operation.credential_calls, [])
+                self.assertEqual(operation.credential_contexts, [])
+                if fault is None:
+                    self.assertEqual(events, list(module.SAME_PACKAGE_ROLES))
+                    self.assertTrue(operation.receipt["passed"])
+                    self.assertTrue(operation.receipt["targetRetired"] and operation.receipt["originalClosesKnown"])
+                    self.assertEqual(operation.receipt["samePackageObservation"]["newExportCount"], 1)
+                    self.assertEqual((work / "same-package-case/installer-output.status").read_bytes(), b"0\n")
+                else:
+                    self.assertFalse(operation.receipt["passed"])
+                    self.assertNotIn("distribution-detach", events)
+                    self.assertNotIn("samePackageObservation", operation.receipt)
+                    if fault != "final-receipt":
+                        self.assertTrue(operation.installer_entered)
+                        self.assertFalse(operation.mount_detached or operation.receipt["targetRetired"])
+                    else:
+                        self.assertEqual(events, [])
+                self.assertTrue(all(e["closed"] for e in operation.entries))
 
     def python_fixture(self, root, *, target="aarch64-apple-darwin", phase="python-engineering", failure=None):
         module = ANDROID_HELPER
@@ -1675,10 +4615,22 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                      "desktop/native/macos-installed-entry/gate.h", "desktop/native/macos-installed-entry/fixed_paths.h",
                      "desktop/native/macos-installed-entry/image_abi.h", "desktop/native/macos-installed-entry/desktop_facade.c",
                      "desktop/native/macos-installed-entry/resident_facade.c", release_path,
-                     "desktop/native/macos-installed-native/src/native.m", "desktop/src-tauri/src/macos_install_fixed_paths.rs", module.TOOL_NOMINATION, "desktop/packaging/macos-empty-entitlements.plist"):
+                     "desktop/native/macos-installed-native/src/native.m", "desktop/src-tauri/src/macos_install_fixed_paths.rs", "desktop/packaging/macos-empty-entitlements.plist"):
             target = checkout / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((source / name).read_bytes()); target.chmod(0o644)
+        # This unconfigured inert resident fixture stages neither optional tool.
+        # Declare its own coherent SOURCE; deployed nominations may enroll both.
+        nomination = checkout / module.TOOL_NOMINATION
+        nomination.write_bytes(TOOL.canonical({"schemaVersion": 1, "tools": {
+            purpose: {target: {"build": {"state": "unconfigured"}, "signed": {"state": "unconfigured"}}
+                      for target in TOOL.MAC_TARGETS} for purpose in module.TOOL_FIXED}}))
+        nomination.chmod(0o644)
+        history = checkout / TOOL.HISTORY_PROVIDER_PROFILE
+        history.write_bytes(TOOL.canonical({"schemaVersion": 1,
+            "version": TOOL.HISTORY_PROVIDER_VERSION, "sourceManifestSha256": None,
+            "targets": {target: None for target in TOOL.MAC_TARGETS}}))
+        history.chmod(0o644)
         release = json.loads((checkout / release_path).read_bytes())["release"]
         body = image_macho_fixture("resident", target=("aarch64-apple-darwin" if failure == "wrong-architecture" else build_target))
         observations = []
@@ -1687,6 +4639,18 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             observations.append((tuple(argv), options))
             if argv[0] == module.direct_rust_tools(build_target)[0]:
                 self.assertEqual(argv[argv.index("--target") + 1], build_target)
+                if argv[1] == "fetch":
+                    self.assertEqual(build_target, module.INTEL_TARGET)
+                    self.assertEqual(argv, [module.direct_rust_tools(build_target)[0], "fetch", "--manifest-path",
+                        str(checkout / module.WORKSPACE / "Cargo.toml"), "--locked", "--target", build_target])
+                    self.assertEqual((options["timeout"], options["capture"], options["text"], options["output_limit"]),
+                                     (120, True, False, 4 * 1024 * 1024))
+                    if failure == "fetch-owner":
+                        raise RuntimeError("DATA fetch original result unavailable")
+                    return CompletedProcess(argv, 101 if failure == "fetch-nonzero" else 0,
+                        "malformed DATA" if failure == "fetch-malformed" else b"", b"synthetic fetch DATA\n")
+                self.assertEqual(argv[1], "build")
+                self.assertEqual("--offline" in argv, build_target == module.INTEL_TARGET)
                 target = work / "android-helper-target"
                 binary = target / build_target / "release" / module.RESIDENT_IMAGE
                 binary.parent.mkdir(parents=True)
@@ -2148,6 +5112,31 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             else: changed["remove-producer.sig"] = (signed + b"x", 0o444)
             with self.assertRaises(TOOL.Refused): TOOL.removal_distribution_layout_data(list(changed), expected, changed)
 
+    def test_intel_fetch_failure_never_reaches_compiler_or_signer(self):
+        module = ANDROID_HELPER
+        self.assertEqual(module.prepare_roles(module.ARM_TARGET), module.PREPARE_ROLES)
+        self.assertEqual(module.prepare_roles(module.INTEL_TARGET), ("resident-fetch",) + module.PREPARE_ROLES)
+        with self.assertRaises(module.Refused): module.prepare_roles("foreign-target")
+        for failure in ("fetch-nonzero", "fetch-owner", "fetch-malformed"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary),
+                    failure=failure, build_target=module.INTEL_TARGET)
+                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL, target=module.INTEL_TARGET)
+                with self.assertRaises(module.Refused): operation.execute()
+                self.assertEqual(len(observations), 1)
+                self.assertEqual(observations[0][0][1], "fetch")
+                self.assertEqual(tuple(row["role"] for row in operation.calls), ("resident-fetch",))
+                call = operation.calls[0]
+                self.assertEqual(call["returned"], failure == "fetch-nonzero")
+                self.assertEqual(call["capturesSettled"], failure == "fetch-nonzero")
+                self.assertFalse(operation.receipt["passed"])
+                self.assertEqual(operation.receipt["failure"]["stage"], "resident-dependency-fetch")
+                self.assertFalse(operation.credential_calls or operation.credential_contexts)
+                self.assertTrue(operation.receipt["originalClosesKnown"])
+                self.assertTrue(all(entry["closed"] and entry["fd"] is None for entry in operation.entries))
+                self.assertFalse((work / module.RESIDENT_IMAGE).exists())
+                self.assertFalse((work / "android-helper-target" / module.INTEL_TARGET).exists())
+
     def test_actual_copy_and_staged_checks_bind_final_bytes_and_retire_each_owned_target(self):
         module = ANDROID_HELPER
 
@@ -2234,20 +5223,29 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertTrue(receipt["passed"] and receipt["originalClosesKnown"] and receipt["targetRetired"])
                 self.assertEqual(receipt["target"], build_target)
                 self.assertEqual(receipt["residentImageCargoArtifact"]["target"], build_target)
-                build_argv, build_options = observations[0]
+                build_index = int(build_target == module.INTEL_TARGET)
+                build_argv, build_options = observations[build_index]
+                if build_index:
+                    fetch_argv, fetch_options = observations[0]
+                    self.assertEqual(fetch_argv[1], "fetch")
+                    self.assertEqual(fetch_options["environ"], build_options["environ"])
+                    self.assertFalse(set(fetch_options["environ"]) & set(module.CREDENTIAL_VARIABLES + module.INSTALLER_CREDENTIAL_VARIABLES
+                        + ("MRK_MACOS_NOTARY_API_KEY_BASE64", "GITHUB_TOKEN", "HTTP_PROXY", "HTTPS_PROXY")))
+                    self.assertEqual((work / "android-helper-resident-fetch.stderr").read_bytes(), b"synthetic fetch DATA\n")
+                self.assertEqual("--offline" in build_argv, bool(build_index))
                 self.assertEqual([arg for arg in build_argv if arg.startswith("--message-format=")],
                                  ["--message-format=json-render-diagnostics"])
                 self.assertEqual((build_options["timeout"], build_options["capture"],
                                   build_options["text"], build_options["output_limit"]),
-                                 (480, True, False, 4 * 1024 * 1024))
+                                 (720 if build_target == module.INTEL_TARGET else 480, True, False, 4 * 1024 * 1024))
                 diagnostic = b"warning: synthetic helper build diagnostic\n"
                 self.assertEqual((work / "android-helper-build.stderr").read_bytes(), diagnostic)
-                self.assertEqual(receipt["originalCalls"][0]["stderrSha256"], module.digest(diagnostic))
+                self.assertEqual(receipt["originalCalls"][build_index]["stderrSha256"], module.digest(diagnostic))
                 self.assertEqual((work / "android-helper-build.jsonl").read_bytes(),
                                  self.encoded(self.cargo_rows(checkout, work / "android-helper-target", build_target=build_target)))
-                self.assertEqual(tuple(call["role"] for call in receipt["originalCalls"]), module.PREPARE_ROLES)
-                self.assertEqual(len(receipt["originalCalls"]), 8)
-                self.assertEqual(receipt["originalCalls"][3]["role"], "entry-build")
+                self.assertEqual(tuple(call["role"] for call in receipt["originalCalls"]), module.prepare_roles(build_target))
+                self.assertEqual(len(receipt["originalCalls"]), 8 + build_index)
+                self.assertEqual(receipt["originalCalls"][3 + build_index]["role"], "entry-build")
                 self.assertIn("--lib", build_argv)
                 self.assertNotIn("--bin", build_argv)
                 self.assertEqual(build_options["environ"]["MRK_IMAGE_RELEASE_ID"], release)
@@ -2276,14 +5274,15 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 (daemons / (module.IDENTIFIER + ".plist")).chmod(0o644)
                 for phase in ("verify-before", "verify-after"):
                     actual = module.Operation(owner, checkout, work, phase, environment, TOOL, target=build_target)
-                    self.assertEqual(actual.execute(expected), expected)
+                    with mock.patch.object(TOOL, "DESKTOP", checkout / "desktop"):
+                        self.assertEqual(actual.execute(expected), expected)
                     self.assertFalse((work / ("android-helper-" + phase)).exists())
                     verified = json.loads((work / ("android-helper-" + phase + ".json")).read_bytes())
                     self.assertTrue(verified["passed"])
                     self.assertEqual(verified["target"], build_target)
                     self.assertEqual([call["role"] for call in verified["originalCalls"]], [phase, phase + "-resident-image"])
                     self.assertEqual(verified["residentImageSha256"], operation.resident_image_sha256)
-                self.assertEqual([item[0][0] for item in observations], [module.direct_rust_tools(build_target)[0]] + ["/usr/bin/codesign"] * 2
+                self.assertEqual([item[0][0] for item in observations], [module.direct_rust_tools(build_target)[0]] * (1 + build_index) + ["/usr/bin/codesign"] * 2
                                  + ["/usr/bin/xcrun"] * 3 + ["/usr/bin/codesign"] * 6)
         # A plausible Cargo graph is insufficient: its actual copied image
         # must pass the same selected Intel Mach-O check before publication.
@@ -2297,7 +5296,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertFalse(receipt["passed"])
             self.assertEqual(receipt["failure"]["stage"], "compiler-original-copy")
             self.assertTrue(receipt["originalClosesKnown"] and receipt["targetRetired"])
-            self.assertEqual(len(observations), 1)
+            self.assertEqual(len(observations), 2)
+            self.assertEqual([row[0][1] for row in observations], ["fetch", "build"])
             self.assertFalse((work / module.RESIDENT_IMAGE).exists())
 
         # Same actual filesystem copy/POST/retirement path, with only original
@@ -2723,6 +5723,11 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         module.digest(notary_body), len(final_body), returned,
                         TOOL.build_release_data(release_body, target=target)["release"], module.digest(release_body))
                     self.assertEqual(module.final_package_receipt(record_body, *arguments), record["finalPackage"])
+                    legacy = copy.deepcopy(record); del legacy["packageStapleObservation"]
+                    self.assertEqual(module.final_package_receipt(TOOL.canonical(legacy), *arguments), record["finalPackage"])
+                    malformed_observation = dict(record, packageStapleObservation=None)
+                    with self.assertRaises(module.Refused):
+                        module.final_package_receipt(TOOL.canonical(malformed_observation), *arguments)
                     if role == "ordinary-image":
                         missing_product = copy.deepcopy(record)
                         missing_product["originalCalls"] = missing_product["originalCalls"][1:]
@@ -2855,9 +5860,13 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertNotEqual(path.read_bytes()[:1], state.original_image[:1])
                 self.assertEqual(returned, TOOL.digest(state.final_image))
                 self.assertEqual(tuple(row[0] for row in state.observations), module.FINAL_IMAGE_ROLES)
-                self.assertEqual([row[2]["timeout"] for row in state.observations], [30, 30, 30, 1200, 30, 30, 30, 30, 120, 60, 30])
+                self.assertEqual(module.FINAL_IMAGE_ROLES[:11], ("final-image-resolve-notarytool", "final-image-resolve-stapler",
+                    "final-image-signature-before", "final-image-submit", "final-image-log", "final-image-staple",
+                    "final-image-validate", "final-image-signature-after", "final-image-verify", "final-image-attach", "final-image-detach"))
+                self.assertEqual(module.FINAL_IMAGE_ROLES[11:], ("final-image-policy-status", "final-image-policy-assess"))
+                self.assertEqual([row[2]["timeout"] for row in state.observations], [30, 30, 30, 1200, 30, 30, 30, 30, 120, 60, 30, 30, 30])
                 self.assertEqual([row[2]["output_limit"] for row in state.observations], [4096, 4096, 65536, 65536,
-                    1048576, 65536, 65536, 65536, 65536, 65536, 65536])
+                    1048576, 65536, 65536, 65536, 65536, 65536, 65536, 4096, 65536])
                 self.assertFalse(active)
                 self.assertLessEqual(max(peaks), 60)  # Same existing64 descriptor limit including stdio.
                 self.assertTrue(all(row["closed"] and consumed.get(id(row), 0) == 1 for row in operation.entries))
@@ -2885,6 +5894,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     profiles=(state.credentials.producer, state.credentials.service,
                               (state.checkout / module.NOTARY_PROFILE).read_bytes()))
                 self.assertEqual(facts, receipt["finalImage"])
+                self.assertLessEqual(len(receipt_body), 16384)
+                self.assertIs(facts["assessmentSubsystemEnabledBefore"], True)
+                self.assertIs(facts["actualDiskImagePolicyAssessment"], True)
+                self.assertEqual(facts["assurance"], "final-carrier-observation-not-downloaded-install-or-gatekeeper-authority")
                 # Exercise the Remove receipt-purpose branch against the same
                 # completed DATA shape. No original Install readback is reused
                 # as evidence that a remover ran: Remove explicitly has none.
@@ -2900,7 +5913,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     release_body=release_body, profiles=(state.credentials.producer, state.credentials.service,
                         (state.checkout / module.NOTARY_PROFILE).read_bytes()), remove=True)
                 self.assertEqual(TOOL.final_image_receipt_data(TOOL.canonical(removal), **removal_arguments), removal["finalImage"])
-                for mutation in ("phase", "kind", "request", "owner-key", "detach", "mount-retained", "unknown-close"):
+                for mutation in ("phase", "kind", "request", "owner-key", "detach", "mount-retained", "unknown-close",
+                                 "old-eleven", "extra-role", "policy-order", "policy-status-false", "policy-assess-false", "policy-missing"):
                     changed = copy.deepcopy(removal)
                     if mutation == "phase": changed["phase"] = "finalize-image"
                     elif mutation == "kind": changed["finalImage"]["kind"] = "mrk-final-user-image"
@@ -2908,6 +5922,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     elif mutation == "owner-key": changed["finalImage"]["packageInstallReceiptSha256"] = changed["finalImage"].pop("packageRemoveReceiptSha256")
                     elif mutation == "detach": changed["finalImageMount"]["detached"] = False
                     elif mutation == "mount-retained": changed["finalImageMount"]["retained"] = True
+                    elif mutation == "old-eleven": del changed["originalCalls"][11:]
+                    elif mutation == "extra-role": changed["originalCalls"].append(dict(changed["originalCalls"][-1]))
+                    elif mutation == "policy-order": changed["originalCalls"][-2:] = reversed(changed["originalCalls"][-2:])
+                    elif mutation == "policy-status-false": changed["finalImage"]["assessmentSubsystemEnabledBefore"] = False
+                    elif mutation == "policy-assess-false": changed["finalImage"]["actualDiskImagePolicyAssessment"] = False
+                    elif mutation == "policy-missing": changed["finalImage"].pop("actualDiskImagePolicyAssessment")
                     else: changed["originalClosesKnown"] = False
                     with self.assertRaises(TOOL.Refused): TOOL.final_image_receipt_data(TOOL.canonical(changed), **removal_arguments)
                 with self.assertRaises(TOOL.Refused):
@@ -3984,7 +7004,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 "signed-input-changed", "signed-roster", "signed-scripts", "submit-json", "submit-status", "log-sha", "log-id",
                 "final-package-signature-before-untrusted", "final-package-signature-before-untimestamped", "final-package-signature-before-chain",
                 "final-package-signature-after-untrusted", "final-package-signature-after-untimestamped", "final-package-signature-after-chain",
-                "ticket-replaced", "ticket-oversize", "ticket-prefix", "ticket-mode", "invalid", "invalid-log-failure"):
+                "ticket-replaced-prefix", "ticket-oversize", "ticket-prefix", "ticket-mode", "invalid", "invalid-log-failure"):
             with self.subTest(finalPackageRefusal=failure), tempfile.TemporaryDirectory() as directory:
                 fixture = self.final_package_fixture(Path(directory), failure=failure)
                 operation = fixture.operation
@@ -4225,7 +7245,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertNotIn("final-package-sign", [row[0] for row in fixture.observations])
                 self.assertNotIn("final-package-submit", [row[0] for row in fixture.observations])
 
-        # Each of the11 SAME original roles is fail-closed for raised,
+        # Each of the13 SAME original roles is fail-closed for raised,
         # malformed, nonzero and late return. No late role gains a new clock.
         for role in module.FINAL_IMAGE_ROLES:
             for outcome in ("owner", "malformed", "nonzero", "late"):
@@ -4274,17 +7294,37 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertTrue(operation.mount_detached and operation.receipt["originalClosesKnown"])
                     self.assertFalse((state.work / "package-mount").exists())
 
+        for failure in ("policy-disabled", "policy-disabled-zero", "policy-status-extra", "policy-status-stderr",
+                        "policy-denied", "policy-changed", "final-image-policy-status-overflow", "final-image-policy-assess-overflow"):
+            with self.subTest(finalImagePolicy=failure), tempfile.TemporaryDirectory() as directory:
+                state = self.final_image_fixture(Path(directory), failure=failure)
+                operation = state.operation
+                with self.final_image_fixture_call(state), self.assertRaises(module.Refused): operation.execute()
+                roles = [row[0] for row in state.observations]
+                status_failure = failure.startswith("policy-status") or failure.startswith("policy-disabled") or failure == "final-image-policy-status-overflow"
+                self.assertEqual(roles, list(module.FINAL_IMAGE_ROLES[:12] if status_failure else module.FINAL_IMAGE_ROLES))
+                self.assertTrue(operation.mount_detached)
+                self.assertFalse(operation.receipt["passed"] or (state.work / "distribution-final").exists())
+                self.assertNotIn("finalImage", operation.receipt)
+                self.assertEqual((state.work / "distribution/MobileReleaseKit.dmg").read_bytes(), state.original_image)
+                if failure in ("policy-disabled", "policy-denied"):
+                    self.assertEqual(operation.calls[-1]["returncode"], 1 if failure == "policy-disabled" else 3)
+                    self.assertEqual(operation.receipt["failure"]["reason"], "original-nonzero-" + roles[-1])
+                if failure in ("policy-disabled-zero", "policy-status-extra", "policy-status-stderr"):
+                    self.assertEqual(operation.receipt["failure"]["reason"], "final-image-policy-status-format")
+
         # Unknown consuming closes and direct-write/rename returns retain
         # custody. Even a file already moved into its final directory cannot
         # be consumed without the missing actual0 and closed final receipt.
-        for failure in ("capture-close", "key-close", "mounted-close", "copy-write", "publication-rename"):
+        for failure in ("capture-close", "key-close", "mounted-close", "copy-write", "publication-rename", "policy-capture-close"):
             with self.subTest(finalImageUnknown=failure), tempfile.TemporaryDirectory() as directory:
                 state = self.final_image_fixture(Path(directory)); operation = state.operation
                 faults = []
                 actual_close, actual_write, actual_rename = module.os.close, module.os.write, module.os.rename
                 book_close, pending_close = operation.close, {"fd": None}
                 selected = {"capture-close": "output-android-helper-final-image-signature-before.stdout",
-                            "key-close": "notary-private-key", "mounted-close": "mounted-Install.pkg"}.get(failure)
+                            "key-close": "notary-private-key", "mounted-close": "mounted-Install.pkg",
+                            "policy-capture-close": "output-android-helper-final-image-policy-status.stdout"}.get(failure)
                 def original_close(entry):
                     if not faults and entry["role"] == selected and entry["fd"] is not None:
                         pending_close["fd"] = entry["fd"]
@@ -4320,6 +7360,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 roles = [row[0] for row in state.observations]
                 if failure == "capture-close": self.assertEqual(roles, list(module.FINAL_IMAGE_ROLES[:3]))
                 if failure == "key-close": self.assertEqual(roles, list(module.FINAL_IMAGE_ROLES[:5]))
+                if failure == "policy-capture-close": self.assertEqual(roles, list(module.FINAL_IMAGE_ROLES[:12]))
                 if failure == "mounted-close":
                     self.assertEqual(roles, list(module.FINAL_IMAGE_ROLES[:10]))
                     self.assertTrue(operation.mount_known and not operation.mount_detached)
@@ -4385,7 +7426,473 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         with self.assertRaisesRegex(module.Refused,"^app-signature-inventory-bytes$"):
             module.app_signature_inventory({str(i)+"x"*4000:(b"",0o444) for i in range(300)})
 
+        # Failure diagnostics are finite passive DATA, never native qualification.
+        # Exact source classes matter: a stager Refused is not helper.Refused.
+        module = ANDROID_HELPER
+        for failure, target, code, category, status in (
+            ("wrong-architecture", module.INTEL_TARGET, "image-dylib-target", "stager-refused", 0),
+            ("nonzero", module.ARM_TARGET, "original-nonzero-build", "helper-refused", 101),
+        ):
+            with self.subTest(diagnosticOriginal=failure), tempfile.TemporaryDirectory() as temporary:
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary), failure, build_target=target)
+                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL, target=target)
+                with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$") as raised:
+                    operation.execute()
+                self.assertEqual(len(observations), 1)
+                # The existing receipt schema/reason remains unchanged. The new
+                # private scalar preserves only the admitted stager code lost there.
+                self.assertEqual(operation.receipt["failure"]["reason"],
+                    "original-operation-refused" if category == "stager-refused" else code)
+                self.assertEqual(operation.diagnostic_failure,
+                    {"type": category, "reason": code, "errno": None})
+                value = module.failure_diagnostic(raised.exception, phase="prepare", target=target,
+                    main_stage="operation-execute", operation=operation, stager=TOOL)
+                self.assertEqual(value["terminal"]["reason"], "helper-package-incomplete")
+                self.assertEqual((value["originalFailure"]["recorded"], value["originalFailure"]["type"],
+                                  value["originalFailure"]["reason"]), (True, category, code))
+                self.assertEqual(value["originalFailure"]["stage"],
+                    "compiler-original-copy" if category == "stager-refused" else "separate-resident-image-compiler")
+                self.assertEqual((value["lastRecordedNative"]["role"], value["lastRecordedNative"]["returncode"],
+                                  value["lastRecordedNative"]["returned"], value["lastRecordedNative"]["capturesSettled"]),
+                                 ("build", status, True, True))
+                self.assertEqual(value["counts"], {"native": 1, "credential": 0, "contexts": 0, "cleanupErrors": 0})
+                self.assertTrue(value["cleanup"]["targetRetired"] and value["cleanup"]["originalClosesKnown"])
+                self.assertFalse(value["cleanup"]["directStagerIOPending"])
+                self.assertIsNone(value["lastRecordedCredential"]["status"])
+                self.assertFalse(value["productReady"] or operation.receipt["passed"])
+                self.assertNotIn("passed", value)
+                diagnostic_output = io.StringIO()
+                with contextlib.redirect_stderr(diagnostic_output):
+                    module.emit_failure_diagnostic(raised.exception, phase="prepare", target=target,
+                        main_stage="operation-execute", operation=operation, stager=TOOL)
+                encoded = diagnostic_output.getvalue()
+                self.assertLessEqual(len(encoded.encode("ascii")), 4096)
+                self.assertEqual(json.loads(encoded), value)
+                self.assertNotIn(str(checkout), encoded)
+                self.assertNotIn("synthetic helper build", encoded)
 
+        class PrivateError(RuntimeError):
+            @property
+            def args(self):
+                raise AssertionError("exception property must not be inspected")
+            def __str__(self):
+                raise AssertionError("exception text must not be rendered")
+        class ForeignRefused(RuntimeError):
+            pass
+        private = "secret-shaped-but-not-a-source-code"
+        for error in (module.Refused(private), TOOL.Refused(private), ForeignRefused("image-dylib-target"),
+                      PrivateError(private), module.Refused("credential-input-bound", private),
+                      TOOL.Refused({"private": private})):
+            value = module.failure_exception(error, TOOL)
+            self.assertEqual(value["reason"], "unclassified")
+            self.assertNotIn(private, json.dumps(value))
+        self.assertEqual(module.failure_exception(OSError(5, private), TOOL),
+                         {"type": "os-error", "reason": "unclassified", "errno": 5})
+        # Failure-code capture itself is best effort. The real execute catch
+        # still keeps its existing primary record and completes known cleanup.
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout, work, environment, owner, observations = self.fixture(Path(temporary),
+                "wrong-architecture", build_target=module.INTEL_TARGET)
+            operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL, target=module.INTEL_TARGET)
+            with (mock.patch.object(module, "failure_exception", side_effect=PrivateError(private)),
+                  self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$")):
+                operation.execute()
+            self.assertIsNone(operation.diagnostic_failure)
+            self.assertEqual(operation.receipt["failure"]["reason"], "original-operation-refused")
+            self.assertTrue(operation.receipt["targetRetired"] and operation.receipt["originalClosesKnown"])
+            self.assertEqual(len(observations), 1)
+        # An inert exact-class object only exercises the passive DATA reducer;
+        # it is not a constructor/original-owner or cleanup qualification.
+        passive = object.__new__(module.Operation)
+        passive.__dict__.update(
+            receipt={"failure": {"stage": private, "type": private, "reason": private, "errno": True},
+                     "passed": True, "targetRetired": False, "originalClosesKnown": False,
+                     "directStagerIOPending": private, "private": private},
+            diagnostic_failure={"type": "other", "reason": private, "errno": True},
+            calls=[{"role": "build", "entered": True, "returned": False, "capturesSettled": False,
+                    "returncode": True, "dispatched": True, "contained": False, "cleanup_complete": False,
+                    "argv": [private], "stderr": private,
+                    "originalFailure": {"available": True, "ownerErrorType": "ProcessOutcomeUnknown",
+                        "classification": "cleanup-unconfirmed", "frames": [{"private": private}]}}],
+            credential_calls=[{"role": "restore", "entered": True, "returned": True, "settled": True, "status": 0,
+                               "argv": [private], "output": private}],
+            credential_contexts=[{"purpose": "resident-image", "closed": False, "retired": False,
+                                  "searchRestored": False, "defaultUnchanged": None, "private": private}],
+            errors=[{"private": private}], credential_unknown=True, environment={"PRIVATE": private})
+        value = module.failure_diagnostic(PrivateError(private), phase=private, target=private,
+            main_stage=private, operation=passive, stager=TOOL)
+        self.assertEqual(value["outcome"], "failure")
+        self.assertTrue(value["diagnosticOnly"])
+        self.assertFalse(value["productReady"])
+        self.assertEqual(value["originalFailure"],
+            {"recorded": True, "stage": "unclassified", "type": "other", "reason": "unclassified", "errno": None})
+        self.assertEqual(value["lastRecordedNative"]["originalFailure"],
+            {"available": True, "ownerErrorType": "ProcessOutcomeUnknown", "classification": "cleanup-unconfirmed"})
+        self.assertFalse(value["lastRecordedNative"]["returned"] or value["lastRecordedNative"]["capturesSettled"])
+        self.assertIsNone(value["lastRecordedNative"]["returncode"])
+        self.assertEqual((value["lastRecordedCredential"]["role"], value["lastRecordedCredential"]["status"]), ("restore", 0))
+        self.assertFalse(value["lastRecordedContext"]["searchRestored"])
+        self.assertIsNone(value["lastRecordedContext"]["defaultUnchanged"])
+        self.assertEqual(value["cleanup"], {"targetRetired": False, "originalClosesKnown": False,
+            "credentialUnknown": True, "directStagerIOPending": True})
+        self.assertNotIn(private, json.dumps(value))
+        self.assertNotIn("passed", value)
+        # Malformed scalars and oversized lists cannot be coerced into zero/true.
+        passive.calls = [{}] * 4097
+        passive.credential_calls = [{}] * 65
+        passive.credential_contexts = [{}] * 65
+        passive.errors = [{}] * 4097
+        passive.receipt["targetRetired"] = 1
+        passive.receipt["originalClosesKnown"] = 0
+        value = module.failure_diagnostic(module.Refused(private), operation=passive, stager=TOOL)
+        self.assertTrue(all(item is None for item in value["counts"].values()))
+        self.assertIsNone(value["cleanup"]["targetRetired"])
+        self.assertIsNone(value["cleanup"]["originalClosesKnown"])
+        # Real main pre-operation failure never claims a receipt or owner exists.
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (mock.patch.object(module.sys, "argv", ["fixed", "not-a-phase"]),
+              contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr)):
+            self.assertEqual(module.main(), 1)
+        self.assertEqual(stdout.getvalue(), "")
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0], "Fixed Android helper packaging refused; see its bounded work receipt.")
+        value = json.loads(lines[1])
+        self.assertEqual((value["mainStage"], value["terminal"]["reason"]), ("entrypoint", "closed-entrypoint"))
+        self.assertIsNone(value["originalFailure"]["recorded"])
+        self.assertTrue(all(item is None for item in value["counts"].values()))
+        self.assertTrue(all(item is None for item in value["cleanup"].values()))
+        # Formatting, generic-line writes, or diagnostic flush failures cannot
+        # replace main's original exit1. No exception text is used as fallback.
+        class BrokenStderr:
+            def write(self, body):
+                raise OSError(5, private)
+            def flush(self):
+                raise OSError(5, private)
+        for broken in ("serialize", "write", "flush"):
+            with self.subTest(diagnosticFailure=broken), contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(module.sys, "argv", ["fixed", "not-a-phase"]))
+                captured = io.StringIO()
+                stack.enter_context(contextlib.redirect_stderr(BrokenStderr() if broken == "write" else captured))
+                if broken == "serialize":
+                    stack.enter_context(mock.patch.object(module.json, "dumps", side_effect=PrivateError(private)))
+                elif broken == "flush":
+                    stack.enter_context(mock.patch.object(captured, "flush", side_effect=PrivateError(private)))
+                self.assertEqual(module.main(), 1)
+                self.assertNotIn(private, captured.getvalue())
+        # Drive genuine main -> constructor -> execute -> stager parser/cleanup
+        # using the existing actual-FS fixture and its explicit inert native port.
+        for failed in (False, True):
+            with self.subTest(diagnosticMainFailure=failed), tempfile.TemporaryDirectory() as temporary:
+                target = module.INTEL_TARGET if failed else module.ARM_TARGET
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary),
+                    "wrong-architecture" if failed else None, build_target=target)
+                (checkout / ".git").mkdir()
+                (checkout / ".git/HEAD").write_text(environment["GITHUB_SHA"] + "\n")
+                def load(checkout_arg, name, alias):
+                    self.assertEqual(checkout_arg, checkout)
+                    if name == "stage_macos_installed.py":
+                        self.assertEqual(alias, "_mrk_android_helper_stager")
+                        return TOOL
+                    self.assertEqual((name, alias), ("macos_aqua_qualification.py", "_mrk_android_helper_owner_loader"))
+                    return SimpleNamespace(load_owner=lambda source: owner if source == checkout else self.fail("owner source mismatch"))
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (mock.patch.object(module, "CHECKOUT", checkout), mock.patch.object(module, "load_data", side_effect=load),
+                      mock.patch.object(module, "admit", return_value=work),
+                      mock.patch.object(module.sys, "argv", ["fixed", "prepare", "--target", target]),
+                      mock.patch.dict(module.os.environ, environment, clear=True),
+                      contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr)):
+                    self.assertEqual(module.main(), 1 if failed else 0)
+                self.assertEqual(len(observations), 1 if failed else len(module.PREPARE_ROLES))
+                if failed:
+                    self.assertEqual(stdout.getvalue(), "")
+                    lines = stderr.getvalue().splitlines()
+                    self.assertEqual(len(lines), 2)
+                    value = json.loads(lines[1])
+                    self.assertEqual((value["mainStage"], value["originalFailure"]["type"], value["originalFailure"]["reason"]),
+                                     ("operation-execute", "stager-refused", "image-dylib-target"))
+                    self.assertEqual(value["terminal"]["reason"], "helper-package-incomplete")
+                    self.assertTrue(value["cleanup"]["targetRetired"] and value["cleanup"]["originalClosesKnown"])
+                else:
+                    self.assertEqual(stderr.getvalue(), "")
+                    self.assertEqual([line.split("=", 1)[0] for line in stdout.getvalue().splitlines()],
+                        ["sha256", "entry-sha256", "resident-image-sha256", "desktop-facade-sha256", "image-release-id"])
+
+        # Compiler diagnostics are data from the SAME failed, settled Cargo
+        # result. Never render messages, external paths, or a successful build.
+        source = "/private/compiler-checkout"
+        helper_root = "desktop/helpers/macos-android-register"
+        native_root = "desktop/native/macos-installed-native"
+        def compiler_message(path="src/lib.rs", *, line=43, column=7, code="E0308", root=helper_root):
+            return {"reason": "compiler-message", "manifest_path": source + "/" + root + "/Cargo.toml",
+                "message": {"level": "error", "code": {"code": code, "explanation": private},
+                    "message": private, "rendered": private,
+                    "spans": [{"file_name": path, "line_start": line, "column_start": column, "is_primary": True},
+                              {"file_name": "/private/secondary.rs", "line_start": 1, "column_start": 1, "is_primary": False}]}}
+        rust = module.compiler_diagnostic(self.encoded([compiler_message()]), b"", source)
+        self.assertEqual(rust["rows"], [{"kind": "rust", "code": "E0308", "source": helper_root + "/src/lib.rs", "line": 43, "column": 7}])
+        self.assertEqual((rust["rustMessages"], rust["scanComplete"], rust["rowsOmitted"]), (1, True, False))
+        self.assertEqual(module.compiler_diagnostic_data(rust), rust)
+        self.assertNotIn(private, json.dumps(rust))
+        for path, root, expected in (
+            (source + "/desktop/src-tauri/src/lib.rs", helper_root, "desktop/src-tauri/src/lib.rs"),
+            ("../../src-tauri/src/lib.rs", helper_root, "desktop/src-tauri/src/lib.rs"),
+            ("src/lib.rs", "unrecognized-crate", None), ("build.rs", "unrecognized-crate", None),
+            ("/private/outside/lib.rs", helper_root, None), ("../../../../outside.rs", helper_root, None),
+            ("src/private\nname.rs", helper_root, None), ("src/" + "x" * 161 + ".rs", helper_root, None),
+        ):
+            with self.subTest(compilerPath=path):
+                value = module.compiler_diagnostic(self.encoded([compiler_message(path, root=root)]), b"", source)
+                self.assertEqual(value["rows"][0], {"kind": "rust", "code": "E0308", "source": expected, "line": 43, "column": 7})
+        # Actual package identity alone can disambiguate; contradicting it with
+        # a different admitted manifest must not adopt either crate.
+        message = compiler_message()
+        message.pop("manifest_path")
+        message["package_id"] = "path+file://" + source + "/" + helper_root + "#mrk-android-register@0.1.0"
+        self.assertEqual(module.compiler_diagnostic(self.encoded([message]), b"", source)["rows"], rust["rows"])
+        message["manifest_path"] = source + "/" + native_root + "/Cargo.toml"
+        self.assertIsNone(module.compiler_diagnostic(self.encoded([message]), b"", source)["rows"][0]["source"])
+        invalid = compiler_message(line=True, column=65536, code="E12345")
+        row = module.compiler_diagnostic(self.encoded([invalid]), b"", source)["rows"][0]
+        self.assertEqual((row["code"], row["line"], row["column"]), (None, None, None))
+        c_output = ("warning: mrk-macos-installed-native@0.1.0: src/native.m:31:9: error: " + private + "\n").encode()
+        panic_output = ("error: failed to run custom build command for `mrk-macos-installed-native v0.1.0 (" + source + ")`\n"
+                        "thread 'main' panicked at build.rs:88:3:\n" + private + "\n").encode()
+        for stdout_body, stderr_body in ((c_output, panic_output), (b"", c_output + panic_output)):
+            value = module.compiler_diagnostic(stdout_body, stderr_body, source)
+            self.assertEqual(value["rows"], [
+                {"kind": "clang", "code": None, "source": native_root + "/src/native.m", "line": 31, "column": 9},
+                {"kind": "build-script-panic", "code": None, "source": native_root + "/build.rs", "line": 88, "column": 3}])
+            self.assertEqual((value["clangErrors"], value["buildScriptPanics"]), (1, 1))
+            self.assertEqual(value["classifications"], ["build-script-failed"])
+            self.assertNotIn(private, json.dumps(value))
+        for text, expected in (
+            ("src/native.m:4:2: fatal error: private\n", native_root + "/src/native.m"),
+            ("src/lib.rs:4:2: error: private\n", None),
+            ("warning: foreign@0.1.0: src/native.m:4:2: error: private\n", None),
+            ("error: failed to run custom build command for `foreign v0.1.0`\nthread 'main' panicked at build.rs:4:2:\n", None),
+        ):
+            value = module.compiler_diagnostic(b"", text.encode(), source)
+            self.assertEqual(value["rows"][0]["source"], expected)
+            self.assertEqual((value["rows"][0]["line"], value["rows"][0]["column"]), (4, 2))
+        class_text = (b"error: lock file needs to be updated but --locked was passed\n"
+                      b"no matching package named private found; offline mode\n"
+                      b"failed to download private; could not resolve host\n"
+                      b"private requires rustc 99; no space left on device\n"
+                      b"failed to run custom build command for `foreign v0.1.0`\n"
+                      b"linking with private failed\n")
+        classes = module.compiler_diagnostic(b"", class_text, source)
+        self.assertEqual(classes["classifications"], list(module._COMPILER_CLASSES[:-1]))
+        self.assertFalse(classes["rows"])
+        self.assertNotIn("private", json.dumps(classes))
+        many = module.compiler_diagnostic(self.encoded([compiler_message(line=i) for i in range(1, 10)]), b"", source)
+        self.assertEqual((len(many["rows"]), many["rustMessages"], many["rowsOmitted"]), (8, 9, True))
+        for body in (b'{"reason":"compiler-message",', b'\xff\n', b'x' * 8193,
+                     b'{"compiler-message":"' + b'x' * (256 * 1024), b'\n' * 65537,
+                     b'x' * (4 * 1024 * 1024 + 1)):
+            value = module.compiler_diagnostic(body, b"", source)
+            self.assertFalse(value["scanComplete"])
+            self.assertFalse(value["rows"])
+        # A pathlike prefix cannot cause retry at every character or attribute
+        # the short valid-looking suffix of a single overlong path token.
+        long_token = b"x" * 5000 + b"/desktop/src-tauri/src/lib.rs:1:2: error: private\n"
+        self.assertFalse(module.compiler_diagnostic(b"", long_token, source)["rows"])
+        for key, wrong in (("rustMessages", True), ("scanComplete", 1), ("classifications", [private]),
+                           ("rows", [dict(rust["rows"][0], source="/private/outside.rs")]),
+                           ("rows", [dict(rust["rows"][0], line=True)])):
+            self.assertIsNone(module.compiler_diagnostic_data(dict(rust, **{key: wrong})))
+
+        actual_parser = module.compiler_diagnostic
+        for kind in ("captured", "parser-error", "unknown", "success"):
+            with self.subTest(compilerOriginal=kind), tempfile.TemporaryDirectory() as temporary:
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary),
+                    "owner" if kind == "unknown" else None if kind == "success" else "nonzero")
+                original_command, parser_calls = owner.run_owned, []
+                captured_stdout = self.encoded([compiler_message()])
+                # Relocate only the synthetic Cargo manifest to THIS actual tiny
+                # checkout; the native port remains the existing inert fixture.
+                captured_stdout = captured_stdout.replace(source.encode(), str(checkout).encode())
+                captured_stderr = c_output
+                def command(argv, **options):
+                    returned = original_command(argv, **options)
+                    if kind in ("captured", "parser-error"):
+                        self.assertEqual(returned.returncode, 101)
+                        return CompletedProcess(returned.args, returned.returncode, captured_stdout, captured_stderr)
+                    return returned
+                owner.run_owned = command
+                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
+                def inspect(stdout_body, stderr_body, actual_checkout):
+                    parser_calls.append(True)
+                    self.assertIs(stdout_body, captured_stdout)
+                    self.assertIs(stderr_body, captured_stderr)
+                    self.assertEqual(actual_checkout, str(checkout))
+                    self.assertEqual((operation.calls[-1]["returncode"], operation.calls[-1]["returned"],
+                                      operation.calls[-1]["capturesSettled"]), (101, True, True))
+                    if kind == "parser-error":
+                        raise PrivateError(private)
+                    return actual_parser(stdout_body, stderr_body, actual_checkout)
+                with mock.patch.object(module, "compiler_diagnostic", side_effect=inspect):
+                    if kind == "success":
+                        operation.execute()
+                    else:
+                        with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"):
+                            operation.execute()
+                self.assertEqual(len(parser_calls), 1 if kind in ("captured", "parser-error") else 0)
+                if kind == "captured":
+                    self.assertEqual(operation.compiler_failure["rows"], rust["rows"] + [
+                        {"kind": "clang", "code": None, "source": native_root + "/src/native.m", "line": 31, "column": 9}])
+                    projected = module.failure_diagnostic(module.Refused("helper-package-incomplete"), operation=operation, stager=TOOL)
+                    self.assertEqual(projected["compiler"], operation.compiler_failure)
+                    self.assertNotIn(str(checkout), json.dumps(projected))
+                    self.assertNotIn(private, json.dumps(projected))
+                else:
+                    self.assertIsNone(operation.compiler_failure)
+                if kind in ("captured", "parser-error"):
+                    self.assertEqual(operation.receipt["failure"]["reason"], "original-nonzero-build")
+                    self.assertEqual(len(observations), 1)
+                    self.assertTrue(operation.receipt["targetRetired"] and operation.receipt["originalClosesKnown"])
+                    self.assertFalse(operation.receipt["passed"] or operation.credential_calls or operation.credential_contexts)
+                elif kind == "unknown":
+                    self.assertFalse(operation.calls[0]["returned"] or operation.calls[0]["capturesSettled"])
+                    self.assertFalse(operation.receipt["passed"])
+                else:
+                    self.assertTrue(operation.receipt["passed"])
+                    self.assertEqual(len(observations), len(module.PREPARE_ROLES))
+
+        # The public whole-line cap stays4096. The reducer copies rows; trimming
+        # its output cannot change the saved original diagnostic fact. A larger
+        # encoder whitespace margin explicitly forces the same cap branch.
+        passive = object.__new__(module.Operation)
+        passive.__dict__.update(receipt={}, compiler_failure=copy.deepcopy(many))
+        for index, row in enumerate(passive.compiler_failure["rows"]):
+            row["source"] = "desktop/src-tauri/src/" + str(index) + "x" * 134 + ".rs"
+        passive.compiler_failure["rowsOmitted"] = False
+        stored = copy.deepcopy(passive.compiler_failure)
+        actual_dumps, output = json.dumps, io.StringIO()
+        failure = module.Refused("helper-package-incomplete")
+        initial = module.failure_diagnostic(failure, operation=passive)
+        initial_line = actual_dumps(initial, sort_keys=True, separators=(",", ":")) + "\n"
+        self.assertEqual(len(initial["compiler"]["rows"]), 8)
+        self.assertFalse(initial["compiler"]["rowsOmitted"])
+        self.assertLessEqual(len(initial_line.encode("ascii")), 4096)
+        margin = 4097 - len(initial_line)
+        def padded_dumps(value, **options):
+            return actual_dumps(value, **options) + " " * margin
+        self.assertEqual(len((padded_dumps(initial, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")), 4097)
+        with mock.patch.object(module.json, "dumps", side_effect=padded_dumps), contextlib.redirect_stderr(output):
+            module.emit_failure_diagnostic(failure, operation=passive)
+        body = output.getvalue()
+        self.assertTrue(body)
+        self.assertLessEqual(len(body.encode("ascii")), 4096)
+        value = json.loads(body)
+        self.assertEqual(value["terminal"]["reason"], "helper-package-incomplete")
+        self.assertTrue(value["compiler"]["rowsOmitted"])
+        self.assertEqual(len(value["compiler"]["rows"]), 7)
+        self.assertEqual(passive.compiler_failure, stored)
+
+
+
+    def test_installer_public_source_nomination_matches_exact_der_chain(self):
+        # Public SOURCE pin correspondence only; no native trust or private key.
+        root = Path(__file__).resolve().parents[2]
+        expected = {
+            "schemaVersion": 1, "mode": "developer-id-installer", "teamId": "7CGZ2343AA",
+            "identityCommonName": "Developer ID Installer: Abdelrahman Farag (7CGZ2343AA)",
+            "leafSha1": "2176c921a318fd50510672b92022813c4e617fbd",
+            "leafSha256": "76880822154a840386b3a309382069568262ad79a84611d1281b823312e9fe04",
+            "issuerSha256": "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a",
+            "rootSha256": "b0b1730ecbc7ff4505142c49f1295e6eda6bcaed7e2c68c5be91b5a11001f024",
+        }
+        selection = ANDROID_HELPER.installer_profile((root / ANDROID_HELPER.INSTALLER_PROFILE).read_bytes())
+        self.assertEqual(selection, expected)
+        certificates = []
+        for name, size in (("leaf", 1489), ("issuer", 1090), ("root", 1215)):
+            certificate = root / "desktop/packaging/macos-installer-certificates" / (name + ".der")
+            self.assertTrue(stat.S_ISREG(certificate.lstat().st_mode))
+            body = certificate.read_bytes()
+            self.assertEqual(len(body), size)
+            self.assertLessEqual(len(body), 16384)
+            self.assertEqual(hashlib.sha256(body).hexdigest(), expected[name + "Sha256"])
+            certificates.append(body)
+        self.assertEqual(len(set(certificates)), 3)
+        self.assertEqual(hashlib.sha1(certificates[0]).hexdigest(), expected["leafSha1"])
+        application = TOOL.packaging_signing_data((root / ANDROID_HELPER.PRODUCER_PROFILE).read_bytes(),
+                                                  (root / ANDROID_HELPER.PROFILE).read_bytes())
+        self.assertEqual(selection["teamId"], application.team)
+        self.assertEqual(application.leaf_sha1, "5effa7d19bbe005b19c1617833cbe22186c2af96")
+        self.assertNotEqual(selection["leafSha1"], application.leaf_sha1)
+
+    def test_notary_ticket_architecture_annotations_preserve_strict_log_contract(self):
+        # Synthetic closed DATA reflecting the authenticated 27/3/1 census,
+        # not Apple's private paths/cdhashes and not native target eligibility.
+        module = ANDROID_HELPER
+        submission = {"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "status": "Accepted"}
+        original_submission = dict(submission)
+        def body(value):
+            return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        def ticket(arch):
+            return {"path": "SYNTHETIC/nested-code", "digestAlgorithm": "SHA-256", "cdhash": "c" * 40, "arch": arch}
+        log = {"logFormatVersion": 1, "jobId": submission["id"], "status": "Accepted",
+               "statusCode": 0, "archiveFilename": module.NOTARY_ZIP_NAME, "sha256": "d" * 64,
+               "issues": None, "ticketContents": [ticket("arm64")] * 27 + [ticket("x86_64")] * 3 + [ticket("i386")]}
+        encoded = body(log)
+        expected = {"sha256Compared": True, "errorCount": 0, "warningCount": 0,
+                    "ticketRowCount": 31, "logSha256": module.digest(encoded)}
+        self.assertEqual(module.notary_log_data(encoded, submission, "d" * 64), expected)
+        for archive in (module.NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg"):
+            for arch in ("arm64", "x86_64", "i386"):
+                for algorithm in ("SHA-1", "SHA-256"):
+                    row = dict(ticket(arch), digestAlgorithm=algorithm)
+                    current = dict(log, archiveFilename=archive, ticketContents=[row])
+                    encoded = body(current)
+                    self.assertEqual(module.notary_log_data(encoded, submission, "d" * 64, archive_name=archive),
+                                     dict(expected, ticketRowCount=1, logSha256=module.digest(encoded)))
+            carrier = dict(ticket(None), path=archive)
+            omitted = dict(carrier); del omitted["arch"]
+            # Signed containers may omit arch rather than explicitly use null.
+            # This is the same exact top-level carrier exception, never ZIP/code.
+            for annotation in (carrier, omitted):
+                current = dict(log, archiveFilename=archive, ticketContents=[annotation])
+                encoded = body(current)
+                if archive == module.NOTARY_ZIP_NAME:
+                    with self.assertRaises(module.Refused):
+                        module.notary_log_data(encoded, submission, "d" * 64, archive_name=archive)
+                else:
+                    self.assertEqual(module.notary_log_data(encoded, submission, "d" * 64, archive_name=archive),
+                                     dict(expected, ticketRowCount=1, logSha256=module.digest(encoded)))
+                with self.assertRaises(module.Refused):
+                    module.notary_log_data(body(dict(current, ticketContents=[dict(annotation, path=archive + "/nested")])),
+                                           submission, "d" * 64, archive_name=archive)
+                invalid_carriers = [dict(annotation, extra=True)]
+                for required_key in ("path", "digestAlgorithm", "cdhash"):
+                    missing_required = dict(annotation); del missing_required[required_key]
+                    invalid_carriers.append(missing_required)
+                for invalid_carrier in invalid_carriers:
+                    with self.assertRaises(module.Refused):
+                        module.notary_log_data(body(dict(current, ticketContents=[invalid_carrier])),
+                                               submission, "d" * 64, archive_name=archive)
+        row = ticket("i386")
+        missing = dict(row); del missing["arch"]
+        bad_rows = [dict(row, arch=value) for value in ("arm64e", "x86_64h", "ppc", "", "null", True, 386, [], None)]
+        bad_rows += [missing, dict(row, extra=True), dict(row, path=""), dict(row, path="bad\npath"),
+                     dict(row, path="p" * 4097), dict(row, digestAlgorithm="MD5"), dict(row, cdhash="c" * 39),
+                     dict(row, cdhash="c" * 64), dict(row, cdhash="z" * 40)]
+        for changed in bad_rows:
+            with self.subTest(ticket=changed), self.assertRaises(module.Refused):
+                module.notary_log_data(body(dict(log, ticketContents=[changed])), submission, "d" * 64)
+        for changed in (dict(log, ticketContents=[row] * 2049), dict(log, ticketContents={}),
+                        dict(log, issues=[{}] * 2049), dict(log, extra=True), dict(log, logFormatVersion=True),
+                        dict(log, jobId="11111111-2222-3333-4444-555555555555"), dict(log, status="Invalid"),
+                        dict(log, archiveFilename="Other.zip"), dict(log, sha256="e" * 64), dict(log, statusCode=4000),
+                        dict(log, issues=[{"severity": "error", "path": "SYNTHETIC", "message": "SYNTHETIC error"}])):
+            with self.subTest(logKeys=tuple(changed)), self.assertRaises(module.Refused):
+                module.notary_log_data(body(changed), submission, "d" * 64)
+        with self.assertRaises(module.Refused):
+            module.notary_log_data(b'{"logFormatVersion":1,"logFormatVersion":1}', submission, "d" * 64)
+        self.assertEqual(submission, original_submission)
+        self.assertEqual((module.ARM_TARGET, module.INTEL_TARGET), ("aarch64-apple-darwin", "x86_64-apple-darwin"))
+        with self.assertRaises(module.Refused):
+            module.entrypoint(["tool", "notarize-payload", "--target", "i386-apple-darwin"])
 
     def test_clean_environment_and_configured_profile_refuse_any_ad_hoc_fallback(self):
         module = ANDROID_HELPER
@@ -4514,7 +8021,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             TOOL.packaging_selection_command(SimpleNamespace(target=selection.target))
 
         self.assertEqual(module.PYTHON_SUPPLIERS, TOOL.SIGNED_ORIGINAL_SUPPLIERS)
-        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove"))
+        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove",
+                                       "same-package-noop", "update-baseline", "prepare-app-absence", "app-absence-restore"))
         for phase in module.PYTHON_PHASES:
             self.assertEqual(module.entrypoint(["inert", phase, "--target", module.INTEL_TARGET]), (phase, module.INTEL_TARGET))
         for phase in ("python-auto", "python-shipping ", "python-engineering-fallback"):
@@ -4710,7 +8218,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         for value in (display + b"CDHash=malformed\n", display + display, display + b"Signature=other\n", b"\xff",
                       display.replace(b"adhoc", b"configured"), display.replace(b"c" * 40, b"c" * 39), b"x" * 16385):
             with self.subTest(displayBytes=len(value)), self.assertRaises(module.Refused): module.credential_cdhash(value)
-        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove"))
+        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove",
+                                       "same-package-noop", "update-baseline", "prepare-app-absence", "app-absence-restore"))
         self.assertEqual(module.SIGNING_PHASES, ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover"))
         for phase in module.SIGNING_PHASES:
             for target in (module.ARM_TARGET, module.INTEL_TARGET):
@@ -4737,9 +8246,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         key = b"-----BEGIN PRIVATE KEY-----\nSU5FUlQ=\n-----END PRIVATE KEY-----\n"
         encoded = module.base64.b64encode(key).decode("ascii")
         self.assertEqual(module.notary_key_data({module.NOTARY_KEY_VARIABLE: encoded}), key)
+        for eol in (b"\n", b"\r\n", b"\r"):
+            for original in (key.replace(b"\n", eol), key[:-1].replace(b"\n", eol)):
+                self.assertEqual(module.notary_key_data({module.NOTARY_KEY_VARIABLE:
+                    module.base64.b64encode(original).decode("ascii")}), original)
         for value in (None, "", encoded + "\n", encoded + "=", "x" * 10925,
-                      module.base64.b64encode(b"not PKCS8 PEM").decode("ascii"),
-                      module.base64.b64encode(key.replace(b"\n", b"\r\n")).decode("ascii")):
+                      module.base64.b64encode(b"not PKCS8 PEM").decode("ascii")):
             with self.subTest(notary_key_type=type(value).__name__), self.assertRaises(module.Refused):
                 module.notary_key_data({module.NOTARY_KEY_VARIABLE: value})
         submission = {"id": "abcdef12-3456-789a-bcde-0123456789ab", "status": "Accepted"}
@@ -4841,6 +8353,16 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(module.package_signature_data(signature, selection, certificates, path),
                          {"trusted": True, "timestamp": True, "certificateSha256": [module.digest(value) for value in certificates]})
         self.assertEqual(module.package_signature_data(signature.replace(b'trusted by macOS', b'trusted by Mac OS X'), selection, certificates, path)["trusted"], True)
+        modern_signature = signature.replace(b'signed by a certificate trusted by macOS',
+            b'signed by a developer certificate issued by Apple for distribution')
+        self.assertEqual(module.package_signature_data(modern_signature, selection, certificates, path),
+                         module.package_signature_data(signature, selection, certificates, path))
+        for body in (modern_signature.replace(b'issued by Apple for distribution', b'issued by Apple for Distribution'),
+                     modern_signature.replace(b'issued by Apple for distribution', b'issued by Apple for distribution untrusted'),
+                     modern_signature.replace(b'Signed with a trusted timestamp on: INERT DATA\n', b''),
+                     modern_signature.replace(selection["identityCommonName"].encode(), b'Developer ID Installer: FOREIGN (TEST000001)')):
+            with self.assertRaises(module.Refused):
+                module.package_signature_data(body, selection, certificates, path)
         for body in (signature.replace(b'trusted by macOS', b'untrusted by macOS'),
                      signature.replace(b'Signed with a trusted timestamp on:', b'Signed without a trusted timestamp on:'),
                      signature.replace(b'1. Developer ID Installer:', b'2. Developer ID Installer:'),
@@ -4849,6 +8371,30 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                      signature + b'4. FOREIGN\n', signature.replace(b'INERT DATA\n', b'INERT\x00DATA\n', 1), b'x' * 65537):
             with self.assertRaises(module.Refused):
                 module.package_signature_data(body, selection, certificates, path)
+
+        # The removal caller has a distinct fixed package name, not an
+        # arbitrary .pkg grant. Its actual header, trust and chain still bind.
+        removal_path = Path('/DATA-only/Remove.pkg')
+        removal_signature = signature.replace(b'MobileReleaseKit.pkg', b'Remove.pkg')
+        expected_signature = {"trusted": True, "timestamp": True,
+                              "certificateSha256": [module.digest(value) for value in certificates]}
+        for header in (b'Remove.pkg', str(removal_path).encode()):
+            body = removal_signature.replace(b'Package "Remove.pkg":', b'Package "' + header + b'":', 1)
+            self.assertEqual(module.package_signature_data(body, selection, certificates, removal_path), expected_signature)
+        for name in ('Other.pkg', 'Install.pkg', 'remove.pkg', 'Remove.pkg.bak'):
+            body = removal_signature.replace(b'Remove.pkg', name.encode())
+            with self.subTest(unrelatedPackage=name), self.assertRaises(module.Refused):
+                module.package_signature_data(body, selection, certificates, removal_path.with_name(name))
+        for header in (b'MobileReleaseKit.pkg', b'Other.pkg', b'/OTHER/Remove.pkg'):
+            body = removal_signature.replace(b'Package "Remove.pkg":', b'Package "' + header + b'":', 1)
+            with self.subTest(mismatchedHeader=header), self.assertRaises(module.Refused):
+                module.package_signature_data(body, selection, certificates, removal_path)
+        issuer_fingerprint = ' '.join(module.digest(certificates[1])[i:i + 2].upper() for i in range(0, 64, 2)).encode()
+        for body in (removal_signature.replace(b'trusted by macOS', b'untrusted by macOS'),
+                     removal_signature.replace(b'Signed with a trusted timestamp on:', b'Signed without a trusted timestamp on:'),
+                     removal_signature.replace(issuer_fingerprint, b'00 ' * 31 + b'00')):
+            with self.assertRaises(module.Refused):
+                module.package_signature_data(body, selection, certificates, removal_path)
 
         # Only these five fixed archive purposes are accepted. The default ZIP
         # parser behavior remains unchanged; null arch is NONAUTHORITY metadata
@@ -4936,10 +8482,17 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     getgid=mock.Mock(return_value=20),getegid=mock.Mock(return_value=20))):
                 for phase in expected:
                     self.assertEqual(module.admit(selected,target=target,phase=phase),Path(selected["MRK_MACOS_WORK"]))
-                for phase in set(module.PHASES + module.PYTHON_PHASES + module.SIGNING_PHASES + module.TOOL_SIGNING_PHASES
-                                 + module.NOTARY_PHASES + module.FINAL_PACKAGE_PHASES + module.FINAL_IMAGE_PHASES
-                                 + module.REMOVAL_OWNER_PHASES) - set(expected):
-                    with self.subTest(appRefPhase=phase), self.assertRaisesRegex(module.Refused,"^app-signature-fixed-native-phase$"):
+                phase_refusals = {
+                    "same-package-noop": "same-package-fixed-purpose",
+                    "update-baseline": "update-fixed-credential-free-baseline",
+                    "prepare-app-absence": "app-absence-fixed-native-phase",
+                    "app-absence-restore": "app-absence-fixed-native-phase",
+                }
+                for phase in sorted(set(module.PHASES + module.PYTHON_PHASES + module.SIGNING_PHASES + module.TOOL_SIGNING_PHASES
+                                        + module.NOTARY_PHASES + module.FINAL_PACKAGE_PHASES + module.FINAL_IMAGE_PHASES
+                                        + module.REMOVAL_OWNER_PHASES) - set(expected)):
+                    reason = phase_refusals.get(phase, "app-signature-fixed-native-phase")
+                    with self.subTest(appRefPhase=phase), self.assertRaisesRegex(module.Refused, "^" + reason + "$"):
                         module.admit(selected,target=target,phase=phase)
                 for phase in module.APP_SIGNATURE_DATA:
                     module.tool_data_context(selected,phase,target)
@@ -4955,14 +8508,75 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         main_node = next(n for n in helper_ast.body if isinstance(n,ast.FunctionDef) and n.name == "main")
         operation_node = next(n for n in helper_ast.body if isinstance(n,ast.ClassDef) and n.name == "Operation")
         execute_node = next(n for n in operation_node.body if isinstance(n,ast.FunctionDef) and n.name == "execute")
-        for callable_node in (main_node,execute_node):
-            self.assertIn('get("GITHUB_REF") != APP_SIGNATURE_REF',ast.get_source_segment(helper_source,callable_node))
+        for callable_node, expected_guard in (
+                (main_node, 'get("GITHUB_REF") != APP_SIGNATURE_REF'),
+                (execute_node, 'get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF)')):
+            with self.subTest(signingProfileGuard=callable_node.name):
+                self.assertIn(expected_guard, ast.get_source_segment(helper_source, callable_node))
         with self.assertRaises(TOOL.Refused):
             TOOL.packaging_signing_data(b"schema=1\nstate=unconfigured\n",module.UNCONFIGURED_PROFILE,
                                        allow_unconfigured=environment["GITHUB_REF"] != module.APP_SIGNATURE_REF)
 
 
 
+
+    def test_installer_basic_chain_keeps_exact_public_originals_and_refuses_before_signing(self):
+        # Genuine current package/credential methods with inert native returns;
+        # this does not establish certificate validity or native signing.
+        module = ANDROID_HELPER
+        for failure in (None, "installer-chain"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                fixture = self.final_package_fixture(Path(directory))
+                legacy_signature = fixture.signature_text
+                fixture.signature_text = legacy_signature.replace(b'signed by a certificate trusted by macOS',
+                    b'signed by a developer certificate issued by Apple for distribution')
+                self.assertNotEqual(fixture.signature_text, legacy_signature)
+                fixture.credentials.failure = failure
+                operation = fixture.operation
+                with self.final_package_fixture_call(fixture):
+                    if failure is None:
+                        operation.execute()
+                    else:
+                        with self.assertRaises(module.Refused):
+                            operation.execute()
+                originals = [row for row in operation.credential_calls if row["role"] == "installer-chain"]
+                self.assertEqual(len(originals), 1)
+                self.assertEqual(originals[0]["status"], 0 if failure is None else 1)
+                self.assertTrue(originals[0]["entered"] and originals[0]["returned"] and originals[0]["settled"])
+                args = [argv for role, argv in fixture.credentials.events if role == "installer-chain"]
+                paths = [str(fixture.checkout / "desktop/packaging/macos-installer-certificates" / (role + ".der"))
+                         for role in ("leaf", "issuer", "root")]
+                self.assertEqual(args, [("/usr/bin/security", "verify-cert", "-p", "basic", "-N", "-L",
+                                         "-c", paths[0], "-c", paths[1], "-r", paths[2])])
+                self.assertEqual(fixture.credentials.search, fixture.credentials.initial)
+                self.assertFalse(Path(fixture.credentials.keychain).exists())
+                self.assertTrue(all(row["closed"] and row["retired"] and row["searchRestored"]
+                                    and row["defaultUnchanged"] for row in operation.credential_contexts))
+                callbacks = [row[0] for row in fixture.observations]
+                self.assertEqual(operation.receipt["passed"], failure is None)
+                if failure is None:
+                    selection, certificates = fixture.credentials.installer, fixture.credentials.certificates
+                    path = Path('/DATA-only/MobileReleaseKit.pkg')
+                    expected = {"trusted": True, "timestamp": True,
+                                "certificateSha256": [module.digest(value) for value in certificates]}
+                    for body in (legacy_signature, legacy_signature.replace(b'trusted by macOS', b'trusted by Mac OS X'),
+                                 fixture.signature_text):
+                        self.assertEqual(module.package_signature_data(body, selection, certificates, path), expected)
+                    fingerprint = ' '.join(module.digest(certificates[1])[i:i + 2].upper() for i in range(0, 64, 2)).encode()
+                    for body in (fixture.signature_text.replace(b'issued by Apple for distribution', b'issued by Apple for Distribution'),
+                                 fixture.signature_text.replace(b'issued by Apple for distribution', b'issued by Apple for distribution untrusted'),
+                                 fixture.signature_text.replace(b'Signed with a trusted timestamp on: INERT DATA\n', b''),
+                                 fixture.signature_text.replace(fingerprint, b'00 ' * 31 + b'00')):
+                        with self.assertRaises(module.Refused):
+                            module.package_signature_data(body, selection, certificates, path)
+                    self.assertIn("final-package-sign", callbacks)
+                    self.assertIn("final-package-signature-before", callbacks)
+                    self.assertIn("final-package-submit", callbacks)
+                    self.assertIn("finalPackage", operation.receipt)
+                else:
+                    self.assertNotIn("final-package-sign", callbacks)
+                    self.assertNotIn("final-package-submit", callbacks)
+                    self.assertNotIn("finalPackage", operation.receipt)
 
     def test_ios_recovery_admission_keeps_the_full_package_scope_closed(self):
         module = ANDROID_HELPER
@@ -4972,7 +8586,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             "installation-inspection", "vault-helper-shipping-installation-inspection",
             "project-recovery-pending", "ios-recovery-pending", "doctor-preflight2", "local-edits3",
         ))
-        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove"))
+        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove",
+                                       "same-package-noop", "update-baseline", "prepare-app-absence", "app-absence-restore"))
         sha, ref = "a" * 40, "refs/heads/verify/desktop-macos-aqua"
         work = module.WORK_PARENT / "mrk-macos-aqua.AbC12345"
         environment = {
@@ -5054,9 +8669,16 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual(uname.call_count, observed)
                 aqua = dict(environment, RUNNER_ARCH=runner, RUSTUP_TOOLCHAIN=toolchain)
                 self.assertEqual(module.admit(aqua, target=target), work)
+                phase_refusals = {
+                    "package-remove": "final-image-preview-ref-only",
+                    "same-package-noop": "same-package-fixed-purpose",
+                    "update-baseline": "update-fixed-credential-free-baseline",
+                    "prepare-app-absence": "app-absence-fixed-native-phase",
+                    "app-absence-restore": "app-absence-fixed-native-phase",
+                }
                 for phase in module.PHASES:
-                    if phase == "package-remove":
-                        with self.assertRaisesRegex(module.Refused, "^final-image-preview-ref-only$"):
+                    if phase in phase_refusals:
+                        with self.subTest(aquaRefPhase=phase), self.assertRaisesRegex(module.Refused, "^" + phase_refusals[phase] + "$"):
                             module.admit(aqua, target=target, phase=phase)
                     else:
                         self.assertEqual(module.admit(aqua, target=target, phase=phase), work)
@@ -5077,6 +8699,31 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 with self.assertRaisesRegex(module.Refused, "^hosted-native-platform$"):
                     module.admit(aqua, target=target)
 
+
+    def test_public_notary_enrollment_binds_current_application_team_without_credentials(self):
+        # SOURCE DATA only: no private key, auth request, child or notary operation.
+        module, root = ANDROID_HELPER, Path(__file__).absolute().parents[2]
+        selected = TOOL.packaging_signing_data((root / module.PRODUCER_PROFILE).read_bytes(),
+                                               (root / module.PROFILE).read_bytes())
+        identity = (selected.team, selected.leaf_sha1)
+        expected = {"schemaVersion": 1, "mode": "app-store-connect-team-key", "teamId": "7CGZ2343AA",
+                    "keyId": "59VQCHM463", "issuerId": "375572d7-6413-4f28-96af-2f39c49227fe"}
+        body = (root / module.NOTARY_PROFILE).read_bytes()
+        self.assertEqual(module.notary_service(body, identity), expected)
+        self.assertEqual(selected.team, expected["teamId"])
+        with self.assertRaisesRegex(module.Refused, "^notary-profile-source$"):
+            module.notary_service(body, ("TEST000001", selected.leaf_sha1))
+        for changed in ({"schemaVersion": 1, "mode": "unconfigured"},
+                        dict(expected, teamId="TEST000001"), dict(expected, mode="individual-key"),
+                        dict(expected, issuerId=expected["issuerId"].upper()),
+                        dict(expected, issuerId="not-a-uuid"), dict(expected, keyId="../key"),
+                        dict(expected, privateKey="INERT forbidden extra field")):
+            with self.subTest(profile=changed), self.assertRaises(module.Refused):
+                module.notary_service(TOOL.canonical(changed), identity)
+        # The schema is generic, not a new issuer allowlist. Exact nomination
+        # equality above detects changed SOURCE values separately from syntax.
+        alternative = dict(expected, issuerId="11111111-2222-3333-4444-555555555555")
+        self.assertEqual(module.notary_service(TOOL.canonical(alternative), identity), alternative)
 
     def test_both_workflows_use_one_digest_and_owned_nested_checks_around_app_signing(self):
         root = Path(__file__).absolute().parents[2]
@@ -5453,8 +9100,16 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(argument_call.args, [])
         self.assertEqual({row.arg: ast.dump(row.value) for row in argument_call.keywords},
                          {name: ast.dump(ast.parse(value, mode="eval").body) for name, value in expected_arguments.items()})
-        self.assertEqual(json.loads((root / ANDROID_HELPER.NOTARY_PROFILE).read_bytes()), {"schemaVersion": 1, "mode": "unconfigured"})
-        self.assertEqual(json.loads((root / ANDROID_HELPER.INSTALLER_PROFILE).read_bytes()), {"schemaVersion": 1, "mode": "unconfigured"})
+        source_signing = TOOL.packaging_signing_data((root / ANDROID_HELPER.PRODUCER_PROFILE).read_bytes(),
+                                                    (root / ANDROID_HELPER.PROFILE).read_bytes())
+        source_notary = ANDROID_HELPER.notary_service((root / ANDROID_HELPER.NOTARY_PROFILE).read_bytes(),
+                                                     (source_signing.team, source_signing.leaf_sha1))
+        self.assertEqual(source_notary["mode"], "app-store-connect-team-key")
+        self.assertEqual(source_notary["teamId"], source_signing.team)
+        source_installer = ANDROID_HELPER.installer_profile((root / ANDROID_HELPER.INSTALLER_PROFILE).read_bytes())
+        self.assertEqual(source_installer["mode"], "developer-id-installer")
+        self.assertEqual(source_installer["teamId"], source_signing.team)
+        self.assertNotEqual(source_installer["leafSha1"], source_signing.leaf_sha1)
         methods = {node.name: ast.get_source_segment((root / "desktop/tools/macos_android_helper_package.py").read_text(), node)
                    for node in operation.body if isinstance(node, ast.FunctionDef)}
         images = methods["package_image"]
@@ -5485,7 +9140,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertNotIn(forbidden, phase)
         self.assertLess(installed.index("macos_android_helper_package.py package-install"), installed.index(call))
         self.assertLess(installed.index(call), installed.index("stage_macos_installed.py preview"))
-        for role in ANDROID_HELPER.FINAL_IMAGE_ROLES:
+        # These are the exact historical raw exports, not the current public
+        # whitelist. The two policy originals must never acquire raw uploads.
+        self.assertEqual(ANDROID_HELPER.FINAL_IMAGE_ROLES[11:], ("final-image-policy-status", "final-image-policy-assess"))
+        for role in ANDROID_HELPER.FINAL_IMAGE_ROLES[:11]:
             for suffix in ("stdout", "stderr", "status"):
                 self.assertEqual(installed.count("/android-helper-" + role + "." + suffix), 1)
         self.assertEqual(installed.count("/android-helper-finalize-image.json"), 1)
@@ -5503,6 +9161,18 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             '"final-image-signature-after"', '"final-image-verify"', '"final-image-attach"',
             'self.mount_inputs(', 'self.detach_package_mount()', 'self.final_image_publish()')))
         self.assertIn('return self.notary_clock()[0]', methods["package_clock"])
+        self.assertEqual(final.count('self.final_image_call("final-image-policy-status"'), 1)
+        self.assertEqual(final.count('self.final_image_call("final-image-policy-assess"'), 1)
+        self.assertLess(final.index('self.detach_package_mount()'), final.index('"final-image-policy-status"'))
+        self.assertLess(final.index('"final-image-policy-status"'), final.index('"final-image-policy-assess"'))
+        self.assertLess(final.index('"final-image-policy-assess"'), final.index('self.final_image_publish()'))
+        self.assertIn('result.stdout == b"assessments enabled\\n" and not result.stderr', final)
+        self.assertIn('"--ignore-cache", "--no-cache", str(path)', final)
+        for forbidden in ('"--master-disable"', '"--global-disable"', '"--add"', '"--purge"', 'removexattr', 'setxattr'):
+            self.assertNotIn(forbidden, final)
+        for role in ANDROID_HELPER.FINAL_IMAGE_ROLES[11:]:
+            for suffix in ("stdout", "stderr", "status"):
+                self.assertNotIn('/android-helper-' + role + '.' + suffix, installed)
         self.assertIn('return self.final_image_call("final-image-detach", argv)', methods["package_call"])
         self.assertIn('after[:6] == before[:6]', methods["final_image_mutated"])
         self.assertIn('abs(after[6] - before[6]) <= 1024 * 1024', methods["final_image_mutated"])
@@ -5516,7 +9186,32 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         retained = ('Admit only this exact disposable-hosted source route', 'Check out exact reviewed source without retained credentials', 'Select DATA stager Python, not the packaged interpreter', 'Select the fixed configured signed runtime before any payload download', 'Select fixed frontend compiler', 'Reserve fresh work and record exact source and actual tool bindings', 'Bind the complete reviewed first-party checkout before compilation', 'Admit the fixed image Rust tools without installing a distribution', 'Admit only a fresh independently pinned Python transport destination', 'Download the independently accepted fresh Python transport', 'Project the pinned fresh Python transport without executing it', 'Download only the configured signed Python capsule', 'Project the configured capsule as DATA without executing it', 'Select only SOURCE-enrolled current signed GitHub tools', 'Download exactly the nominated signed history provider', 'Download exactly the nominated signed seal helper', 'Project current signed tools without executing either program', 'Prepare the current payload from the independently accepted fresh Python supplier', 'Acquire and verify the two fixed Android support archives as DATA', 'Require the fixed SOURCE producer identity and release before ordinary signing', 'Build and sign the fixed resident image and C facades', 'Build and sign the separate fixed vault helper before binding the app', 'Build the ordinary selected-target desktop image and embedded frontend', 'Record the effective pinned compiler from the successful build context', 'Assemble the ordinary image app and sign code inside-out (never --deep)')
         excluded = ('Build only the external normal-app XCTest runner, not an instrumented app', 'Fail fast on native Scripts ownership and package format (never Installer)', 'Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive', 'Compile and run only fixed native DATA contracts and exact host-Python regressions', 'Bind this completed signed app and current-source runtime into fresh Installer DATA', 'Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)', 'Build the separate fixed eight-case Installer package from the same completed input', 'Standard Installer runs the one fixed fixture, never root libtest or a scenario selector', 'Nonroot fixture readback leaves protected0700 staging closed and unchanged', 'Build the fixed one-shot root Installer and scripts-only package', 'Build fixed Installer presentation then sign and notarize the completed outer package before final P', 'Standard Installer only is privileged; never execute the app or Python as root', 'Prepare fresh private Android UI suppliers and disposable key inputs', 'Exercise one ordinary signed Android build with current private inputs', 'Bind the single Android journey to current installed originals only', 'Exercise one ordinary unsigned iOS archive and normal Quit', 'Observe the single unsigned iOS XCTest summary under the same source', 'Notarize, staple and verify only the final user image', 'Prepare the fixed two-file removal package without executing it', 'Sign and notarize the completed removal package without executing it', 'Emit the genuine removal descriptor and readonly carrier without Installer', 'Prepare three source-bound readonly observation carriers without removal', 'One genuine fixed removal journey through the existing original owners', 'Notarize staple and verify the separate readonly removal carrier', 'Stage only the audited normal early-preview deliverables', 'Upload only the normal user preview package and guide', 'Launch the exact ordinary app, Cancel its real Quit sheet, then Quit normally', 'Preserve original XCTest counts and a closed UI-only result, never a clean-exit claim', 'Exercise normal project edits, images and four draft-only Browse fields', 'Verify both selected project journeys against their original XCTest result', 'Exercise synthetic encrypted credentials through the ordinary Mac UI', 'Bind the single persistence journey to original XCTest and app-helper evidence', 'Observe one original build-tool diagnostics report through the ordinary Mac UI', 'Bind the single diagnostics journey to original XCTest and the same ordinary package', 'Observe saved offline checks and empty build-input inspection through the ordinary Mac UI', 'Bind both saved-check journeys to original XCTest and the same ordinary package', 'Exercise one selected saved-version recovery, GitHub refusal or saved evidence through the ordinary Mac UI', 'Bind only the selected singleton to original XCTest and the same ordinary preview package', 'Preserve bounded originals; upload success is never GUI/native acceptance', "Remove only this completed preview build's disposable compiler outputs")
         added = ('Summarize only completed whole-app signatures and observed bytes', 'Retire only settled app-signature compiler outputs independently of upload', 'Retain finite app-signature facts only, never an installable delivery')
-        self.assertEqual(set(app_named),set(retained+excluded+added))
+        prebuild_name = "Check fixed optional-array argv before native preparation"
+        diagnostics = ("Encrypt only the settled failed ARM compiler captures",
+                       "Retain ciphertext and finite transport receipt only")
+        retained += (prebuild_name,)
+        excluded += ("Project closed public verification facts without raw originals",
+                     "Exercise and bind each remaining saved-file journey once in fixed order")
+        self.assertEqual(set(app_named),set(retained+excluded+added+diagnostics))
+        # Retire only the independent budget delta; keep app_current raw below.
+        budget_predecessor = without_intel_app_build_budget_workflow(app_current)
+        for label, markers, replacements in RECENT_APP_SIGNATURE_WORKFLOW_INVERSE:
+            for current, previous in replacements:
+                self.assertEqual(budget_predecessor.count(current), 1, label)
+        prebuild_step = app_named[prebuild_name]
+        self.assertNotIn("        if:", prebuild_step)
+        self.assertNotIn("continue-on-error", prebuild_step)
+        self.assertNotIn("secrets.", prebuild_step)
+        self.assertIn("        timeout-minutes: 1\n", prebuild_step)
+        ordered_steps = list(app_named)
+        source_index = ordered_steps.index("Bind the complete reviewed first-party checkout before compilation")
+        self.assertEqual(ordered_steps[source_index + 1:source_index + 3],
+                         [prebuild_name, "Admit the fixed image Rust tools without installing a distribution"])
+        for name in diagnostics:
+            self.assertIn("        timeout-minutes: 2\n", app_named[name])
+            self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-app-signature'", app_named[name])
+            self.assertIn("matrix.target == 'aarch64-apple-darwin'", app_named[name])
+            self.assertNotIn("secrets.", app_named[name])
         self.assertEqual(len(app_named),len(app_blocks))
         for name in excluded:
             self.assertIn("if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'",app_named[name])
@@ -5778,6 +9473,157 @@ def channel_data(path, body=None, *, private=False):
 
 @unittest.skipUnless(TOOL is not None, "Darwin/POSIX DATA tool only")
 class MacInstalledData(unittest.TestCase):
+    def test_positive_update_is_unconfigured_and_reverses_to_current_recovery_source(self):
+        root = Path(__file__).absolute().parents[2]
+        raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        self.assertEqual(json.loads((root / "desktop/macos-installed-inputs/update-predecessors.json").read_text()),
+                         {"schemaVersion": 1, "mode": "unconfigured"})
+        self.assertEqual(raw.count("macos_android_helper_package.py update-baseline --target"), 1)
+        self.assertEqual(raw.count("macos_android_helper_package.py package-install --target"), 1)
+        self.assertLess(raw.index("Refuse unconfigured update"), raw.index("Select fixed frontend compiler"))
+        self.assertLess(raw.index("id: update_baseline"), raw.index("id: package_install"))
+        baseline = raw.split("        id: update_baseline\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 9", baseline)
+        self.assertNotIn("secrets.", baseline)
+        self.assertIn("digest-mismatch: error", raw)
+        previous = without_positive_update_workflow(raw)
+        self.assertEqual(hashlib.sha256(previous.encode()).hexdigest(), "024cb67a62bbc1b7ba929c044a0edffc7f27731c8eeb508ca7e373924be4afc1")
+        self.assertEqual(without_positive_update_workflow(previous), previous)
+        self.assertNotIn("verify/desktop-macos-positive-update", previous)
+        for before, after in POSITIVE_UPDATE_WORKFLOW_INVERSE:
+            with self.assertRaises(AssertionError): without_positive_update_workflow(raw.replace(after, before, 1))
+        with self.assertRaises(AssertionError): without_positive_update_workflow(raw + POSITIVE_UPDATE_WORKFLOW_INVERSE[0][1])
+        # Current SOURCE S assertions remain raw; only this exact newer route
+        # is removed before the already-reviewed historical inverse chain.
+        self.assertEqual(raw.count("10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"), 2)
+        self.assertNotIn("c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09", raw)
+        self.assertEqual(previous.count("c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"), 2)
+        self.assertEqual(without_app_absence_workflow(raw), without_app_absence_workflow(previous))
+
+    def test_intel_android_ui_target_join_precedes_historical_projection(self):
+        root = Path(__file__).absolute().parents[2]
+        raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        pending_current = raw
+        self.assertEqual(raw.count("      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n"), 1)
+        self.assertIn("&& 'ios-pending-recovery' || 'disabled'", raw)
+        self.assertEqual(raw.count("        id: normal_ios_pending_ui_test\n"), 1)
+        self.assertEqual(raw.count("        id: normal_ios_pending_ui_summary\n"), 1)
+        self.assertIn("--normal-ios-pending-recovery-test", raw)
+        self.assertIn("--normal-ios-pending-recovery-summary", raw)
+        raw = without_normal_ios_pending_workflow(raw)
+        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), "b96a9fe68f93b9eceeaf4297cdc4e1f54cb70b9c5ef51c346c84519e83ab4e65")
+        self.assertEqual(without_normal_ios_pending_workflow(raw), raw)
+        for previous, current in NORMAL_IOS_PENDING_WORKFLOW_INVERSE:
+            with self.assertRaises(AssertionError):
+                without_normal_ios_pending_workflow(pending_current.replace(current, previous, 1))
+        with self.assertRaises(AssertionError):
+            without_normal_ios_pending_workflow(pending_current + "# unexpected pending recovery tail\n")
+        with self.assertRaises(AssertionError):
+            without_normal_ios_pending_workflow(pending_current.replace("timeout-minutes: 19", "timeout-minutes: 20", 1))
+        (old_android, new_android), (old_ios, new_ios) = INSTALLED_IOS_ACTIVATION_INVERSE
+        self.assertEqual(raw.count(new_android), 1)
+        self.assertEqual(raw.count(new_ios), 1)
+        self.assertEqual(raw.count("      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n"), 1)
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ios-unsigned-archive' || 'disabled'", new_ios)
+        self.assertIn("MRK_MACOS_SAVED_FILE_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'remaining-three' || 'ordinary-seven' }}", raw)
+        ios_prior = without_installed_ios_activation_workflow(raw)
+        self.assertEqual(ios_prior, raw.replace(new_android, old_android, 1).replace(new_ios, old_ios, 1))
+        self.assertEqual(hashlib.sha256(ios_prior.encode()).hexdigest(),
+                         "ec216ac8fceb8d35cd91f793c7e496c620f1ba212278026b8da883a88907a2dc")
+        self.assertEqual(without_installed_ios_activation_workflow(ios_prior), ios_prior)
+        for changed in (
+                raw.replace(new_ios, new_ios.replace("verify/desktop-macos-installed", "verify/desktop-macos-preview"), 1),
+                raw.replace(new_ios, new_ios.splitlines(keepends=True)[0] + "      MRK_MACOS_IOS_UI_SCOPE: ios-unsigned-archive\n", 1),
+                raw.replace(new_android, old_android, 1),
+                raw.replace(new_ios, old_ios, 1),
+                raw + new_ios,
+                raw + "# unexpected iOS activation tail\n"):
+            with self.assertRaises(AssertionError):
+                without_installed_ios_activation_workflow(changed)
+        raw = ios_prior
+        inactive, active = INSTALLED_ANDROID_ACTIVATION_INVERSE
+        self.assertEqual(raw.count(active), 1)
+        self.assertNotIn(inactive.splitlines(keepends=True)[1], raw)
+        activation_prior = without_installed_android_activation_workflow(raw)
+        self.assertEqual(activation_prior, raw.replace(active, inactive, 1))
+        self.assertEqual(hashlib.sha256(activation_prior.encode()).hexdigest(),
+                         "b5e5776a4922100d68691f06fb0d354eb8aa6b6b92305889bd03251529d843ef")
+        self.assertEqual(activation_prior.count("MRK_MACOS_ANDROID_UI_SCOPE: disabled"), 1)
+        self.assertEqual(without_installed_android_activation_workflow(activation_prior), activation_prior)
+        for changed in (
+                raw.replace(active, active.replace("verify/desktop-macos-installed", "verify/desktop-macos-preview"), 1),
+                raw.replace(active, active.splitlines(keepends=True)[0] + "      MRK_MACOS_ANDROID_UI_SCOPE: android-signed-build\n", 1),
+                raw.replace(active, active.splitlines(keepends=True)[1], 1),
+                raw.replace(active, active.splitlines(keepends=True)[0], 1),
+                raw + active,
+                raw + "# unexpected activation tail\n"):
+            with self.assertRaises(AssertionError):
+                without_installed_android_activation_workflow(changed)
+        selection = "github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build'"
+        self.assertEqual(raw.count(selection), 4)
+        self.assertNotIn("matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE", raw)
+        self.assertIn('case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$MRK_MACOS_HOSTED_JOB" in', raw)
+        self.assertIn('aarch64-apple-darwin/ARM64/github-hosted-macos26-arm64|x86_64-apple-darwin/X64/github-hosted-macos26-x86_64', raw)
+        self.assertIn("('build-release.json' if TARGET == 'aarch64-apple-darwin' else 'build-release-intel.json')", raw)
+        self.assertIn('N.android_signed_receipts(build, test, summary, facts, source=source, normal=normal, run=run, attempt=attempt, target=TARGET)', raw)
+        prior = without_intel_android_workflow(raw)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), '2363019ea613375c22473cb323adc4b5ee44fc42f5bedd1390fe05b524aeece8')
+        self.assertEqual(hashlib.sha256(without_positive_update_workflow(prior).encode()).hexdigest(),
+                         '024cb67a62bbc1b7ba929c044a0edffc7f27731c8eeb508ca7e373924be4afc1')
+        self.assertEqual(without_intel_android_workflow(prior), prior)
+        self.assertEqual(without_app_absence_workflow(raw), without_app_absence_workflow(prior))
+        # Entire predecessor equality also preserves removal ARM rows, all caps,
+        # default matrix, original exits, credential/ref and private-upload guards.
+        for previous, current in INTEL_ANDROID_WORKFLOW_INVERSE:
+            with self.subTest(region=current[:48]), self.assertRaises(AssertionError):
+                without_intel_android_workflow(raw.replace(current, current + '# corrupt\n', 1))
+        with self.assertRaises(AssertionError): without_intel_android_workflow(raw + INTEL_ANDROID_WORKFLOW_INVERSE[0][1])
+
+    def test_app_absence_fixed_route_has_exact_originals_and_current_predecessor(self):
+        root = Path(__file__).absolute().parents[2]
+        raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        raw = without_positive_update_workflow(raw)
+        prior = without_app_absence_workflow(raw)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), 'ce06d7acffac6e5d37b0bf2c3afbe86ab7cf58729e68b64408634908642b8f02')
+        self.assertEqual(without_app_absence_workflow(prior), prior)
+        self.assertEqual(without_same_package_workflow(raw), without_same_package_workflow(prior))
+        self.assertEqual(raw.count("id: app_absence_prepare"), 1)
+        self.assertEqual(raw.count("id: app_absence_restore"), 1)
+        for role, minutes in (("prepare-app-absence", 56), ("app-absence-restore", 13)):
+            label = "      - name: Fixed nonshipping app-absence " + role + "; no credentials or user artifact"
+            block = raw[raw.index(label):].split("\n      - name:", 1)[0]
+            self.assertIn("timeout-minutes: " + str(minutes), block)
+            self.assertIn("refs/heads/verify/desktop-macos-app-absence-fixture", block)
+            self.assertNotIn("secrets.", block)
+            self.assertIn('"$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py ' + role, block)
+            self.assertIn('phase_status=$?', block)
+            self.assertIn('if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi', block)
+        self.assertLess(raw.index("id: data_contracts"), raw.index("id: app_absence_prepare"))
+        self.assertLess(raw.index("id: app_absence_prepare"), raw.index("id: package_install"))
+        self.assertLess(raw.index("id: package_install"), raw.index("id: app_absence_restore"))
+        self.assertEqual(raw.count("MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}"), 1)
+        self.assertNotIn("app-absence-", raw[raw.index("      - name: Upload only the normal user preview package and guide"):])
+        adapter = (root / "desktop/tools/macos_app_absence_fixture.py").read_bytes()
+        helper = (root / "desktop/tools/macos_android_helper_package.py").read_bytes()
+        self.assertLessEqual(len(adapter), 65536)
+        self.assertLessEqual(len(helper), 512 * 1024)
+        tree = ast.parse(adapter)
+        assignments = {n.targets[0].id: n.value for n in tree.body if isinstance(n, ast.Assign)
+                       and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
+        self.assertEqual(ast.literal_eval(assignments["PREPARE_ROLES"]), ("app-absence-build", "app-absence-data-tests", "app-absence-adhoc",
+            "app-absence-verify-code", "app-absence-pkgbuild", "app-absence-tar", "app-absence-xar"))
+        self.assertEqual(ast.literal_eval(assignments["RESTORE_ROLES"]), ("app-absence-restore-attach", "app-absence-withdraw",
+            "app-absence-install", "app-absence-verify", "app-absence-restore-detach"))
+        self.assertIn(b'(3180, 3240) if op.phase == PREPARE else (660, 720)', adapter)
+        self.assertIn(b'else (1740, 1800)', adapter)
+        self.assertIn(b'expected_restore_previous=expected', adapter)
+        self.assertIn(b'MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT', (root / "desktop/src-tauri/build.rs").read_bytes())
+        for previous, current in APP_ABSENCE_WORKFLOW_INVERSE:
+            changed = raw.replace(current, previous, 1)
+            with self.assertRaises(AssertionError): without_app_absence_workflow(changed)
+        with self.assertRaises(AssertionError): without_app_absence_workflow(raw + APP_ABSENCE_WORKFLOW_INVERSE[0][1])
+        self.assertNotIn("prepare-app-absence", prior)
+
     def test_portable_names_and_complete_directory_identity(self):
         for name in ("python/lib/python3.14/encodings/utf_8.py", "app/Contents/_CodeSignature/CodeResources"):
             self.assertTrue(TOOL.safe_path(name))
@@ -5929,6 +9775,57 @@ class MacInstalledData(unittest.TestCase):
         for archive in bad:
             with self.subTest(archive=archive[:6]), self.assertRaises(TOOL.Refused):
                 TOOL.cpio_members(archive)
+
+    def test_app_absence_archive_sequential_audits_keep_exact_scripts_and_root_owner(self):
+        # Both decoders are genuine. Only current SOURCE selection and original
+        # filesystem DATA ports are replaced; never tar/xar/pkgbuild execution.
+        for target in TOOL.MAC_TARGETS:
+            selection = TOOL.source_build_selection(target)
+            program = entry_macho_fixture(target=target)
+            inventory = b"INERT fixed inventory DATA\n"
+            hook = b'#!/bin/sh\nset -eu\nd="${0%/*}"\nexec "$d/mrk-macos-app-absence-fixture" "$d/input" "$1"\n'
+            files = {"postinstall": (hook, 0o555), "mrk-macos-app-absence-fixture": (program, 0o555),
+                     "input/" + TOOL.INSTALLATION_INVENTORY_NAME: (inventory, 0o444), "input/data": (b"DATA", 0o444)}
+            info = package_data(selection=selection)[1]["PackageInfo"].replace(
+                TOOL.PACKAGE_ID.encode(), (TOOL.PACKAGE_ID + "-app-absence-fixture").encode())
+            def members(uid=0, gid=0, changed=None):
+                values = files if changed is None else changed
+                archive = odc(".", stat.S_IFDIR | 0o755, uid=uid, gid=gid)
+                archive += odc("./input", stat.S_IFDIR | 0o555, uid=uid, gid=gid)
+                for name, (body, mode) in sorted(values.items()):
+                    archive += odc("./" + name, stat.S_IFREG | mode, body, uid=uid, gid=gid)
+                return {"PackageInfo": info, "Scripts": archive + odc("TRAILER!!!", 0)}
+            original = MacAndroidHelperPackagingData.final_package_xar(self, members(501, 20))
+            final = MacAndroidHelperPackagingData.final_package_xar(self, members())
+            args = SimpleNamespace(target=target, scripts=Path("/inert/scripts"), original_package=Path("/inert/original.pkg"),
+                package=Path("/inert/final.pkg"), expected_program=TOOL.digest(program), expected_inventory=TOOL.digest(inventory))
+            with (mock.patch.object(TOOL, "source_build_selection", return_value=selection),
+                  mock.patch.object(TOOL, "packager_ids", return_value=(501, 20)), mock.patch.object(TOOL, "tree", return_value=files),
+                  mock.patch.object(TOOL, "parent", side_effect=lambda path: contextlib.nullcontext((91, path.name))),
+                  mock.patch.object(TOOL, "read_at", return_value=(original, SimpleNamespace(st_uid=501, st_gid=20))),
+                  mock.patch.object(TOOL, "read", return_value=final) as read):
+                compact = TOOL.app_absence_original_command(args)
+                self.assertEqual(set(compact["rows"]), set(files) | {"input"})
+                self.assertEqual(compact["rows"]["input/data"], {"size": 4, "sha256": TOOL.digest(b"DATA"), "mode": 0o444})
+                self.assertEqual([key for key, value in compact.items() if isinstance(value, bytes)], ["packageInfo"])
+                value = TOOL.app_absence_final_command(args, compact)
+                self.assertEqual(value["packageSha256"], TOOL.digest(final))
+                self.assertEqual(value["originalPackageSha256"], TOOL.digest(original))
+                self.assertEqual(value["qualification"], "nonshipping-app-absence-fixture-not-installed")
+                wrong = [members(501, 20), dict(members(), Payload=b"forbidden"),
+                         dict(members(), PackageInfo=info+b"\n"), members(changed=dict(files, **{"input/data": (b"DIFF", 0o444)})),
+                         members(changed=dict(files, **{"input/data": (b"DATA", 0o555)})),
+                         members(changed={k: v for k, v in files.items() if k != "input/data"})]
+                for row in wrong:
+                    read.return_value = MacAndroidHelperPackagingData.final_package_xar(self, row)
+                    with self.assertRaises(TOOL.Refused): TOOL.app_absence_final_command(args, compact)
+                with self.assertRaises(TOOL.Refused): TOOL.package_info(info, selection=selection)
+                with self.assertRaises(TOOL.Refused): TOOL.package_info(info, selection=selection, fixture=True, app_absence=True)
+                for changed in (dict(files, postinstall=(b"exit 0\n", 0o555)),
+                                dict(files, **{"mrk-macos-app-absence-fixture": (program+b"different", 0o555)}),
+                                dict(files, **{"input/"+TOOL.INSTALLATION_INVENTORY_NAME: (b"different", 0o444)})):
+                    with self.assertRaises(TOOL.Refused):
+                        TOOL.app_absence_scripts_data(changed, args.expected_program, args.expected_inventory)
 
     def test_original_package_preparation_cannot_substitute_for_root_audit(self):
         files, members = package_data(uid=501, gid=20)
@@ -6394,7 +10291,7 @@ class MacInstalledData(unittest.TestCase):
                       "env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence'", 'timeout-minutes: 11',
                       '-default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300'):
             self.assertIn(token, selected)
-        self.assertIn('MRK_MACOS_SAVED_FILE_UI_SCOPE: ordinary-seven', current)
+        self.assertEqual(current.count("      MRK_MACOS_SAVED_FILE_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'remaining-three' || 'ordinary-seven' }}\n"), 1)
         self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-preview'", selected)
         code = result_block.split("<<'PY_SAVED_VERSION_RECOVERY_RESULT'\n", 1)[1].split('          PY_SAVED_VERSION_RECOVERY_RESULT', 1)[0]
         tree = ast.parse('\n'.join(line[10:] if line.startswith('          ') else line for line in code.splitlines()))
@@ -7415,6 +11312,799 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
             with self.assertRaisesRegex(TOOL.Refused, "installer-channel-parent-protection"):
                 TOOL.installer_success_status(args)
 
+    def test_same_package_census_uses_exact_public_names_and_consuming_originals(self):
+        request = "1" * 32
+        path = TOOL.INSTALL_ROOT.parent / ("MobileReleaseKit-InstallerResult-v2-" + request + ".json")
+        body = TOOL.canonical(export_document()) + b"\n"
+        for fault in (None, "extra", "duplicate", "bound", "mode", "close"):
+            with self.subTest(fault=fault), channel_data(path, body) as model:
+                names = [SimpleNamespace(name=path.name)]
+                if fault == "extra": names.append(SimpleNamespace(name="MobileReleaseKit-InstallerResult-v2-invalid.json"))
+                if fault == "duplicate": names *= 2
+                if fault == "bound": names = [SimpleNamespace(name="unrelated")] * 4097
+                model.api.scandir.side_effect = lambda fd: contextlib.nullcontext(iter(names))
+                if fault == "mode":
+                    model.objects[model.leaf] = SimpleNamespace(**{**model.objects[model.leaf].__dict__, "st_mode": stat.S_IFREG | 0o644})
+                if fault == "close":
+                    def close(fd):
+                        model.close(fd)
+                        if fd == model.leaf: raise OSError("INERT original-close uncertainty")
+                    model.api.close.side_effect = close
+                if fault is None:
+                    rows = TOOL.same_package_result_census()
+                    self.assertEqual(rows, {request: {"bytes": len(body), "sha256": TOOL.digest(body),
+                        "identity": list(TOOL.signature(model.objects[model.leaf]))}})
+                    model.api.scandir.assert_called_once_with(model.parent)
+                else:
+                    with self.assertRaises((TOOL.Refused, OSError)):
+                        TOOL.same_package_result_census()
+                self.assertEqual(model.closed, list(reversed(model.opened)))
+        # Real tiny filesystem traversal/read/EOF/close. Only fixture uid/gid are
+        # translated into the root-policy DATA expected by this pure test; all
+        # modes, type, nlink, size, inode and timestamps remain actually observed.
+        # This does not qualify native ownership or an installation channel.
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            name = "MobileReleaseKit-InstallerResult-v2-" + request + ".json"
+            (parent / name).write_bytes(body)
+            (parent / name).chmod(0o444)
+            (parent / "unrelated").write_bytes(b"ignored")
+            real_os = TOOL.os
+            opened, closed = [], []
+            parent_fd = real_os.open(parent, real_os.O_RDONLY | real_os.O_DIRECTORY)
+            def identity(info):
+                fields = {key: getattr(info, key) for key in dir(info) if key.startswith("st_")}
+                return SimpleNamespace(**{**fields, "st_uid": 0, "st_gid": 0})
+            def named(name, *, dir_fd, follow_symlinks):
+                self.assertEqual(dir_fd, parent_fd); self.assertEqual(name, name_expected)
+                self.assertIs(follow_symlinks, False)
+                return identity(real_os.stat(name, dir_fd=dir_fd, follow_symlinks=False))
+            def acquire(name, flags, *, dir_fd):
+                self.assertEqual(dir_fd, parent_fd); self.assertEqual(name, name_expected)
+                fd = real_os.open(name, flags, dir_fd=dir_fd); opened.append(fd)
+                return fd
+            def close(fd):
+                self.assertIn(fd, opened); self.assertNotIn(fd, closed)
+                real_os.close(fd); closed.append(fd)
+            name_expected = name
+            api = mock.Mock(wraps=real_os)
+            api.stat.side_effect = named
+            api.open.side_effect = acquire
+            api.fstat.side_effect = lambda fd: identity(real_os.fstat(fd))
+            api.close.side_effect = close
+            try:
+                with (mock.patch.object(TOOL, "os", api),
+                      mock.patch.object(TOOL, "installer_channel_parent", return_value=contextlib.nullcontext((parent_fd, "unused")))):
+                    actual = TOOL.same_package_result_census()
+                self.assertEqual(actual[request]["bytes"], len(body))
+                self.assertEqual(actual[request]["sha256"], TOOL.digest(body))
+                self.assertEqual(len(opened), 1)
+                self.assertEqual(closed, opened)
+                api.read.assert_called()
+                api.scandir.assert_called_once_with(parent_fd)
+            finally:
+                real_os.close(parent_fd)
+
+        before = {request: {"bytes": 1, "sha256": "a" * 64, "identity": [1] * 9}}
+        after = {**before, "2" * 32: {"bytes": 2, "sha256": "b" * 64, "identity": [2] * 9}}
+        self.assertEqual(TOOL.same_package_new_request(before, after, request), "2" * 32)
+        for changed in ({}, before, {**after, "3" * 32: {}}, {**after, request: {}}, {**before, "bad": {}}):
+            with self.assertRaises(TOOL.Refused): TOOL.same_package_new_request(before, changed, request)
+
+    def test_same_package_readback_requires_actual_immediate_previous_state(self):
+        for target in TOOL.MAC_TARGETS:
+            for actions in (("fresh-install", "same-package-noop"), ("fresh-install", "same-package-noop", "same-package-noop")):
+                producer, records, result = maintenance_documents(actions, target=target)
+                selected = TOOL.maintenance_producer_data(TOOL.canonical(producer), target=target)
+                _state, parsed = TOOL.maintenance_history_data(result, records, selected)
+                intent = parsed[result["invocation"]][0]
+                expected = intent["previousState"]
+                TOOL.same_package_previous_data(result, parsed, expected)
+                for changed in ({**expected, "invocation": "f" * 32}, {**expected, "sha256": "e" * 64},
+                                {**expected, "extra": True}, None):
+                    with self.assertRaises(TOOL.Refused): TOOL.same_package_previous_data(result, parsed, changed)
+            for action in ("restore-fixed-app", "update"):
+                producer, records, result = maintenance_documents(("fresh-install", action), target=target)
+                selected = TOOL.maintenance_producer_data(TOOL.canonical(producer), target=target)
+                _state, parsed = TOOL.maintenance_history_data(result, records, selected)
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.same_package_previous_data(result, parsed, parsed[result["invocation"]][0]["previousState"])
+
+        # Whole ordinary readback wiring, not a replacement observation/history
+        # reducer. Only SOURCE selection and finite low-level IO ports are inert;
+        # the genuine status/export readers and all closed history/current-byte
+        # reducers execute. No fake FD below reaches the host and no installed
+        # ownership, signature, native Installer or Store qualification is made.
+        for target in TOOL.MAC_TARGETS:
+            for fault in (None, "default", "previous", "status", "current-bytes"):
+                with self.subTest(target=target, ordinary_readback=fault):
+                    producer, old_records, result = maintenance_documents(("fresh-install", "same-package-noop"), target=target)
+                    release = producer["releaseSet"]["current"]
+                    selection = TOOL.BuildSelection(target, release["packageVersion"], release["release"])
+                    record, inventory, root_identity, _ = installation_record_fixture(selection=selection)
+                    inventory_data = TOOL.decode(inventory)
+                    manifest_hash = TOOL.digest(b"x")
+                    inventory_data["runtimeManifestSha256"] = manifest_hash
+                    for row in inventory_data["files"]:
+                        row["sha256"] = manifest_hash
+                    inventory = TOOL.canonical(inventory_data)
+                    inventory_hash = TOOL.digest(inventory)
+                    def bind(value):
+                        if type(value) is dict:
+                            return {key: (inventory_hash if key == "inventorySha256" else manifest_hash
+                                    if key == "runtimeManifestSha256" else bind(item)) for key, item in value.items()}
+                        if type(value) is list:
+                            return [bind(item) for item in value]
+                        return value
+                    producer = bind(producer)
+                    records, evidence = {}, []
+                    for invocation, raw in old_records.items():
+                        intent, state, capsule = [bind(TOOL.decode(body)) for body in raw]
+                        if intent["previousState"] is not None:
+                            previous = intent["previousState"]["invocation"]
+                            intent["previousState"]["sha256"] = TOOL.digest(records[previous][1])
+                        state["previousEvidence"] = copy.deepcopy(evidence)
+                        intent_body, state_body = TOOL.canonical(intent) + b"\n", TOOL.canonical(state) + b"\n"
+                        capsule.update(intentSha256=TOOL.digest(intent_body), stateSha256=TOOL.digest(state_body))
+                        capsule_body = TOOL.canonical(capsule) + b"\n"
+                        records[invocation] = (intent_body, state_body, capsule_body)
+                        hashes = {"intentSha256": TOOL.digest(intent_body), "stateSha256": TOOL.digest(state_body),
+                                  "capsuleSha256": TOOL.digest(capsule_body)}
+                        evidence.append({"invocation": invocation, **hashes})
+                    result = {**result, **hashes}
+                    descriptor, signed = TOOL.canonical(producer), b"inert-public-signature"
+                    current, parsed = TOOL.maintenance_history_data(result, records,
+                        TOOL.maintenance_producer_data(descriptor, target=target))
+                    expected = copy.deepcopy(parsed[result["invocation"]][0]["previousState"])
+                    generation = current["current"]
+                    record.update(instance=generation["instance"], runtimeManifestSha256=manifest_hash,
+                                  releaseDirectory=generation["releaseDirectory"],
+                                  inventory={"name": TOOL.INSTALLATION_INVENTORY_NAME, "bytes": len(inventory), "sha256": inventory_hash})
+                    args = result_args()
+                    args.target, args.request_id = target, result["requestId"]
+                    args.expected_inventory, args.expected_manifest = inventory_hash, manifest_hash
+                    export = TOOL.canonical(result) + b"\n"
+                    names, stages = TOOL.maintenance_roster_data(current, parsed, target)
+                    descriptor_name, signature_name = TOOL.maintenance_control_names(target, selection.release)
+                    metadata = {(100, TOOL.MAINTENANCE_STATE_NAME): records[current["invocation"]][1],
+                                (100, TOOL.MAINTENANCE_GATE_NAME): TOOL.MAINTENANCE_GATE_BYTES,
+                                (100, TOOL.REGISTRATION_GATE_NAME): TOOL.REGISTRATION_GATE_BYTES,
+                                (100, descriptor_name): descriptor, (100, signature_name): signed,
+                                (103, TOOL.INSTALLATION_INVENTORY_NAME): inventory,
+                                (103, TOOL.INSTALLATION_RECORD_NAME): TOOL.canonical(record)}
+                    for invocation, (intent_body, state_body, capsule_body) in records.items():
+                        metadata[(100, ".maintenance-" + invocation + ".intent.json")] = intent_body
+                        metadata[(100, ".maintenance-" + invocation + ".capsule.json")] = capsule_body
+                        if invocation != current["invocation"]:
+                            metadata[(100, ".maintenance-" + invocation + ".state.json")] = state_body
+                    payload = {row["path"]: (b"x", 0o555 if row["executable"] else 0o444) for row in inventory_data["files"]}
+                    if fault == "current-bytes":
+                        payload["app/Contents/Info.plist"] = (b"y", 0o444)
+                    directory_rows = {(90, TOOL.INSTALL_ROOT.name): (100, root_identity, 0o755),
+                                      (100, "versions"): (101, root_identity, 0o755),
+                                      (100, TOOL.APP_NAME): (102, generation["app"]["identity"], 0o555),
+                                      (101, selection.release): (103, generation["releaseDirectory"], 0o755)}
+                    entered, closed, channel_models = [], [], []
+                    original_channel, original_read_at = TOOL.installer_channel_parent, TOOL.read_at
+                    @contextlib.contextmanager
+                    def channel(path, *, private=None):
+                        if path == TOOL.INSTALL_ROOT:
+                            yield 90, path.name
+                        else:
+                            body = (b"1\n" if fault == "status" else b"0\n") if private is not None else export
+                            with channel_data(path, body, private=private is not None) as model:
+                                channel_models.append(model)
+                                with original_channel(path, private=private) as originals:
+                                    yield originals
+                    @contextlib.contextmanager
+                    def directory(fd, name, mode):
+                        child, identity, expected_mode = directory_rows[(fd, name)]
+                        self.assertEqual(mode, expected_mode)
+                        entered.append(child)
+                        try:
+                            yield child, identity
+                        finally:
+                            closed.append(child)
+                    def metadata_read(fd, name, limit):
+                        body = metadata[(fd, name)]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def read_at(fd, name, limit):
+                        if fd != 200:
+                            return original_read_at(fd, name, limit)
+                        body = {"producer.json": descriptor, "producer.sig": signed}[name]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def tree(path, *, installed):
+                        self.assertIs(installed, True)
+                        prefix = {TOOL.INSTALL_ROOT / TOOL.APP_NAME: "app/",
+                                  TOOL.INSTALL_ROOT / "versions" / selection.release / "runtime": "runtime/"}[path]
+                        return {name[len(prefix):]: value for name, value in payload.items() if name.startswith(prefix)}
+                    api = mock.Mock(wraps=TOOL.os)
+                    api.O_DIRECTORY = TOOL.os.O_DIRECTORY
+                    api.getuid.return_value = api.geteuid.return_value = 501
+                    api.getgid.return_value = api.getegid.return_value = 20
+                    api.listdir.side_effect = {100: names, 101: {selection.release},
+                        103: {"runtime", TOOL.INSTALLATION_INVENTORY_NAME, TOOL.INSTALLATION_RECORD_NAME}}.__getitem__
+                    api.fstat.side_effect = lambda fd: log_info(st_ino=fd, st_mode=stat.S_IFDIR | 0o755)
+                    def stage_stat(name, *, dir_fd, follow_symlinks):
+                        self.assertEqual(dir_fd, 100); self.assertIn(name, stages); self.assertIs(follow_symlinks, False)
+                        return log_info(st_dev=root_identity["device"], st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0, st_flags=0)
+                    api.stat.side_effect = stage_stat
+                    # ExitStack avoids Python's static nested-block limit and
+                    # restores every port before the next finite scenario.
+                    with contextlib.ExitStack() as stack:
+                        for name, replacement in (("os", api), ("installer_channel_parent", channel),
+                                ("maintenance_directory", directory), ("installation_metadata_leaf", metadata_read),
+                                ("read_at", read_at), ("tree", tree)):
+                            stack.enter_context(mock.patch.object(TOOL, name, replacement))
+                        stack.enter_context(mock.patch.object(TOOL, "source_build_selection", return_value=selection))
+                        stack.enter_context(mock.patch.object(TOOL, "parent", side_effect=lambda path: contextlib.nullcontext((200, path.name))))
+                        stack.enter_context(mock.patch.object(TOOL, "read", side_effect=lambda path, limit: inventory
+                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == 1024 * 1024 else self.fail("unexpected SOURCE read")))
+                        history = stack.enter_context(mock.patch.object(TOOL, "maintenance_history_data", wraps=TOOL.maintenance_history_data))
+                        producer_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_producer_inputs", wraps=TOOL.maintenance_producer_inputs))
+                        generation_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_generation_readback", wraps=TOOL.maintenance_generation_readback))
+                        if fault == "previous": expected["sha256"] = "f" * 64
+                        reason = {"previous": "same-package-immediate-predecessor", "status": "installer-status-not-original-zero",
+                                  "current-bytes": "installed-byte-mode-correspondence"}.get(fault)
+                        if reason is not None:
+                            with self.assertRaisesRegex(TOOL.Refused, reason):
+                                TOOL.observation_command(args, expected_previous=expected)
+                        else:
+                            observed = TOOL.observation_command(args) if fault == "default" else TOOL.observation_command(args, expected_previous=expected)
+                            self.assertEqual(observed["originalInstallerResult"], result)
+                            self.assertEqual(observed["nonrootReadbackFileCount"], 7)
+                            self.assertIs(observed["originalInstallerReturnedZero"], True)
+                            self.assertEqual("samePackagePredecessorMatched" in observed, fault != "default")
+                            if fault is None:
+                                self.assertIs(observed["samePackagePredecessorMatched"], True)
+                                ordinary_shape = {key: value for key, value in observed.items() if key != "samePackagePredecessorMatched"}
+                            else:
+                                self.assertEqual(observed, ordinary_shape)
+                        self.assertEqual(producer_read.call_count, 0 if fault == "status" else 1)
+                        self.assertEqual(history.call_count, 0 if fault == "status" else 1)
+                        self.assertEqual(generation_read.call_count, 0 if fault in ("status", "previous") else 1)
+                    self.assertEqual(closed, list(reversed(entered)))
+                    for model in channel_models:
+                        self.assertEqual(model.closed, list(reversed(model.opened)))
+
+
+    def test_positive_update_uses_genuine_history_status_and_both_generation_readers(self):
+        # Whole ordinary readback wiring, not a replacement observation/history
+        # reducer. Only SOURCE selection and finite low-level IO ports are inert;
+        # the genuine status/export readers and all closed history/current-byte
+        # reducers execute. No fake FD below reaches the host and no installed
+        # ownership, signature, native Installer or Store qualification is made.
+        for target in TOOL.MAC_TARGETS:
+            for fault in (None, "default", "previous", "root", "instance", "status", "current-bytes"):
+                with self.subTest(target=target, ordinary_readback=fault):
+                    producer, old_records, result = maintenance_documents(("fresh-install", "update"), target=target)
+                    release = producer["releaseSet"]["current"]
+                    selection = TOOL.BuildSelection(target, release["packageVersion"], release["release"])
+                    record, inventory, root_identity, _ = installation_record_fixture(selection=selection)
+                    inventory_data = TOOL.decode(inventory)
+                    manifest_hash = TOOL.digest(b"x")
+                    inventory_data["runtimeManifestSha256"] = manifest_hash
+                    for row in inventory_data["files"]:
+                        row["sha256"] = manifest_hash
+                    inventory = TOOL.canonical(inventory_data)
+                    inventory_hash = TOOL.digest(inventory)
+                    old_release = producer["releaseSet"]["acceptedPredecessors"][0]
+                    old_selection = TOOL.BuildSelection(target, old_release["packageVersion"], old_release["release"])
+                    old_record, old_inventory, _, _ = installation_record_fixture(selection=old_selection)
+                    old_inventory_data = TOOL.decode(old_inventory)
+                    old_inventory_data["runtimeManifestSha256"] = manifest_hash
+                    for row in old_inventory_data["files"]: row["sha256"] = manifest_hash
+                    old_inventory = TOOL.canonical(old_inventory_data)
+                    def bind(value):
+                        if type(value) is dict and "profile" in value and "inventorySha256" in value:
+                            return {**value, "runtimeManifestSha256": manifest_hash,
+                                    "inventorySha256": TOOL.digest(old_inventory) if value["release"] == old_selection.release else inventory_hash}
+                        if type(value) is dict:
+                            return {key: (inventory_hash if key == "inventorySha256" else manifest_hash
+                                    if key == "runtimeManifestSha256" else bind(item)) for key, item in value.items()}
+                        if type(value) is list:
+                            return [bind(item) for item in value]
+                        return value
+                    producer = bind(producer)
+                    records, evidence = {}, []
+                    for invocation, raw in old_records.items():
+                        intent, state, capsule = [bind(TOOL.decode(body)) for body in raw]
+                        if intent["previousState"] is not None:
+                            previous = intent["previousState"]["invocation"]
+                            intent["previousState"]["sha256"] = TOOL.digest(records[previous][1])
+                        state["previousEvidence"] = copy.deepcopy(evidence)
+                        intent_body, state_body = TOOL.canonical(intent) + b"\n", TOOL.canonical(state) + b"\n"
+                        capsule.update(intentSha256=TOOL.digest(intent_body), stateSha256=TOOL.digest(state_body))
+                        capsule_body = TOOL.canonical(capsule) + b"\n"
+                        records[invocation] = (intent_body, state_body, capsule_body)
+                        hashes = {"intentSha256": TOOL.digest(intent_body), "stateSha256": TOOL.digest(state_body),
+                                  "capsuleSha256": TOOL.digest(capsule_body)}
+                        evidence.append({"invocation": invocation, **hashes})
+                    result = {**result, **hashes}
+                    descriptor, signed = TOOL.canonical(producer), b"inert-public-signature"
+                    current, parsed = TOOL.maintenance_history_data(result, records,
+                        TOOL.maintenance_producer_data(descriptor, target=target))
+                    previous = copy.deepcopy(parsed[result["invocation"]][0]["previousState"])
+                    old_generation = parsed[previous["invocation"]][1]["current"]
+                    expected = {"previous": previous, "rootIdentity": root_identity, "generation": old_generation}
+                    facts = {}
+                    generation = current["current"]
+                    record.update(instance=generation["instance"], runtimeManifestSha256=manifest_hash,
+                                  releaseDirectory=generation["releaseDirectory"],
+                                  inventory={"name": TOOL.INSTALLATION_INVENTORY_NAME, "bytes": len(inventory), "sha256": inventory_hash})
+                    args = result_args()
+                    args.target, args.request_id = target, result["requestId"]
+                    args.expected_inventory, args.expected_manifest = inventory_hash, manifest_hash
+                    export = TOOL.canonical(result) + b"\n"
+                    names, stages = TOOL.maintenance_roster_data(current, parsed, target)
+                    descriptor_name, signature_name = TOOL.maintenance_control_names(target, selection.release)
+                    metadata = {(100, TOOL.MAINTENANCE_STATE_NAME): records[current["invocation"]][1],
+                                (100, TOOL.MAINTENANCE_GATE_NAME): TOOL.MAINTENANCE_GATE_BYTES,
+                                (100, TOOL.REGISTRATION_GATE_NAME): TOOL.REGISTRATION_GATE_BYTES,
+                                (100, descriptor_name): descriptor, (100, signature_name): signed,
+                                (103, TOOL.INSTALLATION_INVENTORY_NAME): inventory,
+                                (103, TOOL.INSTALLATION_RECORD_NAME): TOOL.canonical(record)}
+                    for invocation, (intent_body, state_body, capsule_body) in records.items():
+                        metadata[(100, ".maintenance-" + invocation + ".intent.json")] = intent_body
+                        metadata[(100, ".maintenance-" + invocation + ".capsule.json")] = capsule_body
+                        if invocation != current["invocation"]:
+                            metadata[(100, ".maintenance-" + invocation + ".state.json")] = state_body
+                    payload = {row["path"]: (b"x", 0o555 if row["executable"] else 0o444) for row in inventory_data["files"]}
+                    if fault == "current-bytes":
+                        payload["app/Contents/Info.plist"] = (b"y", 0o444)
+                    directory_rows = {(90, TOOL.INSTALL_ROOT.name): (100, root_identity, 0o755),
+                                      (100, "versions"): (101, root_identity, 0o755),
+                                      (100, TOOL.APP_NAME): (102, generation["app"]["identity"], 0o555),
+                                      (101, selection.release): (103, generation["releaseDirectory"], 0o755)}
+                    old_record.update(instance=old_generation["instance"], runtimeManifestSha256=manifest_hash,
+                        releaseDirectory=old_generation["releaseDirectory"],
+                        inventory={"name": TOOL.INSTALLATION_INVENTORY_NAME, "bytes": len(old_inventory), "sha256": TOOL.digest(old_inventory)})
+                    old_producer = copy.deepcopy(producer)
+                    old_producer["releaseSet"].update(current=old_generation["release"], acceptedPredecessors=[])
+                    old_descriptor = TOOL.canonical(old_producer)
+                    old_names = TOOL.maintenance_control_names(target, old_selection.release)
+                    metadata.update({(100, old_names[0]): old_descriptor, (100, old_names[1]): signed,
+                        (105, TOOL.INSTALLATION_INVENTORY_NAME): old_inventory,
+                        (105, TOOL.INSTALLATION_RECORD_NAME): TOOL.canonical(old_record)})
+                    directory_rows.update({(100, ".retained-app-" + current["invocation"]): (104, old_generation["app"]["identity"], 0o555),
+                        (101, old_selection.release): (105, old_generation["releaseDirectory"], 0o755),
+                        (105, "runtime"): (106, {**root_identity, "inode": 106, "mode": stat.S_IFDIR | 0o555}, 0o555)})
+                    entered, closed, live, channel_models = [], [], [], []
+                    original_channel, original_read_at = TOOL.installer_channel_parent, TOOL.read_at
+                    @contextlib.contextmanager
+                    def channel(path, *, private=None):
+                        if path == TOOL.INSTALL_ROOT:
+                            yield 90, path.name
+                        else:
+                            body = (b"1\n" if fault == "status" else b"0\n") if private is not None else export
+                            with channel_data(path, body, private=private is not None) as model:
+                                channel_models.append(model)
+                                with original_channel(path, private=private) as originals:
+                                    yield originals
+                    @contextlib.contextmanager
+                    def directory(fd, name, mode):
+                        child, identity, expected_mode = directory_rows[(fd, name)]
+                        self.assertEqual(mode, expected_mode)
+                        entered.append(child)
+                        live.append(child)
+                        try:
+                            yield child, identity
+                        finally:
+                            self.assertEqual(live[-1], child)
+                            live.pop()
+                            closed.append(child)
+                    def metadata_read(fd, name, limit):
+                        body = metadata[(fd, name)]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def read_at(fd, name, limit):
+                        if fd != 200:
+                            return original_read_at(fd, name, limit)
+                        body = {"producer.json": descriptor, "producer.sig": signed}[name]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def tree(path, *, installed):
+                        self.assertIs(installed, True)
+                        prefix = {TOOL.INSTALL_ROOT / TOOL.APP_NAME: "app/",
+                                  TOOL.INSTALL_ROOT / "versions" / selection.release / "runtime": "runtime/"}[path]
+                        return {name[len(prefix):]: value for name, value in payload.items() if name.startswith(prefix)}
+                    api = mock.Mock(wraps=TOOL.os)
+                    api.O_DIRECTORY = TOOL.os.O_DIRECTORY
+                    api.getuid.return_value = api.geteuid.return_value = 501
+                    api.getgid.return_value = api.getegid.return_value = 20
+                    api.listdir.side_effect = {100: names, 101: {selection.release, old_selection.release},
+                        103: {"runtime", TOOL.INSTALLATION_INVENTORY_NAME, TOOL.INSTALLATION_RECORD_NAME},
+                        105: {"runtime", TOOL.INSTALLATION_INVENTORY_NAME, TOOL.INSTALLATION_RECORD_NAME}}.__getitem__
+                    api.fstat.side_effect = lambda fd: log_info(st_ino=fd, st_mode=stat.S_IFDIR | 0o755)
+                    def stage_stat(name, *, dir_fd, follow_symlinks):
+                        self.assertEqual(dir_fd, 100); self.assertIn(name, stages); self.assertIs(follow_symlinks, False)
+                        return log_info(st_dev=root_identity["device"], st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0, st_flags=0)
+                    api.stat.side_effect = stage_stat
+                    # ExitStack avoids Python's static nested-block limit and
+                    # restores every port before the next finite scenario.
+                    with contextlib.ExitStack() as stack:
+                        for name, replacement in (("os", api), ("installer_channel_parent", channel),
+                                ("maintenance_directory", directory), ("installation_metadata_leaf", metadata_read),
+                                ("read_at", read_at), ("tree", tree)):
+                            stack.enter_context(mock.patch.object(TOOL, name, replacement))
+                        stack.enter_context(mock.patch.object(TOOL, "source_build_selection", return_value=selection))
+                        stack.enter_context(mock.patch.object(TOOL, "parent", side_effect=lambda path: contextlib.nullcontext((200, path.name))))
+                        stack.enter_context(mock.patch.object(TOOL, "read", side_effect=lambda path, limit: inventory
+                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == 1024 * 1024 else self.fail("unexpected SOURCE read")))
+                        history = stack.enter_context(mock.patch.object(TOOL, "maintenance_history_data", wraps=TOOL.maintenance_history_data))
+                        producer_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_producer_inputs", wraps=TOOL.maintenance_producer_inputs))
+                        generation_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_generation_readback", wraps=TOOL.maintenance_generation_readback))
+                        if fault == "previous": expected = {**expected, "previous": {**previous, "sha256": "f" * 64}}
+                        elif fault == "root": expected = {**expected, "rootIdentity": {**root_identity, "inode": 9999}}
+                        elif fault == "instance": expected = {**expected, "generation": {**old_generation, "instance": "f" * 32}}
+                        reason = {"previous": "update-immediate-predecessor", "root": "update-immediate-predecessor",
+                                  "instance": "update-initial-fresh-generation", "status": "installer-status-not-original-zero",
+                                  "current-bytes": "installed-byte-mode-correspondence"}.get(fault)
+                        if reason is not None:
+                            with self.assertRaisesRegex(TOOL.Refused, reason):
+                                TOOL.observation_command(args, expected_update_previous=expected, update_facts=facts)
+                        else:
+                            observed = TOOL.observation_command(args) if fault == "default" else TOOL.observation_command(args, expected_update_previous=expected, update_facts=facts)
+                            self.assertEqual(observed["originalInstallerResult"], result)
+                            self.assertEqual(observed["nonrootReadbackFileCount"], 7)
+                            self.assertIs(observed["originalInstallerReturnedZero"], True)
+                            self.assertNotIn("updatePredecessorMatched", observed)
+                            if fault is None:
+                                self.assertEqual(facts["rootIdentity"], root_identity)
+                                self.assertEqual(facts["generation"], current["current"])
+                                self.assertNotEqual(facts["generation"]["instance"], old_generation["instance"])
+                                ordinary_shape = observed
+                            else:
+                                self.assertEqual(observed, ordinary_shape)
+                        self.assertEqual(producer_read.call_count, 0 if fault == "status" else 1)
+                        self.assertEqual(history.call_count, 0 if fault == "status" else 1)
+                        self.assertEqual(generation_read.call_count, 0 if fault in ("status", "previous", "root", "instance") else 1 if fault == "current-bytes" else 2)
+                    # Current and retained generations are sequential sibling
+                    # scopes: require lexical LIFO and each original closed once,
+                    # not reversal of the combined acquisition history.
+                    self.assertEqual(live, [])
+                    self.assertEqual(len(closed), len(entered))
+                    self.assertCountEqual(closed, entered)
+                    if fault in (None, "default"):
+                        self.assertEqual(entered, [100, 101, 102, 103, 104, 105, 106])
+                        self.assertEqual(closed, [103, 102, 106, 105, 104, 101, 100])
+                    for model in channel_models:
+                        self.assertEqual(model.closed, list(reversed(model.opened)))
+
+
+    def test_update_baseline_uses_fixed_nomination_and_genuine_fresh_current_reader(self):
+        # Whole ordinary readback wiring, not a replacement observation/history
+        # reducer. Only SOURCE selection and finite low-level IO ports are inert;
+        # the genuine status/export readers and all closed history/current-byte
+        # reducers execute. No fake FD below reaches the host and no installed
+        # ownership, signature, native Installer or Store qualification is made.
+        for target in TOOL.MAC_TARGETS:
+            for fault in (None, "default", "nomination", "status", "current-bytes"):
+                with self.subTest(target=target, ordinary_readback=fault):
+                    producer, old_records, result = maintenance_documents(("fresh-install",), target=target)
+                    release = producer["releaseSet"]["current"]
+                    selection = TOOL.BuildSelection(target, release["packageVersion"], release["release"])
+                    record, inventory, root_identity, _ = installation_record_fixture(selection=selection)
+                    inventory_data = TOOL.decode(inventory)
+                    manifest_hash = TOOL.digest(b"x")
+                    inventory_data["runtimeManifestSha256"] = manifest_hash
+                    for row in inventory_data["files"]:
+                        row["sha256"] = manifest_hash
+                    inventory = TOOL.canonical(inventory_data)
+                    inventory_hash = TOOL.digest(inventory)
+                    def bind(value):
+                        if type(value) is dict:
+                            return {key: (inventory_hash if key == "inventorySha256" else manifest_hash
+                                    if key == "runtimeManifestSha256" else bind(item)) for key, item in value.items()}
+                        if type(value) is list:
+                            return [bind(item) for item in value]
+                        return value
+                    producer = bind(producer)
+                    records, evidence = {}, []
+                    for invocation, raw in old_records.items():
+                        intent, state, capsule = [bind(TOOL.decode(body)) for body in raw]
+                        if intent["previousState"] is not None:
+                            previous = intent["previousState"]["invocation"]
+                            intent["previousState"]["sha256"] = TOOL.digest(records[previous][1])
+                        state["previousEvidence"] = copy.deepcopy(evidence)
+                        intent_body, state_body = TOOL.canonical(intent) + b"\n", TOOL.canonical(state) + b"\n"
+                        capsule.update(intentSha256=TOOL.digest(intent_body), stateSha256=TOOL.digest(state_body))
+                        capsule_body = TOOL.canonical(capsule) + b"\n"
+                        records[invocation] = (intent_body, state_body, capsule_body)
+                        hashes = {"intentSha256": TOOL.digest(intent_body), "stateSha256": TOOL.digest(state_body),
+                                  "capsuleSha256": TOOL.digest(capsule_body)}
+                        evidence.append({"invocation": invocation, **hashes})
+                    result = {**result, **hashes}
+                    descriptor, signed = TOOL.canonical(producer), b"inert-public-signature"
+                    current, parsed = TOOL.maintenance_history_data(result, records,
+                        TOOL.maintenance_producer_data(descriptor, target=target))
+                    nomination = {"release": producer["releaseSet"]["current"]}
+                    nominated_source = {"schemaVersion": 1, "mode": "configured", "targets": {
+                        item: nomination for item in TOOL.MAC_TARGETS}}
+                    facts = {}
+                    generation = current["current"]
+                    record.update(instance=generation["instance"], runtimeManifestSha256=manifest_hash,
+                                  releaseDirectory=generation["releaseDirectory"],
+                                  inventory={"name": TOOL.INSTALLATION_INVENTORY_NAME, "bytes": len(inventory), "sha256": inventory_hash})
+                    args = result_args()
+                    args.target, args.request_id = target, result["requestId"]
+                    args.expected_inventory, args.expected_manifest = inventory_hash, manifest_hash
+                    args.expected_source = producer["releaseSet"]["current"]["sourceCommit"]
+                    args.expected_package = producer["releaseSet"]["current"]["packageSha256"]
+                    export = TOOL.canonical(result) + b"\n"
+                    names, stages = TOOL.maintenance_roster_data(current, parsed, target)
+                    descriptor_name, signature_name = TOOL.maintenance_control_names(target, selection.release)
+                    metadata = {(100, TOOL.MAINTENANCE_STATE_NAME): records[current["invocation"]][1],
+                                (100, TOOL.MAINTENANCE_GATE_NAME): TOOL.MAINTENANCE_GATE_BYTES,
+                                (100, TOOL.REGISTRATION_GATE_NAME): TOOL.REGISTRATION_GATE_BYTES,
+                                (100, descriptor_name): descriptor, (100, signature_name): signed,
+                                (103, TOOL.INSTALLATION_INVENTORY_NAME): inventory,
+                                (103, TOOL.INSTALLATION_RECORD_NAME): TOOL.canonical(record)}
+                    for invocation, (intent_body, state_body, capsule_body) in records.items():
+                        metadata[(100, ".maintenance-" + invocation + ".intent.json")] = intent_body
+                        metadata[(100, ".maintenance-" + invocation + ".capsule.json")] = capsule_body
+                        if invocation != current["invocation"]:
+                            metadata[(100, ".maintenance-" + invocation + ".state.json")] = state_body
+                    payload = {row["path"]: (b"x", 0o555 if row["executable"] else 0o444) for row in inventory_data["files"]}
+                    if fault == "current-bytes":
+                        payload["app/Contents/Info.plist"] = (b"y", 0o444)
+                    directory_rows = {(90, TOOL.INSTALL_ROOT.name): (100, root_identity, 0o755),
+                                      (100, "versions"): (101, root_identity, 0o755),
+                                      (100, TOOL.APP_NAME): (102, generation["app"]["identity"], 0o555),
+                                      (101, selection.release): (103, generation["releaseDirectory"], 0o755)}
+                    entered, closed, channel_models = [], [], []
+                    original_channel, original_read_at = TOOL.installer_channel_parent, TOOL.read_at
+                    @contextlib.contextmanager
+                    def channel(path, *, private=None):
+                        if path == TOOL.INSTALL_ROOT:
+                            yield 90, path.name
+                        else:
+                            body = (b"1\n" if fault == "status" else b"0\n") if private is not None else export
+                            with channel_data(path, body, private=private is not None) as model:
+                                channel_models.append(model)
+                                with original_channel(path, private=private) as originals:
+                                    yield originals
+                    @contextlib.contextmanager
+                    def directory(fd, name, mode):
+                        child, identity, expected_mode = directory_rows[(fd, name)]
+                        self.assertEqual(mode, expected_mode)
+                        entered.append(child)
+                        try:
+                            yield child, identity
+                        finally:
+                            closed.append(child)
+                    def metadata_read(fd, name, limit):
+                        body = metadata[(fd, name)]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def read_at(fd, name, limit):
+                        if fd != 200:
+                            return original_read_at(fd, name, limit)
+                        body = {"producer.json": descriptor, "producer.sig": signed}[name]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def tree(path, *, installed):
+                        self.assertIs(installed, True)
+                        prefix = {TOOL.INSTALL_ROOT / TOOL.APP_NAME: "app/",
+                                  TOOL.INSTALL_ROOT / "versions" / selection.release / "runtime": "runtime/"}[path]
+                        return {name[len(prefix):]: value for name, value in payload.items() if name.startswith(prefix)}
+                    api = mock.Mock(wraps=TOOL.os)
+                    api.O_DIRECTORY = TOOL.os.O_DIRECTORY
+                    api.getuid.return_value = api.geteuid.return_value = 501
+                    api.getgid.return_value = api.getegid.return_value = 20
+                    api.listdir.side_effect = {100: names, 101: {selection.release},
+                        103: {"runtime", TOOL.INSTALLATION_INVENTORY_NAME, TOOL.INSTALLATION_RECORD_NAME}}.__getitem__
+                    api.fstat.side_effect = lambda fd: log_info(st_ino=fd, st_mode=stat.S_IFDIR | 0o755)
+                    def stage_stat(name, *, dir_fd, follow_symlinks):
+                        self.assertEqual(dir_fd, 100); self.assertIn(name, stages); self.assertIs(follow_symlinks, False)
+                        return log_info(st_dev=root_identity["device"], st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0, st_flags=0)
+                    api.stat.side_effect = stage_stat
+                    # ExitStack avoids Python's static nested-block limit and
+                    # restores every port before the next finite scenario.
+                    with contextlib.ExitStack() as stack:
+                        for name, replacement in (("os", api), ("installer_channel_parent", channel),
+                                ("maintenance_directory", directory), ("installation_metadata_leaf", metadata_read),
+                                ("read_at", read_at), ("tree", tree)):
+                            stack.enter_context(mock.patch.object(TOOL, name, replacement))
+                        stack.enter_context(mock.patch.object(TOOL, "source_build_selection", return_value=selection))
+                        stack.enter_context(mock.patch.object(TOOL, "parent", side_effect=lambda path: contextlib.nullcontext((200, path.name))))
+                        def source_read(path, limit):
+                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == 1024 * 1024: return inventory
+                            if path == TOOL.DESKTOP / "macos-installed-inputs/update-predecessors.json" and limit == 16384:
+                                return TOOL.canonical(nominated_source)
+                            self.fail("unexpected SOURCE read")
+                        stack.enter_context(mock.patch.object(TOOL, "read", side_effect=source_read))
+                        history = stack.enter_context(mock.patch.object(TOOL, "maintenance_history_data", wraps=TOOL.maintenance_history_data))
+                        producer_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_producer_inputs", wraps=TOOL.maintenance_producer_inputs))
+                        generation_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_generation_readback", wraps=TOOL.maintenance_generation_readback))
+                        if fault == "nomination": nomination = {"release": {**nomination["release"], "sourceCommit": "f" * 40}}
+                        reason = {"nomination": "update-source-nomination", "status": "installer-status-not-original-zero",
+                                  "current-bytes": "installed-byte-mode-correspondence"}.get(fault)
+                        if reason is not None:
+                            with self.assertRaisesRegex(TOOL.Refused, reason):
+                                TOOL.observation_command(args, nominated_update_predecessor=nomination, update_facts=facts)
+                        else:
+                            observed = TOOL.observation_command(args) if fault == "default" else TOOL.observation_command(args, nominated_update_predecessor=nomination, update_facts=facts)
+                            self.assertEqual(observed["originalInstallerResult"], result)
+                            self.assertEqual(observed["nonrootReadbackFileCount"], 7)
+                            self.assertIs(observed["originalInstallerReturnedZero"], True)
+                            self.assertNotIn("updatePredecessorMatched", observed)
+                            if fault is None:
+                                self.assertEqual(facts["generation"], generation)
+                                self.assertEqual(facts["rootIdentity"], root_identity)
+                                self.assertEqual(facts["previous"], {"invocation": current["invocation"], "sha256": TOOL.digest(records[current["invocation"]][1])})
+                                ordinary_shape = observed
+                            else:
+                                self.assertEqual(observed, ordinary_shape)
+                        self.assertEqual(producer_read.call_count, 0 if fault in ("status", "nomination") else 1)
+                        self.assertEqual(history.call_count, 0 if fault in ("status", "nomination") else 1)
+                        self.assertEqual(generation_read.call_count, 0 if fault in ("status", "nomination") else 1)
+                    self.assertEqual(closed, list(reversed(entered)))
+                    for model in channel_models:
+                        self.assertEqual(model.closed, list(reversed(model.opened)))
+
+
+    def test_app_absence_restore_uses_genuine_history_status_and_current_byte_readers(self):
+        # Whole ordinary readback wiring, not a replacement observation/history
+        # reducer. Only SOURCE selection and finite low-level IO ports are inert;
+        # the genuine status/export readers and all closed history/current-byte
+        # reducers execute. No fake FD below reaches the host and no installed
+        # ownership, signature, native Installer or Store qualification is made.
+        for target in TOOL.MAC_TARGETS:
+            for fault in (None, "default", "previous", "status", "current-bytes"):
+                with self.subTest(target=target, ordinary_readback=fault):
+                    producer, old_records, result = maintenance_documents(("fresh-install", "restore-fixed-app"), target=target)
+                    release = producer["releaseSet"]["current"]
+                    selection = TOOL.BuildSelection(target, release["packageVersion"], release["release"])
+                    record, inventory, root_identity, _ = installation_record_fixture(selection=selection)
+                    inventory_data = TOOL.decode(inventory)
+                    manifest_hash = TOOL.digest(b"x")
+                    inventory_data["runtimeManifestSha256"] = manifest_hash
+                    for row in inventory_data["files"]:
+                        row["sha256"] = manifest_hash
+                    inventory = TOOL.canonical(inventory_data)
+                    inventory_hash = TOOL.digest(inventory)
+                    def bind(value):
+                        if type(value) is dict:
+                            return {key: (inventory_hash if key == "inventorySha256" else manifest_hash
+                                    if key == "runtimeManifestSha256" else bind(item)) for key, item in value.items()}
+                        if type(value) is list:
+                            return [bind(item) for item in value]
+                        return value
+                    producer = bind(producer)
+                    records, evidence = {}, []
+                    for invocation, raw in old_records.items():
+                        intent, state, capsule = [bind(TOOL.decode(body)) for body in raw]
+                        if intent["previousState"] is not None:
+                            previous = intent["previousState"]["invocation"]
+                            intent["previousState"]["sha256"] = TOOL.digest(records[previous][1])
+                        state["previousEvidence"] = copy.deepcopy(evidence)
+                        intent_body, state_body = TOOL.canonical(intent) + b"\n", TOOL.canonical(state) + b"\n"
+                        capsule.update(intentSha256=TOOL.digest(intent_body), stateSha256=TOOL.digest(state_body))
+                        capsule_body = TOOL.canonical(capsule) + b"\n"
+                        records[invocation] = (intent_body, state_body, capsule_body)
+                        hashes = {"intentSha256": TOOL.digest(intent_body), "stateSha256": TOOL.digest(state_body),
+                                  "capsuleSha256": TOOL.digest(capsule_body)}
+                        evidence.append({"invocation": invocation, **hashes})
+                    result = {**result, **hashes}
+                    descriptor, signed = TOOL.canonical(producer), b"inert-public-signature"
+                    current, parsed = TOOL.maintenance_history_data(result, records,
+                        TOOL.maintenance_producer_data(descriptor, target=target))
+                    expected = copy.deepcopy(parsed[result["invocation"]][0]["previousState"])
+                    generation = current["current"]
+                    record.update(instance=generation["instance"], runtimeManifestSha256=manifest_hash,
+                                  releaseDirectory=generation["releaseDirectory"],
+                                  inventory={"name": TOOL.INSTALLATION_INVENTORY_NAME, "bytes": len(inventory), "sha256": inventory_hash})
+                    args = result_args()
+                    args.target, args.request_id = target, result["requestId"]
+                    args.expected_inventory, args.expected_manifest = inventory_hash, manifest_hash
+                    export = TOOL.canonical(result) + b"\n"
+                    names, stages = TOOL.maintenance_roster_data(current, parsed, target)
+                    descriptor_name, signature_name = TOOL.maintenance_control_names(target, selection.release)
+                    metadata = {(100, TOOL.MAINTENANCE_STATE_NAME): records[current["invocation"]][1],
+                                (100, TOOL.MAINTENANCE_GATE_NAME): TOOL.MAINTENANCE_GATE_BYTES,
+                                (100, TOOL.REGISTRATION_GATE_NAME): TOOL.REGISTRATION_GATE_BYTES,
+                                (100, descriptor_name): descriptor, (100, signature_name): signed,
+                                (103, TOOL.INSTALLATION_INVENTORY_NAME): inventory,
+                                (103, TOOL.INSTALLATION_RECORD_NAME): TOOL.canonical(record)}
+                    for invocation, (intent_body, state_body, capsule_body) in records.items():
+                        metadata[(100, ".maintenance-" + invocation + ".intent.json")] = intent_body
+                        metadata[(100, ".maintenance-" + invocation + ".capsule.json")] = capsule_body
+                        if invocation != current["invocation"]:
+                            metadata[(100, ".maintenance-" + invocation + ".state.json")] = state_body
+                    payload = {row["path"]: (b"x", 0o555 if row["executable"] else 0o444) for row in inventory_data["files"]}
+                    if fault == "current-bytes":
+                        payload["app/Contents/Info.plist"] = (b"y", 0o444)
+                    directory_rows = {(90, TOOL.INSTALL_ROOT.name): (100, root_identity, 0o755),
+                                      (100, "versions"): (101, root_identity, 0o755),
+                                      (100, TOOL.APP_NAME): (102, generation["app"]["identity"], 0o555),
+                                      (101, selection.release): (103, generation["releaseDirectory"], 0o755)}
+                    entered, closed, channel_models = [], [], []
+                    original_channel, original_read_at = TOOL.installer_channel_parent, TOOL.read_at
+                    @contextlib.contextmanager
+                    def channel(path, *, private=None):
+                        if path == TOOL.INSTALL_ROOT:
+                            yield 90, path.name
+                        else:
+                            body = (b"1\n" if fault == "status" else b"0\n") if private is not None else export
+                            with channel_data(path, body, private=private is not None) as model:
+                                channel_models.append(model)
+                                with original_channel(path, private=private) as originals:
+                                    yield originals
+                    @contextlib.contextmanager
+                    def directory(fd, name, mode):
+                        child, identity, expected_mode = directory_rows[(fd, name)]
+                        self.assertEqual(mode, expected_mode)
+                        entered.append(child)
+                        try:
+                            yield child, identity
+                        finally:
+                            closed.append(child)
+                    def metadata_read(fd, name, limit):
+                        body = metadata[(fd, name)]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def read_at(fd, name, limit):
+                        if fd != 200:
+                            return original_read_at(fd, name, limit)
+                        body = {"producer.json": descriptor, "producer.sig": signed}[name]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def tree(path, *, installed):
+                        self.assertIs(installed, True)
+                        prefix = {TOOL.INSTALL_ROOT / TOOL.APP_NAME: "app/",
+                                  TOOL.INSTALL_ROOT / "versions" / selection.release / "runtime": "runtime/"}[path]
+                        return {name[len(prefix):]: value for name, value in payload.items() if name.startswith(prefix)}
+                    api = mock.Mock(wraps=TOOL.os)
+                    api.O_DIRECTORY = TOOL.os.O_DIRECTORY
+                    api.getuid.return_value = api.geteuid.return_value = 501
+                    api.getgid.return_value = api.getegid.return_value = 20
+                    api.listdir.side_effect = {100: names, 101: {selection.release},
+                        103: {"runtime", TOOL.INSTALLATION_INVENTORY_NAME, TOOL.INSTALLATION_RECORD_NAME}}.__getitem__
+                    api.fstat.side_effect = lambda fd: log_info(st_ino=fd, st_mode=stat.S_IFDIR | 0o755)
+                    def stage_stat(name, *, dir_fd, follow_symlinks):
+                        self.assertEqual(dir_fd, 100); self.assertIn(name, stages); self.assertIs(follow_symlinks, False)
+                        return log_info(st_dev=root_identity["device"], st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0, st_flags=0)
+                    api.stat.side_effect = stage_stat
+                    # ExitStack avoids Python's static nested-block limit and
+                    # restores every port before the next finite scenario.
+                    with contextlib.ExitStack() as stack:
+                        for name, replacement in (("os", api), ("installer_channel_parent", channel),
+                                ("maintenance_directory", directory), ("installation_metadata_leaf", metadata_read),
+                                ("read_at", read_at), ("tree", tree)):
+                            stack.enter_context(mock.patch.object(TOOL, name, replacement))
+                        stack.enter_context(mock.patch.object(TOOL, "source_build_selection", return_value=selection))
+                        stack.enter_context(mock.patch.object(TOOL, "parent", side_effect=lambda path: contextlib.nullcontext((200, path.name))))
+                        stack.enter_context(mock.patch.object(TOOL, "read", side_effect=lambda path, limit: inventory
+                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == 1024 * 1024 else self.fail("unexpected SOURCE read")))
+                        history = stack.enter_context(mock.patch.object(TOOL, "maintenance_history_data", wraps=TOOL.maintenance_history_data))
+                        producer_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_producer_inputs", wraps=TOOL.maintenance_producer_inputs))
+                        generation_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_generation_readback", wraps=TOOL.maintenance_generation_readback))
+                        if fault == "previous": expected["sha256"] = "f" * 64
+                        reason = {"previous": "restore-immediate-predecessor", "status": "installer-status-not-original-zero",
+                                  "current-bytes": "installed-byte-mode-correspondence"}.get(fault)
+                        if reason is not None:
+                            with self.assertRaisesRegex(TOOL.Refused, reason):
+                                TOOL.observation_command(args, expected_restore_previous=expected)
+                        else:
+                            observed = TOOL.observation_command(args) if fault == "default" else TOOL.observation_command(args, expected_restore_previous=expected)
+                            self.assertEqual(observed["originalInstallerResult"], result)
+                            self.assertEqual(observed["nonrootReadbackFileCount"], 7)
+                            self.assertIs(observed["originalInstallerReturnedZero"], True)
+                            self.assertEqual("restorePredecessorMatched" in observed, fault != "default")
+                            if fault is None:
+                                self.assertIs(observed["restorePredecessorMatched"], True)
+                                ordinary_shape = {key: value for key, value in observed.items() if key != "restorePredecessorMatched"}
+                            else:
+                                self.assertEqual(observed, ordinary_shape)
+                        self.assertEqual(producer_read.call_count, 0 if fault == "status" else 1)
+                        self.assertEqual(history.call_count, 0 if fault == "status" else 1)
+                        self.assertEqual(generation_read.call_count, 0 if fault in ("status", "previous") else 1)
+                    self.assertEqual(closed, list(reversed(entered)))
+                    for model in channel_models:
+                        self.assertEqual(model.closed, list(reversed(model.opened)))
     def test_installer_export_reader_checks_original_leaf_and_all_closes(self):
         args = result_args()
         path = TOOL.installer_result_path(args.expected_source, args.expected_inventory, args.expected_manifest, request_id=args.request_id)
@@ -7536,7 +12226,7 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
                     TOOL.main([command, *options, *complete, "--installer-output", "/work/old-output.txt"])
                 call.assert_not_called()
         source = (Path(__file__).absolute().parents[2] / "desktop/tools/stage_macos_installed.py").read_text(encoding="utf-8")
-        ordinary = source.split("def observation_command(args):", 1)[1].split("def visible_occupant", 1)[0]
+        ordinary = source.split("def observation_command(args, *, expected_previous=None, expected_restore_previous=None,", 1)[1].split("def visible_occupant", 1)[0]
         fixture = source.split("def fixture_observation_command(args):", 1)[1].split("def main", 1)[0]
         for block in (ordinary, fixture):
             self.assertIn("installer_result_readback(args", block)
@@ -9068,6 +13758,483 @@ def current_data_fixture():
 
 @unittest.skipUnless(sys.platform in ("darwin", "linux"), "POSIX DATA stager")
 class MacCurrentRuntimeData(unittest.TestCase):
+    def test_same_package_noop_workflow_is_preview_scoped_and_exactly_reversible(self):
+        root = Path(__file__).absolute().parents[2]
+        source = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        owner_source = "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"
+        old_owner_source = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+        self.assertEqual(source.count(owner_source), 2)
+        self.assertNotIn(old_owner_source, source)
+        owner_normalized = without_primary_owner_runtime_source_pin(source)
+        self.assertEqual(owner_normalized, source.replace(owner_source, old_owner_source))
+        self.assertEqual(without_primary_owner_runtime_source_pin(owner_normalized), owner_normalized)
+        for damaged in (source.replace(owner_source, old_owner_source, 1),
+                        source.replace(owner_source, owner_source + owner_source, 1),
+                        source.replace(owner_source, "0" * 64, 1)):
+            with self.assertRaisesRegex(AssertionError, "^primary owner runtime SOURCE exact two-site delta differs$"):
+                without_primary_owner_runtime_source_pin(damaged)
+        source = owner_normalized
+        # The current signed-runtime composition must be proven before old inverses.
+        signed_source = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+        prior_source = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+        self.assertEqual(source.count(signed_source), 2)
+        self.assertNotIn(prior_source, source)
+        source = without_installed_android_activation_workflow(source)
+        signed_normalized = without_signed_android_runtime_source_pin(source)
+        self.assertEqual(signed_normalized, source.replace(signed_source, prior_source))
+        self.assertEqual(without_signed_android_runtime_source_pin(signed_normalized), signed_normalized)
+        for damaged in (source.replace(signed_source, prior_source, 1),
+                        source.replace(signed_source, signed_source + signed_source, 1),
+                        source.replace(signed_source, "0" * 64, 1)):
+            with self.assertRaisesRegex(AssertionError, "^signed Android runtime SOURCE exact two-site delta differs$"):
+                without_signed_android_runtime_source_pin(damaged)
+        source = signed_normalized
+        current_source = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+        previous_source = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
+        self.assertEqual(source.count(current_source), 2)
+        self.assertNotIn(previous_source, source)
+        normalized_source = without_command_terminal_runtime_source_pin(source)
+        self.assertEqual(normalized_source, source.replace(current_source, previous_source))
+        self.assertEqual(without_command_terminal_runtime_source_pin(normalized_source), normalized_source)
+        for damaged in (source.replace(current_source, previous_source, 1),
+                        source.replace(current_source, current_source + current_source, 1),
+                        source.replace(current_source, "0" * 64, 1)):
+            with self.assertRaisesRegex(AssertionError, "^command terminal runtime SOURCE exact two-site delta differs$"):
+                without_command_terminal_runtime_source_pin(damaged)
+        source = without_command_terminal_runtime_source_pin(without_app_absence_workflow(source))
+        active_scope = "      MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}\n"
+        self.assertEqual(source.count(active_scope), 1)
+        disabled_source = source.replace(active_scope, '      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled\n', 1)
+        self.assertEqual(hashlib.sha256(disabled_source.encode()).hexdigest(), '2211187a8a202d875b59e2118d80c75fd7480fbe0186e71807bb39f5db17be99')
+        self.assertEqual(disabled_source.count("      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled\n"), 1)
+        self.assertEqual(source.count("macos_android_helper_package.py same-package-noop --target"), 1)
+        phase = source.split("      - name: Observe one ordinary finalized-carrier same-package no-op\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("steps.package_install.outcome == 'success'", phase)
+        self.assertIn("steps.finalize_image.outcome == 'success'", phase)
+        self.assertNotIn("secrets.", phase)
+        self.assertNotIn("normal_ui", phase)
+        self.assertIn("timeout-minutes: 32", phase)
+        self.assertIn('"$noop_status" > "$MRK_MACOS_WORK/same-package-noop.status"', phase)
+        prior = without_same_package_workflow(source)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), 'cf880d883ee3f0337caf11d328356e9dff07265135a32c2edb7f4f532de0083d')
+        self.assertEqual(without_same_package_workflow(prior), prior)
+        for previous, current in SAME_PACKAGE_WORKFLOW_INVERSE:
+            with self.subTest(partial=current[:48]), self.assertRaises(AssertionError):
+                without_same_package_workflow(source.replace(current, previous, 1))
+        with self.assertRaises(AssertionError):
+            without_same_package_workflow(source + "\nMRK_MACOS_SAME_PACKAGE_SCOPE\n")
+        helper = (root / "desktop/tools/macos_android_helper_package.py").read_text()
+        tree = ast.parse(helper)
+        operation = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Operation")
+        body = ast.get_source_segment(helper, next(n for n in operation.body if isinstance(n, ast.FunctionDef) and n.name == "same_package_noop"))
+        for required in ("self.final_image_input()", "self.stager.final_image_receipt_data", 'self.package_stager_io("v2-readback", args)',
+                         'self.package_stager_io("same-package-readback", args)', 'self.package_stager_io("same-package-census", None)',
+                         "self.detach_package_mount()"):
+            self.assertIn(required, body)
+        self.assertNotIn("credential_scope(", body)
+        self.assertNotIn("self.prepare(", body)
+
+    def test_remaining_three_reuses_exact_singleton_bodies_and_closed_cleanup(self):
+        # Actual SOURCE and finite string/AST checks only, never workflow execution.
+        root = Path(__file__).absolute().parents[2]
+        with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
+            body = stream.read(512 * 1024 + 1)
+        self.assertLessEqual(len(body), 512 * 1024)
+        source = body.decode("utf-8", "strict")
+        source = without_intel_resident_prepare_budget_workflow(source)
+        for previous, current in REMAINING_THREE_WORKFLOW_INVERSE:
+            self.assertEqual(source.count(current), 1)
+        prior = without_remaining_three_workflow(source)
+        self.assertEqual(len(prior.encode()), 434907)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(),
+                         "db2867eab4cce915942e953f848b74a1ad4bfcd654a73459d6e07099a25980f7")
+        # Independently undo the orthogonal removal-case suffix, never refresh the historical hash.
+        bound_prior = without_removal_public_verification_workflow(prior)
+        self.assertEqual(hashlib.sha256(bound_prior.encode()).hexdigest(), "70f45b237ad1fee9466dafa427e661df2c8cd5bb96f513820eeacd5145c2bf32")
+        self.assertEqual(without_remaining_three_workflow(prior), prior)
+        blocks = {}
+        for text in source.split("      - name: ")[1:]:
+            block = "      - name: " + text
+            ids = [line.strip()[4:] for line in block.splitlines() if line.startswith("        id: ")]
+            if ids:
+                self.assertEqual(len(ids), 1)
+                self.assertNotIn(ids[0], blocks)
+                blocks[ids[0]] = block
+        first = blocks["normal_saved_version_recovery_ui_test"]
+        second = blocks["normal_saved_version_recovery_ui_result"]
+        bundle = blocks["normal_remaining_saved_file_ui"]
+        self.assertEqual(source.count(first), 1)
+        self.assertEqual(source.count(second), 1)
+        self.assertEqual(prior.count(first), 1)
+        self.assertEqual(prior.count(second), 1)
+        loop = ('          for MRK_MACOS_SAVED_FILE_UI_SCOPE in saved-version-recovery workflow-refusal release-evidence; do\n'
+                '          export MRK_MACOS_SAVED_FILE_UI_SCOPE\n')
+        run = bundle.split("        run: |\n", 1)[1]
+        self.assertEqual(run, loop + first.split("        run: |\n", 1)[1] + second.split("        run: |\n", 1)[1] + "          done\n")
+        self.assertEqual(bundle.count("        timeout-minutes: 42\n"), 1)
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-preview' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_diagnostics_ui_result.outcome == 'success'", bundle)
+        self.assertIn("          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n", bundle)
+        self.assertNotIn("remaining-three", first + second)
+        for forbidden in ("continue-on-error", "GITHUB_ENV", " || true", " &\n"):
+            self.assertNotIn(forbidden, bundle)
+        self.assertIn('[[ "$test_status" == 0 ]] || exit "$test_status"', run)
+        self.assertIn('[[ "$summary_status" == 0 ]] || exit "$summary_status"', run)
+        self.assertEqual(run.count("test-without-building"), 1)
+        self.assertEqual(run.count("--normal-summary"), 1)
+        self.assertIn('-maximum-test-execution-time-allowance 300', run)
+        self.assertIn("ordinary-ui-observed-original-saved-release-evidence-documents-only", run)
+        self.assertIn('"fullUIQualified": False', run)
+        self.assertIn('"allWorkerFinality": "not-established-by-XCTest-UI-state"', run)
+        scope = "      MRK_MACOS_SAVED_FILE_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'remaining-three' || 'ordinary-seven' }}\n"
+        self.assertEqual(source.count(scope), 1)
+        self.assertIn('saved-version-recovery|workflow-refusal|release-evidence|remaining-three) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;', source)
+        self.assertEqual(source.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0], prior.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0])
+        self.assertIn("&& 110 || 350 }}", source)
+        self.assertIn("no350min fit is claimed", source)
+        cleanup = source.split("      - name: Remove only this completed preview build's disposable compiler outputs\n", 1)[1]
+        guard = cleanup.split("        run: |\n", 1)[0]
+        self.assertIn("env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_remaining_saved_file_ui.outcome == 'success'", guard)
+        for prerequisite in ("preview_upload", "normal_ui_result", "normal_persistence_ui_result", "normal_project_ui_result", "normal_diagnostics_ui_result", "data_contracts", "evidence"):
+            self.assertIn("steps." + prerequisite + ".outcome == 'success'", guard)
+        self.assertIn('stems = (("saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else', cleanup)
+        self.assertIn('*saved_directories, root / "normal-ui/tmp"', cleanup)
+        self.assertIn('(stem + "-test.log", stem + "-summary.raw.json", stem + "-summary.stderr")', cleanup)
+        self.assertEqual(without_public_verification_workflow(source), without_public_verification_workflow(prior))
+        for previous, current in REMAINING_THREE_WORKFLOW_INVERSE:
+            for altered in (previous, current + current, current[:-1], current.replace(" ", "  ", 1)):
+                damaged = source.replace(current, altered, 1)
+                self.assertNotEqual(damaged, source)
+                with self.assertRaises(AssertionError):
+                    without_remaining_three_workflow(damaged)
+        self.assertEqual(without_remaining_three_workflow(source + "# unrelated mutation\n"), prior + "# unrelated mutation\n")
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(source + "# unrelated mutation\n")
+        for invalid in (None, b"DATA", "x" * (512 * 1024 + 1)):
+            with self.assertRaises(AssertionError):
+                without_remaining_three_workflow(invalid)
+        self.assertEqual(without_remaining_three_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+
+    def test_current_intel_app_build_budget_precedes_historical_projection(self):
+        root = Path(__file__).absolute().parents[2]
+        before_pins = {'desktop-macos-installed.yml': {'bytes': 474760, 'sha256': '7ca1cb29075ca0f14bd829f59f826e6da9830d61bb27a2cae5dd32bdb018c8f2'}, 'desktop-macos-aqua.yml': {'bytes': 133491, 'sha256': '36b53942b31b13337875fdd47872a2f54f0a285d746e071b33a42c157f74f57d'}}
+        for filename, pin in before_pins.items():
+            raw = (root / ".github/workflows" / filename).read_text()
+            self.assertEqual(raw.count("&& 26 || 10"), 1)
+            self.assertIn("cancel-in-progress: false", raw)
+            prior = without_intel_fetch_workflow(raw)
+            self.assertEqual((len(prior.encode()), hashlib.sha256(prior.encode()).hexdigest()), (pin["bytes"], pin["sha256"]))
+            self.assertEqual(without_intel_fetch_workflow(prior), prior)
+            self.assertEqual(without_intel_resident_prepare_budget_workflow(raw),
+                             without_intel_resident_prepare_budget_workflow(prior))
+            self.assertEqual(raw.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0],
+                             prior.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0])
+            for previous, current in dict(INTEL_FETCH_WORKFLOW_INVERSE)[raw.splitlines()[0]]:
+                for damaged in (previous, current + current, current[:-1], current.replace(" ", "  ", 1)):
+                    changed = raw.replace(current, damaged, 1)
+                    if changed == prior:
+                        self.assertEqual(without_intel_fetch_workflow(changed), prior)
+                        continue  # Complete exact predecessor is supported; partial mixtures are not.
+                    try: projected = without_intel_fetch_workflow(changed)
+                    except AssertionError: pass
+                    else: self.assertNotEqual(hashlib.sha256(projected.encode()).hexdigest(), pin["sha256"])
+        # Current SOURCE only: a larger finite allocation is not native completion.
+        root = Path(__file__).absolute().parents[2]
+        with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
+            body = stream.read(512 * 1024 + 1)
+        self.assertLessEqual(len(body), 512 * 1024)
+        source = without_intel_fetch_workflow(body.decode("utf-8", "strict"))
+        # This independent Intel resident allowance is not measured completion.
+        # Assert current raw callers, then retire exactly this delta before old tables.
+        resident_pins = {'desktop-macos-installed.yml': {'bytes': 457018, 'sha256': '0af1bc78d9201ccd77fdde2d3969af36641f940e0cc89a4c0b6744d34f4b5f1a'}, 'desktop-macos-aqua.yml': {'bytes': 132632, 'sha256': '16829e57ec783d368c11763bf3d5a5415fdd729c876aa6eb36367eb2a16033b0'}}
+        resident_expression = "${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}"
+        for resident_filename, resident_pin in resident_pins.items():
+            with (root / ".github/workflows" / resident_filename).open("rb") as resident_stream:
+                resident_body = resident_stream.read(512 * 1024 + 1)
+            self.assertLessEqual(len(resident_body), 512 * 1024)
+            resident_source = without_intel_fetch_workflow(resident_body.decode("utf-8", "strict"))
+            resident_rows = dict(INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_INVERSE)[resident_source.splitlines()[0]]
+            for previous, current in resident_rows:
+                self.assertEqual(resident_source.count(current), 1)
+                self.assertNotIn(previous, resident_source)
+            resident_name = "      - name: Build and sign the fixed resident image and C facades\n"
+            self.assertEqual(resident_source.count(resident_name), 1)
+            resident_step = resident_source.split(resident_name, 1)[1].split("      - name:", 1)[0]
+            self.assertEqual(re.findall(r"^        timeout-minutes: (.+)$", resident_step, re.M), [resident_expression])
+            self.assertEqual(resident_source.count(resident_expression), 1)
+            resident_prior = without_intel_resident_prepare_budget_workflow(resident_source)
+            self.assertEqual((len(resident_prior.encode()), hashlib.sha256(resident_prior.encode()).hexdigest()),
+                             (resident_pin["bytes"], resident_pin["sha256"]))
+            self.assertEqual(without_intel_resident_prepare_budget_workflow(resident_prior), resident_prior)
+            self.assertEqual(resident_source.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0],
+                             resident_prior.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0])
+            for previous, current in resident_rows:
+                damaged_values = ("", current + current, previous + current, current[:-1], current.replace(" ", "  ", 1))
+                if len(resident_rows) > 1:
+                    damaged_values += (previous,)  # Mixed new/old regions, not the accepted complete old caller.
+                for damaged in damaged_values:
+                    with self.subTest(resident=resident_filename, damaged=damaged):
+                        changed = resident_source.replace(current, damaged, 1)
+                        try:
+                            projected = without_intel_resident_prepare_budget_workflow(changed)
+                        except AssertionError:
+                            pass
+                        else:
+                            # Marker-free damaged text is not promoted to the exact prior workflow.
+                            self.assertNotEqual(hashlib.sha256(projected.encode()).hexdigest(), resident_pin["sha256"])
+            for changed_expression in (resident_expression.replace("24", "25"),
+                                       resident_expression.replace("10", "11"),
+                                       resident_expression.replace("x86_64-apple-darwin", "aarch64-apple-darwin")):
+                changed = resident_source.replace(resident_expression, changed_expression, 1)
+                try:
+                    projected = without_intel_resident_prepare_budget_workflow(changed)
+                except AssertionError:
+                    pass
+                else:
+                    self.assertNotEqual(hashlib.sha256(projected.encode()).hexdigest(), resident_pin["sha256"])
+            with self.assertRaises(AssertionError):
+                without_intel_resident_prepare_budget_workflow(resident_source.replace(resident_source.splitlines()[0], "name: foreign", 1))
+            if resident_filename == "desktop-macos-installed.yml":
+                # Current normal-iOS source is a complete pinned predecessor, not a loose textual inverse.
+                with self.assertRaisesRegex(AssertionError, "normal iOS pending workflow whole predecessor differs"):
+                    without_intel_resident_prepare_budget_workflow(resident_source + "# unrelated\n")
+            else:
+                self.assertEqual(without_intel_resident_prepare_budget_workflow(resident_source + "# unrelated\n"),
+                                 resident_prior + "# unrelated\n")
+        for invalid in (None, b"DATA", "x" * (512 * 1024 + 1)):
+            with self.assertRaises(AssertionError):
+                without_intel_resident_prepare_budget_workflow(invalid)
+        self.assertEqual(without_intel_resident_prepare_budget_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+        resident_helper = (root / "desktop/tools/macos_android_helper_package.py").read_text()
+        resident_tree = ast.parse(resident_helper)
+        resident_class = next(node for node in resident_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
+        resident_prepare = next(node for node in resident_class.body if isinstance(node, ast.FunctionDef) and node.name == "prepare")
+        resident_calls = [node for node in ast.walk(resident_prepare) if isinstance(node, ast.Call)
+                          and isinstance(node.func, ast.Attribute) and node.func.attr == "call"
+                          and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "build"]
+        self.assertEqual(len(resident_calls), 1)
+        resident_timeout = [item.value for item in resident_calls[0].keywords if item.arg == "timeout"]
+        self.assertEqual(len(resident_timeout), 1)
+        self.assertEqual(ast.dump(resident_timeout[0]), ast.dump(ast.parse("720 if self.target == INTEL_TARGET else 480", mode="eval").body))
+        resident_text = ast.get_source_segment(resident_helper, resident_prepare)
+        self.assertEqual(resident_text.count(INTEL_FETCH_PREPARE_PREFIX), 1)
+        self.assertEqual(resident_text.count(INTEL_FETCH_OFFLINE_REGION[1]), 1)
+        resident_text = resident_text.replace(INTEL_FETCH_PREPARE_PREFIX, "", 1)
+        resident_text = resident_text.replace(INTEL_FETCH_OFFLINE_REGION[1], INTEL_FETCH_OFFLINE_REGION[0], 1)
+        self.assertEqual(resident_text.count("timeout=720 if self.target == INTEL_TARGET else 480"), 1)
+        resident_old = resident_text.replace("timeout=720 if self.target == INTEL_TARGET else 480", "timeout=480", 1)
+        self.assertEqual(hashlib.sha256(resident_old.encode()).hexdigest(), '100f794aa060db73370a1ab8c789075f2ce03792a8ca270447b044b9632a9da3')
+        source = without_intel_resident_prepare_budget_workflow(source)
+        source = without_remaining_three_workflow(source)
+        for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE:
+            self.assertEqual(source.count(current), 1)
+            self.assertNotIn(previous, source)
+        expression = "${{ matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}"
+        name = "      - name: Build the ordinary selected-target desktop image and embedded frontend\n"
+        self.assertEqual(source.count(name), 1)
+        app = source.split(name, 1)[1].split("      - name:", 1)[0]
+        self.assertEqual(re.findall(r"^        timeout-minutes: (.+)$", app, re.M), [expression])
+        self.assertEqual(source.count(expression), 1)
+        containing = "    timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}\n"
+        self.assertEqual(source.count(containing), 1)
+        self.assertIn("        id: shipping_compile\n        timeout-minutes: 24\n",
+                      source.split("  shipping-image-compile:\n", 1)[1])
+        matrix = re.findall(r"^        include: (.+)$", source, re.M)
+        self.assertEqual(len(matrix), 1)
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'", matrix[0])
+        branches = re.findall(r"'(\[\{.*?\}\])'", matrix[0])
+        self.assertEqual(len(branches), 2)
+        self.assertEqual([(row["target"], row["removal_case"]) for row in json.loads(branches[0])],
+                         [("aarch64-apple-darwin", "ordinary"), ("aarch64-apple-darwin", "abrupt")])
+        self.assertEqual([(row["target"], row["runner"]) for row in json.loads(branches[1])],
+                         [("aarch64-apple-darwin", "macos-26"), ("x86_64-apple-darwin", "macos-26-intel")])
+        prior = without_intel_app_build_budget_workflow(source)
+        self.assertEqual(len(prior.encode()), 434739)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(),
+                         "1dc04737ea6298f34196adb7f71e4fb0f6b25b50dde30b4c95292d29efec4514")
+        self.assertEqual(without_intel_app_build_budget_workflow(prior), prior)
+        self.assertEqual(matrix, re.findall(r"^        include: (.+)$", prior, re.M))
+        old_app = prior.split(name, 1)[1].split("      - name:", 1)[0]
+        for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE[1:]:
+            app = app.replace(current, previous, 1)
+        self.assertEqual(app, old_app)  # Commands, environment and original status writes are unchanged.
+        self.assertEqual(without_app_signature_workflow(source), without_app_signature_workflow(prior))
+        for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE:
+            for altered in ("", previous, current + current, previous + current,
+                            current[:-1], current.replace(" ", "  ", 1)):
+                with self.subTest(altered=altered), self.assertRaises(AssertionError):
+                    without_intel_app_build_budget_workflow(source.replace(current, altered, 1))
+        for altered in (expression.replace("48", "49"), expression.replace("24", "25"),
+                        expression.replace("x86_64-apple-darwin", "aarch64-apple-darwin")):
+            with self.assertRaises(AssertionError):
+                without_intel_app_build_budget_workflow(source.replace(expression, altered, 1))
+        for old in ("unchanged historical DATA\n", "name: Historical Aqua qualification\n"):
+            self.assertEqual(without_intel_app_build_budget_workflow(old), old)
+        unrelated = source + "# unrelated mutation\n"
+        self.assertEqual(without_intel_app_build_budget_workflow(unrelated), prior + "# unrelated mutation\n")
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(unrelated)
+        # Erasing all new markers cannot bypass the unchanged whole-workflow hash.
+        erased = source
+        for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE:
+            erased = erased.replace(current, "", 1)
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(erased)
+        for invalid in (None, b"DATA", "x" * (512 * 1024 + 1),
+                        source.replace(source.splitlines()[0], "name: Historical Aqua qualification", 1)):
+            with self.assertRaises(AssertionError):
+                without_intel_app_build_budget_workflow(invalid)
+
+    def test_removal_public_evidence_case_is_current_before_historical_projection(self):
+        # Read actual current SOURCE, not the inverse view or a raw artifact.
+        root = Path(__file__).absolute().parents[2]
+        with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
+            body = stream.read(512 * 1024 + 1)
+        self.assertLessEqual(len(body), 512 * 1024)
+        source = body.decode("utf-8", "strict")
+        previous, current = REMOVAL_PUBLIC_VERIFICATION_WORKFLOW_INVERSE
+        self.assertEqual(source.count(current), 1)
+        self.assertNotIn(previous, source)
+        self.assertEqual(source.count('--removal-case "$MRK_MACOS_REMOVAL_CASE"'), 1)
+        prior = without_removal_public_verification_workflow(source)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(),
+                         "70f45b237ad1fee9466dafa427e661df2c8cd5bb96f513820eeacd5145c2bf32")
+        self.assertEqual(without_removal_public_verification_workflow(prior), prior)
+        self.assertEqual(without_public_verification_workflow(source), without_public_verification_workflow(prior))
+        self.assertEqual(without_app_signature_workflow(source), without_app_signature_workflow(prior))
+        for altered in ("", current + current, previous + current, current[:-1],
+                        current.replace("--removal-case", "--removal-case disabled", 1),
+                        current.replace("MRK_MACOS_REMOVAL_CASE", "MRK_OTHER_CASE", 1),
+                        current.replace('            --removal-case', '          --removal-case', 1),
+                        current.split('            --removal-case', 1)[0],
+                        current.replace("--profile installed", "--profile aqua", 1)):
+            damaged = source.replace(current, altered, 1)
+            self.assertNotEqual(damaged, source)
+            with self.subTest(altered=altered), self.assertRaises(AssertionError):
+                without_removal_public_verification_workflow(damaged)
+            with self.assertRaises(AssertionError):
+                without_public_verification_workflow(damaged)
+        self.assertEqual(without_removal_public_verification_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+        self.assertEqual(without_removal_public_verification_workflow(source + "# unrelated mutation\n"),
+                         prior + "# unrelated mutation\n")
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(source + "# unrelated mutation\n")
+        for invalid in (None, b"DATA", "x" * (512 * 1024 + 1), "--removal-case disabled\n"):
+            with self.assertRaises(AssertionError):
+                without_removal_public_verification_workflow(invalid)
+
+    def test_public_verification_exports_are_current_closed_data_before_projection(self):
+        # Fixed bounded SOURCE only. No historical module/product import or child.
+        root = Path(__file__).absolute().parents[2]
+        for path, header, prior_hash, replacements in PUBLIC_VERIFICATION_WORKFLOW_INVERSE:
+            with self.subTest(workflow=path):
+                with (root / path).open("rb") as stream:
+                    body = stream.read(512 * 1024 + 1)
+                self.assertLessEqual(len(body), 512 * 1024)
+                source = body.decode("utf-8", "strict")
+                self.assertTrue(source.startswith(header))
+                self.assertEqual(source.count("        id: public_evidence\n"), 1)
+                self.assertEqual(source.count("desktop/tools/macos_public_verification_evidence.py"), 1)
+                # Only the independently asserted current removal-case CLI suffix is projected here.
+                source = without_removal_public_verification_workflow(source)
+                upload_count = 0
+                for previous, current in replacements:
+                    self.assertEqual(source.count(current), 1)
+                    if current.startswith("      - name: Preserve"):
+                        upload_count += 1
+                        self.assertEqual([line for line in current.splitlines() if line.startswith("          path:")],
+                                         ["          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json"])
+                        self.assertIn("&& steps.public_evidence.outcome == 'success'\n", current)
+                        self.assertNotIn("          path: |", current)
+                    if current.startswith("      - name: Project closed public verification facts"):
+                        projector = current.split("      - name:", 2)[1]
+                        self.assertIn("        timeout-minutes: 1\n", projector)
+                        self.assertIn("/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC", projector)
+                        self.assertNotIn("secrets.", projector)
+                        self.assertNotIn("continue-on-error", projector)
+                    for altered in (current + current, current[:-1], current.replace(" ", "  ", 1)):
+                        with self.assertRaises(AssertionError):
+                            without_public_verification_workflow(source.replace(current, altered, 1))
+                    # No partial old/new export state is accepted.
+                    with self.assertRaises(AssertionError):
+                        without_public_verification_workflow(source.replace(current, previous, 1))
+                self.assertEqual(upload_count, 1 if "installed.yml" in path else 4)
+                prior = without_public_verification_workflow(source)
+                self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), prior_hash)
+                self.assertEqual(without_public_verification_workflow(prior), prior)
+                self.assertEqual(without_public_verification_workflow(source + "# unrelated mutation\n"),
+                                 prior + "# unrelated mutation\n")
+                if "installed.yml" in path:
+                    # Existing historical whole-workflow hash still rejects unrelated bytes.
+                    with self.assertRaises(AssertionError):
+                        without_app_signature_workflow(source + "# unrelated mutation\n")
+                    delivery_name = "      - name: Upload only the normal user preview package and guide\n"
+                    delivery = source.split(delivery_name, 1)[1].split("      - name:", 1)[0]
+                    old_delivery = prior.split(delivery_name, 1)[1].split("      - name:", 1)[0]
+                    self.assertEqual(delivery, old_delivery)
+                    self.assertEqual([line.strip() for line in delivery.splitlines()
+                                      if line.startswith("            ${{ steps.work.outputs.root }}/")],
+                                     ["${{ steps.work.outputs.root }}/" + leaf for leaf in
+                                      ("preview/MobileReleaseKit.dmg", "preview/README.md", "preview/PREVIEW.json",
+                                       "remove-preview/MobileReleaseKit-Remove.dmg", "remove-preview/REMOVE.md", "remove-preview/REMOVAL.json")])
+        self.assertEqual(without_public_verification_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+
+    def test_exact_recent_app_workflow_projection_preserves_historical_hashes(self):
+        # Bounded SOURCE DATA only; never import a stager or execute a workflow.
+        root = Path(__file__).absolute().parents[2]
+        with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
+            body = stream.read(512 * 1024 + 1)
+        self.assertLessEqual(len(body), 512 * 1024)
+        source = body.decode("utf-8", "strict")
+        source = without_intel_app_build_budget_workflow(source)
+        projected = without_recent_app_signature_workflow(source)
+        # Exact e1e4b36 bytes, not a refreshed historical app-predecessor hash.
+        self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(),
+                         "22ce8c9e9f53b9e5e7fd25c0cb11dc305c3780c204305cc326ec4df07b68033b")
+        self.assertEqual(without_recent_app_signature_workflow(projected), projected)
+        self.assertEqual(without_recent_app_signature_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+        app_prior = without_app_signature_workflow(source)
+        self.assertEqual(hashlib.sha256(app_prior.encode()).hexdigest(),
+                         "fdbe8fcc6595ce90cb5cab397b4050cf53c164132198252d6b6ada4be4b83081")
+        self.assertEqual(without_app_signature_workflow(app_prior), app_prior)
+        self.assertEqual(without_current_runtime_source_pin(source), app_prior.replace(
+            "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2",
+            "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"))
+        for label, markers, replacements in RECENT_APP_SIGNATURE_WORKFLOW_INVERSE:
+            with self.subTest(delta=label):
+                self.assertTrue(any(marker in source for marker in markers))
+                for current, previous in replacements:
+                    self.assertEqual(source.count(current), 1)
+                    # Keep recognized text while breaking a complete line/block.
+                    for altered in (current + current, current[:-1], current.replace(" ", "  ", 1)):
+                        broken = source.replace(current, altered, 1)
+                        with self.assertRaises(AssertionError):
+                            without_recent_app_signature_workflow(broken)
+                    if len(replacements) > 1:
+                        with self.assertRaises(AssertionError):
+                            without_recent_app_signature_workflow(source.replace(current, previous, 1))
+                # Exact older intermediate groups remain admissible, not partial groups.
+                intermediate = source
+                for current, previous in replacements:
+                    intermediate = intermediate.replace(current, previous, 1)
+                self.assertEqual(without_recent_app_signature_workflow(intermediate), projected)
+        enrolled = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
+        preceding = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
+        for broken in (source.replace(enrolled, preceding, 1),
+                       preceding.join(source.rsplit(enrolled, 1))):
+            for normalize in (without_app_signature_workflow, without_current_runtime_source_pin):
+                with self.assertRaisesRegex(AssertionError, "^current runtime source pin exact two-site delta differs$"):
+                    normalize(broken)
+        # An unrelated change survives companion projection and the old hash refuses it.
+        unrelated = source + "# unrelated mutation\n"
+        self.assertEqual(without_recent_app_signature_workflow(unrelated), projected + "# unrelated mutation\n")
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(unrelated)
+
     def args(self, fixture, command="describe-current-runtime", suffix="description"):
         return SimpleNamespace(command=command, archive=fixture.archive, work=fixture.root / ("work-" + suffix),
                                output=fixture.root / ("output-" + suffix), expected_source="0" * 64,
@@ -9759,7 +14926,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
             self.assertIn('"$' + variable + '" == ' + configured[0], workflow)
         # Read the actual bounded source DATA used by the stager, not a copy of
         # its historical pin. No core import, supplier extraction or execution.
-        self.assertEqual(anchors["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"], TOOL.current_source()[2])
+        self.assertEqual(anchors["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"], TOOL.current_source(history_provider=True)[2])
         # The manifest pin still needs independent runtime-regeneration evidence.
         # Its format, guards and CLI binding here do not establish its authority.
         self.assertEqual(TOOL.CURRENT_PROTOCOL, anchors["MRK_BUNDLED_PROTOCOL_SHA256"])
@@ -9770,11 +14937,15 @@ class MacCurrentRuntimeData(unittest.TestCase):
         previous_pin = "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"
         self.assertEqual(workflow.count(current_pin), 2)
         normalized = without_current_runtime_source_pin(workflow)
-        self.assertEqual(normalized, workflow.replace(current_pin, previous_pin))
+        preceding_pin = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
+        # Preserve the current whole-source contract through newer inverse layers;
+        # replacing its pin before the iOS predecessor check would be malformed.
+        expected_without_app = without_app_signature_workflow(workflow)
+        self.assertEqual(normalized, expected_without_app.replace(preceding_pin, previous_pin))
         self.assertEqual(without_current_runtime_source_pin(normalized), normalized)
         for partial in (workflow.replace(current_pin, previous_pin, 1),
                         previous_pin.join(workflow.rsplit(current_pin, 1))):
-            with self.assertRaisesRegex(AssertionError, "^current runtime source pin exact two-site delta differs$"):
+            with self.assertRaisesRegex(AssertionError, "^primary owner runtime SOURCE exact two-site delta differs$"):
                 without_current_runtime_source_pin(partial)
         workflow = without_remove_output_workflow(workflow)
         for field, variable in (("runtimeManifestSha256", "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),
@@ -10371,8 +15542,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         self.assertIn('MRK_IMAGE_RELEASE_ID', native_build)
         evidence = workflow_step(actual_shipping, 'Preserve only bounded public compile evidence; upload is not qualification')
         public = re.findall(r'^            \$\{\{ steps.compile_work.outputs.root \}\}/([^\n]+)$', evidence, re.M)
-        self.assertEqual(public, ['source-inventory.json', 'compile-receipt.json', 'npm-ci.stdout', 'npm-ci.stderr',
-                                  'frontend-build.stdout', 'frontend-build.stderr', 'shipping-image-build.stdout', 'shipping-image-build.stderr'])
+        self.assertEqual(public, ['compile-receipt.json'])
         for text in (actual_shipping.replace("run: *mrk_installed_source_inventory", "run: *other", 1),
                      actual_shipping.replace("timeout-minutes: 35", "timeout-minutes: 36", 1),
                      actual_shipping.replace("  shipping-image-compile:\n", "  wrong-compile:\n", 1)):
@@ -10538,7 +15708,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
 
 
 def android_support_fixture(root=Path("/synthetic-mrk-support")):
-    # Tiny inert ZIP inputs under a replaced SOURCE manifest, never vendor code.
+    # Tiny inert notice-only ZIPs: synthetic app composition, never supplier authority.
     rows, values, files, archives = [], {}, {}, []
     for identity, filename, url, members in TOOL.ANDROID_SUPPORT_LAYOUT:
         notices = []
@@ -10559,8 +15729,35 @@ def android_support_fixture(root=Path("/synthetic-mrk-support")):
     manifest = {"schemaVersion": 1, "platform": "macos", "archives": rows}
     manifest_path = root / "android-support.json"
     values[manifest_path] = TOOL.canonical(manifest)
-    return SimpleNamespace(manifest=manifest, manifest_path=manifest_path, values=values, files=files,
+    receipt_path = root / "android-support-signed-receipt.json"
+    values[receipt_path] = b"synthetic receipt boundary only\n"
+    return SimpleNamespace(android_support_signed_receipt=receipt_path, manifest=manifest, manifest_path=manifest_path, values=values, files=files,
                            bundletool_archive=archives[0], aapt2_archive=archives[1])
+
+
+@contextlib.contextmanager
+def synthetic_android_support(fixture, *, app_seal=None):
+    """Only synthetic composition bypasses capsule authority; actual ZIP and
+    app-resource readback remain genuine. Real SOURCE/transport tests below do
+    not use this seam, and a real capsule is separately checked by its owner.
+    """
+    manifest_sha, rows = TOOL.android_support_manifest_data(TOOL.canonical(fixture.manifest))
+    relation = SimpleNamespace(archives=tuple(SimpleNamespace(file_name=row["fileName"],
+        derived=SimpleNamespace(size=row["size"], sha256=row["sha256"])) for row in rows),
+        receipt=SimpleNamespace(size=len(fixture.values[fixture.android_support_signed_receipt])))
+    source = (None, relation, manifest_sha, rows, None, None)
+    archives = {row["fileName"]: fixture.values[getattr(fixture, row["id"] + "_archive")] for row in rows}
+    # Composition callers may explicitly supply inert GitHub resource DATA.
+    # None leaves the genuine GitHub admission path entirely untouched.
+    with (contextlib.ExitStack() as stack,
+          mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", fixture.manifest_path),
+          mock.patch.object(TOOL, "android_signed_source", side_effect=lambda: contextlib.nullcontext(source)),
+          mock.patch.object(TOOL, "android_signed_capsule", side_effect=lambda _args:
+              contextlib.nullcontext((manifest_sha, rows, archives, relation)))):
+        if app_seal is not None:
+            stack.enter_context(mock.patch.object(TOOL, "github_seal_files",
+                side_effect=lambda *_args, **_kwargs: contextlib.nullcontext(app_seal)))
+        yield relation
 
 
 def normal_cargo_fixture(target=None, *, role="desktop", checkout=None, build_target="aarch64-apple-darwin"):
@@ -10653,7 +15850,7 @@ class MacAndroidSupportData(unittest.TestCase):
 
     def test_original_archives_and_notices_are_nonexecuting_data_with_exact_readback(self):
         fixture = android_support_fixture()
-        with mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", fixture.manifest_path), \
+        with synthetic_android_support(fixture), \
                 mock.patch.object(TOOL, "read", side_effect=lambda path, *_: fixture.values[path]), \
                 mock.patch.object(TOOL, "write_tree") as output:
             source_sha, files = TOOL.android_support_files(fixture)
@@ -10665,6 +15862,8 @@ class MacAndroidSupportData(unittest.TestCase):
                 TOOL.android_support_input(files)
             result = TOOL.android_support_command(fixture)
             self.assertEqual(result["androidSupportManifestSha256"], source_sha)
+            self.assertEqual(result["androidSupportSignedManifestSha256"], TOOL.ANDROID_SIGNED_MANIFEST_SHA)
+            self.assertEqual(result["qualification"], "source-pinned-signed-derivative-and-original-notices-data-only-no-vendor-execution")
             self.assertEqual(result["fileCount"], 10)
             self.assertEqual(result["payloadBytes"], sum(len(body) for body, _ in files.values()))
             self.assertEqual({mode for _, mode in files.values()}, {0o644})
@@ -10674,7 +15873,7 @@ class MacAndroidSupportData(unittest.TestCase):
         for change in (lambda b: b + b"extra", lambda b: bytes([b[0] ^ 1]) + b[1:]):
             fixture = android_support_fixture()
             fixture.values[fixture.bundletool_archive] = change(fixture.values[fixture.bundletool_archive])
-            with mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", fixture.manifest_path), \
+            with synthetic_android_support(fixture), \
                     mock.patch.object(TOOL, "read", side_effect=lambda path, *_: fixture.values[path]), \
                     mock.patch.object(TOOL.zipfile, "ZipFile") as parser, self.assertRaisesRegex(TOOL.Refused, "android-support-archive"):
                 TOOL.android_support_files(fixture)
@@ -10694,8 +15893,15 @@ class MacAndroidSupportData(unittest.TestCase):
                         data = b"!" + data[1:]
                     archive.writestr(notice["member"], data)
                     if index == 0 and failure == "duplicate":
-                        with self.assertWarns(UserWarning):
+                        registry = vars(TOOL.zipfile).get("__warningregistry__")
+                        with warnings.catch_warnings(record=True) as caught:
+                            warnings.simplefilter("always", UserWarning)
                             archive.writestr(notice["member"], data)
+                        self.assertEqual(len(caught), 1)
+                        self.assertIs(caught[0].category, UserWarning)
+                        self.assertEqual(str(caught[0].message), "Duplicate name: " + repr(notice["member"]))
+                        if registry is not None:
+                            self.assertIs(TOOL.zipfile.__warningregistry__, registry)
             archive_bytes = buffer.getvalue()
             first.update(size=len(archive_bytes), sha256=TOOL.digest(archive_bytes))
             fixture.values[fixture.bundletool_archive] = archive_bytes
@@ -10716,14 +15922,14 @@ class MacAndroidSupportData(unittest.TestCase):
                 resident_image=resident, expected_resident_image=TOOL.digest(fixture.values[resident]),
                 entry_binary=Path("/synthetic-mrk-support/entry"), expected_entry=TOOL.digest(code),
                 output=Path("/synthetic-mrk-support/app"), bundletool_archive=fixture.bundletool_archive,
-                aapt2_archive=fixture.aapt2_archive)
+                aapt2_archive=fixture.aapt2_archive, android_support_signed_receipt=fixture.android_support_signed_receipt)
             remover_target, remover, remover_rows, remover_body = remover_cargo_fixture()
             args.remover, args.expected_remover = remover, TOOL.digest(remover_body)
             args.remover_cargo_messages, args.remover_cargo_target_dir = Path("/synthetic-mrk-support/remover.jsonl"), remover_target
             fixture.values[remover] = remover_body
             fixture.values[args.remover_cargo_messages] = cargo_lines(*remover_rows, {"reason": "build-finished", "success": True})
             original_read = TOOL.read
-            with self.subTest(failure=failure), mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", fixture.manifest_path), \
+            with self.subTest(failure=failure), synthetic_android_support(fixture, app_seal={}), \
                     mock.patch.object(TOOL, "read", side_effect=lambda path, *limit: fixture.values[path] if path in fixture.values else original_read(path, *limit)), \
                     mock.patch.object(TOOL, "write_tree") as output, self.assertRaisesRegex(TOOL.Refused, "android-support-notice"):
                 TOOL.app_command(args)
@@ -10734,9 +15940,14 @@ class MacAndroidSupportData(unittest.TestCase):
                 "--expected-app-binary", "b" * 64, "--entry-binary", "/inert/entry", "--expected-entry", "b" * 64,
                 "--vault-helper", "/h", "--expected-vault-helper", "a" * 64,
                 "--android-helper", "/resident-facade", "--expected-android-helper", "c" * 64,
-                "--resident-image", "/resident.dylib", "--expected-resident-image", "d" * 64, "--output", "/out"])):
-            for absent in ("--bundletool-archive", "--aapt2-archive"):
-                flags = ["--aapt2-archive", "/aapt2"] if absent == "--bundletool-archive" else ["--bundletool-archive", "/bundletool"]
+                "--resident-image", "/resident.dylib", "--expected-resident-image", "d" * 64,
+                "--remover", "/inert/remover", "--expected-remover", "e" * 64,
+                "--remover-cargo-messages", "/inert/remover.jsonl", "--remover-cargo-target-dir", "/inert/remover-target",
+                "--output", "/out"])):
+            for absent in ("--bundletool-archive", "--aapt2-archive", "--android-support-signed-receipt"):
+                flags = [value for flag, path in (("--bundletool-archive", "/bundletool"),
+                    ("--aapt2-archive", "/aapt2"), ("--android-support-signed-receipt", "/receipt"))
+                    if flag != absent for value in (flag, path)]
                 stderr = io.StringIO()
                 action_name = "app_command" if command == "app" else "android_support_command"
                 with mock.patch.object(TOOL, action_name) as action, mock.patch.object(TOOL, "read") as reader, \
@@ -10747,13 +15958,133 @@ class MacAndroidSupportData(unittest.TestCase):
                 action.assert_not_called()
                 reader.assert_not_called()
 
+    def test_signed_source_is_fixed_scoped_and_rejects_capsule_before_zip(self):
+        # Genuine current SOURCE, not a synthetic receipt/producer success.
+        name = "mrk_android_signed_support_data"
+        self.assertNotIn(name, sys.modules)
+        with TOOL.android_signed_source() as (module, relation, source_sha, rows, producer, service):
+            self.assertIs(sys.modules[name], module)
+            self.assertEqual(source_sha, TOOL.digest(TOOL.ANDROID_SUPPORT_MANIFEST.read_bytes()))
+            self.assertEqual([a.file_name for a in relation.archives], [row["fileName"] for row in rows])
+            self.assertEqual([a.derived.size for a in relation.archives], [32494771, 4328126])
+            self.assertEqual(relation.receipt.size, 7246)
+            self.assertEqual((len(producer), len(service)), (488, 219))
+        self.assertNotIn(name, sys.modules)
+        marker = object()
+        with mock.patch.dict(sys.modules, {name: marker}):
+            with self.assertRaisesRegex(TOOL.Refused, "android-support-loader-collision"):
+                with TOOL.android_signed_source(): self.fail("collision was admitted")
+            self.assertIs(sys.modules[name], marker)
+        self.assertNotIn(name, sys.modules)
+        with self.assertRaisesRegex(RuntimeError, "inert caller failure"):
+            with TOOL.android_signed_source(): raise RuntimeError("inert caller failure")
+        self.assertNotIn(name, sys.modules)
+        for archives, receipt in (({}, b"{}"),
+            ({"bundletool-all-1.18.3.jar": b"not the signed artifact",
+              "aapt2-8.9.2-12782657-osx.jar": b"not the signed artifact"}, b"{}")):
+            # Only the transport fixture is inert. The actual typed SOURCE
+            # parser rejects before any notice parser or app output is entered.
+            with (mock.patch.object(TOOL, "android_signed_transport", side_effect=lambda *_:
+                    contextlib.nullcontext((archives, receipt))),
+                  mock.patch.object(TOOL.zipfile, "ZipFile") as parser,
+                  mock.patch.object(TOOL, "write_tree") as output,
+                  self.assertRaisesRegex(TOOL.Refused, "android-support-signed-data")):
+                TOOL.android_support_files(SimpleNamespace())
+            parser.assert_not_called(); output.assert_not_called()
+            self.assertNotIn(name, sys.modules)
+
+    def test_signed_transport_keeps_exact_owned_originals_and_refuses_unknown_close(self):
+        # Tiny DATA exercises the real FD/parent/roster transport, not B1 receipt
+        # authority. All operations stay inside this test's temporary directory.
+        self.assertNotEqual(os.getuid(), 0, "the owner must execute this group nonroot")
+        def fixture(parent):
+            root = parent / "capsule"; root.mkdir(mode=0o700)
+            names = ("bundletool-all-1.18.3.jar", "aapt2-8.9.2-12782657-osx.jar",
+                     "android-support-signed-receipt.json")
+            bodies = (b"inert bundletool", b"inert aapt2", b"inert receipt")
+            for name, body in zip(names, bodies):
+                (root / name).write_bytes(body); (root / name).chmod(0o444)
+            args = SimpleNamespace(bundletool_archive=root/names[0], aapt2_archive=root/names[1],
+                                   android_support_signed_receipt=root/names[2])
+            relation = SimpleNamespace(archives=tuple(SimpleNamespace(file_name=name,
+                derived=SimpleNamespace(size=len(body))) for name, body in zip(names[:2], bodies[:2])),
+                receipt=SimpleNamespace(size=len(bodies[2])))
+            return root, args, relation, names, bodies
+        for failure in (None, "missing-receipt", "other-parent", "extra", "writable-root", "writable-leaf",
+                        "symlink", "hardlink", "changed-leaf", "replaced-parent", "unknown-close"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                parent = Path(temporary).resolve(strict=True)
+                root, args, relation, names, bodies = fixture(parent)
+                if failure == "missing-receipt": del args.android_support_signed_receipt
+                if failure == "other-parent": args.android_support_signed_receipt = parent / names[2]
+                if failure == "extra": (root / "unrelated").write_bytes(b"not removed by transport")
+                if failure == "writable-root": root.chmod(0o777)
+                if failure == "writable-leaf": args.bundletool_archive.chmod(0o666)
+                if failure in ("symlink", "hardlink"):
+                    original = parent / "original"; args.bundletool_archive.rename(original)
+                    if failure == "symlink": args.bundletool_archive.symlink_to(original)
+                    else: os.link(original, args.bundletool_archive)
+                closed = []; real_close = TOOL.close_once
+                def close(fd):
+                    closed.append(fd); real_close(fd)
+                    if failure == "unknown-close" and len(closed) == 1:
+                        raise TOOL.Refused("original-close-unknown")
+                with mock.patch.object(TOOL, "close_once", side_effect=close):
+                    expectation = (contextlib.nullcontext() if failure is None else self.assertRaises(TOOL.Refused))
+                    with expectation:
+                        with TOOL.android_signed_transport(args, relation) as (archives, receipt):
+                            self.assertEqual(archives, dict(zip(names[:2], bodies[:2])))
+                            self.assertEqual(receipt, bodies[2])
+                            if failure == "changed-leaf":
+                                args.bundletool_archive.chmod(0o644)
+                                args.bundletool_archive.write_bytes(b"X" * len(bodies[0]))
+                                args.bundletool_archive.chmod(0o444)
+                            if failure == "replaced-parent":
+                                root.rename(parent / "withdrawn-capsule")
+                                fixture(parent)
+                self.assertEqual(len(closed), len(set(closed)), "an original close was retried")
+                for fd in closed:
+                    with self.assertRaises(OSError): os.fstat(fd)
+                if failure is None:
+                    self.assertEqual({p.name for p in root.iterdir()}, set(names))
+                    for name, body in zip(names, bodies): self.assertEqual((root / name).read_bytes(), body)
+                if failure == "extra": self.assertEqual((root / "unrelated").read_bytes(), b"not removed by transport")
+
     def test_workflows_download_fixed_originals_without_configuration_or_credentials(self):
         root = Path(__file__).absolute().parents[2]
         _, rows = TOOL.android_support_manifest()
         name = "Acquire and verify the two fixed Android support archives as DATA"
         for filename, assembly in (("desktop-macos-installed.yml", "Assemble the ordinary image app and sign code inside-out (never --deep)"),
                                    ("desktop-macos-aqua.yml", "Assemble the instrumented observation app with SOURCE-selected signing")):
-            workflow = without_remove_output_workflow((root / ".github/workflows" / filename).read_text())
+            raw = (root / ".github/workflows" / filename).read_text()
+            download = workflow_step(raw, "Download the fixed once-signed Android support capsule")
+            admission = workflow_step(raw, name)
+            self.assertIn("timeout-minutes: 3", download)
+            self.assertIn("timeout-minutes: 1", admission)
+            for expected in ("artifact-ids: '11691308054'", "run-id: '38109802320'",
+                "repository: Apdelrahman1911/mobile-release-kit", "merge-multiple: 'false'",
+                "digest-mismatch: error", "skip-decompress: 'false'",
+                "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"):
+                self.assertIn(expected, download)
+            self.assertNotIn("github.token", admission)
+            self.assertNotIn("curl", admission)
+            self.assertEqual(raw.count("--android-support-signed-receipt"), 2)
+            self.assertIn('[[ ! -e "$MRK_MACOS_WORK/signed-android-transport" && ! -L "$MRK_MACOS_WORK/signed-android-transport" ]]', raw)
+            for current in (admission, workflow_step(raw, assembly)):
+                self.assertIn("signed-android-transport/android-support-signed-receipt.json", current)
+                self.assertIn("signed-android-transport/bundletool-all-1.18.3.jar", current)
+                self.assertIn("signed-android-transport/aapt2-8.9.2-12782657-osx.jar", current)
+            if filename == "desktop-macos-aqua.yml":
+                self.assertEqual(download.splitlines()[0], admission.splitlines()[0])
+                self.assertEqual(admission.splitlines()[0], workflow_step(raw, assembly).splitlines()[0])
+            predecessor = without_signed_android_support_workflow(raw)
+            self.assertEqual(without_signed_android_support_workflow(predecessor), predecessor)
+            for changed in (raw.replace("artifact-ids: '11691308054'", "artifact-ids: '1'", 1),
+                raw.replace(download, download.replace("digest-mismatch: error", "digest-mismatch: ignore"), 1),
+                raw + "# signed-android-transport unexpected\n"):
+                with self.assertRaises(AssertionError):
+                    without_signed_android_support_workflow(changed)
+            workflow = without_remove_output_workflow(predecessor)
             block = workflow_step(workflow, name)
             self.assertIn("shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}", block)
             self.assertEqual(block.count("/usr/bin/env -i PATH=/usr/bin:/bin HOME=\"$work\""), 3)
@@ -10826,6 +16157,7 @@ class MacNormalPreviewData(unittest.TestCase):
                 args = SimpleNamespace(target=build_target, package_role=role, binary=facade, expected_app_binary=TOOL.digest(body), output=output,
                     entry_binary=entry, expected_entry=TOOL.digest(entry_macho_fixture(target=build_target)),
                     bundletool_archive=support.bundletool_archive, aapt2_archive=support.aapt2_archive,
+                    android_support_signed_receipt=support.android_support_signed_receipt,
                     vault_helper=helper, expected_vault_helper=TOOL.digest(helper_body),
                     remover=remover, expected_remover=TOOL.digest(remover_body),
                     remover_cargo_messages=remover_cargo, remover_cargo_target_dir=remover_target,
@@ -10836,7 +16168,7 @@ class MacNormalPreviewData(unittest.TestCase):
                     args.desktop_image_cargo_messages, args.desktop_image_cargo_target_dir = cargo, target
                 else:
                     args.observer_cargo_messages, args.observer_cargo_target_dir = cargo, target
-                with mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path):
+                with synthetic_android_support(support, app_seal={}):
                     result = TOOL.app_command(args)
                 icon = (TOOL.DESKTOP / "src-tauri/icons/icon.png").read_bytes()
                 expected = {TOOL.ENTRY_BINARY: (entry_macho_fixture(target=build_target), 0o755), TOOL.APP_BINARY: (body, 0o755),
@@ -10859,8 +16191,7 @@ class MacNormalPreviewData(unittest.TestCase):
                 self.assertEqual(TOOL.tree(output), expected)
                 seal = {TOOL.GITHUB_SEAL: (helper_body, 0o555), TOOL.GITHUB_SEAL_NOTICE: (b"inert notice DATA", 0o644)}
                 sealed_args = SimpleNamespace(**dict(vars(args), output=work / "with-seal.app"))
-                with mock.patch.object(TOOL, "github_seal_files", return_value=contextlib.nullcontext(seal)), \
-                     mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path):
+                with synthetic_android_support(support, app_seal=seal):
                     TOOL.app_command(sealed_args)
                 self.assertEqual(TOOL.tree(sealed_args.output), dict(expected, **seal))
                 self.assertEqual(result["packageRole"], role)
@@ -10871,7 +16202,8 @@ class MacNormalPreviewData(unittest.TestCase):
                     remover_messages, remover, remover_target, remover_body, target=build_target))
                 missing = SimpleNamespace(**{key: value for key, value in vars(args).items() if key != "remover"})
                 missing.output = work / "missing-remover-app"
-                with self.assertRaisesRegex(TOOL.Refused, "package-role-remover-required"): TOOL.app_command(missing)
+                with synthetic_android_support(support, app_seal={}), self.assertRaisesRegex(TOOL.Refused, "package-role-remover-required"):
+                    TOOL.app_command(missing)
                 self.assertFalse(missing.output.exists())
                 self.assertEqual(result["residentImageSha256"], TOOL.digest(resident_body))
                 self.assertNotIn("normalCargoArtifact", result)
@@ -10881,7 +16213,7 @@ class MacNormalPreviewData(unittest.TestCase):
                     self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
                 wrong = SimpleNamespace(**dict(vars(args), output=work / "refused-app",
                     target="x86_64-apple-darwin" if build_target == "aarch64-apple-darwin" else "aarch64-apple-darwin"))
-                with self.assertRaises(TOOL.Refused): TOOL.app_command(wrong)
+                with synthetic_android_support(support, app_seal={}), self.assertRaises(TOOL.Refused): TOOL.app_command(wrong)
                 self.assertFalse(wrong.output.exists())
 
     def test_app_copy_mode_exception_is_only_the_fixed_readonly_helper(self):
@@ -10962,6 +16294,7 @@ class MacNormalPreviewData(unittest.TestCase):
             desktop_image=binary, expected_desktop_image=TOOL.digest(image_body),
             desktop_image_cargo_messages=base / "cargo.jsonl", desktop_image_cargo_target_dir=target,
             bundletool_archive=support.bundletool_archive, aapt2_archive=support.aapt2_archive,
+            android_support_signed_receipt=support.android_support_signed_receipt,
             vault_helper=base / "helper", expected_vault_helper=TOOL.digest(body),
             android_helper=base / "resident-facade", expected_android_helper=TOOL.digest(body),
             resident_image=base / "resident-image", expected_resident_image=TOOL.digest(resident))
@@ -10971,7 +16304,7 @@ class MacNormalPreviewData(unittest.TestCase):
         values[remover] = remover_body
         values[args.remover_cargo_messages] = cargo_lines(*remover_rows, {"reason": "build-finished", "success": True})
         with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]), \
-                mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path), \
+                synthetic_android_support(support, app_seal={}), \
                 mock.patch.object(TOOL, "write_tree") as output:
             staged = TOOL.app_command(args)
         self.assertEqual(staged["desktopImageCargoArtifact"], result)
@@ -11298,7 +16631,7 @@ class MacNormalPreviewData(unittest.TestCase):
                   TOOL.DESKTOP / "macos-installed-inputs" / Path(TOOL.ANDROID_SERVICE_PLIST).name: plist}
         with (mock.patch.object(TOOL, "runtime_tree", return_value=runtime) as runtime_reader,
               mock.patch.object(TOOL, "tree", return_value=app) as tree,
-              mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path),
+              synthetic_android_support(support, app_seal={}),
               mock.patch.object(TOOL, "read", side_effect=lambda path, *_: source[path]),
               mock.patch.object(TOOL, "write_tree") as output):
             result = TOOL.input_command(args)
@@ -11387,7 +16720,7 @@ class MacNormalPreviewData(unittest.TestCase):
             "schemaVersion": 1, "packageVersion": "0.1.1", "release": intel_release})
         with (mock.patch.object(TOOL, "runtime_tree", return_value=runtime) as runtime_reader,
               mock.patch.object(TOOL, "tree", return_value=intel_app) as signed_tree,
-              mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path),
+              synthetic_android_support(support, app_seal={}),
               mock.patch.object(TOOL, "read", side_effect=lambda path, *_: source[path]),
               mock.patch.object(TOOL, "write_tree") as output):
             TOOL.input_command(intel_args)
@@ -11631,7 +16964,7 @@ class MacNormalPreviewData(unittest.TestCase):
             "installation-observation.json": observed, "android-helper-package-install.json": owner,
             "package-audit.json": {"packageSha256": TOOL.digest(package), "packageSize": len(package),
                 "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
-                "qualification": "scripts-only-package-audited-not-installed-or-GUI-qualified"}}
+                "qualification": TOOL.INSTALL_PRODUCT_QUALIFICATION}}
         # Explicitly synthetic final-carrier correspondence, never a native
         # notary/Installer receipt. The real parser is called by preview below.
         final_package = b'{"syntheticFinalPackageReceipt":"not native evidence"}\n'
@@ -11654,6 +16987,7 @@ class MacNormalPreviewData(unittest.TestCase):
             "sha256Compared": True, "errorCount": 0, "warningCount": 0, "ticketRowCount": 1, "logSha256": "e" * 64,
             "strictSignatureBeforeAndAfter": True, "actualStaplerValidation": True, "actualImageVerification": True,
             "finalMountReadOnly": True, "finalMountOriginalsMatch": True, "originalMountDetached": True,
+            "assessmentSubsystemEnabledBefore": True, "actualDiskImagePolicyAssessment": True,
             "assurance": "final-carrier-observation-not-downloaded-install-or-gatekeeper-authority"}
         final_receipt = {"schemaVersion": 1, "phase": "finalize-image", "target": selection.target, "source": "a" * 40,
             "packageRole": "ordinary-image", "workflowSource": "a" * 40,
@@ -11662,7 +16996,7 @@ class MacNormalPreviewData(unittest.TestCase):
             "originalCalls": [{"role": "final-image-" + role, "entered": True, "returned": True, "capturesSettled": True,
                 "returncode": 0, "stdoutSha256": TOOL.digest(b""), "stderrSha256": TOOL.digest(b"")}
                 for role in ("resolve-notarytool", "resolve-stapler", "signature-before", "submit", "log", "staple", "validate",
-                             "signature-after", "verify", "attach", "detach")],
+                             "signature-after", "verify", "attach", "detach", "policy-status", "policy-assess")],
             "credentialOriginals": [], "credentialContexts": [], "targetRetired": True, "originalClosesKnown": True,
             "passed": True, "outerFinalityRequired": True, "androidServiceAuthenticated": False,
             "androidRegisteredCopyQualified": False, "androidBuildQualified": False,
@@ -11732,6 +17066,8 @@ class MacNormalPreviewData(unittest.TestCase):
 
     def test_failed_original_status_changed_package_or_unsettled_readback_cannot_publish(self):
         failures = [
+            ("package-audit.json", "qualification", "scripts-only-package-audited-not-installed-or-GUI-qualified"),
+            ("package-audit.json", "qualification", "not-a-product-audit"),
             ("image-finalization.status", None, b"1\n"), ("package-finalization.status", None, b"1\n"),
             ("distribution-final/MobileReleaseKit.dmg", None, b"changed"),
             ("android-helper-finalize-package.json", None, b"changed raw S3 receipt"),
@@ -11960,7 +17296,23 @@ class MacNormalPreviewData(unittest.TestCase):
         for required in ("package-export receipt is intentionally a **build/Installer/readback snapshot**",
                          "automatic-open and normal-Quit fields remain unexecuted at that stage",
                          "same hosted job subsequently runs one external XCTest scenario",
-                         "normal-ui/result.json", "A missing, failed or skipped check is not a pass",
+                         "matching **public-verification-evidence.json** in the separate evidence artifact",
+                         "normal-ui/test.status", "normal-ui/summary.status",
+                         "not the original XCTest counts or full UI proof",
+                         "A zero scalar status alone does not establish the narrow UI observation",
+                         "actual completed check and its exact-source qualification still require review",
+                         "Raw native results are not published in that artifact",
+                         "A missing, failed or skipped check is not a pass",
+                         "exact reviewed run and attempt", "`aarch64-apple-darwin`",
+                         "mobile-release-kit-macos26-<target>-preview-<source>-<run-id>-<run-attempt>",
+                         "desktop-macos-installed-<target>-<source>-<run-id>-<run-attempt>",
+                         "check their source/workflow, run/attempt and target bindings",
+                         "Do not substitute another target, run, attempt or removal-lifecycle artifact",
+                         "**14-day retention**", "can expire or be unavailable",
+                         "missing evidence is not a pass or permission to use an older package",
+                         "review the actual completed job and check outcomes, not just artifact availability",
+                         "Preserve downloaded-file quarantine and macOS security policy",
+                         "without removing quarantine or bypassing it",
                          "does not prove POSIX exit status or every worker's finality",
                          "Gatekeeper", "Do not disable", "NOT READY / undelivered",
                          "fixed eight-case Installer fixture before ordinary install",
@@ -11968,10 +17320,19 @@ class MacNormalPreviewData(unittest.TestCase):
                          "project-field Aqua observer failure is preserved and unresolved"):
             self.assertIn(required, guide)
 
-        for required in ("Ordinary V2 installation requires", "Developer ID Application certificate/key", "shipping profiles are currently unconfigured",
+        for required in ("Ordinary V2 installation requires", "Developer ID Application certificate/key",
+                         "public Application, Installer and notary configurations are enrolled",
+                         "Current-package Installer-key, notarization and installed-preview verification remain pending",
+                         "configuration is not native qualification",
                          "Credential-free engineering fixtures do **not** satisfy", "Downloaded-image/Installer interaction and Gatekeeper qualification remain",
-                         "producer.json", "producer.sig", "standalone package copied to writable Downloads is unsupported"):
+                         "producer.json", "producer.sig", "standalone package copied to writable Downloads is unsupported",
+                         "no old-version pruning is provided", "separate removal disk image and its accompanying guide",
+                         "its execution and recovery remain unqualified here",
+                         "carrier's execution/recovery remain separate obligations"):
             self.assertIn(required, guide)
+        for stale in ("shipping profiles are currently unconfigured", "no old-version pruning or uninstall is provided",
+                      "any future uninstall", "normal-ui/result.json"):
+            self.assertNotIn(stale, guide)
 
         image_name = "Notarize, staple and verify only the final user image"
         image_step = workflow_step(workflow, image_name)

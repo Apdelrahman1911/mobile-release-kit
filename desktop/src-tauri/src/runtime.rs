@@ -2486,12 +2486,18 @@ fn macos_images_selection_and_edit_share_one_sealed_profile() {
 pub(crate) fn installed_macos_evidence_profile_data_check() -> bool {
     // Explicitly called by the harness=false observer. Compiled selection and
     // method DATA only: no runtime resolution, native query or document permit.
+    use crate::android_build_protocol::Profile;
     let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mrk-evidence-profile-not-opened"));
     let selected = macos_bindings();
+    // Compiled catalogue DATA supports both Mac profiles, not the Linux profile.
+    for (profile, expected) in [(Profile::MacArm64, true), (Profile::MacX64, true), (Profile::LinuxX64, false)] {
+        if crate::android_toolchain_macos_policy::native_catalog_supports(profile) != expected { return false; }
+    }
+    let android_supported = matches!(Profile::current(), Some(Profile::MacArm64 | Profile::MacX64));
     if runtime.project_selection_profile_available() != selected
         || runtime.evidence_selection_profile_available() != selected
         || runtime.project_path_selection_profile_available() != (INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && selected)
-        || runtime.android_source_selection_profile_available() != (INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && selected && cfg!(target_arch = "aarch64")) { return false; }
+        || runtime.android_source_selection_profile_available() != (INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && selected && android_supported) { return false; }
     for method in ["artifacts.candidate.observe", "release.evidence.observe"] {
         if !macos_installed_passive_method(method) { return false; }
         #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
@@ -2589,7 +2595,7 @@ mod tests {
         assert_eq!(runtime.metadata_images_edit_profile_available(), admitted);
         assert_eq!(runtime.metadata_images_selection_profile_available(), admitted);
         assert_eq!(runtime.project_path_selection_profile_available(), INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && admitted);
-        assert_eq!(runtime.android_source_selection_profile_available(), INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && admitted && cfg!(target_arch = "aarch64"));
+        assert_eq!(runtime.android_source_selection_profile_available(), INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && admitted && cfg!(any(target_arch = "aarch64", target_arch = "x86_64")));
         assert_eq!(runtime.evidence_selection_profile_available(), admitted);
     }
     #[cfg(target_os = "macos")]
@@ -2600,7 +2606,7 @@ mod tests {
             INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && runtime.project_selection_profile_available());
         assert_eq!(runtime.evidence_selection_profile_available(), runtime.project_selection_profile_available());
         assert_eq!(runtime.android_source_selection_profile_available(),
-            INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && runtime.project_selection_profile_available() && cfg!(target_arch = "aarch64"));
+            INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && runtime.project_selection_profile_available() && cfg!(any(target_arch = "aarch64", target_arch = "x86_64")));
         #[cfg(all(target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             assert_eq!(runtime.evidence_selection_profile_available(), macos_bindings());
@@ -2823,7 +2829,7 @@ mod tests {
             not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))
             && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-        let expected = cfg!(target_arch = "aarch64") && macos_bindings() && !cfg!(feature = "windows-runtime-publisher");
+        let expected = cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) && macos_bindings() && !cfg!(feature = "windows-runtime-publisher");
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
             all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let expected = false;
