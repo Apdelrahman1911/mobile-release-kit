@@ -2629,11 +2629,13 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertIsNone(report['setupFacts']); self.assertIsNone(report['setupRole'])
             for error, kind, number in ((RuntimeError('PRIVATE_SENTINEL'), 'other', None),
                     (PermissionError(13, 'PRIVATE_SENTINEL', 'PRIVATE_SENTINEL'), 'OSError', 13),
+                    (OSError(62, 'PRIVATE_SENTINEL'), 'OSError', 62),
                     (OSError(99999, 'PRIVATE_SENTINEL'), 'OSError', None)):
                 probe.setup_failure(report, error)
                 self.assertEqual(report['setupExceptionClass'], kind)
                 self.assertEqual(report['setupErrno'], number)
                 self.assertNotIn('PRIVATE_SENTINEL', json.dumps(report))
+        self.assertEqual(probe.TOOLS, ('/usr/bin/pkgbuild', '/usr/bin/bsdtar', '/usr/bin/xar', '/usr/bin/productbuild'))
         self.assertEqual(probe.FILE_LIMIT, 4 * 1024 * 1024)
         for scenario in ('pass', 'audit-refused', 'unknown-command', 'oversize'):
             # Exercise the exact boundary algorithm with small inert output,

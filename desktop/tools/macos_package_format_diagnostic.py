@@ -16,7 +16,7 @@ REF = 'refs/heads/verify/desktop-macos-package-format-diagnostic'
 SCRIPT = 'desktop/tools/macos_package_format_diagnostic.py'
 WORKFLOW = '.github/workflows/desktop-macos-package-format-diagnostic.yml'
 TARGET = 'x86_64-apple-darwin'
-TOOLS = ('/usr/bin/pkgbuild', '/usr/bin/tar', '/usr/bin/xar', '/usr/bin/productbuild')
+TOOLS = ('/usr/bin/pkgbuild', '/usr/bin/bsdtar', '/usr/bin/xar', '/usr/bin/productbuild')
 FILE_LIMIT = 4 * 1024 * 1024
 TOTAL_LIMIT = 16 * 1024 * 1024
 CORE = ('__init__.py', 'errors.py', 'owned_process.py', '_command_process.py',
@@ -312,7 +312,7 @@ def setup_failure(report, error):
     if isinstance(error, OSError):
         kind = 'OSError'
         candidate = OSError.errno.__get__(error)
-        if type(candidate) is int and candidate in (1, 2, 5, 9, 13, 20, 21, 22, 24, 28, 40, 60):
+        if type(candidate) is int and candidate in (1, 2, 5, 9, 13, 20, 21, 22, 24, 28, 40, 60, 62):
             number = candidate
     report.update(setupExceptionClass=kind, setupErrno=number)
 
