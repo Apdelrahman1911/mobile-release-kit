@@ -3949,6 +3949,205 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(state.operation.notary_tool, original_tool)
         self.assertEqual((module.NOTARY_FREE_FLOOR, module.NOTARY_STORAGE_RESERVE), (3 * 1024 * 1024 * 1024, 2 * 1024 * 1024 * 1024))
 
+    @contextlib.contextmanager
+    def mount_fixture_call(self, operation, *, fault=None, events=None):
+        """Explicit native metadata DATA only; real source/ledger/validator run."""
+        module = ANDROID_HELPER
+        real_load, real_fstat, real_stat, real_statvfs = module.load_data, module.os.fstat, module.os.stat, module.os.fstatvfs
+        events = [] if events is None else events
+        def mounted_fd():
+            entry = operation.mount_entry
+            return None if entry is None or entry["closed"] else entry["fd"]
+        def info_data(info):
+            if fault == "metadata": self.assertFalse(operation.mount_known)
+            return SimpleNamespace(**{name: getattr(info, name) for name in (
+                "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")},
+                st_dev=info.st_dev + 1)
+        def fstat(fd):
+            info = real_fstat(fd)
+            return info_data(info) if fd == mounted_fd() else info
+        def named(name, *args, **kwargs):
+            info = real_stat(name, *args, **kwargs)
+            return info_data(info) if (name == "package-mount" and kwargs.get("dir_fd") == operation.work_entry["fd"]
+                and mounted_fd() is not None) else info
+        def statvfs(fd):
+            if fd == mounted_fd(): return SimpleNamespace(f_flag=0 if fault == "metadata" else os.ST_RDONLY)
+            return real_statvfs(fd)
+        def api(deadline, *, target):
+            self.assertFalse(operation.mount_entered or operation.mount_known)
+            self.assertEqual(target, operation.target)
+            deadline.check()
+            events.append("api-admitted")
+            def filesystem(fd):
+                self.assertEqual(fd, mounted_fd())
+                deadline.check()
+                events.append("facts-known" if operation.mount_known else "facts-acquiring")
+                if fault == "source":
+                    self.assertFalse(operation.mount_known)
+                    source, _ = operation.mount_host_source
+                    (operation.checkout / "desktop/tools/macos_xcode_host_preparation.py").write_bytes(b"changed SOURCE")
+                return {"typeName": "hfs", "fsid": [1, 2], "owner": os.getuid(), "type": 17, "flags": 0x1001,
+                    "subtype": 0, "flagsExt": 0, "mountOn": str(operation.work / "package-mount"),
+                    "mountFrom": "/dev/disk98s1" if fault == "device" else operation.mount_device}
+            return SimpleNamespace(filesystem=filesystem)
+        def load(checkout, filename, name):
+            if filename == "macos_xcode_host_preparation.py":
+                self.assertEqual((checkout, name), (operation.checkout, "_mrk_package_mount_host"))
+                source, body = operation.mount_host_source
+                self.assertEqual(operation.read(source), body)
+                self.assertEqual(len(body), 96477)
+                self.assertEqual(module.digest(body), "d03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376")
+                return SimpleNamespace(DarwinAPI=api)
+            return real_load(checkout, filename, name)
+        with (mock.patch.object(module, "load_data", side_effect=load), mock.patch.object(module.os, "fstat", side_effect=fstat),
+              mock.patch.object(module.os, "stat", side_effect=named), mock.patch.object(module.os, "fstatvfs", side_effect=statvfs)):
+            yield operation
+        self.assertIs(module.load_data, real_load)
+        self.assertIs(module.os.fstat, real_fstat); self.assertIs(module.os.stat, real_stat)
+        self.assertIs(module.os.fstatvfs, real_statvfs)
+
+    def test_readonly_mount_custody_precedes_policy_and_unknowns_retain(self):
+        """Genuine acquire/validator/execute-finally; no native command runs."""
+        module = ANDROID_HELPER
+        source = (Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py").read_text()
+        operation_node = next(n for n in ast.parse(source).body if isinstance(n, ast.ClassDef) and n.name == "Operation")
+        methods = {n.name: ast.get_source_segment(source, n) for n in operation_node.body if isinstance(n, ast.FunctionDef)}
+        for name in ("finalize_image", "same_package_noop", "package_install"):
+            self.assertLess(methods[name].index("self.normal_mount_host()"), methods[name].index("self.mount_custody("))
+        baseline = methods["removal_baseline_attach"]
+        self.assertLess(baseline.index("cleanup_mount_device_data("), baseline.index("self.removal_open_directory("))
+        self.assertLess(baseline.index("self.removal_own_parent_post("), baseline.index("self.mount_known = True"))
+        self.assertLess(baseline.index("self.mount_known = True"), baseline.index("self.stager.distribution_mount_data("))
+        # Out-of-scope UPDATE_PHASE keeps its exact original validator; a
+        # normal phase must never fall back merely because API/facts are absent.
+        environment = {"GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40,
+            "GITHUB_WORKFLOW_REF": "SOURCE DATA", "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}
+        legacy = module.Operation(SimpleNamespace(), Path("/DATA"), Path("/DATA/work"), module.UPDATE_PHASE, environment, TOOL)
+        identity = (2, 3, stat.S_IFDIR | 0o555, os.getuid(), os.getgid())
+        legacy.work_entry = {"fd": 10, "identity": (1, 2, stat.S_IFDIR | 0o700, os.getuid(), os.getgid())}
+        legacy.mount_entry = {"fd": 11, "closed": False, "identity": identity}
+        legacy.mount_known = True
+        def original_info(**changed):
+            return SimpleNamespace(**dict(zip(("st_dev", "st_ino", "st_mode", "st_uid", "st_gid"), identity), **changed))
+        with (mock.patch.object(legacy, "package_clock", return_value=100),
+              mock.patch.object(legacy, "recheck_directory"),
+              mock.patch.object(module.os, "stat", return_value=original_info()),
+              mock.patch.object(module.os, "fstat", return_value=original_info()),
+              mock.patch.object(module.os, "fstatvfs", return_value=SimpleNamespace(f_flag=os.ST_RDONLY))):
+            legacy.recheck_mount()
+            self.assertIsNone(legacy.mount_api)
+            with mock.patch.object(module.os, "fstatvfs", return_value=SimpleNamespace(f_flag=0)), self.assertRaises(module.Refused):
+                legacy.recheck_mount()
+            with mock.patch.object(module.os, "stat", return_value=original_info(st_ino=4)), self.assertRaises(module.Refused):
+                legacy.recheck_mount()
+            legacy.phase = "package-install"
+            with self.assertRaisesRegex(module.Refused, "^package-original-mount-unavailable$"):
+                legacy.recheck_mount()
+        for fault in (None, "ambiguous", "device", "metadata", "source", "open", "captures", "close", "mounted-file-open"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                checkout, work, environment, _owner, _ = self.fixture(Path(directory))
+                events, expected_error = [], TOOL.Refused("distribution-attach-mount")
+                environment.update(MRK_MACOS_SAME_PACKAGE_SCOPE=module.SAME_PACKAGE_PHASE)
+                operation = None
+                def command(argv, **options):
+                    role = operation.calls[-1]["role"]
+                    events.append(role)
+                    if role == "distribution-attach":
+                        self.assertTrue(operation.mount_entered)
+                        self.assertFalse(operation.mount_known)
+                        rows = [{"dev-entry": "/dev/disk99s1", "mount-point": str(work / "package-mount"),
+                            "potentially-mountable": fault == "mounted-file-open"}]  # Nomination is not policy acceptance.
+                        if fault == "ambiguous": rows.append(dict(rows[0]))
+                        return CompletedProcess(argv, 0, TOOL.plistlib.dumps({"system-entities": rows}), b"")
+                    self.assertEqual(role, "distribution-detach")
+                    self.assertEqual(argv, ["/usr/bin/hdiutil", "detach", "/dev/disk99s1"])
+                    self.assertFalse(operation.installer_entered)
+                    self.assertTrue(all(row["closed"] for row in operation.entries if row["kind"] in ("mount", "mounted-file")))
+                    return CompletedProcess(argv, 0, b"", b"")
+                operation = module.Operation(SimpleNamespace(run_owned=command), checkout, work,
+                    module.SAME_PACKAGE_PHASE, environment, TOOL)
+                state = self.credential_fixture(operation, clock=[10_000_000_000])
+                for key in module.CREDENTIAL_VARIABLES + module.INSTALLER_CREDENTIAL_VARIABLES + (module.NOTARY_KEY_VARIABLE,):
+                    environment.pop(key, None)
+                acquired_mount_fd = []
+                real_open, real_close, real_custody = module.os.open, module.os.close, operation.mount_custody
+                policy_seen, close_fault_pending = [], [True]
+                real_parser = TOOL.distribution_mount_data
+                def policy(stdout, stderr, code, path):
+                    self.assertTrue(operation.mount_known)
+                    policy_seen.append(True)
+                    with self.assertRaises(TOOL.Refused) as caught:
+                        real_parser(stdout, stderr, code, path)
+                    self.assertEqual(BaseException.args.__get__(caught.exception), ("distribution-attach-mount",))
+                    raise expected_error
+                def acquire(name, flags, *args, **kwargs):
+                    if name == "Install.pkg" and fault == "mounted-file-open":
+                        self.assertTrue(operation.mount_known)
+                        entry = operation.entries[-1]
+                        self.assertEqual((entry["role"], entry["kind"], entry["name"]),
+                            ("mounted-Install.pkg", "mounted-file", "Install.pkg"))
+                        self.assertIsNone(entry["fd"]); self.assertFalse(entry["closed"])
+                        self.assertIs(operation.entry_registry[id(entry)], entry)
+                        raise OSError("INERT mounted-file acquisition refusal")
+                    if name == "package-mount" and flags & os.O_DIRECTORY and operation.mount_api is not None and fault == "open":
+                        self.assertFalse(operation.mount_known)
+                        self.assertIsNone(operation.mount_entry["fd"])
+                        self.assertIs(operation.entry_registry[id(operation.mount_entry)], operation.mount_entry)
+                        raise OSError("INERT acquisition refusal")
+                    fd = real_open(name, flags, *args, **kwargs)
+                    if name == "package-mount" and flags & os.O_DIRECTORY and operation.mount_api is not None:
+                        acquired_mount_fd.append(fd)
+                    return fd
+                def consuming_close(fd):
+                    real_close(fd)
+                    if fault == "close" and close_fault_pending[0] and acquired_mount_fd and fd == acquired_mount_fd[0]:
+                        close_fault_pending[0] = False
+                        raise OSError("INERT consuming original close uncertainty")
+                def custody(result, role):
+                    if fault == "captures":
+                        operation.calls[-1]["capturesSettled"] = False
+                    return real_custody(result, role)
+                def selected_flow():
+                    operation.package_name = "Install.pkg"
+                    operation.mount_placeholder = operation.package_directory("package-mount")
+                    operation.normal_mount_host()
+                    operation.stage = "package-readonly-attach"
+                    result = operation.package_call("distribution-attach", ["/usr/bin/hdiutil", "attach", "/INERT/image",
+                        "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", str(work / "package-mount"), "-plist"], timeout=60)
+                    if fault == "mounted-file-open":
+                        operation.mount_custody(result, "same-package-readonly-mount")
+                        operation.mount_inputs({"Install.pkg": b"inert", "producer.json": b"inert", "producer.sig": b"inert"}, "Install.pkg")
+                    else:
+                        with mock.patch.object(TOOL, "distribution_mount_data", side_effect=policy):
+                            try:
+                                operation.mount_custody(result, "same-package-readonly-mount")
+                            except TOOL.Refused as error:
+                                self.assertIs(error, expected_error)
+                                raise
+                with (self.credential_fixture_call(operation, state), self.mount_fixture_call(operation, fault=fault, events=events),
+                      mock.patch.object(operation, "same_package_noop", side_effect=selected_flow),
+                      mock.patch.object(operation, "mount_custody", side_effect=custody),
+                      mock.patch.object(module.os, "open", side_effect=acquire),
+                      mock.patch.object(module.os, "close", side_effect=consuming_close)):
+                    with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"):
+                        operation.execute()
+                self.assertFalse(operation.receipt["passed"] or operation.installer_entered)
+                self.assertEqual(events.count("distribution-attach"), 1)
+                self.assertEqual(events.count("distribution-detach"), 1 if fault is None else 0)
+                self.assertEqual(operation.mount_known, fault in (None, "close", "mounted-file-open"))
+                self.assertEqual(operation.mount_detached, fault is None)
+                self.assertEqual(policy_seen, [True] if fault in (None, "close") else [])
+                if fault in (None, "close"):
+                    self.assertEqual(operation.diagnostic_failure, {"type": "stager-refused", "reason": "distribution-attach-mount", "errno": None})
+                    self.assertEqual(operation.receipt["failure"]["reason"], "distribution-attach-mount")
+                if fault is None:
+                    self.assertTrue(operation.receipt["targetRetired"] and operation.receipt["originalClosesKnown"])
+                else:
+                    self.assertFalse(operation.receipt["targetRetired"])
+                # Task-private temporary DATA is owned by this fixture, not a
+                # production authorization to repair any unknown mounted object.
+                self.assertTrue(all(entry["fd"] is None for entry in operation.entries))
+
     def final_image_fixture(self, root, *, target="aarch64-apple-darwin", failure=None, inventory_body=None):
         """Same real S3 handoff/book and S4 files; no tool or mount executes.
 
@@ -4172,21 +4371,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
     def final_image_fixture_call(self, state):
         module, operation = ANDROID_HELPER, state.operation
         original_mount, original_tool = operation.recheck_mount, operation.notary_tool
-        def mounted_device_data():
-            operation.package_clock()
-            operation.recheck_directory(operation.work_entry)
-            entry = operation.mount_entry
-            self.assertTrue(operation.mount_known and not operation.mount_detached and not entry["closed"])
-            named = (operation.work / "package-mount").stat()
-            held = os.fstat(entry["fd"])
-            identity = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
-            self.assertEqual(identity(named), identity(held))
-            self.assertEqual(identity(held), entry["identity"])
-            # The real recheck_mount body separately requires ST_RDONLY and
-            # a different device. This local DATA fixture is not a real mount.
-        with (self.credential_fixture_call(operation, state),
+        with (self.credential_fixture_call(operation, state), self.mount_fixture_call(operation),
               mock.patch.object(operation, "notary_tool", side_effect=state.tool),
-              mock.patch.object(operation, "recheck_mount", side_effect=mounted_device_data),
               mock.patch.object(module, "NOTARY_FREE_FLOOR", 0),
               mock.patch.object(module, "NOTARY_STORAGE_RESERVE", 2 * 1024 * 1024)):
             yield operation
@@ -4459,11 +4645,6 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     return CompletedProcess(argv, 0, b"", b"")
                 operation = state.operation = module.Operation(SimpleNamespace(run_owned=command), state.checkout,
                     work, module.SAME_PACKAGE_PHASE, state.environment, TOOL, target=target)
-                def readonly_mount_port():
-                    entry = operation.mount_entry
-                    self.assertTrue(operation.mount_known and not operation.mount_detached and not entry["closed"])
-                    info = os.fstat(entry["fd"])
-                    self.assertEqual((info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid), entry["identity"])
                 def readback(args, *, expected_previous=None):
                     if expected_previous is None:
                         self.assertEqual(args.installer_status, work / "installer-output.status")
@@ -4482,7 +4663,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         state.status_close_thrown = True
                         raise OSError("INERT consumed status close uncertainty")
                 with (self.credential_fixture_call(operation, state), mock.patch.object(operation, "close", side_effect=consuming_close),
-                      mock.patch.object(operation, "recheck_mount", side_effect=readonly_mount_port),
+                      self.mount_fixture_call(operation),
                       mock.patch.object(TOOL, "observation_command", side_effect=readback),
                       mock.patch.object(TOOL, "same_package_result_census", side_effect=[before, after, after])):
                     if fault is None:
@@ -4683,6 +4864,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             target = checkout / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((source / name).read_bytes()); target.chmod(0o644)
+        host = checkout / "desktop/tools/macos_xcode_host_preparation.py"
+        host.parent.mkdir(parents=True, exist_ok=True)
+        host.write_bytes((source / "desktop/tools/macos_xcode_host_preparation.py").read_bytes()); host.chmod(0o644)
         # This unconfigured inert resident fixture stages neither optional tool.
         # Declare its own coherent SOURCE; deployed nominations may enroll both.
         nomination = checkout / module.TOOL_NOMINATION
@@ -10301,6 +10485,16 @@ class MacInstalledData(unittest.TestCase):
         row = {"dev-entry": "/dev/disk99s1", "potentially-mountable": True, "content-hint": "Apple_HFS", "mount-point": str(mount)}
         encoded = lambda rows: TOOL.plistlib.dumps({"system-entities": rows})
         self.assertEqual(TOOL.distribution_mount_data(encoded([row]), b"", 0, mount), "/dev/disk99s1")
+        self.assertEqual(TOOL.distribution_mount_data(encoded([dict(row, **{"volume-kind": "hfs"})]), b"", 0, mount), "/dev/disk99s1")
+        for kind in ("apfs", "HFS", "unknown", "", True, 1, ["hfs"], {"kind": "hfs"}):
+            with self.subTest(volumeKind=kind), self.assertRaisesRegex(TOOL.Refused, "^distribution-attach-entity$"):
+                TOOL.distribution_mount_data(encoded([dict(row, **{"volume-kind": kind})]), b"", 0, mount)
+        unmounted = {"dev-entry": "/dev/disk99", "potentially-mountable": False, "volume-kind": "hfs"}
+        with self.assertRaisesRegex(TOOL.Refused, "^distribution-attach-entity$"):
+            TOOL.distribution_mount_data(encoded([unmounted, row]), b"", 0, mount)
+        for malformed in (b'<?xml version="1.0"?><plist><dict></plist>', b'<?xml version="1.0"?><plist>'):
+            with self.subTest(malformed=malformed), self.assertRaisesRegex(TOOL.Refused, "^distribution-attach-plist$"):
+                TOOL.distribution_mount_data(malformed, b"", 0, mount)
         for output, status in ((encoded([row]), 1), (encoded([row]), True), (encoded([row, row]), 0), (encoded([]), 0),
             (encoded([dict(row, **{"mount-point": "/other"})]), 0), (encoded([dict(row, **{"dev-entry": "/dev/../disk99"})]), 0),
             (encoded([dict(row, **{"potentially-mountable": False})]), 0), (encoded([dict(row, private="no")]), 0),
@@ -15162,9 +15356,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # This exact helper is already in the readonly SOURCE closure. Inspect
         # its real caller without importing or invoking any operation owner.
         with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
-            helper_raw = original.read(527051 + 1)
+            helper_raw = original.read(533030 + 1)
             self.assertEqual(original.read(1), b"")
-        self.assertEqual(len(helper_raw), 527051)
+        self.assertEqual(len(helper_raw), 533030)
         helper_source = helper_raw.decode("utf-8", "strict")
         helper_tree = ast.parse(helper_source)
         helper_caps = [node.value for node in helper_tree.body

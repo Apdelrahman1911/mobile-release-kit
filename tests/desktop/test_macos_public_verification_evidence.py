@@ -1433,6 +1433,81 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertIs(projected["recordedPassed"], False)
             self.assertNotIn(SENTINEL, json.dumps(projected))
 
+        # Exact original stager failures remain distinct from helper refusals.
+        # Execute only the real finite classifier and real receipt projection
+        # SOURCE fragment; no Operation admission, process, signing or mount.
+        helper_path = ROOT / "desktop/tools/macos_android_helper_package.py"
+        helper_tree = ast.parse(helper_path.read_bytes())
+        names = {"Refused", "DISTRIBUTION_STAGER_REASONS", "_FAILURE_REASONS", "failure_exception"}
+        nodes = [node for node in helper_tree.body if
+                 isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names or
+                 isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                 and node.targets[0].id in names]
+        self.assertEqual(len(nodes), len(names))
+        namespace = {"sys": __import__("sys"), "json": json}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(helper_path), "exec"), namespace)
+        stager_path = ROOT / "desktop/tools/stage_macos_installed.py"
+        refused_node = [node for node in ast.parse(stager_path.read_bytes()).body
+                        if isinstance(node, ast.ClassDef) and node.name == "Refused"]
+        self.assertEqual(len(refused_node), 1)
+        stager = type(__import__("sys"))("original_stager_refusal_DATA")
+        exec(compile(ast.Module(body=refused_node, type_ignores=[]), str(stager_path), "exec"), vars(stager))
+        operation = next(node for node in helper_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
+        execute = next(node for node in operation.body if isinstance(node, ast.FunctionDef) and node.name == "execute")
+        handler = next(node for node in ast.walk(execute) if isinstance(node, ast.ExceptHandler)
+                       and node.name == "error" and any(isinstance(child, ast.Assign) and
+                       isinstance(child.targets[0], ast.Subscript) and isinstance(child.targets[0].value, ast.Attribute)
+                       and child.targets[0].value.attr == "receipt" for child in node.body))
+        start = next(i for i, node in enumerate(handler.body) if isinstance(node, ast.Assign)
+                     and isinstance(node.targets[0], ast.Subscript) and isinstance(node.targets[0].value, ast.Attribute)
+                     and node.targets[0].value.attr == "receipt")
+        fragment = handler.body[start:start+3]
+        self.assertEqual([type(node) for node in fragment], [ast.Assign, ast.Assign, ast.If])
+        function = ast.FunctionDef(name="project_original", args=ast.arguments(posonlyargs=[],
+            args=[ast.arg(arg="self"), ast.arg(arg="error")], kwonlyargs=[], kw_defaults=[], defaults=[]),
+            body=copy.deepcopy(fragment), decorator_list=[])
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), str(helper_path), "exec"), namespace)
+        labels = frozenset(("distribution-attach-original", "distribution-attach-plist", "distribution-attach-entity",
+            "distribution-attach-mount", "distribution-attach-single-mount", "distribution-package-name",
+            "distribution-three-file-roster", "distribution-original-byte-mode"))
+        self.assertEqual(namespace["DISTRIBUTION_STAGER_REASONS"], labels)
+        self.assertEqual(DATA.DISTRIBUTION_STAGER_REASONS, labels)
+        for label in labels:
+            error = stager.Refused(label); before = BaseException.args.__get__(error)
+            captured = namespace["failure_exception"](error, stager)
+            original = SimpleNamespace(stage="package-readonly-attach", stager=stager, diagnostic_failure=captured, receipt={})
+            namespace["project_original"](original, error)
+            self.assertEqual(original.receipt["failure"], {"stage": "package-readonly-attach", "type": "Refused", "reason": label})
+            self.assertEqual(DATA.project_failure(original.receipt["failure"])["reason"], label)
+            self.assertEqual(BaseException.args.__get__(error), before)
+            self.assertIs(type(error), stager.Refused)
+        class ForeignRefused(Exception):
+            def __str__(self): raise AssertionError("private exception rendered")
+        class StagerChild(stager.Refused):
+            def __str__(self): raise AssertionError("private subclass rendered")
+        class PrivateArgument:
+            def __str__(self): raise AssertionError("private argument rendered")
+        unknown = [stager.Refused(SENTINEL), stager.Refused(PrivateArgument()), stager.Refused(*sorted(labels)[:2]),
+                   ForeignRefused(next(iter(labels))), StagerChild(next(iter(labels)))]
+        for error in unknown:
+            before = BaseException.args.__get__(error)
+            captured = namespace["failure_exception"](error, stager)
+            original = SimpleNamespace(stage="package-readonly-attach", stager=stager, diagnostic_failure=captured, receipt={})
+            namespace["project_original"](original, error)
+            self.assertEqual(original.receipt["failure"]["reason"], "original-operation-refused")
+            self.assertEqual(BaseException.args.__get__(error), before)
+            self.assertNotIn(SENTINEL, json.dumps(original.receipt))
+        for captured in (None, SimpleNamespace(type="stager-refused"), {},
+                         {"type": "other", "reason": next(iter(labels)), "errno": None},
+                         {"type": "stager-refused", "reason": SENTINEL, "errno": None},
+                         {"type": "stager-refused", "reason": next(iter(labels)), "errno": 1},
+                         {"type": "stager-refused", "reason": next(iter(labels)), "errno": None, "extra": SENTINEL}):
+            error = stager.Refused(next(iter(labels)))
+            original = SimpleNamespace(stage="package-readonly-attach", stager=stager, diagnostic_failure=captured, receipt={})
+            namespace["project_original"](original, error)
+            self.assertEqual(original.receipt["failure"]["reason"], "original-operation-refused")
+            self.assertNotIn(SENTINEL, json.dumps(original.receipt))
+
         # Genuine fixed-token projector and reader, no native/credential work.
         source = (ROOT / "desktop/src-tauri/examples/macos_package_producer.rs").read_text()
         mapping = dict(re.findall(r'"([a-z-]+)"=>"(package-producer-refused:[a-z-]+)"', source))

@@ -15,6 +15,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import plistlib
 from pathlib import Path
 import re
 import shutil
@@ -64,7 +65,7 @@ INTEL_TARGET = "x86_64-apple-darwin"
 MAX_HELPER = 32 * 1024 * 1024
 # Only nonshipping producer graphs; packaged programs keep release3.
 PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=0"
-HELPER_SOURCE_BYTES = 527051
+HELPER_SOURCE_BYTES = 533030
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -920,6 +921,27 @@ def signature(info):
             info.st_uid, info.st_gid, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+def cleanup_mount_device_data(body, stderr, code, mountpoint):
+    """Cleanup nomination only; the unchanged strict parser still gates use."""
+    need(type(code) is int and code == 0 and type(body) is bytes and 0 < len(body) <= 65536
+         and type(stderr) is bytes and len(stderr) <= 65536 and b"\x00" not in body
+         and b"<!ENTITY" not in body.upper(), "package-cleanup-attach-data")
+    value = plistlib.loads(body)
+    need(type(value) is dict and len(value) <= 12 and all(type(k) is str for k in value)
+         and type(value.get("system-entities")) is list and 0 < len(value["system-entities"]) <= 8,
+         "package-cleanup-attach-plist")
+    rows = value["system-entities"]
+    need(all(type(row) is dict and len(row) <= 12 and all(type(k) is str for k in row) for row in rows),
+         "package-cleanup-attach-rows")
+    mounted = [row for row in rows if "mount-point" in row]
+    need(len(mounted) == 1 and type(mounted[0]["mount-point"]) is str
+         and mounted[0]["mount-point"] == str(mountpoint), "package-cleanup-attach-mount")
+    device = mounted[0].get("dev-entry")
+    need(type(device) is str and re.fullmatch(r"/dev/disk[0-9]{1,5}(?:s[0-9]{1,3})?", device) is not None,
+         "package-cleanup-attach-device")
+    return device
+
+
 def directory_identity(info):
     need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
          and info.st_gid == os.getgid() and not info.st_mode & 0o022, "directory-owner-mode")
@@ -1116,7 +1138,9 @@ def original_failure(error, owner, checkout, timeout, limit):
 # Public failure DATA only. SOURCE-selected labels, never exception text or a
 # diagnostic grant of command/cleanup/signature authority. Unknown labels stay
 # unclassified; in particular exact Refused class alone is not a sanitizer.
-_FAILURE_REASONS = frozenset((
+DISTRIBUTION_STAGER_REASONS = frozenset(('distribution-attach-original', 'distribution-attach-plist', 'distribution-attach-entity', 'distribution-attach-mount', 'distribution-attach-single-mount', 'distribution-package-name', 'distribution-three-file-roster', 'distribution-original-byte-mode'))
+
+_FAILURE_REASONS = frozenset((*DISTRIBUTION_STAGER_REASONS,
     'producer-tests-bound', 'producer-tests-framing', 'producer-tests-roster', 'producer-tests-result',
     'original-nonzero-producer-tests',
     'same-package-baseline-export', 'same-package-case', 'same-package-census', 'same-package-final-carrier', 'same-package-final-carrier-bytes', 'same-package-final-carrier-root', 'same-package-final-carrier-roster', 'same-package-finalizer-original', 'same-package-fixed-purpose', 'same-package-fresh-baseline', 'same-package-immediate-predecessor', 'same-package-input-', 'same-package-inventory', 'same-package-inventory-binding', 'same-package-inventory-input', 'same-package-live-readback', 'same-package-noop', 'same-package-notary-source', 'same-package-original-boundary', 'same-package-original-input', 'same-package-originals-unknown', 'same-package-parent-entry-bound', 'same-package-previous-shape', 'same-package-readback', 'same-package-readonly-mount', 'same-package-result-delta', 'same-package-result-namespace', 'same-package-result-post', 'same-package-source-scope', 'same-package-status-absence', 'same-package-status-post', 'same-package-status-purpose',
@@ -1865,6 +1889,7 @@ class Operation:
         self.python_signed = self.python_modules = None
         self.producer_profile_entry = self.distribution_entry = None
         self.mount_entry = self.mount_placeholder = self.mount_device = None
+        self.mount_api = self.mount_host_source = None
         self.mount_entered = self.mount_known = self.mount_detached = False
         self.installer_entered = self.installer_zero = self.installation_readback = False
         self.removal_package_complete = False
@@ -3936,14 +3961,10 @@ class Operation:
         self.final_image_call("final-image-verify", ["/usr/bin/hdiutil", "verify", str(path)], maximum=120)
         self.package_name = "Remove.pkg" if self.removal else "Install.pkg"  # Actual mounted_post fixed roster, never the observation request alias.
         self.mount_placeholder = self.final_image_io("final-image-mount-placeholder", self.package_directory, "package-mount")
+        self.normal_mount_host()
         attached = self.final_image_call("final-image-attach", ["/usr/bin/hdiutil", "attach", str(path), "-readonly", "-nobrowse",
             "-noautoopen", "-mountpoint", str(self.work / "package-mount"), "-plist"], maximum=60)
-        self.mount_device = self.stager.distribution_mount_data(attached.stdout, attached.stderr, attached.returncode, self.work / "package-mount")
-        fd = os.open("package-mount", READ_FLAGS | os.O_DIRECTORY, dir_fd=self.work_entry["fd"])
-        self.mount_entry = self.register(fd, "final-image-readonly-mount", "mount", self.work_entry["fd"], "package-mount")
-        info = os.fstat(fd)
-        self.mount_entry["identity"] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
-        self.mount_known = True
+        self.mount_custody(attached, "final-image-readonly-mount")
         self.mount_inputs(expected, self.package_name)
         self.mounted_post()
         self.final_image_mount_verified = True
@@ -6199,7 +6220,7 @@ class Operation:
         self.stage = "package-readonly-attach"
         attached = self.package_call("distribution-attach", ["/usr/bin/hdiutil", "attach", str(observation_path),
             "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", str(path), "-plist"], timeout=60)
-        self.mount_device = self.stager.distribution_mount_data(attached.stdout, attached.stderr, attached.returncode, path)
+        self.mount_device = cleanup_mount_device_data(attached.stdout, attached.stderr, attached.returncode, path)
         entry = self.removal_open_directory(self.removal_volumes, path.name, "removal-baseline-original-mount", readonly=True)
         entry["kind"] = "mount"  # Existing consuming-close route, not a second FD.
         info = os.fstat(entry["fd"])
@@ -6209,7 +6230,10 @@ class Operation:
              and entry["removal_facts"][2]["mountOn"] == str(path)
              and entry["removal_facts"][2]["mountFrom"] == self.mount_device, "removal-baseline-original-device")
         self.removal_own_parent_post(self.removal_volumes, self.removal_baseline_roster, path.name, present=True)
+        self.package_post()
         self.mount_known = True
+        need(self.stager.distribution_mount_data(attached.stdout, attached.stderr, attached.returncode, path)
+             == self.mount_device, "package-accepted-mount-device")
         return path
 
     def removal_baseline_mount_post(self):
@@ -6403,24 +6427,99 @@ class Operation:
         self.package_post()
         return {"file": path.name, "sha256": digest(body), "bytes": len(body)}, path
 
+    def normal_mount_host(self):
+        self.package_clock()
+        need(self.phase in ("package-install", SAME_PACKAGE_PHASE) + FINAL_IMAGE_PHASES
+             and self.removal_baseline_mount is None and not self.mount_entered
+             and self.mount_api is None and self.mount_host_source is None and self.package_settled(),
+             "package-mount-host-admission")
+        entry = self.source_original("desktop/tools/macos_xcode_host_preparation.py", "source-package-mount-host", 96477)
+        body = self.read(entry)
+        need(len(body) == 96477 and digest(body) == "d03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376",
+             "package-mount-host-source")
+        self.package_sources.append((entry, body))
+        self.mount_host_source = (entry, body)
+        module = load_data(self.checkout, "macos_xcode_host_preparation.py", "_mrk_package_mount_host")
+        need(self.read(entry) == body, "package-mount-host-source-post")
+        self.package_clock()
+        self.mount_api = module.DarwinAPI(_RemovalHostClock(self), target=self.target)
+        self.package_clock()
+        need(self.read(entry) == body, "package-mount-host-source-post")
+
+    def mount_facts(self, entry):
+        """Validate acquisition without publishing cleanup-known prematurely."""
+        self.package_clock()
+        self.recheck_directory(self.work_entry)
+        need(self.entry_registry.get(id(entry)) is entry and type(entry.get("fd")) is int
+             and not entry["closed"] and entry["parent"] == self.work_entry["fd"]
+             and entry["name"] == "package-mount" and self.mount_api is not None
+             and self.mount_host_source is not None, "package-original-mount-unavailable")
+        source, body = self.mount_host_source
+        need(self.read(source) == body, "package-mount-host-source-post")
+        named = os.stat("package-mount", dir_fd=self.work_entry["fd"], follow_symlinks=False)
+        held = os.fstat(entry["fd"])
+        need(stat.S_ISDIR(held.st_mode) and held.st_uid in (0, os.getuid()) and not held.st_mode & 0o022
+             and signature(named) == signature(held)
+             and (held.st_dev, held.st_ino, held.st_mode, held.st_uid, held.st_gid) == entry["identity"],
+             "package-readonly-mount-shape")
+        flags = os.fstatvfs(entry["fd"]).f_flag
+        fs = self.mount_api.filesystem(entry["fd"])
+        self.package_clock()
+        need(type(flags) is int and flags & os.ST_RDONLY and held.st_dev != self.work_entry["identity"][0]
+             and type(fs) is dict and type(fs.get("flags")) is int and 0 <= fs["flags"] < 1 << 32
+             and fs["flags"] & 1 and fs["flags"] & 0x1000 and not fs["flags"] & (0x20 | 0x4000000)
+             and fs.get("typeName") in ("hfs", "apfs")
+             and fs.get("mountOn") == str(self.work / "package-mount")
+             and fs.get("mountFrom") == self.mount_device, "package-readonly-mount-original")
+        need(self.read(source) == body and signature(os.fstat(entry["fd"])) == signature(held)
+             and signature(os.stat("package-mount", dir_fd=self.work_entry["fd"], follow_symlinks=False)) == signature(held),
+             "package-readonly-mount-post")
+        self.recheck_directory(self.work_entry)
+        self.package_clock()
+        return fs
+
+    def mount_custody(self, attached, role):
+        need(self.mount_entered and not self.mount_known and self.mount_entry is None
+             and self.package_settled(), "package-mount-custody-admission")
+        path = self.work / "package-mount"
+        self.mount_device = cleanup_mount_device_data(attached.stdout, attached.stderr, attached.returncode, path)
+        self.package_clock()
+        self.recheck_directory(self.work_entry)
+        entry = self.register(None, role, "mount", self.work_entry["fd"], "package-mount")
+        self.mount_entry = entry
+        entry["fd"] = os.open("package-mount", READ_FLAGS | os.O_DIRECTORY, dir_fd=self.work_entry["fd"])
+        info = os.fstat(entry["fd"])
+        entry["identity"] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+        entry["mount_facts"] = self.mount_facts(entry)
+        self.package_post()
+        self.mount_known = True  # Original cleanup authority, NOT parser acceptance.
+        need(self.stager.distribution_mount_data(attached.stdout, attached.stderr, attached.returncode, path)
+             == self.mount_device, "package-accepted-mount-device")
+
     def recheck_mount(self):
         if self.removal_baseline_mount is not None:
             self.removal_baseline_mount_post()
             return
-        entry = self.mount_entry
-        self.package_clock()
-        self.recheck_directory(self.work_entry)
-        need(entry is not None and entry["fd"] is not None and not entry["closed"]
-             and self.mount_known and not self.mount_detached, "package-original-mount-unavailable")
-        named, held = os.stat("package-mount", dir_fd=self.work_entry["fd"], follow_symlinks=False), os.fstat(entry["fd"])
-        def identity(info):
-            need(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, os.getuid()) and not info.st_mode & 0o022,
-                 "package-readonly-mount-shape")
-            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
-        flags = os.fstatvfs(entry["fd"]).f_flag
-        need(type(flags) is int and flags & os.ST_RDONLY
-             and identity(named) == identity(held) == entry["identity"]
-             and held.st_dev != self.work_entry["identity"][0], "package-readonly-mount-original")
+        if self.phase == UPDATE_PHASE:
+            entry = self.mount_entry
+            self.package_clock()
+            self.recheck_directory(self.work_entry)
+            need(entry is not None and entry["fd"] is not None and not entry["closed"]
+                 and self.mount_known and not self.mount_detached, "package-original-mount-unavailable")
+            named, held = os.stat("package-mount", dir_fd=self.work_entry["fd"], follow_symlinks=False), os.fstat(entry["fd"])
+            def identity(info):
+                need(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, os.getuid()) and not info.st_mode & 0o022,
+                     "package-readonly-mount-shape")
+                return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+            flags = os.fstatvfs(entry["fd"]).f_flag
+            need(type(flags) is int and flags & os.ST_RDONLY
+                 and identity(named) == identity(held) == entry["identity"]
+                 and held.st_dev != self.work_entry["identity"][0], "package-readonly-mount-original")
+            return
+        need(self.mount_known and not self.mount_detached and self.mount_entry is not None,
+             "package-original-mount-unavailable")
+        need(self.mount_facts(self.mount_entry) == self.mount_entry["mount_facts"], "package-mount-facts-changed")
+
 
     def mount_inputs(self, expected, package_name):
         self.recheck_mount()
@@ -6430,8 +6529,8 @@ class Operation:
         for name in (package_name, descriptor_name, signature_name):
             limit = self.stager.MAX_BYTES if name == package_name else (
                 self.stager.PRODUCER_DESCRIPTOR_BYTES if name == descriptor_name else self.stager.PRODUCER_SIGNATURE_BYTES)
-            fd = os.open(name, READ_FLAGS, dir_fd=self.mount_entry["fd"])
-            entry = self.register(fd, "mounted-" + name, "mounted-file", self.mount_entry["fd"], name)
+            entry = self.register(None, "mounted-" + name, "mounted-file", self.mount_entry["fd"], name)
+            entry["fd"] = fd = os.open(name, READ_FLAGS, dir_fd=self.mount_entry["fd"])
             info = os.fstat(fd)
             need(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o444
                  and info.st_nlink == 1 and info.st_uid in (0, os.getuid()) and 0 < info.st_size <= limit,
@@ -6545,16 +6644,11 @@ class Operation:
         self.package_name = "Install.pkg"
         self.mount_placeholder = self.package_directory("package-mount")
         self.same_package_post()
+        self.normal_mount_host()
         mounted = self.package_call("distribution-attach", ["/usr/bin/hdiutil", "attach",
             str(self.work / "distribution-final/MobileReleaseKit.dmg"), "-readonly", "-nobrowse", "-noautoopen",
             "-mountpoint", str(self.work / "package-mount"), "-plist"], timeout=60)
-        self.mount_device = self.stager.distribution_mount_data(mounted.stdout, mounted.stderr, mounted.returncode,
-                                                               self.work / "package-mount")
-        fd = os.open("package-mount", READ_FLAGS | os.O_DIRECTORY, dir_fd=self.work_entry["fd"])
-        self.mount_entry = self.register(fd, "same-package-readonly-mount", "mount", self.work_entry["fd"], "package-mount")
-        info = os.fstat(fd)
-        self.mount_entry["identity"] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
-        self.mount_known = True
+        self.mount_custody(mounted, "same-package-readonly-mount")
         self.mount_inputs(expected, "Install.pkg")
         args = argparse.Namespace(target=self.target, fixture=False, input=self.work / "input",
             expected_source=self.image_source, expected_inventory=self.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"],
@@ -6709,14 +6803,10 @@ class Operation:
             mount_path = self.work / "package-mount"
             self.mount_placeholder = self.package_directory("package-mount")
             self.stage = "package-readonly-attach"
+            self.normal_mount_host()
             attached = self.package_call("distribution-attach", ["/usr/bin/hdiutil", "attach", str(observation_path), "-readonly", "-nobrowse",
                 "-noautoopen", "-mountpoint", str(mount_path), "-plist"], timeout=60)
-            self.mount_device = self.stager.distribution_mount_data(attached.stdout, attached.stderr, attached.returncode, mount_path)
-            fd = os.open("package-mount", READ_FLAGS | os.O_DIRECTORY, dir_fd=self.work_entry["fd"])
-            self.mount_entry = self.register(fd, "package-readonly-mount", "mount", self.work_entry["fd"], "package-mount")
-            info = os.fstat(fd)
-            self.mount_entry["identity"] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
-            self.mount_known = True
+            self.mount_custody(attached, "package-readonly-mount")
         self.mount_inputs(expected, self.package_name)
         args = argparse.Namespace(target=self.target, fixture=False, input=self.work / "input", expected_source=self.image_source,
             expected_inventory=inventory_hash, expected_manifest=manifest_hash, request_id=request_id, expected_package=digest(body),
@@ -7106,6 +7196,14 @@ class Operation:
                 pass  # Do not replace the same original failure or its cleanup.
             self.receipt["failure"] = {"stage": self.stage, "type": type(error).__name__,
                                        "reason": str(error) if type(error) is Refused else "original-operation-refused"}
+            captured = self.diagnostic_failure
+            if (type(self.stager) is type(sys) and type(error) is self.stager.__dict__.get("Refused")
+                    and type(captured) is dict and all(type(key) is str for key in captured)
+                    and tuple(captured) == ("type", "reason", "errno")
+                    and type(captured["type"]) is str and captured["type"] == "stager-refused"
+                    and type(captured["reason"]) is str and captured["reason"] in DISTRIBUTION_STAGER_REASONS
+                    and captured["errno"] is None):
+                self.receipt["failure"]["reason"] = captured["reason"]
             if isinstance(error, OSError):
                 number = OSError.errno.__get__(error)
                 if type(number) is int and 0 < number < 65536:

@@ -27,11 +27,11 @@ REASONS = ('distribution-attach-original', 'distribution-attach-plist', 'distrib
            'distribution-attach-mount', 'distribution-attach-single-mount', 'distribution-package-name',
            'distribution-three-file-roster', 'distribution-original-byte-mode')
 SOURCE_PINS = {
-    'desktop/tools/macos_android_helper_package.py': (527051, '5ceeee6906ee41c7629b64400734b43e8142028426e9fcfd12cc51eadcbd2a43'),
+    'desktop/tools/macos_android_helper_package.py': (533030, '946327b46109dbe5bd0aa8464724e4483e84127a010f7b853dc98f9fdfc4dce0'),
     'desktop/macos-installed-inputs/build-release.json': (95, '521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512'),
     'desktop/tools/macos_e2_native_fixture.py': (390498, 'e4ac0883d7a077d59cc065e3467b4052a47476838f7d0a98cc0e17caaee892a8'),
-    'desktop/tools/macos_aqua_qualification.py': (464005, '62f40be14d242c967643eb88a793d2cac19c1d0e47992ebcfd61648d6c6864b5'),
-    'desktop/tools/stage_macos_installed.py': (373675, 'ce3b83e861a04caf619d25823dd5dbbfc9a6c8e122d09128f6b6bd54e6c227a6'),
+    'desktop/tools/macos_aqua_qualification.py': (464005, 'f0ba092245e7d7772a8ac02b837f32c3b718139a76f49a3d775404a92c627bbc'),
+    'desktop/tools/stage_macos_installed.py': (373915, 'be9abea2b55c65dfb5161fc4d91da58dc8cf5a541af036894dea819e5daa865b'),
     'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'),
     'src/mobile_release/owned_process.py': (9127, 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59'),
     'src/mobile_release/_command_process.py': (177438, 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43'),

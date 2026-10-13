@@ -5731,7 +5731,7 @@ def shipping_gate_compiler_argv(target=ARM_TARGET):
 
 
 SHIPPING_GATE_SOURCE_PINS = {
-    "desktop/tools/stage_macos_installed.py": 'ce3b83e861a04caf619d25823dd5dbbfc9a6c8e122d09128f6b6bd54e6c227a6',
+    "desktop/tools/stage_macos_installed.py": 'be9abea2b55c65dfb5161fc4d91da58dc8cf5a541af036894dea819e5daa865b',
     "desktop/macos-installed-inputs/build-release.json": "521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512",
     "desktop/macos-installed-inputs/build-release-intel.json": "5864c0efb2a66219cf7efa41d3863721327148ef7b4c6d6f3252de3ce20596e7",
 }
@@ -6062,7 +6062,7 @@ def _gate_load_stager(fixtures, checkout, *, target=ARM_TARGET, registrations=No
     target_row = target_data(target)
     selected, bodies = [], {}
     for relative, expected in SHIPPING_GATE_SOURCE_PINS.items():
-        limit = 373675 if relative == "desktop/tools/stage_macos_installed.py" else 256 * 1024
+        limit = 373915 if relative == "desktop/tools/stage_macos_installed.py" else 256 * 1024
         body, original = _gate_file(fixtures, str(checkout / relative), None, limit)
         need(digest(body) == expected, "gate-stager-source-pin")
         selected.append(original)

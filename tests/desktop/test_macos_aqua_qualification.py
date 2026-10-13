@@ -10881,7 +10881,7 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                 def source_file(fixture, name, parent, limit):
                     relative = Path(name).relative_to(PATH.parents[2]).as_posix()
                     self.assertIsNone(parent)
-                    self.assertEqual(limit, 373675 if relative == 'desktop/tools/stage_macos_installed.py' else 256 * 1024)
+                    self.assertEqual(limit, 373915 if relative == 'desktop/tools/stage_macos_installed.py' else 256 * 1024)
                     raw = Path(name).read_bytes()
                     self.assertLessEqual(len(raw), limit)
                     row = {'name': name, 'sha256': M.digest(raw)}; held.append(row)
@@ -10904,7 +10904,7 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
             held, posts = [], []
             def changed_source_file(fixture, name, parent, limit):
                 raw, row = source_file(fixture, name, parent, limit)
-                self.assertEqual(len(raw), 373675)
+                self.assertEqual(len(raw), 373915)
                 return bytes([raw[0] ^ 1]) + raw[1:], row
             with patch.dict(sys.modules), patch.object(M, '_gate_file', changed_source_file), \
                  patch.object(importlib.util, 'spec_from_file_location') as attempted_import:
@@ -10929,7 +10929,7 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
             # not 256KiB, and refuses one additional byte before capture/import.
             # These are private regular-file DATA originals, not native work.
             stager_body = PATH.with_name('stage_macos_installed.py').read_bytes()
-            self.assertEqual(len(stager_body), 373675)
+            self.assertEqual(len(stager_body), 373915)
             for extra in (b'', b'\n'):
                 with tempfile.TemporaryDirectory(prefix='mrk-gate-source-bound-') as temporary:
                     selected = Path(temporary) / 'stage_macos_installed.py'
@@ -10938,10 +10938,10 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                     try:
                         if extra:
                             with self.assertRaisesRegex(M.Refused, '^gate-original-file$'):
-                                M._gate_file(fixture, str(selected), None, 373675)
+                                M._gate_file(fixture, str(selected), None, 373915)
                             self.assertEqual(fixture.gate_files, [])
                         else:
-                            body, original = M._gate_file(fixture, str(selected), None, 373675)
+                            body, original = M._gate_file(fixture, str(selected), None, 373915)
                             self.assertEqual(body, stager_body)
                             self.assertEqual(original['sha256'], M.SHIPPING_GATE_SOURCE_PINS['desktop/tools/stage_macos_installed.py'])
                             M._gate_recheck(fixture)
