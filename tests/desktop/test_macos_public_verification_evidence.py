@@ -1682,18 +1682,23 @@ class PublicVerificationEvidenceData(unittest.TestCase):
 
         # Actual fixed Installer log originals: byte-preserving selector DATA,
         # failed original hash/status/context join, never arbitrary line text.
-        stage_names = {'need', 'Refused', 'digest', 'select_installer_log', 'LOG_INTERVAL_BYTES', 'LOG_LINE_BYTES', 'LOG_SELECTED_BYTES'}
+        stage_names = {'need', 'Refused', 'digest', 'select_installer_log', 'LOG_INTERVAL_BYTES', 'LOG_LINE_BYTES', 'LOG_SELECTED_BYTES',
+                       'distribution_request_name', 'maintenance_hex', 'INSTALL_LOG'}
         stage_nodes = [node for node in ast.parse(stager_path.read_bytes()).body if
             isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in stage_names or
             isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
             and node.targets[0].id in stage_names]
         self.assertEqual(len(stage_nodes), len(stage_names))
-        selector = {'re': re, 'hashlib': hashlib}
+        selector = {'re': re, 'hashlib': hashlib, 'Path': Path}
         exec(compile(ast.Module(body=stage_nodes, type_ignores=[]), str(stager_path), 'exec'), selector)
         binding = {'packageKind': 'ordinary', 'packageIdentifier': 'dev.mobile-release-kit.desktop.installed',
-            'packagePath': '/private/' + SENTINEL + '/package-mount/MobileReleaseKit-' + '7' * 32 + '.pkg',
+            'packagePath': '/private/' + SENTINEL + '/package-mount/' + selector['distribution_request_name']('7' * 32),
             'sourceCommit': CONTEXT['source'], 'inventorySha256': '8' * 64, 'runtimeManifestSha256': '9' * 64,
             'runId': CONTEXT['runId'], 'runAttempt': CONTEXT['runAttempt'], 'requestId': '7' * 32}
+        self.assertEqual(selector['distribution_request_name']('7' * 32), 'MobileReleaseKit-Request-' + '7' * 32 + '.pkg')
+        self.assertEqual(str(selector['INSTALL_LOG']), '/private/var/log/install.log')
+        for invalid_request in ('0' * 32, '7' * 31, 'G' * 32, 7):
+            with self.assertRaises(selector['Refused']): selector['distribution_request_name'](invalid_request)
         phase_line = (SENTINEL + ' MRK_MACOS_POSTINSTALL_PHASE=entry\n').encode()
         refusal_line = (SENTINEL + ' MRK_MACOS_POSTINSTALL_REFUSED=cwd\n').encode()
         acl_line = (SENTINEL + ' MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role=input-directory;phase=fstatx-snapshot;'
@@ -1703,7 +1708,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         self.assertNotEqual(selected_body, interval_body)
         self.assertEqual(selected_body, phase_line + refusal_line + acl_line)
         metadata = {'schemaVersion': 1, 'kind': 'installer-log-capture', 'state': 'observed-project-correlated',
-            'binding': binding, 'logPath': '/var/log/install.log',
+            'binding': binding, 'logPath': str(selector['INSTALL_LOG']),
             'identity': {'device': 1, 'inode': 2, 'mode': 0o100644, 'uid': 0, 'gid': 0, 'links': 1},
             'cursorSha256': 'a' * 64, 'startOffsetBytes': 100, 'endOffsetBytes': 100 + len(interval_body),
             'growthBeyondSnapshotBytes': 0, 'intervalBytes': len(interval_body),
@@ -1808,6 +1813,10 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             ('row-anchors', lambda d: d['selectedLines'][0].update(anchors=['package-path'])),
             ('count-correspondence', lambda d: d['markerCounts'].update({'postinstall-phase': 2})),
             ('result-state', lambda d: d.update(resultMarkerState='unbound'))]
+        stage_vectors.extend([
+            ('binding-path', lambda d: d['binding'].update(packagePath='/private/' + SENTINEL + '/package-mount/MobileReleaseKit-' + '7' * 32 + '.pkg')),
+            ('binding-path', lambda d: d['binding'].update(packagePath='/private/' + SENTINEL + '/package-mount/' + selector['distribution_request_name']('6' * 32))),
+            ('captured-schema', lambda d: d.update(logPath='/var/log/install.log'))])
         for expected, mutate in stage_vectors:
             fresh = copy.deepcopy(metadata); mutate(fresh)
             trace = {'nodes': 0, 'deadline': time.monotonic_ns() + 45_000_000_000}

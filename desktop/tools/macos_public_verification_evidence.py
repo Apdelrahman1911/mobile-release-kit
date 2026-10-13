@@ -1797,7 +1797,7 @@ def project_installer_failure_diagnostic(metadata_body, selected_body, phase, st
     need(type(path) is str and path.startswith("/") and len(path.encode("utf-8")) <= 4096
          and all(ord(character) >= 32 and ord(character) != 127 for character in path)
          and all(part and part not in (".", "..") for part in path.split("/")[1:])
-         and path.split("/")[-2:] == ["package-mount", "MobileReleaseKit-" + request + ".pkg"])
+         and path.split("/")[-2:] == ["package-mount", "MobileReleaseKit-Request-" + request + ".pkg"])
     result = {"receiptState": "observed", "diagnosticOnly": True, "originalInstallerReturnedZero": False,
               "nativeSuccessInferred": False, "policyUnchanged": True,
               "binding": "same-source-run-target-failed-original-project-correlated",
@@ -1821,7 +1821,7 @@ def project_installer_failure_diagnostic(metadata_body, selected_body, phase, st
          "startOffsetBytes", "endOffsetBytes", "growthBeyondSnapshotBytes", "intervalBytes", "intervalSha256",
          "linesObserved", "linesUnselected", "selectedLines", "markerCounts", "resultMarkerState", "selectedData",
          "authority", "scriptOutputFinality"} and metadata["state"] == "observed-project-correlated"
-         and metadata["logPath"] == "/var/log/install.log" and metadata["cursorSha256"] == cursor["stdoutSha256"])
+         and metadata["logPath"] == "/private/var/log/install.log" and metadata["cursorSha256"] == cursor["stdoutSha256"])
     budget["installerDiagnosticStage"] = "log-identity"
     log_id = metadata["identity"]
     need(type(log_id) is dict and set(log_id) == {"device", "inode", "mode", "uid", "gid", "links"}
