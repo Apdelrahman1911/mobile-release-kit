@@ -723,6 +723,72 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
         self.assertEqual(M.DarwinSigaction.mask.offset, 8)
         self.assertEqual(M.DarwinSigaction.flags.offset, 12)
 
+        # Inert CDLL-shaped DATA exercises the actual fixed prototype binder.
+        # No library is loaded and no filesystem/ACL/system call is performed.
+        class FunctionData:
+            def __init__(self, library, name):
+                self.library, self.name = library, name
+
+            def __call__(self, *arguments):
+                self.library.calls.append(self.name)
+                if self.name == "issetugid":
+                    return 0
+                if self.name == "sysctlbyname":
+                    self.library.case.assertEqual(arguments[0], b"kern.osproductversion")
+                    arguments[1].value = b"26.0"
+                    ctypes.cast(arguments[2], ctypes.POINTER(ctypes.c_size_t)).contents.value = 5
+                    return 0
+                raise AssertionError("unit prototype binding must not invoke another native function")
+
+        class LibraryData:
+            def __init__(self, case, missing=None):
+                self.case, self.missing = case, missing
+                self.lookups, self.calls, self.functions = [], [], {}
+
+            def __getattr__(self, name):
+                self.lookups.append(name)
+                if name == self.missing:
+                    raise AttributeError(name)
+                function = FunctionData(self, name)
+                self.functions[name] = function
+                return function
+
+        for target, stat_name, fs_name in (
+                (M.ARM_TARGET, "fstatx_np", "fstatfs"),
+                (M.INTEL_TARGET, "fstatx_np$INODE64", "fstatfs$INODE64")):
+            native = LibraryData(self)
+            deadline = types.SimpleNamespace(check=lambda: None)
+            with self.subTest(target=target), mock.patch.object(M.ctypes, "CDLL", return_value=native) as load:
+                api = M.DarwinAPI(deadline, target=target)
+                load.assert_called_once_with("/usr/lib/libSystem.B.dylib", use_errno=True)
+                self.assertIs(api.deadline, deadline)
+                self.assertEqual(api.version, "26.0")
+            self.assertEqual(native.lookups, ["issetugid", "sigaction", "sysctlbyname", fs_name,
+                "filesec_init", "filesec_free", stat_name, "filesec_get_property",
+                "filesec_query_property", "acl_valid", "acl_get_entry", "acl_free", "flistxattr", "fgetxattr"])
+            self.assertEqual(native.calls, ["issetugid", "sysctlbyname"])
+            self.assertIs(native.fstatx_np, native.functions[stat_name])
+            self.assertIs(native.fstatfs, native.functions[fs_name])
+            self.assertIs(native.fstatx_np.restype, ctypes.c_int)
+            self.assertEqual(native.fstatx_np.argtypes,
+                             [ctypes.c_int, ctypes.POINTER(M.DarwinStat), ctypes.c_void_p])
+            self.assertEqual(native.fstatfs.argtypes, [ctypes.c_int, ctypes.POINTER(M.DarwinStatFS)])
+            for missing in (stat_name, fs_name):
+                native = LibraryData(self, missing)
+                with self.subTest(target=target, missing=missing), \
+                        mock.patch.object(M.ctypes, "CDLL", return_value=native) as load, \
+                        self.assertRaises(AttributeError):
+                    M.DarwinAPI(deadline, target=target)
+                self.assertEqual(load.call_count, 1)
+                self.assertEqual(native.lookups.count(missing), 1)
+                self.assertNotIn("fstatx_np" if "$" in stat_name else "fstatx_np$INODE64", native.lookups)
+                self.assertNotIn("fstatfs" if "$" in fs_name else "fstatfs$INODE64", native.lookups)
+                self.assertEqual(native.calls, [])
+        with mock.patch.object(M.ctypes, "CDLL") as load, self.assertRaises(M.Refused):
+            M.DarwinAPI(types.SimpleNamespace(check=lambda: None), target="i686-apple-darwin")
+        load.assert_not_called()
+
+
     def test_nonempty_acl_invalid_acl_and_free_errors_refuse(self):
         empty = ACLLibraryData(present=32)
         result = M._acl_snapshot(empty, 17, empty.expected)
@@ -820,6 +886,126 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
             with self.assertRaises(M.Refused):
                 M._validate_context(environment(), (501, 501, 20, 20), ("Darwin", "arm64"), (3, 14, 6), (1, 1, 1))
             load.assert_not_called()
+
+        intel = environment()
+        intel["RUNNER_ARCH"] = "X64"
+        self.assertEqual(M._validate_context(intel, (501, 501, 20, 20),
+            ("Darwin", "x86_64"), (3, 14, 7), (1, 1, 1), target=M.INTEL_TARGET)["machine"], "x86_64")
+        for target, candidate, machine in (
+                (M.ARM_TARGET, intel, "x86_64"), (M.INTEL_TARGET, environment(), "arm64"),
+                (M.INTEL_TARGET, intel, "arm64"), (M.INTEL_TARGET, environment(), "x86_64"),
+                ("i686-apple-darwin", intel, "x86_64"), ("", intel, "x86_64")):
+            with self.subTest(target=target, machine=machine), self.assertRaises(M.Refused):
+                M._validate_context(candidate, (501, 501, 20, 20),
+                    ("Darwin", machine), (3, 14, 7), (1, 1, 1), target=target)
+
+        # Actual entry routing, with every native/book effect stopped at the
+        # original constructor seam. Same deadline and exact argv, no renewal.
+        launches = (((), False, M.ARM_TARGET), ((M.CLASSIFICATION_ARG,), True, M.ARM_TARGET))
+        launches += tuple((prefix + ("--target", target), bool(prefix), target)
+                          for target in (M.ARM_TARGET, M.INTEL_TARGET)
+                          for prefix in ((), (M.CLASSIFICATION_ARG,)))
+        for arguments, classification, target in launches:
+            self.assertEqual(M._entry_arguments(arguments), (classification, target))
+            launch = (M.WORKSPACE + "/" + M.HELPER,) + arguments
+            context = valid_context()
+            context["machine"] = "arm64" if target == M.ARM_TARGET else "x86_64"
+            book = types.SimpleNamespace(context=context, work=None, work_admitted=False,
+                errors=[], receipt_attempts=set(), budget={"uncertain": False, "live": 0},
+                error=lambda *args: None, close_all=mock.Mock(return_value=[]))
+            deadline = types.SimpleNamespace(check=mock.Mock())
+            with self.subTest(arguments=arguments), contextlib.ExitStack() as stack:
+                made = stack.enter_context(mock.patch.object(M, "Deadline", return_value=deadline))
+                stack.enter_context(mock.patch.object(M.sys, "argv", list(launch)))
+                checked = stack.enter_context(mock.patch.object(M, "_validate_context", return_value=context))
+                native = stack.enter_context(mock.patch.object(M, "DarwinAPI", return_value=types.SimpleNamespace(version="26.0")))
+                originals = stack.enter_context(mock.patch.object(M, "Originals", return_value=book))
+                for name in ("_collect_prerequisites", "_classify_installed"):
+                    stack.enter_context(mock.patch.object(M, name, side_effect=M.Refused("unit-stop-before-effects")))
+                command = stack.enter_context(mock.patch.object(M, "FixedCommandOwner",
+                    side_effect=AssertionError("unit forbids preparation command")))
+                stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                self.assertEqual(M.main(), 1)
+                made.assert_called_once_with()
+                self.assertEqual(checked.call_args.kwargs, {"target": target})
+                native.assert_called_once_with(deadline, target=target)
+                self.assertIs(originals.call_args.args[2], deadline)
+                self.assertEqual(originals.call_args.kwargs, {"classification": True} if classification else {})
+                self.assertEqual(book.launch_argv, launch)
+                book.close_all.assert_called_once_with()
+                command.assert_not_called()
+        for arguments in (("--target",), ("--target", "i686-apple-darwin"),
+                ("--target", M.INTEL_TARGET, M.CLASSIFICATION_ARG),
+                (M.CLASSIFICATION_ARG, "--target"), (M.CLASSIFICATION_ARG, "extra"),
+                (M.CLASSIFICATION_ARG, M.CLASSIFICATION_ARG),
+                ("--target", M.ARM_TARGET, "extra"), ("--target", M.ARM_TARGET, "extra", "extra")):
+            with self.subTest(arguments=arguments), \
+                    mock.patch.object(M.sys, "argv", [M.WORKSPACE + "/" + M.HELPER, *arguments]), \
+                    mock.patch.object(M, "_validate_context") as checked, \
+                    mock.patch.object(M.ctypes, "CDLL") as load, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(M.main(), 1)
+                checked.assert_not_called()
+                load.assert_not_called()
+
+        # Real source-binding predicates, inert held-book DATA. In particular,
+        # the workflow cap cannot become the helper/global cap or skip hashes.
+        def source_book(workflow_size=319057, helper_size=16, mismatch=None):
+            material = {M.WORKFLOW: b"w" * workflow_size, M.HELPER: b"h" * helper_size, M.TEST_SOURCE: b"t"}
+            files = [{"path": name, "gitMode": "100644", "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "blob": hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()}
+                for name, data in sorted(material.items())]
+            if mismatch is not None:
+                row = next(row for row in files if row["path"] == M.WORKFLOW)
+                row[mismatch] = row["size"] + 1 if mismatch == "size" else "0" * (40 if mismatch == "blob" else 64)
+            context = valid_context()
+            raw = json.dumps({"source": context["source"], "tree": M._inventory_tree(files), "files": files}).encode()
+            book = types.SimpleNamespace(context=context, errors=[], classification=False,
+                launch_argv=(M.WORKSPACE + "/" + M.HELPER, "--target", M.ARM_TARGET), reads=[])
+            book.context_chain = lambda *args: types.SimpleNamespace(pre={"roster": [M.INVENTORY]})
+            book.chain = lambda *args: None
+            book.open = lambda parent, name, kind, policy, role: role
+            def read(role, limit):
+                book.reads.append((role, limit))
+                data = raw if role == "complete-source-inventory" else material[role.removeprefix("source:")]
+                if len(data) > limit:
+                    raise M.Refused("unit-original-read-bound")
+                return data
+            book.read = read
+            return book
+
+        def bind(book, current_argv=None):
+            with mock.patch.object(M.os, "getcwd", return_value=M.WORKSPACE), \
+                    mock.patch.object(M, "__file__", M.WORKSPACE + "/" + M.HELPER), \
+                    mock.patch.object(M.sys, "argv", list(book.launch_argv if current_argv is None else current_argv)):
+                M._bind_source(book)
+
+        for workflow_size, helper_size in ((319057, 16), (512 * 1024, 131072)):
+            book = source_book(workflow_size, helper_size)
+            bind(book)
+            self.assertEqual(book.reads, [("complete-source-inventory", 2 * 1024 * 1024),
+                ("source:" + M.WORKFLOW, 512 * 1024), ("source:" + M.HELPER, 131072)])
+            self.assertEqual([row["size"] for row in book.source_binding["heldSourceBindings"]],
+                             [workflow_size, helper_size])
+        for arguments in ({"workflow_size": 512 * 1024 + 1}, {"helper_size": 131073},
+                          {"mismatch": "size"}, {"mismatch": "sha256"}, {"mismatch": "blob"}):
+            book = source_book(**arguments)
+            with self.subTest(source=arguments), self.assertRaises(M.Refused):
+                bind(book)
+            self.assertFalse(hasattr(book, "source_binding"))
+        for suffix in ((), (M.CLASSIFICATION_ARG,), ("--target", M.INTEL_TARGET)):
+            book = source_book()
+            with self.subTest(mutatedArgv=suffix), self.assertRaisesRegex(M.Refused, "^fixed-helper-launch-path-required$"):
+                bind(book, (M.WORKSPACE + "/" + M.HELPER,) + suffix)
+            self.assertFalse(hasattr(book, "source_binding"))
+        for classification, target in ((True, M.ARM_TARGET), (False, M.INTEL_TARGET)):
+            book = source_book()
+            book.launch_argv = (M.WORKSPACE + "/" + M.HELPER,) + ((M.CLASSIFICATION_ARG,) if classification else ()) + ("--target", target)
+            with self.subTest(bookMode=classification, bookTarget=target), self.assertRaisesRegex(
+                    M.Refused, "^fixed-helper-launch-path-required$"):
+                bind(book)
+
 
     def test_already_protected_is_observed_noop_not_command_success(self):
         book = OrchestrationBookData(mode=0o755)

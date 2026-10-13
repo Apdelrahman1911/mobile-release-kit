@@ -26,10 +26,10 @@ type Result<T> = std::result::Result<T, Problem>;
 mod linux;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use linux::{Location, Observation, ReadOriginal, ReadWitness, RootWitness, StoreBook};
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[path = "vault_store_macos.rs"]
 mod macos;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use macos::{Location, Observation, ReadOriginal, ReadWitness, RootWitness, StoreBook};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]

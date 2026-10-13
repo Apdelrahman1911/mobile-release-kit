@@ -21,7 +21,7 @@ from .build_inputs import (BuildInputError, _Directory, _FD, _attempt_all,
 from .cancellation import CleanupScope, DefaultCancellation
 from .init_transaction import (InitApplyOutcome, InitConflict, InitOperationFailure,
                                InitWorkspace, ObservedFile, TypedEditProfile, METADATA_IGNORE_LINES,
-                               ALL_STATE_NAMES, IMAGE_STATE_NAMES, STATE_NAMES)
+                               ALL_STATE_NAMES, IMAGE_STATE_NAMES, STATE_NAMES, METADATA_STATE_NAMES, VERSION_STATE_NAMES)
 
 if TYPE_CHECKING:
     from .metadata_text import PublicTextSelection
@@ -94,6 +94,17 @@ class MetadataTargets:
         return {path: dict(value) if value is not None else None for path, value in self._parents
                 if path not in self.directories}
 
+    def journal_context(self) -> dict[str, Any]:
+        """Closed restart context from this original target descriptor only."""
+        from .metadata_text import DEPENDENCY_PATHS, content_digest
+        selected = self._selection
+        raw = {path: body for path, _, body in self._dependencies}
+        return {"policy": "saved-text-recovery-v1",
+                "config": content_digest(raw[DEPENDENCY_PATHS[0]]),
+                "ignore": content_digest(raw[DEPENDENCY_PATHS[1]]),
+                "selection": {"platform": selected.platform, "locale": selected.locale,
+                              "metadataRoot": selected.metadata_root}}
+
     def _check_workspace(self, workspace: InitWorkspace) -> None:
         if (type(self) is not MetadataTargets or self._identity is not self
                 or type(workspace) is not InitWorkspace
@@ -163,6 +174,17 @@ class VersionTargets:
         return {path: dict(value) if value is not None else None for path, value in self._parents
                 if path not in self.directories}
 
+    def journal_context(self) -> dict[str, Any]:
+        """Closed restart context from this original target descriptor only."""
+        from .metadata_text import DEPENDENCY_PATHS, content_digest
+        selected = self._selection
+        raw = {path: body for path, _, body in self._dependencies}
+        return {"policy": "saved-text-recovery-v1",
+                "config": content_digest(raw[DEPENDENCY_PATHS[0]]),
+                "ignore": content_digest(raw[DEPENDENCY_PATHS[1]]),
+                "selection": {"source": selected.source, "nameKey": selected.name_key,
+                              "buildKey": selected.build_key, "iosEnabled": selected.ios_enabled}}
+
     def _check_workspace(self, workspace: InitWorkspace) -> None:
         if (type(self) is not VersionTargets or self._identity is not self
                 or type(workspace) is not InitWorkspace
@@ -179,7 +201,7 @@ class VersionTargets:
 class RootedRevision:
     """Exact private immutable capture; a token string cannot reconstruct it."""
     __slots__ = ("_lease", "_profile", "_token", "_parents", "_parent_facts", "_files", "_raw", "_absent",
-                 "_metadata_targets", "_version_targets", "_image_targets")
+                 "_metadata_targets", "_version_targets", "_image_targets", "_initialization_targets")
 
     def __new__(cls, *args: Any, **kwargs: Any):
         raise TypeError("rooted revisions are bound only by the original lease")
@@ -280,14 +302,17 @@ class LockedInitScope:
         guard.check()
         self.check()
         try:
-            if self.lease._image_recovery_mode or self.lease._workflow_recovery_mode:
+            if (self.lease._image_recovery_mode or self.lease._workflow_recovery_mode
+                    or self.lease._saved_text_recovery_mode):
                 # Explicit recovery still excludes every other edit and
                 # build-input domain. Use the existing exact-name admission;
                 # never a permissive suffix/prefix/path-based recovery search.
                 from .build_inputs import _exact_reserved_names
                 names = _exact_reserved_names(number, {".mobile-release", *ALL_STATE_NAMES})
                 pending = names & set(ALL_STATE_NAMES)
-                allowed = STATE_NAMES if self.lease._workflow_recovery_mode else IMAGE_STATE_NAMES
+                allowed = (STATE_NAMES if self.lease._workflow_recovery_mode else
+                           METADATA_STATE_NAMES if self.lease._saved_text_recovery_mode and self.lease.profile is TypedEditProfile.METADATA_TEXT else
+                           VERSION_STATE_NAMES if self.lease._saved_text_recovery_mode else IMAGE_STATE_NAMES)
                 if len(pending) > 1 or not pending <= set(allowed):
                     raise _failure("pending_state")
             else:
@@ -324,6 +349,9 @@ class LockedInitScope:
         self.workspace = workspace
 
     def outcome(self, reason: str) -> InitApplyOutcome:
+        if self.lease._saved_text_recovery_mode:
+            from .saved_text_recovery import recovery_outcome
+            return recovery_outcome(self.lease, self.workspace, reason)
         if self.lease._workflow_recovery_mode:
             from .github_workflow_recovery import recovery_outcome
             return recovery_outcome(self.lease, self.workspace, reason)
@@ -361,7 +389,9 @@ class InitRootLease:
     def __init__(self, root: Path, *, cancellation: DefaultCancellation,
                  profile: TypedEditProfile = TypedEditProfile.CONFIGURATION,
                  registered_identity: dict[str, int] | None = None,
-                 image_recovery: bool = False, workflow_recovery: bool = False) -> None:
+                 image_recovery: bool = False, workflow_recovery: bool = False,
+                 saved_text_recovery: bool = False, configuration_recovery: bool = False,
+                 initialization_recovery: bool = False) -> None:
         if type(cancellation) is not DefaultCancellation or type(profile) is not TypedEditProfile:
             raise _failure("invalid_params")
         if type(image_recovery) is not bool or image_recovery and profile is not TypedEditProfile.METADATA_IMAGES:
@@ -369,10 +399,22 @@ class InitRootLease:
         if (type(workflow_recovery) is not bool
                 or workflow_recovery and (image_recovery or profile is not TypedEditProfile.GITHUB_WORKFLOWS)):
             raise _failure("invalid_params")
+        if (type(saved_text_recovery) is not bool
+                or saved_text_recovery and (image_recovery or workflow_recovery
+                    or profile not in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION))):
+            raise _failure("invalid_params")
+        if (type(configuration_recovery) is not bool or configuration_recovery and
+                (image_recovery or workflow_recovery or saved_text_recovery
+                 or profile is not TypedEditProfile.CONFIGURATION)):
+            raise _failure("invalid_params")
+        if (type(initialization_recovery) is not bool or initialization_recovery and
+                (image_recovery or workflow_recovery or saved_text_recovery or configuration_recovery
+                 or profile is not TypedEditProfile.PROJECT_INITIALIZATION)):
+            raise _failure("invalid_params")
         cancellation._check_owner()
         if threading.current_thread() is not threading.main_thread():
             raise _failure("invalid_params")
-        if profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
+        if configuration_recovery or profile in (TypedEditProfile.PROJECT_INITIALIZATION, TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
                        TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES):
             if (type(registered_identity) is not dict
                     or set(registered_identity) != {"device", "inode", "mode", "uid", "gid"}
@@ -396,13 +438,21 @@ class InitRootLease:
         self._metadata_targets: MetadataTargets | None = None
         self._version_targets: VersionTargets | None = None
         self._image_targets: ImageTargets | None = None
+        self._initialization_targets: Any = None
+        self._initialization_recovery_mode = initialization_recovery
         self._image_recovery_mode = image_recovery
         self._image_recovery: Any = None
-        self._workflow_recovery_mode = workflow_recovery
+        self._configuration_recovery_mode = configuration_recovery
+        self._workflow_recovery_mode = workflow_recovery or configuration_recovery or initialization_recovery
         self._workflow_recovery: Any = None
         self._workflow_recovery_journal = "unknown"
         self._workflow_recovery_effect = "not_started"
         self._workflow_recovery_reason = "none"
+        self._saved_text_recovery_mode = saved_text_recovery
+        self._saved_text_recovery: Any = None
+        self._saved_text_recovery_journal = "unknown"
+        self._saved_text_recovery_effect = "not_started"
+        self._saved_text_recovery_reason = "none"
         self._acquire_claimed = False
         self._acquired = False
         self._capture_claimed = False
@@ -466,7 +516,7 @@ class InitRootLease:
             raise _failure("custody_unknown", unknown=True)
         try:
             self.directory.check()
-            if self._profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
+            if self._configuration_recovery_mode or self._profile in (TypedEditProfile.PROJECT_INITIALIZATION, TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
                                 TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES):
                 # Rust registration carries full st_mode, not S_IMODE. Read the
                 # original retained root descriptor before any target capture;
@@ -486,6 +536,9 @@ class InitRootLease:
 
     @property
     def last_outcome(self) -> InitApplyOutcome:
+        if self._saved_text_recovery_mode:
+            from .saved_text_recovery import recovery_outcome
+            return recovery_outcome(self) if not self._scopes else self._scopes[-1].outcome("none")
         if self._workflow_recovery_mode:
             from .github_workflow_recovery import recovery_outcome
             return recovery_outcome(self) if not self._scopes else self._scopes[-1].outcome("none")
@@ -605,7 +658,18 @@ class InitRootLease:
         return bind_image_targets(self, workspace, dependencies, platform, locale,
                                   asset_type, images, protected_sources, protected_objects)
 
+    def bind_initialization_targets(self, workspace: InitWorkspace, data: Any):
+        from .initialization_targets import bind_targets
+        return bind_targets(self, workspace, data)
+
     def _observation_roster(self, workspace: InitWorkspace) -> tuple[tuple[str, ...], tuple[int, ...], set[str]]:
+        if self._profile is TypedEditProfile.PROJECT_INITIALIZATION:
+            from .initialization_targets import InitializationTargets
+            targets = self._initialization_targets
+            if type(targets) is not InitializationTargets:
+                raise _failure("invalid_params")
+            targets._check_workspace(workspace)
+            return targets.paths, targets.observation_limits, set(targets.directories)
         if self._profile is TypedEditProfile.METADATA_TEXT:
             targets = self._metadata_targets
             if type(targets) is not MetadataTargets:
@@ -654,7 +718,7 @@ class InitRootLease:
             ("_files", files), ("_raw", tuple(sorted(workspace._raw_observations.items()))),
             ("_absent", self._profile is TypedEditProfile.CONFIGURATION and workspace.parents["release"] is None),
             ("_metadata_targets", self._metadata_targets), ("_version_targets", self._version_targets),
-            ("_image_targets", self._image_targets),
+            ("_image_targets", self._image_targets), ("_initialization_targets", self._initialization_targets),
         ):
             object.__setattr__(revision, name, value)
         self._revision = revision
@@ -668,6 +732,8 @@ class InitRootLease:
         if self._profile is TypedEditProfile.RELEASE_VERSION and revision._version_targets is not self._version_targets:
             raise _failure("invalid_params")
         if self._profile is TypedEditProfile.METADATA_IMAGES and revision._image_targets is not self._image_targets:
+            raise _failure("invalid_params")
+        if self._profile is TypedEditProfile.PROJECT_INITIALIZATION and revision._initialization_targets is not self._initialization_targets:
             raise _failure("invalid_params")
         paths, limits, _ = self._observation_roster(workspace)
         workspace.parents = {path: dict(value) if value is not None else None
@@ -694,7 +760,8 @@ class InitRootLease:
     @contextmanager
     def workspace_scope(self, revision: RootedRevision | None = None) -> Iterator[InitWorkspace]:
         self.check()
-        if self._active is not None or self._image_recovery_mode or self._workflow_recovery_mode:
+        if (self._active is not None or self._image_recovery_mode or self._workflow_recovery_mode
+                or self._saved_text_recovery_mode):
             raise _failure("invalid_params")
         if revision is None:
             if self._capture_claimed:
@@ -744,8 +811,12 @@ class InitRootLease:
         """Same original custody, disjoint current-inspection recovery intent."""
         from .github_workflow_recovery import WorkflowRecoveryRevision
         self.check()
-        if (not self._workflow_recovery_mode or self._profile is not TypedEditProfile.GITHUB_WORKFLOWS
-                or self._image_recovery_mode or self._active is not None or self._revision is not None):
+        selected = (TypedEditProfile.PROJECT_INITIALIZATION if self._initialization_recovery_mode else
+                    TypedEditProfile.CONFIGURATION if self._configuration_recovery_mode
+                    else TypedEditProfile.GITHUB_WORKFLOWS)
+        if (not self._workflow_recovery_mode or self._profile is not selected
+                or self._image_recovery_mode or self._saved_text_recovery_mode
+                or self._active is not None or self._revision is not None):
             raise _failure("invalid_params")
         if revision is None:
             if self._capture_claimed or self._workflow_recovery is not None:
@@ -754,7 +825,8 @@ class InitRootLease:
         else:
             if (type(revision) is not WorkflowRecoveryRevision or revision is not self._workflow_recovery
                     or getattr(revision, "_identity", None) is not revision
-                    or getattr(revision, "_lease", None) is not self or self._rechecks >= 2):
+                    or getattr(revision, "_lease", None) is not self
+                    or getattr(revision, "_profile", None) is not selected or self._rechecks >= 2):
                 raise _failure("invalid_params")
             self._rechecks += 1
         owner = LockedInitScope(self)
@@ -806,6 +878,60 @@ class InitRootLease:
             self._capture_claimed = True
         else:
             if (type(revision) is not ImageRecoveryRevision or revision is not self._image_recovery
+                    or getattr(revision, "_identity", None) is not revision
+                    or getattr(revision, "_lease", None) is not self or self._rechecks >= 2):
+                raise _failure("invalid_params")
+            self._rechecks += 1
+        owner = LockedInitScope(self)
+        self._scopes.append(owner)
+        self._active = owner
+        cleanup = CleanupScope(self.guard, owner.close, owns_cancellation=False, first_primary=True)
+        try:
+            try:
+                with cleanup:
+                    owner.acquire()
+                    workspace = InitWorkspace.borrowed(owner)
+                    if revision is not None:
+                        revision.recheck(workspace)
+                    yield workspace
+                    owner.check()
+                    self.guard.check()
+            finally:
+                cleanup.__exit__(*sys.exc_info())
+        except BaseException as error:
+            self._failed = True
+            if type(error) is InitOperationFailure:
+                outcome = error.outcome
+            else:
+                reason = ("cancelled" if isinstance(error, KeyboardInterrupt) else
+                          "stale_revision" if isinstance(error, InitConflict) else "filesystem_error")
+                outcome = owner.outcome(reason)
+            if self.guard.lifetime_ledger.fatal or not owner.closed:
+                outcome = InitApplyOutcome(outcome.effect, outcome.journal, "unknown",
+                                           outcome.reason if outcome.reason != "none" else "custody_unknown")
+            raise InitOperationFailure(outcome, error) from None
+        finally:
+            self._active = None
+
+
+    @contextmanager
+    def saved_text_recovery_scope(self, revision: Any = None) -> Iterator[InitWorkspace]:
+        """A closed text/version restoration, never a recreated writer revision.
+
+        This is the same original lock/descriptor/cancellation path, with two
+        explicit one-use rechecks and a disjoint immutable capability type.
+        """
+        from .saved_text_recovery import SavedTextRecoveryRevision
+        self.check()
+        if (not self._saved_text_recovery_mode or self._profile not in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION)
+                or self._active is not None or self._revision is not None):
+            raise _failure("invalid_params")
+        if revision is None:
+            if self._capture_claimed or self._saved_text_recovery is not None:
+                raise _failure("invalid_params")
+            self._capture_claimed = True
+        else:
+            if (type(revision) is not SavedTextRecoveryRevision or revision is not self._saved_text_recovery
                     or getattr(revision, "_identity", None) is not revision
                     or getattr(revision, "_lease", None) is not self or self._rechecks >= 2):
                 raise _failure("invalid_params")

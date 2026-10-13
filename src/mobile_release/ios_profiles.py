@@ -7,6 +7,8 @@ authenticated validation, not call this current-policy gate again.
 from __future__ import annotations
 
 import os
+import hashlib
+from contextlib import nullcontext
 import stat
 import sys
 import tempfile
@@ -541,6 +543,13 @@ def _profile_entry(
     return evidence, owns_evidence, guard, owns_guard
 
 
+def _artifact_operation(deadline):
+    if type(deadline).__name__ != "_ArtifactInspectionDeadline":
+        return None
+    from .desktop_artifact_inspection import operation_for
+    return operation_for(deadline)
+
+
 def read_profile_bytes(
     path: Path, *, maximum: int = MAX_PROFILE_BYTES, deadline: InspectionDeadline | None = None,
     cancellation: DefaultCancellation | None = None, _evidence: ProfileCallEvidence | None = None,
@@ -548,6 +557,7 @@ def read_profile_bytes(
     """Take one bounded no-follow snapshot with explicit raw descriptor ownership."""
     evidence, owns_evidence, guard, owns_guard = _profile_entry(_evidence, "read", cancellation)
     deadline = deadline if deadline is not None else InspectionDeadline()
+    artifact = _artifact_operation(deadline)
     descriptor = _ProfileDescriptor()
 
     def cleanup() -> None:
@@ -556,44 +566,63 @@ def read_profile_bytes(
     scope = _ProfileCleanupScope(guard, cleanup, owns_cancellation=owns_guard,
                                  descriptors=(descriptor,), evidence=evidence, evidence_role="READER")
     try:
-        with scope:
-            if owns_guard:
-                guard.install()
-                guard.activate()
-            deadline.check()
-            guard.check()
-            if type(maximum) is not int or not 0 < maximum <= MAX_PROFILE_BYTES:
-                raise ValidationError("provisioning input read bound is invalid")
-            # Reject ordinary invalid paths before any FD attempt. The later
-            # no-follow open/fstat still establishes the actual read identity;
-            # an open that was attempted but never published remains UNKNOWN.
-            entry = os.lstat(path)
-            if not stat.S_ISREG(entry.st_mode) or not 0 < entry.st_size <= maximum:
-                raise ValidationError("provisioning input must be a nonempty bounded regular file")
-            with guard.deferred():
-                descriptor.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-            before = os.fstat(descriptor.number)
-            if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= maximum:
-                raise ValidationError("provisioning input must be a nonempty bounded regular file")
-            if (entry.st_dev, entry.st_ino) != (before.st_dev, before.st_ino):
-                raise ValidationError("provisioning input changed while being inspected")
-            content = bytearray()
-            while len(content) <= maximum:
-                deadline.check()
-                guard.check()
-                chunk = os.read(descriptor.number, min(64 * 1024, maximum + 1 - len(content)))
-                if not chunk:
-                    break
-                content.extend(chunk)
-            after = os.fstat(descriptor.number)
-            attributes = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-            if len(content) != before.st_size or any(getattr(before, key) != getattr(after, key) for key in attributes):
-                raise ValidationError("provisioning input changed while being inspected")
-            result = bytes(content)
-    except OSError:
+        with (artifact.profile_original(path) if artifact is not None else nullcontext(None)) as original:
+            try:
+                with scope:
+                    if owns_guard:
+                        guard.install()
+                        guard.activate()
+                    deadline.check()
+                    guard.check()
+                    if type(maximum) is not int or not 0 < maximum <= MAX_PROFILE_BYTES:
+                        raise ValidationError("provisioning input read bound is invalid")
+                    # Reject ordinary invalid paths before any FD attempt. The later
+                    # no-follow open/fstat still establishes the actual read identity;
+                    # an open that was attempted but never published remains UNKNOWN.
+                    if artifact is not None:
+                        maximum = min(maximum, 256 * 1024)
+                        parent, name, entry, expected_digest = original
+                    else:
+                        entry = os.lstat(path)
+                    if not stat.S_ISREG(entry.st_mode) or not 0 < entry.st_size <= maximum:
+                        raise ValidationError("provisioning input must be a nonempty bounded regular file")
+                    with guard.deferred():
+                        descriptor.open(path if artifact is None else name,
+                            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                            dir_fd=None if artifact is None else parent)
+                    before = os.fstat(descriptor.number)
+                    if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= maximum:
+                        raise ValidationError("provisioning input must be a nonempty bounded regular file")
+                    if (entry.st_dev, entry.st_ino) != (before.st_dev, before.st_ino):
+                        raise ValidationError("provisioning input changed while being inspected")
+                    content = bytearray()
+                    while len(content) <= maximum:
+                        deadline.check()
+                        guard.check()
+                        chunk = os.read(descriptor.number, min(64 * 1024, maximum + 1 - len(content)))
+                        if not chunk:
+                            break
+                        content.extend(chunk)
+                    after = os.fstat(descriptor.number)
+                    attributes = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+                    if len(content) != before.st_size or any(getattr(before, key) != getattr(after, key) for key in attributes):
+                        raise ValidationError("provisioning input changed while being inspected")
+                    result = bytes(content)
+                    if artifact is not None:
+                        from ._desktop_artifact_inspection_selection import _identity
+                        if (_identity(before) != _identity(entry) or _identity(after) != _identity(entry)
+                                or hashlib.sha256(result).hexdigest() != expected_digest):
+                            raise ValidationError("provisioning input changed while being inspected")
+            finally:
+                scope.__exit__(*exc_info())
+    except OSError as error:
+        if artifact is not None:
+            artifact.remember(error)
         raise ValidationError("provisioning input could not be read safely") from None
     finally:
         try:
+            # Also settles an unacquired descriptor if the surrounding source
+            # loan failed before its body could enter. Existing scope is one-shot.
             scope.__exit__(*exc_info())
         finally:
             _finish_profile_evidence(evidence, owns_evidence, exc_info()[1])
@@ -621,7 +650,20 @@ def _capture_profile(
     _require_profile_scratch_available()
     finality = finality if finality is not None else CaptureFinality()
     deadline.check()
-    result = capture_profile(directory, deadline, cancellation=cancellation, finality=finality)
+    artifact = _artifact_operation(deadline)
+    if artifact is not None:
+        artifact.profile_capture_before()
+    try:
+        result = capture_profile(directory, deadline, cancellation=cancellation, finality=finality)
+    except BaseException:
+        if artifact is not None:
+            artifact.profile_capture_after(None)  # Unknown/failed return consumes its full prequote.
+        raise
+    if artifact is not None:
+        # completed_content accepted one exact full frame; its fixed framing
+        # and this actual content length account the accepted payload buffer.
+        actual = len(result) + len(COMPLETION_MAGIC) + 4 + len(COMPLETION_MARKER) if type(result) is bytes else None
+        artifact.profile_capture_after(actual)
     if finality.state != "FINALIZED":
         raise ValidationError("Apple profile worker cleanup could not be confirmed; no upload is authorized")
     deadline.check()

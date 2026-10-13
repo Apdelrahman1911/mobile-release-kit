@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Script } from 'node:vm';
 import guideResource from '../../src/mobile_release/api/data/metadata-text-help-v1.json' with { type: 'json' };
+import { parseSavedTextRecoveryView, parseSavedTextRecoveryProjection, savedTextRecoveryEffect, savedTextRecoverySucceeded } from '../src/savedTextRecovery.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
 import { METADATA_TEXT_IDS, metadataCacheBytes, metadataCompareRetainedDraft, metadataConfiguredChoices, metadataConfigReason, metadataLineEndings,
@@ -109,7 +110,7 @@ function owner(h, phase = 'opening', options = {}) {
 }
 function harness({ config = BASE, nativeStatus = status(), subscribeGate = null } = {}) {
   let workspace = addProject(initialWorkspace, 'a', config); let registry = clone(nativeStatus); let listener; let clock = 100;
-  let otherReason = null; let operationReason = null; const calls = []; const reads = [];
+  let otherReason = null; let operationReason = null; const calls = []; const reads = []; const boundaries = [];
   const selected = () => workspace.projects[workspace.selectedId] ?? null;
   const request = (kind, args) => { const pending = deferred(); calls.push({ kind, args: clone(args), ...pending }); return pending.promise; };
   const api = { mode: 'native',
@@ -117,17 +118,17 @@ function harness({ config = BASE, nativeStatus = status(), subscribeGate = null 
     metadataTextEditStatus: () => { calls.push({ kind: 'status' }); return reads.length ? reads.shift().promise : Promise.resolve(clone(registry)); },
     observeMetadataText: (input) => request('observe', input), validateMetadataText: (input) => request('validate', input),
     openMetadataTextEdit: (input) => request('open', input), prepareMetadataTextEdit: (input) => request('prepare', input),
-    applyMetadataTextEdit: (sessionId, planToken) => request('apply', { sessionId, planToken }), closeMetadataTextEdit: (sessionId) => request('close', { sessionId }),
+    applyMetadataTextEdit: (sessionId, planToken, intent) => request('apply', intent === undefined ? { sessionId, planToken } : { sessionId, planToken, intent }), closeMetadataTextEdit: (sessionId) => request('close', { sessionId }),
   };
-  const controller = new MetadataTextEditController({ selectedProject: selected, otherEditReason: () => otherReason, otherOperationReason: () => operationReason, now: () => clock });
+  const controller = new MetadataTextEditController({ selectedProject: selected, otherEditReason: () => otherReason, otherOperationReason: () => operationReason, onRecoveryBoundary: (id) => { boundaries.push(id); }, now: () => clock });
   const info = { runtime: { state: 'available', mode: 'development', reason: null }, capabilities: { methods: [
     { method: 'metadata.text.observe', available: true, reason: '' }, { method: 'metadata.text.validate', available: true, reason: '' },
   ] } };
   controller.beginConnection(); controller.setConnection(api, info); controller.setHelp(guideResource);
-  const h = { controller, api, selected, calls, info,
+  const h = { controller, api, selected, calls, info, boundaries,
     get state() { return controller.getSnapshot(); }, get workspace() { return workspace; }, get frame() { return registry; },
     count: (kind) => calls.filter((call) => call.kind === kind).length, last: (kind) => calls.filter((call) => call.kind === kind).at(-1),
-    dispatch: (action) => { workspace = workspaceReducer(workspace, action); controller.syncProject(); },
+    dispatch: (action) => { controller.beforeWorkspaceAction(action); workspace = workspaceReducer(workspace, action); controller.syncProject(); },
     add: (id, data = BASE) => { workspace = addProject(workspace, id, data); controller.syncProject(); },
     blockOther: (value) => { otherReason = value; }, blockOperation: (value) => { operationReason = value; }, advance: (amount) => { clock += amount; },
     deferStatus: () => { const value = deferred(); reads.push(value); return value; },
@@ -628,4 +629,349 @@ test('retained draft still requires fresh validation and a separate native save 
   const local = unavailable.h.controller.reviewRetainedDraft(unavailable.sourceKey); assert.ok(local);
   assert.equal(unavailable.h.controller.adoptRetainedDraft(local), true); await validate(unavailable.h);
   assert.equal(unavailable.h.controller.start(), false); assert.equal(unavailable.h.count('open'), 0);
+});
+
+// Fresh-process recovery transport/controller DATA only. No journal is created
+// or inspected by these fixtures; core/native restart evidence stays separate.
+const RECOVERY = { session: 'f'.repeat(32), revision: '1'.repeat(32), plan: '2'.repeat(32), transaction: '3'.repeat(32) };
+function recoveryView(action = 'rollback', platform = 'android') {
+  const files = METADATA_TEXT_IDS[platform].map((id, index) => {
+    const before = index === 0 ? null : { ...digest(`old-${id}`), mode: 0o644 };
+    const after = index === 2 ? null : { ...digest(`new-${id}`), mode: 0o644 };
+    const effect = action === 'rollback' ? after === null ? 'preserve' : before === null ? 'remove_new' : 'restore_original' :
+      action === 'committed_cleanup' && after !== null ? 'keep_committed' : 'preserve';
+    return { path: `release/store/${platform}/en-US/${id}`, effect, before, after };
+  });
+  return { schemaVersion: 1, kind: 'saved-text-recovery', domain: 'metadata_text', state: 'recoverable', reason: 'none',
+    action, transactionId: RECOVERY.transaction, selection: { platform, locale: 'en-US', metadataRoot: 'release/store' }, files,
+    privateCleanup: { fileCount: 4, directoryCount: 1, scope: 'inspected-owned-journal-only' } };
+}
+function recoveryProjection(phase, view = recoveryView(), options = {}) {
+  const prepared = view.state === 'recoverable' && ['reviewing', 'applying', 'finalizing', 'final', 'unknown'].includes(phase);
+  return { domain: 'metadata_text', projectId: 'a', sessionId: RECOVERY.session, ownerGeneration: ID.window,
+    platform: null, locale: null, phase, reviewRemainingMs: 900000, checkout: null, prepared: null,
+    recovery: { checkout: phase === 'opening' ? null : { revision: RECOVERY.revision, view: clone(view) },
+      prepared: prepared ? { revision: RECOVERY.revision, planToken: RECOVERY.plan, view: clone(view) } : null },
+    applySubmitted: prepared && ['applying', 'finalizing', 'final', 'unknown'].includes(phase),
+    coreOutcome: phase === 'final' ? { effect: view.action ? savedTextRecoveryEffect(view.action) : 'not_started', journal: 'clean', resources: 'settled', reason: 'none' } : null,
+    nativeReason: 'none', nativeFinality: phase === 'final' ? 'settled' : phase === 'unknown' ? 'unknown' : 'pending', lateSettled: false, ...options };
+}
+function inspectRecovery(h, view = recoveryView()) {
+  const before = h.count('prepare');
+  assert.equal(h.controller.inspectRecoveryReason(), null); assert.equal(h.controller.inspectRecovery(), true);
+  assert.deepEqual(h.last('open').args, { projectId: 'a', intent: 'recover' });
+  assert.equal(h.controller.inspectRecovery(), false);
+  h.publish(recoveryProjection('opening', view)); h.publish(recoveryProjection('editing', view));
+  assert.equal(h.count('prepare'), before + (view.state === 'recoverable' ? 1 : 0));
+  if (view.state === 'recoverable') {
+    assert.deepEqual(h.last('prepare').args, { sessionId: RECOVERY.session, revision: RECOVERY.revision, intent: 'recover' });
+    h.publish(recoveryProjection('reviewing', view));
+    const binding = h.controller.currentRecoveryApplyBinding(); assert.ok(binding); return binding;
+  }
+  return null;
+}
+
+test('metadata_text recovery uses exact intent variants in existing commands; normal shapes and preview refusal stay unchanged', async () => {
+  const open = { projectId: 'a', intent: 'recover' }, prepare = { sessionId: RECOVERY.session, revision: RECOVERY.revision, intent: 'recover' },
+    apply = { sessionId: RECOVERY.session, planToken: RECOVERY.plan, intent: 'recover' };
+  for (const [command, value] of [['metadata_text_edit_open', open], ['metadata_text_edit_prepare', prepare], ['metadata_text_edit_apply', apply]]) {
+    assert.equal(metadataTextRequestFits(command, value), true);
+    for (const key of ['root', 'source', 'platform', 'locale', 'fields', 'values', 'expectedBaseline', 'action', 'force'])
+      assert.equal(metadataTextRequestFits(command, { ...value, [key]: 'forbidden' }), false);
+    assert.equal(metadataTextRequestFits(command, { ...value, intent: 'recover-again' }), false);
+  }
+  const calls = [], api = createNativeApi('native', async (command, args) => { calls.push({ command, args }); return status(); });
+  await api.openMetadataTextEdit(open); await api.prepareMetadataTextEdit(prepare); await api.applyMetadataTextEdit(RECOVERY.session, RECOVERY.plan, 'recover');
+  assert.deepEqual(calls, [{ command: 'metadata_text_edit_open', args: open }, { command: 'metadata_text_edit_prepare', args: prepare }, { command: 'metadata_text_edit_apply', args: apply }]);
+  await api.applyMetadataTextEdit(ID.session, ID.plan);
+  assert.deepEqual(calls.at(-1).args, { sessionId: ID.session, planToken: ID.plan });
+  await assert.rejects(api.applyMetadataTextEdit(ID.session, ID.plan, 'wrong')); assert.equal(calls.length, 4);
+  await assert.rejects(previewApi.openMetadataTextEdit(open));
+  await assert.rejects(previewApi.prepareMetadataTextEdit(prepare));
+  await assert.rejects(previewApi.applyMetadataTextEdit(RECOVERY.session, RECOVERY.plan, 'recover'));
+});
+
+test('metadata_text recovery VIEW is closed, bounded and separate from normal checkout/Save', () => {
+  for (const action of ['rollback', 'committed_cleanup', 'rolled_back_cleanup', 'preparing_cleanup']) {
+    const view = recoveryView(action); assert.ok(parseSavedTextRecoveryView(view, 'metadata_text'));
+    const owner = recoveryProjection('reviewing', view); assert.ok(parseSavedTextRecoveryProjection(owner, 'metadata_text'));
+    assert.ok(parseMetadataTextEditStatus(status(1, owner))); assert.equal(normalMetadataTextResult(recoveryProjection('final', view)), null);
+  }
+  for (const mutate of [(v) => { v.domain = 'release_version'; }, (v) => { v.schemaVersion = 2; },
+    (v) => { v.rawText = 'never-export'; }, (v) => { v.reason = 'exception text'; }, (v) => { v.action = 'continue_save'; },
+    (v) => { v.transactionId += '\n'; }, (v) => { v.files[0].path = '/absolute/path'; }, (v) => { v.files[0].effect = 'save_draft'; },
+    (v) => { v.files[0].before = null; v.files[0].after = null; }, (v) => { v.files[0].after.mode = 512; },
+    (v) => { v.files[0].after.sha256 += '\n'; }, (v) => { v.files[0].after.byteLength = 32769; },
+    (v) => { v.files.push(clone(v.files[0])); }, (v) => { v.privateCleanup.fileCount = 15; },
+    (v) => { v.privateCleanup.directoryCount = 12; }, (v) => { v.privateCleanup.scope = 'whole-project'; }]) {
+    const value = recoveryView(); mutate(value); assert.equal(parseSavedTextRecoveryView(value, 'metadata_text'), null);
+  }
+  for (const key of ['state', 'reason', 'action', 'transactionId']) {
+    const invalid = recoveryView(); invalid[key] = [invalid[key]];
+    assert.equal(parseSavedTextRecoveryView(invalid, 'metadata_text'), null);
+  }
+  for (const key of ['phase', 'nativeReason', 'nativeFinality']) {
+    const invalid = recoveryProjection('reviewing'); invalid[key] = [invalid[key]];
+    assert.equal(parseSavedTextRecoveryProjection(invalid, 'metadata_text'), null);
+  }
+  for (const key of ['effect', 'journal', 'resources', 'reason']) {
+    const invalid = recoveryProjection('final'); invalid.coreOutcome[key] = [invalid.coreOutcome[key]];
+    assert.equal(parseSavedTextRecoveryProjection(invalid, 'metadata_text'), null);
+  }
+  for (const mutate of [(v) => { delete v.recovery; }, (v) => { v.checkout = { revision: RECOVERY.revision }; },
+    (v) => { v.prepared = { planToken: RECOVERY.plan }; }, (v) => { v.recovery.prepared.planToken = RECOVERY.revision; },
+    (v) => { v.recovery.prepared.view.files[0].after.byteLength += 1; }, (v) => { v.recovery.checkout.view.domain = 'foreign'; }]) {
+    const owner = recoveryProjection('reviewing'); mutate(owner); assert.equal(parseMetadataTextEditStatus(status(1, owner)), null);
+  }
+  let invoked = 0; const value = recoveryView(); Object.defineProperty(value, 'files', { enumerable: true, get() { invoked += 1; return []; } });
+  assert.equal(parseSavedTextRecoveryView(value, 'metadata_text'), null); assert.equal(invoked, 0);
+  const a = recoveryProjection('reviewing'), b = clone(a); b.recovery.checkout.view.files[0].after.sha256 = '4'.repeat(64);
+  b.recovery.prepared.view = clone(b.recovery.checkout.view); assert.ok(parseMetadataTextEditStatus(status(2, b))); assert.equal(metadataProjectionProgress(a, b), false);
+});
+
+test('metadata recovery derives Android or iOS selection from journal DATA, not the current locale or a draft', async () => {
+  for (const platform of ['android', 'ios']) {
+    const h = await connected(); assert.equal(h.controller.selectedEntry(), null);
+    h.controller.setHelp(null); // Recovery does not need a normal validation/checkout.
+    const view = recoveryView('rollback', platform), binding = inspectRecovery(h, view);
+    assert.equal(binding.view.selection.platform, platform); assert.equal(binding.view.files.length, platform === 'ios' ? 5 : 3);
+    assert.equal(h.state.edit.attempt, null); assert.equal(h.controller.selectedEntry(), null);
+    assert.equal(h.count('observe'), 0); assert.equal(h.count('validate'), 0); assert.equal(h.count('apply'), 0);
+    const mismatch = clone(recoveryProjection('reviewing', view)); mismatch.platform = platform; mismatch.locale = 'en-US';
+    assert.equal(parseMetadataTextEditStatus(status(1, mismatch)), null);
+    assert.equal(h.controller.applyRecovery({ ...binding, action: 'committed_cleanup' }), false);
+    assert.equal(h.controller.applyRecovery({ ...binding, revision: ID.revision }), false);
+    assert.equal(h.controller.applyRecovery({ ...binding, domain: 'release_version' }), false);
+    assert.equal(h.controller.applyRecovery(binding), true); assert.equal(h.controller.applyRecovery(binding), false);
+    assert.deepEqual(h.last('apply').args, { sessionId: RECOVERY.session, planToken: RECOVERY.plan, intent: 'recover' });
+    h.controller.dispose();
+  }
+});
+
+test('metadata recovery waits for original Close; all four actions preserve dirty/newer fields, baselines and normal outcomes', async () => {
+  for (const action of ['rollback', 'committed_cleanup', 'rolled_back_cleanup', 'preparing_cleanup']) {
+    const h = await connected(), normal = await reviewing(h);
+    assert.equal(h.controller.inspectRecovery(), false); assert.equal(h.count('open'), 1);
+    h.controller.requestClose(); assert.equal(h.count('close'), 1); assert.equal(h.controller.inspectRecovery(), false);
+    const closed = { ...owner(h, 'reviewing'), phase: 'final', nativeFinality: 'settled', nativeReason: 'discarded',
+      coreOutcome: { effect: 'not_started', journal: 'not_created', resources: 'settled', reason: 'none' } };
+    h.publish(closed); assert.equal(h.state.edit.attempt.handled, true);
+    const before = clone(h.controller.selectedEntry()), retained = h.state.edit.attempt, settings = clone(h.workspace);
+    const view = recoveryView(action), binding = inspectRecovery(h, view);
+    assert.equal(h.controller.currentRecoveryApplyBinding().planToken, RECOVERY.plan); assert.equal(h.count('apply'), 0);
+    assert.equal(h.controller.loadReason().includes('recovery'), true); assert.equal(h.controller.discardReason(before.context.key) !== null, true);
+    assert.equal(h.controller.applyRecovery(binding), true);
+    h.controller.editField(before.context.key, 'title.txt', 'Newer unsaved title after recovery intent');
+    h.publish(recoveryProjection('final', view));
+    const after = h.controller.selectedEntry(); assert.equal(h.state.edit.recovery.succeeded, true);
+    assert.equal(savedTextRecoverySucceeded(h.state.edit.recovery), true);
+    assert.deepEqual(after.baseline, before.baseline); assert.equal(after.baselineGeneration, before.baselineGeneration);
+    assert.equal(after.fields[0].text, 'Newer unsaved title after recovery intent'); assert.equal(after.revision, before.revision + 1);
+    assert.deepEqual(after.lastSave, before.lastSave); assert.equal(metadataTextSavedFresh(after), false); assert.equal(after.stale, true);
+    assert.equal(after.observationPredatesSave, true); assert.equal(after.validation, null);
+    assert.deepEqual({ ...h.state.edit.attempt, projectionRevision: retained.projectionRevision }, retained);
+    assert.ok(h.state.edit.attempt.projectionRevision >= retained.projectionRevision); // Later status may re-observe the same normal outcome.
+    assert.deepEqual(h.workspace, settings); assert.deepEqual(h.boundaries, ['a', 'a']);
+    assert.equal(currentMetadataApplyBinding(h.state), null); assert.equal(h.controller.canApply(normal), false);
+    assert.equal(h.count('observe'), 1); // No automatic reload or draft adoption.
+    await load(h); assert.equal(h.controller.selectedEntry().fields[0].text, after.fields[0].text);
+    const discard = h.controller.discardBinding(before.context.key); assert.equal(h.controller.discard(discard, 'latest'), true);
+    assert.equal(h.controller.selectedEntry().fields[0].text, texts()[0]); h.controller.dispose();
+  }
+});
+
+test('metadata_text recovery stale context, navigation, service and expiry cannot revive frozen confirmation', async () => {
+  for (const change of [(h) => { h.controller.setVisible(false); h.controller.setVisible(true); }, (h) => { h.controller.beginConnection(); }, (h) => { h.add('q'); h.dispatch({ type: 'switch', projectId: 'a' }); }, (h) => { h.controller.beforeWorkspaceAction({ type: 'snapshot-start', projectId: 'a', requestId: 99 }); }, (h) => { h.advance(900001); h.controller.recoveryTick(); }, (h) => { h.controller.setSelectionPending(true); h.controller.setSelectionPending(false); }]) {
+    const h = await connected(), binding = inspectRecovery(h);
+    change(h); assert.equal(h.controller.canApplyRecovery(binding), false); assert.equal(h.controller.applyRecovery(binding), false);
+    assert.equal(h.count('apply'), 0); assert.equal(h.count('close'), 1); assert.equal(h.state.edit.recovery.invalidated, true);
+    h.publish(recoveryProjection('reviewing')); assert.equal(h.controller.canApplyRecovery(binding), false);
+    assert.equal(h.count('prepare'), 1); h.controller.dispose();
+  }
+});
+
+test('metadata_text recovery late Open can only close, and lost Apply reply observes once without resubmitting', async () => {
+  const late = await connected(); assert.equal(late.controller.inspectRecovery(), true);
+  late.controller.setVisible(false); late.publish(recoveryProjection('editing'));
+  assert.equal(late.count('close'), 1); assert.equal(late.count('prepare'), 0); assert.equal(late.count('apply'), 0);
+  late.controller.setVisible(true); assert.equal(late.controller.currentRecoveryApplyBinding(), null); late.controller.dispose();
+  const h = await connected(), binding = inspectRecovery(h); assert.equal(h.controller.applyRecovery(binding), true);
+  h.publish(recoveryProjection('applying')); const reads = h.count('status');
+  h.last('apply').reject({ code: 'BridgeLost' }); await flush();
+  assert.equal(h.count('status'), reads + 1); assert.equal(h.count('apply'), 1); assert.equal(h.count('open'), 1); assert.equal(h.count('prepare'), 1);
+  assert.equal(h.controller.applyRecovery(binding), false);
+  h.publish(recoveryProjection('final')); assert.equal(h.state.edit.recovery.succeeded, true); h.controller.dispose();
+});
+
+test('metadata_text recovery clears only its matched submitted success; conflicts, idle and inspected discard retain attention', async () => {
+  for (const ending of ['idle', 'legacy_journal', 'incomplete_journal', 'invalid_journal', 'foreign_journal', 'dependency_changed', 'target_changed', 'discard', 'success']) {
+    const h = await connected(); await reviewing(h); const n = currentMetadataApplyBinding(h.state); h.controller.apply(n);
+    h.publish(owner(h, 'final', { coreOutcome: { effect: 'committed', journal: 'recovery_required', resources: 'settled', reason: 'filesystem_error' } }));
+    assert.deepEqual(h.state.edit.recoveryProjects, ['a']);
+    const view = recoveryView('committed_cleanup');
+    if (!['discard', 'success'].includes(ending)) Object.assign(view, { state: ending === 'idle' ? 'idle' : 'conflict', reason: ending === 'idle' ? 'none' : ending,
+      action: null, transactionId: null, selection: null, files: [], privateCleanup: { fileCount: 0, directoryCount: 0, scope: 'inspected-owned-journal-only' } });
+    const prepares = h.count('prepare'), binding = inspectRecovery(h, view);
+    if (ending === 'success') {
+      assert.equal(h.controller.applyRecovery(binding), true);
+      h.blockOther('Another domain retains its own journal');
+      h.publish(recoveryProjection('final', view)); assert.equal(h.state.edit.recovery.succeeded, true);
+      assert.deepEqual(h.state.edit.recoveryProjects, []); assert.equal(h.controller.inspectRecoveryReason(), 'Another domain retains its own journal');
+    } else {
+      assert.equal(h.state.edit.recovery.succeeded, false); assert.equal(h.count('prepare'), prepares + (ending === 'discard' ? 1 : 0));
+      h.controller.requestRecoveryClose(); const previous = h.state.edit.recovery.projection;
+      h.publish({ ...clone(previous), phase: 'final', nativeFinality: 'settled', nativeReason: 'discarded',
+        coreOutcome: { effect: ending === 'discard' ? 'committed' : 'not_started', journal: 'recovery_required', resources: 'settled', reason: 'none' } });
+      assert.equal(h.state.edit.recovery.succeeded, false); assert.deepEqual(h.state.edit.recoveryProjects, ['a']);
+      assert.equal(h.controller.currentRecoveryApplyBinding(), null);
+    }
+    h.controller.dispose();
+  }
+});
+
+test('metadata_text recovery refusal/failure/unknown or altered original plans cannot clear native or journal blocks', async () => {
+  const blocked = await connected(); blocked.blockOther('Other original owner'); assert.equal(blocked.controller.inspectRecovery(), false);
+  blocked.blockOther(null); const binding = inspectRecovery(blocked); blocked.blockOther('Other original owner');
+  assert.equal(blocked.controller.applyRecovery(binding), false); assert.equal(blocked.count('apply'), 0); blocked.controller.dispose();
+  for (const kind of ['failed', 'unknown', 'mismatched-plan', 'wrong-success-effect']) {
+    const h = await connected(), consent = inspectRecovery(h);
+    assert.equal(h.controller.applyRecovery(consent), true);
+    if (kind === 'mismatched-plan') {
+      const result = recoveryProjection('final'); result.recovery.prepared.planToken = '4'.repeat(32); h.publish(result);
+      assert.equal(h.state.edit.integrityFailed, true); assert.equal(h.state.edit.recovery.succeeded, false);
+    } else if (kind === 'wrong-success-effect') {
+      const result = recoveryProjection('final'); result.coreOutcome.effect = 'committed'; h.publish(result);
+      assert.equal(h.state.edit.integrityFailed, true); assert.equal(h.state.edit.recovery.succeeded, false);
+    } else {
+      const result = recoveryProjection(kind === 'unknown' ? 'unknown' : 'final', recoveryView(), {
+        coreOutcome: { effect: 'rolled_back', journal: 'recovery_required', resources: kind === 'unknown' ? 'unknown' : 'settled', reason: 'filesystem_error' },
+        nativeReason: kind === 'unknown' ? 'cleanup_unknown' : 'none' });
+      h.publish(result, { reason: kind === 'unknown' ? 'cleanup_unknown' : 'available' });
+      assert.equal(h.state.edit.recovery.succeeded, false);
+      if (kind === 'unknown') {
+        const refined = clone(result); refined.lateSettled = true; refined.coreOutcome.resources = 'settled'; h.publish(refined);
+        assert.equal(h.state.edit.nativeBlocked, true); assert.equal(h.controller.inspectRecovery(), false);
+        assert.equal(h.state.edit.recovery.succeeded, false);
+      }
+    }
+    assert.equal(h.controller.applyRecovery(consent), false); assert.equal(h.count('apply'), 1); h.controller.dispose();
+  }
+});
+
+test('metadata recovery UI uses separate frozen confirmation and reuses App consent/intent boundaries', () => {
+  const ui = readFileSync(new URL('../src/components/MetadataTextEditor.tsx', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.match(ui, /function RecoveryConfirmation/); assert.match(ui, /confirmation !== 'RECOVER'/);
+  assert.match(ui, /mounted.current && dialog.current\?\.isConnected && dialog.current.open/);
+  assert.match(ui, /binding=\{confirmation\}/); assert.match(ui, /canApply\(confirmation\) && onApply\(confirmation\)/);
+  assert.match(app, /metadataControllerRef\.current\?\.beforeWorkspaceAction\(action\)/);
+  assert.match(app, /metadataText\.setVisible\(next === 'metadata'\)/); assert.match(app, /metadataText\.snapshotIntent\(projectId\)/);
+  assert.match(app, /onRecoveryBoundary:[\s\S]*?releaseVersion\.saveIntent\(\);[\s\S]*?releaseInputs\.saveIntent\(\);[\s\S]*?androidBuildControllerRef/);
+});
+
+
+test('metadata_text recovery completion covers only older exact-context known replies and never newer attention', async () => {
+  const failedCore = { effect: 'committed', journal: 'recovery_required', resources: 'settled', reason: 'filesystem_error' };
+  const counts = (h) => ['open', 'prepare', 'apply', 'close'].map((kind) => h.count(kind));
+  // Resolve the actual retained normal Apply promise AFTER recovery succeeds.
+  // An isolated controller per case prevents a prior sticky flag masking a guard.
+  for (const kind of ['older', 'equal', 'later', 'foreign-project', 'foreign-window', 'custody', 'late-finality',
+    'unknown-companion', 'custody-companion', 'current-custody-companion', 'cleanup-capability',
+    'navigation-aba', 'snapshot-intent', 'selection-aba', 'service-aba']) {
+    const h = await connected(), normal = await reviewing(h);
+    assert.equal(h.controller.apply(normal), true); const pending = h.last('apply');
+    const failed = clone(h.publish(owner(h, 'final', { coreOutcome: clone(failedCore) })));
+    assert.deepEqual(h.state.edit.recoveryProjects, ['a']);
+    const view = recoveryView('committed_cleanup'), binding = inspectRecovery(h, view);
+    assert.equal(h.controller.applyRecovery(binding), true);
+    const done = clone(h.publish(recoveryProjection('final', view)));
+    assert.equal(h.state.edit.recovery.succeeded, true); assert.deepEqual(h.state.edit.recoveryProjects, []);
+    assert.equal(h.state.edit.recovery.projectionRevision, done.statusRevision);
+    const draft = clone(h.controller.selectedEntry()), priorCounts = counts(h), reply = clone(failed);
+    if (kind === 'equal') reply.statusRevision = done.statusRevision;
+    if (kind === 'later') reply.statusRevision = done.statusRevision + 1;
+    if (kind === 'foreign-project') { reply.lastTerminal.projectId = 'foreign'; reply.lastTerminal.sessionId = 'e'.repeat(32); }
+    if (kind === 'foreign-window') { reply.windowGeneration = '9'.repeat(32); reply.lastTerminal.ownerGeneration = reply.windowGeneration; }
+    if (kind === 'custody') { reply.lastTerminal.sessionId = 'e'.repeat(32); reply.lastTerminal.coreOutcome.reason = 'custody_unknown'; }
+    if (kind === 'late-finality') {
+      Object.assign(reply.lastTerminal, { sessionId: 'e'.repeat(32), phase: 'unknown', nativeFinality: 'unknown', nativeReason: 'cleanup_unknown', lateSettled: true });
+      reply.capability = { available: false, reason: 'cleanup_unknown' };
+    }
+    if (kind === 'unknown-companion') {
+      reply.active = owner(h, 'unknown', { sessionId: 'e'.repeat(32), nativeReason: 'cleanup_unknown', coreOutcome: {
+        effect: 'unknown', journal: 'unknown', resources: 'unknown', reason: 'custody_unknown' } });
+      reply.capability = { available: false, reason: 'cleanup_unknown' };
+    }
+    if (kind === 'custody-companion') {
+      reply.active = owner(h, 'applying', { sessionId: 'e'.repeat(32), coreOutcome: {
+        effect: 'not_started', journal: 'not_created', resources: 'unknown', reason: 'custody_unknown' } });
+    }
+    if (kind === 'current-custody-companion') h.emit(status(done.statusRevision + 1, owner(h, 'applying', { sessionId: 'e'.repeat(32), coreOutcome: {
+        effect: 'not_started', journal: 'not_created', resources: 'unknown', reason: 'custody_unknown' } }), done.lastTerminal));
+    if (kind === 'cleanup-capability') reply.capability = { available: false, reason: 'cleanup_unknown' };
+    if (kind === 'navigation-aba') { h.controller.setVisible(false); h.controller.setVisible(true); }
+    if (kind === 'snapshot-intent') h.controller.snapshotIntent('a');
+    if (kind === 'selection-aba') { h.controller.setSelectionPending(true); h.controller.setSelectionPending(false); }
+    if (kind === 'service-aba') { h.controller.beginConnection(); h.controller.setConnection(h.api, h.info); h.controller.setHelp(guideResource); }
+    pending.resolve(reply); await flush();
+    assert.equal(h.state.edit.recovery.succeeded, true); // Historical result, not a reset of newer evidence.
+    assert.deepEqual(h.controller.selectedEntry(), draft); assert.deepEqual(counts(h), priorCounts);
+    if (kind === 'older') {
+      assert.deepEqual(h.state.edit.recoveryProjects, []);
+      assert.equal(h.state.edit.integrityFailed, false); assert.equal(h.state.edit.generationLost, false);
+      assert.equal(h.state.edit.nativeBlocked, false); assert.equal(h.state.edit.unknownEvidence, null);
+      assert.equal(metadataOwnerReason(h.state, 'a'), null);
+    } else {
+      if (kind === 'equal') assert.equal(h.state.edit.integrityFailed, true);
+      else if (kind === 'late-finality') {
+        assert.equal(h.state.edit.nativeBlocked, true); assert.equal(h.state.edit.unknownEvidence.lateSettled, true);
+      } else {
+        assert.ok(h.state.edit.recoveryProjects.includes(kind === 'foreign-project' ? 'foreign' : 'a'), kind);
+        if (kind === 'foreign-window') assert.equal(h.state.edit.generationLost, true);
+        if (kind === 'unknown-companion') {
+          assert.equal(h.state.edit.nativeBlocked, true); assert.equal(h.state.edit.unknownEvidence.sessionId, 'e'.repeat(32));
+        }
+        if (kind === 'cleanup-capability') assert.equal(h.state.edit.nativeBlocked, true);
+      }
+      // Re-observing handled success cannot re-clear any newly retained block.
+      h.emit(done);
+      if (kind === 'equal') assert.equal(h.state.edit.integrityFailed, true);
+      else if (kind === 'late-finality') assert.equal(h.state.edit.nativeBlocked, true);
+      else assert.ok(h.state.edit.recoveryProjects.includes(kind === 'foreign-project' ? 'foreign' : 'a'), kind);
+      assert.deepEqual(counts(h), priorCounts);
+    }
+    h.controller.dispose();
+  }
+  for (const kind of ['newer-pending', 'newer-unrelated', 'success-with-active-pending', 'success-with-active-custody', 'context-after-submit',
+    'snapshot-after-submit', 'workspace-after-submit', 'shutdown-after-submit']) {
+    const h = await connected(), normal = await reviewing(h);
+    assert.equal(h.controller.apply(normal), true);
+    h.publish(owner(h, 'final', { coreOutcome: clone(failedCore) }));
+    const view = recoveryView('committed_cleanup'), binding = inspectRecovery(h, view);
+    assert.equal(h.controller.applyRecovery(binding), true); const pending = h.last('apply');
+    h.publish(recoveryProjection('applying', view));
+    const completed = status(h.frame.statusRevision + 1, null, recoveryProjection('final', view));
+    if (kind === 'newer-pending') h.emit(status(completed.statusRevision + 1, null, owner(h, 'final', { sessionId: 'e'.repeat(32), coreOutcome: clone(failedCore) })));
+    if (kind === 'newer-unrelated') h.emit(status(completed.statusRevision + 1));
+    if (kind === 'success-with-active-pending') {
+      // One publication can retain this success beside a newer active owner:
+      // revision equality alone must not clear that owner's pending journal.
+      completed.active = owner(h, 'applying', { sessionId: 'e'.repeat(32), coreOutcome: clone(failedCore) });
+    }
+    if (kind === 'success-with-active-custody') completed.active = owner(h, 'applying', { sessionId: 'e'.repeat(32), coreOutcome: {
+        effect: 'not_started', journal: 'not_created', resources: 'unknown', reason: 'custody_unknown' } });
+    if (kind === 'context-after-submit') { h.controller.setVisible(false); h.controller.setVisible(true); }
+    if (kind === 'snapshot-after-submit') h.controller.snapshotIntent('a');
+    if (kind === 'workspace-after-submit') h.controller.beforeWorkspaceAction({ type: 'snapshot-start', projectId: 'a', requestId: 99 });
+    if (kind === 'shutdown-after-submit') h.controller.shutdownIntent();
+    const priorCounts = counts(h); pending.resolve(completed); await flush();
+    assert.equal(h.state.edit.integrityFailed, false); assert.equal(h.state.edit.nativeBlocked, false);
+    assert.equal(h.state.edit.recovery.succeeded, true);
+    assert.equal(h.state.edit.recovery.projectionRevision, completed.statusRevision);
+    assert.deepEqual(h.state.edit.recoveryProjects, ['a'], kind);
+    assert.deepEqual(counts(h), priorCounts);
+    if (kind.startsWith('newer-')) assert.ok(h.state.edit.status.statusRevision > h.state.edit.recovery.projectionRevision);
+    else assert.equal(h.state.edit.status.statusRevision, h.state.edit.recovery.projectionRevision);
+    h.controller.dispose();
+  }
 });

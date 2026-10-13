@@ -1,8 +1,41 @@
 //! Small Darwin ABI boundary, not an operation owner or an execution permit.
 //! The application retains its original slots/tasks and supplies every deadline.
-#![cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#![cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[cfg(all(feature = "installed-observation", not(debug_assertions)))]
 compile_error!("installed observation controls require debug assertions in an explicit instrumented build");
+// Fixed nonshipping removal cut only. This feature has no native image role
+// and must not unify with an observer, helper, producer or E2 image graph.
+#[cfg(all(feature = "installed-removal-abrupt-fixture", any(
+    feature = "installed-observation", feature = "vault-helper",
+    feature = "android-registration-helper", feature = "desktop-image",
+    feature = "resident-image", feature = "e2-native-fixture",
+    feature = "package-producer-signing", mrk_wrapping_keychain_qualification
+)))]
+compile_error!("removal abrupt fixture requires its isolated native graph");
+/// Terminate only the explicit nonshipping removal-cut process with fixed86.
+/// The caller retains all effect/POST admission; this primitive grants none.
+#[cfg(feature = "installed-removal-abrupt-fixture")]
+pub fn removal_fixture_abrupt_exit() -> ! {
+    // SAFETY: no pointers or caller-controlled inputs. Darwin _exit terminates
+    // the process without Rust drops, stdio flushing or atexit handlers.
+    unsafe { nix::libc::_exit(86) }
+}
+
+// Qualification libtest must link without granting a private process role.
+// Only the two fixed example mains can return active roles 1/2. Dependencies
+// of those examples compile without cfg(test), so this definition is absent.
+#[cfg(all(test, feature = "installed-observation", mrk_wrapping_keychain_qualification,
+    mrk_wrapping_keychain_qualification_native, debug_assertions))]
+mod qualification_libtest_role {
+    #[unsafe(no_mangle)]
+    pub extern "C" fn mrk_wrapping_private_process_role() -> u32 { 0 }
+
+    #[test]
+    fn refuses_process_role() {
+        assert_eq!(mrk_wrapping_private_process_role(), 0);
+    }
+}
+
 // The fixture requires its paired native build and one isolated image graph.
 // A Cargo feature or synthetic receipt alone never qualifies fixture identity.
 #[cfg(any(
@@ -29,6 +62,9 @@ pub mod vault_helper_launch;
 pub mod installed_entry;
 pub mod android_lease;
 pub mod android_registration;
+// Shared cutoff DATA is present in helpers; live confirmation/peer APIs remain
+// nonhelper-only inside this fixed module.
+pub mod removal_coordinator;
 pub mod android_maintenance_wire;
 #[cfg(not(any(feature = "android-registration-helper", feature = "vault-helper")))]
 pub mod android_maintenance_client;
@@ -44,10 +80,19 @@ pub mod android_service_resident;
 pub mod android_service_budget;
 #[cfg(not(any(feature = "android-registration-helper", feature = "vault-helper")))]
 pub mod android_service_management;
+#[cfg(not(any(feature = "android-registration-helper", feature = "vault-helper")))]
+pub mod install_producer;
 mod android_service_lease;
 mod android_service_client_data;
 pub const DESKTOP_IMAGE_BUILD: bool = cfg!(feature = "desktop-image");
 pub const RESIDENT_IMAGE_BUILD: bool = cfg!(feature = "resident-image");
+pub const PACKAGE_PRODUCER_SIGNING_BUILD: bool = cfg!(feature = "package-producer-signing");
+#[cfg(all(feature = "package-producer-signing", any(
+    feature = "installed-observation", feature = "vault-helper", feature = "android-registration-helper",
+    feature = "desktop-image", feature = "resident-image", feature = "e2-native-fixture",
+    mrk_wrapping_keychain_qualification
+)))]
+compile_error!("package producer signing requires its isolated nonshipping native graph");
 #[cfg(all(feature = "resident-image", any(not(feature = "android-registration-helper"),
     feature = "desktop-image", feature = "vault-helper", feature = "installed-observation",
     mrk_wrapping_keychain_qualification)))]
@@ -76,6 +121,9 @@ use std::{ffi::{c_char, c_int, c_void, CString}, io, marker::PhantomData,
 
 unsafe extern "C" {
     fn mrk_platform() -> c_int;
+    #[cfg(test)]
+    fn mrk_platform_native_data(sysname: *const c_char, machine: *const c_char, returned: c_int,
+        observed_errno: c_int, length: usize, translated: c_int) -> c_int;
     fn mrk_user(uid: *mut u32) -> c_int;
     fn mrk_reveal_installation() -> c_int;
     fn mrk_acl_empty(fd: c_int, phase: *mut c_int, call_result: *mut c_int, native_errno: *mut c_int,
@@ -84,6 +132,7 @@ unsafe extern "C" {
     fn mrk_entries(fd: c_int, bytes: *mut u8, capacity: usize, used: *mut usize) -> c_int;
     fn mrk_sync(fd: c_int, file: c_int) -> c_int;
     fn mrk_publish(from: c_int, source: *const c_char, to: c_int, destination: *const c_char) -> c_int;
+    fn mrk_swap_installation_state(root: c_int, archived: *const c_char) -> c_int;
     fn mrk_panel_reserve() -> *mut c_void;
     fn mrk_panel_reserve_images() -> *mut c_void;
     fn mrk_panel_start(panel: *mut c_void, kind: c_int) -> c_int;
@@ -182,14 +231,33 @@ pub fn publish_directory(from: BorrowedFd<'_>, source: &str, to: BorrowedFd<'_>,
     // The C call always uses RENAME_EXCL; never an overwrite-capable fallback.
     result(unsafe { mrk_publish(from.as_raw_fd(), source.as_ptr(), to.as_raw_fd(), destination.as_ptr()) })
 }
+fn state_archive_component(value: &str) -> io::Result<CString> {
+    let invocation = value.strip_prefix(".maintenance-").and_then(|s| s.strip_suffix(".state.json"))
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    if invocation.len() != 32 || !invocation.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || !invocation.bytes().any(|b| b != b'0') { return Err(io::ErrorKind::InvalidInput.into()); }
+    CString::new(value).map_err(|_| io::ErrorKind::InvalidInput.into())
+}
+/// One fixed metadata swap, not an overwrite-capable payload publisher. Caller
+/// must hold the original EX gate and BOTH authenticated files, account the
+/// actual return, recheck names/content and persist the original parent. No
+/// absence fallback, path discovery, file deletion or durability claim here.
+pub fn swap_installation_state(root: BorrowedFd<'_>, archived: &str) -> io::Result<()> {
+    let archived = state_archive_component(archived)?;
+    // SAFETY: borrowed directory and a checked fixed-format NUL-terminated leaf.
+    // Native admits two distinct protected metadata files on this filesystem;
+    // the canonical name and RENAME_SWAP flags are fixed in the shim.
+    result(unsafe { mrk_swap_installation_state(root.as_raw_fd(), archived.as_ptr()) })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PanelKind { Project, Quit, File, VersionSource, IosProject, IosWorkspace, MetadataRoot, EvidenceFolder, PublicImages, AndroidJdk, AndroidSdk, AndroidGradle }
+pub enum PanelKind { Project, Quit, File, VersionSource, IosProject, IosWorkspace, MetadataRoot, EvidenceFolder, PublicImages, AndroidJdk, AndroidSdk, AndroidGradle, ArtifactAab, ArtifactIpa, ArtifactArchive, ArtifactDsyms }
 impl PanelKind {
     fn code(self) -> c_int { match self {
         Self::Project => 1, Self::Quit => 2, Self::File => 3, Self::VersionSource => 4,
         Self::IosProject => 5, Self::IosWorkspace => 6, Self::MetadataRoot => 7, Self::EvidenceFolder => 8,
         Self::PublicImages => 9, Self::AndroidJdk => 10, Self::AndroidSdk => 11, Self::AndroidGradle => 12,
+        Self::ArtifactAab=>13,Self::ArtifactIpa=>14,Self::ArtifactArchive=>15,Self::ArtifactDsyms=>16,
     } }
     fn project_field(self) -> bool { matches!(self, Self::VersionSource | Self::IosProject | Self::IosWorkspace | Self::MetadataRoot) }
 }
@@ -2580,6 +2648,7 @@ mod observation {
                     4 => PanelKind::VersionSource, 5 => PanelKind::IosProject, 6 => PanelKind::IosWorkspace, 7 => PanelKind::MetadataRoot,
                     8 => PanelKind::EvidenceFolder, 9 => PanelKind::PublicImages,
                     10 => PanelKind::AndroidJdk, 11 => PanelKind::AndroidSdk, 12 => PanelKind::AndroidGradle,
+                    13=>PanelKind::ArtifactAab,14=>PanelKind::ArtifactIpa,15=>PanelKind::ArtifactArchive,16=>PanelKind::ArtifactDsyms,
                     _ => return Err(io::Error::from(io::ErrorKind::InvalidData)) };
                 let directory_readiness = observation_directory_readiness(kind, flags).ok_or(io::ErrorKind::InvalidData)?;
                 if !observation_name_sample_valid(kind, flags, name_sample) { return Err(io::ErrorKind::InvalidData.into()); }
@@ -2707,6 +2776,48 @@ fn evidence_folder_abi_data_check() -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn compiled_machine_and_translation_data_refuse_foreign_or_unknown_hosts() {
+        use nix::errno::Errno;
+        #[cfg(target_arch = "aarch64")]
+        let (native, opposite) = (c"arm64", c"x86_64");
+        #[cfg(target_arch = "x86_64")]
+        let (native, opposite) = (c"x86_64", c"arm64");
+        let check = |sysname: *const c_char, machine: *const c_char, returned: c_int,
+            observed_errno: c_int, length: usize, translated: c_int| {
+            // SAFETY: only static terminated strings or null; the private C
+            // predicate consumes DATA, with no native queries or acquisitions.
+            unsafe { mrk_platform_native_data(sysname, machine, returned, observed_errno, length, translated) }
+        };
+        let width = std::mem::size_of::<c_int>();
+        let missing = Errno::ENOENT as c_int;
+        let error = Errno::EIO as c_int;
+        let refused = Errno::ENOTSUP as c_int;
+        assert_eq!(check(c"Darwin".as_ptr(), native.as_ptr(), 0, 0, width, 0), 0);
+        assert_eq!(check(c"Darwin".as_ptr(), native.as_ptr(), 0, error, width, 0), 0);
+        // Neither output scalar is a fact after the documented missing key.
+        assert_eq!(check(c"Darwin".as_ptr(), native.as_ptr(), -1, missing, usize::MAX, c_int::MIN), 0);
+        for translated in [-1, 1, 2] {
+            assert_eq!(check(c"Darwin".as_ptr(), native.as_ptr(), 0, missing, width, translated), refused);
+        }
+        for length in [0, width - 1, width + 1, usize::MAX] {
+            assert_eq!(check(c"Darwin".as_ptr(), native.as_ptr(), 0, 0, length, 0), refused);
+        }
+        for (returned, observed_errno) in [(-1, 0), (-1, error), (1, missing), (-2, missing)] {
+            assert_eq!(check(c"Darwin".as_ptr(), native.as_ptr(), returned, observed_errno, width, 0), refused);
+        }
+        // Native/absent-key paths both require the independent compiled-machine
+        // literal and Darwin. Null/empty values cannot authorize either path.
+        for (sysname, machine) in [
+            (c"Linux".as_ptr(), native.as_ptr()), (c"".as_ptr(), native.as_ptr()),
+            (std::ptr::null(), native.as_ptr()), (c"Darwin".as_ptr(), opposite.as_ptr()),
+            (c"Darwin".as_ptr(), c"".as_ptr()), (c"Darwin".as_ptr(), std::ptr::null()),
+        ] {
+            for (returned, observed_errno) in [(0, 0), (-1, missing)] {
+                assert_eq!(check(sysname, machine, returned, observed_errno, width, 0), refused);
+            }
+        }
+    }
+    #[test]
     fn bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches() {
         // Literal public Darwin packed DATA: length, returned attributes,
         // name reference, object type, full64-bit FILEID, name and padding.
@@ -2826,7 +2937,8 @@ mod tests {
         }
         // Android purposes are actual open panels, not unknown-kind sentinels.
         // Use the public purpose mapping while testing the same native classifier.
-        for purpose in [PanelKind::AndroidJdk, PanelKind::AndroidSdk, PanelKind::AndroidGradle] {
+        for purpose in [PanelKind::AndroidJdk, PanelKind::AndroidSdk, PanelKind::AndroidGradle,
+            PanelKind::ArtifactAab,PanelKind::ArtifactIpa,PanelKind::ArtifactArchive,PanelKind::ArtifactDsyms] {
             let kind = purpose.code();
             for (code, expected) in [(1, PanelResponse::Accept), (0, PanelResponse::Decline),
                 (-1000, PanelResponse::Other), (-1001, PanelResponse::Other),
@@ -2838,6 +2950,10 @@ mod tests {
                 let programmatic = unsafe { mrk_panel_response(kind, code, 1) };
                 assert_eq!(panel_response(programmatic).ok(), Some(PanelResponse::Other), "programmatic kind={kind} code={code}");
             }
+        }
+        for (kind,code) in [(PanelKind::ArtifactAab,13),(PanelKind::ArtifactIpa,14),(PanelKind::ArtifactArchive,15),(PanelKind::ArtifactDsyms,16)] {
+            assert_eq!(kind.code(),code);assert!(!kind.project_field());
+            assert!(project_field_initial(kind,Path::new("/inert")).is_err());
         }
         assert!(panel_response(-1).is_err());
         assert!(panel_response(3).is_err());

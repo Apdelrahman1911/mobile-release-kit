@@ -1,4 +1,11 @@
-import { installationError, installationCheckError, parseInstallationReveal, parseInstallationCancel, parseInstallationStatus } from './installation.ts';
+import { ARTIFACT_INSPECTION_EVENT, encodeArtifactInspectionRequest, artifactInspectionError, parseArtifactInspectionStatus } from './artifactInspectionProtocol.ts';
+import type { ArtifactInspectionCommand } from './artifactInspectionProtocol.ts';
+import type { ArtifactInspectionStatus } from './artifactInspectionTypes.ts';
+import { initializationRequestFits, parseProjectInitializationStatus, initializationError } from './projectInitializationProtocol.ts';
+import type { ProjectInitializationCommand } from './projectInitializationProtocol.ts';
+import type { ProjectInitializationStatus } from './projectInitializationTypes.ts';
+import { installationError, installationCheckError, installationPreparationError, parseInstallationReveal, parseInstallationCancel,
+  parseInstallationStatus, parseInstallationPreparationRequest, parseInstallationPreparationStatus } from './installation.ts';
 import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
 import { environmentError, environmentRequestFits, parseEnvironmentResult } from './environment.ts';
 import { parseReleaseVersionObservation, releaseVersionError, releaseVersionRequestFits } from './releaseVersion.ts';
@@ -20,12 +27,18 @@ import type { GitHubWorkflowEditStatus } from './githubWorkflowEditTypes.ts';
 import { GITHUB_CONNECTION_ENTRY_AVAILABLE, GITHUB_CONNECTION_EVENT, githubConnectionError, githubConnectionRequestFits,
   parseGitHubConnectionHelp, parseGitHubConnectionStatus } from './githubConnectionProtocol.ts';
 import type { GitHubConnectionStatus } from './githubConnectionTypes.ts';
+import { GITHUB_REMOTE_SETUP_EVENT, githubRemoteSetupError, githubRemoteSetupRequestFits, parseGitHubRemoteSetupStatus } from './GitHubRemoteSetupProtocol.ts';
+import type { GitHubRemoteSetupCommand } from './GitHubRemoteSetupProtocol.ts';
+import type { GitHubRemoteSetupStatus } from './GitHubRemoteSetupTypes.ts';
 import { GITHUB_PREFLIGHT_EVENT, githubPreflightError, githubPreflightRequestFits, parseGitHubPreflightStatus } from './githubPreflightProtocol.ts';
 import { GITHUB_RELEASE_EVENT, githubReleaseError, githubReleaseRequestFits, parseGitHubReleaseStatus } from './githubReleaseProtocol.ts';
 import type { GitHubPreflightCommand } from './githubPreflightProtocol.ts';
 import type { GitHubReleaseCommand } from './githubReleaseProtocol.ts';
 import type { GitHubPreflightStatus } from './githubPreflightTypes.ts';
 import type { GitHubReleaseStatus } from './githubReleaseTypes.ts';
+import { GITHUB_HISTORY_EVENT, githubHistoryError, githubHistoryRequestFits, parseGitHubHistoryStatus } from './githubHistoryProtocol.ts';
+import type { GitHubHistoryCommand } from './githubHistoryProtocol.ts';
+import type { GitHubHistoryStatus } from './githubHistoryTypes.ts';
 import { metadataTextError, metadataTextRequestFits, parseMetadataTextEditStatus, parseMetadataTextGuide, parseMetadataTextObservation, parseMetadataTextValidation } from './metadataTextProtocol.ts';
 import type { MetadataTextCommand } from './metadataTextProtocol.ts';
 import { VERSION_EDIT_EVENT, parseVersionEditGuide, parseVersionEditStatus, versionEditError, versionEditRequestFits } from './releaseVersionEdit.ts';
@@ -54,7 +67,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -88,6 +101,26 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!status) throw { code: 'project_recovery_protocol' };
       return status;
     } catch (error) { throw projectRecoveryError(error); }
+  };
+  const githubRemoteSetupCall = async (command: GitHubRemoteSetupCommand, value: unknown): Promise<GitHubRemoteSetupStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'github_remote_setup_refused_runtime_unavailable' };
+      if (!githubRemoteSetupRequestFits(command, value)) throw { code: 'github_remote_setup_refused_invalid_input' };
+      const status = parseGitHubRemoteSetupStatus(await invoke<unknown>(command, structuredClone(value)));
+      if (!status) throw { code: 'github_remote_setup_unknown' };
+      return status;
+    } catch (error) { throw githubRemoteSetupError(error); }
+  };
+  const githubHistoryCall = async (command: GitHubHistoryCommand, value: unknown): Promise<GitHubHistoryStatus> => {
+    try {
+      if (mode !== 'native' || (command === 'github_history_start' && !listen)) throw { code: 'github_history_refused_runtime_unavailable' };
+      if (!githubHistoryRequestFits(command, value)) throw { code: 'github_history_refused_invalid_input' };
+      // The closed request carries correlation DATA only, not a root, hash,
+      // token or provider choice. Native independently admits the saved original.
+      const status = parseGitHubHistoryStatus(await invoke<unknown>(command, structuredClone(value)));
+      if (!status) throw { code: 'github_history_unknown' };
+      return status;
+    } catch (error) { throw githubHistoryError(error); }
   };
   const githubPreflightCall = async (command: GitHubPreflightCommand, value: unknown): Promise<GitHubPreflightStatus> => {
     try {
@@ -182,6 +215,17 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       return status;
     } catch (error) { throw offlinePreflightError(error); }
   };
+  const artifactCall = async (command: ArtifactInspectionCommand, value: unknown): Promise<ArtifactInspectionStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'artifact_inspection_unavailable' };
+      const body = encodeArtifactInspectionRequest(command, value);
+      if (!body) throw { code: 'artifact_inspection_invalid' };
+      // Uint8Array is Tauri Raw IPC. Never wrap JSON text in an object/string.
+      const status = parseArtifactInspectionStatus(await invoke<unknown>(command, body));
+      if (!status) throw { code: 'artifact_inspection_protocol' };
+      return status;
+    } catch (error) { throw artifactInspectionError(error); }
+  };
   const evidenceCall = async (command: EvidenceCommand, args: Record<string, unknown>): Promise<EvidenceStatus> => {
     try {
       if (mode !== 'native') throw { code: 'artifact_evidence_unavailable' };
@@ -227,6 +271,14 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!result) throw { code: 'AssetStatusInvalid' };
       return result;
     } catch (error) { throw assetError(error); }
+  };
+  const initializationCall = async (command: ProjectInitializationCommand, args: unknown): Promise<ProjectInitializationStatus> => {
+    try {
+      if (!initializationRequestFits(command,args)) throw {code:'ProjectInitializationRequestInvalid'};
+      const status=parseProjectInitializationStatus(await call<unknown>(command,structuredClone(args) as Record<string,unknown>));
+      if(!status)throw {code:'ProjectInitializationStatusInvalid'};
+      return structuredClone(status);
+    }catch(error){throw initializationError(error);}
   };
   const workflowCall = async (command: GitHubWorkflowEditCommand, args: unknown): Promise<GitHubWorkflowEditStatus> => {
     try {
@@ -308,6 +360,24 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (!result) throw { code: 'installation_check_unconfirmed' };
         return result;
       } catch (error) { throw installationCheckError(error); }
+    },
+    installationPreparationStatus: async () => {
+      try {
+        if (mode !== 'native') throw { code: 'macos_maintenance_unavailable' };
+        const result = parseInstallationPreparationStatus(await invoke<unknown>('installation_preparation_status', {}));
+        if (!result) throw { code: 'installation_preparation_unconfirmed' };
+        return result;
+      } catch (error) { throw installationPreparationError(error); }
+    },
+    prepareInstallationQuit: async (input) => {
+      try {
+        if (mode !== 'native') throw { code: 'macos_maintenance_unavailable' };
+        const request = parseInstallationPreparationRequest(input);
+        if (!request) throw { code: 'invalid_request' };
+        const result = parseInstallationPreparationStatus(await invoke<unknown>('prepare_installation_quit', request));
+        if (!result) throw { code: 'installation_preparation_unconfirmed' };
+        return result;
+      } catch (error) { throw installationPreparationError(error); }
     },
     chooseProject: () => call<ProjectReference | null>('choose_project'),
     chooseProjectPath: async (input) => {
@@ -445,6 +515,18 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         return await listen(OFFLINE_PREFLIGHT_EVENT, (value) => onStatus(parseOfflinePreflightStatus(value)));
       } catch (error) { throw offlinePreflightError(error); }
     },
+    pickArtifactInspection: (request) => artifactCall('artifact_inspection_pick', request),
+    discardArtifactInspection: (request) => artifactCall('artifact_inspection_discard', request),
+    prepareArtifactInspection: (request) => artifactCall('artifact_inspection_prepare', request),
+    startArtifactInspection: (request) => artifactCall('artifact_inspection_start', request),
+    artifactInspectionStatus: () => artifactCall('artifact_inspection_status', {}),
+    cancelArtifactInspection: (operationId, ownerGeneration) => artifactCall('artifact_inspection_cancel', { operationId, ownerGeneration }),
+    subscribeArtifactInspection: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'artifact_inspection_unavailable' };
+        return await listen(ARTIFACT_INSPECTION_EVENT, (value) => onStatus(parseArtifactInspectionStatus(value)));
+      } catch (error) { throw artifactInspectionError(error); }
+    },
     startEnvironmentDiagnostics: (request) => diagnosticsCall('start_environment_diagnostics', request),
     cancelEnvironmentDiagnostics: (runId, ownerGeneration) => diagnosticsCall('cancel_environment_diagnostics', { runId, ownerGeneration }),
     environmentDiagnosticsStatus: () => diagnosticsCall('environment_diagnostics_status', {}),
@@ -470,6 +552,9 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       } catch (error) { throw githubSetupError(error); }
     },
     openConfigEdit: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId }),
+    openConfigRecovery: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId, intent: 'recover' }),
+    prepareConfigRecovery: (sessionId, revision) => call<ConfigEditStatus>('prepare_config_edit', { sessionId, revision, intent: 'recover' }),
+    applyConfigRecovery: (sessionId, planToken) => call<ConfigEditStatus>('apply_config_edit', { sessionId, planToken, intent: 'recover' }),
     prepareConfigEdit: ({ sessionId, revision, expectedBase, draft, draftRevision, baselineGeneration }) =>
       call<ConfigEditStatus>('prepare_config_edit', { sessionId, revision, expectedBase, draft, draftRevision, baselineGeneration }),
     applyConfigEdit: (sessionId, planToken) => call<ConfigEditStatus>('apply_config_edit', { sessionId, planToken }),
@@ -479,6 +564,15 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (mode !== 'native' || !listen) throw { code: 'NativeBridgeRequired', message: 'Native edit status events are unavailable. Saving is disabled.', retryable: false } satisfies ApiError;
       try { return await listen('config-edit-state', onStatus); }
       catch (error) { throw apiError(error); }
+    },
+    openProjectInitialization: (request) => initializationCall('project_initialization_open',request),
+    prepareProjectInitialization: (sessionId,revision,intent) => initializationCall('project_initialization_prepare',{sessionId,revision,intent}),
+    applyProjectInitialization: (sessionId,planToken,intent) => initializationCall('project_initialization_apply',{sessionId,planToken,intent}),
+    discardProjectInitialization: (sessionId) => initializationCall('project_initialization_discard',{sessionId}),
+    projectInitializationStatus: () => initializationCall('project_initialization_status',{}),
+    subscribeProjectInitialization: async (onStatus) => {
+      if(mode!=='native'||!listen)throw initializationError({code:'NativeBridgeRequired'});
+      try{return await listen('project-initialization-state-changed',onStatus);}catch(error){throw initializationError(error);}
     },
     openGitHubWorkflowRecovery: (projectId) => workflowCall('github_workflow_edit_open', { projectId, intent: 'recover' }),
     prepareGitHubWorkflowRecovery: (sessionId, revision) => workflowCall('github_workflow_edit_prepare', { sessionId, revision, intent: 'recover' }),
@@ -496,7 +590,8 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     },
     openReleaseVersionEdit: (request) => versionCall('release_version_edit_open', request),
     prepareReleaseVersionEdit: (request) => versionCall('release_version_edit_prepare', request),
-    applyReleaseVersionEdit: (sessionId, planToken) => versionCall('release_version_edit_apply', { sessionId, planToken }),
+    applyReleaseVersionEdit: (sessionId, planToken, intent) => versionCall('release_version_edit_apply',
+      intent === undefined ? { sessionId, planToken } : { sessionId, planToken, intent }),
     closeReleaseVersionEdit: (sessionId) => versionCall('release_version_edit_close', { sessionId }),
     releaseVersionEditStatus: () => versionCall('release_version_edit_status', {}),
     subscribeReleaseVersionEdit: async (onStatus) => {
@@ -509,7 +604,8 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     validateMetadataText: (request) => metadataCall('metadata_text_validate', request, parseMetadataTextValidation),
     openMetadataTextEdit: (request) => metadataCall('metadata_text_edit_open', request, parseMetadataTextEditStatus),
     prepareMetadataTextEdit: (request) => metadataCall('metadata_text_edit_prepare', request, parseMetadataTextEditStatus),
-    applyMetadataTextEdit: (sessionId, planToken) => metadataCall('metadata_text_edit_apply', { sessionId, planToken }, parseMetadataTextEditStatus),
+    applyMetadataTextEdit: (sessionId, planToken, intent) => metadataCall('metadata_text_edit_apply',
+      intent === undefined ? { sessionId, planToken } : { sessionId, planToken, intent }, parseMetadataTextEditStatus),
     closeMetadataTextEdit: (sessionId) => metadataCall('metadata_text_edit_close', { sessionId }, parseMetadataTextEditStatus),
     metadataTextEditStatus: () => metadataCall('metadata_text_edit_status', {}, parseMetadataTextEditStatus),
     subscribeMetadataTextEdit: async (onStatus) => {
@@ -526,6 +622,26 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (mode !== 'native' || !listen) return Promise.reject(githubConnectionError({ code: 'github_connection_refused_runtime_unavailable' }));
       try { return listen(GITHUB_CONNECTION_EVENT, (value) => onStatus(parseGitHubConnectionStatus(value))).catch(connectionRejection); }
       catch (error) { return Promise.reject(githubConnectionError(error)); }
+    },
+    githubRemoteSetupStatus: () => githubRemoteSetupCall('github_remote_setup_status', {}),
+    githubRemoteSetupPrepare: (args) => githubRemoteSetupCall('github_remote_setup_prepare', args),
+    githubRemoteSetupApply: (args) => githubRemoteSetupCall('github_remote_setup_apply', args),
+    githubRemoteSetupDiscard: (args) => githubRemoteSetupCall('github_remote_setup_discard', args),
+    githubRemoteSetupCancel: (operationId) => githubRemoteSetupCall('github_remote_setup_cancel', { operationId }),
+    subscribeGitHubRemoteSetup: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'github_remote_setup_refused_runtime_unavailable' };
+        return await listen(GITHUB_REMOTE_SETUP_EVENT, (value) => onStatus(parseGitHubRemoteSetupStatus(value)));
+      } catch (error) { throw githubRemoteSetupError(error); }
+    },
+    githubHistoryStatus: () => githubHistoryCall('github_history_status', {}),
+    startGitHubHistory: (args) => githubHistoryCall('github_history_start', args),
+    cancelGitHubHistory: (args) => githubHistoryCall('github_history_cancel', args),
+    subscribeGitHubHistory: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'github_history_refused_runtime_unavailable' };
+        return await listen(GITHUB_HISTORY_EVENT, (value) => onStatus(parseGitHubHistoryStatus(value)));
+      } catch (error) { throw githubHistoryError(error); }
     },
     githubPreflightStatus: () => githubPreflightCall('github_preflight_status', {}),
     prepareGitHubPreflight: (args) => githubPreflightCall('github_preflight_prepare', args),

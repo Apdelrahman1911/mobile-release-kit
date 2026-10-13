@@ -397,6 +397,69 @@ test('original failure, unknown or lost Start acknowledgement cannot become impl
   h.controller.beginConnection(); await h.controller.connect({ ...h.api }); assert.equal(h.subscriptions.length, 1);
   h.emit(status(3, completed(op))); assert.ok(h.state.integrityFailed); assert.equal(h.state.status.operation.outcome, 'unknown');
   assert.ok(!JSON.stringify(h.state).includes('PRIVATE'));
+
+  // Native terminal A does not let its delayed Cancel reply act on new B.
+  for (const late of ['reject', 'malformed']) {
+    const h = harness(t), first = await reviewed(h), initial = start(h, first);
+    h.reply(initial.call, status(2, running(first))); await initial.done;
+    assert.equal(h.controller.cancel(), true);
+    const cancel = h.calls.at(-1);
+    assert.equal(cancel.kind, 'cancel');
+    assert.deepEqual(cancel.input, { operationId: first.operationId, ownerGeneration: first.ownerGeneration });
+    // Terminal must preserve the last observed running stage, not regress to consent's null stage.
+    const settled = terminal(running(first));
+    h.emit(status(3, settled)); await flush();
+    assert.deepEqual(clone(h.state.status.operation), settled);
+    assert.equal(h.state.integrityFailed, false);
+    assert.equal(h.state.nativeBlocked, false);
+    assert.equal(h.controller.prepareReason(), null);
+    const next = await reviewed(h, { operationId: OTHER, ownerGeneration: '1'.repeat(32) });
+    const sent = start(h, next);
+    h.reply(sent.call, status(5, running(next))); await sent.done;
+    assert.equal(h.state.historical, false);
+    assert.equal(h.state.error, null);
+    const current = clone(h.state);
+    if (late === 'reject') cancel.reject({ code: 'bridge-reply-lost', message: 'PRIVATE OLD CANCEL' });
+    else cancel.resolve({ schemaVersion: 999 });
+    await flush();
+    assert.equal(h.calls.filter((call) => call.kind === 'cancel').length, 1,
+      'A stale Cancel completion must not dispatch Cancel for B');
+    assert.deepEqual(clone(h.state), current);
+    assert.deepEqual(h.calls.filter((call) => call.kind === 'cancel').map((call) => call.input),
+      [{ operationId: first.operationId, ownerGeneration: first.ownerGeneration }]);
+    assert.equal(h.state.status.operation.operationId, next.operationId);
+    assert.equal(h.state.status.operation.ownerGeneration, next.ownerGeneration);
+    assert.equal(h.state.status.operation.phase, 'running');
+    assert.equal(h.state.integrityFailed, false);
+    assert.equal(h.state.nativeBlocked, false);
+    h.emit(status(6, completed(next))); await flush();
+    assert.equal(h.state.status.operation.phase, 'terminal');
+  }
+
+  // The still-current claim keeps its ordinary settlement/refusal behavior.
+  for (const completion of ['valid', 'reject', 'malformed']) {
+    const h = harness(t), original = await reviewed(h);
+    assert.equal(h.controller.cancel(), true);
+    const cancel = h.calls.at(-1);
+    assert.equal(cancel.kind, 'cancel');
+    if (completion === 'valid') h.reply(cancel, status(2, terminal(original)));
+    else if (completion === 'reject') cancel.reject({ code: 'bridge-reply-lost', message: 'PRIVATE CURRENT CANCEL' });
+    else cancel.resolve({ schemaVersion: 999 });
+    await flush();
+    assert.equal(h.state.consent, null);
+    assert.equal(h.calls.filter((call) => call.kind === 'cancel').length, 1);
+    if (completion === 'valid') {
+      assert.equal(h.state.status.operation.phase, 'terminal');
+      assert.equal(h.state.error, null);
+      assert.equal(h.state.integrityFailed, false);
+    } else {
+      assert.equal(h.state.observationIssue, completion === 'reject' ? 'bridge' : 'protocol');
+      assert.equal(h.state.integrityFailed, completion === 'malformed');
+      assert.equal(h.state.nativeBlocked, completion === 'malformed');
+      assert.ok(!JSON.stringify(h.state).includes('PRIVATE'));
+      h.emit(status(2, terminal(original))); await flush();
+    }
+  }
 });
 
 test('a lost Prepare reply can settle only its observed original terminal, never acquire consent', async (t) => {
@@ -719,6 +782,69 @@ test('recovery lost Start and Unknown keep original ownership while hidden or ex
   }
 });
 
+
+test('current recovery details bind the original native pair without saved inputs or automatic consent', async (t) => {
+  // SOURCE projection joins plus real controller transitions, not JSX rendering,
+  // native accessibility, account recovery or worker-finality evidence.
+  const component = readFileSync(new URL('../src/components/IOSArchive.tsx', import.meta.url), 'utf8');
+  const details = component.slice(component.indexOf('function RecoveryDetails('), component.indexOf('export function IOSRecovery('));
+  assert.ok(details.startsWith('function RecoveryDetails('));
+  for (const guard of ["state.mode !== 'native'", '!isIOSRecoveryOperation(op)', 'state.historical',
+    'state.integrityFailed', 'state.nativeBlocked', 'state.originalUnconfirmed', 'state.generationLost',
+    'state.selectionPending', 'state.observationIssue !== null', '!project', 'op.context.projectId !== project.projectId',
+    "op.phase !== 'awaiting-consent'", '!op.intentUsable', 'sameIOSArchiveIdentity(op, consent)',
+    'sameIOSArchiveData(op.context, consent.binding.context)',
+    ...['connectionGeneration', 'selectionGeneration', 'contextGeneration', 'requestGeneration']
+      .map((key) => `consent.binding.${key} !== state.${key}`)]) assert.ok(details.includes(guard), guard);
+  assert.doesNotMatch(details, /savedConfig|savedVersion|sameIOSArchiveSavedPair|project\.inputIssue/);
+  for (const literal of ['role="group" aria-label="Recovery details"', 'Recovery operation ID: {op.operationId}',
+    'Recovery owner generation: {op.ownerGeneration}', 'Recovery phase: {op.phase}',
+    "Recovery outcome: {op.outcome ?? 'not-observed'}", 'Recovery reason: {op.reason}']) assert.ok(details.includes(literal), literal);
+  assert.equal((component.match(/<RecoveryDetails state=\{state\} \/>/g) ?? []).length, 1);
+  assert.ok(component.includes("role=\"group\" aria-label={domain === 'account' ? 'Account signing recovery state' : 'Project build-input recovery state'}"));
+
+  const h = harness(t, { savedSnapshot: null, completeVersion: false }), inspect = await reviewedRecovery(h);
+  assert.equal(h.state.project.savedConfig, null); assert.equal(h.state.project.savedVersion, null);
+  assert.equal(h.versionCalls.length, 0); assert.equal(h.state.consent.acknowledged, false);
+  assert.deepEqual(clone(h.state.consent.binding.context), inspect.context);
+  assert.deepEqual([h.state.consent.operationId, h.state.consent.ownerGeneration], [inspect.operationId, inspect.ownerGeneration]);
+  for (const key of ['connectionGeneration', 'selectionGeneration', 'contextGeneration', 'requestGeneration'])
+    assert.equal(h.state.consent.binding[key], h.state[key], key);
+  for (const key of ['historical', 'integrityFailed', 'nativeBlocked', 'originalUnconfirmed', 'generationLost', 'selectionPending'])
+    assert.equal(h.state[key], false, key);
+  assert.equal(h.state.observationIssue, null);
+  await h.controller.start(inspect.operationId, inspect.ownerGeneration); assert.equal(h.calls.length, 1);
+  const first = start(h, inspect);
+  assert.equal(h.state.originalUnconfirmed, true); // Pending reply cannot supply displayed current native details.
+  const pending = recoveryCompleted(inspect);
+  h.reply(first.call, status(2, pending)); await first.done;
+  assert.equal(h.state.originalUnconfirmed, false); assert.equal(h.state.historical, false);
+  assert.deepEqual(clone(h.state.status.operation.report.account), { status: 'pending', session: ACCOUNT_SESSION, next: 'ordinary' });
+  assert.equal(h.state.status.operation.phase, 'terminal'); assert.equal(h.state.status.operation.outcome, 'complete');
+  assert.equal(h.state.status.operation.reason, 'none');
+  const recover = await reviewedRecovery(h, 'account', pending, { operationId: OTHER, ownerGeneration: '7'.repeat(32) });
+  assert.notEqual(recover.operationId, inspect.operationId); assert.notEqual(recover.ownerGeneration, inspect.ownerGeneration);
+  assert.equal(h.state.consent.acknowledged, false); assert.equal(recover.context.recovery.session, ACCOUNT_SESSION);
+  await h.controller.start(recover.operationId, recover.ownerGeneration);
+  assert.equal(h.calls.filter((call) => call.kind === 'start').length, 1);
+  const second = start(h, recover);
+  assert.equal(h.state.originalUnconfirmed, true);
+  h.reply(second.call, status(4, recoveryCompleted(recover))); await second.done;
+  assert.equal(h.state.originalUnconfirmed, false); assert.equal(h.state.historical, false);
+  assert.equal(h.state.consent, null);
+  assert.deepEqual(clone(h.state.status.operation.report.account), { status: 'recovered', session: ACCOUNT_SESSION, next: 'none' });
+  assert.equal(h.calls.filter((call) => call.kind === 'start').length, 2);
+
+  const old = harness(t, { initial: status(4, recoveryCompleted(recover)), savedSnapshot: null, completeVersion: false });
+  await old.ready; assert.equal(old.state.historical, true); assert.equal(old.state.consent, null); assert.equal(old.calls.length, 0);
+  for (const field of ['operationId', 'ownerGeneration']) {
+    const foreign = harness(t, { savedSnapshot: null, completeVersion: false }), original = await reviewedRecovery(foreign);
+    foreign.emit(status(2, { ...clone(original), [field]: OTHER }));
+    assert.equal(foreign.state.integrityFailed, true, field); assert.equal(foreign.state.consent, null, field);
+    assert.equal(foreign.calls.filter((call) => call.kind === 'start').length, 0);
+  }
+});
+
 test('native bridge sends only Raw requests; preview never provides fabricated execution', async () => {
   const calls = [], listeners = [];
   const api = createNativeApi('native', async (command, body) => { calls.push({ command, body }); return status(); },
@@ -733,7 +859,7 @@ test('native bridge sends only Raw requests; preview never provides fabricated e
     await assert.rejects(previewApi[name](), (error) => error.code === 'ios_archive_unavailable');
 });
 
-test('actual app shares status/cancel and retirement; each important archive choice has practical guidance', () => {
+test('actual app shares status/cancel and retirement; each important archive choice has practical guidance', async (t) => {
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   for (const literal of ['iosArchiveControllerRef.current?.beforeWorkspaceAction(action)', 'iosArchiveControllerRef.current?.syncProject()',
     'iosArchive.beginConnection()', 'iosArchive.connect(connection)', 'iosArchive.syncReleaseVersion()', 'iosArchive.selectionIntent()',
@@ -751,4 +877,74 @@ test('actual app shares status/cancel and retirement; each important archive cho
   assert.ok(component.includes("iosArchiveModeAvailability(state.status, 'ios-local-recovery')"));
   assert.match(iosSigningHelp.format, /ios.teamId.*ios.distributionCertificateSha256.*password write-only/);
   assert.match(iosRecoveryHelp.failure, /live Unknown stays owned.*manual recheck is not supported/);
+  // SOURCE joins protect the visible projection; the actual controller below
+  // supplies parsed current/inert states. This is not a JSX or native AX test.
+  const details = component.slice(component.indexOf('function UnsignedArchiveDetails('), component.indexOf('// Only the original native completed status'));
+  assert.ok(details.startsWith('function UnsignedArchiveDetails('));
+  for (const guard of ["state.mode !== 'native'", "state.archiveMode !== 'unsigned'", 'isIOSRecoveryOperation(op)',
+    "op.context.operation !== 'ios-unsigned-archive'", 'state.historical', 'state.integrityFailed', 'state.nativeBlocked',
+    'state.originalUnconfirmed', 'state.generationLost', 'state.selectionPending', 'project?.savedConfig', 'project.savedVersion',
+    'project.inputIssue !== null', 'op.context.projectId !== project.projectId', 'op.context.draftRevision !== project.draftRevision',
+    'op.context.baselineGeneration !== project.baselineGeneration',
+    'sameIOSArchiveSavedPair(op.context, { savedConfig: project.savedConfig, savedVersion: project.savedVersion })',
+    "op.phase !== 'awaiting-consent'", '!op.intentUsable', 'sameIOSArchiveIdentity(op, consent)',
+    'sameIOSArchiveData(op.context, consent.binding.context)', 'sameIOSArchiveData(project.selection, consent.binding.selection)',
+    'consent.binding.connectionGeneration !== state.connectionGeneration', 'consent.binding.selectionGeneration !== state.selectionGeneration',
+    'consent.binding.contextGeneration !== state.contextGeneration', 'consent.binding.requestGeneration !== state.requestGeneration',
+    'consent.binding.observationGeneration !== project.observationGeneration',
+    'sameIOSArchiveData(consent.binding.versionObservation, project.versionObservation)']) assert.ok(details.includes(guard), guard);
+  assert.ok(details.includes('if (review) {'));
+  for (const text of ['role="group" aria-label="Archive details"', '<p>Archive operation ID: {op.operationId}</p>',
+    '<p>Archive owner generation: {op.ownerGeneration}</p>']) assert.ok(details.includes(text), text);
+  assert.equal((component.match(/<UnsignedArchiveDetails state=\{state\} \/>/g) ?? []).length, 2);
+  assert.equal((component.match(/<UnsignedArchiveDetails state=\{state\} review \/>/g) ?? []).length, 1);
+  assert.ok(component.includes('role="status" aria-live="polite" aria-label="Original iOS archive status"'));
+  assert.ok(component.includes("'Confirm this saved unsigned iOS archive intent'"));
+  assert.ok(component.includes("'Completed local unsigned iOS archive observation'"));
+  assert.ok(component.includes('This location is a historical observation, not a file opener, current-file authority or permission to publish or delete.'));
+
+  const h = harness(t), op = await reviewed(h);
+  assert.equal(op.context.operation, 'ios-unsigned-archive');
+  assert.deepEqual(clone(h.state.status.operation), op);
+  assert.deepEqual([h.state.consent.operationId, h.state.consent.ownerGeneration], [op.operationId, op.ownerGeneration]);
+  assert.deepEqual(clone(h.state.consent.binding.context), op.context);
+  for (const key of ['historical', 'integrityFailed', 'nativeBlocked', 'originalUnconfirmed', 'generationLost', 'selectionPending'])
+    assert.equal(h.state[key], false, key);
+  for (const key of ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion'])
+    assert.deepEqual(clone(h.state.project[key]), op.context[key], key);
+  for (const key of ['connectionGeneration', 'selectionGeneration', 'contextGeneration', 'requestGeneration'])
+    assert.equal(h.state.consent.binding[key], h.state[key], key);
+  const sent = start(h, op);
+  assert.equal(h.state.originalUnconfirmed, true); // Never display the pending reply as a current original.
+  h.reply(sent.call, status(2, running(op), 'busy')); await sent.done;
+  assert.equal(h.state.originalUnconfirmed, false); assert.equal(h.state.historical, false); assert.equal(h.state.consent, null);
+  assert.deepEqual([h.state.status.operation.operationId, h.state.status.operation.ownerGeneration], [op.operationId, op.ownerGeneration]);
+  h.emit(status(3, completed(op)));
+  assert.equal(h.state.status.operation.result.scope, IOS_ARCHIVE_SCOPE);
+  assert.equal(h.state.status.operation.phase, 'terminal'); assert.equal(h.state.historical, false);
+  assert.equal(h.state.originalUnconfirmed, false);
+  assert.equal(h.calls.filter((call) => call.kind === 'start').length, 1);
+
+  const historical = harness(t, { initial: status(3, completed(operation())) }); await historical.ready;
+  assert.equal(historical.state.historical, true); assert.equal(historical.state.consent, null);
+  assert.equal(historical.calls.length, 0);
+  for (const field of ['operationId', 'ownerGeneration']) {
+    const foreign = harness(t), original = await reviewed(foreign);
+    foreign.emit(status(2, { ...clone(original), [field]: OTHER }));
+    assert.equal(foreign.state.integrityFailed, true, field); assert.equal(foreign.state.consent, null, field);
+    assert.equal(foreign.calls.filter((call) => call.kind === 'start').length, 0);
+  }
+  const retired = harness(t), prior = await reviewed(retired);
+  retired.controller.versionIntent();
+  assert.equal(retired.state.historical, true); assert.equal(retired.state.consent, null);
+  assert.equal(retired.calls.at(-1).kind, 'cancel');
+  retired.reply(retired.calls.at(-1), status(2, terminal(prior, 'cancelled', 'context-changed'))); await flush();
+  assert.equal(retired.state.historical, true);
+  const signed = harness(t, { savedSnapshot: signedSnapshot(), assets: assetState() }); await signed.ready;
+  assert.equal(signed.controller.setArchiveMode('signed'), true);
+  const signedOp = await reviewed(signed);
+  assert.equal(signedOp.context.operation, 'ios-signed-export'); // Selected labels cannot turn this into an unsigned original.
+  const signedStart = start(signed, signedOp);
+  signed.reply(signedStart.call, status(2, signedCompleted(signedOp))); await signedStart.done;
+  assert.equal(signed.state.status.operation.result.scope, IOS_SIGNED_ARCHIVE_SCOPE);
 });

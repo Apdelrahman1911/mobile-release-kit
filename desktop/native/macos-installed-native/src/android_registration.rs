@@ -47,13 +47,121 @@ impl Bounds {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrozenFailure { pub first: Option<u64>, pub cleanup: Option<u64>, pub unknown: bool }
 
+// Parent CLOCK_MONOTONIC and service CLOCK_UPTIME_RAW are DISTINCT domains.
+// Frozen projected endpoints only contract this operation's existing waits.
+// Relative rate/offset is NOT an invariant between these clocks. Every positive
+// cut samples BOTH original domains; Parent first-F is NEVER translated.
+struct RemovalClockData {
+    start:u64,work:u64,hard:u64,uptime_work:u64,uptime_hard:u64,
+    last_parent:AtomicU64,last_uptime:AtomicU64,
+    parent_first:AtomicU64,work_stopped:AtomicBool,invalid:AtomicBool,
+}
+impl RemovalClockData {
+    fn from_samples(start:u64,work:u64,hard:u64,u0:u64,p0:u64,p1:u64,u1:u64)->Option<Self>{
+        if start==0 || work.checked_sub(start)!=Some(110_000_000_000)
+            || hard.checked_sub(start)!=Some(120_000_000_000) || hard>FIRST_MASK
+            || u0==0 || u0>u1 || u1>FIRST_MASK || p0<start || p0>p1 || p1>=work {return None;}
+        let uptime_work=u0.checked_add(work.checked_sub(p1)?)?;
+        let uptime_hard=u0.checked_add(hard.checked_sub(p1)?)?;
+        if uptime_work<=u1 || uptime_work>=uptime_hard || uptime_hard>FIRST_MASK{return None;}
+        Some(Self{start,work,hard,uptime_work,uptime_hard,
+            last_parent:AtomicU64::new(p1),last_uptime:AtomicU64::new(u1),
+            parent_first:AtomicU64::new(0),work_stopped:AtomicBool::new(false),invalid:AtomicBool::new(false)})
+    }
+    fn observe_samples(&self,previous_p:u64,previous_u:u64,u0:u64,p:u64,u1:u64)->bool{
+        // Raw first-F remains MONOTONIC, even when a later consistency check
+        // refuses. It is NOT written into Signal/Control's own failure clocks.
+        if p>=self.work && p<=FIRST_MASK{let _=self.parent_first.compare_exchange(0,self.work,Ordering::SeqCst,Ordering::SeqCst);}
+        let valid=u0!=0 && u0>=previous_u && u0<=u1 && u1<=FIRST_MASK
+            && p>=previous_p && p>=self.start && p<FIRST_MASK;
+        if valid{self.last_parent.fetch_max(p,Ordering::SeqCst);self.last_uptime.fetch_max(u1,Ordering::SeqCst);}
+        if p>=self.work || u1>=self.uptime_work{self.work_stopped.store(true,Ordering::SeqCst);}
+        if !valid || p>=self.hard || u1>=self.uptime_hard{self.invalid.store(true,Ordering::SeqCst);}
+        // Known work-stop forbids work/final success, not still-known consuming
+        // cleanup. Regression, missing samples and either hard bound never heal.
+        valid && self.cleanup_allowed()
+    }
+    fn work_allowed(&self)->bool{!self.work_stopped.load(Ordering::SeqCst) && self.cleanup_allowed()}
+    fn cleanup_allowed(&self)->bool{!self.invalid.load(Ordering::SeqCst)}
+}
+/// Fixed-purpose finite admission clock, NOT source/peer/consent authority.
+/// Before native authentication its raw DATA only contracts source work. The
+/// SAME object receives a genuine cutoff once, with no new clock bracket.
+pub struct RemovalClock {
+    data:RemovalClockData,bridge:ClockBridge,
+    cutoff:OnceLock<crate::removal_coordinator::ParentCutoff>,
+}
+struct RemovalClockPoint { parent:u64,uptime:u64,valid:bool }
+impl RemovalClock {
+    pub fn capture_removal_data(start:u64,work:u64,hard:u64)->Option<Arc<Self>>{
+        let u0=uptime()?;let p0=removal_parent_sample()?;let bridge=ClockBridge::capture()?;
+        let p1=removal_parent_sample()?;let u1=uptime()?;
+        Some(Arc::new(Self{data:RemovalClockData::from_samples(start,work,hard,u0,p0,p1,u1)?,
+            bridge,cutoff:OnceLock::new()}))
+    }
+    pub fn authenticate_once(&self,cutoff:&crate::removal_coordinator::ParentCutoff)->bool{
+        if self.data.start!=cutoff.start_ns() || self.data.work!=cutoff.work_ns() || self.data.hard!=cutoff.hard_ns()
+            || self.work_sample().is_none() || self.cutoff.set(cutoff.clone()).is_err(){self.mark_unknown();return false;}
+        self.work_sample().is_some()
+    }
+    fn observe(&self)->Option<RemovalClockPoint>{
+        // Read both previous values BEFORE sampling; a concurrent later publish
+        // must not turn an already sampled earlier observation into regression.
+        let previous_p=self.data.last_parent.load(Ordering::SeqCst);
+        let previous_u=self.data.last_uptime.load(Ordering::SeqCst);
+        let sampled=(||Some((uptime()?,removal_parent_sample()?,uptime()?)))();
+        let Some((u0,p,u1))=sampled else{self.mark_unknown();return None;};
+        let valid=self.data.observe_samples(previous_p,previous_u,u0,p,u1);
+        Some(RemovalClockPoint{parent:p,uptime:u1,valid})
+    }
+    pub fn work_sample(&self)->Option<u64>{
+        self.observe().filter(|point|point.valid && self.data.work_allowed()
+            && point.parent<self.data.work && point.uptime<self.data.uptime_work).map(|point|point.parent)
+    }
+    pub fn cleanup_sample(&self)->Option<u64>{
+        self.observe().filter(|point|point.valid && point.parent<self.data.hard && point.uptime<self.data.uptime_hard).map(|point|point.parent)
+    }
+    pub fn cutoff(&self)->Option<&crate::removal_coordinator::ParentCutoff>{self.cutoff.get()}
+    pub fn bridge(&self)->&ClockBridge{&self.bridge}
+    pub fn uptime_work(&self)->u64{self.data.uptime_work}
+    pub fn uptime_hard(&self)->u64{self.data.uptime_hard}
+    pub fn parent_first(&self)->Option<u64>{let first=self.data.parent_first.load(Ordering::SeqCst);(first!=0).then_some(first)}
+    pub fn work_stopped(&self)->bool{self.data.work_stopped.load(Ordering::SeqCst)}
+    pub fn invalid(&self)->bool{self.data.invalid.load(Ordering::SeqCst)}
+    pub fn unknown(&self)->bool{self.work_stopped() || self.invalid()}
+    /// The same frozen own-domain work projection may only restrict work.
+    /// This is STOP, not an invented Parent/UPTIME failure or lost native custody.
+    pub fn mark_work_stopped(&self){self.data.work_stopped.store(true,Ordering::SeqCst);}
+    pub fn mark_unknown(&self){self.data.invalid.store(true,Ordering::SeqCst);}
+    pub fn project_owned_upper_bound()->Option<usize>{
+        std::mem::size_of::<Self>().checked_add(2*std::mem::size_of::<usize>())?
+            .checked_add(crate::removal_coordinator::ParentCutoff::project_owned_upper_bound()?)
+    }
+}
+/// Actual Parent-domain sample. Also available in the helper build without
+/// importing the AppKit confirmation adapter or changing helper wire Bounds.
+fn removal_parent_sample()->Option<u64>{
+    let mut value=nix::libc::timespec{tv_sec:0,tv_nsec:0};
+    // SAFETY: the fixed syscall writes only this owned timespec; no pointer is retained.
+    if unsafe{nix::libc::clock_gettime(nix::libc::CLOCK_MONOTONIC,&mut value)}!=0{return None;}
+    let seconds=u64::try_from(value.tv_sec).ok()?;let nanos=u64::try_from(value.tv_nsec).ok()?;
+    if nanos>=1_000_000_000{return None;}
+    seconds.checked_mul(1_000_000_000)?.checked_add(nanos).filter(|value|*value!=0 && *value<=FIRST_MASK)
+}
+
 /// One bounded, independently runnable first-F/STOP mailbox. Failure publication
 /// takes no Registry, Document, native-book or ingress lock. Failure/Unknown and
 /// finality freeze share ONE atomic word: a callback cannot pass a separate
 /// terminal flag then overwrite the immutable terminal result.
-pub struct Signal { bounds: OnceLock<Bounds>, state: AtomicU64, maintenance_cutoff: AtomicU64 }
+pub struct Signal {
+    bounds: OnceLock<Bounds>, state: AtomicU64, maintenance_cutoff: AtomicU64,
+    removal_clock: OnceLock<Arc<RemovalClock>>,
+}
 impl Signal {
-    pub fn reserved() -> Self { Self { bounds: OnceLock::new(), state: AtomicU64::new(0), maintenance_cutoff: AtomicU64::new(0) } }
+    pub fn reserved() -> Self { Self {
+        bounds: OnceLock::new(), state: AtomicU64::new(0), maintenance_cutoff: AtomicU64::new(0),
+        removal_clock: OnceLock::new(),
+    } }
     fn arm_at(&self, bounds: Bounds, now: u64) -> Result<(), Failure> {
         if !bounds.valid() || now < bounds.origin || now >= bounds.work
             || self.bounds.set(bounds).is_err()
@@ -69,6 +177,22 @@ impl Signal {
     }
     pub fn arm(&self, bounds: Bounds) -> Result<(), Failure> {
         self.arm_at(bounds, uptime().ok_or_else(|| { self.unknown_clock(); Failure::Unknown })?)
+    }
+    /// SAME authenticated clock object, never the raw request DATA alone.
+    pub fn bind_removal_clock(&self,clock:&Arc<RemovalClock>)->Result<(),Failure>{
+        let Some(bounds)=self.bounds()else{self.unknown_clock();return Err(Failure::Unknown);};
+        let now=uptime().ok_or_else(||{self.unknown_clock();Failure::Unknown})?;
+        if clock.cutoff().is_none() || clock.work_sample().is_none() || now<bounds.origin || now>=bounds.work
+            || clock.uptime_work()<=bounds.origin || clock.uptime_work()>bounds.work || clock.uptime_hard()>bounds.hard
+            || self.state.load(Ordering::SeqCst)!=0 || self.removal_clock.set(clock.clone()).is_err(){
+            self.unknown_clock();return Err(Failure::Unknown);
+        }
+        if self.admitted(false){Ok(())}else{Err(Failure::Unknown)}
+    }
+    pub fn removal_cutoff(&self)->Option<&crate::removal_coordinator::ParentCutoff>{self.removal_clock.get()?.cutoff()}
+    pub fn removal_clock(&self)->Option<&Arc<RemovalClock>>{self.removal_clock.get()}
+    pub fn work_endpoint(&self)->Option<u64>{
+        self.bounds().map(|bounds|self.removal_clock.get().map_or(bounds.work,|clock|bounds.work.min(clock.uptime_work())))
     }
     fn update(&self, first: Option<u64>, flags: u64) {
         let mut old = self.state.load(Ordering::SeqCst);
@@ -105,9 +229,26 @@ impl Signal {
         let first = self.state.load(Ordering::SeqCst) & FIRST_MASK;
         (first != 0).then_some(first)
     }
-    pub fn unknown(&self) -> bool { self.state.load(Ordering::SeqCst) & UNKNOWN_BIT != 0 }
+    // The containing removal owner still checks its live Parent clock before
+    // permission/finality. An already frozen Signal is immutable historical
+    // DATA, not a grant, so later peer-clock expiry cannot rewrite its result.
+    fn live_word_data(word:u64,parent_stopped:bool,parent_invalid:bool)->u64{
+        if word&TERMINAL_BIT!=0{return word;}
+        word | if parent_invalid{UNKNOWN_BIT|CLOCK_UNKNOWN_BIT}else if parent_stopped{UNKNOWN_BIT}else{0}
+    }
+    fn live_word(&self,word:u64)->u64{
+        let clock=self.removal_clock.get();
+        Self::live_word_data(word,clock.is_some_and(|clock|clock.work_stopped()),clock.is_some_and(|clock|clock.invalid()))
+    }
+    /// Own stored failures, not the additional live Parent STOP overlay. The
+    /// SAME synchronizer must still import a genuine own Unknown concurrent
+    /// with Parent STOP; subtracting a combined boolean would lose that fact.
+    pub fn stored_unknown(&self)->bool{self.state.load(Ordering::SeqCst)&UNKNOWN_BIT!=0}
+    pub fn stored_clock_unknown(&self)->bool{self.state.load(Ordering::SeqCst)&CLOCK_UNKNOWN_BIT!=0}
+    pub fn unknown(&self) -> bool { self.live_word(self.state.load(Ordering::SeqCst))&UNKNOWN_BIT!=0 }
     pub fn bounds(&self) -> Option<Bounds> { self.bounds.get().copied() }
     fn snapshot_word(&self, word: u64) -> FrozenFailure {
+        let word=self.live_word(word);
         let first = word & FIRST_MASK;
         let first = (first != 0).then_some(first);
         let cleanup = self.bounds().and_then(|bounds| {
@@ -119,6 +260,7 @@ impl Signal {
         });
         let narrow=self.maintenance_cutoff.load(Ordering::SeqCst);
         let cleanup=cleanup.map(|end|if narrow==0{end}else{end.min(narrow)});
+        let cleanup=cleanup.map(|end|self.removal_clock.get().map_or(end,|clock|end.min(clock.uptime_hard())));
         FrozenFailure { first, cleanup, unknown: word & UNKNOWN_BIT != 0 }
     }
     pub fn snapshot(&self) -> FrozenFailure { self.snapshot_word(self.state.load(Ordering::SeqCst)) }
@@ -162,11 +304,21 @@ impl Signal {
     pub fn admitted_at(&self, cleanup: bool, now: u64) -> bool {
         let Some(bounds) = self.bounds() else { return false; };
         if now < bounds.origin || now > FIRST_MASK { self.unknown_clock(); return false; }
+        // Genuine own UPTIME failure is recorded before the Parent veto. Never
+        // replace it with raw Parent W or the supplemental projected cutoff.
+        if (!cleanup || self.removal_clock.get().is_some()) && now>=bounds.work{self.failure_at(bounds.work,false);}
+        let mut observed=now;
+        if let Some(clock)=self.removal_clock.get(){
+            let Some(point)=clock.observe()else{self.unknown_clock();return false;};
+            if point.uptime>=bounds.work{self.failure_at(bounds.work,false);}
+            if point.uptime<now || !point.valid || clock.cutoff().is_none(){self.unknown_clock();return false;}
+            observed=point.uptime;
+        }
         let word = self.state.load(Ordering::SeqCst);
         if word & (CLOCK_UNKNOWN_BIT | TERMINAL_BIT) != 0 { return false; }
-        if !cleanup && now >= bounds.work { self.failure_at(bounds.work, false); }
-        if cleanup { self.cleanup().is_some_and(|end| now < end) }
-        else { !self.unknown() && self.first().is_none() && now < bounds.work && self.cleanup().is_some_and(|end|now<end) }
+        if cleanup { self.cleanup().is_some_and(|end| observed < end) }
+        else { !self.unknown() && self.first().is_none() && observed < self.work_endpoint().unwrap_or(bounds.work)
+            && self.cleanup().is_some_and(|end|observed<end) }
     }
     pub fn admitted(&self, cleanup: bool) -> bool {
         match uptime() { Some(now) => self.admitted_at(cleanup, now), None => { self.unknown_clock(); false } }
@@ -174,8 +326,27 @@ impl Signal {
     /// Service coordinator ONLY after its actual original worker join. DATA
     /// freeze is the stop/result linearization point, not a lease/join proof.
     fn freeze(&self) -> FrozenFailure {
-        let before = self.state.fetch_or(TERMINAL_BIT, Ordering::SeqCst);
-        self.snapshot_word(before | TERMINAL_BIT)
+        if self.state.load(Ordering::SeqCst)&TERMINAL_BIT==0 && self.removal_clock.get().is_some(){
+            // Observe both live domains before the existing local terminal
+            // linearization. Any observed Parent veto is folded into this word
+            // without inventing an own-domain first-F. A later Parent event is
+            // still the outer owner's obligation, not a mutable old terminal.
+            let _=self.admitted(true);
+        }
+        let clock=self.removal_clock.get();
+        self.freeze_parent_data(clock.is_some_and(|clock|clock.work_stopped()),clock.is_some_and(|clock|clock.invalid()))
+    }
+    fn freeze_parent_data(&self,parent_stopped:bool,parent_invalid:bool)->FrozenFailure{
+        let mut old=self.state.load(Ordering::SeqCst);
+        loop{
+            if old&TERMINAL_BIT!=0{return self.snapshot_word(old);}
+            // Fold observed Parent STOP into the SAME immutable terminal word.
+            // A concurrent/repeated freeze cannot rewrite an earlier terminal.
+            let next=Self::live_word_data(old,parent_stopped,parent_invalid)|TERMINAL_BIT;
+            match self.state.compare_exchange_weak(old,next,Ordering::SeqCst,Ordering::SeqCst){
+                Ok(_)=>return self.snapshot_word(next),Err(actual)=>old=actual,
+            }
+        }
     }
 }
 
@@ -606,6 +777,9 @@ pub struct ClientBook {
     pointer: Option<NonNull<c_void>>, signal: ManuallyDrop<Arc<Signal>>,
     facts: NativeFacts, started: bool, retired: bool, poisoned: bool, in_call: bool, bytes: usize, account: u32,
     prepare: Option<prepare::ClientAttempt>, prepare_last: u64, data: Option<DataOwner>, maintenance:bool,
+    // Last genuinely decoded native maintenance reply, retained before any
+    // returned-time veto. Comparison DATA only; never a tail/retirement token.
+    maintenance_reply:Option<(u32,crate::android_maintenance_wire::Frame)>,
     #[cfg(feature="e2-native-fixture")] fixture_identity:FixtureIdentityFacts,
     #[cfg(feature = "e2-native-fixture")]
     e2_allocation:FixtureClientAllocation,
@@ -616,6 +790,7 @@ impl ClientBook {
         Self { pointer: None, signal: ManuallyDrop::new(signal), facts: NativeFacts { version: 1, ..NativeFacts::default() },
             started: false, retired: false, poisoned: false, in_call: false, bytes: 0, account: 0,
             prepare: None, prepare_last: 0, data: None, maintenance:false,
+            maintenance_reply:None,
             #[cfg(feature="e2-native-fixture")] fixture_identity:FixtureIdentityFacts::inert(),
             #[cfg(feature = "e2-native-fixture")]
             e2_allocation:FixtureClientAllocation::default(),
@@ -704,6 +879,14 @@ impl ClientBook {
         if !self.signal.admitted(false) { return Err(Failure::Stopped); }
         Ok(())
     }
+    fn retain_maintenance_reply_data(&mut self,method:u32,returned:c_int,
+        output:&[u8;crate::android_maintenance_wire::BYTES]){
+        if returned==1 && matches!(method,3|4|5){
+            if let Some(frame)=crate::android_maintenance_wire::Frame::decode(output){
+                self.maintenance_reply=Some((method,frame));
+            }
+        }
+    }
     pub(crate) fn maintenance_exchange(&mut self,method:u32,input:&[u8;crate::android_maintenance_wire::BYTES])
         ->Result<[u8;crate::android_maintenance_wire::BYTES],Failure>{
         let cleanup=method==7;
@@ -712,6 +895,9 @@ impl ClientBook {
         let mut output=[0;crate::android_maintenance_wire::BYTES];self.in_call=true;
         let returned=unsafe{mrk_android_maintenance_exchange(self.ptr(),method,input.as_ptr(),
             if cleanup{std::ptr::null_mut()}else{output.as_mut_ptr()})};self.in_call=false;
+        // Preserve this actual returned frame before refresh/Signal admission
+        // can refuse its late arrival. No decode here authorizes a later step.
+        self.retain_maintenance_reply_data(method,returned,&output);
         if !self.refresh() || returned!=1 || !self.facts.quiescent() || self.facts.peer!=0{
             self.signal.failure_now(true);return Err(Failure::Native);
         }
@@ -942,6 +1128,118 @@ mod tests {
         assert!(book.release());assert_eq!(book.retained_bytes(),Some(0));
         assert_eq!(Arc::strong_count(&signal),1);assert!(!signal.unknown());
     }
+    #[test]
+    fn removal_cutoff_contracts_same_signal_without_rearming_or_widening_wire(){
+        // Pure fixed-cutoff DATA, with deliberately DISTINCT clock origins.
+        // No native proof, clock sample, peer or service is manufactured here.
+        let p=800_000_000_000;let u=3_000_000_000;
+        let make=||RemovalClockData::from_samples(p,p+110_000_000_000,p+120_000_000_000,u,p+100,p+110,u+20).unwrap();
+        let clock=make();assert_eq!(clock.uptime_work,u+110_000_000_000-110);
+        assert_eq!(clock.uptime_hard,u+120_000_000_000-110);
+        assert!(clock.observe_samples(p+110,u+20,u+100,p+200,u+120));
+        assert_eq!(clock.parent_first.load(Ordering::SeqCst),0);assert!(clock.work_allowed());
+        // Actual Parent W (including sleep with almost no UPTIME advance)
+        // irreversibly stops work, but permits known consuming cleanup to H.
+        for (before,after) in [(u+21,u+22),(u+109_999_999_900,u+109_999_999_920)]{
+            let expiry=make();assert!(expiry.observe_samples(p+110,u+20,before,p+110_000_000_000,after));
+            assert_eq!(expiry.parent_first.load(Ordering::SeqCst),p+110_000_000_000);
+            assert!(!expiry.work_allowed());assert!(expiry.cleanup_allowed());
+            assert!(expiry.observe_samples(p+110_000_000_000,after,after+1,p+110_000_000_001,after+2));
+            assert!(!expiry.work_allowed());assert!(expiry.cleanup_allowed());
+            assert!(!expiry.observe_samples(p+110_000_000_001,after+2,after+3,p+120_000_000_000,after+4));
+            assert!(!expiry.cleanup_allowed());
+            assert!(!expiry.observe_samples(p+120_000_000_000,after+4,after+5,p+120_000_000_001,after+6));
+        }
+        // The supplemental own projection contracts work/hard independently;
+        // it never fabricates a Parent-domain first-F or permits resumed work.
+        let projected=make();assert!(projected.observe_samples(p+110,u+20,
+            projected.uptime_work-1,p+200,projected.uptime_work));
+        assert!(!projected.work_allowed());assert!(projected.cleanup_allowed());
+        assert_eq!(projected.parent_first.load(Ordering::SeqCst),0);
+        assert!(!projected.observe_samples(p+200,projected.uptime_work,
+            projected.uptime_hard-1,p+201,projected.uptime_hard));assert!(!projected.cleanup_allowed());
+        // No relative offset/rate equality is claimed. Both actual domains are
+        // checked, without rebase, tolerance or historical failure conversion.
+        for (before,parent,after) in [(u+100,p+300,u+120),(u+100,p+150,u+120),
+            (u+21,p+1_000_000_000,u+22)]{
+            let drift=make();assert!(drift.observe_samples(p+110,u+20,before,parent,after));
+            assert!(drift.work_allowed());assert_eq!(drift.parent_first.load(Ordering::SeqCst),0);
+        }
+        for (before,parent,after) in [(u+19,p+200,u+120),(u+100,p+109,u+120),
+            (u+121,p+200,u+120),(0,p+200,u+120),(u+100,FIRST_MASK,u+120),
+            (u+100,p+200,FIRST_MASK+1)]{
+            let bad=make();assert!(!bad.observe_samples(p+110,u+20,before,parent,after));
+            assert!(!bad.cleanup_allowed());
+            assert!(!bad.observe_samples(p+110,u+20,u+100,p+200,u+120));
+        }
+        for args in [(0,110_000_000_000,120_000_000_000,u,p,p,u+1),
+            (p,p+110_000_000_001,p+120_000_000_000,u,p,p,u+1),
+            (p,p+110_000_000_000,p+120_000_000_000,u,p+110_000_000_000,p+110_000_000_000,u+1),
+            (p,p+110_000_000_000,p+120_000_000_000,FIRST_MASK-1,p,p,FIRST_MASK)]{
+            assert!(RemovalClockData::from_samples(args.0,args.1,args.2,args.3,args.4,args.5,args.6).is_none());
+        }
+        // A known Parent STOP overlays non-success without an own first-F.
+        // A later genuine own Unknown must stay independently observable.
+        let stopped=Signal::reserved();stopped.arm_at(bounds(),20).unwrap();
+        assert!(!stopped.stored_unknown());
+        assert_eq!(Signal::live_word_data(0,true,false),UNKNOWN_BIT);
+        assert_eq!(stopped.snapshot_word(Signal::live_word_data(0,true,false)).cleanup,Some(bounds().hard));
+        stopped.failure_at(30,true);assert!(stopped.stored_unknown());assert!(!stopped.stored_clock_unknown());
+        assert_eq!(stopped.first(),Some(30));assert_eq!(stopped.cleanup(),Some(30+CLEANUP_NS));
+        assert!(stopped.admitted_at(true,30+CLEANUP_NS-1));assert!(!stopped.admitted_at(true,30+CLEANUP_NS));
+        let signal=Signal::reserved();signal.arm_at(bounds(),20).unwrap();
+        signal.failure_at(30,false);signal.clock_unknown();
+        assert_eq!(signal.first(),Some(30));assert!(signal.stored_clock_unknown());assert_eq!(signal.cleanup(),None);
+        let absent=Signal::reserved();absent.arm_at(bounds(),20).unwrap();absent.clock_unknown();assert_eq!(absent.first(),None);
+        let ordinary=Signal::reserved();ordinary.arm_at(bounds(),20).unwrap();
+        assert_eq!(ordinary.work_endpoint(),Some(bounds().work));assert_eq!(ordinary.cleanup(),Some(bounds().hard));
+        assert!(ordinary.admitted_at(false,bounds().origin+120_000_000_001));assert!(ordinary.removal_cutoff().is_none());
+        assert_eq!(Signal::live_word_data(30,true,true),30|UNKNOWN_BIT|CLOCK_UNKNOWN_BIT);
+        assert_eq!(Signal::live_word_data(30|TERMINAL_BIT,true,true),30|TERMINAL_BIT);
+        let frozen=ordinary.freeze();ordinary.clock_unknown();ordinary.failure_at(40,true);
+        assert_eq!(ordinary.snapshot(),frozen);assert_eq!(ordinary.freeze(),frozen);
+        let terminal=Signal::reserved();terminal.arm_at(bounds(),20).unwrap();
+        let stopped_terminal=terminal.freeze_parent_data(true,false);
+        assert!(stopped_terminal.unknown);assert_eq!(stopped_terminal.first,None);
+        assert_eq!(stopped_terminal.cleanup,Some(bounds().hard));assert!(!terminal.admitted_at(true,21));
+        assert_eq!(terminal.freeze_parent_data(false,true),stopped_terminal);
+        let invalid=Signal::reserved();invalid.arm_at(bounds(),20).unwrap();
+        let invalid_terminal=invalid.freeze_parent_data(true,true);
+        assert!(invalid_terminal.unknown);assert_eq!(invalid_terminal.cleanup,None);assert_eq!(invalid_terminal.first,None);
+
+        // Real production return-retention reducer, entirely inert DATA here.
+        // A later clock veto must not erase a decoded BeginDrain binding, but
+        // that observation cannot start a client, settle a native cell or make
+        // the stopped Signal admissible. The inline slot is capacity-accounted
+        // by size_of::<ClientBook>/the enclosing maintenance Client.
+        use crate::android_maintenance_wire as maintenance;
+        #[cfg(all(target_os="macos",target_arch="x86_64"))]
+        let target=b"x86_64-apple-darwin".as_slice();
+        #[cfg(not(all(target_os="macos",target_arch="x86_64")))]
+        let target=b"aarch64-apple-darwin".as_slice();
+        let mut identity=maintenance::Identity{instance:[1;16],source:[b'1';40],release:[0;64],target:[0;24]};
+        identity.release[..7].copy_from_slice(b"fixture");identity.target[..target.len()].copy_from_slice(target);
+        let mut binding=maintenance::Binding::request(identity,[2;16],maintenance::Bounds{
+            origin:100,work:100+maintenance::WORK_NS,hard:100+maintenance::HARD_NS}).unwrap();
+        binding.instance=identity.instance;binding.number=9;binding.account=501;binding.slot=2;binding.acceptance=110;
+        binding.nonce[..8].copy_from_slice(b"MRKACTX1");binding.nonce[8..].copy_from_slice(&binding.number.to_be_bytes());
+        binding.cut=120;binding.cutoff=120+maintenance::CLEANUP_NS;
+        let frame=maintenance::Frame{kind:maintenance::Kind::BeginDrainReply,
+            code:maintenance::Code::Accepted,binding,tail:None};
+        let raw=frame.encode().unwrap();let signal=Arc::new(Signal::reserved());
+        let mut book=ClientBook::new_maintenance(signal.clone());assert!(book.maintenance_reply.is_none());
+        for (method,returned) in [(5,0),(5,-1),(7,1),(99,1)]{
+            book.retain_maintenance_reply_data(method,returned,&raw);assert!(book.maintenance_reply.is_none());
+        }
+        book.retain_maintenance_reply_data(5,1,&raw);assert_eq!(book.maintenance_reply,Some((5,frame)));
+        signal.clock_unknown();assert!(!signal.admitted_at(false,130));
+        assert_eq!(book.maintenance_reply,Some((5,frame)));assert!(!book.started);assert!(book.pointer.is_none());
+        assert!(!book.settled());assert_eq!(signal.first(),None);
+        book.retain_maintenance_reply_data(5,1,&[0;maintenance::BYTES]);
+        book.retain_maintenance_reply_data(7,1,&raw);assert_eq!(book.maintenance_reply,Some((5,frame)));
+        assert!(book.release());assert_eq!(Arc::strong_count(&signal),1);
+    }
+
     #[test]
     fn earliest_failure_precedes_later_stop_and_cleanup_never_renews() {
         let signal = Signal::reserved(); signal.arm_at(bounds(), 20).unwrap();

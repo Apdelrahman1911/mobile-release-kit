@@ -57,10 +57,15 @@ int main(int argc, char **argv) {
     char own[PATH_MAX]; uint32_t own_size = sizeof(own);
     if (argc != 1 || mrk_user(&uid) || _NSGetExecutablePath(own, &own_size)
         || strcmp(own, MRK_ENTRY_EXECUTABLE)) return 64;
+    mrk_entry_book reservation; mrk_entry_init(&reservation);
+    if (!mrk_entry_root(&reservation) || !mrk_entry_open_registration(&reservation)
+        || mrk_registration_acquire_shared(&reservation) != 1) _exit(75);
     mrk_entry_book book; mrk_entry_init(&book);
     if (!mrk_entry_root(&book) || !mrk_entry_open_gate(&book)) _exit(65);
     if (flock(book.gate, LOCK_SH | LOCK_NB)) _exit(errno == EWOULDBLOCK ? 75 : 66);
     if (!mrk_entry_gate_matches(&book, FD_CLOEXEC)) _exit(67);
+    /* Overlap R SH with the actual lifetime M SH. R never crosses exec. */
+    if (!mrk_registration_retire(&reservation)) _exit(67);
     char home[PATH_MAX+6], user[262], logname[265], temporary[PATH_MAX+8];
     if (!environment(home, user, logname, temporary)) _exit(68);
     char *const clean[] = {"PATH=/usr/bin:/bin:/usr/sbin:/sbin", home, user, logname,

@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ApiError, AppInfo, DesktopApi, HelpContent } from '../types.ts';
-import { installationError, installationLocationHelp, parseInstallationDescription, installationCheckActive, installationCheckHelp, INSTALLATION_CHECK_GUIDANCE } from '../installation.ts';
-import { InstallationCheckController, type InstallationCheckApi, type InstallationCheckView } from '../installationController.ts';
+import { installationError, installationLocationHelp, parseInstallationDescription, installationCheckActive, installationCheckHelp,
+  INSTALLATION_CHECK_GUIDANCE, installationPreparationActive, installationPreparationHelp, INSTALLATION_PREPARATION_GUIDANCE } from '../installation.ts';
+import { InstallationCheckController, InstallationPreparationController, type InstallationCheckApi, type InstallationCheckView,
+  type InstallationPreparationApi, type InstallationPreparationView } from '../installationController.ts';
 import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
 
 export function InstallationDetails({ info, api, preview, loading, onHelp }: {
-  info: AppInfo | null; api: (Pick<DesktopApi, 'revealInstallation'> & InstallationCheckApi) | null;
+  info: AppInfo | null; api: (Pick<DesktopApi, 'revealInstallation'> & InstallationCheckApi & InstallationPreparationApi) | null;
   preview: boolean; loading: boolean; onHelp: (help: HelpContent) => void;
 }) {
   const description = parseInstallationDescription(info?.installation);
@@ -43,10 +45,11 @@ export function InstallationDetails({ info, api, preview, loading, onHelp }: {
       <div className="button-row"><button type="button" className="button secondary" disabled={!available || pending} onClick={() => void reveal()}>{pending ? 'Requesting Finder…' : 'Show in Finder'}</button></div>
       {!available && <p className="save-note">{loading ? 'Wait for the current connection to finish loading.' : 'Finder requests are unavailable in the current native runtime profile.'}</p>}
       <p>To open the installed app manually, use Finder → Go → Go to Folder, enter the location above, then open Mobile Release Kit.</p>
-      <p><strong>Fresh installation only.</strong> This engineering installer does not yet repair, update or uninstall an occupied installation. Rerunning it does not replace existing files. Keep any partial-installation evidence; do not delete the protected tree to make a retry pass.</p>
+      <p><strong>A verified Installer package is required.</strong> The package checks whether it can install, leave the same installation unchanged, restore the missing app at its fixed location, or apply an explicitly authorized update. This screen does not select or authorize those actions. Keep partial-installation evidence and unknown files; do not delete the protected tree to bypass a refusal. Uninstall is not yet available.</p>
       <p className="save-note">Your projects, signing originals and credential data are separate from this location card. The location description alone does not check files. The separate read-only check below performs no maintenance and does not verify signing, notarization or release readiness.</p>
     </> : <p>{preview ? 'Browser preview cannot observe an installation or request Finder.' : 'Installation location information is not available in this runtime profile. This does not mean the application is missing.'}</p>}
     <InstallationCheckPanel api={api} enabled={!preview && !loading && !!api && description !== null} onHelp={onHelp} />
+    <InstallationPreparationPanel api={api} enabled={!preview && !loading && !!api && description !== null} onHelp={onHelp} />
     {visible?.error && <ErrorNotice error={visible.error} title="Finder request not confirmed" />}
     {visible && !visible.error && <p role="status">Finder request sent. Finder visibility is unconfirmed; look for the selected app in Finder. No project or installation files were changed.</p>}
   </section>;
@@ -96,5 +99,57 @@ function InstallationCheckPanel({ api, enabled, onHelp }: {
       {status.phase === 'not-checked' && status.available && !status.canStart && <p>Wait for the original window and other native operations to be ready before starting.</p>}
     </div>}
     {view.error && <ErrorNotice error={view.error} title="Installation check not confirmed" />}
+  </div>;
+}
+
+function InstallationPreparationPanel({ api, enabled, onHelp }: {
+  api: InstallationPreparationApi | null; enabled: boolean; onHelp: (help: HelpContent) => void;
+}) {
+  const identity = useMemo(() => ({}), [api, enabled]);
+  const current = useRef<{ identity: object; controller: InstallationPreparationController } | null>(null);
+  const [rendered, render] = useState<{ identity: object; view: InstallationPreparationView } | null>(null);
+  const [confirmation, setConfirmation] = useState<{ identity: object; checked: boolean } | null>(null);
+  useEffect(() => {
+    const controller = new InstallationPreparationController(api, enabled);
+    current.current = { identity, controller };
+    controller.attach((view) => render({ identity, view }));
+    return () => {
+      if (current.current?.controller === controller) current.current = null;
+      controller.dispose();
+    };
+  }, [api, enabled, identity]);
+  const controller = current.current?.identity === identity ? current.current.controller : null;
+  const view: InstallationPreparationView = rendered?.identity === identity ? rendered.view
+    : { status: null, error: null, starting: false, refreshing: false };
+  const checked = confirmation?.identity === identity && confirmation.checked;
+  const status = view.status;
+  const active = installationPreparationActive(status);
+  const canConfirm = enabled && status?.canStart === true && !view.starting && !view.refreshing && !view.error;
+  return <div className="session-progress" aria-busy={active || view.starting}>
+    <h3>Prepare app to quit <HelpButton content={installationPreparationHelp} onHelp={onHelp} /></h3>
+    <p>Save your edits and finish or cancel active work first. This stops the installed Android helper, closes new work and then uses the normal Quit flow. It does not delete projects, credentials or installed files, and makes no Store changes.</p>
+    <label><input type="checkbox" checked={checked} disabled={!canConfirm}
+      onChange={(event) => setConfirmation({ identity, checked: event.currentTarget.checked })} />
+      {' '}I want to stop the installed Android helper and prepare this application to quit.</label>
+    <div className="button-row">
+      <button type="button" className="button secondary" disabled={!canConfirm || !checked}
+        onClick={() => { if (controller?.start(checked)) setConfirmation({ identity, checked: false }); }}>
+        {view.starting ? 'Starting preparation…' : 'Prepare and quit'}</button>
+      <button type="button" className="button secondary small" disabled={!enabled || view.refreshing || view.starting}
+        onClick={() => void controller?.refresh()}>{view.refreshing ? 'Checking status…' : 'Refresh preparation status'}</button>
+    </div>
+    {!enabled && <p className="save-note">Preparation is available only in a supported normal installed macOS app, not browser preview.</p>}
+    {status && <div role="status" aria-live="polite">
+      <Badge>{status.phase === 'prepared' ? 'Original preparation settled · exit unconfirmed' : status.phase.replaceAll('-', ' ')}</Badge>
+      <p>{INSTALLATION_PREPARATION_GUIDANCE[status.reason]}</p>
+      {active && <p>Waiting for the original native helper operation and its cleanup. Changing screens does not cancel it or start another request.</p>}
+      {status.phase === 'prepared' && <p>The native completion uses the normal Quit flow. If you cancel Quit, new work remains closed; the app does not automatically register the helper again.</p>}
+      {status.phase === 'refused' && <p>{status.newWorkClosed
+        ? 'New work remains closed because the helper operation started or its effect was uncertain. Do not treat this as successful preparation.'
+        : 'The original owner settled an early refusal without starting the helper operation. Refresh and resolve the cause before explicitly trying again.'}</p>}
+      {status.operationId && <p className="save-note">Preparation #{status.generation} · {status.newWorkClosed ? 'New work closed' : 'No maintenance closure retained'}. The status is not proof that the app has exited.</p>}
+    </div>}
+    {view.error && <ErrorNotice error={view.error} title="Preparation not confirmed" />}
+    <p className="save-note">Preparing to quit does not authorize installation changes. A separate verified Installer package must check any update or fixed-location restore. Uninstall is not yet available; keep partial installations and unknown files intact.</p>
   </div>;
 }

@@ -32,7 +32,7 @@ pub(crate) const INTENT_NAME: &str = ".mutation-intent";
 // Identity alone does not qualify a provider or enable durable storage.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) const BACKEND: u16 = 1;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) const BACKEND: u16 = 2;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 pub(crate) const BACKEND: u16 = 3;
@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     fn asc_descriptor_has_exact_two_presence_cells_and_no_persisted_approval() {
         for presence in [vec![false, false], vec![true, false], vec![false, true], vec![true, true]] {
             let descriptor = Descriptor::new(Kind::AscP8, None, presence.clone(), true).unwrap();

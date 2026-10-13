@@ -428,7 +428,8 @@ impl MainCustody{
 /// comes from CLI/environment. Service Enabled alone is not a release result.
 pub fn run()->i32{
     if std::env::args_os().take(2).count()!=1 || nix::unistd::getuid().as_raw()!=0
-        || nix::unistd::geteuid().as_raw()!=0 || !mrk_macos_installed_native::ANDROID_REGISTRATION_HELPER_BUILD{return 2;}
+        || nix::unistd::geteuid().as_raw()!=0 || !mrk_macos_installed_native::ANDROID_REGISTRATION_HELPER_BUILD
+        || !crate::android_build_protocol::Profile::current().is_some_and(crate::android_toolchain_macos_policy::native_catalog_supports){return 2;}
     let Some(resident)=MainCustody::start()else{return 2;};
     resident.drive().into_exit_code()
 }
@@ -437,7 +438,8 @@ pub fn run()->i32{
 #[cfg(feature="macos-installed-resident-image")]
 pub fn run_image(host:mrk_macos_installed_native::installed_image::AdmittedHost)->Option<ResidentReturn>{
     if nix::unistd::getuid().as_raw()!=0 || nix::unistd::geteuid().as_raw()!=0
-        || !mrk_macos_installed_native::RESIDENT_IMAGE_BUILD{return None;}
+        || !mrk_macos_installed_native::RESIDENT_IMAGE_BUILD
+        || !crate::android_build_protocol::Profile::current().is_some_and(crate::android_toolchain_macos_policy::native_catalog_supports){return None;}
     Some(MainCustody::start_bound(Some(host))?.drive())
 }
 #[cfg(test)]

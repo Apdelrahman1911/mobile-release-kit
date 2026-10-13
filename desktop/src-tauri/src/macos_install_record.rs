@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use crate::{macos_install_paths as paths, protocol::strict_json, runtime::safe_payload_path};
+use crate::{macos_install_maintenance::ReleaseData, macos_install_paths as paths,
+    protocol::strict_json, runtime::safe_payload_path};
 
 pub const INVENTORY_NAME: &str = "install-inventory.json";
 pub const RECORD_NAME: &str = "installation-v1.json";
@@ -15,6 +16,7 @@ pub const ENTRY_BINARY: &str = paths::ENTRY_INVENTORY_PATH;
 pub const APP_BINARY: &str = paths::PAYLOAD_INVENTORY_PATH;
 pub const VAULT_HELPER: &str = paths::VAULT_HELPER_INVENTORY_PATH;
 pub const ANDROID_HELPER: &str = paths::ANDROID_HELPER_INVENTORY_PATH;
+pub const REMOVER: &str = paths::REMOVER_INVENTORY_PATH;
 pub const ANDROID_SERVICE_PLIST: &str = paths::ANDROID_SERVICE_INVENTORY_PATH;
 pub const DESKTOP_IMAGE: &str = paths::DESKTOP_IMAGE_INVENTORY_PATH;
 pub const RESIDENT_IMAGE: &str = paths::RESIDENT_IMAGE_INVENTORY_PATH;
@@ -72,10 +74,21 @@ impl InventoryIndex<'_> {
 }
 impl Inventory {
     pub fn parse(bytes: &[u8], runtime_manifest: &str) -> Result<Self> {
+        Self::parse_for_release(bytes, runtime_manifest, paths::RELEASE)
+    }
+    /// The original observer supplies a producer-selected generation, never the
+    /// release/runtime strings learned from the inventory being checked. The
+    /// ordinary compatibility entry remains bound to the compiled release.
+    pub fn parse_for_release(bytes: &[u8], runtime_manifest: &str, release: &str) -> Result<Self> {
         check(!bytes.is_empty() && bytes.len() <= INVENTORY_LIMIT, "inventory-size")?;
-        let inventory: Self = serde_json::from_value(strict_json(bytes).map_err(|_| "inventory-json")?)
+        check(!release.is_empty() && release.len() <= 128 && release != "." && release != ".."
+            && release.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b)), "inventory-expected-release")?;
+        let value = strict_json(bytes).map_err(|_| "inventory-json")?;
+        check(value.is_object() && value.get("files").and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items.iter().all(serde_json::Value::is_object)), "inventory-shape")?;
+        let inventory: Self = serde_json::from_value(value)
             .map_err(|_| "inventory-shape")?;
-        check(inventory.schema_version == 1 && inventory.release == paths::RELEASE
+        check(inventory.schema_version == 1 && inventory.release == release
             && !inventory.files.is_empty() && inventory.files.len() <= FILE_LIMIT - 3
             && hex(runtime_manifest, 64) && inventory.runtime_manifest_sha256 == runtime_manifest, "inventory-binding")?;
         Ok(inventory)
@@ -90,7 +103,8 @@ impl Inventory {
                 && (item.path.starts_with("app/Contents/") || item.path.starts_with("runtime/"))
                 && item.path.as_str() > previous && hex(&item.sha256, 64), "inventory-path")?;
             check(item.executable == matches!(item.path.as_str(),
-                ENTRY_BINARY | APP_BINARY | VAULT_HELPER | ANDROID_HELPER | DESKTOP_IMAGE | RESIDENT_IMAGE | "runtime/python/bin/python3"),
+                ENTRY_BINARY | APP_BINARY | VAULT_HELPER | ANDROID_HELPER | REMOVER | DESKTOP_IMAGE | RESIDENT_IMAGE | "runtime/python/bin/python3"
+                | paths::HISTORY_PROVIDER_INVENTORY_PATH | paths::GITHUB_SEAL_INVENTORY_PATH),
                 "inventory-executable-scope")?;
             total = total.checked_add(item.size).ok_or("inventory-bound")?;
             check(total <= PAYLOAD_LIMIT, "inventory-bound")?;
@@ -139,39 +153,95 @@ pub struct Expected<'a> {
 }
 impl Record {
     pub fn encode(instance: &str, inventory: &[u8], expected: &Expected<'_>) -> Result<Vec<u8>> {
+        let bytes = Self::encode_bound_data(instance, inventory, expected,
+            paths::PACKAGE_VERSION, paths::RELEASE, paths::PROTOCOL_SHA)?;
+        Self::parse_data(&bytes, inventory, expected)?;
+        Ok(bytes)
+    }
+    /// Bounded comparison DATA for a separately authenticated generation. The
+    /// instance and directory originals are those of the torn attempt being
+    /// compared, not copied from the complete source generation's record.
+    /// Neither this encoder nor a parsed release supplies native authority.
+    pub fn encode_for_release_data(instance: &str, inventory: &[u8], expected: &Expected<'_>,
+        selected: &ReleaseData) -> Result<Vec<u8>> {
+        // This NEW public entry rejects unbounded borrowed operands BEFORE the
+        // shared constructor clones strings or serializes any record.
+        let binding = selected.binding_data();
+        check(hex(instance, 32) && instance.bytes().any(|b| b != b'0')
+            && expected.kind == Kind::Ordinary && hex(expected.source_commit, 40)
+            && hex(expected.runtime_manifest, 64)
+            && expected.install_root.valid() && expected.release_directory.valid()
+            && !inventory.is_empty() && inventory.len() <= INVENTORY_LIMIT,
+            "installation-record-selected-input")?;
+        check(!binding.package_version.is_empty() && binding.package_version.len() <= 32
+            && binding.package_version.is_ascii()
+            && !binding.release.is_empty() && binding.release.len() <= 128
+            && binding.release.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b))
+            && binding.release != "." && binding.release != ".." && hex(binding.protocol_sha256, 64)
+            && binding.package_identifier == paths::PACKAGE_ID && binding.bundle_identifier == paths::BUNDLE_ID
+            && binding.source_commit == expected.source_commit
+            && binding.runtime_manifest_sha256 == expected.runtime_manifest
+            && hex(binding.inventory_sha256, 64) && digest(inventory) == binding.inventory_sha256,
+            "installation-record-selected-release")?;
+        let bytes = Self::encode_bound_data(instance, inventory, expected,
+            binding.package_version, binding.release, binding.protocol_sha256)?;
+        Self::parse_for_release_data(&bytes, inventory, expected, selected)?;
+        Ok(bytes)
+    }
+    // One canonical serializer; the old compiled entry retains its exact tuple
+    // and byte output. The selected entry changes no schema or finality field.
+    fn encode_bound_data(instance: &str, inventory: &[u8], expected: &Expected<'_>,
+        package_version: &str, release: &str, protocol_sha256: &str) -> Result<Vec<u8>> {
         let record = Self { schema_version: 1, basis: "protected-recorded-installation-inventory".into(),
             phase: "inventory-recorded".into(), kind: expected.kind, instance: instance.into(),
-            package_identifier: expected.kind.package_identifier().into(), package_version: paths::PACKAGE_VERSION.into(),
-            bundle_identifier: paths::BUNDLE_ID.into(), release: paths::RELEASE.into(),
-            source_commit: expected.source_commit.into(), protocol_sha256: paths::PROTOCOL_SHA.into(),
+            package_identifier: expected.kind.package_identifier().into(), package_version: package_version.into(),
+            bundle_identifier: paths::BUNDLE_ID.into(), release: release.into(),
+            source_commit: expected.source_commit.into(), protocol_sha256: protocol_sha256.into(),
             runtime_manifest_sha256: expected.runtime_manifest.into(),
             inventory: InventoryBinding { name: INVENTORY_NAME.into(), bytes: inventory.len() as u64, sha256: digest(inventory) },
             policy: "fixed-root-wheel-readonly-v1".into(), install_root: expected.install_root,
             release_directory: expected.release_directory };
         let mut bytes = serde_json::to_vec(&record).map_err(|_| "installation-record-shape")?;
         bytes.push(b'\n');
-        Self::parse_data(&bytes, inventory, expected)?;
         Ok(bytes)
     }
     pub fn parse_data(bytes: &[u8], inventory: &[u8], expected: &Expected<'_>) -> Result<Self> {
+        Self::parse_bound_data(bytes, inventory, expected, paths::PACKAGE_VERSION, paths::RELEASE, paths::PROTOCOL_SHA)
+    }
+    /// Historical DATA remains inventory-recorded, not an old completion
+    /// receipt. The caller independently selected this exact release tuple and
+    /// retains its current root/generation originals and signature observation.
+    pub fn parse_for_release_data(bytes: &[u8], inventory: &[u8], expected: &Expected<'_>, release: &ReleaseData) -> Result<Self> {
+        let binding = release.binding_data();
+        check(expected.source_commit == binding.source_commit && expected.runtime_manifest == binding.runtime_manifest_sha256
+            && binding.package_identifier == paths::PACKAGE_ID
+            && binding.bundle_identifier == paths::BUNDLE_ID && digest(inventory) == binding.inventory_sha256,
+            "installation-record-selected-release")?;
+        Self::parse_bound_data(bytes, inventory, expected, binding.package_version, binding.release, binding.protocol_sha256)
+    }
+    fn parse_bound_data(bytes: &[u8], inventory: &[u8], expected: &Expected<'_>, package_version: &str,
+        release: &str, protocol_sha256: &str) -> Result<Self> {
         check(!bytes.is_empty() && bytes.len() <= RECORD_LIMIT, "installation-record-size")?;
-        let record: Self = serde_json::from_value(strict_json(bytes).map_err(|_| "installation-record-json")?)
+        let value = strict_json(bytes).map_err(|_| "installation-record-json")?;
+        check(value.is_object() && ["inventory", "installRoot", "releaseDirectory"].iter()
+            .all(|name| value.get(*name).is_some_and(serde_json::Value::is_object)), "installation-record-shape")?;
+        let record: Self = serde_json::from_value(value)
             .map_err(|_| "installation-record-shape")?;
         check(hex(expected.source_commit, 40) && hex(expected.runtime_manifest, 64)
             && expected.install_root.valid() && expected.release_directory.valid(), "installation-record-expected")?;
         check(record.schema_version == 1 && record.basis == "protected-recorded-installation-inventory"
             && record.phase == "inventory-recorded" && record.kind == expected.kind
             && hex(&record.instance, 32) && record.instance.bytes().any(|b| b != b'0')
-            && record.package_identifier == expected.kind.package_identifier() && record.package_version == paths::PACKAGE_VERSION
-            && record.bundle_identifier == paths::BUNDLE_ID && record.release == paths::RELEASE
-            && record.source_commit == expected.source_commit && record.protocol_sha256 == paths::PROTOCOL_SHA
+            && record.package_identifier == expected.kind.package_identifier() && record.package_version == package_version
+            && record.bundle_identifier == paths::BUNDLE_ID && record.release == release
+            && record.source_commit == expected.source_commit && record.protocol_sha256 == protocol_sha256
             && record.runtime_manifest_sha256 == expected.runtime_manifest && record.policy == "fixed-root-wheel-readonly-v1"
             && record.install_root == expected.install_root && record.release_directory == expected.release_directory,
             "installation-record-binding")?;
         check(!inventory.is_empty() && inventory.len() <= INVENTORY_LIMIT && record.inventory.name == INVENTORY_NAME
             && record.inventory.bytes == inventory.len() as u64 && record.inventory.sha256 == digest(inventory),
             "installation-record-inventory")?;
-        let parsed = Inventory::parse(inventory, expected.runtime_manifest)?;
+        let parsed = Inventory::parse_for_release(inventory, expected.runtime_manifest, release)?;
         let indexed = parsed.index()?;
         check(indexed.payload_bytes.checked_add(inventory.len() as u64).and_then(|n| n.checked_add(RECORD_LIMIT as u64))
             .and_then(|n| n.checked_add(paths::MAINTENANCE_GATE_BYTES.len() as u64))
@@ -278,6 +348,79 @@ mod tests {
             let changed=serde_json::to_vec(&value).unwrap();
             assert!(Record::encode(&"d".repeat(32),&changed,&expected).is_err());
         }
+        // A historical inventory must match an independently selected release,
+        // not the current compile default or strings learned from that record.
+        use crate::macos_install_maintenance::{MaintenanceTargetData, ReleaseSetData};
+        let mut raw_inventory:serde_json::Value=serde_json::from_slice(&input).unwrap();
+        raw_inventory["release"]=json!("macos26-arm64-data-2");
+        let historical_inventory=serde_json::to_vec(&raw_inventory).unwrap();
+        let selection=ReleaseSetData::parse_for_target_data(&serde_json::to_vec(&json!({"schemaVersion":2,
+            "current":{"profile":"fixed-macos26-arm64-maintenance-v2","packageIdentifier":paths::PACKAGE_ID,
+                "bundleIdentifier":paths::BUNDLE_ID,"packageVersion":"0.2.0","release":"macos26-arm64-data-2",
+                "sourceCommit":source,"protocolSha256":paths::PROTOCOL_SHA,"runtimeManifestSha256":manifest,
+                "inventorySha256":digest(&historical_inventory),"signingPolicySha256":"b".repeat(64),"packageSha256":"d".repeat(64)},
+            "acceptedPredecessors":[]})).unwrap(),MaintenanceTargetData::Arm64).unwrap();
+        let mut record:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+        record["release"]=raw_inventory["release"].clone(); record["packageVersion"]=json!("0.2.0");
+        record["inventory"]["bytes"]=json!(historical_inventory.len());
+        record["inventory"]["sha256"]=json!(digest(&historical_inventory));
+        let historical_record=serde_json::to_vec(&record).unwrap();
+        assert!(Record::parse_for_release_data(&historical_record,&historical_inventory,&expected,selection.current_data()).is_ok());
+        assert!(Record::parse_data(&historical_record,&historical_inventory,&expected).is_err());
+        assert!(Inventory::parse(&historical_inventory,&manifest).is_err());
+        assert!(Record::parse_for_release_data(&historical_record,&historical_inventory,
+            &Expected { kind:Kind::Fixture,..expected },selection.current_data()).is_err());
+        let mut changed=historical_inventory.clone(); changed.push(b' ');
+        assert!(Record::parse_for_release_data(&historical_record,&changed,&expected,selection.current_data()).is_err());
+        let positional=|value:&serde_json::Value, keys:&[&str]| serde_json::Value::Array(keys.iter().map(|key|value[*key].clone()).collect());
+        for (name,keys) in [("inventory",&["name","bytes","sha256"][..]),
+            ("installRoot",&["device","inode","mode","uid","gid","flags"][..]),
+            ("releaseDirectory",&["device","inode","mode","uid","gid","flags"][..])] {
+            let mut changed=record.clone(); changed[name]=positional(&record[name],keys);
+            assert!(Record::parse_for_release_data(&serde_json::to_vec(&changed).unwrap(),&historical_inventory,&expected,selection.current_data()).is_err());
+        }
+        let mut changed=raw_inventory.clone();
+        changed["files"][0]=positional(&raw_inventory["files"][0],&["path","sha256","size","executable"]);
+        assert!(Inventory::parse_for_release(&serde_json::to_vec(&changed).unwrap(),&manifest,"macos26-arm64-data-2").is_err());
+
+        // A C binary comparing a torn B attempt must encode B's selected tuple,
+        // but the torn attempt's own instance and current directory identities.
+        let torn = Expected { install_root:identity(41), release_directory:identity(42), ..expected };
+        let selected_bytes = Record::encode_for_release_data(&"e".repeat(32), &historical_inventory,
+            &torn, selection.current_data()).unwrap();
+        let selected_record = Record::parse_for_release_data(&selected_bytes, &historical_inventory,
+            &torn, selection.current_data()).unwrap();
+        assert_eq!(selected_record.instance(), "e".repeat(32));
+        assert_eq!(selected_record.install_root, identity(41));
+        assert_eq!(selected_record.release_directory, identity(42));
+        assert_eq!(selected_record.package_version, "0.2.0");
+        assert_eq!(selected_record.phase, "inventory-recorded");
+        assert!(Record::parse_data(&selected_bytes, &historical_inventory, &torn).is_err());
+        assert!(Record::parse_for_release_data(&selected_bytes, &historical_inventory,
+            &expected, selection.current_data()).is_err());
+        assert!(Record::encode_for_release_data(&"e".repeat(32), &input,
+            &torn, selection.current_data()).is_err());
+        assert!(Record::encode_for_release_data(&"e".repeat(32), &historical_inventory,
+            &Expected { source_commit:&"f".repeat(40), ..torn }, selection.current_data()).is_err());
+        assert!(Record::encode_for_release_data(&"e".repeat(32), &historical_inventory,
+            &Expected { runtime_manifest:&"f".repeat(64), ..torn }, selection.current_data()).is_err());
+        for invalid_instance in ["".to_owned(), "0".repeat(32), "e".repeat(4096)] {
+            assert!(Record::encode_for_release_data(&invalid_instance, &historical_inventory,
+                &torn, selection.current_data()).is_err());
+        }
+        let mut compiled:serde_json::Value=serde_json::from_slice(&selection.encode_data().unwrap()).unwrap();
+        compiled["current"]["release"]=json!(paths::RELEASE);
+        compiled["current"]["packageVersion"]=json!(paths::PACKAGE_VERSION);
+        compiled["current"]["protocolSha256"]=json!(paths::PROTOCOL_SHA);
+        compiled["current"]["inventorySha256"]=json!(digest(&input));
+        let target=if paths::RELEASE.starts_with("macos26-arm64-") { MaintenanceTargetData::Arm64 }
+            else { MaintenanceTargetData::Intel };
+        compiled["current"]["profile"]=json!(match target {
+            MaintenanceTargetData::Arm64=>"fixed-macos26-arm64-maintenance-v2",
+            MaintenanceTargetData::Intel=>"fixed-macos26-x86_64-maintenance-v2" });
+        let compiled=ReleaseSetData::parse_for_target_data(&serde_json::to_vec(&compiled).unwrap(),target).unwrap();
+        assert_eq!(Record::encode_for_release_data(&"d".repeat(32), &input, &expected,
+            compiled.current_data()).unwrap(), bytes);
     }
     fn progress_preserves_partial_native_returns_and_never_mints_finality_data() {
         let mut progress=Progress::default();
@@ -339,6 +482,21 @@ mod tests {
                 wrong["files"].as_array_mut().unwrap().sort_by(|a,b|a["path"].as_str().cmp(&b["path"].as_str()));
                 assert!(Inventory::parse(&serde_json::to_vec(&wrong).unwrap(),&manifest).unwrap().index().is_err());
             }
+        }
+        // Historical authenticated inventories remain parseable. Only this
+        // new fixed executable joins the closed list; current-role admission
+        // must separately require its genuine signed original.
+        for (path,executable,accepted) in [(REMOVER,true,true),(REMOVER,false,false),
+            (paths::HISTORY_PROVIDER_INVENTORY_PATH,true,true),(paths::HISTORY_PROVIDER_INVENTORY_PATH,false,false),
+            (paths::GITHUB_SEAL_INVENTORY_PATH,true,true),(paths::GITHUB_SEAL_INVENTORY_PATH,false,false),
+            ("runtime/tools/gh-other",true,false),
+            ("app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-github-seal-other",true,false),
+            ("app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-macos-remove-other",true,false)] {
+            let mut changed=original.clone();let rows=changed["files"].as_array_mut().unwrap();
+            rows.push(json!({"path":path,"sha256":"b".repeat(64),"size":1,"executable":executable}));
+            rows.sort_by(|a,b|a["path"].as_str().cmp(&b["path"].as_str()));
+            let bytes=serde_json::to_vec(&changed).unwrap();
+            assert_eq!(Inventory::parse(&bytes,&manifest).unwrap().index().is_ok(),accepted);
         }
     }
     #[test] fn closed_record_tuple_inventory_and_nonfinality() { closed_record_tuple_inventory_and_nonfinality_data(); }

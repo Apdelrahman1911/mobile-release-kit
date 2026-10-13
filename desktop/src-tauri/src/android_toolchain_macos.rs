@@ -14,6 +14,10 @@ use crate::{android_build_protocol::{MacToolchainSelection, RootIdentity, Toolch
     android_toolchain_macos_policy::{self as policy, Alias, FileSpec, Inventory, Provider, Registration}};
 
 type Result<T> = std::result::Result<T, Failure>;
+fn current_native_profile() -> Result<crate::android_build_protocol::Profile> {
+    crate::android_build_protocol::Profile::current()
+        .filter(|profile| policy::native_catalog_supports(*profile)).ok_or(Failure::Inventory)
+}
 const LIVE_FDS: usize = 64; // Separate tool budget; never widens runtime's 48.
 const ORIGINALS: usize = policy::ENTRY_LIMIT + 256;
 const READ_LIMIT: u64 = 2 * policy::TOTAL_LIMIT + 2 * (policy::MANIFEST_LIMIT + policy::RECORD_LIMIT + policy::PROVIDER_LIMIT) as u64;
@@ -237,6 +241,9 @@ impl AndroidToolchainSlots {
         self.check(index,end,Some(stop))?;Ok(out)
     }
     fn native_file(&mut self,index:usize,spec:&FileSpec,prefix:&[u8],inventory:Option<&Inventory>,end:Instant,stop:&watch::Receiver<bool>) -> Result<()> {
+        let profile=current_native_profile()?;
+        let authority=crate::android_native_macos_profile::authority(profile).ok_or(Failure::Inventory)?;
+        if inventory.is_some_and(|inventory|!inventory.matches_profile(profile)){return Err(Failure::Inventory);}
         if inventory.is_some() {
             if policy::android_target_elf(spec,prefix).map_err(|_|Failure::Inventory)?
                 || policy::gradle_foreign_launcher(spec).map_err(|_|Failure::Inventory)? {return Ok(());}
@@ -252,7 +259,7 @@ impl AndroidToolchainSlots {
             return Ok(());
         }
         let architecture=if sdk.is_some_and(|kind|kind.legacy()) {policy::MachArchitecture::X86_64}
-            else {policy::MachArchitecture::Arm64};
+            else {authority.architecture()};
         let mandatory=spec.mode&0o111!=0 || spec.path.ends_with(".dylib") || spec.path.ends_with(".jnilib");
         let recognizable=prefix.starts_with(&[0xcf,0xfa,0xed,0xfe]) || prefix.starts_with(&[0xfe,0xed,0xfa,0xcf])
             || prefix.starts_with(&[0xca,0xfe,0xba,0xbe]) || prefix.starts_with(&[0xca,0xfe,0xba,0xbf]);
@@ -263,7 +270,7 @@ impl AndroidToolchainSlots {
         let body=self.region(index,slice.offset,bytes.checked_add(32).ok_or(Failure::Bounds)?,end,stop)?;
         let commands=policy::native_commands(&body,slice,architecture).ok_or(Failure::Inventory)?;
         let accepted=match inventory {
-            Some(inventory)=>policy::local_loads(&spec.path,&commands,inventory),
+            Some(inventory)=>policy::local_loads_for(profile,&spec.path,&commands,inventory),
             None=>commands.loads.iter().all(|load|policy::system_load(load))
                 && commands.rpaths.iter().all(|path|policy::OS_ROOTS.contains(&path.as_str()) || policy::system_load(path)),
         };
@@ -349,7 +356,8 @@ impl AndroidToolchainSlots {
         if self.inspection_started || self.closed || self.arm_entered || self.frame.is_some() {return Err(Failure::AlreadyUsed);}
         self.inspection_started=true;
         // Same original blocking inspector, already registered before GO.
-        let result=self.arm_once(end,stop).and_then(|_|self.inspect_inner(intent,end,stop));
+        let result=current_native_profile().and_then(|_|self.arm_once(end,stop))
+            .and_then(|_|self.inspect_inner(intent,end,stop));
         if let Err(failure)=result {self.fail(failure);}
         result
     }
@@ -367,7 +375,7 @@ impl AndroidToolchainSlots {
         let (inventory,provider)=self.read_bound_content(root,&selected,&record,intent,end,stop)?;
         // Full recovery/Start requires genuine supplier correspondence as well
         // as the existing complete file, launcher, load and OS-provider checks.
-        crate::android_supplier_macos::admit(&inventory,&intent.content_data().supplier_record)
+        crate::android_supplier_macos::admit_for(current_native_profile()?,&inventory,&intent.content_data().supplier_record)
             .map_err(|_|Failure::Inventory)?;
         let membership=Membership::new(&inventory);
         let mut seen=BTreeSet::new();
@@ -410,13 +418,14 @@ impl AndroidToolchainSlots {
     /// It compares copied totals, not copied+sealed-provider read-budget totals.
     fn read_bound_content(&mut self,root:usize,selected:&MacToolchainSelection,record:&[u8],intent:&Intent,
         end:Instant,stop:&watch::Receiver<bool>) -> Result<(Inventory,Provider)> {
-        if !Registration::parse(record,selected.owner_uid,&selected.instance).is_some_and(|r|r.matches(selected)){
+        let profile=current_native_profile()?;
+        if !Registration::parse_for(profile,record,selected.owner_uid,&selected.instance).is_some_and(|r|r.matches_for(profile,selected)){
             return Err(Failure::Inventory);
         }
         let provider_raw=self.header(root,policy::PROVIDER,policy::PROVIDER_LIMIT,&selected.os_provider_sha256,end,stop)?;
-        let provider=Provider::parse(&provider_raw,selected).ok_or(Failure::Inventory)?;
+        let provider=Provider::parse_for(profile,&provider_raw,selected).ok_or(Failure::Inventory)?;
         let manifest_raw=self.header(root,policy::MANIFEST,policy::MANIFEST_LIMIT,&selected.inventory_sha256,end,stop)?;
-        let inventory=policy::parse_manifest(&manifest_raw,selected).ok_or(Failure::Inventory)?;
+        let inventory=policy::parse_manifest_for(profile,&manifest_raw,selected).ok_or(Failure::Inventory)?;
         let payload_bytes=inventory.data.files.iter().try_fold(0u64,|n,f|n.checked_add(f.size)).ok_or(Failure::Bounds)?;
         let metadata_bytes=(record.len() as u64).checked_add(provider_raw.len() as u64)
             .and_then(|n|n.checked_add(manifest_raw.len() as u64)).ok_or(Failure::Bounds)?;
@@ -459,7 +468,7 @@ impl AndroidToolchainSlots {
         if !self.inspected || self.closed || self.unknown || self.first_failure().is_some() {return Err(Failure::Unknown);}
         let id=self.root.and_then(|i|self.originals[i].identity).ok_or(Failure::Identity)?;
         let selected=self.selected.as_ref().ok_or(Failure::Inventory)?;
-        ToolchainBinding::new_macos_data(&selected.root_data(),RootIdentity {device:id.device.to_string(),inode:id.inode.to_string(),
+        ToolchainBinding::new_macos_data(current_native_profile()?,&selected.root_data(),RootIdentity {device:id.device.to_string(),inode:id.inode.to_string(),
             mode:u32::from(id.mode),uid:id.uid,gid:id.gid},selected).map_err(|_|Failure::Inventory)
     }
     pub(crate) fn check_before_spawn(&mut self,end:Instant,stop:&watch::Receiver<bool>) -> Result<()> {
@@ -576,7 +585,7 @@ impl AndroidMetadataSlots{
         end:Instant,stop:&watch::Receiver<bool>)->Result<MetadataCandidate>{
         if self.started || self.original.closed{return Err(Failure::AlreadyUsed);}
         self.started=true;
-        let result=self.original.arm_once(end,stop)
+        let result=current_native_profile().and_then(|_|self.original.arm_once(end,stop))
             .and_then(|_|self.inspect_inner(key,account,generation,intent,end,stop));
         if let Err(failure)=result{self.original.fail(failure);}result
     }
@@ -595,7 +604,7 @@ impl AndroidMetadataSlots{
         if id.gid!=0 || id.mode&0o7777!=0o555{return Err(Failure::Ownership);}
         self.original.check(root,end,Some(stop))?;
         let (record_sha256,record)=self.original.header_raw(root,policy::RECORD,policy::RECORD_LIMIT,end,stop)?;
-        let parsed=Registration::parse(&record,account,&instance).ok_or(Failure::Inventory)?;
+        let parsed=Registration::parse_for(current_native_profile()?,&record,account,&instance).ok_or(Failure::Inventory)?;
         let selected=MacToolchainSelection{instance,owner_uid:account,catalog_generation:generation,
             record_sha256,inventory_sha256:parsed.inventory_sha256,os_provider_sha256:parsed.os_provider_sha256};
         if !selected.valid(){return Err(Failure::Inventory);}
@@ -634,6 +643,19 @@ mod inert_arm_tests {
     }
     pub(super) fn android_catalog_constructor_is_inert_and_lost_frame_return_is_not_finality_data() {
         // Control DATA only: no SnapshotBook constructor/native API is called.
+        assert_eq!(current_native_profile().ok(), crate::android_build_protocol::Profile::current()
+            .filter(|profile|policy::native_catalog_supports(*profile)));
+        // Compiled catalogue DATA is not current-host or native-execution proof.
+        for (profile, architecture) in [
+            (crate::android_build_protocol::Profile::MacArm64, policy::MachArchitecture::Arm64),
+            (crate::android_build_protocol::Profile::MacX64, policy::MachArchitecture::X86_64),
+        ] {
+            let authority=crate::android_native_macos_profile::authority(profile)
+                .expect("compiled macOS profile DATA authority");
+            assert_eq!(authority.profile(),profile);
+            assert_eq!(authority.architecture(),architecture);
+        }
+        assert!(crate::android_native_macos_profile::authority(crate::android_build_protocol::Profile::LinuxX64).is_none());
         let end=Instant::now()+Duration::from_secs(30);
         let (_send,read)=watch::channel(end);
         let mut catalog=AndroidCatalogSlots::new(read);

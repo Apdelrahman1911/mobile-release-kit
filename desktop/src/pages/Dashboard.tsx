@@ -28,7 +28,7 @@ const setupHelp: HelpContent = {
   why: 'Keep suggested values, an editable draft, and an explicitly confirmed file save separate.',
   where: 'Choose your app’s project folder, then use Project settings. Suggested values come from the core; check them against your app and Store accounts.',
   format: 'Use the labeled fields and file pickers. Each field has its own help; no terminal commands or manual file placement are required for these steps.',
-  failure: 'Nothing changes just by opening this guide. Invalid or changed files require another review. Unavailable save or version controls stay unavailable; this guide does not create workflows, metadata or a release.',
+  failure: 'Nothing changes just by opening this guide. Invalid or changed files require another review. Unavailable save or version controls stay unavailable; the separate Review initialization action creates a complete local configuration/caller/metadata skeleton only after explicit confirmation. It does not build or release an app.',
 };
 
 function SavedVersionCard({ state, reason, onRead, onHelp }: {
@@ -59,9 +59,10 @@ function SavedVersionCard({ state, reason, onRead, onHelp }: {
   </section>;
 }
 
-export function Dashboard({ session, info, preview, chooseDisabled, chooseReason, refreshReason, releaseVersionState, releaseVersionReason, versionEditor, configSaveState, onReadVersion, onChoose, onRefresh, onNavigate, onHelp }: {
+export function Dashboard({ session, info, preview, chooseDisabled, chooseReason, refreshReason, releaseVersionState, releaseVersionReason, versionEditor, initializationPanel, configSaveState, onReadVersion, onChoose, onRefresh, onNavigate, onHelp }: {
   session: ProjectSession | null; info: AppInfo | null; preview: boolean; chooseDisabled: boolean; chooseReason: string | null; refreshReason: string | null;
   versionEditor: ReactNode;
+  initializationPanel: ReactNode;
   configSaveState: ConfigEditState;
   releaseVersionState: ReleaseVersionState; releaseVersionReason: string | null; onReadVersion: () => void;
   onChoose: () => void; onRefresh: () => void; onNavigate: (page: Page) => void; onHelp: (help: HelpContent) => void;
@@ -105,6 +106,7 @@ export function Dashboard({ session, info, preview, chooseDisabled, chooseReason
         </button>
       </details>
     </section>
+    {initializationPanel}
     <div className="summary-grid">
       <SavedVersionCard state={releaseVersionState} reason={releaseVersionReason} onRead={onReadVersion} onHelp={onHelp} />
       <div className="card summary-card"><div className="summary-label"><span>Configuration</span><Icon name="settings" size={18} /></div><strong className="summary-value compact-value">{status.label}</strong><p>{preview && session ? 'Inert example · not core validated' : config ? 'Policy and syntax are not release evidence' : 'No configuration facts assumed'}</p><div className="summary-foot"><Icon name="metadata" size={14} /><span>{configName}</span></div></div>

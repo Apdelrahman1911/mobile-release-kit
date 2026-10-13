@@ -49,10 +49,36 @@ feature unification. The existing OriginalWork coordinator registers the one
 blocking child before native admission; it owns launch, request GO, three pipes,
 absolute work/cleanup limits, the real child wait, and the actual worker join.
 
-Both reviewed Mac workflow jobs select Rust **1.98.1**, commit
-48a229ceaefd4985c50990b14116b6d856af0985; the native build script checks the
-actual selected compiler. The Apple Instant/CLOCK_UPTIME_RAW source binding
-is specific to that toolchain, not a promise about arbitrary future compilers.
+The ordinary installed/Aqua workflow tool selections remain separate from the
+native clock guard. That guard preserves Rust **1.98.1**, commit
+`48a229ceaefd4985c50990b14116b6d856af0985`, for both `aarch64-apple-darwin` and
+`x86_64-apple-darwin`; it additionally admits Rust **1.98.0**, commit
+`88d9e12ae178fab0fb5cc050a94da85685d449ea`, **only** for `x86_64-apple-darwin`.
+The three complete target/release/commit rows are closed SOURCE inputs, not an
+arbitrary compiler-version range or fallback. The original selected compiler
+query must succeed with bounded UTF-8 output and exactly one matching full
+release and commit-hash field. Cargo target cfg must be macOS/LP64/Apple/Unix.
+Existing supported cross-target builds are not replaced by a new host policy;
+the compiler-only CI caller independently checks its actual compiler host.
+
+The official Rust sources below are byte-identical at those two exact commits.
+Prefix each relative path with either pinned source root:
+- `https://raw.githubusercontent.com/rust-lang/rust/48a229ceaefd4985c50990b14116b6d856af0985/`
+- `https://raw.githubusercontent.com/rust-lang/rust/88d9e12ae178fab0fb5cc050a94da85685d449ea/`
+
+| Relative Rust SOURCE path | Bytes | SHA-256 at both commits |
+| --- | ---: | --- |
+| `library/std/src/sys/time/mod.rs` | 1125 | `449afdd86955252a302d889032a6cb2cbb04dd786f8cb81d9a9059ad933e7e4c` |
+| `library/std/src/sys/time/unix.rs` | 4999 | `2250ca181d117737d32734c50156a7a9e74852251a17bf70b2a002b8d6fbac43` |
+| `library/std/src/sys/pal/unix/time.rs` | 8303 | `963774dbbabd67a0a8264d7f1edf0faca0bbc4e064af6c2459371481a5888307` |
+
+Unix selection plus the Apple cfg chooses `CLOCK_UPTIME_RAW`; `Instant::now`
+passes that clock to `Timespec::now`, whose macOS path calls
+`libc::clock_gettime(clock, ...)`. The existing native helper uses the same
+clock; its original bracket, conversion, regression checks and deadlines are
+unchanged. This is specific standard-library SOURCE correspondence, not a
+promise about future compilers, a runtime timing measurement, or qualification
+of installation, signatures, service registration, process finality or UI.
 No shared global Rust toolchain or Windows/Linux profile is changed.
 
 Packaging order is helper build → hardened/empty-entitlements signature →
@@ -189,11 +215,23 @@ acceptance. Original runtime, document, input and owner admission still applies.
 - GitHub read-only and publisher-bound preflight/release profiles have separate
   selectors. A local workflow proposal grants no network or Store operation;
   profile selection is not live-service success or general network authority.
-- The project-relative P2 field picker remains closed in the normal Mac profile:
-  `INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED` is false. Browse for `version.source`,
-  `ios.project`, `ios.workspace`, and `metadata.root` is unavailable; manual text
-  entry remains. Project registration and the other selection profiles do not
-  qualify this separate gate.
+- The undelivered candidate selects the separate project-relative P2 profile:
+  `INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED` is true for ordinary-app validation.
+  Browse for `version.source`, `ios.project`, `ios.workspace`, and `metadata.root`
+  chooses existing descendants into the draft, without copying or Save; manual
+  text entry remains. Both Xcode fields are retained even when they conflict.
+  This availability is not qualification: exact-source AppKit/APFS refusal/owner
+  evidence and the ordinary two-case UI batch must pass before delivery.
+- The separate undelivered Android source-folder flag is true for ordinary-app
+  validation. Status refines only an otherwise-available Document/publisher gate
+  with the same cached selector already required by Choose; original Cancel and
+  the seven denial states are unchanged. The same two-case batch must genuinely
+  Browse JDK, SDK and Gradle, Cancel while retaining the selected JDK, replace it
+  with another inert directory, then observe backend SourceRefused after a real
+  native directory Open while retaining all prior selections. This does not
+  qualify supplier inspection, registration/protected copying, builds or native
+  link/wrong-kind handling. Exact enabled-source ordinary native evidence is
+  still required before delivery; no additional selection profile is enabled.
 
 The existing frontend/capability intersection is still used. None of these
 selectors, source tests or a successful build establishes the outstanding native
@@ -204,8 +242,11 @@ or product readiness. The separate evidence and signing limitations below remain
 
 The installed app is
 `/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app`.
-The runtime is
-`/Library/Application Support/MobileReleaseKit/versions/macos26-arm64-entry-m2a-01/runtime`.
+The candidate ARM64 runtime path is
+`/Library/Application Support/MobileReleaseKit/versions/macos26-arm64-desktop-01/runtime`
+(x86_64 selects `macos26-x86_64-desktop-01` instead). Both candidates use
+package version `0.1.1`; these names are not public release or native
+installation qualification.
 The historical supplier archive keeps its original label; it does not select the
 current installed release.
 
@@ -220,7 +261,7 @@ does not move. Helper authentication compares the actual executing payload to it
 static payload signature, never the entry signature. Android's `BundleProgram`
 remains payload-relative `Contents/Helpers/mrk-android-register`.
 
-The existing fresh-only Installer provisions or strictly admits the permanent
+The Installer provisions or strictly admits the permanent
 `maintenance-gate-v1` at the installation root: exact30B
 `MRK-MACOS-MAINTENANCE-GATE-v1\n`, root:wheel0444, one regular link, empty
 ACL/xattrs and protected local APFS ancestry. It never repairs, replaces or
@@ -372,17 +413,26 @@ successful installation, open Finder, choose **Go → Go to Folder**, enter
 `/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app`, and open
 the app. This does not require a terminal, copying assets or moving the bundle.
 
-The Environment page describes this fixed location and the current fresh-only
-installation policy. Its **Show in Finder** action accepts no renderer path and
+The Environment page describes this fixed location and the requirement for a
+verified Installer package. Its **Show in Finder** action accepts no renderer path and
 uses the ordinary user's fixed native Finder request under the original document
 lifecycle gate. “Request sent” does not prove Finder became visible or validate
 the installed bytes, signing, notarization, or release readiness.
 
-This engineering package does not yet repair, update or uninstall an occupied
-installation. Rerunning the same package is not a repair operation. Retain partial
-installation evidence; do not delete protected installation directories to bypass
-a refusal. These presentation changes do not add maintenance, a package wrapper,
-LaunchServices registration, auto-launch, or a privileged application process.
+The verified package, not the Environment card or preparation status, determines
+which action is eligible. The existing Installer can admit a fresh installation,
+leave an exact same-package installation unchanged, restore only a missing app at
+its fixed location, or update an explicitly authorized predecessor. These are not
+general repair or overwrite permissions: modified, partial or unknown trees may
+be refused. Retain partial-installation evidence and unknown files; do not delete
+protected directories to bypass a refusal. Uninstall is not yet available.
+
+The presentation contract uses `installMode: verified-package-required` and retains
+`maintenance: unavailable` and `assurance: profile-description-only`. It grants no
+Installer authority and is not evidence of package signing, notarization, successful
+installation or native qualification. **Prepare and quit** only prepares the current
+app; any later package operation must independently authenticate its inputs and
+acquire its own maintenance ownership.
 
 ## Installer entry and bounded diagnostics
 
@@ -571,10 +621,10 @@ with historical protocol
 Those facts remain supplier provenance, not current-core or native acceptance.
 The unchanged historical `runtime` subcommand still enforces that old profile.
 
-The ordinary installed and Aqua product workflows both bind the independently
-reviewed current-payload DATA:
-- M (manifest): `2903a7576902c5a4a76d9ef7360c432421da68b55fea97149eae376200ca70f3`.
-- S (source inputs): `13da9bec462c6430e78521f76e26cd552bee6be17f5b2828a1e9dcc1c8b2b659`.
+An earlier current-payload DATA snapshot (historical, not today's fresh
+supplier workflow nomination) bound the following independently reviewed values:
+- M (manifest): `854740a4ef63a127d8884008a8f031b00961b81419ae2228376f2bb579399721`.
+- S (source inputs): `0abf9451b69602d6b3c03e631bedee18362461178bc985f5f5baf2c632ce69df`.
 - Q (protocol): `083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5`.
 
 Their existing `current-runtime` actions reuse only the accepted interpreter
@@ -586,7 +636,7 @@ requires explicit S/M before publishing the fresh final runtime. The subsequent
 historical default. Both packages use that one completed app/runtime inventory.
 
 The captured current-source roster is 151 inputs (139 core files, ten bootstraps,
-the committed CA and the preparation tool), totaling 3,764,765 bytes. The reviewed
+the committed CA and the preparation tool), totaling 3,766,874 bytes. The reviewed
 manifest is 82,988 bytes with 590 runtime-file records. The M/S values above bind
 that descriptor; workflow/guide-only consumer pin updates do not alter its payload
 closure. The accepted interpreter supplier is unchanged, so no interpreter source
@@ -598,11 +648,199 @@ The application is a normal Cargo-built Tauri bundled-asset binary in a standard
 `.app` wrapper (`Info.plist`, icon, `PkgInfo`). No CLI/plugin runner is added.
 The macOS Tauri overlay declares an active app and minimum 26.0. The narrow
 workflow assembles that same wrapper directly, avoiding a new Tauri-CLI build
-dependency. Its only ad-hoc signing commands target the completed app and the
-standalone Installer; the runtime lives **outside** the app and is never passed
-to codesign. A complete signed-app/runtime inventory is then passed explicitly
-into the installer build. That per-build inventory binds this build's completed
-output, not an arbitrary adjacent file, and grants no runtime/GUI qualification.
+dependency. In the earlier snapshot above, ad-hoc signing targeted the completed
+app and standalone Installer; the separate runtime was not re-signed. The
+configured derivation below now supplies the Python signature before M, not by
+mutating a completed runtime. A complete signed-app/runtime inventory is passed
+explicitly into the installer build. That per-build inventory binds this build's
+completed output, not an adjacent file, and grants no runtime/GUI qualification.
+
+## CI signing identity provisioning — implementation, not credential authority
+
+The runtime-signing shipping route, ordinary installed route, and the eleven
+package-producing Aqua scopes use the `macos-developer-id` GitHub environment.
+The credential-free runtime engineering route and the three nonpackage Aqua
+classification/private/lifecycle routes select `macos-engineering` and receive
+no signing secret. Repository administrators must independently configure the
+protected environment's permitted trusted verification branches, required
+reviewers and these two environment secrets:
+
+* `MRK_MACOS_DEVELOPER_ID_P12_BASE64`: canonical base64 of the owner-authorized
+  Developer ID Application identity PKCS12, at most32KiB decoded;
+* `MRK_MACOS_DEVELOPER_ID_P12_PASSWORD`: its nonempty bounded printable-ASCII
+  password. No secret or secret hash belongs in SOURCE, artifacts or a public
+  receipt. The public SOURCE profiles/certificates must independently match.
+
+An environment name in YAML is not proof that protection rules or credentials
+exist. Unconfigured profiles still refuse shipping before credential allocation;
+no ad-hoc fallback, guessed identity or future signed-capsule/M pin is supplied.
+Each secret-bearing combined build/sign step disables tracing and allexport and
+unexports both variables before its first child. Only the fixed packaging helper
+receives inline assignments; Cargo, rustc, stagers, native probes and unrelated
+children receive neither variable. No `$GITHUB_ENV`, exported job secret,
+workspace key file or cross-step keychain adoption is used.
+
+The existing original invocation owner provisions one private keychain per fixed
+signing purpose. Its240s ceiling is clipped to the original enclosing endpoint,
+with30s cleanup reserved inside that same ceiling, at most64 auxiliary calls per
+operation and16KiB private captures per call. Exact search-list/default originals
+are queried, and the user search list is temporarily restricted to the single
+private keychain only after exact public SOURCE identity/certificate admission.
+The default keychain is never changed. The ordered original list is restored and
+rechecked, then the private keychain is removed with the Security API. Each phase
+must finish all original closes and default/search-list POST before later work.
+Unknown/late/mutating/close results retain private state rather than adopt or
+delete an unproven object; they forbid further signing/probe/Installer dispatch
+and success. Public facts contain only fixed roles/status/finality, not private
+argv, search paths, output, passwords or credential hashes.
+
+The exclusive held0700 private root is outside the work/artifact roots. The one
+decoded PKCS12 has exact0600 mode, full original write/readback/POST/close and is
+removed before the signing callback. Opaque Security-created database/sidecar
+contents are never read: a bounded owned-single-link regular-file census permits
+readable metadata modes such as0644 under the private root, rejects special,
+executable and nonowner-write bits, and retains named/held/root identity checks.
+It does not assume every Security version creates0600 databases or chmod an
+unknown API result. Empty-root API cleanup and known closes are required.
+
+Existing code signing retains the exact Developer ID Application SHA1 and current
+flags/empty entitlement policy. Five fixed helper phases replace only the prior
+vault-helper/desktop-image/payload-app/root-app/root-installer signing commands;
+there is no arbitrary path/argv signer or `--deep`. The native package-producer
+copy is first ad-hoc signed/strictly verified and bound to its actual CDHash and
+unchanged compiled content, sealed0555, and only then admitted by exact `-T` plus
+its CDHash partition. It uses the same per-purpose keychain for the existing
+`SecIdentityCreateWithCertificate(NULL, sourceCertificate)` call. This is distinct
+from an unsigned or compiler-future executable permission grant. Public package
+original-call roles and the existing15-call emission/Installer sequence remain.
+
+This Application wiring remains separate from the Developer ID Installer public
+SOURCE nomination and S3 package-signing policy below. The bounded package producer
+still uses the Application identity and existing raw producer signature. This
+wiring alone adds no Apple ID/notary API key, `notarytool`, staple, Gatekeeper or
+distributable notarization claim. Genuine configured key discovery/use, signature
+verification, native emitter/Installer, final signed-runtime nomination/M and
+installed/Aqua journeys remain required. Credential-free hardened-runtime
+engineering results remain reusable for their exact executed SOURCE; they are
+not substituted for Developer ID, environment protection or notarization.
+
+## Python signature derivation before the final runtime manifest
+
+The fresh public CPython suppliers for both targets are already built, probed,
+and ad-hoc signed. Their six fixed receipt/TAR/source/run/attempt/artifact pins
+remain original supplier authority, not Developer ID or notarization evidence.
+The isolated `desktop-macos-python-runtime-signing.yml` workflow reuses those
+originals; it does not rebuild Python or modify either supplier artifact.
+
+Its two fixed refs select **engineering** or **configured shipping** explicitly.
+Both use the existing original-process owner, one private task, and an empty
+entitlements plist. Engineering signs ad-hoc with hardened runtime enabled,
+then runs the existing modules (including real libffi callbacks), loader, TLS,
+and cancellation probes on the exact signed bytes. Intel is tested first; a
+failure is not a reason to retry with broader entitlements. Neither
+`allow-jit`, `disable-library-validation`, nor
+`allow-unsigned-executable-memory` is automatically enabled. This credential-free
+behavior check publishes only bounded facts, never a shipping capsule or M.
+
+Configured shipping requires the existing SOURCE signing profiles and the exact
+configured Developer ID identity. It signs the one executable in a standalone
+owned slot with `--options runtime` and a timestamp, verifies the exact code
+requirement with `codesign --verify --strict --all-architectures`, and runs the
+same four native probes. There is no `--deep`, keychain discovery, ad-hoc
+fallback, or signer-selected entitlement exception. Missing credentials remain
+an external requirement; the path is implemented but no configured-signature,
+notarization, installation, or UI result is implied by its presence.
+
+Only `python/bin/python3` may differ. The complete original TAR/header/content
+inventory is checked before copying; every other resource byte is preserved.
+Inputs, SOURCE, copied files, and their held directory identities are checked
+again after the original calls. Only known originals authorize the bounded
+read-only-to-cleanup directory transition and task retirement; uncertain
+operation/close/retirement outcomes withhold all capsule authority. No command
+can start after retirement begins. Successful shipping exports exactly
+`python3` and a <=16KiB `python-signed-receipt.json`, and the outer original zero
+exit is required before the workflow uploads that capsule.
+
+The existing `describe-current-runtime` and `current-runtime` commands optionally
+accept this **complete** additional input group:
+
+```
+--signed-python FILE --signing-receipt FILE
+--expected-signed-python SHA256 --expected-signing-receipt SHA256
+--expected-signing-source COMMIT --expected-signing-run RUN_ID
+--expected-signing-attempt ATTEMPT
+```
+
+The original fresh `--python-root`, `--supplier-receipt`, and
+`--expected-supplier` inputs remain mandatory. The group cannot be mixed with
+the historical archive route or partially supplied. It binds the fixed original
+supplier6, independently nominated derivation source/run/hashes, configured
+profiles, one-file correspondence, and exact native-evidence/finality roster;
+receipt booleans alone never authorize a signature. DATA staging does not invoke
+the signed executable or treat the capsule as installation authority.
+
+The substituted bytes enter the unchanged current-runtime preparer **before**
+it computes M. The original supplier inventory and receipt retain their own
+identities; the derived signature has separate provenance. S still covers the
+same current-core/bootstrap/CA preparation inputs. A signed executable changes
+M, so existing ARM/Intel ad-hoc S/M observations cannot be reused as the signed
+M. Both inputs and signatures are rechecked after final publication; partial
+outputs after a failed POST are inadmissible, not a retry candidate. The ordinary
+installed/Aqua callers must never sign a runtime after freezing M or claim
+shipping readiness from the engineering workflow.
+
+### Fixed consumer nomination and transport
+
+The independent SOURCE file
+`desktop/macos-installed-inputs/python-signed-runtime-binding.json` selects the
+capsule. Its strict schema contains both fixed targets; each row is either
+exactly `{"state":"unconfigured"}` or a configured signing source commit,
+run/attempt/artifact IDs, signed Python and receipt hashes, S/M, and both existing
+identity-profile hashes. The committed initial rows are **unconfigured**. They
+contain no guessed future hashes, IDs, signatures or M. An unconfigured selected
+target fails before payload/dependency downloads or compilation; an unconfigured
+other target does not block it. There is no fallback to ad-hoc M, latest artifacts
+or a neighboring receipt. The credential-free engineering signer remains
+independent of this nomination.
+
+This file is deliberately separate from the producer identity profile: embedding
+a receipt hash in that profile would change a digest already sealed by the
+receipt. The signing producer's commit/run are also distinct from the later
+consuming app commit and its current S. Original supplier6 remain unchanged.
+Configure a row only after independently reviewing the real capsule's original
+native signing/probe/finality evidence and exact two-file correspondence, then
+describing its signed M with the existing seven explicit capsule arguments.
+`describe-current-runtime` can do that DATA work before nomination; its output
+must not be automatically adopted by a shipping job. A later nomination-only
+commit does not reclassify or recreate the original native signing evidence.
+
+After checkout and fixed DATA-Python setup, ordinary/preview and the eleven Aqua
+current-runtime scopes use `runtime-signing-selection --target` to read the
+nomination and profiles. Only its small closed public tuple is exported to fixed
+environment keys. M comes from that SOURCE tuple; the independent literal S,
+protocol and original supplier6 checks remain. Nonruntime Aqua scopes do not
+read the nomination. The source/tool record retains both the consuming commit
+and the selected signing tuple plus nomination digest, never conflating them.
+
+Each caller downloads the original supplier and exactly one separately pinned
+capsule artifact, by fixed repository/run/artifact IDs and with digest mismatch
+refusal. `project-signed-python --target --transport-root DIR --output DIR`
+reads exactly `python3` and `python-signed-receipt.json`, checks their configured
+hashes and all original no-follow names/identities/owners/EOF/POST/closes, and
+uses a new read-only output with modes 0555/0444. Downloaded originals are never
+rewritten or executed. Extra entries, links, wrong modes, overlap, replacement,
+partial output or unknown close refuse; failed output is retained unqualified,
+not cleaned up or retried. This projection is DATA, not signature validation.
+
+Both final `current-runtime` callers require `--configured-signing` plus the
+complete seven capsule arguments above. The selected tuple/profiles and original
+supplier are checked before work allocation and again across final publication;
+unchanged receipt validation establishes one-file correspondence before prepare
+computes M. The configured M must match those actual signed bytes. Receipt
+booleans or nomination state alone grant no signature, installation or shipping
+authority. Genuine identity/key availability, real signed capsule and M, and
+ordinary/installed/Aqua/notarization qualification are still separate obligations.
+
 
 ## Existing owners and native originals
 
@@ -642,8 +880,8 @@ Mac project discovery never creates an asset session or enables C/P2.
 registers the workflow without merging unverified code into default main; it is
 not a broad push trigger or an automatic retry. Both expected and Installer
 source bind to `github.sha`, with exact event/ref/workflow-source/path checks,
-nonroot disposable ARM64 macOS26 admission and literal accepted current M/S/Q
-with separate 64-hex/equality guards. Permissions remain read-only and checkout
+nonroot disposable ARM64 macOS26 admission, independently fixed S/Q and
+SOURCE-nominated signed M with separate 64-hex/equality guards. Permissions remain read-only and checkout
 retains no credentials. There is no release/Store action, new descriptor or
 interpreter rebuild.
 
@@ -741,3 +979,182 @@ and compiler-runtime/component correspondence, thirteen notice sufficiency,
 Developer ID/notarization/quarantine, upgrades, Intel and older macOS remain
 separate, unresolved delivery obligations. No legal/distribution clearance is
 implied by adding notices or by an engineering package.
+
+## S2: notarize the completed payload before fixing Installer inventory
+
+The ordinary Installer and packaging Aqua routes now call the existing
+`macos_android_helper_package.py notarize-payload --target <fixed-target>`
+phase instead of calling the stager's `input` CLI directly. This is a
+**configured shipping prerequisite**, not an engineering/ad-hoc success path.
+The public `desktop/packaging/macos-notary-service.json` now nominates the
+reviewed Developer ID Application team and the owner's public App Store Connect
+team API `keyId` and canonical `issuerId`; it never contains a private key.
+This public enrollment is not proof of authentication, API permission, accepted
+notarization or native stapler compatibility; those remain unverified here. The
+only configured shape has the five fields `schemaVersion`, `mode`
+(`app-store-connect-team-key`), `teamId`, `keyId`, and `issuerId`.
+
+The existing protected job environment supplies the separate
+`MRK_MACOS_NOTARY_API_KEY_BASE64` secret only on the input-binding step. Shell
+tracing and allexport are disabled and the variable is unexported before any
+child; only the one helper invocation receives it. No Developer ID P12 is
+present in this phase, and its preceding signing keychain context has already
+restored and closed. No `store-credentials`, persistent notary keychain
+profile, Apple-ID password, custom JWT, or private key in a command argument
+is used. The helper writes bounded PKCS#8 PEM-shape bytes to its exclusive
+0700 private directory/0400 original file, passes only that pathname and
+SOURCE public key identifiers to Apple's tools, and closes/removes the same
+original key before any staple call. The shape check is not cryptographic
+validation; real authentication belongs to Apple. Unknown writes, returns,
+closes, restoration, or cleanup forbid success and preserve uncertain state.
+
+The fixed phase first checks the selected configured signed-runtime
+nomination/capsule, current S/M, both signed app identities, and complete
+current stager input. It creates only a disposable private input copy; during
+its same-parent app rename only that copy's parent is temporarily writable,
+and it is restored to 0555 before any native child. Signed original code,
+source/runtime bytes, and the readonly child keep their original modes.
+Only the private submission copy is named `MobileReleaseKit.app`; the original
+and installed `Mobile Release Kit.app`, signed contents and identifiers are
+unchanged. This filename is not notarization evidence; genuine acceptance and
+the original validation gates below remain required.
+One bounded ZIP carries the copied whole outer app (including its nested
+payload app) and separate runtime. The fixed original Xcode toolchain is
+independently bound; `xcrun --find` cannot select another tool or location.
+
+The successful original role sequence is exactly thirteen: resolve
+notarytool, resolve stapler, verify inner, verify outer, create ZIP, submit
+with `--wait --output-format json`, retrieve the same-ID log, staple inner,
+validate inner, staple outer, validate outer, verify inner again, verify
+outer again. A zero-return terminal `Invalid` retrieves one bounded same-ID
+log only for diagnosis and remains a refusal. Nonzero, malformed, unknown,
+or late originals do not enter that diagnostic branch. Only terminal
+`Accepted` plus a bound error-free log may proceed to stapling.
+
+After each staple the same original tree may have only its one named ticket
+addition: `Contents/CodeResources`, or
+`Contents/Helpers/MobileReleaseKitPayload.app/Contents/CodeResources`.
+All other file hashes/identities/modes and directory identity/rosters must
+match. Each ticket is nonexecuting and at most 1 MiB, and the actual original
+`stapler validate` and strict code verification must return zero. These paths
+are a strict, authoritative-source-informed nomination, **not evidence of a
+native output shape until actually observed**; different real output is a
+refusal, not silently accepted. The unchanged S1 DATA API receives that exact
+observed pair and builds the final input and complete inventory only then.
+M still names the already-signed runtime; inventory I now includes the ticket
+bytes before compiling the one-shot Installer. Neither is a final-package
+signature, notarization, DMG carrier, registration, or installed-app claim.
+
+One nonrenewed 1800-second endpoint contains 1740 seconds of work and a
+60-second finality reserve. The fixed thirteen role ceilings total 1710
+seconds and are clipped against the remaining endpoint, including capture
+and POST work. The existing input step has a 32-minute outer ceiling; the
+Installer job remains 300 minutes with the exact 38 step ceilings now
+summing to 295. Aqua uses 180 minutes for doctor, 105 for the other
+packaging scopes, and retains 75 for nonpackaging scopes. This does not renew
+or extend the existing package990/Installer120/private-keychain240 budgets.
+The existing 512 MiB/2048-file input bound remains; ZIP is at most 576 MiB and
+a 2 GiB reservation is required above a conservative 3 GiB free-space floor.
+
+Raw notary responses, upload ZIP, key, private input copy, and native capture
+files are not added to artifact upload globs. Only the finite, bounded
+`android-helper-notarize-payload.json` receipt is explicitly published. Its
+`passed` field is provisional until the original Python caller exits zero
+with every original/capture/POST/close and known-only retirement complete;
+`productReady` and installed/native qualification flags stay false. The
+stdout contract remains the final stager input JSON (at most 2048 bytes).
+
+The smallest real proof is one configured ordinary ARM payload phase after
+SOURCE review and the focused inert tests, using actual authorized signing
+and App Store Connect credentials. Without those external credentials only
+fail-closed/local contract evidence exists. A successful payload phase still
+requires later final PKG signing/notarization/stapling before P/producer
+signature, and separate final DMG carrier work; it is not a deliverable by
+itself and does not waive those remaining phases.
+
+### Final Installer package signing and notarization (S3)
+
+The `finalize-package` phase uses the existing fixed `Operation` / `run_owned`
+originals after `pkgbuild` and the complete root-owned Scripts XAR reconstruction.
+That reconstruction now produces `package-unsigned/MobileReleaseKit.pkg`, not P.
+The separate public `macos-installer-signing.json` profile now nominates the
+observed Developer ID Installer common name, Team `7CGZ2343AA`, leaf SHA1 and
+distinct leaf/issuer/root SHA256 values, with the three exact public DER originals
+under `macos-installer-certificates/`. The Installer shares the Application team
+but has a different leaf; this public SOURCE selection supplies no private key.
+The named `macos-developer-id` environment supplies the
+separate `MRK_MACOS_INSTALLER_P12_BASE64` / `MRK_MACOS_INSTALLER_P12_PASSWORD`
+pair and the existing team P8 API-key secret only to this fixed helper call.
+The Application P12 is not supplied to this phase or substituted for it.
+
+The separate one-time `desktop-macos-installer-certificate-enrollment.yml`
+workflow is restricted to `verify/desktop-macos-installer-certificate-enrollment`
+and the named `macos-developer-id` environment. That name does not establish
+reviewer or branch protection. It uses only the two Installer secret names to
+extract the single public DER leaf nominated by SHA1
+`2176c921a318fd50510672b92022813c4e617fbd`; the Application nomination is unchanged.
+The fixed helper extracts certificates only, performs an exact DER roundtrip,
+and completes private-file cleanup before retaining only `leaf.der` for one day.
+It never imports a keychain identity, extracts a private key, signs, or submits
+to Apple. Bootstrap success is not Team/Installer-role/chain/private-key proof.
+The nominated leaf came from successful run `38052182326`, attempt `1`, artifact
+`11669776299`, at source `afd7f20e1d896a08866592ca87fb39c86c7c8cee`.
+Public inspection observed the exact Installer CN/Team, critical Installer marker
+`1.2.840.113635.100.6.1.14` (DER NULL), and EKU `1.2.840.113635.100.4.13`.
+The retained public recipe checked every critical extension before an explicit
+OpenSSL `-ignore_critical` chain/current-time/basic-constraints check against the
+independently pinned Developer ID G2 issuer and original Apple Root CA. That
+cryptographic check does not enforce the Apple marker/proprietary EKU semantics
+or establish native Apple policy, system trust, revocation, or private-key use.
+Public nomination cannot replace the existing native `pkgSign` check, actual
+`productsign` and `pkgutil --check-signature` signing/system-trust/timestamp
+qualification, notarization, or final-package verification.
+
+An exclusive task-private keychain admits only the fixed `productsign` and
+Security clients, the single selected private-key identity and exact public
+chain. The local `verify-cert -r` check deliberately selects a SOURCE anchor;
+it does not establish system trust or change trust settings. Independent
+`pkgutil --check-signature` must report a system-trusted signature and trusted
+timestamp with the complete exact SOURCE chain, both before and after stapling.
+The Installer scope retires before the potentially long P8 submission. The P8
+original retires before stapling. No secret is passed to build/Installer/image
+children, printed, hashed into evidence or uploaded.
+
+Nine fixed primary roles and twenty successful Security auxiliary calls share
+one1800s deadline (1740s work,60s finality); submit is capped1200s, signing60s,
+and other calls30s. There is no polling/retry or nonzero/unknown acceptance.
+Only terminal Accepted plus its same-job bounded log, actual stapler validation
+and complete PackageInfo/uid0:gid0 Scripts audit permit publication. Optional
+container ticket-row metadata is a finite nonauthority annotation, never a
+signature or native-code grant. Stapling must append at most1MiB to the SAME
+held signed original, with every preexisting byte matching the retained PRE
+SHA256 and all other identity/mode/owner/parent rules preserved. Replacement,
+unexpected metadata, unknown close or late completion retains/refuses instead
+of inventing a compatible writer. Two additional worst-case package copies
+are reserved inside a2GiB storage allowance above the existing3GiB free floor.
+
+Only the complete validated package is sealed0444 and published under a fresh
+`package-final/`. The following `package-install` requires the actual prior
+helper0, held `package-finalization.status`, the closed <=16KiB
+`android-helper-finalize-package.json` receipt, current SOURCE/profile/role/target
+and full immutable package hash, then repeats the original Scripts audit before
+computing P or invoking the producer. `producer.json` / `producer.sig` remain
+sidecars outside P. No later signing/stapling of that package is allowed.
+Receipts remain scoped observations with product/developer-ID-qualified flags
+false; they do not substitute for the original caller status or final delivery.
+
+Within the unchanged990s package-install group, each existing distribution and
+observation DMG sign/strict-verify pair now has its own short Application
+credential scope; neither relies on the already-retired producer keychain or
+an ambient key. The successful aggregate is22 producer auxiliary calls plus
+19+19 image calls =60 under the same global64 limit, not64 per scope. Native
+image creation/verification and Installer stay outside these private scopes.
+This signs the original images but does not claim final carrier notarization;
+the separate S4 successor must preserve these originals and their receipt.
+
+The ordinary workflow budgets one added32-minute step (39steps/sum327/job332);
+Aqua packaging branches become doctor212/other137 minutes, with nonpackaging75
+unchanged. Only the closed final-P receipt and original status join the existing
+explicit artifact list. Actual Developer ID keys, Apple submission results,
+writer compatibility and native installed validation remain external/runtime
+obligations; local DATA tests do not supply them.

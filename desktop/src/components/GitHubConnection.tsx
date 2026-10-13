@@ -51,12 +51,12 @@ export function GitHubConnection({ state, controller, onHelp, repositoryInput, o
         <Icon name="github" size={24} />
       </SectionHeading>
       <div className="notice notice-info" role="status"><Icon name="shield" size={18} /><div>
-        <strong>{entryReady ? 'Session-only, read-only GitHub connection' : 'Credential entry is not available now'}</strong>
+        <strong>{entryReady ? 'Session-only GitHub connection · read-only Connect' : 'Credential entry is not available now'}</strong>
         <p id={reasonId}>{!GITHUB_CONNECTION_ENTRY_AVAILABLE ? 'Advanced token entry is not qualified for this build. Safe Status and original-session retirement do not enable it.' :
           !projectSelected ? 'Select your application project first.' : !state.context ? 'Enter the explicit application repository below.' :
           state.helpState !== 'current' ? 'Reload current core guidance before entering a token.' :
           state.status && !state.status.capability.readOnlySessionAvailable ? GITHUB_CONNECTION_REASON_HELP[state.status.capability.reason] :
-          entryReady ? 'Only account, repository and bounded Actions metadata are read. No Store access, repository writes or workflow dispatch.' :
+          entryReady ? 'Connecting reads only account, repository and bounded Actions metadata. Connecting alone performs no Store access, repository write or workflow dispatch. Settings below require separate review and confirmation.' :
           'An original session or uncertain operation is retained. Read its Status; retire it before making a new connection.'} No GitHub App registration is needed for a session-only token. App/device login remains separately unavailable. No project credential asset is reused.</p>
       </div></div>
       <div className="field-label-row"><label htmlFor={repositoryId}>{repositoryHelp?.label ?? 'Explicit application repository'}</label><Badge>Required for connection</Badge>
@@ -78,7 +78,7 @@ export function GitHubConnection({ state, controller, onHelp, repositoryInput, o
           {tokenHelp && <HelpButton content={helpContent(tokenHelp)} onHelp={onHelp} />}</div>
         <input ref={tokenInput} id={tokenId} type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={4096}
           aria-describedby={`${tokenId}-help`} required />
-        <p id={`${tokenId}-help`} className="save-note">{tokenHelp?.what} {tokenHelp?.where} {tokenHelp?.format} Use only the minimum read access described in Help. The value is handed to the native session once, then this field is cleared immediately. It is not saved in project files or an asset vault. Disconnect is local retirement, not remote token revocation.</p>
+        <p id={`${tokenId}-help`} className="save-note">{tokenHelp?.what} {tokenHelp?.where} {tokenHelp?.format} Use the minimum permissions for your intended actions: the existing read permissions for Connect, plus only the separate Administration permission described below if using repository settings. The value is handed to the native session once, then this field is cleared immediately. It is not saved in project files or an asset vault. Disconnect is local retirement, not remote token revocation.</p>
         <button type="submit" className="button primary"><Icon name="key" size={17} />Connect for read-only observations</button>
       </form>}
       {state.helpState !== 'current' && <p className="review-caution" role="status">{state.helpState === 'previous' ? 'Previously loaded help is retained for reading only; it does not enable entry.' : 'Core connection help is unavailable; entry remains disabled.'}</p>}
@@ -120,9 +120,11 @@ export function GitHubConnection({ state, controller, onHelp, repositoryInput, o
       </div>
       <p className="save-note">Busy rejects new Connect/Refresh, not retained Status or exact-session Disconnect. A lost reply is not permission to retry. Disconnect requests local retirement, not remote revocation, native settlement or credential erasure.</p>
     </section>
-    <section className="card" aria-label="Remote GitHub setup unavailable">
-      <SectionHeading title="Remote setup — unavailable" description="Local workflow Apply does not push files or grant remote authority."><Icon name="lock" size={22} /></SectionHeading>
-      <p>This read-only connection section does not write repository settings or dispatch workflows. The separate nonpublishing preflight panel has its own native qualification, exact caller review and one-use consent. Secrets, variables, environments and protections are not remotely configured here; the administrator checklist and release readiness remain unverified.</p>
+    <section className="card" aria-label="Remote setup limits and permissions">
+      <SectionHeading title="Remote setup limits and separate permissions" description="Local workflow Apply does not push files or grant remote authority."><Icon name="lock" size={22} /></SectionHeading>
+      <p>The separate Authenticated release history panel below reads one exact run, attempt, release stage and platform only after you select Start. It uses this original session and clean saved project settings, with Contents and Actions read access for the selected repository. Connect alone does not read History. Local Status and Cancel do not poll GitHub or cancel a remote workflow. Missing native runtime or attestation provider stays unavailable; authenticated retained workflow evidence is not current Store state or permission to promote.</p>
+      <p>For repository-setting previews, GitHub requires repository Administration (read). Applying a reviewed change requires Administration (write) for that repository. A successful connection does not prove these permissions. Keep the token limited to the intended repository and permissions. Existing connection read permissions still apply; this is not a request to grant every permission.</p>
+      <p>Connecting checks your account and repository without changing them. Repository settings below require a separate preview and confirmation. Connecting alone never changes settings or starts a workflow. The separate nonpublishing preflight panel has its own native qualification, exact caller review and one-use consent. The separate settings panel can review only its fixed environment fields with explicit confirmation. The separate settings card can also preview one supported assigned secret only when its actual native runtime and fixed sealing helper are available. It never accepts raw secret text. Environments/secret permissions are separate from Administration and are checked for that operation; the five mapped nonsecret variables have a separate explicit preview showing their desired text and require actual native variable support, not the sealing helper. Unsupported recordless inputs remain unavailable. GitHub acceptance cannot verify a secret value; administrator bypass, complete environment protection and release readiness remain unverified.</p>
     </section>
   </>;
 }

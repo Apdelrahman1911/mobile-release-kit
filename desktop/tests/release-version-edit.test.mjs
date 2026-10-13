@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import guideResource from '../../src/mobile_release/api/data/release-version-help-v1.json' with { type: 'json' };
+import { parseSavedTextRecoveryView, parseSavedTextRecoveryProjection, savedTextRecoveryEffect, savedTextRecoverySucceeded } from '../src/savedTextRecovery.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
 import { previewApi } from '../src/preview.ts';
@@ -77,7 +78,7 @@ function harness({ raw = ORIGINAL, opened = checkout(raw), nativeStatus = status
     subscribeReleaseVersionEdit: async (receive) => { listener = receive; calls.push({ kind: 'subscribe' }); return () => { listener = null; }; },
     releaseVersionEditStatus: () => { calls.push({ kind: 'status' }); return reads.length ? reads.shift().promise : Promise.resolve(clone(registry)); },
     openReleaseVersionEdit: (input) => request('open', input), prepareReleaseVersionEdit: (input) => request('prepare', input),
-    applyReleaseVersionEdit: (sessionId, planToken) => request('apply', { sessionId, planToken }), closeReleaseVersionEdit: (sessionId) => request('close', { sessionId }),
+    applyReleaseVersionEdit: (sessionId, planToken, intent) => request('apply', intent === undefined ? { sessionId, planToken } : { sessionId, planToken, intent }), closeReleaseVersionEdit: (sessionId) => request('close', { sessionId }),
   };
   const controller = new ReleaseVersionEditController({ selectedProject: selected, project: (id) => workspace.projects[id] ?? null,
     otherEditReason: () => other, otherOperationReason: () => operation, now: () => clock,
@@ -394,4 +395,323 @@ test('App explicitly fans every version save boundary into passive/read/build/of
   assert.ok(action >= 0); assert.ok(action < app.indexOf('workspaceReducer(', action));
   assert.match(app, /versionEdit\.snapshotIntent\(projectId\)/);
   assert.match(app, /versionEdit\.beginConnection\(\)/);
+});
+
+// Fresh-process recovery transport/controller DATA only. No journal is created
+// or inspected by these fixtures; core/native restart evidence stays separate.
+const RECOVERY = { session: 'f'.repeat(32), revision: '1'.repeat(32), plan: '2'.repeat(32), transaction: '3'.repeat(32) };
+function recoveryView(action = 'rollback', absent = false) {
+  const facts = (text) => { const value = digest(text); return { byteLength: value.bytes, sha256: value.sha256, mode: 0o640 }; };
+  const before = absent ? null : facts(ORIGINAL), after = facts('VERSION_NAME=2.3.4\nBUILD_NUMBER=8\n');
+  const effect = action === 'rollback' ? absent ? 'remove_new' : 'restore_original' : action === 'committed_cleanup' ? 'keep_committed' : 'preserve';
+  return { schemaVersion: 1, kind: 'saved-text-recovery', domain: 'release_version', state: 'recoverable', reason: 'none',
+    action, transactionId: RECOVERY.transaction, selection: { source: SOURCE, nameKey: 'VERSION_NAME', buildKey: 'BUILD_NUMBER', iosEnabled: true },
+    files: [{ path: SOURCE, effect, before, after }], privateCleanup: { fileCount: 4, directoryCount: 1, scope: 'inspected-owned-journal-only' } };
+}
+function recoveryProjection(phase, view = recoveryView(), options = {}) {
+  const prepared = view.state === 'recoverable' && ['reviewing', 'applying', 'finalizing', 'final', 'unknown'].includes(phase);
+  return { domain: 'release_version', projectId: 'p', sessionId: RECOVERY.session, ownerGeneration: ID.window,
+     phase, reviewRemainingMs: 900000, checkout: null, prepared: null,
+    recovery: { checkout: phase === 'opening' ? null : { revision: RECOVERY.revision, view: clone(view) },
+      prepared: prepared ? { revision: RECOVERY.revision, planToken: RECOVERY.plan, view: clone(view) } : null },
+    applySubmitted: prepared && ['applying', 'finalizing', 'final', 'unknown'].includes(phase),
+    coreOutcome: phase === 'final' ? { effect: view.action ? savedTextRecoveryEffect(view.action) : 'not_started', journal: 'clean', resources: 'settled', reason: 'none' } : null,
+    nativeReason: 'none', nativeFinality: phase === 'final' ? 'settled' : phase === 'unknown' ? 'unknown' : 'pending', lateSettled: false, ...options };
+}
+function inspectRecovery(h, view = recoveryView()) {
+  const before = h.count('prepare');
+  assert.equal(h.controller.inspectRecoveryReason(), null); assert.equal(h.controller.inspectRecovery(), true);
+  assert.deepEqual(h.last('open').args, { projectId: 'p', intent: 'recover' });
+  assert.equal(h.controller.inspectRecovery(), false);
+  h.publish(recoveryProjection('opening', view)); h.publish(recoveryProjection('editing', view));
+  assert.equal(h.count('prepare'), before + (view.state === 'recoverable' ? 1 : 0));
+  if (view.state === 'recoverable') {
+    assert.deepEqual(h.last('prepare').args, { sessionId: RECOVERY.session, revision: RECOVERY.revision, intent: 'recover' });
+    h.publish(recoveryProjection('reviewing', view));
+    const binding = h.controller.currentRecoveryApplyBinding(); assert.ok(binding); return binding;
+  }
+  return null;
+}
+
+test('release_version recovery uses exact intent variants in existing commands; normal shapes and preview refusal stay unchanged', async () => {
+  const open = { projectId: 'p', intent: 'recover' }, prepare = { sessionId: RECOVERY.session, revision: RECOVERY.revision, intent: 'recover' },
+    apply = { sessionId: RECOVERY.session, planToken: RECOVERY.plan, intent: 'recover' };
+  for (const [command, value] of [['release_version_edit_open', open], ['release_version_edit_prepare', prepare], ['release_version_edit_apply', apply]]) {
+    assert.equal(versionEditRequestFits(command, value), true);
+    for (const key of ['root', 'source', 'platform', 'locale', 'fields', 'values', 'expectedBaseline', 'action', 'force'])
+      assert.equal(versionEditRequestFits(command, { ...value, [key]: 'forbidden' }), false);
+    assert.equal(versionEditRequestFits(command, { ...value, intent: 'recover-again' }), false);
+  }
+  const calls = [], api = createNativeApi('native', async (command, args) => { calls.push({ command, args }); return status(); });
+  await api.openReleaseVersionEdit(open); await api.prepareReleaseVersionEdit(prepare); await api.applyReleaseVersionEdit(RECOVERY.session, RECOVERY.plan, 'recover');
+  assert.deepEqual(calls, [{ command: 'release_version_edit_open', args: open }, { command: 'release_version_edit_prepare', args: prepare }, { command: 'release_version_edit_apply', args: apply }]);
+  await api.applyReleaseVersionEdit(ID.session, ID.plan);
+  assert.deepEqual(calls.at(-1).args, { sessionId: ID.session, planToken: ID.plan });
+  await assert.rejects(api.applyReleaseVersionEdit(ID.session, ID.plan, 'wrong')); assert.equal(calls.length, 4);
+  await assert.rejects(previewApi.openReleaseVersionEdit(open));
+  await assert.rejects(previewApi.prepareReleaseVersionEdit(prepare));
+  await assert.rejects(previewApi.applyReleaseVersionEdit(RECOVERY.session, RECOVERY.plan, 'recover'));
+});
+
+test('release_version recovery VIEW is closed, bounded and separate from normal checkout/Save', () => {
+  for (const action of ['rollback', 'committed_cleanup', 'rolled_back_cleanup', 'preparing_cleanup']) {
+    const view = recoveryView(action); assert.ok(parseSavedTextRecoveryView(view, 'release_version'));
+    const owner = recoveryProjection('reviewing', view); assert.ok(parseSavedTextRecoveryProjection(owner, 'release_version'));
+    assert.ok(parseVersionEditStatus(status(1, owner))); assert.equal(normalVersionEditResult(recoveryProjection('final', view)), null);
+  }
+  for (const mutate of [(v) => { v.domain = 'metadata_text'; }, (v) => { v.schemaVersion = 2; },
+    (v) => { v.rawText = 'never-export'; }, (v) => { v.reason = 'exception text'; }, (v) => { v.action = 'continue_save'; },
+    (v) => { v.transactionId += '\n'; }, (v) => { v.files[0].path = '/absolute/path'; }, (v) => { v.files[0].effect = 'save_draft'; },
+    (v) => { v.files[0].before = null; v.files[0].after = null; }, (v) => { v.files[0].after.mode = 512; },
+    (v) => { v.files[0].after.sha256 += '\n'; }, (v) => { v.files[0].after.byteLength = 65537; },
+    (v) => { v.files.push(clone(v.files[0])); }, (v) => { v.privateCleanup.fileCount = 15; },
+    (v) => { v.privateCleanup.directoryCount = 12; }, (v) => { v.privateCleanup.scope = 'whole-project'; }]) {
+    const value = recoveryView(); mutate(value); assert.equal(parseSavedTextRecoveryView(value, 'release_version'), null);
+  }
+  for (const key of ['state', 'reason', 'action', 'transactionId']) {
+    const invalid = recoveryView(); invalid[key] = [invalid[key]];
+    assert.equal(parseSavedTextRecoveryView(invalid, 'release_version'), null);
+  }
+  for (const key of ['phase', 'nativeReason', 'nativeFinality']) {
+    const invalid = recoveryProjection('reviewing'); invalid[key] = [invalid[key]];
+    assert.equal(parseSavedTextRecoveryProjection(invalid, 'release_version'), null);
+  }
+  for (const key of ['effect', 'journal', 'resources', 'reason']) {
+    const invalid = recoveryProjection('final'); invalid.coreOutcome[key] = [invalid.coreOutcome[key]];
+    assert.equal(parseSavedTextRecoveryProjection(invalid, 'release_version'), null);
+  }
+  for (const mutate of [(v) => { delete v.recovery; }, (v) => { v.checkout = { revision: RECOVERY.revision }; },
+    (v) => { v.prepared = { planToken: RECOVERY.plan }; }, (v) => { v.recovery.prepared.planToken = RECOVERY.revision; },
+    (v) => { v.recovery.prepared.view.files[0].after.byteLength += 1; }, (v) => { v.recovery.checkout.view.domain = 'foreign'; }]) {
+    const owner = recoveryProjection('reviewing'); mutate(owner); assert.equal(parseVersionEditStatus(status(1, owner)), null);
+  }
+  let invoked = 0; const value = recoveryView(); Object.defineProperty(value, 'files', { enumerable: true, get() { invoked += 1; return []; } });
+  assert.equal(parseSavedTextRecoveryView(value, 'release_version'), null); assert.equal(invoked, 0);
+  const a = recoveryProjection('reviewing'), b = clone(a); b.recovery.checkout.view.files[0].after.sha256 = '4'.repeat(64);
+  b.recovery.prepared.view = clone(b.recovery.checkout.view); assert.ok(parseVersionEditStatus(status(2, b))); assert.equal(versionProjectionProgress(a, b), false);
+});
+
+test('version recovery needs no normal checkout and never invents a source or Create baseline', async () => {
+  for (const absent of [false, true]) {
+    const h = await connected(); h.controller.setHelp(null);
+    const view = recoveryView('rollback', absent), binding = inspectRecovery(h, view);
+    assert.equal(h.controller.selectedEntry(), null); assert.equal(h.state.edit.attempt, null); assert.equal(h.count('apply'), 0);
+    assert.equal(binding.view.files[0].effect, absent ? 'remove_new' : 'restore_original');
+    assert.equal(h.controller.applyRecovery({ ...binding, planToken: ID.plan }), false);
+    assert.equal(h.controller.applyRecovery({ ...binding, domain: 'metadata_text' }), false);
+    assert.equal(h.controller.applyRecovery({ ...binding, projectId: 'other' }), false);
+    assert.equal(h.controller.applyRecovery(binding), true); assert.equal(h.controller.applyRecovery(binding), false);
+    assert.deepEqual(h.last('apply').args, { sessionId: RECOVERY.session, planToken: RECOVERY.plan, intent: 'recover' });
+    h.publish(recoveryProjection('final', view)); assert.equal(h.controller.selectedEntry(), null); h.controller.dispose();
+  }
+});
+
+test('version recovery waits for original Close and preserves dirty/newer values and all four historical effects', async () => {
+  for (const action of ['rollback', 'committed_cleanup', 'rolled_back_cleanup', 'preparing_cleanup']) {
+    const h = await connected(); await openSaved(h); h.controller.editField('name', '9.9.9');
+    assert.equal(h.controller.inspectRecovery(), false); assert.equal(h.count('open'), 1);
+    h.controller.requestClose(); assert.equal(h.controller.inspectRecovery(), false); assert.equal(h.count('close'), 1);
+    h.closeFinal(); const before = clone(h.controller.selectedEntry()), retained = h.state.edit.attempt, settings = clone(h.workspace);
+    const view = recoveryView(action), binding = inspectRecovery(h, view); assert.equal(h.count('apply'), 0);
+    assert.equal(h.controller.discard(h.controller.resetBinding()), false); assert.equal(h.controller.reload(h.controller.resetBinding()), false);
+    assert.equal(h.controller.applyRecovery(binding), true); h.controller.editField('build', '99');
+    h.publish(recoveryProjection('final', view));
+    const after = h.controller.selectedEntry(); assert.equal(h.state.edit.recovery.succeeded, true);
+    assert.equal(savedTextRecoverySucceeded(h.state.edit.recovery), true);
+    assert.deepEqual(after.original, before.original); assert.equal(after.baselineGeneration, before.baselineGeneration);
+    assert.deepEqual(after.values, { name: '9.9.9', build: '99' }); assert.equal(after.revision, before.revision + 1);
+    assert.deepEqual(after.outcome, before.outcome); assert.equal(after.stale, true); assert.deepEqual({ ...h.state.edit.attempt, projectionRevision: retained.projectionRevision }, retained);
+    assert.ok(h.state.edit.attempt.projectionRevision >= retained.projectionRevision); // Later status may re-observe the same normal outcome.
+    assert.deepEqual(h.workspace, settings); assert.deepEqual(h.boundaries, ['p', 'p']); assert.equal(h.count('open'), 2);
+    assert.equal(currentVersionApplyBinding(h.state), null); assert.notEqual(h.controller.reviewReason(), null);
+    // Only explicit existing discard-confirmed Reload adopts fresh normal data.
+    h.original(ORIGINAL, checkout(), '4'.repeat(32)); assert.equal(h.controller.reload(h.controller.resetBinding()), true);
+    h.publish(h.owner('editing')); assert.deepEqual(h.controller.selectedEntry().values, { name: '1.2.3', build: '7' });
+    assert.equal(h.controller.selectedEntry().stale, false); h.controller.dispose();
+  }
+});
+
+test('release_version recovery stale context, navigation, service and expiry cannot revive frozen confirmation', async () => {
+  for (const change of [(h) => { h.controller.setVisible(false); h.controller.setVisible(true); }, (h) => { h.controller.beginConnection(); }, (h) => { h.add('q'); h.dispatch({ type: 'switch', projectId: 'p' }); }, (h) => { h.controller.beforeWorkspaceAction({ type: 'snapshot-start', projectId: 'p', requestId: 99 }); }, (h) => { h.advance(900001); h.controller.recoveryTick(); }, (h) => { h.controller.selectionIntent(); }]) {
+    const h = await connected(), binding = inspectRecovery(h);
+    change(h); assert.equal(h.controller.canApplyRecovery(binding), false); assert.equal(h.controller.applyRecovery(binding), false);
+    assert.equal(h.count('apply'), 0); assert.equal(h.count('close'), 1); assert.equal(h.state.edit.recovery.invalidated, true);
+    h.publish(recoveryProjection('reviewing')); assert.equal(h.controller.canApplyRecovery(binding), false);
+    assert.equal(h.count('prepare'), 1); h.controller.dispose();
+  }
+});
+
+test('release_version recovery late Open can only close, and lost Apply reply observes once without resubmitting', async () => {
+  const late = await connected(); assert.equal(late.controller.inspectRecovery(), true);
+  late.controller.setVisible(false); late.publish(recoveryProjection('editing'));
+  assert.equal(late.count('close'), 1); assert.equal(late.count('prepare'), 0); assert.equal(late.count('apply'), 0);
+  late.controller.setVisible(true); assert.equal(late.controller.currentRecoveryApplyBinding(), null); late.controller.dispose();
+  const h = await connected(), binding = inspectRecovery(h); assert.equal(h.controller.applyRecovery(binding), true);
+  h.publish(recoveryProjection('applying')); const reads = h.count('status');
+  h.last('apply').reject({ code: 'BridgeLost' }); await flush();
+  assert.equal(h.count('status'), reads + 1); assert.equal(h.count('apply'), 1); assert.equal(h.count('open'), 1); assert.equal(h.count('prepare'), 1);
+  assert.equal(h.controller.applyRecovery(binding), false);
+  h.publish(recoveryProjection('final')); assert.equal(h.state.edit.recovery.succeeded, true); h.controller.dispose();
+});
+
+test('release_version recovery clears only its matched submitted success; conflicts, idle and inspected discard retain attention', async () => {
+  for (const ending of ['idle', 'legacy_journal', 'incomplete_journal', 'invalid_journal', 'foreign_journal', 'dependency_changed', 'target_changed', 'discard', 'success']) {
+    const h = await connected(); await reviewing(h); const n = currentVersionApplyBinding(h.state); h.controller.apply(n);
+    h.publish(h.owner('final', { coreOutcome: { effect: 'committed', journal: 'recovery_required', resources: 'settled', reason: 'filesystem_error' } }));
+    assert.deepEqual(h.state.edit.recoveryProjects, ['p']);
+    const view = recoveryView('committed_cleanup');
+    if (!['discard', 'success'].includes(ending)) Object.assign(view, { state: ending === 'idle' ? 'idle' : 'conflict', reason: ending === 'idle' ? 'none' : ending,
+      action: null, transactionId: null, selection: null, files: [], privateCleanup: { fileCount: 0, directoryCount: 0, scope: 'inspected-owned-journal-only' } });
+    const prepares = h.count('prepare'), binding = inspectRecovery(h, view);
+    if (ending === 'success') {
+      assert.equal(h.controller.applyRecovery(binding), true);
+      h.other('Another domain retains its own journal');
+      h.publish(recoveryProjection('final', view)); assert.equal(h.state.edit.recovery.succeeded, true);
+      assert.deepEqual(h.state.edit.recoveryProjects, []); assert.equal(h.controller.inspectRecoveryReason(), 'Another domain retains its own journal');
+    } else {
+      assert.equal(h.state.edit.recovery.succeeded, false); assert.equal(h.count('prepare'), prepares + (ending === 'discard' ? 1 : 0));
+      h.controller.requestRecoveryClose(); const previous = h.state.edit.recovery.projection;
+      h.publish({ ...clone(previous), phase: 'final', nativeFinality: 'settled', nativeReason: 'discarded',
+        coreOutcome: { effect: ending === 'discard' ? 'committed' : 'not_started', journal: 'recovery_required', resources: 'settled', reason: 'none' } });
+      assert.equal(h.state.edit.recovery.succeeded, false); assert.deepEqual(h.state.edit.recoveryProjects, ['p']);
+      assert.equal(h.controller.currentRecoveryApplyBinding(), null);
+    }
+    h.controller.dispose();
+  }
+});
+
+test('release_version recovery refusal/failure/unknown or altered original plans cannot clear native or journal blocks', async () => {
+  const blocked = await connected(); blocked.other('Other original owner'); assert.equal(blocked.controller.inspectRecovery(), false);
+  blocked.other(null); const binding = inspectRecovery(blocked); blocked.other('Other original owner');
+  assert.equal(blocked.controller.applyRecovery(binding), false); assert.equal(blocked.count('apply'), 0); blocked.controller.dispose();
+  for (const kind of ['failed', 'unknown', 'mismatched-plan', 'wrong-success-effect']) {
+    const h = await connected(), consent = inspectRecovery(h);
+    assert.equal(h.controller.applyRecovery(consent), true);
+    if (kind === 'mismatched-plan') {
+      const result = recoveryProjection('final'); result.recovery.prepared.planToken = '4'.repeat(32); h.publish(result);
+      assert.equal(h.state.edit.integrityFailed, true); assert.equal(h.state.edit.recovery.succeeded, false);
+    } else if (kind === 'wrong-success-effect') {
+      const result = recoveryProjection('final'); result.coreOutcome.effect = 'committed'; h.publish(result);
+      assert.equal(h.state.edit.integrityFailed, true); assert.equal(h.state.edit.recovery.succeeded, false);
+    } else {
+      const result = recoveryProjection(kind === 'unknown' ? 'unknown' : 'final', recoveryView(), {
+        coreOutcome: { effect: 'rolled_back', journal: 'recovery_required', resources: kind === 'unknown' ? 'unknown' : 'settled', reason: 'filesystem_error' },
+        nativeReason: kind === 'unknown' ? 'cleanup_unknown' : 'none' });
+      h.publish(result, { reason: kind === 'unknown' ? 'cleanup_unknown' : 'available' });
+      assert.equal(h.state.edit.recovery.succeeded, false);
+      if (kind === 'unknown') {
+        const refined = clone(result); refined.lateSettled = true; refined.coreOutcome.resources = 'settled'; h.publish(refined);
+        assert.equal(h.state.edit.nativeBlocked, true); assert.equal(h.controller.inspectRecovery(), false);
+        assert.equal(h.state.edit.recovery.succeeded, false);
+      }
+    }
+    assert.equal(h.controller.applyRecovery(consent), false); assert.equal(h.count('apply'), 1); h.controller.dispose();
+  }
+});
+
+
+test('release_version recovery completion covers only older exact-context known replies and never newer attention', async () => {
+  const failedCore = { effect: 'committed', journal: 'recovery_required', resources: 'settled', reason: 'filesystem_error' };
+  const counts = (h) => ['open', 'prepare', 'apply', 'close'].map((kind) => h.count(kind));
+  // Resolve the actual retained normal Apply promise AFTER recovery succeeds.
+  // An isolated controller per case prevents a prior sticky flag masking a guard.
+  for (const kind of ['older', 'equal', 'later', 'foreign-project', 'foreign-window', 'custody', 'late-finality',
+    'unknown-companion', 'custody-companion', 'current-custody-companion', 'cleanup-capability',
+    'navigation-aba', 'snapshot-intent', 'selection-aba', 'service-aba']) {
+    const h = await connected(), normal = await reviewing(h);
+    assert.equal(h.controller.apply(normal), true); const pending = h.last('apply');
+    const failed = clone(h.publish(h.owner('final', { coreOutcome: clone(failedCore) })));
+    assert.deepEqual(h.state.edit.recoveryProjects, ['p']);
+    const view = recoveryView('committed_cleanup'), binding = inspectRecovery(h, view);
+    assert.equal(h.controller.applyRecovery(binding), true);
+    const done = clone(h.publish(recoveryProjection('final', view)));
+    assert.equal(h.state.edit.recovery.succeeded, true); assert.deepEqual(h.state.edit.recoveryProjects, []);
+    assert.equal(h.state.edit.recovery.projectionRevision, done.statusRevision);
+    const draft = clone(h.controller.selectedEntry()), priorCounts = counts(h), reply = clone(failed);
+    if (kind === 'equal') reply.statusRevision = done.statusRevision;
+    if (kind === 'later') reply.statusRevision = done.statusRevision + 1;
+    if (kind === 'foreign-project') { reply.lastTerminal.projectId = 'foreign'; reply.lastTerminal.sessionId = 'e'.repeat(32); }
+    if (kind === 'foreign-window') { reply.windowGeneration = '9'.repeat(32); reply.lastTerminal.ownerGeneration = reply.windowGeneration; }
+    if (kind === 'custody') { reply.lastTerminal.sessionId = 'e'.repeat(32); reply.lastTerminal.coreOutcome.reason = 'custody_unknown'; }
+    if (kind === 'late-finality') {
+      Object.assign(reply.lastTerminal, { sessionId: 'e'.repeat(32), phase: 'unknown', nativeFinality: 'unknown', nativeReason: 'cleanup_unknown', lateSettled: true });
+      reply.capability = { available: false, reason: 'cleanup_unknown' };
+    }
+    if (kind === 'unknown-companion') {
+      reply.active = h.owner('unknown', { sessionId: 'e'.repeat(32), nativeReason: 'cleanup_unknown', coreOutcome: {
+        effect: 'unknown', journal: 'unknown', resources: 'unknown', reason: 'custody_unknown' } });
+      reply.capability = { available: false, reason: 'cleanup_unknown' };
+    }
+    if (kind === 'custody-companion') {
+      reply.active = h.owner('applying', { sessionId: 'e'.repeat(32), coreOutcome: {
+        effect: 'not_started', journal: 'not_created', resources: 'unknown', reason: 'custody_unknown' } });
+    }
+    if (kind === 'current-custody-companion') h.emit(status(done.statusRevision + 1, h.owner('applying', { sessionId: 'e'.repeat(32), coreOutcome: {
+        effect: 'not_started', journal: 'not_created', resources: 'unknown', reason: 'custody_unknown' } }), done.lastTerminal));
+    if (kind === 'cleanup-capability') reply.capability = { available: false, reason: 'cleanup_unknown' };
+    if (kind === 'navigation-aba') { h.controller.setVisible(false); h.controller.setVisible(true); }
+    if (kind === 'snapshot-intent') h.controller.snapshotIntent('p');
+    if (kind === 'selection-aba') { h.controller.setSelectionPending(true); h.controller.setSelectionPending(false); }
+    if (kind === 'service-aba') { h.controller.beginConnection(); h.controller.setHelp(guideResource); await h.controller.connect(h.api); }
+    pending.resolve(reply); await flush();
+    assert.equal(h.state.edit.recovery.succeeded, true); // Historical result, not a reset of newer evidence.
+    assert.deepEqual(h.controller.selectedEntry(), draft); assert.deepEqual(counts(h), priorCounts);
+    if (kind === 'older') {
+      assert.deepEqual(h.state.edit.recoveryProjects, []);
+      assert.equal(h.state.edit.integrityFailed, false); assert.equal(h.state.edit.generationLost, false);
+      assert.equal(h.state.edit.nativeBlocked, false); assert.equal(h.state.edit.unknownEvidence, null);
+      assert.equal(versionOwnerReason(h.state, 'p'), null);
+    } else {
+      if (kind === 'equal') assert.equal(h.state.edit.integrityFailed, true);
+      else if (kind === 'late-finality') {
+        assert.equal(h.state.edit.nativeBlocked, true); assert.equal(h.state.edit.unknownEvidence.lateSettled, true);
+      } else {
+        assert.ok(h.state.edit.recoveryProjects.includes(kind === 'foreign-project' ? 'foreign' : 'p'), kind);
+        if (kind === 'foreign-window') assert.equal(h.state.edit.generationLost, true);
+        if (kind === 'unknown-companion') {
+          assert.equal(h.state.edit.nativeBlocked, true); assert.equal(h.state.edit.unknownEvidence.sessionId, 'e'.repeat(32));
+        }
+        if (kind === 'cleanup-capability') assert.equal(h.state.edit.nativeBlocked, true);
+      }
+      // Re-observing handled success cannot re-clear any newly retained block.
+      h.emit(done);
+      if (kind === 'equal') assert.equal(h.state.edit.integrityFailed, true);
+      else if (kind === 'late-finality') assert.equal(h.state.edit.nativeBlocked, true);
+      else assert.ok(h.state.edit.recoveryProjects.includes(kind === 'foreign-project' ? 'foreign' : 'p'), kind);
+      assert.deepEqual(counts(h), priorCounts);
+    }
+    h.controller.dispose();
+  }
+  for (const kind of ['newer-pending', 'newer-unrelated', 'success-with-active-pending', 'success-with-active-custody', 'context-after-submit',
+    'snapshot-after-submit', 'workspace-after-submit', 'shutdown-after-submit']) {
+    const h = await connected(), normal = await reviewing(h);
+    assert.equal(h.controller.apply(normal), true);
+    h.publish(h.owner('final', { coreOutcome: clone(failedCore) }));
+    const view = recoveryView('committed_cleanup'), binding = inspectRecovery(h, view);
+    assert.equal(h.controller.applyRecovery(binding), true); const pending = h.last('apply');
+    h.publish(recoveryProjection('applying', view));
+    const completed = status(h.frame.statusRevision + 1, null, recoveryProjection('final', view));
+    if (kind === 'newer-pending') h.emit(status(completed.statusRevision + 1, null, h.owner('final', { sessionId: 'e'.repeat(32), coreOutcome: clone(failedCore) })));
+    if (kind === 'newer-unrelated') h.emit(status(completed.statusRevision + 1));
+    if (kind === 'success-with-active-pending') {
+      // One publication can retain this success beside a newer active owner:
+      // revision equality alone must not clear that owner's pending journal.
+      completed.active = h.owner('applying', { sessionId: 'e'.repeat(32), coreOutcome: clone(failedCore) });
+    }
+    if (kind === 'success-with-active-custody') completed.active = h.owner('applying', { sessionId: 'e'.repeat(32), coreOutcome: {
+        effect: 'not_started', journal: 'not_created', resources: 'unknown', reason: 'custody_unknown' } });
+    if (kind === 'context-after-submit') { h.controller.setVisible(false); h.controller.setVisible(true); }
+    if (kind === 'snapshot-after-submit') h.controller.snapshotIntent('p');
+    if (kind === 'workspace-after-submit') h.controller.beforeWorkspaceAction({ type: 'snapshot-start', projectId: 'p', requestId: 99 });
+    if (kind === 'shutdown-after-submit') h.controller.shutdownIntent();
+    const priorCounts = counts(h); pending.resolve(completed); await flush();
+    assert.equal(h.state.edit.integrityFailed, false); assert.equal(h.state.edit.nativeBlocked, false);
+    assert.equal(h.state.edit.recovery.succeeded, true);
+    assert.equal(h.state.edit.recovery.projectionRevision, completed.statusRevision);
+    assert.deepEqual(h.state.edit.recoveryProjects, ['p'], kind);
+    assert.deepEqual(counts(h), priorCounts);
+    if (kind.startsWith('newer-')) assert.ok(h.state.edit.status.statusRevision > h.state.edit.recovery.projectionRevision);
+    else assert.equal(h.state.edit.status.statusRevision, h.state.edit.recovery.projectionRevision);
+    h.controller.dispose();
+  }
 });

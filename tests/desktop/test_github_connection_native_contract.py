@@ -112,6 +112,33 @@ class GitHubNativeWiringTests(unittest.TestCase):
         self.assertIn("document.github_connection_status()", relay)
         self.assertIn("github_connection_wire::EVENT", relay)
         self.assertEqual(relay.count("Duration::from_millis(100)"), 1)
+        # AppManifest generates permission definitions, not a main-window grant.
+        # Check these real, registered entrypoints as well as the original
+        # connection checks above. Native handlers still enforce their owners.
+        fixed = (
+            "project_initialization_open", "project_initialization_prepare",
+            "project_initialization_apply", "project_initialization_discard",
+            "project_initialization_status", "artifact_inspection_pick",
+            "artifact_inspection_prepare", "artifact_inspection_start",
+            "artifact_inspection_cancel", "artifact_inspection_status",
+            "artifact_inspection_discard",
+        )
+        for command in fixed:
+            self.assertEqual(handlers.count(command), 1)
+            self.assertEqual(build.count(f'"{command}"'), 1)
+            self.assertEqual(capability["permissions"].count("allow-" + command.replace("_", "-")), 1)
+        # This AppManifest is explicitly the main desktop-shell table, not
+        # every Rust function or fixture-only command. No absent/debug command
+        # is granted just to make another roster match. There are no exceptions
+        # in this current main table; the only separate grants are read events.
+        manifest = section(build, "const COMMANDS: &[&str] = &[", "];").split('"')[1::2]
+        self.assertTrue(manifest)
+        self.assertEqual(len(manifest), len(set(manifest)))
+        expected = {"allow-" + command.replace("_", "-") for command in manifest}
+        expected.update(("core:event:allow-listen", "core:event:allow-unlisten"))
+        self.assertEqual(len(capability["permissions"]), len(set(capability["permissions"])))
+        self.assertEqual(set(capability["permissions"]), expected)
+
 
     def test_real_document_retirement_and_exit_do_not_change_vault_lock_semantics(self):
         document = source("desktop/src-tauri/src/asset_session.rs")

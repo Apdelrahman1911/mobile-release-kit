@@ -412,16 +412,20 @@ export class OfflinePreflightController {
     if (!observer.active || sameOfflineIdentity(this.cancelClaim, identity)) return false;
     // Single local STOP claim. Lost cancellation replies are reconciled by the
     // original observer, never by automatic retries or replacement documents.
-    this.cancelClaim = id(identity);
+    const claim = id(identity);
+    this.cancelClaim = claim;
     this.update({ cancelClaimed: id(identity), consent: null });
+    // A later Prepare replaces this completion's routing token. Native terminal
+    // settlement may permit new work, but an old Cancel reply cannot retire it.
+    const current = () => observer.active && this.observer === observer && this.cancelClaim === claim;
     void (async () => {
       try {
         const value = await observer.api.cancelOfflinePreflight(identity.operationId, identity.ownerGeneration);
-        if (!observer.active) return;
+        if (!current()) return;
         const status = parseOfflinePreflightStatus(value);
         if (!status?.operation || !sameOfflineIdentity(status.operation, identity)) { this.fail({ code: 'offline_preflight_protocol' }, true); return; }
         this.receive(observer, status);
-      } catch (error) { if (observer.active) this.fail(error); }
+      } catch (error) { if (current()) this.fail(error); }
     })();
     return true;
   }

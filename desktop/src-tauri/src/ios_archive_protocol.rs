@@ -21,6 +21,7 @@ pub(crate) const EVENT: &str = "ios-archive-state-changed";
 pub(crate) const SCOPE: &str = "local-unsigned-ios-archive-observation";
 pub(crate) const SIGNED_SCOPE: &str = "local-signed-ios-artifact-validation";
 pub(crate) const TOOLCHAIN_PROFILE: &str = "ios-full-xcode-macos-arm64-v1";
+pub(crate) const X64_TOOLCHAIN_PROFILE: &str = "ios-full-xcode-macos-x86_64-v1";
 pub(crate) const IPC_LIMIT: usize = 8 * 1024;
 pub(crate) const REQUEST_LIMIT: usize = 32 * 1024;
 pub(crate) const RESPONSE_LIMIT: usize = 64 * 1024;
@@ -202,10 +203,21 @@ pub(crate) fn cancel(value: &Value) -> Result<Cancel, BridgeError> {
 pub(crate) fn status_request(value: &Value) -> Result<(), BridgeError> { if keys(value, &[]) { Ok(()) } else { Err(invalid()) } }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
-pub(crate) enum Profile { #[serde(rename = "macos-arm64")] MacArm64 }
-impl Profile { pub(crate) fn current() -> Option<Self> {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) { Some(Self::MacArm64) } else { None }
-} }
+pub(crate) enum Profile {
+    #[serde(rename = "macos-arm64")] MacArm64,
+    #[serde(rename = "macos-x86_64")] MacX64,
+}
+impl Profile {
+    pub(crate) fn current() -> Option<Self> {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) { Some(Self::MacArm64) }
+        else if cfg!(all(target_os = "macos", target_arch = "x86_64", target_pointer_width = "64")) { Some(Self::MacX64) }
+        else { None }
+    }
+    fn toolchain_profile(self) -> &'static str { match self {
+        Self::MacArm64 => TOOLCHAIN_PROFILE,
+        Self::MacX64 => X64_TOOLCHAIN_PROFILE,
+    } }
+}
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ToolIdentity {
@@ -239,20 +251,24 @@ pub(crate) struct ToolchainBinding {
 impl ToolchainBinding {
     /// Native produces comparison DATA from retained originals. This performs
     /// no IO, discovery or tool admission and is not a renderer constructor.
-    pub(crate) fn new_data(developer: &Path, developer_identity: RootIdentity, xcodebuild_identity: ToolIdentity,
+    pub(crate) fn new_data(profile: Profile, developer: &Path, developer_identity: RootIdentity, xcodebuild_identity: ToolIdentity,
         sdk: &Path, sdk_identity: RootIdentity) -> Result<Self, BridgeError> {
-        let value = Self { schema_version: 1, profile: TOOLCHAIN_PROFILE.into(),
+        let value = Self { schema_version: 1, profile: profile.toolchain_profile().into(),
             developer_dir: native_path(developer).ok_or_else(invalid)?.into(), developer_identity,
             xcodebuild_identity, sdk: native_path(sdk).ok_or_else(invalid)?.into(), sdk_identity };
         if !value.valid() { return Err(invalid()); } Ok(value)
     }
     fn valid(&self) -> bool {
         let prefix = format!("{}/Platforms/iPhoneOS.platform/Developer/SDKs/", self.developer_dir);
-        self.schema_version == 1 && self.profile == TOOLCHAIN_PROFILE && self.developer_identity.valid()
+        self.schema_version == 1 && matches!(self.profile.as_str(), TOOLCHAIN_PROFILE | X64_TOOLCHAIN_PROFILE)
+            && self.developer_identity.valid()
             && self.xcodebuild_identity.valid() && self.sdk_identity.valid()
             && native_path(Path::new(&self.developer_dir)).is_some() && native_path(Path::new(&self.sdk)).is_some()
             && self.developer_dir.starts_with("/Applications/") && self.developer_dir.ends_with(".app/Contents/Developer")
             && self.sdk.strip_prefix(&prefix).is_some_and(|s| !s.contains('/') && s.ends_with(".sdk"))
+    }
+    fn matches_profile(&self, profile: Profile) -> bool {
+        self.valid() && self.profile == profile.toolchain_profile()
     }
 }
 pub(crate) fn request(operation: &str, generation: &str, context: &Context, profile: Profile,
@@ -269,7 +285,7 @@ pub(crate) fn request_signed(operation: &str, generation: &str, context: &Contex
 fn request_data(operation: &str, generation: &str, context: &Context, profile: Profile,
     project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding,
     signing: Option<(&SigningToolBindings, &Content)>) -> Result<Vec<u8>, BridgeError> {
-    if !token(operation) || !token(generation) || !context.valid() || context.recovery() || !toolchain.valid()
+    if !token(operation) || !token(generation) || !context.valid() || context.recovery() || !toolchain.matches_profile(profile)
         || context.signed() != signing.is_some()
         || signing.is_some_and(|(tools, comparison)| !tools.valid() || !comparison.valid(512 * 1024)) { return Err(invalid()); }
     let observed = project.identity.posix().map_err(|_| invalid())?.preflight_identity();
@@ -1061,6 +1077,52 @@ pub(crate) mod tests {
         assert!(unsigned.push(&envelope(1,"progress",json!({"schemaVersion":1,"stage":"validating-signing"}))).is_err());
         let mut wrong = FrameDecoder::new(&"a".repeat(32), &"b".repeat(32), &signed_context()).unwrap();
         assert!(wrong.push(&envelope(0,"accepted",json!({"schemaVersion":1,"context":signed_context()}))).is_err());
+    }
+    #[test]
+    fn native_request_pairs_exact_mac_profile_with_sdk_and_signing_data() {
+        let developer = Path::new("/Applications/Xcode_Inert.app/Contents/Developer");
+        let sdk = developer.join("Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk");
+        let directory = RootIdentity { device:"1".into(), inode:"2".into(), mode:0o040755, uid:0, gid:0 };
+        let tool = ToolIdentity { device:"1".into(),inode:"3".into(),mode:0o100555,uid:0,gid:0,links:1,size:512,
+            mtime_ns:"4".into(),ctime_ns:"5".into() };
+        let signing = SigningToolBindings::new_data(tool.clone(), tool.clone(), tool.clone()).unwrap();
+        let canonical = Content { bytes:17, sha256:"a".repeat(64) };
+        let project = RegisteredRoot { path:"/inert/project".into(),
+            identity:crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+        for (profile, native, toolchain, opposite) in [
+            (Profile::MacArm64, "macos-arm64", "ios-full-xcode-macos-arm64-v1", Profile::MacX64),
+            (Profile::MacX64, "macos-x86_64", "ios-full-xcode-macos-x86_64-v1", Profile::MacArm64),
+        ] {
+            let binding = ToolchainBinding::new_data(profile, developer, directory.clone(), tool.clone(), &sdk, directory.clone()).unwrap();
+            assert!(binding.matches_profile(profile));
+            assert!(!binding.matches_profile(opposite));
+            let unsigned = context(); let signed = signed_context();
+            for encoded in [
+                request(&"a".repeat(32), &"b".repeat(32), &unsigned, profile, &project, &project.path, &binding).unwrap(),
+                request_signed(&"a".repeat(32), &"b".repeat(32), &signed, profile,
+                    &project, &project.path, &binding, &signing, &canonical).unwrap(),
+            ] {
+                let value: Value = serde_json::from_slice(&encoded).unwrap();
+                assert_eq!(value["native"]["profile"], json!(native));
+                assert_eq!(value["native"]["toolchain"]["profile"], json!(toolchain));
+            }
+            assert!(request(&"a".repeat(32), &"b".repeat(32), &unsigned, opposite, &project, &project.path, &binding).is_err());
+            assert!(request_signed(&"a".repeat(32), &"b".repeat(32), &signed, opposite,
+                &project, &project.path, &binding, &signing, &canonical).is_err());
+            for fault in ["foreign-sdk", "clt", "unknown-profile", "file-not-directory"] {
+                let mut changed = binding.clone();
+                match fault {
+                    "foreign-sdk" => changed.sdk = "/inert/foreign.sdk".into(),
+                    "clt" => changed.developer_dir = "/Library/Developer/CommandLineTools".into(),
+                    "unknown-profile" => changed.profile = "ios-full-xcode-macos-unknown-v1".into(),
+                    _ => changed.sdk_identity.mode = 0o100444,
+                }
+                assert!(request(&"a".repeat(32), &"b".repeat(32), &unsigned, profile, &project, &project.path, &changed).is_err(), "{fault}");
+            }
+            let mut foreign_signing = signing.clone(); foreign_signing.security.uid = 501;
+            assert!(request_signed(&"a".repeat(32), &"b".repeat(32), &signed, profile,
+                &project, &project.path, &binding, &foreign_signing, &canonical).is_err());
+        }
     }
     #[test]
     fn signing_tool_data_is_not_ambient_or_renderer_authority() {

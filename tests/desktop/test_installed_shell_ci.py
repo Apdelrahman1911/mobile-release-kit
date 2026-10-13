@@ -67,7 +67,7 @@ def messages(rows):
 
 def metadata():
     packages = [
-        {"id": "root", "name": "mobile-release-kit-desktop", "version": "0.1.0", "source": None,
+        {"id": "root", "name": "mobile-release-kit-desktop", "version": "0.1.1", "source": None,
          "manifest_path": "/source/desktop/src-tauri/Cargo.toml"},
         {"id": "mount", "name": "mrk-linux-mount-observation", "version": "0.1.0", "source": None,
          "manifest_path": "/source/desktop/native/linux-mount-observation/Cargo.toml"},
@@ -86,7 +86,7 @@ def metadata():
             ("mrk-linux-mount-observation", "linux-mount-observation",
              'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'),
             ("mrk-macos-installed-native", "macos-installed-native",
-             'cfg(all(target_os = "macos", target_arch = "aarch64"))'),
+             'cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))'),
             ("mrk-windows-installed-native", "windows-installed-native",
              'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'),
         )
@@ -1163,35 +1163,76 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         library = (root / "src/lib.rs").read_text()
         main = (root / "src/main.rs").read_text()
         observer = (root / "tests/installed_shell_observation.rs").read_text()
+        shell = (root / "src/shell.rs").read_text()
+        runtime = (root / "src/installed_runtime_macos.rs").read_text()
+        inspection = (root / "src/installation_observation_macos.rs").read_text()
         production = set(re.findall(r"^(?:pub )?mod ([a-z0-9_]+);$", library, re.MULTILINE))
         observed = set(re.findall(r'^#\[path = "\.\./src/[^"\n]+\.rs"\] mod ([a-z0-9_]+);$', observer, re.MULTILINE))
         publishers = {"runtime_publication", "runtime_publication_windows"}
         android_helpers = {"android_catalog_query_helper", "android_registration_publisher", "android_registration_helper"}
-        self.assertEqual(production - observed, publishers | android_helpers)
+        producer_data = {"macos_install_transaction", "macos_install_producer"}
+        selection_data = {"macos_install_producer_selection_data"}
+        self.assertEqual(production - observed, publishers | android_helpers | selection_data)
         self.assertEqual(observed - production, set())
+        attributes = r"((?:#\[[^\n]+\]\n)*)"
+        # The actual-main observer includes the ordinary installed reader;
+        # its linked v2 inspection imports BOTH existing DATA modules.
+        self.assertIn('#[path = "installation_observation_macos.rs"]\nmod installation_observation;', runtime)
+        self.assertIn("macos_install_producer::{self as producer_data, ProducerData}", inspection)
+        self.assertIn("macos_install_transaction::{self as transaction, AppIdentityData, CapsuleData, CorrespondenceData,", inspection)
+        for name in producer_data:
+            declared = re.findall(r"^" + attributes + r"pub mod " + name + r";$", library, re.MULTILINE)
+            self.assertEqual(declared, [""], name)
+            self.assertEqual(library.count("mod " + name + ";"), 1, name)
+            included = re.findall(r"^" + attributes + re.escape(
+                '#[path = "../src/' + name + '.rs"] mod ' + name + ';') + r"$", observer, re.MULTILINE)
+            self.assertEqual(included, [""], name)
+            self.assertEqual(observer.count("mod " + name + ";"), 1, name)
+        # This is the exact build-only SOURCE parser exercised by libtest,
+        # not an ordinary observer module or another signing implementation.
+        selected = "macos_install_producer_selection_data"
+        declared = re.findall(r"^" + attributes + r"mod " + selected + r";$", library, re.MULTILINE)
+        self.assertEqual(declared, ['#[cfg(test)]\n#[path = "../../native/macos-installed-native/build_support/producer_selection.rs"]\n'])
+        self.assertEqual(library.count("mod " + selected + ";"), 1)
+        self.assertNotIn("mod " + selected + ";", observer)
         # These are separate Cargo helper roles, not missing app dependencies.
-        helper_cfg = '#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-android-registration-helper"))]\n'
+        helper_cfg = '#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-android-registration-helper"))]\n'
         for name in android_helpers:
             visibility = "pub " if name == "android_registration_helper" else ""
             self.assertIn(helper_cfg + visibility + "mod " + name + ";", library)
             self.assertEqual(library.count("mod " + name + ";"), 1)
             self.assertNotIn("mod " + name + ";", observer)
-        mac = '#[cfg(all(target_os = "macos", target_arch = "aarch64"))]\n'
-        data = '#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]\n'
-        client = '#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]\n'
-        for name, expected in (
-                ("android_registration_protocol", ""), ("android_registration_app_protocol", ""),
-                ("android_native_macos_profile", ""), ("android_shared_lease_macos", mac),
-                ("android_catalog_query_client", client), ("android_supplier_macos_source", data),
-                ("android_sdk_metadata_macos", data), ("android_supplier_macos", data)):
+        # Both roots include the same fixed Mac LP64 module closure. This
+        # source contract is not native compilation or Intel qualification.
+        library_mac = '#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]\n'
+        library_data = '#[cfg(any(test, all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]\n'
+        library_client = '#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]\n'
+        observer_mac = library_mac
+        observer_data = library_data
+        observer_client = library_client
+        for name, declared_expected, included_expected in (
+                ("macos_build_profile", "#[allow(dead_code)]\n", "#[allow(dead_code)]\n"),
+                ("android_registration_protocol", "", ""), ("android_registration_app_protocol", "", ""),
+                ("android_native_macos_profile", "", ""), ("android_shared_lease_macos", library_mac, observer_mac),
+                ("android_catalog_query_client", library_client, observer_client), ("android_supplier_macos_source", library_data, observer_data),
+                ("android_sdk_metadata_macos", library_data, observer_data), ("android_supplier_macos", library_data, observer_data)):
             # Exact adjacent attributes catch changed/missing cfgs as well as a
             # missing or duplicated source declaration, before a native build.
-            attributes = r"((?:#\[[^\n]+\]\n)*)"
             declared = re.findall(r"^" + attributes + r"mod " + name + r";$", library, re.MULTILINE)
             included = re.findall(r"^" + attributes + re.escape(
                 '#[path = "../src/' + name + '.rs"] mod ' + name + ';') + r"$", observer, re.MULTILINE)
-            self.assertEqual(declared, [expected], name)
-            self.assertEqual(included, [expected], name)
+            self.assertEqual(declared, [declared_expected], name)
+            self.assertEqual(included, [included_expected], name)
+            self.assertEqual(observer.count("mod " + name + ";"), 1, name)
+        self.assertIn(library_mac + '#[path = "installed_runtime_macos.rs"]\nmod installed_runtime;', library)
+        self.assertIn(observer_mac + '#[path = "../src/installed_runtime_macos.rs"] mod installed_runtime;', observer)
+        self.assertIn(library_mac + "mod vault_keyring_macos;", library)
+        self.assertIn(observer_mac + '#[path = "../src/vault_keyring_macos.rs"] mod vault_keyring_macos;', observer)
+        shared_vault = ('#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),\n'
+                        '    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]\n')
+        for name in ("vault_format", "vault_crypto", "vault_store"):
+            self.assertIn(shared_vault.replace("\n    ", " ") + "mod " + name + ";", library)
+            self.assertIn(shared_vault + '#[path = "../src/' + name + '.rs"] mod ' + name + ";", observer)
             self.assertEqual(observer.count("mod " + name + ";"), 1, name)
         windows = '#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]\n'
         self.assertIn(windows + 'mod installed_runtime_windows;', library)
@@ -1207,8 +1248,34 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         self.assertIn('#![forbid(unsafe_code)]', observer)
         self.assertIn('all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",', observer)
         self.assertIn('not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")', observer)
-        self.assertIn('not(feature = "macos-android-registration-helper")', observer.split("compile_error!", 1)[0])
+        observation_guard = observer.split("compile_error!", 1)[0]
+        self.assertIn('not(feature = "macos-android-registration-helper")', observation_guard)
+        self.assertIn('all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))', observation_guard)
         self.assertIn('fn main() -> std::process::ExitCode { shell::installed_observation::main() }', observer)
+        # A paired crate root alone is insufficient: original state/callbacks
+        # and the complementary ordinary run branches must select the SAME
+        # existing observer on both LP64 targets. Check every actual cfg, not
+        # an invented compiler profile or a second observation implementation.
+        shell_cfgs = re.findall(r"#\[cfg\([^\]]+\)\]", shell)
+        observed_cfgs = [cfg for cfg in shell_cfgs
+                         if 'all(test, debug_assertions' in cfg
+                         and 'feature = "macos-installed-observation"' in cfg]
+        self.assertEqual(len(observed_cfgs), 103)
+        self.assertEqual(sum(cfg.startswith("#[cfg(not(") for cfg in observed_cfgs), 3)
+        mac = ('target_os = "macos", target_pointer_width = "64", '
+               'any(target_arch = "aarch64", target_arch = "x86_64")')
+        for cfg in observed_cfgs:
+            normalized = re.sub(r"\s+", " ", cfg)
+            self.assertIn(mac, normalized)
+            for clause in ('all(test, debug_assertions', 'feature = "desktop-shell"',
+                           'feature = "custom-protocol"', 'not(feature = "development-runtime")',
+                           'not(feature = "ubuntu-runtime-publisher")',
+                           'not(feature = "macos-installed-installer")'):
+                self.assertIn(clause, normalized)
+        self.assertIn('#[cfg_attr(target_os = "macos", path = "installed_shell_observation_macos.rs")]', shell)
+        self.assertIn('q.actual_exit(state.exit_ready.load(Ordering::SeqCst), &state.document, &state.bridge.edits)', shell)
+        self.assertIn('{ Ok(application.run_return(callback)) }', shell)
+        self.assertIn('{ application.run(callback); Ok(()) }', shell)
 
     def test_shell_source_manifest_accepts_actual_version_qualified_hashing_profile(self):
         # Exercise the real admission against the checked-in inputs, not a

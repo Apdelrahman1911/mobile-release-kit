@@ -448,7 +448,8 @@ def inert_current_reads(target, revision, *, change=None):
 def metadata_journal_fixture(custody, *, replace=False):
     values = [b"Old title", b"Preserved summary", b"Preserved description"] if replace else None
     lease, owner, targets, revision, dependencies, originals = captured_target_fixture(custody, raw_values=values)
-    header = {"schemaVersion": 1, "transactionId": "d" * 32, "root": dict(owner.root_identity), "domain": "metadata_text"}
+    header = {"schemaVersion": 2, "transactionId": "d" * 32, "root": dict(owner.root_identity),
+              "domain": "metadata_text", "recovery": targets.journal_context()}
     dirs = [{"path": path, "before": owner.parents[path],
              "after": None if owner.parents[path] is not None else dict(device=9, inode=80 + index, mode=0o755)}
             for index, path in enumerate(targets.directories)]
@@ -812,6 +813,15 @@ class MetadataTargetAndStateTests(unittest.TestCase):
                     entries["header.json"] = ({**before, "inode": 999}, raw)
                 if change is None:
                     self.assertEqual(owner._load(400), plan)
+                    self.assertEqual(plan["schemaVersion"], 2)
+                    self.assertEqual(plan["recovery"], {"policy": "saved-text-recovery-v1",
+                        "config": text.content_digest(dependencies[0].data),
+                        "ignore": text.content_digest(dependencies[1].data),
+                        "selection": {"platform": "android", "locale": "en-US", "metadataRoot": "public/store"}})
+                    detached = targets.journal_context()
+                    detached["selection"]["locale"] = "fr-FR"
+                    detached["config"]["sha256"] = "0" * 64
+                    self.assertEqual(targets.journal_context(), plan["recovery"])
                     self.assertEqual(owner.parents["release"], dict(dict(targets._parents)["release"]))
                     self.assertNotIn("release", [entry["path"] for entry in plan["directories"]])
                     self.assertEqual([entry["path"] for entry in plan["files"]], list(targets.paths))

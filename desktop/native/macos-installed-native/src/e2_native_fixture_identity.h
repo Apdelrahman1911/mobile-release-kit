@@ -45,4 +45,9 @@ CFStringRef mrk_e2_fixture_resident_requirement(void *);
 int mrk_e2_fixture_main_epoch_admits(uint32_t,uint32_t);
 int mrk_e2_fixture_main_borrow(void *);
 int mrk_e2_fixture_main_borrow_return(void *);
+/* Copied diagnostics only. Zero means unobserved; no field is permission.
+ * The original manager's ObserveStatus gate/pool owns this synchronous call. */
+typedef struct { uint32_t bundle,executable,identifier,plist; } mrk_e2_fixture_bundle_lookup;
+_Static_assert(sizeof(mrk_e2_fixture_bundle_lookup)==16u,"fixed main-bundle diagnostic DATA");
+int mrk_e2_fixture_main_bundle_lookup(void *,mrk_e2_fixture_bundle_lookup *);
 #endif

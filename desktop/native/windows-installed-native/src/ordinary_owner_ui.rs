@@ -1321,7 +1321,7 @@ impl DashboardNames {
             "about:blank" => 2,
             "http://tauri.localhost/" => 4,
             "Microsoft Edge WebView2" | "WebView2" => 8,
-            "THE KIT FOR A CAREFUL LAUNCH" | "Core-managed builds are disabled" => 16,
+            "THE KIT FOR A CAREFUL LAUNCH" | "Every action has its own checks" => 16,
             "DESKTOP Not loaded" => 32,
             _ if name.contains("Loading desktop capabilities and the core field catalogue") => 64,
             _ => 128,
@@ -4755,7 +4755,7 @@ mod contract_tests {
         for (name, mask) in [
             ("Mobile Release Kit", 1), ("about:blank", 2), ("http://tauri.localhost/", 4),
             ("Microsoft Edge WebView2", 8), ("WebView2", 8),
-            ("THE KIT FOR A CAREFUL LAUNCH", 16), ("Core-managed builds are disabled", 16),
+            ("THE KIT FOR A CAREFUL LAUNCH", 16), ("Every action has its own checks", 16),
             ("DESKTOP Not loaded", 32),
             ("Loading desktop capabilities and the core field catalogue", 64),
             ("Before Loading desktop capabilities and the core field catalogue After", 64),

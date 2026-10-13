@@ -211,6 +211,7 @@ pub struct DesktopBridge {
     pub(crate) android_build: crate::android_build_owner::AndroidBuildOwner,
     pub(crate) project_recovery: crate::project_recovery_owner::ProjectRecoveryOwner,
     pub(crate) ios_archive: crate::ios_archive_owner::IOSArchiveOwner,
+    pub(crate) artifact_inspection: crate::saved_command_owner::SavedCommandOwner,
     installed_project_selection_available: bool,
     installed_project_path_selection_available: bool,
     installed_android_source_selection_available: bool,
@@ -272,6 +273,7 @@ impl DesktopBridge {
             // Retain the owner and compiled profile DATA only; neither is tool
             // custody or qualification. The renderer cannot select this profile.
             android_build: crate::android_build_owner::AndroidBuildOwner::new(runtime.clone(), crate::android_toolchain::AndroidToolchainProfile::compiled()),
+            artifact_inspection: crate::saved_command_owner::SavedCommandOwner::artifact_inspection(runtime.clone()),
             ios_archive: crate::ios_archive_owner::IOSArchiveOwner::new(runtime),
             installed_project_selection_available,
             installed_project_path_selection_available,
@@ -400,7 +402,7 @@ impl DesktopBridge {
     /// Fixture DATA only, called under the original DocumentBinding lock. It
     /// grants no ProjectProbe, picker, filesystem identity, asset or GitHub gate.
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     pub(crate) fn environment_fixture_registration(&self,
         permit: &crate::environment_diagnostics_owner::EnvironmentRegistrationPermit, change: bool) -> Result<(), BridgeError> {
         let (id, root, generation) = permit.validate(&self.diagnostics)?;
@@ -420,7 +422,7 @@ impl DesktopBridge {
     /// Separate offline fixture permit and actual held-root identity. Never
     /// upgrade the diagnostics fixture's identity:None registration in place.
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     pub(crate) fn offline_fixture_registration(&self,
         permit: &crate::offline_preflight_owner::OfflineRegistrationPermit) -> Result<(), BridgeError> {
         let (id, root, generation) = permit.validate(&self.preflight)?;
@@ -437,7 +439,7 @@ impl DesktopBridge {
         self.preflight.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
-        self.ios_archive.ensure_idle()?;
+        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
@@ -451,7 +453,7 @@ impl DesktopBridge {
         self.preflight.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
-        self.ios_archive.ensure_idle()?;
+        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
@@ -460,6 +462,26 @@ impl DesktopBridge {
         // and document invalidation after this in-memory lookup.
         let root = self.project_root(&project_id)?;
         self.edits.open_published(publisher, window, project_id, root)
+    }
+    pub(crate) fn open_project_initialization(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::project_initialization_edit_protocol::Open) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+        let project_id = args.project_id().to_owned();
+        let ticket = self.edits.initialization_open_ticket(window, args)?;
+        let selected = project_id.clone();
+        document.initialization_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_initialization_published(publisher, window, project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_project_initialization(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::project_initialization_edit_protocol::Prepare) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.initialization_edit_admit_published(|bridge| bridge.edits.initialization_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_initialization_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_project_initialization(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::project_initialization_edit_protocol::Apply) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.initialization_edit_admit_published(|bridge| bridge.edits.initialization_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.apply_initialization_published(publisher, window, args, registration))
     }
     pub(crate) fn open_workflow_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         project_id: String) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
@@ -470,6 +492,24 @@ impl DesktopBridge {
         let selected = project_id.clone();
         document.workflow_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
             bridge.edits.open_workflow_published(publisher, window, project_id, registration, ticket))
+    }
+    pub(crate) fn open_configuration_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::edit_commands::ConfigurationRecoveryOpen) -> Result<crate::edit_protocol::ConfigEditStatus, BridgeError> {
+        let ticket = self.edits.configuration_recovery_open_ticket(window)?;
+        let selected = args.project_id.clone();
+        document.configuration_recovery_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_configuration_recovery_published(publisher, window, args.project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_configuration_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::edit_protocol::PrepareConfigurationRecovery) -> Result<crate::edit_protocol::ConfigEditStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.configuration_recovery_admit_published(|bridge| bridge.edits.configuration_recovery_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_configuration_recovery_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_configuration_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::edit_commands::ConfigurationRecoveryApply) -> Result<crate::edit_protocol::ConfigEditStatus, BridgeError> {
+        document.configuration_recovery_admit_published(|bridge| bridge.edits.configuration_recovery_project(window, &args.session_id), |bridge, registration, publisher|
+            bridge.edits.apply_configuration_recovery_published(publisher, window, &args.session_id, &args.plan_token, registration))
     }
     pub(crate) fn open_workflow_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::edit_commands::WorkflowRecoveryOpen) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
@@ -536,6 +576,42 @@ impl DesktopBridge {
         session_id: &str, plan_token: &str) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
         document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, session_id), |bridge, registration, publisher|
             bridge.edits.apply_release_version_published(publisher, window, session_id, plan_token, registration))
+    }
+    pub(crate) fn open_metadata_text_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Open) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
+        let ticket=self.edits.metadata_text_recovery_open_ticket(window)?;
+        let selected=args.project_id.clone();
+        document.metadata_text_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_metadata_text_recovery_published(publisher, window, args.project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_metadata_text_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Prepare) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
+        let session_id=args.session_id.clone();
+        document.metadata_text_edit_admit_published(|bridge| bridge.edits.metadata_text_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_metadata_text_recovery_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_metadata_text_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Apply) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
+        document.metadata_text_edit_admit_published(|bridge| bridge.edits.metadata_text_project(window, &args.session_id), |bridge, registration, publisher|
+            bridge.edits.apply_metadata_text_recovery_published(publisher, window, &args.session_id, &args.plan_token, registration))
+    }
+    pub(crate) fn open_release_version_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Open) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        let ticket=self.edits.release_version_recovery_open_ticket(window)?;
+        let selected=args.project_id.clone();
+        document.release_version_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_release_version_recovery_published(publisher, window, args.project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_release_version_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Prepare) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        let session_id=args.session_id.clone();
+        document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_release_version_recovery_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_release_version_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Apply) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, &args.session_id), |bridge, registration, publisher|
+            bridge.edits.apply_release_version_recovery_published(publisher, window, &args.session_id, &args.plan_token, registration))
     }
     pub(crate) fn metadata_images_selection_available(&self) -> bool {
         self.edits.metadata_images_selection_profile_available()
@@ -636,7 +712,7 @@ impl DesktopBridge {
         self.preflight.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
-        self.ios_archive.ensure_idle()?;
+        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() || self.edits.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() || self.edits.disabled() { return Err(BridgeError::cleanup_unknown()); }

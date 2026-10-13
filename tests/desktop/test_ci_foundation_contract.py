@@ -1117,7 +1117,7 @@ class WorkflowNativeHelperTests(unittest.TestCase):
 
     def test_native_scope_is_separate_and_refuses_other_phases_before_context_or_tools(self):
         self.assertNotIn(helper.WORKFLOW_NATIVE_SCOPE, helper.COMPILE_PROFILES)
-        self.assertEqual(set(helper.COMPILE_PROFILES), {helper.COMPILE_SCOPE, helper.GTK_COMPILE_SCOPE})
+        self.assertEqual(set(helper.COMPILE_PROFILES), {helper.COMPILE_SCOPE, helper.GTK_COMPILE_SCOPE, helper.MAC_COMPILE_SCOPE})
         with patch.object(helper, "load_context", side_effect=AssertionError("no context IO")), \
                 patch.object(helper, "tools", side_effect=AssertionError("no compiler selection")):
             for name in ("native", "config-owner", "config-task-loss", "config-owner-delta", "config-transaction-eof", "config-core", "windows-snapshot", "unknown"):
@@ -3967,6 +3967,8 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
             helper.BOUNDARY_SCOPE: (set(helper.BOUNDARY_PHASES), platforms),
             helper.COMPILE_SCOPE: (set(helper.COMPILE_PHASES), platforms),
             helper.GTK_COMPILE_SCOPE: (set(helper.COMPILE_PHASES), {"linux"}),
+            helper.MAC_COMPILE_SCOPE: (set(helper.COMPILE_PHASES), {"macos"}),
+            helper.VERSION_NATIVE_SCOPE: (set(helper.VERSION_NATIVE_PHASES), {"linux"}),
             helper.WORKFLOW_NATIVE_SCOPE: (set(helper.WORKFLOW_NATIVE_PHASES), {"linux"}),
             helper.METADATA_NATIVE_SCOPE: (set(helper.METADATA_NATIVE_PHASES), {"linux"}),
             helper.ENVIRONMENT_NATIVE_SCOPE: (set(helper.ENVIRONMENT_NATIVE_PHASES), {"linux", "macos"}),
@@ -3976,7 +3978,7 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
             helper.WINDOWS_SNAPSHOT_SCOPE: ({"prepare", "acquire", "compile", "windows-snapshot", "clean"}, {"windows"}),
         }
         self.assertEqual(helper.FOUNDATION_SCOPE, helper.BOUNDARY_SCOPE)
-        self.assertEqual(set(helper.COMPILE_PROFILES), {helper.COMPILE_SCOPE, helper.GTK_COMPILE_SCOPE})
+        self.assertEqual(set(helper.COMPILE_PROFILES), {helper.COMPILE_SCOPE, helper.GTK_COMPILE_SCOPE, helper.MAC_COMPILE_SCOPE})
         self.assertEqual(helper.WINDOWS_SNAPSHOT_PHASES, profiles[helper.WINDOWS_SNAPSHOT_SCOPE][0])
         phases = {"unexpected", ""}.union(*(names for names, _ in profiles.values()))
 
@@ -4039,7 +4041,7 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
         choices = next(keyword.value for keyword in argument[0].keywords if keyword.arg == "choices")
         self.assertIsInstance(choices, ast.Tuple)
         self.assertEqual(["*" + node.value.id if isinstance(node, ast.Starred) else node.value for node in choices.elts],
-            ["*BOUNDARY_PHASES", "workflow-owner", "workflow-transaction-eof", "workflow-core", "metadata-owner",
+            ["*BOUNDARY_PHASES", "workflow-owner", "workflow-transaction-eof", "workflow-core", "version-owner", "version-transaction-eof", "version-core", "metadata-owner",
              "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
              "environment-native", "offline-cli11", "retain", "windows-installed-native", "windows-installed-native-finalize",
              "windows-installed-runtime-data", "*WINDOWS_FULLWALK_DATA_PHASES", "*WINDOWS_INSTALLED_PASSIVE_DATA_PHASES",
@@ -4053,7 +4055,7 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
         self.assertLess(main.index("windows_installed_phase(args.phase, scope)"), main.index("admit_phase(scope, args.phase)"))
         self.assertLess(main.index("admit_phase(scope, args.phase)"), main.index("platform = (admitted_host("))
         self.assertLess(main.index("platform = (admitted_host("), main.index("prepare(platform, scope)"))
-        self.assertIn('platform = (admitted_host(retention_only=True) if (scope == METADATA_NATIVE_SCOPE and args.phase == "clean"\n'
+        self.assertIn('platform = (admitted_host(retention_only=True) if (scope in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE} and args.phase == "clean"\n'
                       '                    or scope == ENVIRONMENT_NATIVE_SCOPE and args.phase == "retain"\n'
                       '                    or scope == OFFLINE_NATIVE_SCOPE and args.phase != "prepare") else admitted_host())', main)
         self.assertIn('prepare(platform, scope) if args.phase == "prepare" else phase(args.phase, platform, scope)', main)
@@ -4062,11 +4064,11 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
         self.assertIn("def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:", source)
         host = source.split("def admitted_host(*, retention_only: bool = False) -> str:\n", 1)[1].split("\n\ndef admitted_scope(", 1)[0]
         self.assertEqual(host.count("admitted_scope(platform)"), 1)
-        self.assertIn('os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, '
+        self.assertIn('os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, '
                       '*ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}', host)
-        self.assertIn('require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES}', host)
+        self.assertIn('require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES}', host)
         self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:\n        admitted_scope(platform)', host)
-        self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:', host)
+        self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:', host)
         self.assertIn('os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"', host)
         self.assertIn('os.environ.get("ImageOS") == "ubuntu24" and (retention_only or os.uname().machine == "x86_64")', host)
         self.assertIn('os.geteuid() != 0', host)
@@ -4538,6 +4540,12 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
             self.assertEqual(len(written), 6)
             for _, value in written:
                 self.assertNotIn("compiledTest", value)
+
+        # The new Mac profile cannot turn Windows compiledTest DATA into a
+        # Mac compilation or native result; legacy receipt bodies above remain.
+        with patch.object(helper, "write_json", side_effect=forbidden), self.assertRaises(helper.CheckFailure):
+            helper.phase_receipt({**context, "executionScope": helper.MAC_COMPILE_SCOPE}, "compile", checks,
+                                 scope=helper.WINDOWS_SNAPSHOT_PUBLIC_SCOPE, compiled=compiled)
 
 
 # SOURCE-only fragment for tests/desktop/test_ci_foundation_contract.py.
@@ -8026,8 +8034,9 @@ class WindowsReaderGateTests(unittest.TestCase):
         dependencies.extend([secret_service, {**deepcopy(secret_service), "kind": "dev",
             "features": ["rt-tokio-crypto-rust", "mrk-retrieval-test-support"]}])
         for name, manifest in declared.items():
-            ids[name] = name + "@0.1.0"
-            locked.append({"name": name, "version": "0.1.0"})
+            version = "0.1.1" if name == "mobile-release-kit-desktop" else "0.1.0"
+            ids[name] = name + "@" + version
+            locked.append({"name": name, "version": version})
             if name not in {"mobile-release-kit-desktop", "mrk-windows-installed-native"}:
                 continue  # Real filtered metadata keeps declarations, not these packages.
             path = source / manifest
@@ -8039,7 +8048,7 @@ class WindowsReaderGateTests(unittest.TestCase):
                               "src_path": str(path.parent / "build.rs")})
                 units.append({"name": "mrk-windows-runtime-publish", "kind": ["bin"], "crate_types": ["bin"],
                               "src_path": str(path.parent / "src/bin/windows_runtime_publish.rs")})
-            packages.append({"id": ids[name], "name": name, "version": "0.1.0", "source": None,
+            packages.append({"id": ids[name], "name": name, "version": version, "source": None,
                              "manifest_path": str(path), "features": deepcopy(helper.WINDOWS_NATIVE_DECLARED_FEATURES)
                                  if name == "mrk-windows-installed-native" else {"allowed": [],
                                      "windows-runtime-publisher": ["mrk-windows-installed-native/runtime-publication"]}, "targets": units,
@@ -15345,7 +15354,7 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
         direct = {"getrandom": "0.3.4", "serde": "1.0.228", "serde_json": "1.0.145", "sha2": "0.10.9", "tokio": "1.48.0",
             "mrk-windows-installed-native": "0.1.0", "rfd": "0.15.4", "tauri": "2.11.5", "tauri-build": "2.6.3",
             **{name: row["version"] for name, row in WINDOWS_COMMON_PARSERS.items()}}
-        selected = {"mobile-release-kit-desktop": "0.1.0", **direct, **helper.WINDOWS_NORMAL_UI_MATERIAL_PACKAGES}
+        selected = {"mobile-release-kit-desktop": "0.1.1", **direct, **helper.WINDOWS_NORMAL_UI_MATERIAL_PACKAGES}
         ids = {name: name + "@" + version for name, version in selected.items()}
         app, native = ids["mobile-release-kit-desktop"], ids["mrk-windows-installed-native"]
         packages, nodes = [], []
@@ -15444,7 +15453,7 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
             self.assertEqual(graph["observer"], observer)
             self.assertEqual(len(graph["materialIds"]), 10)
             self.assertEqual({(row["name"], row["version"]) for row in lock["package"] if row.get("source") is None},
-                {("mobile-release-kit-desktop", "0.1.0"), ("mrk-linux-mount-observation", "0.1.0"),
+                {("mobile-release-kit-desktop", "0.1.1"), ("mrk-linux-mount-observation", "0.1.0"),
                  ("mrk-macos-installed-native", "0.1.0"), ("mrk-windows-installed-native", "0.1.0"),
                  ("secret-service", "5.2.0"), ("zbus", "5.19.0")})
             self.assertFalse({"secret-service", "zbus"} & {row["name"] for row in graph["packages"].values()})

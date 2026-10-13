@@ -17,6 +17,7 @@ else:
     _OFFLINE_CLI11_STARTED_NS = None
 
 import argparse
+import ast
 from contextlib import contextmanager
 import hashlib
 import json
@@ -269,147 +270,183 @@ CONVENTIONAL_PREPARE_INPUTS: dict | None = {
 # the reviewed current preparer. Never replace this closed roster with
 # a discovered checkout inventory or H's historical core-source-files.json.
 CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
-    {"path":"/work/inputs/core-source/desktop/android_build_bootstrap.py","size":1051,"sha256":"2cc8b02d24458f3e3e0b90a661765d8e2f97c884030bbeed2a37f587379975a7"},
-    {"path":"/work/inputs/core-source/desktop/config_edit_bootstrap.py","size":1163,"sha256":"927e52dc4e2bb77ce07b4fccdf29807f4fc51f750e53bc1e139719f419cef86f"},
-    {"path":"/work/inputs/core-source/desktop/engine_bootstrap.py","size":1187,"sha256":"fe90aa7f12192d7b94067a7774a7151b4f235a339b94881897e9120b0fe25c7c"},
-    {"path":"/work/inputs/core-source/desktop/environment_bootstrap.py","size":1077,"sha256":"e737c9bf570358025e17d4413f1a567d41b9132142855226572e8a06cd141965"},
-    {"path":"/work/inputs/core-source/desktop/github-ca.pem","size":240216,"sha256":"9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f"},
-    {"path":"/work/inputs/core-source/desktop/github_connection_bootstrap.py","size":1227,"sha256":"f484aa139d5e33dd1d27ccee790d2a4e1c90046064956de3699c6b2b89a7df79"},
-    {"path":"/work/inputs/core-source/desktop/github_preflight_bootstrap.py","size":812,"sha256":"04731ad5972dc7390f708e664484bfc14e9f18e905aab18a29cf01a508d81509"},
-    {"path":"/work/inputs/core-source/desktop/github_release_bootstrap.py","size":895,"sha256":"0f4a9c8910e527546fa1b16ed34890d267295c6b56ecd10aac73f599cb707bdc"},
-    {"path":"/work/inputs/core-source/desktop/ios_archive_bootstrap.py","size":738,"sha256":"1c750ecd088f2bf33985a1bdf62a3a9fd0df19fd9563f4f443e605b272661c19"},
-    {"path":"/work/inputs/core-source/desktop/offline_preflight_bootstrap.py","size":1081,"sha256":"0864d0d24de1d5be64781b7cb5378ebeb77c528352927f31609786fb12be8750"},
-    {"path":"/work/inputs/core-source/desktop/project_recovery_bootstrap.py","size":750,"sha256":"596edfd308abe327a9a255c82d8ea181e3b607e55db40406cb39a1675bd9edbf"},
-    {"path":"/work/inputs/core-source/desktop/tools/prepare_runtime.py","size":13227,"sha256":"dd554d59850d6b059a2c05de92dcdddc9373b154c53d9536e84d13497137f88d"},
-    {"path":"/work/inputs/core-source/src/mobile_release/__init__.py","size":144,"sha256":"557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2"},
-    {"path":"/work/inputs/core-source/src/mobile_release/__main__.py","size":115,"sha256":"50fd328dfe5b5339a9958444940e9ce45b9764dbb7b130cc25f3a966ccb706a8"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_command_process.py","size":172299,"sha256":"30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_control.py","size":3936,"sha256":"67cc1c9e37c80ab91c5abce21c92a9319f8273374f6b57d51ff488521e524826"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_engine.py","size":509,"sha256":"acb8af725b5b77cdaaacbeabe193351498b5b9e1f828e6c7405dca67e0951c4a"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_files.py","size":66714,"sha256":"68c31de6508628d5994e82459f6c3f149dca1fe2359fbf04e8945327c01a01c5"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_protocol.py","size":44597,"sha256":"d41bd28c4b752d5aeff1d4bc8ac086c350a05fbed87591ab72e88e145bdbcad7"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_selection.py","size":7238,"sha256":"f0526059bb7b76e90b075b50f6144e0e4b2e8aa7d431a8a40d51090b4e898527"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_signing_material.py","size":10009,"sha256":"81e484a291ff1aed07c822499057b7932ae11cbd6243d6cd87cbdf8b6e1cdfc8"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_control.py","size":7712,"sha256":"a300db0df65418ac110399225312c117b0e1f1a43608f3259ea6044ab33341e7"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_engine.py","size":17411,"sha256":"392d6e0e183c3127361ec1b7faeda9b14fc73173934899c109788eda017275e2"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_protocol.py","size":11994,"sha256":"96751f97c443d7a3e31305f5d83183c27f4a2883e0a88df83bc5125bebe3303e"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_engine.py","size":9464,"sha256":"083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_control.py","size":5794,"sha256":"b4d8fbe47b575faa8de2fc06854bb6863cd3e68fdb60473c8f5488ce70142771"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_engine.py","size":6574,"sha256":"0f99c422928fd7aa955e5c6d63682ef29c0e226e09ce51d25141bee98d44e6bc"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_protocol.py","size":19517,"sha256":"1316e980200e63741340c2545a2a6d93adf9cf4a8e2f37f379768f33d445f39b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_github_engine.py","size":14149,"sha256":"a468ce5b3ccf18606a0968817299bebeaee63299268430f9a52a1de7bf02483c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_github_preflight_engine.py","size":11006,"sha256":"93d25c01506dd3db36e18d6157b23b122c37db4f21b8ae4716e9ea1799063dda"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_control.py","size":5216,"sha256":"64a22a771783a0a5e0ae800be9ddeabe6a2f4d0441814664b4ffa1e572b67c45"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_engine.py","size":492,"sha256":"ab1e76f3ae0b4a83f4b17340df3f803909d9fbb84063aa743a49a63a26319080"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_protocol.py","size":22594,"sha256":"10775bf62ea12f6c449c51c90ffd8d06166d78aceb8c4dea67749b0732bf6721"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_selection.py","size":4160,"sha256":"8a5d9051f3772bdc070ff25a090ab234ca36b59b4c3ffc6f7cfe56e1efae1b49"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_recovery_protocol.py","size":6972,"sha256":"8f3c6801776e8b8cf48385234860b7a448af87dfb51eac4c6c2b757b13601c39"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_signed_operation.py","size":36496,"sha256":"9f423b72ab217506d682607609b9d75537532ccef99d69beba67f3624c12f184"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_signing_material.py","size":9566,"sha256":"4742c1c9b8d7acc984b4fb2dfcb84d9a8a76b9121f241a3f18ee8d7a51d46929"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_budget.py","size":16253,"sha256":"391ef71136be104523e09b4c2da0967d04271fbbedf7ea04663649eeb82e02d4"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_control.py","size":938,"sha256":"7d867dfba27acd98333f3bb8477f1693e4ad93738a0273be4a4fa44108c438d9"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_engine.py","size":1199,"sha256":"ebd6e6e40b024724cb4659f51d200ec255f67fb2b97bd20ab41df8956038f444"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_protocol.py","size":13301,"sha256":"094b9259bf99b790d237b0e99c81401eb3839da5360985910b4a86182f542537"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_control.py","size":1430,"sha256":"97b8b5cc938fcaf2b432a3dc8bc82a05989113525b0739be538807abeb869790"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_engine.py","size":494,"sha256":"430d9938a7b93094d5f078af5aa83d19dbc289ec4f8a3a66ba3a26169273a231"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_protocol.py","size":11539,"sha256":"e0d7227470502cce0f59bd9d978b76f2e39b561afb4646899680c01fffd3fae8"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_saved_command_control.py","size":12928,"sha256":"0be0f717b20ee040658beca3de5478a5b7ee9a0f9408ca486cfad305609f1a3c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_saved_command_engine.py","size":16555,"sha256":"295d229b4dd9928b7c944613f400ce04b3f3daf8ba1dd99a244c18202399121b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_github_action_family.py","size":634,"sha256":"999d1be9a50f2a2eda0bc64234e1e9102f7387af7bef50643889b45b4c60dbbc"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_github_connection_transport.py","size":44396,"sha256":"83f920465937d6d2443606413469229e47022370ad4813f0266afe3ca393e5a1"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_github_preflight_journal.py","size":17327,"sha256":"c2f6e0385adbcb61d92daa6d81f4f19c46b27c13263428e8db36f8e7cc134638"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_lifetime_evidence.py","size":19072,"sha256":"f79d21c9846d7527b9c08f474ef47bc57515f592a090b7c61ba9046a82232da3"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_native_process.py","size":62175,"sha256":"70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_profile_callers.py","size":8197,"sha256":"4c1374b6a738f027a3cdbbd4a778346a5ec5df889da9781f8d26b3f7ac688c75"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_profile_process.py","size":131940,"sha256":"be6442d5d2f5e777ed48e61a0151c50c4e9878c7c40fec8573af524511780613"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_contract.py","size":9500,"sha256":"8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_evidence.py","size":17638,"sha256":"bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_files.py","size":35156,"sha256":"880eb0cfa37c0c70eb089c6adbe333450af139f1d85c901e861c756057c7aac5"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android.py","size":38142,"sha256":"68a704b27702372b73ea92861e774d2bb9e59f0d01df822f2624fbe5ed83fe25"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_build_operation.py","size":26589,"sha256":"26a72465effb88e3dea613c75e6ba3d3812e2689c39052eff4e600e006ce2867"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_build_signing.py","size":9158,"sha256":"48505b448f0685b4ed49802a2ff2317564e1715cf19dde9863a85c4d0b1f786e"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_build_tools.py","size":56931,"sha256":"79a6c092c7d30f752c5d326bbac9e4db0e02b836e905904d4c98f947770472be"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_manifest.py","size":9267,"sha256":"7fe056f442e239a8668a62d699f0b4c7f077de9b959d32fc4a2f8f770460bdd7"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_upload_validation.py","size":6295,"sha256":"5be3d74272ade8a30938d48e25ffe42a661ff3e142872c17b014dee1641cfd72"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_zip.py","size":15103,"sha256":"34391d082553f2b5168af71c275c743c00bd7982b719933183874ad8258ee15a"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_zip_integrity.py","size":15169,"sha256":"80bae3a6142f044643f7a1077b671f3ad105123fe1db55ac674d1b4eb0b1467f"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/__init__.py","size":9264,"sha256":"df0553cbacb757af487715c1f235469be8d72e5044820a28cb454bc7b2abc879"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_candidate_evidence.py","size":16989,"sha256":"d86e658d861d37c8e4f43095a5de71cd9607b0eb1260ebc1de76e64ff02b3366"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_catalog.py","size":15772,"sha256":"72059524e4968b4769b5da7bcfb0dbeda121112ddbd04ffe0a20f2daeecf91b3"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_credential_assessment.py","size":19158,"sha256":"834e6a88a64cf491504e03e8e7026b70c693b37196c489bf3d6ebabdcb9bac92"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_credential_guide.py","size":7905,"sha256":"bd713a2150eb6b03ea2896ea98db27647146fd536f7a2d412a7f8ada7e98a3fb"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_environment.py","size":14236,"sha256":"4115d50e6ff1b2acb991b259a7f06443f234a07d4820167bc444aed916f5b0d4"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_github_connection.py","size":16515,"sha256":"a68974f2bf477cd5d3d4349398a3c7616ac3f47b8fd704a0fa356e3784d29a7b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_github_setup.py","size":12630,"sha256":"87fa322b2fcd02e399eff4b49eb15ebc84864f1fdcd25b3f958944ea21f9f825"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_json.py","size":2851,"sha256":"84c90334c94b12877cc3dbcd9324bd80d78a2de9f54d64e30c771af06f719815"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_lifecycle_evidence.py","size":8942,"sha256":"f094cdd8af9418c44e69f4c7578349251511d5857af2b22ff74cf3e8ee918618"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_metadata_text.py","size":10878,"sha256":"759c3124d807fd768883c50b15e05b0040e114414ef5f92045a536d2aba4d8a7"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_preview.py","size":10213,"sha256":"ed5ea4c2777ea36b34816ec66603cf2453aeab22bf98764b82ea0db07ab6beae"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_release_version.py","size":8391,"sha256":"54706d38280f898d80418e9402038712e7f66610c6d64930286a8405e0e3370c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot.py","size":33629,"sha256":"54a4872db61696c3312a30ef5d9ea539506bdd9a86718d7b2da6af89fe8d08ee"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot_windows.py","size":19049,"sha256":"c96e29786f986811f211ec8679336fc665a06fcb918c056260fa77ea2b0696a0"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot_windows_native.py","size":26733,"sha256":"a4b1303e6cdc73053a1c22dc109f9925d5babf612ec4041453dad876a5db4d17"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/contracts.py","size":29210,"sha256":"28430514789c40b873e27efc0c8af0c23d1d71d38bff131d59df7e3509faae0c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/credential-guide-v1.json","size":39128,"sha256":"7f9828720684a1b6d071df2a34d415feb8ff4552c89d8d6d42b19970d838d478"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/field-help.json","size":28837,"sha256":"890d9d1c22a4984bb60b0b503cf1106fe5b5f03ddf50614b5d00350ee510bb16"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/github-connection-v1.json","size":9225,"sha256":"75a635de5747c8e0773ec1ee996fff594f38e2a7f28d90099db86f56b4319714"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/github-setup-v1.json","size":20358,"sha256":"6fa1f3b7dd1907f56af44ccf050458626d702ec0a06e5578a7416986c46ad29a"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/metadata-text-help-v1.json","size":10495,"sha256":"08c4efac78ee2aabc75f6ece7f93010f34193bcb8c8304a742b9e0c7e940ccfb"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/project.schema.json","size":12407,"sha256":"2c59a6a3d0c90188db5800898db2c42612960616f30d84aecf25a4611ec5fbd7"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/release-version-help-v1.json","size":5157,"sha256":"d4ee75cba9accb83ce0982de1fbe4359e9744b38c40856831dea111c1739ff09"},
-    {"path":"/work/inputs/core-source/src/mobile_release/build_inputs.py","size":158556,"sha256":"72c1d593425b46cd16615984528fd28097ccee8bffbfc76928b86f2b1099c8fb"},
-    {"path":"/work/inputs/core-source/src/mobile_release/cancellation.py","size":31041,"sha256":"5f469444f42b5ad6a69ecce8161a7d83e67303c92a221a31f88c079f4ff29d35"},
-    {"path":"/work/inputs/core-source/src/mobile_release/checked_files.py","size":22382,"sha256":"803b9a0767231426243c0be423a6eb94bcc512ada3bbc132f0798b76a0baedc3"},
-    {"path":"/work/inputs/core-source/src/mobile_release/cli.py","size":64644,"sha256":"9f1967be7552446ad2f4e5fd6b6f88666573eeb1e6077320deb13d1570e16de2"},
-    {"path":"/work/inputs/core-source/src/mobile_release/config.py","size":39869,"sha256":"1e7c192fb46d49bee34a316eb4714079b38aa68a1188462e612d815d8117e1ed"},
-    {"path":"/work/inputs/core-source/src/mobile_release/config_edit.py","size":24493,"sha256":"23ddff685ee6179f0a5b9c35d7b5706683f965c27438fd7b16539754d7779b83"},
-    {"path":"/work/inputs/core-source/src/mobile_release/config_payloads.py","size":4803,"sha256":"b7b9ca12f5c09595430b07bfcf8aed2b1b93f60230888721d1ab78199bc910c2"},
-    {"path":"/work/inputs/core-source/src/mobile_release/credential_policy.py","size":4714,"sha256":"384375dc92348ba2f25159241ae1c9e9711b5ff7c7d72c2fa230146846590805"},
-    {"path":"/work/inputs/core-source/src/mobile_release/credential_requirements.py","size":9503,"sha256":"2ee398a6b17a067977d4081b111ac72ef49d6876d8cddfa75bbaca60545e301f"},
-    {"path":"/work/inputs/core-source/src/mobile_release/credentials.py","size":106984,"sha256":"1d7efc1307772005282602cd6211ee660cab134a134b7379f25eff6c8df863f5"},
-    {"path":"/work/inputs/core-source/src/mobile_release/data/apple-profile-roots.pem","size":4539,"sha256":"c704ce9bc7d65280e2893c2235c2434dba8cbce00f659787492714ca441b1e93"},
-    {"path":"/work/inputs/core-source/src/mobile_release/desktop_android_build.py","size":16867,"sha256":"86caa7a953fbd3a68e4627a0074669d29b85186a74d580964103726932fb93f5"},
-    {"path":"/work/inputs/core-source/src/mobile_release/desktop_ios_archive.py","size":22552,"sha256":"c8e8c564dd22826c31028557a35741e6fbf002c25de0e6cc22f3d77e9177658b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/desktop_preflight.py","size":8915,"sha256":"2f1b3fc4aae8c55e80954ff578cf97116bba246c759cf183bd13578fafc13581"},
-    {"path":"/work/inputs/core-source/src/mobile_release/desktop_project_recovery.py","size":7245,"sha256":"f86353181b260e45d8c748e0dda0653fe7317b571b95c117682d3476067a9611"},
-    {"path":"/work/inputs/core-source/src/mobile_release/discovery.py","size":27885,"sha256":"6802bd28bccf0c807ca67299c0cb94d2eab0158b44383aed167a42465b2608bd"},
-    {"path":"/work/inputs/core-source/src/mobile_release/environment_diagnostics.py","size":12025,"sha256":"db34c792e7097df8d9e0e52980486df450b1e6f9064027202987d99847ec67a1"},
-    {"path":"/work/inputs/core-source/src/mobile_release/environment_diagnostics_tools.py","size":24700,"sha256":"a45822d5d237c224164dcec35ff7a91703a49f032f3b4993d9bcdf9b90454da0"},
-    {"path":"/work/inputs/core-source/src/mobile_release/errors.py","size":749,"sha256":"26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853"},
-    {"path":"/work/inputs/core-source/src/mobile_release/evidence_layout.py","size":2011,"sha256":"e39ed2fb0c63f5cb6d3fd076e684ce8285332864d4ac20f60dd68f9dcfd2464e"},
-    {"path":"/work/inputs/core-source/src/mobile_release/github_preflight.py","size":23244,"sha256":"9d326639f15c50397f110385b5aa6b215f31d5330c5c29e9a4fcf0ea9cacca34"},
-    {"path":"/work/inputs/core-source/src/mobile_release/github_release.py","size":35859,"sha256":"8e798185e43632d64a3f45d7f45934d617751dfd4221d8478eaec074af06d61f"},
-    {"path":"/work/inputs/core-source/src/mobile_release/github_workflow_edit.py","size":21086,"sha256":"cd059224ec5174ece0f0ddb5d74464a9df4497ac991bc3f86fa160f932d0dcaf"},
-    {"path":"/work/inputs/core-source/src/mobile_release/init_transaction.py","size":88826,"sha256":"b19ee28073fd59a6903414ee7429a64e0b9dcf17864d0428009be646e93dda9c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/init_workspace_custody.py","size":33409,"sha256":"3a1ff617db9ecf54209e2b99daa5547b414b146a46bf8c655d0e5cdbb8b5296c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/inspection.py","size":930,"sha256":"663d6d82261815cf044ecc96f19eb7252b54d224edbecd4641679b2a32fc920a"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios.py","size":63226,"sha256":"d399eae3aa5ed516a43b91611150b36cdb10e94ab3c4f3226130e37cccf3cfa7"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_archive_operation.py","size":68026,"sha256":"ca724e7943c9862608f4f23db3ffa4202a3904703600c9c338acb8667ee0a49a"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_artifacts.py","size":81185,"sha256":"7b4065bb9a69f2dc404dab40512dffe9e1f4fe957eb41cb865197f1e8c3f85a4"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_der.py","size":5132,"sha256":"9ad85b4f36c65d5dc1895fae45ffc3959f0e190e7b183615aa6c0714d8b38ab5"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_entitlements.py","size":23224,"sha256":"3278efadeecbcc09187cc859c03e1e011a8bf2d8f22355f92c03ade140c4951f"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_plist_binary.py","size":8499,"sha256":"1601d3e15467a95348bde537ec6da633c2b4b46e0f7803eb619622b3cab69b2b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_profile_auth.py","size":7972,"sha256":"143897fba6fcd6e8a6d3d8063425a3274643eca934da334ada795865c840014c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_profile_trust.py","size":9102,"sha256":"e813efc8e4218048bae71f04de942493e93e5880f095e5ae68f051d6cf176edf"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_profiles.py","size":36397,"sha256":"ee19ada826cdd49da7ad8a4ad2b7a2f6bc82eedf9334507980c6c4b87853bb1f"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_upload_validation.py","size":7171,"sha256":"2b914576fd795123bd6088711f19d1072801415736f266ebaf39c5d6d4446589"},
-    {"path":"/work/inputs/core-source/src/mobile_release/local_signing.py","size":99969,"sha256":"2163e0233b616ac23921612755ea975826b1ea5a2d55f7384c0a4e3bee3c6c4d"},
-    {"path":"/work/inputs/core-source/src/mobile_release/macho.py","size":23720,"sha256":"b313682fbc54a73d7eddd1afb6620493c12e3031857c43ed725c5d6103e3719b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/metadata.py","size":27910,"sha256":"1aadff63995e2e705c21d5b5e30d8b4ba9f7c69035f32de39afada6d05c8dc2b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/metadata_text.py","size":8246,"sha256":"207cde915a41c7ae026d2640d97464220bd7284c2de20ff3f366fb9fb0f4cb70"},
-    {"path":"/work/inputs/core-source/src/mobile_release/metadata_text_edit.py","size":16301,"sha256":"e6f76867b3605f72816f66e37a413d9ab1bc001790b8a0d8eff252d485280815"},
-    {"path":"/work/inputs/core-source/src/mobile_release/owned_process.py","size":9037,"sha256":"0c7c87c7eaf27629be2eb33c195a956b6c40b7b5883214a08e15f255ac4939b8"},
-    {"path":"/work/inputs/core-source/src/mobile_release/preflight.py","size":60891,"sha256":"d49e71ec66f149bab82ef4dcabf22db96fed61864a5540d48ae309183e25c173"},
-    {"path":"/work/inputs/core-source/src/mobile_release/provenance.py","size":203226,"sha256":"30567c328615b0fd2825e51c08dbfdf82e8c83868ab1d4a8c8017af9330c5442"},
-    {"path":"/work/inputs/core-source/src/mobile_release/release_confirmation.py","size":456,"sha256":"7bac256337f269289b867da659ce19ac3fd403527d2ddf118ba473e7a6215aa4"},
-    {"path":"/work/inputs/core-source/src/mobile_release/release_version_edit.py","size":15399,"sha256":"2ba0d9f3cf99ebe77a06a1690d6f93755ce48af55ca20da9989fed5cd2eed167"},
-    {"path":"/work/inputs/core-source/src/mobile_release/reporting.py","size":7628,"sha256":"4bbed825e6f1098dd4a89d864002641a2c7ec13f183ac0e85d5de3cc38aab900"},
-    {"path":"/work/inputs/core-source/src/mobile_release/stores.py","size":51029,"sha256":"1346d53d11e60d2f70101905c00e8cda98bcfb838e3ad53359a34cac1b1ab58a"},
-    {"path":"/work/inputs/core-source/src/mobile_release/toolchain_policy.py","size":517,"sha256":"1b48e5c7e08864ff8ee63bcb3a91bf6782259fbe91f413ba707510bc631f2f61"},
-    {"path":"/work/inputs/core-source/src/mobile_release/tooling.py","size":7495,"sha256":"3bc69d9522c563fa1cb7403976f1cf6c1c2b5ad3e042a4a88dfbc7db06932c4d"},
-    {"path":"/work/inputs/core-source/src/mobile_release/version_text.py","size":10275,"sha256":"408c9fbc1ba4b101230ff271050ef75ef2b34f2e7656869f88006f8101687eb1"},
-    {"path":"/work/inputs/core-source/src/mobile_release/workflow.py","size":128551,"sha256":"095d2c7dbca450c6dbbb79c9cdd4332073a134aa3150cc51ce2d3b5bb378dd52"},
-    {"path":"/work/inputs/core-source/src/mobile_release/workflow_payloads.py","size":3228,"sha256":"5dbc513b408c0e5735ed67c00db1e3e92499461f307abd53307d493f0895201b"},
+    {'path': '/work/inputs/core-source/desktop/android_build_bootstrap.py', 'size': 1522, 'sha256': 'c40cc18014cb2287a947a29ae206d06484616472886afa04f5afa90f70969f9b'},
+    {'path': '/work/inputs/core-source/desktop/artifact_inspection_bootstrap.py', 'size': 742, 'sha256': 'ebfd55d7b0fe85daa0b65a5eaeae92487f75050f391298d8025260a784907bfc'},
+    {'path': '/work/inputs/core-source/desktop/config_edit_bootstrap.py', 'size': 1355, 'sha256': '0d0123feedf4b992571f02ccd7ad79f2b46dbfa9b23304c8f245c8fe7b291d7f'},
+    {'path': '/work/inputs/core-source/desktop/engine_bootstrap.py', 'size': 1187, 'sha256': 'fe90aa7f12192d7b94067a7774a7151b4f235a339b94881897e9120b0fe25c7c'},
+    {'path': '/work/inputs/core-source/desktop/environment_bootstrap.py', 'size': 1077, 'sha256': 'e737c9bf570358025e17d4413f1a567d41b9132142855226572e8a06cd141965'},
+    {'path': '/work/inputs/core-source/desktop/github-ca.pem', 'size': 240216, 'sha256': '9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f'},
+    {'path': '/work/inputs/core-source/desktop/github_connection_bootstrap.py', 'size': 1249, 'sha256': '442137c076170a8f5df291503961e0e67e2edad9ae3c44905075f61204dc4668'},
+    {'path': '/work/inputs/core-source/desktop/github_history_bootstrap.py', 'size': 801, 'sha256': '759dbcb7b3bef35a5ba22536d79d9f5007d759835212a7e66f5651765c2feb92'},
+    {'path': '/work/inputs/core-source/desktop/github_preflight_bootstrap.py', 'size': 831, 'sha256': '5c28892a457c6a8ea946c43774dd53c1f61a179b3136e63a52cf6eb1d32447db'},
+    {'path': '/work/inputs/core-source/desktop/github_release_bootstrap.py', 'size': 911, 'sha256': '96868532859a696a72868ec8fe2c327b3f81769f6c57ea8d4de92147d038c07d'},
+    {'path': '/work/inputs/core-source/desktop/github_setup_bootstrap.py', 'size': 806, 'sha256': '0ab443416343692b6c5cf7ad123f68f319cbd64a3bd762c6430f6dccf39fa4a4'},
+    {'path': '/work/inputs/core-source/desktop/ios_archive_bootstrap.py', 'size': 738, 'sha256': '1c750ecd088f2bf33985a1bdf62a3a9fd0df19fd9563f4f443e605b272661c19'},
+    {'path': '/work/inputs/core-source/desktop/offline_preflight_bootstrap.py', 'size': 1081, 'sha256': '0864d0d24de1d5be64781b7cb5378ebeb77c528352927f31609786fb12be8750'},
+    {'path': '/work/inputs/core-source/desktop/project_recovery_bootstrap.py', 'size': 750, 'sha256': '596edfd308abe327a9a255c82d8ea181e3b607e55db40406cb39a1675bd9edbf'},
+    {'path': '/work/inputs/core-source/desktop/tools/prepare_runtime.py', 'size': 17503, 'sha256': 'eae52fcfed95cf177bcfd4db4f00157b6f07047be54df28ad77c2a16387152d8'},
+    {'path': '/work/inputs/core-source/src/mobile_release/__init__.py', 'size': 144, 'sha256': '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'},
+    {'path': '/work/inputs/core-source/src/mobile_release/__main__.py', 'size': 115, 'sha256': '50fd328dfe5b5339a9958444940e9ce45b9764dbb7b130cc25f3a966ccb706a8'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_command_process.py', 'size': 177438, 'sha256': 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_android_build_control.py', 'size': 3936, 'sha256': '67cc1c9e37c80ab91c5abce21c92a9319f8273374f6b57d51ff488521e524826'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_android_build_engine.py', 'size': 509, 'sha256': 'acb8af725b5b77cdaaacbeabe193351498b5b9e1f828e6c7405dca67e0951c4a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_android_build_files.py', 'size': 66714, 'sha256': '68c31de6508628d5994e82459f6c3f149dca1fe2359fbf04e8945327c01a01c5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_android_build_protocol.py', 'size': 44871, 'sha256': '00e248aa279348194094fc40a0051fcac295eb72f2291915aff3f0e35516eb37'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_android_build_selection.py', 'size': 7238, 'sha256': 'f0526059bb7b76e90b075b50f6144e0e4b2e8aa7d431a8a40d51090b4e898527'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_android_signing_material.py', 'size': 10009, 'sha256': '81e484a291ff1aed07c822499057b7932ae11cbd6243d6cd87cbdf8b6e1cdfc8'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_artifact_inspection_control.py', 'size': 1359, 'sha256': 'a51b94045a1835113db9d5652402fa97ea2fe75497b313c257fc66e903bd0990'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_artifact_inspection_engine.py', 'size': 496, 'sha256': '6a5c8941c81541494e94bd7dd7b9b523904dda14d5e3226394c0409325e06b15'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_artifact_inspection_protocol.py', 'size': 20279, 'sha256': 'a74de05d896f927032dda3d9297ab225b21f75ea6fcb53c5c9668ecf5b20da56'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_artifact_inspection_selection.py', 'size': 22811, 'sha256': 'c77ea1550a1dbfd4e7fbf16d13b24caf9997599aa2c1c2b4b3fa61c40a0cddf0'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_edit_control.py', 'size': 8523, 'sha256': '1afda791e6f5c321656a866b76afb67159f129af1cc90cd71b5dff35cdb67a10'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_edit_engine.py', 'size': 31122, 'sha256': 'c0879f50acdeae6fd112af91ef089e09fd98a8f85b55b009727495ebb652e227'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_edit_protocol.py', 'size': 16051, 'sha256': 'a9a3200466861c222c2af5269b915f711f5b8e0f54200e6451e9001a18ab9658'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_engine.py', 'size': 9464, 'sha256': '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_environment_control.py', 'size': 5794, 'sha256': 'b4d8fbe47b575faa8de2fc06854bb6863cd3e68fdb60473c8f5488ce70142771'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_environment_engine.py', 'size': 6574, 'sha256': '0f99c422928fd7aa955e5c6d63682ef29c0e226e09ce51d25141bee98d44e6bc'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_environment_protocol.py', 'size': 19517, 'sha256': '1316e980200e63741340c2545a2a6d93adf9cf4a8e2f37f379768f33d445f39b'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_engine.py', 'size': 14149, 'sha256': 'a468ce5b3ccf18606a0968817299bebeaee63299268430f9a52a1de7bf02483c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_history_control.py', 'size': 4451, 'sha256': 'c3120112579e4bc3b3cb9ba1fa09b401e9f9bf3db1bf883a2c75f460bf28955f'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_history_protocol.py', 'size': 8115, 'sha256': '285e49e31195d56bafc18880d3e3467a76948132152d0e59f1c3c58f6a3b4a28'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_preflight_engine.py', 'size': 11006, 'sha256': '93d25c01506dd3db36e18d6157b23b122c37db4f21b8ae4716e9ea1799063dda'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_setup_engine.py', 'size': 8467, 'sha256': '741f4873c0e527511a9c3a5589658be9142ac662849d89b89d6126fd6d83b01c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_images_protocol.py', 'size': 9003, 'sha256': 'd4b8aa46d95ec7447c8e6a879f021ef8b82fa936020133c62508a75d18e99e63'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_initialization_protocol.py', 'size': 15547, 'sha256': 'e72c015f5d1fece9fd8bcd4ef2b910a457491e89a8b0eeaab866260e7d4b85d0'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_control.py', 'size': 5216, 'sha256': '64a22a771783a0a5e0ae800be9ddeabe6a2f4d0441814664b4ffa1e572b67c45'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_engine.py', 'size': 492, 'sha256': 'ab1e76f3ae0b4a83f4b17340df3f803909d9fbb84063aa743a49a63a26319080'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_protocol.py', 'size': 22814, 'sha256': '38f84a0b11ccaa9b3e192fb782a06909eb0cf003e6d78376a7022fe57078922c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_selection.py', 'size': 4160, 'sha256': '8a5d9051f3772bdc070ff25a090ab234ca36b59b4c3ffc6f7cfe56e1efae1b49'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_recovery_protocol.py', 'size': 6972, 'sha256': '8f3c6801776e8b8cf48385234860b7a448af87dfb51eac4c6c2b757b13601c39'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_signed_operation.py', 'size': 36496, 'sha256': '9f423b72ab217506d682607609b9d75537532ccef99d69beba67f3624c12f184'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_signing_material.py', 'size': 9566, 'sha256': '4742c1c9b8d7acc984b4fb2dfcb84d9a8a76b9121f241a3f18ee8d7a51d46929'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_preflight_budget.py', 'size': 16253, 'sha256': '391ef71136be104523e09b4c2da0967d04271fbbedf7ea04663649eeb82e02d4'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_preflight_control.py', 'size': 938, 'sha256': '7d867dfba27acd98333f3bb8477f1693e4ad93738a0273be4a4fa44108c438d9'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_preflight_engine.py', 'size': 1199, 'sha256': 'ebd6e6e40b024724cb4659f51d200ec255f67fb2b97bd20ab41df8956038f444'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_preflight_protocol.py', 'size': 13301, 'sha256': '094b9259bf99b790d237b0e99c81401eb3839da5360985910b4a86182f542537'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_control.py', 'size': 1430, 'sha256': '97b8b5cc938fcaf2b432a3dc8bc82a05989113525b0739be538807abeb869790'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_engine.py', 'size': 494, 'sha256': '430d9938a7b93094d5f078af5aa83d19dbc289ec4f8a3a66ba3a26169273a231'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_protocol.py', 'size': 11539, 'sha256': 'e0d7227470502cce0f59bd9d978b76f2e39b561afb4646899680c01fffd3fae8'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_saved_command_control.py', 'size': 14436, 'sha256': '6c71ddc4c4d3151edece9364785c11c9baf2db6f75d904cefb279153c60ce875'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_saved_command_engine.py', 'size': 17536, 'sha256': '2671a28e5bc05c509a576283c3c6f0d2c5bd655cbe1652c14aaabd95bc111411'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_github_action_family.py', 'size': 634, 'sha256': '999d1be9a50f2a2eda0bc64234e1e9102f7387af7bef50643889b45b4c60dbbc'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_github_connection_transport.py', 'size': 57820, 'sha256': '91e9dba49d38f1fc518d1a21dca6a27be1d4f5355ac206e9d8d60b407ba1526d'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_github_preflight_journal.py', 'size': 17327, 'sha256': 'c2f6e0385adbcb61d92daa6d81f4f19c46b27c13263428e8db36f8e7cc134638'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_lifetime_evidence.py', 'size': 19514, 'sha256': 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_native_process.py', 'size': 62175, 'sha256': '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_profile_callers.py', 'size': 8197, 'sha256': '4c1374b6a738f027a3cdbbd4a778346a5ec5df889da9781f8d26b3f7ac688c75'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_profile_process.py', 'size': 131940, 'sha256': 'be6442d5d2f5e777ed48e61a0151c50c4e9878c7c40fec8573af524511780613'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_store_lane_contract.py', 'size': 9500, 'sha256': '8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_store_lane_evidence.py', 'size': 17638, 'sha256': 'bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_store_lane_files.py', 'size': 35156, 'sha256': '880eb0cfa37c0c70eb089c6adbe333450af139f1d85c901e861c756057c7aac5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android.py', 'size': 43903, 'sha256': 'bfccda7ce6b0e989a56ee63a2a907ef29f9aa1ae2831221d094509d08cf9bd2f'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_build_operation.py', 'size': 26622, 'sha256': 'e10f2e3738c40452da539078c3b266149f6b7bfa27be91b4edaa944d1b5cb317'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_build_signing.py', 'size': 9158, 'sha256': '48505b448f0685b4ed49802a2ff2317564e1715cf19dde9863a85c4d0b1f786e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_build_tools.py', 'size': 59387, 'sha256': '41b9e27a43ff240412007b3c0381d455cfee9266566ff44735a3131955d0e440'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_build_tools_macos.py', 'size': 24710, 'sha256': '5c4685a16d36edccd68ab968612f954893160619f7d8278037f74713b02688a9'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_manifest.py', 'size': 9267, 'sha256': '7fe056f442e239a8668a62d699f0b4c7f077de9b959d32fc4a2f8f770460bdd7'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_upload_validation.py', 'size': 6295, 'sha256': '5be3d74272ade8a30938d48e25ffe42a661ff3e142872c17b014dee1641cfd72'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_zip.py', 'size': 15103, 'sha256': '34391d082553f2b5168af71c275c743c00bd7982b719933183874ad8258ee15a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_zip_integrity.py', 'size': 15169, 'sha256': '80bae3a6142f044643f7a1077b671f3ad105123fe1db55ac674d1b4eb0b1467f'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/__init__.py', 'size': 9264, 'sha256': 'df0553cbacb757af487715c1f235469be8d72e5044820a28cb454bc7b2abc879'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_candidate_evidence.py', 'size': 17026, 'sha256': '7dbaaf5f63b8f29b50a1841340b8dcc78ec0e4519311416b37d3a75305180452'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_catalog.py', 'size': 15772, 'sha256': '72059524e4968b4769b5da7bcfb0dbeda121112ddbd04ffe0a20f2daeecf91b3'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_credential_assessment.py', 'size': 19158, 'sha256': '834e6a88a64cf491504e03e8e7026b70c693b37196c489bf3d6ebabdcb9bac92'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_credential_guide.py', 'size': 7905, 'sha256': 'bd713a2150eb6b03ea2896ea98db27647146fd536f7a2d412a7f8ada7e98a3fb'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_environment.py', 'size': 14333, 'sha256': '81b5d37f0f2aae536e8a96edc8fe517516fd47c1540a00862c974b481944092b'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_github_connection.py', 'size': 16515, 'sha256': 'a68974f2bf477cd5d3d4349398a3c7616ac3f47b8fd704a0fa356e3784d29a7b'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_github_setup.py', 'size': 13267, 'sha256': 'a8ec2cb35195188ffc66124cabce38ebedbee23726731b43a4333dbd70e240bb'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_json.py', 'size': 2851, 'sha256': '84c90334c94b12877cc3dbcd9324bd80d78a2de9f54d64e30c771af06f719815'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_lifecycle_evidence.py', 'size': 8942, 'sha256': 'f094cdd8af9418c44e69f4c7578349251511d5857af2b22ff74cf3e8ee918618'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_metadata_text.py', 'size': 10878, 'sha256': '759c3124d807fd768883c50b15e05b0040e114414ef5f92045a536d2aba4d8a7'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_preview.py', 'size': 10213, 'sha256': 'ed5ea4c2777ea36b34816ec66603cf2453aeab22bf98764b82ea0db07ab6beae'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_release_version.py', 'size': 8391, 'sha256': '54706d38280f898d80418e9402038712e7f66610c6d64930286a8405e0e3370c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_snapshot.py', 'size': 35648, 'sha256': 'a8aff7a4fe940491bdc6788b657649168ff918a98b33cfafb8cdad045f26a66e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_snapshot_windows.py', 'size': 19049, 'sha256': 'c96e29786f986811f211ec8679336fc665a06fcb918c056260fa77ea2b0696a0'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_snapshot_windows_native.py', 'size': 26733, 'sha256': 'a4b1303e6cdc73053a1c22dc109f9925d5babf612ec4041453dad876a5db4d17'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/contracts.py', 'size': 29210, 'sha256': '28430514789c40b873e27efc0c8af0c23d1d71d38bff131d59df7e3509faae0c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/credential-guide-v1.json', 'size': 39128, 'sha256': '7f9828720684a1b6d071df2a34d415feb8ff4552c89d8d6d42b19970d838d478'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/field-help.json', 'size': 28837, 'sha256': '890d9d1c22a4984bb60b0b503cf1106fe5b5f03ddf50614b5d00350ee510bb16'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/github-connection-v1.json', 'size': 9225, 'sha256': '75a635de5747c8e0773ec1ee996fff594f38e2a7f28d90099db86f56b4319714'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/github-setup-v1.json', 'size': 20358, 'sha256': '6fa1f3b7dd1907f56af44ccf050458626d702ec0a06e5578a7416986c46ad29a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/metadata-image-help-v1.json', 'size': 5492, 'sha256': 'cae88cfa09df0ad46a841b0ba61e036a2e94bcb1bd17e801eaa84042d7fe313e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/metadata-images-v1.json', 'size': 8572, 'sha256': '2a5b5790573fd4abe3493762b60592c2bd65bccfcc31855a96d11641892e550a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/metadata-text-help-v1.json', 'size': 10495, 'sha256': '08c4efac78ee2aabc75f6ece7f93010f34193bcb8c8304a742b9e0c7e940ccfb'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/project.schema.json', 'size': 12407, 'sha256': '2c59a6a3d0c90188db5800898db2c42612960616f30d84aecf25a4611ec5fbd7'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/release-version-help-v1.json', 'size': 5157, 'sha256': 'd4ee75cba9accb83ce0982de1fbe4359e9744b38c40856831dea111c1739ff09'},
+    {'path': '/work/inputs/core-source/src/mobile_release/artifact_inspection.py', 'size': 9104, 'sha256': 'c350c6fa35c034afab172b6b659acb0915d4534e5ac5eb5cd01bc2b485057e47'},
+    {'path': '/work/inputs/core-source/src/mobile_release/build_inputs.py', 'size': 162796, 'sha256': 'd5407cca9d0ce9aae6bd5634b0ac6bb461142c6043f011989a75a64ff0a4832c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/cancellation.py', 'size': 32351, 'sha256': 'eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/checked_files.py', 'size': 22382, 'sha256': '803b9a0767231426243c0be423a6eb94bcc512ada3bbc132f0798b76a0baedc3'},
+    {'path': '/work/inputs/core-source/src/mobile_release/cli.py', 'size': 63460, 'sha256': '7962b6916a632521378a6d76f163ad4796890cdb262e0bdc37a8ce3e66fbd246'},
+    {'path': '/work/inputs/core-source/src/mobile_release/config.py', 'size': 39869, 'sha256': '1e7c192fb46d49bee34a316eb4714079b38aa68a1188462e612d815d8117e1ed'},
+    {'path': '/work/inputs/core-source/src/mobile_release/config_edit.py', 'size': 25534, 'sha256': '40da2f9bb7813a296e18cb8b86ba2c4e84c703d06dcfbb218eae706f781a4ba6'},
+    {'path': '/work/inputs/core-source/src/mobile_release/config_payloads.py', 'size': 4805, 'sha256': 'e4b260181b325f40d896db86234399ea9fa573ff8bcd07a9c6c494294cf7cd76'},
+    {'path': '/work/inputs/core-source/src/mobile_release/credential_policy.py', 'size': 4714, 'sha256': '384375dc92348ba2f25159241ae1c9e9711b5ff7c7d72c2fa230146846590805'},
+    {'path': '/work/inputs/core-source/src/mobile_release/credential_requirements.py', 'size': 9503, 'sha256': '2ee398a6b17a067977d4081b111ac72ef49d6876d8cddfa75bbaca60545e301f'},
+    {'path': '/work/inputs/core-source/src/mobile_release/credentials.py', 'size': 106984, 'sha256': '1d7efc1307772005282602cd6211ee660cab134a134b7379f25eff6c8df863f5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/darwin_memory.py', 'size': 6079, 'sha256': '31489d681c8bd14cd50fe8f4ac6bf1707ae55681cae99fecc899569e8d6b99b6'},
+    {'path': '/work/inputs/core-source/src/mobile_release/data/apple-profile-roots.pem', 'size': 4539, 'sha256': 'c704ce9bc7d65280e2893c2235c2434dba8cbce00f659787492714ca441b1e93'},
+    {'path': '/work/inputs/core-source/src/mobile_release/desktop_android_build.py', 'size': 16867, 'sha256': '86caa7a953fbd3a68e4627a0074669d29b85186a74d580964103726932fb93f5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/desktop_artifact_inspection.py', 'size': 81442, 'sha256': 'e3ed183182d5220acb12e5fca6b53f55a4d103b3312c2b0c036b0101dc4bc9e5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/desktop_github_history.py', 'size': 40304, 'sha256': '0b286e29e3e1cb665b179a41f49a19054bb23ef4d8ddaf0b8b9c2c134a66d03f'},
+    {'path': '/work/inputs/core-source/src/mobile_release/desktop_ios_archive.py', 'size': 22552, 'sha256': 'c8e8c564dd22826c31028557a35741e6fbf002c25de0e6cc22f3d77e9177658b'},
+    {'path': '/work/inputs/core-source/src/mobile_release/desktop_preflight.py', 'size': 8915, 'sha256': '2f1b3fc4aae8c55e80954ff578cf97116bba246c759cf183bd13578fafc13581'},
+    {'path': '/work/inputs/core-source/src/mobile_release/desktop_project_recovery.py', 'size': 7245, 'sha256': 'f86353181b260e45d8c748e0dda0653fe7317b571b95c117682d3476067a9611'},
+    {'path': '/work/inputs/core-source/src/mobile_release/discovery.py', 'size': 27885, 'sha256': '6802bd28bccf0c807ca67299c0cb94d2eab0158b44383aed167a42465b2608bd'},
+    {'path': '/work/inputs/core-source/src/mobile_release/environment_diagnostics.py', 'size': 12025, 'sha256': 'db34c792e7097df8d9e0e52980486df450b1e6f9064027202987d99847ec67a1'},
+    {'path': '/work/inputs/core-source/src/mobile_release/environment_diagnostics_tools.py', 'size': 24700, 'sha256': 'a45822d5d237c224164dcec35ff7a91703a49f032f3b4993d9bcdf9b90454da0'},
+    {'path': '/work/inputs/core-source/src/mobile_release/errors.py', 'size': 749, 'sha256': '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'},
+    {'path': '/work/inputs/core-source/src/mobile_release/evidence_layout.py', 'size': 2011, 'sha256': 'e39ed2fb0c63f5cb6d3fd076e684ce8285332864d4ac20f60dd68f9dcfd2464e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_history.py', 'size': 16080, 'sha256': 'ba30d719e050db3b203b5c2119475c9e570d3f2ef34521c53a8d29034903fd15'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_history_engine.py', 'size': 7481, 'sha256': '26ab570b1d8df0c760f3ab58a09db2be1b0fc846669c2d928f4bfc1f2157cfc2'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_preflight.py', 'size': 23244, 'sha256': '9d326639f15c50397f110385b5aa6b215f31d5330c5c29e9a4fcf0ea9cacca34'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_release.py', 'size': 37400, 'sha256': '5862c2989f2818e8d6c9faef277fbd5b8608bdfd5e1b63e22dc9057bb51b8cfa'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_setup_remote.py', 'size': 80116, 'sha256': '867e8c97238e8c5c88fef980531604b273ef2aa7fe77d193ba0829521035a428'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_setup_secret_inputs.py', 'size': 18087, 'sha256': '43ada1ec119c3e1d61ee8cb07fc144164b800cd245cc220ef75b116702c8ebd6'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_setup_variable_runtime.py', 'size': 12779, 'sha256': 'e7e6c690ef818823db257c8469496a719740e8867b21c9d521025eb73c39717e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_setup_variables.py', 'size': 23192, 'sha256': 'b01e794bffcbb82c4a4ec72d67c240a6fcb3bba6513a34ee5057a312f8c7f154'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_workflow_edit.py', 'size': 22213, 'sha256': '138d38e2379ae7c2d04142862232dd9adf4e2b7165b708c3a80500c02be411d4'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_workflow_recovery.py', 'size': 42208, 'sha256': '946dd7427df669228d2674202fa3063d5e539e6dc844636349c9d35633a032ab'},
+    {'path': '/work/inputs/core-source/src/mobile_release/init_transaction.py', 'size': 124739, 'sha256': 'e31438ba7b62d147a5d2df5567b5fc796ad7c917fcf32155c41d4df731a80ce0'},
+    {'path': '/work/inputs/core-source/src/mobile_release/init_workspace_custody.py', 'size': 51273, 'sha256': '16db28d284ee5287291ab000cf00500b12b69f43b31b6fe5f0a10da6e3bbc221'},
+    {'path': '/work/inputs/core-source/src/mobile_release/initialization_payloads.py', 'size': 2597, 'sha256': '88047e18b83895264a00cb3f094aa7089d362d14ebcce5fe24717e60b64b2192'},
+    {'path': '/work/inputs/core-source/src/mobile_release/initialization_recovery.py', 'size': 9282, 'sha256': 'f602f708cb92bf449decdadc45d79f427f6f4895ef7b5ebb5159224576262c6e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/initialization_targets.py', 'size': 14895, 'sha256': 'e38cf3eccc4ad87aded173631ede727f6cb1377c306529c111c68bf40304c2c6'},
+    {'path': '/work/inputs/core-source/src/mobile_release/inspection.py', 'size': 930, 'sha256': '663d6d82261815cf044ecc96f19eb7252b54d224edbecd4641679b2a32fc920a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios.py', 'size': 84215, 'sha256': '5e42a8b3a48312d77cd215a8fc6566adf6881787048630535d10a4313493f0da'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_archive_operation.py', 'size': 68026, 'sha256': 'ca724e7943c9862608f4f23db3ffa4202a3904703600c9c338acb8667ee0a49a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_artifacts.py', 'size': 89122, 'sha256': '8247e6fbd81f50bc64742ccc7d3dce7fa2e73e69cf38249b685ac856cb2ff7ec'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_der.py', 'size': 5591, 'sha256': 'cc523fc1239aa4cdfbe38b1a83b12a4ee3a0e6645eeac48c30a27c520f8d5844'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_entitlements.py', 'size': 24766, 'sha256': '62537c12b86f84632ce1c005ab481cff722878ee96f75f202e94e8e329d3919d'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_plist_binary.py', 'size': 8499, 'sha256': '1601d3e15467a95348bde537ec6da633c2b4b46e0f7803eb619622b3cab69b2b'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_profile_auth.py', 'size': 7972, 'sha256': '143897fba6fcd6e8a6d3d8063425a3274643eca934da334ada795865c840014c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_profile_trust.py', 'size': 13730, 'sha256': 'daec8dbe6be114f4c4cf936f228f9152531e5ac86e1619f36389f647d2ceffa7'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_profiles.py', 'size': 38828, 'sha256': '28983f9ecfb445fa8412a065b610ab48f6ec701249aaaaa1c8333aeaf9a5c081'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_upload_validation.py', 'size': 7171, 'sha256': '2b914576fd795123bd6088711f19d1072801415736f266ebaf39c5d6d4446589'},
+    {'path': '/work/inputs/core-source/src/mobile_release/local_signing.py', 'size': 100391, 'sha256': '5fe3dc261a12802cfa54df171c461ec03a3e60119b0ab5c5e943c70715f16d9e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/macho.py', 'size': 24772, 'sha256': '40841a2a613def730afc157133507887db5acf97f2beb8e8cccf5c161b915fef'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata.py', 'size': 26246, 'sha256': 'c4ac064ee8dbb4197fb810045fd10151fc728ec3e990704ce4dbad9245fc1f97'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_image_header.py', 'size': 4953, 'sha256': '0c45ea5966272c370c344245418dcda6e54026fa86af40ba635d88442de468dd'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_images.py', 'size': 34681, 'sha256': 'c22916e49ccb102938f752ba774b875f7f58c7726ad700328c3eb2950f1cd58d'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_images_custody.py', 'size': 17479, 'sha256': '1bf1d046640421012ac06249d55360eb862a50dc28b6a64234a6703d37c2763f'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_images_edit.py', 'size': 14063, 'sha256': 'fe8c1d3842665df68e32373c817dfe7612cbcfb482226d7d3f38420afe9e6fad'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_images_recovery.py', 'size': 47833, 'sha256': '5ee2ec281b08633cfce5f1730f1fa5fc82f09887c86cc4fbc4df882422666db3'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_text.py', 'size': 8246, 'sha256': '207cde915a41c7ae026d2640d97464220bd7284c2de20ff3f366fb9fb0f4cb70'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_text_edit.py', 'size': 16301, 'sha256': 'e6f76867b3605f72816f66e37a413d9ab1bc001790b8a0d8eff252d485280815'},
+    {'path': '/work/inputs/core-source/src/mobile_release/owned_process.py', 'size': 9127, 'sha256': 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59'},
+    {'path': '/work/inputs/core-source/src/mobile_release/preflight.py', 'size': 60891, 'sha256': 'd49e71ec66f149bab82ef4dcabf22db96fed61864a5540d48ae309183e25c173'},
+    {'path': '/work/inputs/core-source/src/mobile_release/project_initialization.py', 'size': 13149, 'sha256': '14a3be9ce60d7e722ec1f2b7e6df6a5e22fedd4812a08cff12da525eaaa949b0'},
+    {'path': '/work/inputs/core-source/src/mobile_release/provenance.py', 'size': 203226, 'sha256': '30567c328615b0fd2825e51c08dbfdf82e8c83868ab1d4a8c8017af9330c5442'},
+    {'path': '/work/inputs/core-source/src/mobile_release/release_confirmation.py', 'size': 456, 'sha256': '7bac256337f269289b867da659ce19ac3fd403527d2ddf118ba473e7a6215aa4'},
+    {'path': '/work/inputs/core-source/src/mobile_release/release_version_edit.py', 'size': 15399, 'sha256': '2ba0d9f3cf99ebe77a06a1690d6f93755ce48af55ca20da9989fed5cd2eed167'},
+    {'path': '/work/inputs/core-source/src/mobile_release/reporting.py', 'size': 7628, 'sha256': '4bbed825e6f1098dd4a89d864002641a2c7ec13f183ac0e85d5de3cc38aab900'},
+    {'path': '/work/inputs/core-source/src/mobile_release/saved_text_recovery.py', 'size': 53291, 'sha256': 'd7b81a1baf7f6546325facc45611ce5b6dfb402f335d3688ee9f49cc908768d5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/stores.py', 'size': 51029, 'sha256': '1346d53d11e60d2f70101905c00e8cda98bcfb838e3ad53359a34cac1b1ab58a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/toolchain_policy.py', 'size': 517, 'sha256': '1b48e5c7e08864ff8ee63bcb3a91bf6782259fbe91f413ba707510bc631f2f61'},
+    {'path': '/work/inputs/core-source/src/mobile_release/tooling.py', 'size': 7495, 'sha256': '3bc69d9522c563fa1cb7403976f1cf6c1c2b5ad3e042a4a88dfbc7db06932c4d'},
+    {'path': '/work/inputs/core-source/src/mobile_release/version_text.py', 'size': 10275, 'sha256': '408c9fbc1ba4b101230ff271050ef75ef2b34f2e7656869f88006f8101687eb1'},
+    {'path': '/work/inputs/core-source/src/mobile_release/workflow.py', 'size': 136165, 'sha256': '087e6c0c6e18214551500afebff281864ed9573b13d488444384d93068cacff2'},
+    {'path': '/work/inputs/core-source/src/mobile_release/workflow_payloads.py', 'size': 4997, 'sha256': 'c485569cc573cf2ec99971370eee18bc0d54be7c1eac4edc344d89160fc06ea9'},
 ]
 CONVENTIONAL_SMOKE_INPUTS: dict | None = {
     "manifestSha256": "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba",
@@ -715,7 +752,165 @@ GTK_COMPILE_CHECKS = {
                 "gtk-js-syntax-only", "gtk-c-pkg-config", "gtk-c-compile-only",
                 "vite-assets", "gtk-integration-compile-only"),
 }
+MAC_COMPILE_SCOPE = "macos-normal-compile-v1"
+MAC_COMPILE_WORKFLOW = ".github/workflows/desktop-macos-normal-compile.yml"
+MAC_COMPILE_REF = "refs/heads/verify/desktop-macos-normal-compile"
+# Each fixed hosted target selects ONE exact compiler tuple; no cross-target
+# fallback. The Intel image publishes Rust1.98.0, independently of ARM1.98.1.
+MAC_COMPILE_RUST = {
+    "aarch64-apple-darwin": ("1.98.1", "48a229ceaefd4985c50990b14116b6d856af0985"),
+    "x86_64-apple-darwin": ("1.98.0", "88d9e12ae178fab0fb5cc050a94da85685d449ea"),
+}
+MAC_COMPILE_HOSTS = {
+    "aarch64-apple-darwin": ("ARM64", "arm64", ("macos26", "macos26-arm64"), "build-release.json", "macos26-arm64-"),
+    "x86_64-apple-darwin": ("X64", "x86_64", ("macos26",), "build-release-intel.json", "macos26-x86_64-"),
+}
+MAC_COMPILE_GRAPHS = (
+    ("mac-normal-bin-compile-only", "desktop/src-tauri/Cargo.toml", "release", "desktop-shell,custom-protocol", "mobile-release-kit-desktop"),
+    ("mac-observer-compile-only", "desktop/src-tauri/Cargo.toml", "test", "desktop-shell,custom-protocol,macos-installed-observation", "installed-shell-observation"),
+    ("mac-image-compile-only", "desktop/helpers/macos-desktop-image/Cargo.toml", "release", "macos-installed-desktop-image", "lib"),
+)
+MAC_COMPILE_VAULT_GRAPH = (
+    "mac-vault-bin-compile-only", "desktop/helpers/macos-vault-helper/Cargo.toml",
+    "release", "", "mrk-vault-keychain",
+)
+MAC_COMPILE_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "mac-vault-locked-metadata", "mac-normal-locked-metadata", "mac-image-locked-metadata", "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "mac-cargo-version", "mac-vault-bin-compile-only", "node-version", "typescript-no-emit", "vite-assets", *(row[0] for row in MAC_COMPILE_GRAPHS)),
+}
+# Closed two-architecture DATA + shipping compile mode, not a runtime grant.
+MAC_HISTORY_MODE = "history-app4"
+MAC_HISTORY_EVIDENCE = "desktop-macos-history-app-data-v1"
+MAC_HISTORY_TESTS = (
+    "github_history_protocol::tests::closed_history_commands_frames_and_original_context",
+    "github_history_protocol::tests::complete_history_result_shapes_and_retained_status_are_bounded",
+    "runtime::macos_github_actions_profile_data_contract",
+    "supervisor::macos_github_actions_original_data_contract",
+)
+MAC_HISTORY_GRAPH = ("headless-test-compile-only", "desktop/src-tauri/Cargo.toml", "test",
+                     "development-runtime", "lib")
+MAC_HISTORY_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "mac-source-slots-locked-metadata",
+                "mac-normal-locked-metadata", "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "mac-cargo-version", "headless-test-compile-only",
+                "mac-source-slots-data-test", "node-version", "typescript-no-emit", "vite-assets",
+                "mac-normal-bin-compile-only"),
+}
+# Same shipping graph only; no auxiliary compiler or test original is entered.
+MAC_APP_MODE = "app-only"
+# The existing observer graph only: no test execution or installed authority.
+MAC_OBSERVER_MODE = "observer-only"
+# Match the installed DATA compiler stdout budget; other capture roles stay fixed.
+MAC_OBSERVER_DATA_MODE = "observer-data"
+MAC_OBSERVER_DATA_EVIDENCE = "desktop-macos-observer-data-v1"
+MAC_OBSERVER_DATA_SCRIPT = "desktop/tools/macos_installed_data_contracts.sh"
+MAC_OBSERVER_DATA_SELECTION_SHA256 = "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94"
+MAC_OBSERVER_DATA_PHASES = ("mount", "apfs", "build", "rust", "python")
+# The exact 21 distinct SOURCE producer codes plus its existing unknown code.
+MAC_OBSERVER_DATA_GUARDS = (
+    "command-not-complete", "filesystem-header", "filesystem-row", "filesystem-volume", "filesystem-native-volume",
+    "cargo-build-finished", "cargo-debug-artifact", "cargo-artifact-path", "cargo-artifact-shape",
+    "cargo-artifact-original", "cargo-artifact-eof", "cargo-artifact-postimage", "rust-aggregate-marker",
+    "python-counts", "source-post", "temporary-post", "temporary-nonempty", "fixed-input-shape",
+    "fixed-input-changed", "output-bound", "output-changed", "unclassified",
+)
+MAC_OBSERVER_DATA_GRAPH = ("mac-observer-fixed-data", *MAC_COMPILE_GRAPHS[1][1:])
+MAC_OBSERVER_STDOUT_LIMIT = 4 * 1024 * 1024
+MAC_OBSERVER_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "mac-normal-locked-metadata",
+                "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "mac-cargo-version", "node-version",
+                "typescript-no-emit", "vite-assets", "mac-observer-compile-only"),
+}
+MAC_OBSERVER_DATA_CHECKS = {
+    "acquire": MAC_OBSERVER_CHECKS["acquire"],
+    "compile": (*MAC_OBSERVER_CHECKS["compile"][:-1], "mac-observer-fixed-data"),
+}
+MAC_APP_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "mac-normal-locked-metadata",
+                "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "mac-cargo-version", "node-version",
+                "typescript-no-emit", "vite-assets", "mac-normal-bin-compile-only"),
+}
+# One debug, embedded-frontend main application for a credential-free UI smoke.
+# This is a compiler profile only; the existing XCTest owner is a separate lane.
+ENGINEERING_COMPILE_SCOPE = "macos-engineering-ui-compile-v1"
+ENGINEERING_COMPILE_WORKFLOW = ".github/workflows/desktop-macos-engineering-ui.yml"
+ENGINEERING_COMPILE_REF = "refs/heads/verify/desktop-macos-engineering-ui"
+ENGINEERING_COMPILE_EVIDENCE = "desktop-macos-engineering-ui-compile-only-v1"
+ENGINEERING_COMPILE_TARGET = "aarch64-apple-darwin"
+ENGINEERING_COMPILE_FEATURES = "desktop-shell,custom-protocol,development-runtime"
+ENGINEERING_APP_IDENTIFIER = "dev.mobile-release-kit.engineering-ui"
+ENGINEERING_MAIN_RELATIVE = "target/engineering-main/mobile-release-kit-desktop"
+ENGINEERING_MAIN_LIMIT = 256 * 1024 * 1024
+ENGINEERING_COMPILE_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "locked-platform-metadata",
+                "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "mac-cargo-version", "node-version",
+                "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"),
+}
+# One fixed Mac-only inert DATA test, not another native execution owner.
+SOURCE_SLOTS_SCOPE = "macos-intel-source-slots-v1"
+SOURCE_SLOTS_WORKFLOW = ".github/workflows/desktop-macos-intel-source-slots.yml"
+SOURCE_SLOTS_REF = "refs/heads/verify/desktop-macos-intel-source-slots"
+SOURCE_SLOTS_EVIDENCE = "desktop-macos-intel-source-slots-data-v1"
+SOURCE_SLOTS_TARGET = "x86_64-apple-darwin"
+SOURCE_SLOTS_FEATURES = "development-runtime"
+SOURCE_SLOTS_TEST = "installed_runtime::android_registration_source::storage_capacity_tests::phase_checked_allocation_uses_exact_admitted_records_without_native_entry"
+SOURCE_SLOTS_REMOVAL_REF = "refs/heads/verify/desktop-macos-intel-removal-abrupt"
+SOURCE_SLOTS_REMOVAL_EVIDENCE = "desktop-macos-intel-removal-abrupt-data-v1"
+SOURCE_SLOTS_REMOVAL_FEATURE = "macos-installed-removal-abrupt-fixture"
+SOURCE_SLOTS_REMOVAL_TESTS = (
+    "installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources",
+    "installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality",
+    "installer::worker::tests::same_absolute_endpoint_reserves_settlement_and_rejects_backwards_or_overflow",
+)
+SOURCE_SLOTS_INITIALIZATION_SELECTION = "project-initialization4"
+SOURCE_SLOTS_INITIALIZATION_EVIDENCE = "desktop-macos-project-initialization-data-v1"
+# Fixed lexical libtest order, not caller-provided names or a runtime permit.
+SOURCE_SLOTS_INITIALIZATION_TESTS = (
+    'edit_owner::workflow_domain_tests::initialization_intent_original_slot_and_recovery_finality_are_closed',
+    'project_initialization_edit_protocol::tests::complete_inventory_and_redacted_review_remain_closed_and_bounded',
+    'project_initialization_edit_protocol::tests::fixed_open_and_response_shapes_never_borrow_other_edit_intents',
+    'project_initialization_edit_protocol::tests::recovery_keeps_historical_effects_but_never_mints_clean_before_apply',
+)
+SOURCE_SLOTS_ARTIFACT_SELECTION = "artifact-setup10"
+SOURCE_SLOTS_ARTIFACT_EVIDENCE = "desktop-macos-artifact-setup-data-v1"
+# Fixed lexical DATA tuple; never a native picker or inspection receipt.
+SOURCE_SLOTS_ARTIFACT_TESTS = (
+    'artifact_inspection_protocol::tests::actual_profile_counts_and_negative_checks_never_replace_original_finality',
+    'artifact_inspection_protocol::tests::exact_result_frames_and_status_headroom_do_not_truncate_or_accept_unbounded_strings',
+    'artifact_inspection_protocol::tests::originals_have_lossless_full_tuples_without_claiming_payload_or_native_custody',
+    'artifact_inspection_protocol::tests::selected_ids_are_closed_distinct_and_never_paths_or_other_domain_consent',
+    'installed_runtime::installed_github_action_original_slots_are_inert_and_uncertainty_is_absorbing',
+    'runtime::macos_github_actions_profile_data_contract',
+    'saved_command_owner::artifact_inputs::tests::missing_original_table_cannot_be_loaned_or_consumed_and_metadata_census_is_checked',
+    'saved_command_owner::tests::artifact_original_closure_distinguishes_unentered_from_claimed_and_unreturned_workers',
+    'saved_command_owner::tests::artifact_two_frames_without_selected_originals_never_publish_and_first_stop_never_renews',
+    'supervisor::macos_github_actions_original_data_contract',
+)
+SOURCE_SLOTS_ENVIRONMENT_SELECTION = "environment-setup1"
+SOURCE_SLOTS_ENVIRONMENT_EVIDENCE = "desktop-macos-environment-setup-data-v1"
+# One existing original/codec DATA group; whole lib compiles, no installed write.
+SOURCE_SLOTS_ENVIRONMENT_TESTS = (
+    "supervisor::macos_github_actions_original_data_contract",
+)
+SOURCE_SLOTS_BUILD_INPUTS = (
+    ("desktop/macos-installed-inputs/build-release-intel.json", 4096),
+    ("desktop/src-tauri/Cargo.toml", 1024 * 1024),
+    ("desktop/src-tauri/tauri.conf.json", 1024 * 1024),
+)
+SOURCE_SLOTS_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "mac-source-slots-locked-metadata"),
+    "compile": ("rust-version-target", "mac-cargo-version", "headless-test-compile-only", "mac-source-slots-data-test"),
+}
 COMPILE_PROFILES = {
+    SOURCE_SLOTS_SCOPE: {"workflow": SOURCE_SLOTS_WORKFLOW, "ref": SOURCE_SLOTS_REF,
+                         "evidence": SOURCE_SLOTS_EVIDENCE, "checks": SOURCE_SLOTS_CHECKS},
+    ENGINEERING_COMPILE_SCOPE: {"workflow": ENGINEERING_COMPILE_WORKFLOW, "ref": ENGINEERING_COMPILE_REF,
+                                "evidence": ENGINEERING_COMPILE_EVIDENCE, "checks": ENGINEERING_COMPILE_CHECKS},
+    MAC_COMPILE_SCOPE: {"workflow": MAC_COMPILE_WORKFLOW, "ref": MAC_COMPILE_REF,
+                        "evidence": "desktop-macos-normal-compile-only-v1", "checks": MAC_COMPILE_CHECKS},
     COMPILE_SCOPE: {"workflow": COMPILE_WORKFLOW, "ref": COMPILE_REF,
                     "evidence": COMPILE_EVIDENCE_SCOPE, "checks": COMPILE_CHECKS},
     GTK_COMPILE_SCOPE: {"workflow": GTK_COMPILE_WORKFLOW, "ref": GTK_COMPILE_REF,
@@ -1594,7 +1789,7 @@ WINDOWS_INSTALLED_APP_LOCALS = {
 # The complete cross-platform source lock is not the active Windows graph.
 # Linux vendors stay source-bound here but must never become Windows units.
 WINDOWS_INSTALLED_APP_LOCK_LOCALS = {
-    "mobile-release-kit-desktop": "0.1.0",
+    "mobile-release-kit-desktop": "0.1.1",
     "mrk-linux-mount-observation": "0.1.0",
     "mrk-macos-installed-native": "0.1.0",
     "mrk-windows-installed-native": "0.1.0",
@@ -2630,8 +2825,12 @@ VERSION_NATIVE_SOURCES = tuple(sorted({
 }))
 
 TOOL_CHECKS = frozenset({
+    "mac-cargo-version", "mac-normal-locked-metadata", "mac-image-locked-metadata",
+    "mac-vault-locked-metadata", "mac-vault-bin-compile-only",
+    "mac-normal-bin-compile-only", "mac-observer-compile-only", "mac-observer-fixed-data", "mac-image-compile-only",
     "source-head", "source-tree", "source-clean", "rust-toolchain-install",
     "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
+    "mac-source-slots-locked-metadata", "mac-source-slots-data-test", "source-slots-diagnostic-source",
     "node-version", "npm-locked-no-scripts", "headless-test-compile-only",
     "typescript-no-emit", "vite-assets", "tauri-debug-compile-only", "passive-native-contract",
     "config-core-ordinary", "config-core-committed-fsync", "config-core-committed-close",
@@ -2704,6 +2903,7 @@ def admit_phase(scope: str, phase: str) -> None:
 
 def admit_platform(scope: str, platform: str) -> None:
     require(platform in TARGETS, "Unknown desktop verification platform")
+    require(scope not in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE} or platform == "macos", "Normal Mac compilation requires macOS")
     require(scope != GTK_COMPILE_SCOPE or platform == "linux", "SG1 compilation requires Linux")
     require(scope != WORKFLOW_NATIVE_SCOPE or platform == "linux", "Workflow native verification requires Linux")
     require(scope != METADATA_NATIVE_SCOPE or platform == "linux", "Metadata native verification requires Linux")
@@ -2712,6 +2912,160 @@ def admit_platform(scope: str, platform: str) -> None:
     require(scope != WINDOWS_SNAPSHOT_SCOPE or platform == "windows", "Windows snapshot verification requires Windows")
     require(scope != GITHUB_READONLY_SCOPE or platform == "linux", "G1 native verification requires Linux")
     require(scope != GITHUB_TLS_SCOPE or platform == "linux", "TLS verification requires Linux")
+
+
+def mac_compile_target(environment: dict[str, str]) -> str:
+    """Fixed hosted row DATA; actual uname and original compiler are separate checks."""
+    target = environment.get("MRK_MACOS_TARGET", "")
+    require(target in MAC_COMPILE_HOSTS, "Unknown normal Mac compiler target")
+    arch, _, images, _, _ = MAC_COMPILE_HOSTS[target]
+    require(environment.get("RUNNER_OS") == "macOS" and environment.get("RUNNER_ARCH") == arch
+            and environment.get("ImageOS") in images, "Normal Mac compiler runner row differs")
+    return target
+
+
+def mac_compile_graphs(target: str, mode: str) -> tuple:
+    """Only actual fixed workflow rows; no arbitrary graph or legacy fallback."""
+    require(target in MAC_COMPILE_HOSTS and type(mode) is str
+            and (mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE)
+                 or mode in ("vault-only", MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE) and target == "aarch64-apple-darwin"),
+            "Normal Mac compiler graph mode differs")
+    if mode == MAC_OBSERVER_DATA_MODE:
+        return (MAC_OBSERVER_DATA_GRAPH,)
+    if mode == MAC_OBSERVER_MODE:
+        return MAC_COMPILE_GRAPHS[1:2]
+    if mode == MAC_APP_MODE:
+        return MAC_COMPILE_GRAPHS[:1]
+    if mode == MAC_HISTORY_MODE:
+        return (MAC_HISTORY_GRAPH, MAC_COMPILE_GRAPHS[0])
+    return (MAC_COMPILE_VAULT_GRAPH, *MAC_COMPILE_GRAPHS) if mode == "full4" else (MAC_COMPILE_VAULT_GRAPH,)
+
+
+def mac_compile_mode(environment: dict[str, str], target: str) -> str:
+    """Independently bind the SOURCE-fixed dispatch row before root allocation."""
+    selection, mode = environment.get("MRK_COMPILE_SELECTION"), environment.get("MRK_MACOS_COMPILE_MODE")
+    mac_compile_graphs(target, mode)
+    require(environment.get("MRK_MACOS_TARGET") == target
+            and selection in ("both", "arm", "intel", "remaining", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE)
+            and (environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                 or environment.get("GITHUB_EVENT_NAME") == "push" and selection == "both"),
+            "Normal Mac compiler selection differs")
+    require((selection == MAC_OBSERVER_DATA_MODE and mode == MAC_OBSERVER_DATA_MODE
+              and target == "aarch64-apple-darwin" and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
+            or (selection == MAC_OBSERVER_MODE and mode == MAC_OBSERVER_MODE
+             and target == "aarch64-apple-darwin" and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
+            or (selection == MAC_APP_MODE and mode == MAC_APP_MODE
+             and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
+            or (selection == MAC_HISTORY_MODE and mode == MAC_HISTORY_MODE
+             and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
+            or (selection == "both" and mode == "full4")
+            or (selection == "arm" and target == "aarch64-apple-darwin" and mode == "full4")
+            or (selection == "intel" and target == "x86_64-apple-darwin" and mode == "full4")
+            or (selection == "remaining" and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                and mode == ("vault-only" if target == "aarch64-apple-darwin" else "full4")),
+            "Normal Mac compiler selected row differs")
+    if mode == MAC_OBSERVER_DATA_MODE:
+        require(all(type(environment.get(key)) is str and re.fullmatch(r"[1-9][0-9]{0,15}", environment[key]) is not None
+                    and int(environment[key]) <= 9007199254740991 for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
+                "Observer DATA run identity differs")
+    return mode
+
+
+def mac_compile_checks(target: str, mode: str) -> dict:
+    mac_compile_graphs(target, mode)
+    if mode == MAC_OBSERVER_DATA_MODE:
+        return MAC_OBSERVER_DATA_CHECKS
+    if mode == MAC_OBSERVER_MODE:
+        return MAC_OBSERVER_CHECKS
+    if mode == MAC_APP_MODE:
+        return MAC_APP_CHECKS
+    if mode == MAC_HISTORY_MODE:
+        return MAC_HISTORY_CHECKS
+    if mode == "full4":
+        return MAC_COMPILE_CHECKS
+    return {
+        "acquire": ("rust-version-target", "mac-cargo-version", "mac-vault-locked-metadata"),
+        "compile": ("rust-version-target", "mac-cargo-version", "mac-vault-bin-compile-only"),
+    }
+
+
+def compiler_binding(context: dict) -> dict:
+    if context.get("executionScope") == SOURCE_SLOTS_SCOPE:
+        require(context.get("platform") == "macos", "SourceSlots compiler requires macOS")
+        release, commit = MAC_COMPILE_RUST[SOURCE_SLOTS_TARGET]
+        return {"release": release, "commitHash": commit, "target": SOURCE_SLOTS_TARGET}
+    if context.get("executionScope") == ENGINEERING_COMPILE_SCOPE:
+        require(context.get("platform") == "macos", "Engineering main compiler requires macOS")
+        release, commit = MAC_COMPILE_RUST[ENGINEERING_COMPILE_TARGET]
+        return {"release": release, "commitHash": commit, "target": ENGINEERING_COMPILE_TARGET}
+    if context.get("executionScope") == MAC_COMPILE_SCOPE:
+        target = context.get("macCompile", {}).get("target")
+        require(context.get("platform") == "macos" and target in MAC_COMPILE_HOSTS,
+                "Normal Mac compiler context differs")
+        release, commit = MAC_COMPILE_RUST[target]
+        return {"release": release, "commitHash": commit, "target": target}
+    return {"release": RUST, "target": TARGETS[context["platform"]]}
+
+
+def mac_compile_release(raw: bytes, target: str, cargo: bytes, tauri: bytes) -> str:
+    require(target in MAC_COMPILE_HOSTS and type(raw) is bytes and 0 < len(raw) <= 4096,
+            "Normal Mac SOURCE release exceeds its fixed bound")
+    value = parse_compile_receipt(raw)
+    require(type(value) is dict and set(value) == {"schemaVersion", "packageVersion", "release"}
+            and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1,
+            "Normal Mac SOURCE release shape differs")
+    version, release = value["packageVersion"], value["release"]
+    require(type(version) is str and re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version) is not None
+            and len(version) <= 32 and all(int(part) <= 0xffffffff for part in version.split(".")),
+            "Normal Mac SOURCE package version differs")
+    require(type(release) is str and 0 < len(release) <= 128
+            and release.startswith(MAC_COMPILE_HOSTS[target][4])
+            and re.fullmatch(r"[a-z0-9][a-z0-9_.-]*[a-z0-9]", release) is not None,
+            "Normal Mac SOURCE release target differs")
+    require(tomllib.loads(cargo.decode("utf-8"))["package"]["version"] == version
+            and parse_compile_receipt(tauri)["version"] == version,
+            "Normal Mac SOURCE package/tauri versions differ")
+    return release
+
+
+def mac_compile_inputs(source: Path, target: str, mode: str) -> dict:
+    graphs = mac_compile_graphs(target, mode)
+    paths = ("desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock",
+             "desktop/helpers/macos-desktop-image/Cargo.toml", "desktop/helpers/macos-desktop-image/Cargo.lock",
+             "desktop/src-tauri/tauri.conf.json", "desktop/native/macos-installed-native/build.rs",
+             "desktop/packaging/macos-android-service-signing.profile", "desktop/packaging/macos-install-producer-signing.profile",
+             "desktop/helpers/macos-vault-helper/Cargo.toml", "desktop/helpers/macos-vault-helper/Cargo.lock",
+             "desktop/helpers/macos-vault-helper/src/main.rs", "desktop/native/macos-installed-native/Cargo.toml",
+             "desktop/macos-installed-inputs/" + MAC_COMPILE_HOSTS[target][3])
+    if mode == MAC_HISTORY_MODE:
+        paths = (*paths[:-1], "desktop/packaging/macos-history-provider.profile", paths[-1])
+    bodies, rows = {}, []
+    for name in paths:
+        path = source / name
+        ordinary(path)
+        with path.open("rb") as stream:
+            raw = stream.read(1024 * 1024 + 1)
+        require(0 < len(raw) <= 1024 * 1024, "Normal Mac compiler SOURCE exceeds its bound")
+        bodies[name] = raw
+        rows.append({"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+    release = mac_compile_release(bodies[paths[-1]], target, bodies[paths[0]], bodies[paths[4]])
+    return {"target": target, "mode": mode, "release": release, "sources": rows,
+            "graphs": [list(row) for row in graphs],
+            **({"execution": "compile-and-selected-data", "tests": list(MAC_HISTORY_TESTS)}
+               if mode == MAC_HISTORY_MODE else {"execution": "compile-and-fixed-data", "data": mac_observer_data_inputs(source)[0]}
+                if mode == MAC_OBSERVER_DATA_MODE else {"execution": "compile-only"})}
+
+
+def mac_compile_source_guard(source: Path, root: Path) -> None:
+    helpers = (source / "desktop/helpers/macos-desktop-image", source / "desktop/helpers/macos-vault-helper")
+    no_cargo_configuration((*helpers, source / "desktop/helpers",
+                            source / "desktop/src-tauri", source / "desktop", source, *source.parents,
+                            root, *root.parents))
+    # Neither separate manifest may select a stale adjacent output instead of
+    # the single explicit private Cargo target. Recheck after acquisition/use.
+    for helper in helpers:
+        generated = helper / "target"
+        require(not generated.exists() and not generated.is_symlink(), "Helper manifest has a preexisting generated target")
 
 
 def compile_profile(scope: str) -> dict:
@@ -2729,16 +3083,31 @@ def compile_workflow_binding(environment: dict[str, str], scope: str = COMPILE_S
             "Compiler workflow source identity differs")
     require(all(re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None for value in (run_id, attempt)),
             "Compiler workflow run identity differs")
-    require(environment.get("GITHUB_REF") == profile["ref"]
+    selected_ref = profile["ref"]
+    if scope == SOURCE_SLOTS_SCOPE and environment.get("GITHUB_REF") == SOURCE_SLOTS_REMOVAL_REF:
+        require(environment.get("GITHUB_EVENT_NAME") == "push" and environment.get("MRK_PUSH_EVENT_AFTER") == sha,
+                "Intel removal DATA requires its actual fixed push source")
+        selected_ref = SOURCE_SLOTS_REMOVAL_REF
+    require(environment.get("GITHUB_REF") == selected_ref
             and environment.get("GITHUB_WORKFLOW_SHA") == sha
-            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{profile['workflow']}@{profile['ref']}",
+            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{profile['workflow']}@{selected_ref}",
             "Compiler workflow/ref binding differs")
     event = environment.get("GITHUB_EVENT_NAME")
+    if scope == SOURCE_SLOTS_SCOPE:
+        require(sha != "0" * 40, "SourceSlots event source is not a commit")
+    if scope == ENGINEERING_COMPILE_SCOPE:
+        require(event == "push", "Engineering main compilation requires its fixed push ref")
     require(event == "push" or event == "workflow_dispatch" and environment.get("MRK_EXPECTED_SHA") == sha,
             "Compiler workflow event or exact dispatch source differs")
+    initialization = scope == SOURCE_SLOTS_SCOPE and source_slots_requested_initialization(environment)
+    artifact = scope == SOURCE_SLOTS_SCOPE and source_slots_requested_artifact(environment)
+    environment_setup = scope == SOURCE_SLOTS_SCOPE and source_slots_requested_environment_setup(environment)
     return {"workflowPath": profile["workflow"], "workflowSha": sha,
             "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
-            "runId": run_id, "attempt": attempt}
+            "runId": run_id, "attempt": attempt,
+            **({"sourceSlotsSelection": SOURCE_SLOTS_INITIALIZATION_SELECTION} if initialization else
+               {"sourceSlotsSelection": SOURCE_SLOTS_ARTIFACT_SELECTION} if artifact else
+               {"sourceSlotsSelection": SOURCE_SLOTS_ENVIRONMENT_SELECTION} if environment_setup else {})}
 
 
 def workflow_native_binding(environment: dict[str, str]) -> dict[str, str]:
@@ -2836,9 +3205,57 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
     expected = {
         "schemaVersion": 1, "scope": profile["evidence"], "phase": phase, "status": "passed",
         **{name: context[name] for name in binding_names},
-        "rust": {"release": RUST, "target": TARGETS[context["platform"]]}, "node": NODE,
+        "rust": compiler_binding(context), "node": NODE,
         "checks": [{"check": name, "exitCode": 0} for name in profile["checks"][phase]],
     }
+    if context["executionScope"] == MAC_COMPILE_SCOPE:
+        mac = context.get("macCompile")
+        require(type(mac) is dict, "Normal Mac compiler receipt context differs")
+        graphs = mac_compile_graphs(mac.get("target"), mac.get("mode"))
+        require(same_compile_json(mac.get("graphs"), [list(row) for row in graphs]),
+                "Normal Mac compiler receipt graphs differ")
+        selected = mac_compile_checks(mac["target"], mac["mode"])
+        expected.update(sourceTree=context["sourceTree"], macCompile=mac,
+                        node=NODE if mac["mode"] in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE) else None,
+                        checks=[{"check": check, "exitCode": 0} for check in selected[phase]])
+        if mac["mode"] == MAC_HISTORY_MODE:
+            require(mac.get("execution") == "compile-and-selected-data" and type(mac.get("tests")) is list
+                    and mac["tests"] == list(MAC_HISTORY_TESTS), "Mac History receipt selection differs")
+            expected["scope"] = MAC_HISTORY_EVIDENCE
+            if phase == "compile":
+                expected["testResult"] = validate_mac_history_result(value.get("testResult"))
+        if mac["mode"] == MAC_OBSERVER_DATA_MODE:
+            require(mac.get("execution") == "compile-and-fixed-data", "Observer DATA receipt execution differs")
+            selected_data = mac_observer_data_binding(mac.get("data"))
+            expected["scope"] = MAC_OBSERVER_DATA_EVIDENCE
+            if phase == "compile":
+                expected["dataResult"] = validate_mac_observer_data_result(value.get("dataResult"))
+                require(expected["dataResult"]["sourceInventorySha256"] == selected_data["sourceInventorySha256"],
+                        "Observer DATA receipt source differs")
+    if context["executionScope"] == ENGINEERING_COMPILE_SCOPE:
+        expected.update(sourceTree=context["sourceTree"], engineeringWork=context["engineeringWork"])
+        if phase == "compile":
+            expected["compiledMain"] = validate_engineering_main(value.get("compiledMain"))
+    if context["executionScope"] == SOURCE_SLOTS_SCOPE:
+        removal = source_slots_is_removal(context)
+        expected.update(sourceTree=context["sourceTree"], sourceSlots=context["sourceSlots"], node=None)
+        if removal:
+            expected.update(scope=SOURCE_SLOTS_REMOVAL_EVIDENCE, sourceSlotsBuild=context["sourceSlotsBuild"])
+        elif source_slots_is_initialization(context):
+            expected.update(scope=SOURCE_SLOTS_INITIALIZATION_EVIDENCE,
+                            sourceSlotsSelection=SOURCE_SLOTS_INITIALIZATION_SELECTION)
+        elif source_slots_is_artifact(context):
+            expected.update(scope=SOURCE_SLOTS_ARTIFACT_EVIDENCE,
+                            sourceSlotsSelection=SOURCE_SLOTS_ARTIFACT_SELECTION)
+        elif source_slots_is_environment_setup(context):
+            expected.update(scope=SOURCE_SLOTS_ENVIRONMENT_EVIDENCE,
+                            sourceSlotsSelection=SOURCE_SLOTS_ENVIRONMENT_SELECTION)
+        if phase == "compile":
+            expected["testResult"] = (validate_source_slots_removal_result(value.get("testResult")) if removal
+                                      else validate_source_slots_initialization_result(value.get("testResult"))
+                                      if source_slots_is_initialization(context) else validate_source_slots_artifact_result(value.get("testResult"))
+                                      if source_slots_is_artifact(context) else validate_source_slots_environment_result(value.get("testResult"))
+                                      if source_slots_is_environment_setup(context) else validate_source_slots_result(value.get("testResult")))
     if context["executionScope"] == GTK_COMPILE_SCOPE:
         expected.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
     require(same_compile_json(value, expected),
@@ -2931,6 +3348,7 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
     require(check in TOOL_CHECKS, "Unknown fixed compiler check")
     require(not (capture and output is not None), "Conflicting compiler output destinations")
     require(diagnostics is None or (output is not None and check in {
+        "mac-source-slots-locked-metadata", "headless-test-compile-only", "mac-source-slots-data-test", "mac-observer-compile-only", "mac-observer-fixed-data",
         "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
         "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
         "environment-locked-headless-metadata", "environment-headless-test-compile-only",
@@ -2953,7 +3371,14 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
     except subprocess.CalledProcessError as error:
         # Do not interpolate exception text: it includes argv and may contain
         # local paths or captured output. These labels come only from fixed code.
-        raise CheckFailure(f"Fixed check {check} exited {error.returncode}") from None
+        failure = CheckFailure(f"Fixed check {check} exited {error.returncode}")
+        # Private acknowledgement of this subprocess.run return, not a native
+        # finality/cleanup grant. The fixed full-DATA wrapper also preserves a
+        # returned signal code; it never grants its inner originals finality.
+        if type(error.returncode) is int and (0 < error.returncode <= 255
+                or check == "mac-observer-fixed-data" and -255 <= error.returncode < 0):
+            failure._returned_command = (check, error.returncode)
+        raise failure from None
     except subprocess.TimeoutExpired:
         raise CheckFailure(f"Fixed check {check} exceeded its deadline") from None
     except OSError:
@@ -2976,6 +3401,14 @@ def admitted_host(*, retention_only: bool = False) -> str:
         "linux": "linux", "darwin": "macos", "win32": "windows",
     }.get(sys.platform), "Unexpected host platform")
     admit_platform(os.environ["MRK_DESKTOP_HOSTED_CHECKS"], platform)
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE}:
+        target = mac_compile_target(os.environ)
+        require(os.environ["MRK_DESKTOP_HOSTED_CHECKS"] != ENGINEERING_COMPILE_SCOPE
+                or target == ENGINEERING_COMPILE_TARGET, "Engineering main smoke is ARM only")
+        require(os.environ["MRK_DESKTOP_HOSTED_CHECKS"] != SOURCE_SLOTS_SCOPE
+                or target == SOURCE_SLOTS_TARGET, "SourceSlots DATA is Intel only")
+        require(os.uname().sysname == "Darwin" and os.uname().machine == MAC_COMPILE_HOSTS[target][1]
+                and os.geteuid() != 0, "Normal Mac compiler requires its actual non-root native host")
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:
         admitted_scope(platform)
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:
@@ -3038,14 +3471,18 @@ def clean_environment(root: Path) -> dict[str, str]:
     return environment
 
 
-def source_unchanged(context: dict) -> None:
+def source_unchanged(context: dict, *, timeout_for=None) -> None:
     source, root = Path(context["source"]), Path(context["root"])
     git = context["git"]
     environment = clean_environment(root)
-    require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15, capture=True)
+    require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15 if timeout_for is None else timeout_for(15), capture=True)
             == context["sourceSha"], "Checkout commit changed")
+    if context.get("executionScope") in {ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE}:
+        require(run([git, "rev-parse", "HEAD^{tree}"], check="source-tree", cwd=source, env=environment,
+                    timeout=15 if timeout_for is None else timeout_for(15), capture=True) == context["sourceTree"],
+                "Engineering original source tree changed")
     run([git, "diff", "--no-ext-diff", "--no-textconv", "--exit-code", "--quiet", "HEAD", "--"],
-        check="source-clean", cwd=source, env=environment, timeout=15)
+        check="source-clean", cwd=source, env=environment, timeout=15 if timeout_for is None else timeout_for(15))
 
 
 def no_cargo_configuration(directories: tuple[Path, ...]) -> None:
@@ -6908,15 +7345,41 @@ def clean_github_tls(context: dict) -> None:
 
 
 def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | None = None,
-                  scope: str = "passive-development-foundation-only", compiled: dict | None = None) -> None:
+                  scope: str = "passive-development-foundation-only", compiled: dict | None = None,
+                  main_compiled: dict | None = None, source_slots_result: dict | None = None,
+                  mac_history_result: dict | None = None, mac_observer_result: dict | None = None) -> None:
     # Only called after the fixed phase and final source check actually succeed.
     # Missing files on failed/skipped phases cannot become passing evidence.
     value = {
         "schemaVersion": 1, "scope": scope, "phase": name,
         "status": "passed", "sourceSha": context["sourceSha"], "platform": context["platform"],
-        "rust": {"release": RUST, "target": TARGETS[context["platform"]]}, "node": node,
+        "rust": compiler_binding(context), "node": node,
         "checks": [{"check": check, "exitCode": 0} for check in checks],
     }
+    if mac_history_result is not None:
+        require(context.get("executionScope") == MAC_COMPILE_SCOPE and name == "compile"
+                and context.get("macCompile", {}).get("mode") == MAC_HISTORY_MODE
+                and node == NODE and compiled is None and main_compiled is None and source_slots_result is None,
+                "Unexpected Mac History DATA result")
+        value["testResult"] = validate_mac_history_result(mac_history_result)
+    if mac_observer_result is not None:
+        require(context.get("executionScope") == MAC_COMPILE_SCOPE and name == "compile"
+                and context.get("macCompile", {}).get("mode") == MAC_OBSERVER_DATA_MODE and node == NODE
+                and compiled is None and main_compiled is None and source_slots_result is None and mac_history_result is None,
+                "Unexpected observer DATA result")
+        value["dataResult"] = validate_mac_observer_data_result(mac_observer_result)
+    if source_slots_result is not None:
+        require(context.get("executionScope") == SOURCE_SLOTS_SCOPE and name == "compile"
+                and node is None and compiled is None and main_compiled is None, "Unexpected SourceSlots DATA result")
+        value["testResult"] = (validate_source_slots_removal_result(source_slots_result) if source_slots_is_removal(context)
+                               else validate_source_slots_initialization_result(source_slots_result)
+                               if source_slots_is_initialization(context) else validate_source_slots_artifact_result(source_slots_result)
+                               if source_slots_is_artifact(context) else validate_source_slots_environment_result(source_slots_result)
+                                      if source_slots_is_environment_setup(context) else validate_source_slots_result(source_slots_result))
+    if main_compiled is not None:
+        require(context.get("executionScope") == ENGINEERING_COMPILE_SCOPE and name == "compile"
+                and compiled is None, "Unexpected engineering main artifact")
+        value["compiledMain"] = validate_engineering_main(main_compiled)
     if compiled is not None:
         require(context.get("executionScope") == WINDOWS_SNAPSHOT_SCOPE
                 and context.get("scope") == WINDOWS_SNAPSHOT_SCOPE and name == "compile"
@@ -6930,6 +7393,27 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                 "Compiler-only phase cannot produce native evidence")
         value.update(scope=profile["evidence"],
                      **{key: context[key] for key in ("workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")})
+        if context["executionScope"] == MAC_COMPILE_SCOPE:
+            value.update(sourceTree=context["sourceTree"], macCompile=context["macCompile"])
+            if context["macCompile"]["mode"] == MAC_HISTORY_MODE:
+                value["scope"] = MAC_HISTORY_EVIDENCE
+            if context["macCompile"]["mode"] == MAC_OBSERVER_DATA_MODE:
+                value["scope"] = MAC_OBSERVER_DATA_EVIDENCE
+        if context["executionScope"] == ENGINEERING_COMPILE_SCOPE:
+            value.update(sourceTree=context["sourceTree"], engineeringWork=context["engineeringWork"])
+        if context["executionScope"] == SOURCE_SLOTS_SCOPE:
+            value.update(sourceTree=context["sourceTree"], sourceSlots=context["sourceSlots"])
+            if source_slots_is_removal(context):
+                value.update(scope=SOURCE_SLOTS_REMOVAL_EVIDENCE, sourceSlotsBuild=context["sourceSlotsBuild"])
+            elif source_slots_is_initialization(context):
+                value.update(scope=SOURCE_SLOTS_INITIALIZATION_EVIDENCE,
+                             sourceSlotsSelection=SOURCE_SLOTS_INITIALIZATION_SELECTION)
+            elif source_slots_is_artifact(context):
+                value.update(scope=SOURCE_SLOTS_ARTIFACT_EVIDENCE,
+                             sourceSlotsSelection=SOURCE_SLOTS_ARTIFACT_SELECTION)
+            elif source_slots_is_environment_setup(context):
+                value.update(scope=SOURCE_SLOTS_ENVIRONMENT_EVIDENCE,
+                             sourceSlotsSelection=SOURCE_SLOTS_ENVIRONMENT_SELECTION)
         if context["executionScope"] == GTK_COMPILE_SCOPE:
             value.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
         validate_compile_receipt(value, context, name)
@@ -7029,9 +7513,255 @@ def version_public_bindings(context: dict) -> dict:
             "payloadBindings": VERSION_PAYLOAD_BINDINGS, "notVerified": list(VERSION_NOT_VERIFIED)}
 
 
+def validate_engineering_main(value: object) -> dict:
+    """Fixed copied main DATA; the UI owner independently holds the actual file."""
+    require(type(value) is dict and set(value) == {"relativePath", "bytes", "sha256"}
+            and value["relativePath"] == ENGINEERING_MAIN_RELATIVE
+            and type(value["bytes"]) is int and 0 < value["bytes"] <= ENGINEERING_MAIN_LIMIT
+            and type(value["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", value["sha256"]) is not None
+            and value["sha256"] != "0" * 64, "Engineering copied main receipt differs")
+    return value
+
+
+def copy_engineering_main(context: dict) -> dict:
+    """One fresh copy after the joined Cargo build; never weaken ordinary().
+
+    Cargo's fixed primary may be hardlinked to its own deps output. Only that
+    original accepts multiple links. The new UI handoff is exclusively created,
+    one-link, streamed, read back and closed under the existing 256 MiB ceiling.
+    Any error retains all output; no compiler receipt is published in that case.
+    """
+    require(context.get("executionScope") == ENGINEERING_COMPILE_SCOPE
+            and context.get("platform") == "macos", "Engineering copy scope differs")
+    root = Path(context["root"])
+    deadline = time.monotonic() + 30
+    full9 = lambda row: (row.st_dev, row.st_ino, row.st_mode, row.st_uid, row.st_gid,
+                         row.st_nlink, row.st_size, row.st_mtime_ns, row.st_ctime_ns)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    held, directories = [], []
+    answer = None
+    try:
+        parent = None
+        # Fixed traversal only, all original directories remain held.
+        for name in (str(root), "target", ENGINEERING_COMPILE_TARGET, "debug"):
+            fd = os.open(name, directory_flags, dir_fd=parent)
+            held.append(fd)
+            row = full9(os.fstat(fd))
+            require(stat.S_ISDIR(row[2]) and row[3] == os.geteuid() and not row[2] & 0o022,
+                    "Engineering compiler directory differs")
+            directories.append((parent, name, fd, row[:5]))
+            parent = fd
+        target_fd, debug_fd = held[1], held[3]
+        main_name = "mobile-release-kit-desktop"
+        original = os.open(main_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=debug_fd)
+        held.append(original)
+        before = full9(os.fstat(original))
+        require(stat.S_ISREG(before[2]) and before[2] & 0o100 and not before[2] & 0o022
+                and before[3] == os.geteuid() and before[5] >= 1
+                and 0 < before[6] <= ENGINEERING_MAIN_LIMIT,
+                "Engineering compiled primary kind, owner or size differs")
+        require(full9(os.stat(main_name, dir_fd=debug_fd, follow_symlinks=False)) == before,
+                "Engineering compiled primary name changed")
+        os.mkdir("engineering-main", 0o700, dir_fd=target_fd)
+        output_directory = os.open("engineering-main", directory_flags, dir_fd=target_fd)
+        held.append(output_directory)
+        output_directory_row = full9(os.fstat(output_directory))
+        require(stat.S_ISDIR(output_directory_row[2]) and output_directory_row[3] == os.geteuid()
+                and stat.S_IMODE(output_directory_row[2]) == 0o700, "Engineering copy directory differs")
+        directories.append((target_fd, "engineering-main", output_directory, output_directory_row[:5]))
+        output = os.open(main_name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o700, dir_fd=output_directory)
+        held.append(output)
+        digest, offset = hashlib.sha256(), 0
+        while True:
+            require(time.monotonic() < deadline, "Engineering main copy clock exceeded")
+            block = os.pread(original, min(65536, ENGINEERING_MAIN_LIMIT + 1 - offset), offset)
+            if not block:
+                break
+            offset += len(block)
+            require(offset <= before[6], "Engineering primary grew during copy")
+            digest.update(block)
+            written = 0
+            while written < len(block):
+                require(time.monotonic() < deadline, "Engineering main copy clock exceeded")
+                amount = os.write(output, block[written:])
+                require(type(amount) is int and 0 < amount <= len(block) - written,
+                        "Engineering original copy write was incomplete")
+                written += amount
+        require(offset == before[6] and full9(os.fstat(original)) == before
+                and full9(os.stat(main_name, dir_fd=debug_fd, follow_symlinks=False)) == before,
+                "Engineering original compiled bytes changed")
+        os.fsync(output)
+        copied = full9(os.fstat(output))
+        require(stat.S_ISREG(copied[2]) and stat.S_IMODE(copied[2]) == 0o700
+                and copied[3] == os.geteuid() and copied[5] == 1 and copied[6] == offset,
+                "Engineering fresh copy is not a single-link executable")
+        observed, offset = hashlib.sha256(), 0
+        while True:
+            require(time.monotonic() < deadline, "Engineering main copy clock exceeded")
+            block = os.pread(output, min(65536, ENGINEERING_MAIN_LIMIT + 1 - offset), offset)
+            if not block:
+                break
+            offset += len(block)
+            require(offset <= copied[6], "Engineering copied bytes grew")
+            observed.update(block)
+        require(offset == copied[6] and observed.digest() == digest.digest()
+                and full9(os.fstat(output)) == copied
+                and full9(os.stat(main_name, dir_fd=output_directory, follow_symlinks=False)) == copied
+                and full9(os.fstat(original)) == before, "Engineering copied original readback changed")
+        for parent, name, fd, identity in directories:
+            require(full9(os.fstat(fd))[:5] == identity
+                    and full9(os.stat(name, dir_fd=parent, follow_symlinks=False))[:5] == identity,
+                    "Engineering original compiler directory changed")
+        answer = validate_engineering_main({"relativePath": ENGINEERING_MAIN_RELATIVE,
+                                           "bytes": copied[6], "sha256": digest.hexdigest()})
+    finally:
+        close_error = None
+        while held:
+            fd = held.pop()
+            try:
+                os.close(fd)  # Consume once, including failures; never retry an integer FD.
+            except OSError as error:
+                close_error = error
+        if close_error is not None:
+            raise close_error
+    require(time.monotonic() < deadline and answer is not None, "Engineering main copy did not settle")
+    return answer
+
+
+def validate_engineering_cleanup(value: object, context: dict, compiled: dict, digests: dict) -> dict:
+    """A positive UI result licenses this work's disposal, never installed authority."""
+    require(context.get("executionScope") == ENGINEERING_COMPILE_SCOPE, "Engineering cleanup scope differs")
+    main = validate_engineering_main(compiled.get("compiledMain"))
+    require(type(value) is dict and type(digests) is dict and set(digests) == {
+        "compilerReceiptSha256", "runtimeResultSha256", "runtimeManifestSha256",
+        "testAdmissionSha256", "summaryAdmissionSha256", "nativeSummarySha256"},
+        "Engineering cleanup original digest roster differs")
+    for digest in [*digests.values(), value.get("runtimeRosterSha256"), value.get("applicationRosterSha256")]:
+        require(type(digest) is str and re.fullmatch(r"[0-9a-f]{64}", digest) is not None and digest != "0" * 64,
+                "Engineering cleanup original digest differs")
+    expected = {
+        "schemaVersion": 1, "scope": "engineering-main-ui-smoke-only", "status": "passed",
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef",
+                                       "workflowSha256", "runId", "attempt", "engineeringWork")},
+        "compilerRoot": context["root"], "target": ENGINEERING_COMPILE_TARGET,
+        **digests, "compilerBinarySha256": main["sha256"],
+        "runtimeRosterSha256": value["runtimeRosterSha256"], "applicationRosterSha256": value["applicationRosterSha256"],
+        "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testEngineeringMainCatalogueAndQuit",
+        "testCounts": {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0},
+        "sameOriginalNormalQuitObserved": True, "cleanExitStatus": None, "allWorkerFinality": "not-established",
+        "fullUIQualified": False, "productReady": False, "sourcePrePostMatched": True,
+        "inputPrePostMatched": True, "inputOriginalClosesCompleted": True,
+        "generatedRunnerOriginalClosesCompleted": True, "originalCommandsReturned": True,
+        "originalWrapperZeroRequired": True,
+    }
+    require(same_compile_json(value, expected), "Engineering UI original completion is not positive and source-bound")
+    return value
+
+
+def engineering_cleanup(context: dict) -> list[Path]:
+    """Positive-only addition to the existing compiler cleanup roster.
+
+    Failed/absent/unknown UI custody retains the compiler bootstrap, runtime,
+    fixture and products. Small closed evidence remains after successful cleanup.
+    """
+    work, root = engineering_main_work(), Path(context["root"])
+    require(str(work) == context["engineeringWork"], "Engineering cleanup work differs")
+    normal = work / "normal-ui"
+    deadline = time.monotonic() + 60
+    full9 = lambda row: (row.st_dev, row.st_ino, row.st_mode, row.st_uid, row.st_gid,
+                         row.st_nlink, row.st_size, row.st_mtime_ns, row.st_ctime_ns)
+    def read_original(path, limit, collect=False):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            before = full9(os.fstat(fd))
+            require(stat.S_ISREG(before[2]) and before[3] == os.geteuid() and before[5] == 1
+                    and not before[2] & 0o022 and 0 <= before[6] <= limit,
+                    "Engineering cleanup original file differs")
+            digest, offset, chunks = hashlib.sha256(), 0, []
+            while True:
+                require(time.monotonic() < deadline, "Engineering cleanup read clock exceeded")
+                block = os.pread(fd, min(65536, limit + 1 - offset), offset)
+                if not block:
+                    break
+                offset += len(block)
+                require(offset <= before[6], "Engineering cleanup original grew")
+                digest.update(block)
+                if collect:
+                    chunks.append(block)
+            require(offset == before[6] and full9(os.fstat(fd)) == before
+                    and full9(os.stat(path, follow_symlinks=False)) == before,
+                    "Engineering cleanup original changed")
+            return b"".join(chunks), digest.hexdigest(), offset
+        finally:
+            os.close(fd)
+    # A persisted pass alone is insufficient: the original summary wrapper must
+    # have returned zero AFTER its source/product/input consuming closes.
+    status, _, _ = read_original(normal / "engineering-summary.status", 2, True)
+    require(status == b"0\n", "Engineering original summary wrapper did not return zero")
+    raw_compile, compiler_digest, _ = read_original(root / "compile-checks.json", 16384, True)
+    compiled = validate_compile_receipt(parse_compile_receipt(raw_compile), context, "compile")
+    _, binary_digest, binary_size = read_original(root / ENGINEERING_MAIN_RELATIVE, ENGINEERING_MAIN_LIMIT)
+    require(compiled["compiledMain"] == {"relativePath": ENGINEERING_MAIN_RELATIVE,
+                                        "bytes": binary_size, "sha256": binary_digest},
+            "Engineering original compiler copy differs at cleanup")
+    digests = {"compilerReceiptSha256": compiler_digest}
+    for key, path, limit in (
+        ("runtimeResultSha256", work / "runtime-result.json", 65536),
+        ("runtimeManifestSha256", work / "runtime/manifest.json", 1024 * 1024),
+        ("testAdmissionSha256", normal / "engineering-test.runner-admission.json", 32768),
+        ("summaryAdmissionSha256", normal / "engineering-summary.command-admission.json", 32768),
+        ("nativeSummarySha256", normal / "engineering-summary.stdout", 262144),
+    ):
+        _, digests[key], _ = read_original(path, limit)
+    raw, _, _ = read_original(normal / "engineering-smoke.json", 16384, True)
+    validate_engineering_cleanup(parse_compile_receipt(raw), context, compiled, digests)
+    directories = ("Mobile Release Kit.app", "runtime", "fresh-python-transport", "fresh-python-supplier",
+                   "fresh-python-receipt", "runtime-description-work", "current-runtime-preparation")
+    retained = {"fresh-python-transport-result.json", "runtime-description.json", "runtime-result.json"}
+    require({path.name for path in work.iterdir()} == {*directories, "normal-ui", *retained},
+            "Engineering cleanup work roster differs; retain all")
+    normal_directories = {"DerivedData", "tmp", "engineering-test.xcresult"}
+    normal_evidence = {
+        "xcode-version.txt", "sdk-path.txt", "sdk-version.txt", "sdk-build.txt",
+        "engineering-build.command-admission.json", "engineering-test.runner-admission.json",
+        "engineering-summary.command-admission.json", "engineering-smoke.json",
+        "engineering-test.stdout", "engineering-test.stderr",
+        "engineering-build.stdout", "engineering-build.stderr", "engineering-build.status",
+        "engineering-test.wrapper.stdout", "engineering-test.wrapper.stderr", "engineering-test.status",
+        "engineering-summary.stdout", "engineering-summary.stderr", "engineering-summary.status",
+    }
+    require({path.name for path in normal.iterdir()} == normal_directories | normal_evidence,
+            "Engineering cleanup UI roster differs; retain all")
+    for directory in (normal, *(work / name for name in directories), *(normal / name for name in normal_directories)):
+        observed = directory.lstat()
+        require(stat.S_ISDIR(observed.st_mode) and observed.st_uid == os.geteuid() and not observed.st_mode & 0o022,
+                "Engineering disposable directory differs; retain all")
+    for path in [*(work / name for name in retained), *(normal / name for name in normal_evidence)]:
+        ordinary(path)
+    require(time.monotonic() < deadline, "Engineering cleanup admission clock exceeded")
+    return [*(work / name for name in directories), *(normal / name for name in sorted(normal_directories))]
+
+
+def engineering_main_work() -> Path:
+    """One fixed private UI work family, never an installed or caller app path."""
+    work = Path(os.environ.get("MRK_MACOS_WORK", ""))
+    require(work.is_absolute() and work.parent == Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+            and re.fullmatch(r"mrk-macos-engineering-ui\.[A-Za-z0-9]{8}", work.name) is not None
+            and not work.is_symlink(), "Engineering UI work root differs")
+    observed = work.stat(follow_symlinks=False)
+    require(stat.S_ISDIR(observed.st_mode) and observed.st_uid == os.geteuid()
+            and stat.S_IMODE(observed.st_mode) == 0o700, "Engineering UI work root ownership differs")
+    return work
+
+
 def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, "prepare")
     admit_platform(scope, platform)
+    if scope == MAC_COMPILE_SCOPE:
+        require(os.environ.get("MRK_COMPILE_SELECTION") != MAC_OBSERVER_DATA_MODE
+                and os.environ.get("MRK_MACOS_COMPILE_MODE") != MAC_OBSERVER_DATA_MODE,
+                "Standalone observer-data lacks source-bound runtime anchors; use the genuine desktop-macos-installed preview Rust+84 DATA gate")
     if scope in ENVIRONMENT_NATIVE_SCOPES:
         prepare_environment_native(platform)
         return
@@ -7039,6 +7769,7 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if windows:
         require(admitted_scope(platform) == scope, "Windows preparation scope differs")
     profile = compile_profile(scope) if scope in COMPILE_PROFILES else None
+    engineering_work = engineering_main_work() if scope == ENGINEERING_COMPILE_SCOPE else None
     native_workflow = scope == WORKFLOW_NATIVE_SCOPE
     native_metadata = scope == METADATA_NATIVE_SCOPE
     native_version = scope == VERSION_NATIVE_SCOPE
@@ -7052,6 +7783,17 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
     sha = os.environ["GITHUB_SHA"]
     require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None, "Invalid source SHA")
+    mac_target = mac_compile_target(os.environ) if scope == MAC_COMPILE_SCOPE else None
+    mac_mode = mac_compile_mode(os.environ, mac_target) if mac_target is not None else None
+    if scope == ENGINEERING_COMPILE_SCOPE:
+        require(mac_compile_target(os.environ) == ENGINEERING_COMPILE_TARGET, "Engineering main target differs")
+    if scope == SOURCE_SLOTS_SCOPE:
+        require(mac_compile_target(os.environ) == SOURCE_SLOTS_TARGET, "SourceSlots target differs")
+        source_slots_source_guard(source, temp)
+        slots_removal = source_slots_removal_workflow(binding["workflowRef"])
+        slots_build = source_slots_build_inputs(source) if slots_removal else None
+    if mac_target is not None or scope == ENGINEERING_COMPILE_SCOPE:
+        mac_compile_source_guard(source, temp)
     for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/target", "desktop/src-tauri/gen"):
         require(not (source / relative).exists() and not (source / relative).is_symlink(),
                 "Fresh checkout contains an existing generated output")
@@ -7078,8 +7820,8 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     for name in empty_files:
         (root / name).touch(mode=0o600, exist_ok=False)
     git = shutil.which("git")
-    rustup = shutil.which("rustup")
-    require(git is not None and rustup is not None, "Hosted compiler tools unavailable")
+    rustup = None if scope in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE} else shutil.which("rustup")
+    require(git is not None and (scope in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE} or rustup is not None), "Hosted compiler tools unavailable")
     environment = clean_environment(root)
     require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15, capture=True) == sha,
             "Event and checkout source differ")
@@ -7113,6 +7855,17 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
                "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                "git": git, "rustup": rustup, "python": str(Path(sys.executable).resolve(strict=True))}
     context.update(binding)
+    if scope == SOURCE_SLOTS_SCOPE:
+        require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "SourceSlots source tree differs")
+        context["sourceSlots"] = source_slots_selection(slots_removal, initialization=source_slots_is_initialization(context), artifact=source_slots_is_artifact(context), environment_setup=source_slots_is_environment_setup(context))
+        if slots_removal:
+            context["sourceSlotsBuild"] = slots_build
+    if engineering_work is not None:
+        require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "Engineering source tree differs")
+        context["engineeringWork"] = str(engineering_work)
+    if mac_target is not None:
+        require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "Normal Mac source tree differs")
+        context["macCompile"] = mac_compile_inputs(source, mac_target, mac_mode)
     if windows:
         context.update(scope=scope, event=os.environ["GITHUB_EVENT_NAME"], ref=os.environ["GITHUB_REF"])
     workflow = (profile["workflow"] if profile else WORKFLOW_NATIVE_WORKFLOW if native_edit
@@ -7134,6 +7887,8 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     elif native_tls:
         prepare_github_tls_context(context, inventory)
     source_unchanged(context)
+    if scope == SOURCE_SLOTS_SCOPE:
+        source_slots_inputs_unchanged(context)
     if not windows:
         write_json(root / "context.json", context)
     if native_version:
@@ -7168,7 +7923,37 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         }
     if profile:
         public.update(binding)
-        public["notQualified"].append("test-execution")
+        if scope != SOURCE_SLOTS_SCOPE and not (scope == MAC_COMPILE_SCOPE and mac_mode in (MAC_HISTORY_MODE, MAC_OBSERVER_DATA_MODE)):
+            public["notQualified"].append("test-execution")
+    if scope == SOURCE_SLOTS_SCOPE:
+        compiler = compiler_binding(context)
+        public.update(expectedRust=compiler["release"], compiler=compiler, sourceSlots=context["sourceSlots"], node=None)
+        if source_slots_is_removal(context):
+            public.update(scope=SOURCE_SLOTS_REMOVAL_EVIDENCE, sourceSlotsBuild=context["sourceSlotsBuild"])
+        elif source_slots_is_initialization(context):
+            public.update(scope=SOURCE_SLOTS_INITIALIZATION_EVIDENCE,
+                          sourceSlotsSelection=SOURCE_SLOTS_INITIALIZATION_SELECTION)
+        elif source_slots_is_artifact(context):
+            public.update(scope=SOURCE_SLOTS_ARTIFACT_EVIDENCE,
+                          sourceSlotsSelection=SOURCE_SLOTS_ARTIFACT_SELECTION)
+        elif source_slots_is_environment_setup(context):
+            public.update(scope=SOURCE_SLOTS_ENVIRONMENT_EVIDENCE,
+                          sourceSlotsSelection=SOURCE_SLOTS_ENVIRONMENT_SELECTION)
+        public["notQualified"].extend(("other-tests", "supplier-native-loading", "Apple-provider-closure", "service-registration", "signing", "installed-runtime"))
+    if scope == MAC_COMPILE_SCOPE:
+        compiler = compiler_binding(context)
+        public.update(expectedRust=compiler["release"], compiler=compiler, macCompile=context["macCompile"])
+        if context["macCompile"]["mode"] == MAC_HISTORY_MODE:
+            public["scope"] = MAC_HISTORY_EVIDENCE
+            public["notQualified"].extend(("other-tests", "live-History", "remote-Apply", "provider-deployment"))
+        if context["macCompile"]["mode"] == MAC_OBSERVER_DATA_MODE:
+            public["scope"] = MAC_OBSERVER_DATA_EVIDENCE
+            public["notQualified"].extend(("other-tests", "installed-effective-toolchain", "installed-runtime", "native-TLS", "vault-tests", "all-worker-finality"))
+        public["notQualified"].extend(("signed-runtime", "Developer-ID-identity", "service-registration", "ordinary-UI"))
+    if scope == ENGINEERING_COMPILE_SCOPE:
+        compiler = compiler_binding(context)
+        public.update(expectedRust=compiler["release"], compiler=compiler, engineeringWork=context["engineeringWork"])
+        public["notQualified"].extend(("shipping-signature", "installed-runtime", "edit-authority", "all-worker-finality"))
     if scope == GTK_COMPILE_SCOPE:
         public["sg1"] = context["sg1"]
         public["notQualified"].extend(("SG1-native-qualification", "installed-API-loader-writer-admission"))
@@ -7215,7 +8000,7 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
             and root.parent == (Path(os.environ["RUNNER_TEMP"]) if retention_only else Path(os.environ["RUNNER_TEMP"]).resolve(strict=True))
             and not root.is_symlink(), "Unrecognized task root")
     ordinary(root / "context.json")
-    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE}
+    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE}
                else workflow_json(root / "context.json") if scope == WORKFLOW_NATIVE_SCOPE
                else json.loads((root / "context.json").read_text(encoding="utf-8")))
     require(context["root"] == str(root) and context["platform"] == platform and context.get("executionScope") == scope
@@ -7231,6 +8016,35 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
         require(all(context.get(key) == value for key, value in binding.items())
                 and context.get("workflowSha256") == hash_file(Path(context["source"]) / profile["workflow"]),
                 "Compiler task workflow binding changed")
+        if scope == MAC_COMPILE_SCOPE:
+            target = mac_compile_target(os.environ)
+            mode = mac_compile_mode(os.environ, target)
+            require(context.get("macCompile") == mac_compile_inputs(Path(context["source"]), target, mode)
+                    and re.fullmatch(r"[0-9a-f]{40}", context.get("sourceTree", "")) is not None,
+                    "Normal Mac compiler source/target binding changed")
+        if scope == ENGINEERING_COMPILE_SCOPE:
+            require(context.get("engineeringWork") == str(engineering_main_work())
+                    and context.get("source") == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
+                    and type(context.get("sourceTree")) is str
+                    and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
+                    and context["sourceTree"] != "0" * 40
+                    and mac_compile_target(os.environ) == ENGINEERING_COMPILE_TARGET,
+                    "Engineering main original source/work/target binding changed")
+            mac_compile_source_guard(Path(context["source"]), root)
+        if scope == SOURCE_SLOTS_SCOPE:
+            removal = source_slots_is_removal(context)
+            require(removal == (os.environ.get("GITHUB_REF") == SOURCE_SLOTS_REMOVAL_REF)
+                    and source_slots_is_initialization(context) == source_slots_requested_initialization(os.environ)
+                    and source_slots_is_artifact(context) == source_slots_requested_artifact(os.environ)
+                    and source_slots_is_environment_setup(context) == source_slots_requested_environment_setup(os.environ)
+                    and context.get("source") == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
+                    and type(context.get("sourceTree")) is str
+                    and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
+                    and context["sourceTree"] != "0" * 40
+                    and mac_compile_target(os.environ) == SOURCE_SLOTS_TARGET,
+                    "SourceSlots context source/target/selector differs")
+            source_slots_source_guard(Path(context["source"]), root)
+            source_slots_inputs_unchanged(context)
         if scope == GTK_COMPILE_SCOPE:
             require(type(context.get("sourceTree")) is str
                     and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
@@ -7315,8 +8129,30 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
     return context
 
 
-def tools(context: dict, environment: dict[str, str]) -> tuple[str, str]:
+def tools(context: dict, environment: dict[str, str], *, timeout_for=None) -> tuple[str, str]:
     root = Path(context["root"])
+    if context.get("executionScope") in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE}:
+        selected = compiler_binding(context)
+        binary = Path("/Users/runner/.rustup/toolchains") / ("stable-" + selected["target"]) / "bin"
+        cargo, rustc = str(binary / "cargo"), str(binary / "rustc")
+        ordinary(Path(cargo))
+        ordinary(Path(rustc))
+        version = run([rustc, "-vV"], check="rust-version-target", cwd=root, env=environment,
+                      timeout=15 if timeout_for is None else timeout_for(15), capture=True)
+        require(len(version.encode()) <= 4096 and "release: " + selected["release"] in version.splitlines()
+                and "commit-hash: " + selected["commitHash"] in version.splitlines()
+                and "host: " + selected["target"] in version.splitlines(), "Direct Mac compiler version/commit/host differs")
+        if context.get("executionScope") == SOURCE_SLOTS_SCOPE:
+            lines = version.splitlines()
+            for field, expected in (("release", selected["release"]), ("commit-hash", selected["commitHash"]), ("host", selected["target"])):
+                require([line for line in lines if line.partition(":")[0].strip() == field] == [field + ": " + expected],
+                        "SourceSlots original compiler tuple is missing, malformed or repeated")
+        cargo_version = run([cargo, "--version"], check="mac-cargo-version", cwd=root, env=environment,
+                            timeout=15 if timeout_for is None else timeout_for(15), capture=True)
+        require(len(cargo_version.encode()) <= 4096 and re.fullmatch(r"cargo [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3} \([0-9a-f]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)", cargo_version) is not None,
+                "Direct Mac Cargo version differs")
+        environment.update(RUSTC=rustc, RUSTUP_AUTO_INSTALL="0", PATH=str(binary) + os.pathsep + environment["PATH"])
+        return cargo, rustc
     cargo = run([context["rustup"], "which", "--toolchain", RUST, "cargo"], cwd=root,
                 check="cargo-selection", env=environment, timeout=15, capture=True)
     rustc = run([context["rustup"], "which", "--toolchain", RUST, "rustc"], cwd=root,
@@ -7809,6 +8645,7 @@ def clean_compile(context: dict) -> None:
     """Only positively completed compiler work; no fabricated native receipts."""
     profile = compile_profile(context.get("executionScope", ""))
     root, source = Path(context["root"]), Path(context["source"])
+    ui_outputs = engineering_cleanup(context) if context.get("executionScope") == ENGINEERING_COMPILE_SCOPE else []
     for phase_name in profile["checks"]:
         path = root / f"{phase_name}-checks.json"
         ordinary(path)
@@ -7828,13 +8665,38 @@ def clean_compile(context: dict) -> None:
     # Validate the complete deletion roster before removing any of it. All were
     # created by prepare/acquire/compile in this fresh hosted job, never user data.
     directories = [source / relative for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/gen")]
+    if (context.get("executionScope") == SOURCE_SLOTS_SCOPE
+            or context.get("executionScope") == MAC_COMPILE_SCOPE and context["macCompile"]["mode"] == "vault-only"):
+        # No frontend original ran in this fixed mode. Never invent or adopt
+        # generated directories just to satisfy the full4 deletion roster.
+        for directory in directories:
+            require(not directory.exists() and not directory.is_symlink(),
+                    "Vault-only compiler has unexpected frontend output; retain it")
+        directories = []
     directories.extend(root / name for name in COMPILER_DIRECTORIES)
+    directories.extend(ui_outputs)
     for directory in directories:
         require(directory.is_dir() and not directory.is_symlink()
                 and not getattr(directory.lstat(), "st_file_attributes", 0) & 0x400,
                 "Task-owned compiler output directory differs")
     for name in COMPILER_PRIVATE_FILES + COMPILE_PUBLIC_FILES:
         ordinary(root / name)
+    if ui_outputs:
+        # Only these seven fixed fixture/runtime/transport trees were made read-only.
+        # Restore owner-write after ALL terminal and deletion-roster admissions.
+        # fwalk holds each no-follow original directory; no file mode is relaxed.
+        deadline, count = time.monotonic() + 60, 0
+        for output in ui_outputs[:7]:
+            for name, _, _, original in os.fwalk(output, follow_symlinks=False):
+                count += 1
+                observed = os.fstat(original)
+                named = os.stat(name, follow_symlinks=False)
+                require(count <= 16384 and time.monotonic() < deadline
+                        and stat.S_ISDIR(observed.st_mode) and observed.st_uid == os.geteuid()
+                        and not observed.st_mode & 0o022
+                        and (observed.st_dev, observed.st_ino) == (named.st_dev, named.st_ino),
+                        "Engineering owned read-only cleanup directory changed")
+                os.fchmod(original, 0o700)
     for directory in directories:
         shutil.rmtree(directory)
     for name in EMPTY_NATIVE_DIRECTORIES:
@@ -7901,9 +8763,1566 @@ def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[
     return observed_node
 
 
+def source_slots_requested_initialization(environment: dict) -> bool:
+    selection = environment.get("MRK_SOURCE_SLOTS_SELECTION", "allocation1")
+    require(type(selection) is str and selection in ("allocation1", SOURCE_SLOTS_INITIALIZATION_SELECTION, SOURCE_SLOTS_ARTIFACT_SELECTION, SOURCE_SLOTS_ENVIRONMENT_SELECTION),
+            "Unknown fixed Intel DATA dispatch selection")
+    if selection in (SOURCE_SLOTS_INITIALIZATION_SELECTION, SOURCE_SLOTS_ARTIFACT_SELECTION, SOURCE_SLOTS_ENVIRONMENT_SELECTION):
+        require(environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                and environment.get("GITHUB_REF") == SOURCE_SLOTS_REF
+                and environment.get("MRK_EXPECTED_SHA") == environment.get("GITHUB_SHA"),
+                "Named DATA requires exact fixed-ref dispatch")
+        return selection == SOURCE_SLOTS_INITIALIZATION_SELECTION
+    return False
+
+
+def source_slots_is_initialization(context: dict) -> bool:
+    if "sourceSlotsSelection" not in context:
+        return False
+    require(type(context["sourceSlotsSelection"]) is str
+            and context["sourceSlotsSelection"] in (SOURCE_SLOTS_INITIALIZATION_SELECTION, SOURCE_SLOTS_ARTIFACT_SELECTION, SOURCE_SLOTS_ENVIRONMENT_SELECTION),
+            "Named DATA context selection differs")
+    return context["sourceSlotsSelection"] == SOURCE_SLOTS_INITIALIZATION_SELECTION
+
+
+def source_slots_requested_artifact(environment: dict) -> bool:
+    source_slots_requested_initialization(environment)  # SAME closed dispatch validation.
+    return environment.get("MRK_SOURCE_SLOTS_SELECTION", "allocation1") == SOURCE_SLOTS_ARTIFACT_SELECTION
+
+
+def source_slots_is_artifact(context: dict) -> bool:
+    source_slots_is_initialization(context)  # SAME closed context tag validation.
+    return context.get("sourceSlotsSelection") == SOURCE_SLOTS_ARTIFACT_SELECTION
+
+
+def source_slots_requested_environment_setup(environment: dict) -> bool:
+    source_slots_requested_initialization(environment)  # SAME closed dispatch validation.
+    return environment.get("MRK_SOURCE_SLOTS_SELECTION", "allocation1") == SOURCE_SLOTS_ENVIRONMENT_SELECTION
+
+
+def source_slots_is_environment_setup(context: dict) -> bool:
+    source_slots_is_initialization(context)  # SAME closed context tag validation.
+    return context.get("sourceSlotsSelection") == SOURCE_SLOTS_ENVIRONMENT_SELECTION
+
+
+def source_slots_selection(removal: bool = False, *, initialization: bool = False, artifact: bool = False,
+                           environment_setup: bool = False) -> dict:
+    require(type(removal) is bool and type(initialization) is bool and type(artifact) is bool and type(environment_setup) is bool
+            and sum((removal, initialization, artifact, environment_setup)) <= 1,
+            "Unknown Intel DATA selector")
+    if environment_setup:
+        return {"target": SOURCE_SLOTS_TARGET, "features": [SOURCE_SLOTS_FEATURES],
+                "testTarget": "lib", "tests": list(SOURCE_SLOTS_ENVIRONMENT_TESTS)}
+    if artifact:
+        return {"target": SOURCE_SLOTS_TARGET, "features": [SOURCE_SLOTS_FEATURES],
+                "testTarget": "lib", "tests": list(SOURCE_SLOTS_ARTIFACT_TESTS)}
+    if initialization:
+        return {"target": SOURCE_SLOTS_TARGET, "features": [SOURCE_SLOTS_FEATURES],
+                "testTarget": "lib", "tests": list(SOURCE_SLOTS_INITIALIZATION_TESTS)}
+    if removal:
+        return {"target": SOURCE_SLOTS_TARGET, "features": [SOURCE_SLOTS_REMOVAL_FEATURE],
+                "testTarget": "bin", "binary": "mrk-macos-remove", "tests": list(SOURCE_SLOTS_REMOVAL_TESTS)}
+    return {"target": SOURCE_SLOTS_TARGET, "features": [SOURCE_SLOTS_FEATURES],
+            "testTarget": "lib", "test": SOURCE_SLOTS_TEST}
+
+
+def source_slots_removal_workflow(value: object) -> bool:
+    require(type(value) is str, "Intel DATA workflow reference differs")
+    match = re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/" + re.escape(SOURCE_SLOTS_WORKFLOW)
+                         + r"@(" + re.escape(SOURCE_SLOTS_REF) + "|" + re.escape(SOURCE_SLOTS_REMOVAL_REF) + ")", value)
+    require(match is not None, "Intel DATA workflow reference differs")
+    return match[1] == SOURCE_SLOTS_REMOVAL_REF
+
+
+def validate_source_slots_build(value: object) -> dict:
+    require(type(value) is dict and set(value) == {"release", "sources"}, "Intel removal build projection differs")
+    release, rows = value["release"], value["sources"]
+    require(type(release) is str and 0 < len(release) < 64
+            and release.startswith(MAC_COMPILE_HOSTS[SOURCE_SLOTS_TARGET][4])
+            and re.fullmatch(r"[a-z0-9][a-z0-9_.-]*[a-z0-9]", release) is not None
+            and type(rows) is list and len(rows) == len(SOURCE_SLOTS_BUILD_INPUTS),
+            "Intel removal build SOURCE selection differs")
+    for row, (name, limit) in zip(rows, SOURCE_SLOTS_BUILD_INPUTS):
+        require(type(row) is dict and set(row) == {"path", "size", "sha256"}
+                and row["path"] == name and type(row["path"]) is str
+                and type(row["size"]) is int and 0 < row["size"] <= limit
+                and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None
+                and row["sha256"] != "0" * 64, "Intel removal build SOURCE row differs")
+    return value
+
+
+def source_slots_build_inputs(source: Path) -> dict:
+    bodies, rows = [], []
+    for name, limit in SOURCE_SLOTS_BUILD_INPUTS:
+        path = source / name
+        ordinary(path)
+        with path.open("rb") as stream:
+            raw = stream.read(limit + 1)
+        require(0 < len(raw) <= limit, "Intel removal build SOURCE exceeds its fixed bound")
+        bodies.append(raw)
+        rows.append({"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+    release = mac_compile_release(bodies[0], SOURCE_SLOTS_TARGET, bodies[1], bodies[2])
+    return validate_source_slots_build({"release": release, "sources": rows})
+
+
+def source_slots_is_removal(context: dict) -> bool:
+    removal = source_slots_removal_workflow(context.get("workflowRef"))
+    initialization = source_slots_is_initialization(context)
+    require(same_compile_json(context.get("sourceSlots"), source_slots_selection(removal, initialization=initialization, artifact=source_slots_is_artifact(context), environment_setup=source_slots_is_environment_setup(context))),
+            "SourceSlots context selector differs from its workflow")
+    if removal:
+        validate_source_slots_build(context.get("sourceSlotsBuild"))
+    else:
+        require("sourceSlotsBuild" not in context, "Legacy DATA1 cannot adopt removal build inputs")
+    return removal
+
+
+def source_slots_inputs_unchanged(context: dict) -> None:
+    if source_slots_is_removal(context):
+        require(same_compile_json(context["sourceSlotsBuild"], source_slots_build_inputs(Path(context["source"]))),
+                "Intel removal build SOURCE projection changed")
+
+
+def validate_source_slots_removal_result(value: object) -> dict:
+    require(type(value) is dict and set(value) == {"tests", "running", "passed", "failed", "ignored", "measured", "filtered"},
+            "Intel removal DATA result fields differ")
+    require(same_compile_json(value["tests"], list(SOURCE_SLOTS_REMOVAL_TESTS))
+            and all(type(value[name]) is int and value[name] == expected for name, expected in
+                    (("running", 3), ("passed", 3), ("failed", 0), ("ignored", 0), ("measured", 0)))
+            and type(value["filtered"]) is int and 0 <= value["filtered"] <= 65535,
+            "Intel removal DATA did not pass exactly its three selected tests")
+    return value
+
+
+def source_slots_removal_test_result(raw: bytes) -> dict:
+    require(type(raw) is bytes and 0 < len(raw) <= 1024 * 1024, "Intel removal DATA stdout exceeds its bound")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeError:
+        raise CheckFailure("Intel removal DATA stdout is not the fixed libtest result") from None
+    rows = "".join("test " + re.escape(name) + r" \.\.\. ok\n" for name in SOURCE_SLOTS_REMOVAL_TESTS)
+    match = re.fullmatch(r"\n?running 3 tests\n" + rows
+                         + r"\ntest result: ok\. 3 passed; 0 failed; 0 ignored; 0 measured; "
+                         + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
+    require(match is not None, "Intel removal DATA stdout is missing, extra, ignored or failed")
+    return validate_source_slots_removal_result({"tests": list(SOURCE_SLOTS_REMOVAL_TESTS), "running": 3, "passed": 3,
+                                                 "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
+
+
+def validate_source_slots_initialization_result(value: object) -> dict:
+    require(type(value) is dict and set(value) == {"tests", "running", "passed", "failed", "ignored", "measured", "filtered"},
+            "Initialization DATA result fields differ")
+    require(same_compile_json(value["tests"], list(SOURCE_SLOTS_INITIALIZATION_TESTS))
+            and all(type(value[name]) is int and value[name] == expected for name, expected in
+                    (("running", 4), ("passed", 4), ("failed", 0), ("ignored", 0), ("measured", 0)))
+            and type(value["filtered"]) is int and 0 <= value["filtered"] <= 65535,
+            "Initialization DATA did not pass exactly its four selected tests")
+    return value
+
+
+def source_slots_initialization_test_result(raw: bytes) -> dict:
+    require(type(raw) is bytes and 0 < len(raw) <= 1024 * 1024, "Initialization DATA stdout exceeds its bound")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeError:
+        raise CheckFailure("Initialization DATA stdout is not the fixed libtest result") from None
+    rows = "".join("test " + re.escape(name) + r" \.\.\. ok\n" for name in SOURCE_SLOTS_INITIALIZATION_TESTS)
+    match = re.fullmatch(r"\n?running 4 tests\n" + rows
+                         + r"\ntest result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; "
+                         + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
+    require(match is not None, "Initialization DATA stdout is missing, extra, ignored or failed")
+    return validate_source_slots_initialization_result({"tests": list(SOURCE_SLOTS_INITIALIZATION_TESTS), "running": 4, "passed": 4,
+                                                 "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
+
+
+def validate_source_slots_artifact_result(value: object) -> dict:
+    require(type(value) is dict and set(value) == {"tests", "running", "passed", "failed", "ignored", "measured", "filtered"},
+            "Artifact DATA result fields differ")
+    require(same_compile_json(value["tests"], list(SOURCE_SLOTS_ARTIFACT_TESTS))
+            and all(type(value[name]) is int and value[name] == expected for name, expected in
+                    (("running", 10), ("passed", 10), ("failed", 0), ("ignored", 0), ("measured", 0)))
+            and type(value["filtered"]) is int and 0 <= value["filtered"] <= 65535,
+            "Artifact DATA did not pass exactly its ten selected tests")
+    return value
+
+
+def source_slots_artifact_test_result(raw: bytes) -> dict:
+    require(type(raw) is bytes and 0 < len(raw) <= 1024 * 1024, "Artifact DATA stdout exceeds its bound")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeError:
+        raise CheckFailure("Artifact DATA stdout is not the fixed libtest result") from None
+    rows = "".join("test " + re.escape(name) + r" \.\.\. ok\n" for name in SOURCE_SLOTS_ARTIFACT_TESTS)
+    match = re.fullmatch(r"\n?running 10 tests\n" + rows
+                         + r"\ntest result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; "
+                         + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
+    require(match is not None, "Artifact DATA stdout is missing, extra, ignored or failed")
+    return validate_source_slots_artifact_result({"tests": list(SOURCE_SLOTS_ARTIFACT_TESTS), "running": 10, "passed": 10,
+                                                 "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
+
+
+def validate_source_slots_environment_result(value: object) -> dict:
+    require(type(value) is dict and set(value) == {"tests", "running", "passed", "failed", "ignored", "measured", "filtered"},
+            "Environment DATA result fields differ")
+    require(same_compile_json(value["tests"], list(SOURCE_SLOTS_ENVIRONMENT_TESTS))
+            and all(type(value[name]) is int and value[name] == expected for name, expected in
+                    (("running", 1), ("passed", 1), ("failed", 0), ("ignored", 0), ("measured", 0)))
+            and type(value["filtered"]) is int and 0 <= value["filtered"] <= 65535,
+            "Environment DATA did not pass exactly its one selected test")
+    return value
+
+
+def source_slots_environment_test_result(raw: bytes) -> dict:
+    require(type(raw) is bytes and 0 < len(raw) <= 1024 * 1024, "Environment DATA stdout exceeds its bound")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeError:
+        raise CheckFailure("Environment DATA stdout is not the fixed libtest result") from None
+    rows = "".join("test " + re.escape(name) + r" \.\.\. ok\n" for name in SOURCE_SLOTS_ENVIRONMENT_TESTS)
+    match = re.fullmatch(r"\n?running 1 test\n" + rows
+                         + r"\ntest result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; "
+                         + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
+    require(match is not None, "Environment DATA stdout is missing, extra, ignored or failed")
+    return validate_source_slots_environment_result({"tests": list(SOURCE_SLOTS_ENVIRONMENT_TESTS), "running": 1, "passed": 1,
+                                                 "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
+
+
+def validate_source_slots_result(value: object) -> dict:
+    require(type(value) is dict and set(value) == {"test", "running", "passed", "failed", "ignored", "measured", "filtered"},
+            "SourceSlots DATA result fields differ")
+    require(value["test"] == SOURCE_SLOTS_TEST and type(value["test"]) is str
+            and all(type(value[name]) is int and value[name] == expected for name, expected in
+                    (("running", 1), ("passed", 1), ("failed", 0), ("ignored", 0), ("measured", 0)))
+            and type(value["filtered"]) is int and 0 <= value["filtered"] <= 65535,
+            "SourceSlots DATA did not pass exactly its one selected test")
+    return value
+
+
+def source_slots_test_result(raw: bytes) -> dict:
+    """Original libtest stdout only, never Cargo stderr or a zero-test exit."""
+    require(type(raw) is bytes and 0 < len(raw) <= 1024 * 1024, "SourceSlots DATA stdout exceeds its bound")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeError:
+        raise CheckFailure("SourceSlots DATA stdout is not the fixed libtest result") from None
+    match = re.fullmatch(r"\n?running 1 test\ntest " + re.escape(SOURCE_SLOTS_TEST)
+                         + r" \.\.\. ok\n\ntest result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; "
+                         + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
+    require(match is not None, "SourceSlots DATA stdout is missing, extra, ignored or failed")
+    return validate_source_slots_result({"test": SOURCE_SLOTS_TEST, "running": 1, "passed": 1,
+                                         "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
+
+
+def source_slots_identity(observed) -> tuple:
+    return (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_uid, observed.st_gid,
+            observed.st_nlink, observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns)
+
+
+def source_slots_writer(path: Path, stream: TextIO) -> tuple:
+    observed = os.fstat(stream.fileno())
+    require(stat.S_ISREG(observed.st_mode) and observed.st_uid == os.geteuid()
+            and observed.st_nlink == 1 and stat.S_IMODE(observed.st_mode) == 0o600
+            and source_slots_identity(path.lstat()) == source_slots_identity(observed),
+            "SourceSlots private output original changed")
+    return source_slots_identity(observed)
+
+
+def source_slots_capture_admission(value, *, observer: bool = False) -> dict | None:
+    """Closed, partial refusal facts only; never a receipt or cleanup grant."""
+    try:
+        if type(observer) is not bool or type(value) is not dict or set(value) != {
+                "schemaVersion", "output", "limitBytes", "writerBytes", "openedBytes",
+                "failedCheck", "readerClosed", "partialObservation"}:
+            return None
+        limits = {"metadata.json": 16 * 1024 * 1024, "source-slots-metadata.stderr": 1024 * 1024,
+                  "source-slots-compile.stdout": MAC_OBSERVER_STDOUT_LIMIT if observer else 2 * 1024 * 1024,
+                  "source-slots-compile.stderr": 1024 * 1024,
+                  "source-slots-test.stdout": 1024 * 1024, "source-slots-test.stderr": 1024 * 1024}
+        if (type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
+                or type(value["output"]) is not str or value["output"] not in limits
+                or observer and value["output"] not in {"source-slots-compile.stdout", "source-slots-compile.stderr"}
+                or type(value["limitBytes"]) is not int or value["limitBytes"] != limits[value["output"]]
+                or any(type(value[key]) is not int or not 0 <= value[key] <= (1 << 63) - 1
+                       for key in ("writerBytes", "openedBytes"))
+                or type(value["failedCheck"]) is not str or value["failedCheck"] not in {
+                    "opened-identity", "named-identity", "regular-file", "owner", "single-link",
+                    "private-mode", "byte-bound", "nonempty-metadata"}
+                or value["readerClosed"] is not True or value["partialObservation"] is not True
+                or len(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()) + 1 > 1024):
+            return None
+        return dict(value)
+    except Exception:
+        return None
+
+
+def source_slots_read(path: Path, expected: tuple, *, retain: bool = False, observer: bool = False) -> bytes:
+    # Only the fixed stdout/stderr originals just returned by run() are read.
+    # This is bounded post-original admission, not a new streaming IO owner.
+    require(type(observer) is bool, "Unexpected SourceSlots private output")
+    limits = {"metadata.json": 16 * 1024 * 1024, "source-slots-metadata.stderr": 1024 * 1024,
+              "source-slots-compile.stdout": MAC_OBSERVER_STDOUT_LIMIT if observer else 2 * 1024 * 1024,
+              "source-slots-compile.stderr": 1024 * 1024,
+              "source-slots-test.stdout": 1024 * 1024, "source-slots-test.stderr": 1024 * 1024}
+    require(path.name in limits and type(expected) is tuple and len(expected) == 9
+            and (not observer or path.name in {"source-slots-compile.stdout", "source-slots-compile.stderr"})
+            and type(retain) is bool and (not retain or path.name in {
+                "source-slots-compile.stdout", "source-slots-compile.stderr"}),
+            "Unexpected SourceSlots private output")
+    original = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    admission_failure = None
+    try:
+        observed = os.fstat(original)
+        # Same predicates and short-circuit IO order: do not lstat/geteuid just
+        # to fill an optional explanation of an earlier failed predicate.
+        failed_check = None
+        if not source_slots_identity(observed) == expected:
+            failed_check = "opened-identity"
+        elif not expected == source_slots_identity(path.lstat()):
+            failed_check = "named-identity"
+        elif not stat.S_ISREG(observed.st_mode):
+            failed_check = "regular-file"
+        elif not observed.st_uid == os.geteuid():
+            failed_check = "owner"
+        elif not observed.st_nlink == 1:
+            failed_check = "single-link"
+        elif not stat.S_IMODE(observed.st_mode) == 0o600:
+            failed_check = "private-mode"
+        elif not 0 <= observed.st_size <= limits[path.name]:
+            failed_check = "byte-bound"
+        elif not (path.name != "metadata.json" or observed.st_size > 0):
+            failed_check = "nonempty-metadata"
+        if failed_check is not None:
+            admission_failure = CheckFailure("SourceSlots private output is changed or oversized")
+            raise admission_failure
+        remaining = observed.st_size
+        chunks = []
+        while remaining:
+            block = os.read(original, min(65536, remaining))
+            require(bool(block), "SourceSlots private output ended early")
+            remaining -= len(block)
+            if retain or path.name == "source-slots-test.stdout":
+                chunks.append(block)
+        require(os.read(original, 1) == b"" and source_slots_identity(os.fstat(original)) == expected
+                and source_slots_identity(path.lstat()) == expected, "SourceSlots private output POST changed")
+        return b"".join(chunks)
+    finally:
+        os.close(original)  # Preserve consuming-close error propagation exactly.
+        if admission_failure is not None:
+            try:
+                facts = source_slots_capture_admission({
+                    "schemaVersion": 1, "output": path.name, "limitBytes": limits[path.name],
+                    "writerBytes": expected[6], "openedBytes": observed.st_size,
+                    "failedCheck": failed_check, "readerClosed": True, "partialObservation": True}, observer=observer)
+                if facts is not None:
+                    admission_failure._source_slots_capture_admission = facts
+            except BaseException:
+                pass  # Optional facts cannot replace this same original refusal.
+
+
+def source_slots_diagnostic_unavailable(code: int | None, reason: str) -> dict:
+    require(reason in {"original-unavailable", "capture-unavailable", "cargo-json-unavailable", "cargo-short-unavailable",
+                       "no-error-records", "source-unavailable", "deadline-unavailable", "output-bound"},
+            "Unknown SourceSlots diagnostic state")
+    return {"state": "unavailable", "reason": reason,
+            "returnCode": code if type(code) is int and 0 < code <= 255 else None,
+            "errors": [], "sources": []}
+
+
+def source_slots_diagnostic_records(raw: bytes, stderr: bytes, source: str, *, observer: bool = False) -> list[dict]:
+    """Only bounded Cargo error DATA; no raw message or foreign path escapes."""
+    require(type(observer) is bool, "Observer diagnostic selector must be boolean")
+    require(type(raw) is bytes and 0 < len(raw) <= (MAC_OBSERVER_STDOUT_LIMIT if observer else 2 * 1024 * 1024)
+            and type(stderr) is bytes and len(stderr) <= 1024 * 1024,
+            "SourceSlots diagnostic captures exceed their fixed stdout/stderr bounds")
+    packages = (("mobile-release-kit-desktop", "0.1.1", "desktop/src-tauri"),
+                ("mrk-macos-installed-native", "0.1.0", "desktop/native/macos-installed-native"))
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            require(key not in result, "Duplicate Cargo diagnostic field")
+            result[key] = value
+        return result
+    def nonfinite(_):
+        raise CheckFailure("Nonfinite Cargo diagnostic field")
+    def finite_float(raw):
+        value = float(raw)
+        require(float("-inf") < value < float("inf"), "Nonfinite Cargo diagnostic field")
+        return value
+    def path_for(name, package):
+        if type(name) is not str or len(name) > 4096 or package is None:
+            return None
+        if name.startswith(source + "/"):
+            relative = name[len(source) + 1:]
+        elif name.startswith("desktop/"):
+            relative = name
+        elif name == "build.rs" or name.startswith("src/"):
+            relative = package[2] + "/" + name
+        elif observer and package[2] == "desktop/src-tauri" and name.startswith("tests/"):
+            relative = package[2] + "/" + name
+        else:
+            return None
+        # Rust preserves the literal #[path = "../src/..."] spelling from
+        # this integration crate. Admit only that one SOURCE-owned alias;
+        # never normalize arbitrary traversal or filesystem paths.
+        alias = "desktop/src-tauri/tests/../src/"
+        if observer and package[2] == "desktop/src-tauri" and relative.startswith(alias):
+            if len(relative) > 512:
+                return None
+            relative = "desktop/src-tauri/src/" + relative[len(alias):]
+        parts = relative.split("/")
+        if (len(relative) > 512 or not relative.endswith(".rs")
+                or any(part in {"", ".", ".."} or re.fullmatch(r"[A-Za-z0-9._+-]+", part) is None for part in parts)
+                or not any(relative.startswith(row[2] + "/") for row in packages)):
+            return None
+        return relative
+    try:
+        text, diagnostic_text = raw.decode("utf-8"), stderr.decode("utf-8")
+        require(text.endswith("\n"), "Partial Cargo diagnostic frame")
+        lines = text.split("\n")[:-1]
+        require(0 < len(lines) <= 4096, "Too many Cargo diagnostic frames")
+        errors, paths, primary_count, terminal = [], set(), 0, False
+        for line in lines:
+            require(not terminal and bool(line), "Trailing or empty Cargo diagnostic frame")
+            value = json.loads(line, object_pairs_hook=pairs, parse_constant=nonfinite, parse_float=finite_float)
+            require(type(value) is dict and value.get("reason") in {
+                "compiler-message", "compiler-artifact", "build-script-executed", "build-finished"},
+                "Unexpected Cargo diagnostic frame")
+            if value["reason"] == "build-finished":
+                require(value.get("success") is False, "Cargo failure has no failed terminal record")
+                terminal = True
+                continue
+            if value["reason"] != "compiler-message":
+                continue
+            message = value.get("message")
+            require(type(message) is dict and type(message.get("level")) is str,
+                    "Malformed Cargo compiler diagnostic")
+            if message["level"] != "error":
+                continue
+            code = message.get("code")
+            require("code" in message and (code is None or (type(code) is dict and type(code.get("code")) is str
+                    and re.fullmatch(r"E[0-9]{4}", code["code"]) is not None)), "Malformed Rust error code")
+            code = None if code is None else code["code"]
+            wording, spans = message.get("message"), message.get("spans")
+            require(type(wording) is str and type(spans) is list, "Malformed Rust error fields")
+            package = next((row for row in packages if value.get("manifest_path") == source + "/" + row[2] + "/Cargo.toml"), None)
+            category = "compiler-error" if code is not None else "compiler-error-without-code"
+            if code is None and re.match(r"linking with `[^`\r\n]{1,256}` failed: ", wording):
+                category = "linker-error"
+            row = {"category": category, "code": code, "package": package[0] if package else "unknown",
+                   "spans": [], "unboundSpans": 0}
+            for span in spans:
+                require(type(span) is dict and type(span.get("is_primary")) is bool, "Malformed Rust source span")
+                if not span["is_primary"]:
+                    continue
+                primary_count += 1
+                require(primary_count <= 32, "Too many Rust primary spans")
+                line_number, column = span.get("line_start"), span.get("column_start")
+                require(type(line_number) is int and 0 < line_number <= 1048576
+                        and type(column) is int and 0 < column <= 1048576, "Malformed Rust source location")
+                relative = path_for(span.get("file_name"), package)
+                if relative is None:
+                    row["unboundSpans"] += 1
+                else:
+                    paths.add(relative)
+                    require(len(paths) <= 8, "Too many Rust source files")
+                    row["spans"].append({"path": relative, "line": line_number, "column": column})
+            errors.append(row)
+            require(len(errors) <= 16, "Too many Rust error records")
+        require(terminal, "Missing Cargo failed terminal record")
+        prefix = "error: failed to run custom build command for `"
+        for line in diagnostic_text.splitlines():
+            if line.startswith(prefix):
+                package = next((row[0] for row in packages if line.startswith(prefix + row[0] + " v" + row[1] + " (")
+                                or line == prefix + row[0] + " v" + row[1] + "`"), "unknown")
+                errors.append({"category": "build-script-failure", "code": None, "package": package,
+                               "spans": [], "unboundSpans": 0})
+                require(len(errors) <= 16, "Too many Rust error records")
+        return errors
+    except (ValueError, UnicodeError, RecursionError, TypeError) as error:
+        if isinstance(error, CheckFailure):
+            raise
+        raise CheckFailure("Malformed bounded Cargo diagnostics") from None
+
+
+def source_slots_short_diagnostic_records(raw: bytes, stderr: bytes, source: str) -> list[dict]:
+    """B-only short errors, never success or an inferred Cargo terminal record."""
+    require(type(raw) is bytes and len(raw) <= 2 * 1024 * 1024
+            and type(stderr) is bytes and len(stderr) <= 1024 * 1024,
+            "SourceSlots short diagnostic captures exceed their fixed bounds")
+    packages = (("mobile-release-kit-desktop", "0.1.1", "desktop/src-tauri"),
+                ("mrk-macos-installed-native", "0.1.0", "desktop/native/macos-installed-native"))
+    errors, paths, line_count, primary_count = [], set(), 0, 0
+    for body in (raw, stderr):
+        require(not body or body.endswith(b"\n"), "Partial SourceSlots short diagnostic line")
+        start = 0
+        while start < len(body):
+            end = body.find(b"\n", start)
+            require(0 <= end - start <= 8192, "SourceSlots short diagnostic line exceeds its bound")
+            line = body[start:end]
+            start = end + 1
+            line_count += 1
+            require(line_count <= 4096, "Too many SourceSlots short diagnostic lines")
+            located = re.match(rb"([^:\r\n]{1,4096}):([1-9][0-9]{0,6}):([1-9][0-9]{0,6}): error(?:\[(E[0-9]{4})\])?:", line)
+            plain = re.match(rb"error(?:\[(E[0-9]{4})\])?:", line)
+            if located is None and plain is None:
+                require(not line.startswith(b"error") and b": error" not in line,
+                        "Malformed SourceSlots short error prefix")
+                continue  # Warnings/progress remain in the admitted original, not this optional projection.
+            match = located if located is not None else plain
+            require(all(32 <= byte <= 126 for byte in match[0]), "Non-ASCII SourceSlots short error prefix")
+            code_bytes = located[4] if located is not None else plain[1]
+            code = code_bytes.decode("ascii") if code_bytes is not None else None
+            row = {"category": "compiler-error" if code is not None else "compiler-error-without-code",
+                   "code": code, "package": "unknown", "spans": [], "unboundSpans": 0}
+            if located is not None:
+                primary_count += 1
+                require(primary_count <= 32, "Too many SourceSlots short primary spans")
+                number, column = int(located[2]), int(located[3])
+                require(number <= 1048576 and column <= 1048576, "SourceSlots short location exceeds its bound")
+                name = located[1].decode("ascii")
+                relative = name[len(source) + 1:] if name.startswith(source + "/") else name
+                parts = relative.split("/")
+                package = next((item for item in packages if relative.startswith(item[2] + "/")), None)
+                if (package is not None and len(relative) <= 512 and relative.endswith(".rs")
+                        and all(part not in {"", ".", ".."} and re.fullmatch(r"[A-Za-z0-9._+-]+", part) is not None for part in parts)):
+                    row["package"] = package[0]
+                    paths.add(relative)
+                    require(len(paths) <= 8, "Too many SourceSlots short SOURCE paths")
+                    row["spans"].append({"path": relative, "line": number, "column": column})
+                else:
+                    row["unboundSpans"] = 1  # No guessed package for a relative src/ path or foreign original.
+            elif code is None:
+                if re.match(rb"error: linking with `[^`\r\n]{1,256}` failed: ", line):
+                    row["category"] = "linker-error"
+                prefix = b"error: failed to run custom build command for `"
+                if line.startswith(prefix):
+                    row["category"] = "build-script-failure"
+                    row["package"] = next((item[0] for item in packages
+                        if line.startswith(prefix + (item[0] + " v" + item[1] + " (").encode("ascii"))
+                        or line == prefix + (item[0] + " v" + item[1] + "`").encode("ascii")), "unknown")
+            errors.append(row)
+            require(len(errors) <= 16, "Too many SourceSlots short error records")
+    return errors
+
+
+def source_slots_compiler_diagnostic(context: dict, raw: bytes, stderr: bytes, code: int, *, timeout_for) -> dict:
+    """A failed original's optional explanation, never a success/cleanup gate."""
+    try:
+        timeout_for(15)
+    except Exception:
+        return source_slots_diagnostic_unavailable(code, "deadline-unavailable")
+    short = False
+    try:
+        # New normal-owner DATA mode uses the same JSON decoder, not an
+        # invented source-slots context. Existing source-slots branch is exact.
+        if context.get("executionScope") == MAC_COMPILE_SCOPE and context.get("macCompile", {}).get("mode") in (MAC_HISTORY_MODE, MAC_OBSERVER_MODE):
+            require(context.get("workflowPath") == MAC_COMPILE_WORKFLOW, "Mac compiler diagnostic workflow differs")
+            short = False
+        else:
+            short = source_slots_is_removal(context)
+        if short:
+            require(type(code) is int and 0 < code <= 255, "Short diagnostics require a returned nonzero original")
+            errors = source_slots_short_diagnostic_records(raw, stderr, context["source"])
+        else:
+            if (context.get("executionScope") == MAC_COMPILE_SCOPE
+                    and context.get("macCompile", {}).get("mode") == MAC_OBSERVER_MODE):
+                errors = source_slots_diagnostic_records(raw, stderr, context["source"], observer=True)
+            else:
+                errors = source_slots_diagnostic_records(raw, stderr, context["source"])
+    except Exception:
+        return source_slots_diagnostic_unavailable(code, "cargo-short-unavailable" if short else "cargo-json-unavailable")
+    if not errors:
+        return source_slots_diagnostic_unavailable(code, "no-error-records")
+    try:
+        source_unchanged(context, timeout_for=timeout_for)
+        paths = sorted({span["path"] for row in errors for span in row["spans"]})
+        sources = []
+        if paths:
+            observed = run([context["git"], "ls-tree", "-z", "--full-tree", context["sourceSha"], "--", *paths],
+                           check="source-slots-diagnostic-source", cwd=Path(context["source"]),
+                           env=clean_environment(Path(context["root"])), timeout=timeout_for(15), capture=True)
+            require(type(observed) is str and len(observed.encode("utf-8")) <= 8192
+                    and (not observed or observed.endswith("\0")), "Malformed diagnostic SOURCE metadata")
+            for item in observed.split("\0")[:-1]:
+                matched = re.fullmatch(r"(100644|100755) blob ([0-9a-f]{40})\t([^\0\r\n]+)", item)
+                require(matched is not None and matched[3] in paths
+                        and matched[3] not in {row["path"] for row in sources}, "Unbound diagnostic SOURCE metadata")
+                sources.append({"path": matched[3], "gitBlob": matched[2]})
+        sources.sort(key=lambda row: row["path"])
+        indices = {row["path"]: index for index, row in enumerate(sources)}
+        for row in errors:
+            bound = []
+            for span in row["spans"]:
+                if span["path"] in indices:
+                    bound.append({"source": indices[span["path"]], "line": span["line"], "column": span["column"]})
+                else:
+                    row["unboundSpans"] += 1
+            row["spans"] = bound
+        timeout_for(15)
+        result = {"state": "complete", "reason": None, "returnCode": code, "errors": errors, "sources": sources}
+        require(type(code) is int and 0 < code <= 255
+                and len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode()) <= 12288,
+                "Compiler diagnostic exceeds its closed output bound")
+        return result
+    except Exception:
+        return source_slots_diagnostic_unavailable(code, "source-unavailable")
+def source_slots_source_guard(source: Path, root: Path) -> None:
+    mac_compile_source_guard(source, root)
+    no_cargo_configuration((root / "home", root / "cargo"))
+    require(not any(name in os.environ for name in (
+        "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+        "CARGO_BUILD_RUSTFLAGS", "CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS", "CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER")),
+        "SourceSlots ambient compiler flags or wrappers are not admitted")
+    for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/gen", "desktop/src-tauri/target"):
+        generated = source / relative
+        require(not generated.exists() and not generated.is_symlink(), "SourceSlots has unexpected frontend or adjacent target output")
+
+
+def phase_source_slots(name: str, context: dict) -> None:
+    """One closed Intel graph through the existing original run/cleanup owner."""
+    require(context.get("executionScope") == SOURCE_SLOTS_SCOPE and context.get("platform") == "macos", "Wrong SourceSlots context")
+    removal = source_slots_is_removal(context)
+    initialization = source_slots_is_initialization(context)
+    artifact = source_slots_is_artifact(context)
+    environment_setup = source_slots_is_environment_setup(context)
+    require(name in ("acquire", "compile", "clean"), "Wrong SourceSlots phase")
+    root, source = Path(context["root"]), Path(context["source"])
+    if name == "clean":
+        source_unchanged(context)
+        source_slots_source_guard(source, root)
+        source_slots_inputs_unchanged(context)
+        clean_compile(context)
+        return
+    started = time.monotonic()
+    deadline, previous = started + 900, started
+    last_check = "source-pre"
+    compiler_diagnostic = None
+    original_return_code, capture_admission = None, None
+    def remaining(cap: int) -> int:
+        nonlocal previous
+        now = time.monotonic()
+        require(previous <= now < deadline - 30, "SourceSlots endpoint expired or clock reversed")
+        previous = now
+        value = min(cap, int(deadline - now - 30))
+        require(value > 0, "SourceSlots has no remaining original time")
+        return value
+    try:
+        remaining(30)
+        source_unchanged(context, timeout_for=remaining)
+        source_slots_source_guard(source, root)
+        source_slots_inputs_unchanged(context)
+        if removal:
+            remaining(30)
+        environment = clean_environment(root)
+        environment["GITHUB_SHA"] = context["sourceSha"]
+        if removal:
+            environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"] = context["sourceSha"]
+            environment["MRK_IMAGE_RELEASE_ID"] = context["sourceSlotsBuild"]["release"]
+        last_check = "tools"
+        cargo, _ = tools(context, environment, timeout_for=remaining)
+        remaining(30)
+        manifest = source / "desktop/src-tauri/Cargo.toml"
+        feature = SOURCE_SLOTS_REMOVAL_FEATURE if removal else SOURCE_SLOTS_FEATURES
+        common = ["--locked", "--offline", "--jobs", "1", "--no-default-features",
+                  "--features", feature, "--target", SOURCE_SLOTS_TARGET,
+                  "--manifest-path", str(manifest), "--target-dir", str(root / "target"),
+                  *(["--bin", "mrk-macos-remove"] if removal else ["--lib"])]
+        if name == "acquire":
+            commands = (("mac-source-slots-locked-metadata",
+                         [cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                          "--features", feature, "--filter-platform", SOURCE_SLOTS_TARGET,
+                          "--manifest-path", str(manifest)], root / "metadata.json",
+                         root / "target/source-slots-metadata.stderr", 600),)
+        else:
+            # Reuse one Cargo-fingerprinted compile; only the literal exact case
+            # follows it. No ignored filter, arbitrary selector or other graph.
+            test_args = (["--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never",
+                          *(SOURCE_SLOTS_REMOVAL_TESTS if removal else SOURCE_SLOTS_INITIALIZATION_TESTS if initialization
+                            else SOURCE_SLOTS_ARTIFACT_TESTS if artifact else SOURCE_SLOTS_ENVIRONMENT_TESTS)] if removal or initialization or artifact or environment_setup
+                         else [SOURCE_SLOTS_TEST, "--", "--exact", "--test-threads=1"])
+            # JSON short changes only rendered, not the full compiler-message payload.
+            # B needs no artifact JSON: preserve all diagnostics in bounded short text.
+            compile_format = ["--message-format=short", "--color", "never"] if removal else ["--message-format=json,json-diagnostic-short"]
+            test_format = ["--message-format=short", "--color", "never"] if removal else []
+            commands = (("headless-test-compile-only", [cargo, "test", *common, *compile_format, "--no-run"],
+                         root / "target/source-slots-compile.stdout", root / "target/source-slots-compile.stderr", 600),
+                        ("mac-source-slots-data-test", [cargo, "test", *common, *test_format, *test_args],
+                         root / "target/source-slots-test.stdout", root / "target/source-slots-test.stderr", 150))
+        result = None
+        for check, argv, output_path, stderr_path, cap in commands:
+            last_check = check
+            original_return_code, capture_admission = None, None
+            remaining(30)
+            command_failure = None
+            try:
+                with output_path.open("x", encoding="utf-8") as output, stderr_path.open("x", encoding="utf-8") as diagnostics:
+                    before = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+                    require(all(row[6] == 0 for row in before), "SourceSlots private output was not fresh")
+                    try:
+                        run(argv, check=check, cwd=root, env=environment, timeout=remaining(cap), output=output, diagnostics=diagnostics)
+                        original_return_code = 0  # Only after this actual check=True original returned.
+                    except CheckFailure as error:
+                        command_failure = error
+                        witness = error.__dict__.get("_returned_command") if type(error) is CheckFailure else None
+                        returned = (type(witness) is tuple and len(witness) == 2
+                                    and type(witness[0]) is str and witness[0] == check
+                                    and type(witness[1]) is int and 0 < witness[1] <= 255)
+                        if returned:
+                            original_return_code = witness[1]
+                        if not (check == "headless-test-compile-only" and returned):
+                            raise
+                        compiler_diagnostic = source_slots_diagnostic_unavailable(witness[1], "capture-unavailable")
+                    output.flush()
+                    diagnostics.flush()
+                    originals = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+                    require(all(old[:6] == new[:6] for old, new in zip(before, originals)), "SourceSlots output identity changed")
+                # Both original writers have consuming-closed before any new
+                # diagnostic reader; an uncertain close keeps only the failure.
+                remaining(30)
+                if command_failure is not None:
+                    raw = source_slots_read(output_path, originals[0], retain=True)
+                    stderr = source_slots_read(stderr_path, originals[1], retain=True)
+                    remaining(30)
+                    compiler_diagnostic = source_slots_compiler_diagnostic(
+                        context, raw, stderr, witness[1], timeout_for=remaining)
+                    raise command_failure
+                raw = source_slots_read(output_path, originals[0])
+                source_slots_read(stderr_path, originals[1])
+                remaining(30)
+            except BaseException as error:
+                try:
+                    facts = source_slots_capture_admission(error.__dict__.get("_source_slots_capture_admission")) if type(error) is CheckFailure else None
+                    if facts is not None and facts["output"] in {output_path.name, stderr_path.name}:
+                        capture_admission = facts
+                except BaseException:
+                    pass
+                if command_failure is not None:
+                    # A later flush/read/close/diagnostic failure cannot replace
+                    # the first returned/unknown command outcome or start a test.
+                    raise command_failure from None
+                raise
+            if check == "mac-source-slots-data-test":
+                result = (source_slots_removal_test_result(raw) if removal else source_slots_initialization_test_result(raw)
+                          if initialization else source_slots_artifact_test_result(raw) if artifact else source_slots_environment_test_result(raw)
+                          if environment_setup else source_slots_test_result(raw))
+        last_check = "source-post"
+        source_slots_source_guard(source, root)
+        source_slots_inputs_unchanged(context)
+        source_unchanged(context, timeout_for=remaining)
+        remaining(30)
+        last_check = "receipt"
+        phase_receipt(context, name, list(SOURCE_SLOTS_CHECKS[name]), node=None, source_slots_result=result)
+        # A retained receipt cannot rescue an original late/failed phase. The
+        # closed failure row also makes the exact successful cleanup roster fail.
+        remaining(30)
+    except Exception:
+        failure = {"schemaVersion": 1, "scope": SOURCE_SLOTS_REMOVAL_EVIDENCE if removal else SOURCE_SLOTS_EVIDENCE, "phase": name,
+                   "status": "failed-or-unknown", "lastFixedStage": last_check,
+                   **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha",
+                                                   "workflowRef", "workflowSha256", "runId", "attempt")}}
+        if removal:
+            failure["sourceSlots"] = context["sourceSlots"]
+            failure["sourceSlotsBuild"] = context["sourceSlotsBuild"]
+        elif initialization:
+            failure.update(scope=SOURCE_SLOTS_INITIALIZATION_EVIDENCE, sourceSlots=context["sourceSlots"],
+                           sourceSlotsSelection=SOURCE_SLOTS_INITIALIZATION_SELECTION)
+        elif artifact:
+            failure.update(scope=SOURCE_SLOTS_ARTIFACT_EVIDENCE, sourceSlots=context["sourceSlots"],
+                           sourceSlotsSelection=SOURCE_SLOTS_ARTIFACT_SELECTION)
+        elif environment_setup:
+            failure.update(scope=SOURCE_SLOTS_ENVIRONMENT_EVIDENCE, sourceSlots=context["sourceSlots"],
+                           sourceSlotsSelection=SOURCE_SLOTS_ENVIRONMENT_SELECTION)
+        if name == "compile" and last_check == "headless-test-compile-only":
+            if compiler_diagnostic is None:
+                compiler_diagnostic = source_slots_diagnostic_unavailable(None, "original-unavailable")
+            if compiler_diagnostic["state"] == "complete":
+                try:
+                    remaining(30)
+                except Exception:
+                    compiler_diagnostic = source_slots_diagnostic_unavailable(
+                        compiler_diagnostic["returnCode"], "deadline-unavailable")
+            failure["compilerDiagnostic"] = compiler_diagnostic
+        if last_check in {"mac-source-slots-locked-metadata", "headless-test-compile-only", "mac-source-slots-data-test"}:
+            failure["originalCommandReturnCode"] = (original_return_code
+                if type(original_return_code) is int and 0 <= original_return_code <= 255 else None)
+        try:
+            facts = source_slots_capture_admission(capture_admission)
+            if facts is not None:
+                explained = {**failure, "captureAdmission": facts}
+                if len(json.dumps(explained, sort_keys=True, separators=(",", ":")).encode()) + 1 <= 16384:
+                    failure = explained
+        except BaseException:
+            pass  # Keep the old bounded failure envelope if optional details fail.
+        try:
+            if (len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 > 16384
+                    and "compilerDiagnostic" in failure):
+                failure["compilerDiagnostic"] = source_slots_diagnostic_unavailable(
+                    failure["compilerDiagnostic"]["returnCode"], "output-bound")
+            require(len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 <= 16384,
+                    "SourceSlots failure summary exceeds its bound")
+            write_json(root / "source-slots-failure.json", failure)
+        except Exception:
+            pass  # Never replace/mask the primary failure or retry publication.
+        raise
+
+
+def validate_mac_history_result(value: object) -> dict:
+    require(type(value) is dict and set(value) == {"tests", "running", "passed", "failed", "ignored", "measured", "filtered"},
+            "Mac History DATA result fields differ")
+    require(type(value["tests"]) is list and value["tests"] == list(MAC_HISTORY_TESTS)
+            and all(type(value[name]) is int and value[name] == expected for name, expected in
+                    (("running", 4), ("passed", 4), ("failed", 0), ("ignored", 0), ("measured", 0)))
+            and type(value["filtered"]) is int and 0 <= value["filtered"] <= 65535,
+            "Mac History DATA did not pass exactly its four selected tests")
+    return value
+
+
+def mac_history_test_result(raw: bytes) -> dict:
+    require(type(raw) is bytes and 0 < len(raw) <= 1024 * 1024, "Mac History DATA stdout exceeds its bound")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeError:
+        raise CheckFailure("Mac History DATA stdout is not the fixed libtest result") from None
+    rows = "".join("test " + re.escape(name) + r" \.\.\. ok\n" for name in MAC_HISTORY_TESTS)
+    match = re.fullmatch(r"\n?running 4 tests\n" + rows
+                         + r"\ntest result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; "
+                         + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
+    require(match is not None, "Mac History DATA stdout is missing, extra, ignored or failed")
+    return validate_mac_history_result({"tests": list(MAC_HISTORY_TESTS), "running": 4, "passed": 4,
+                                       "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
+
+
+def mac_history_data_checks(cargo: str, root: Path, source: Path, target: str, environment: dict, remaining, context: dict) -> dict:
+    """Two literal originals in the containing normal Mac phase, no new owner."""
+    require(target in MAC_COMPILE_HOSTS, "Mac History target differs")
+    common = ["--locked", "--offline", "--jobs", "1", "--no-default-features", "--features", "development-runtime",
+              "--target", target, "--manifest-path", str(source / "desktop/src-tauri/Cargo.toml"),
+              "--target-dir", str(root / "target"), "--lib"]
+    commands = (
+        ("headless-test-compile-only", [cargo, "test", *common, "--message-format=json,json-diagnostic-short", "--no-run"],
+         "source-slots-compile", 600),
+        ("mac-source-slots-data-test", [cargo, "test", *common, "--", "--exact", "--test-threads=1",
+                                      "--format", "pretty", "--color", "never", *MAC_HISTORY_TESTS],
+         "source-slots-test", 150),
+    )
+    result = None
+    for check, argv, stem, cap in commands:
+        remaining(30)
+        output_path, stderr_path = root / ("target/" + stem + ".stdout"), root / ("target/" + stem + ".stderr")
+        primary, returned_code, compiler_diagnostic = None, None, None
+        try:
+            with output_path.open("x", encoding="utf-8") as output, stderr_path.open("x", encoding="utf-8") as diagnostics:
+                before = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+                require(all(row[6] == 0 for row in before), "Mac History private output was not fresh")
+                try:
+                    run(argv, check=check, cwd=root, env=environment, timeout=remaining(cap), output=output, diagnostics=diagnostics)
+                    returned_code = 0
+                except BaseException as error:
+                    primary = error
+                    witness = error.__dict__.get("_returned_command") if type(error) is CheckFailure else None
+                    if (type(witness) is tuple and len(witness) == 2 and witness[0] == check
+                            and type(witness[1]) is int and 0 < witness[1] <= 255):
+                        returned_code = witness[1]
+                output.flush()
+                diagnostics.flush()
+                originals = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+                require(all(old[:6] == new[:6] for old, new in zip(before, originals)), "Mac History output identity changed")
+            # Both consuming closes precede readers and any positive DATA fact.
+            if primary is not None:
+                if check == "headless-test-compile-only" and returned_code is not None:
+                    compiler_diagnostic = source_slots_diagnostic_unavailable(returned_code, "capture-unavailable")
+                    remaining(30)
+                    failed_raw = source_slots_read(output_path, originals[0], retain=True)
+                    failed_stderr = source_slots_read(stderr_path, originals[1], retain=True)
+                    compiler_diagnostic = source_slots_compiler_diagnostic(context, failed_raw, failed_stderr,
+                                                                          returned_code, timeout_for=remaining)
+                raise primary
+            remaining(30)
+            raw = source_slots_read(output_path, originals[0])
+            source_slots_read(stderr_path, originals[1])
+            remaining(30)
+            if check == "mac-source-slots-data-test":
+                result = mac_history_test_result(raw)
+        except BaseException:
+            # Finite failure DATA occupies the already retained compile receipt
+            # path. Its status/shape cannot pass validate_compile_receipt/clean.
+            failure = {"schemaVersion": 1, "scope": MAC_HISTORY_EVIDENCE, "phase": "compile",
+                       "status": "failed-or-unknown", "lastFixedStage": check,
+                       "originalCommandReturnCode": returned_code, "macCompile": context["macCompile"],
+                       **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha",
+                                                       "workflowRef", "workflowSha256", "runId", "attempt")}}
+            if check == "headless-test-compile-only":
+                failure["compilerDiagnostic"] = compiler_diagnostic or source_slots_diagnostic_unavailable(
+                    returned_code, "capture-unavailable" if returned_code is not None else "original-unavailable")
+            try:
+                if "compilerDiagnostic" in failure and failure["compilerDiagnostic"]["state"] == "complete":
+                    try:
+                        remaining(30)
+                    except Exception:
+                        failure["compilerDiagnostic"] = source_slots_diagnostic_unavailable(returned_code, "deadline-unavailable")
+                if len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 > 16384 and "compilerDiagnostic" in failure:
+                    failure["compilerDiagnostic"] = source_slots_diagnostic_unavailable(returned_code, "output-bound")
+                require(len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 <= 16384,
+                        "Mac History diagnostic exceeds the existing receipt bound")
+                write_json(root / "compile-checks.json", failure)
+            except Exception:
+                pass  # Optional diagnostic never replaces the original failure.
+            if primary is not None:
+                raise primary from None
+            raise
+    return validate_mac_history_result(result)
+
+
+def mac_observer_data_selection(raw: bytes) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """Only the one SOURCE heredoc and its existing fixed DATA rosters."""
+    require(type(raw) is bytes and 0 < len(raw) <= 128 * 1024,
+            "Observer DATA SOURCE exceeds its bound")
+    text = raw.decode("utf-8", "strict")
+    opening, closing = "<<'PY_DATA_CONTRACTS'\n", "\nPY_DATA_CONTRACTS\n"
+    require(text.count(opening) == 1 and text.count(closing) == 1 and text.endswith(closing),
+            "Observer DATA SOURCE heredoc differs")
+    body = text.split(opening, 1)[1][:-len(closing)] + "\n"
+    module = ast.parse(body)
+    assignments = {}
+    for node in module.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            if name in {"source_names", "names"}:
+                require(name not in assignments, "Observer DATA SOURCE roster is repeated")
+                assignments[name] = ast.literal_eval(node.value)
+    sources, tests = assignments.get("source_names"), assignments.get("names")
+    require(type(sources) is tuple and len(sources) == 78
+            and all(type(name) is str and len(name) <= 240
+                    and re.fullmatch(r"[A-Za-z0-9_./+-]+", name) is not None
+                    and not name.startswith("/") and not any(part in {"", ".", ".."} for part in name.split("/"))
+                    for name in sources) and len(set(sources)) == 78
+            and MAC_OBSERVER_DATA_SCRIPT in sources,
+            "Observer DATA SOURCE roster differs")
+    require(type(tests) is list and len(tests) == 84 and all(type(name) is str for name in tests)
+            and len(set(tests)) == 84
+            and hashlib.sha256(json.dumps(tests, separators=(",", ":")).encode()).hexdigest()
+                == MAC_OBSERVER_DATA_SELECTION_SHA256,
+            "Observer DATA fixed selection differs")
+    return body, sources, tuple(tests)
+
+
+def mac_observer_data_read(path: Path, limit: int, *, private: bool = False) -> bytes:
+    """Bounded original SOURCE/context/result read; never compiler captures."""
+    require(type(private) is bool and type(limit) is int and limit in {16384, 128 * 1024, 4 * 1024 * 1024},
+            "Observer DATA input bound differs")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        info = os.fstat(descriptor)
+        before = source_slots_identity(info)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1
+                and 0 < info.st_size <= limit and before == source_slots_identity(path.lstat())
+                and (stat.S_IMODE(info.st_mode) == 0o600 if private else not info.st_mode & 0o022),
+                "Observer DATA input is not an original bounded file")
+        chunks, left = [], info.st_size
+        while left:
+            block = os.read(descriptor, min(left, 65536))
+            require(bool(block), "Observer DATA original input ended early")
+            chunks.append(block)
+            left -= len(block)
+        require(os.read(descriptor, 1) == b"" and source_slots_identity(os.fstat(descriptor)) == before
+                and source_slots_identity(path.lstat()) == before,
+                "Observer DATA original input changed")
+        body = b"".join(chunks)
+        del chunks
+        # Two bounded observations of this SAME original descriptor, including
+        # persistent same-size rewrites within one filesystem timestamp tick.
+        # This is not an atomic snapshot or a continuous/ABA exclusion claim.
+        offset = 0
+        while offset < len(body):
+            block = os.pread(descriptor, min(len(body) - offset, 65536), offset)
+            require(bool(block) and block == body[offset:offset + len(block)],
+                    "Observer DATA original input bytes changed")
+            offset += len(block)
+        require(os.pread(descriptor, 1, offset) == b""
+                and source_slots_identity(os.fstat(descriptor)) == before
+                and source_slots_identity(path.lstat()) == before,
+                "Observer DATA original input changed after byte revalidation")
+        return body
+    finally:
+        os.close(descriptor)
+
+
+def mac_observer_data_inputs(source: Path) -> tuple[dict, bytes, list[dict], tuple[str, ...]]:
+    raw = mac_observer_data_read(source / MAC_OBSERVER_DATA_SCRIPT, 128 * 1024)
+    body, names, tests = mac_observer_data_selection(raw)
+    total = 0
+    for name in names:
+        path = source / name
+        ordinary(path)
+        size = path.stat().st_size
+        require(0 < size <= 2 * 1024 * 1024, "Observer DATA selected SOURCE exceeds its bound")
+        total += size
+    require(total <= 32 * 1024 * 1024, "Observer DATA SOURCE aggregate exceeds its bound")
+    rows = fixed_file_inventory(source, tuple(sorted(names)))
+    require(all(0 < row["size"] <= 2 * 1024 * 1024 for row in rows)
+            and sum(row["size"] for row in rows) <= 32 * 1024 * 1024,
+            "Observer DATA selected SOURCE changed its bound")
+    inventory = canonical_json({"files": rows}) + b"\n"
+    require(len(inventory) <= 128 * 1024, "Observer DATA inventory exceeds its bound")
+    selected = {"sourceCount": 78, "sourceInventorySha256": hashlib.sha256(inventory).hexdigest(),
+                "scriptSha256": hashlib.sha256(raw).hexdigest(), "pythonCount": 84,
+                "selectionSha256": MAC_OBSERVER_DATA_SELECTION_SHA256}
+    require(next(row for row in rows if row["path"] == MAC_OBSERVER_DATA_SCRIPT)["sha256"] == selected["scriptSha256"],
+            "Observer DATA original script changed")
+    return selected, body.encode("utf-8"), rows, tests
+
+
+def mac_observer_data_binding(value: object) -> dict:
+    closed_object(value, {"sourceCount", "sourceInventorySha256", "scriptSha256", "pythonCount", "selectionSha256"},
+                  "Observer DATA input binding shape differs")
+    require(type(value["sourceCount"]) is int and value["sourceCount"] == 78
+            and type(value["pythonCount"]) is int and value["pythonCount"] == 84
+            and sha256_value(value["sourceInventorySha256"]) and sha256_value(value["scriptSha256"])
+            and value["selectionSha256"] == MAC_OBSERVER_DATA_SELECTION_SHA256,
+            "Observer DATA input binding differs")
+    return value
+
+
+def validate_mac_observer_data_result(value: object) -> dict:
+    """Only complete fixed DATA can join a positive compiler cleanup receipt."""
+    keys = {"schemaVersion", "wrapperReturnCode", "sourceInventorySha256", "sourceCount", "selectionSha256",
+            "pythonExpectedCount", "commands", "artifact", "aggregatePassed", "pythonCounts", "sourcePost",
+            "temporaryEmpty", "rustPanic", "guardCode", "pythonFailure", "nativeVaultTestsExecuted", "uiExecutedByThisBatch", "nativeTlsQualified",
+            "allWorkerFinalityEstablished"}
+    if type(value) is dict and "rustPanicDiagnostic" in value:
+        keys.add("rustPanicDiagnostic")  # Old positive receipts remain admissible.
+    closed_object(value, keys, "Observer DATA public result shape differs")
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+            and type(value["wrapperReturnCode"]) is int and value["wrapperReturnCode"] == 0
+            and sha256_value(value["sourceInventorySha256"])
+            and type(value["sourceCount"]) is int and value["sourceCount"] == 78
+            and value["selectionSha256"] == MAC_OBSERVER_DATA_SELECTION_SHA256
+            and type(value["pythonExpectedCount"]) is int and value["pythonExpectedCount"] == 84,
+            "Observer DATA source/selection/original return differs")
+    require(type(value["commands"]) is list and len(value["commands"]) == 5,
+            "Observer DATA original command roster differs")
+    for phase, row in zip(MAC_OBSERVER_DATA_PHASES, value["commands"]):
+        closed_object(row, {"phase", "originalReturned", "returnCode", "outputComplete", "captureClosed", "timedOut", "outputOverflow"},
+                      "Observer DATA original command shape differs")
+        require(row["phase"] == phase and type(row["returnCode"]) is int and row["returnCode"] == 0
+                and all(row[key] is True for key in ("originalReturned", "outputComplete", "captureClosed"))
+                and row["timedOut"] is False and row["outputOverflow"] is False,
+                "Observer DATA original command did not pass")
+    artifact = closed_object(value["artifact"], {"sha256", "bytes", "unchangedAfterRun", "originalClosed"},
+                             "Observer DATA artifact shape differs")
+    require(sha256_value(artifact["sha256"]) and integer_between(artifact["bytes"], 1, 1024 * 1024 * 1024)
+            and artifact["unchangedAfterRun"] is True and artifact["originalClosed"] is True,
+            "Observer DATA artifact did not settle")
+    counts = closed_object(value["pythonCounts"], {"testsRun", "failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses"},
+                           "Observer DATA Python counts differ")
+    require(type(counts["testsRun"]) is int and counts["testsRun"] == 84
+            and all(type(counts[key]) is int and counts[key] == 0 for key in counts if key != "testsRun")
+            and value["aggregatePassed"] is True and value["sourcePost"] is True and value["temporaryEmpty"] is True
+            and value["rustPanic"] is None and value.get("rustPanicDiagnostic") is None
+            and value["guardCode"] is None and value["pythonFailure"] is None
+            and all(value[key] is False for key in ("nativeVaultTestsExecuted", "uiExecutedByThisBatch", "nativeTlsQualified", "allWorkerFinalityEstablished")),
+            "Observer DATA original counts/finality differ")
+    return value
+
+
+def mac_observer_data_result(value: object, context: dict, wrapper_returncode: int, *, failure: object = None) -> dict:
+    """Copy only finite original facts; no private receipt/path/message export."""
+    require(context.get("executionScope") == MAC_COMPILE_SCOPE and context.get("macCompile", {}).get("mode") == MAC_OBSERVER_DATA_MODE
+            and context["macCompile"].get("target") == "aarch64-apple-darwin"
+            and integer_between(wrapper_returncode, -255, 255), "Observer DATA result admission differs")
+    selected = mac_observer_data_binding(context["macCompile"]["data"])
+    require(type(value) is dict and value.get("scope") == "ci-observer-fixed-data-and-selected-host-python-regressions"
+            and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1
+            and value.get("sourceCommit") == context["sourceSha"] and value.get("sourceTree") == context["sourceTree"]
+            and value.get("sourceInventorySha256") == selected["sourceInventorySha256"]
+            and value.get("frozenSelectionSha256") == MAC_OBSERVER_DATA_SELECTION_SHA256
+            and type(value.get("pythonExpectedCount")) is int and value["pythonExpectedCount"] == 84
+            and value.get("ciContext") == {key: context[key] for key in ("workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")},
+            "Observer DATA private result context differs")
+    source_rows = value.get("sourceRows")
+    require(type(source_rows) is list and len(source_rows) == 78,
+            "Observer DATA private SOURCE roster differs")
+    source_names = []
+    for row in source_rows:
+        closed_object(row, {"path", "size", "sha256"}, "Observer DATA private SOURCE row differs")
+        require(type(row["path"]) is str and 0 < len(row["path"]) <= 240
+                and re.fullmatch(r"[A-Za-z0-9_./+-]+", row["path"]) is not None
+                and not row["path"].startswith("/") and not any(part in {"", ".", ".."} for part in row["path"].split("/"))
+                and integer_between(row["size"], 1, 2 * 1024 * 1024) and sha256_value(row["sha256"]),
+                "Observer DATA private SOURCE row differs")
+        source_names.append(row["path"])
+    require(len(set(source_names)) == 78 and sum(row["size"] for row in source_rows) <= 32 * 1024 * 1024
+            and hashlib.sha256(canonical_json({"files": sorted(source_rows, key=lambda row: row["path"])}) + b"\n").hexdigest()
+                == selected["sourceInventorySha256"], "Observer DATA private SOURCE inventory differs")
+    names = value.get("pythonTestIds")
+    require(type(names) is list and len(names) == 84 and all(type(name) is str for name in names)
+            and len(set(names)) == 84
+            and hashlib.sha256(json.dumps(names, separators=(",", ":")).encode()).hexdigest() == MAC_OBSERVER_DATA_SELECTION_SHA256,
+            "Observer DATA private Python selection differs")
+    commands = value.get("commands")
+    require(type(commands) is list and 0 <= len(commands) <= 5, "Observer DATA private command roster differs")
+    result = {"schemaVersion": 1, "wrapperReturnCode": wrapper_returncode,
+              "sourceInventorySha256": selected["sourceInventorySha256"], "sourceCount": 78,
+              "selectionSha256": MAC_OBSERVER_DATA_SELECTION_SHA256, "pythonExpectedCount": 84,
+              "commands": [], "artifact": None, "aggregatePassed": None, "pythonCounts": None,
+              "sourcePost": None, "temporaryEmpty": None, "rustPanic": None, "guardCode": None, "pythonFailure": None,
+              "nativeVaultTestsExecuted": False, "uiExecutedByThisBatch": False,
+              "nativeTlsQualified": False, "allWorkerFinalityEstablished": False}
+    for phase, row in zip(MAC_OBSERVER_DATA_PHASES, commands):
+        require(type(row) is dict and row.get("phase") == phase, "Observer DATA private command order differs")
+        copied = {"phase": phase}
+        for key in ("originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow"):
+            item = row.get(key)
+            require(item is None or type(item) is bool, "Observer DATA original flag differs")
+            copied[key] = item
+        code = row.get("returnCode")
+        require(code is None or integer_between(code, -255, 255), "Observer DATA original code differs")
+        copied["returnCode"] = code
+        result["commands"].append(copied)
+    artifact = value.get("artifact")
+    if artifact is not None:
+        require(type(artifact) is dict and sha256_value(artifact.get("sha256"))
+                and type(artifact.get("identity")) is list and len(artifact["identity"]) == 9
+                and integer_between(artifact["identity"][6], 1, 1024 * 1024 * 1024)
+                and type(artifact.get("unchangedAfterRun")) is bool and type(artifact.get("originalClosed")) is bool,
+                "Observer DATA private artifact differs")
+        result["artifact"] = {"sha256": artifact["sha256"], "bytes": artifact["identity"][6],
+                              "unchangedAfterRun": artifact["unchangedAfterRun"], "originalClosed": artifact["originalClosed"]}
+    counts = value.get("pythonCounts")
+    if counts is not None:
+        require(type(counts) is dict and counts.get("testIds") == names and counts.get("actualHostBeforeAndAfter") is True,
+                "Observer DATA private Python counts differ")
+        result["pythonCounts"] = {}
+        for key in ("testsRun", "failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses"):
+            require(integer_between(counts.get(key), 0, 84), "Observer DATA private Python count differs")
+            result["pythonCounts"][key] = counts[key]
+    for old, new in (("ciAggregatePassed", "aggregatePassed"), ("ciSourcePost", "sourcePost"), ("ciTemporaryEmpty", "temporaryEmpty")):
+        item = value.get(old)
+        require(item is None or type(item) is bool, "Observer DATA private finality differs")
+        result[new] = item
+    # The existing SOURCE producer already reduces private captures. This is
+    # only a closed-field projection of its same-original sidecar, not a new
+    # capture parser or an additional success/cleanup authority.
+    if failure is not None:
+        require(type(failure) is dict and bool(result["commands"]), "Observer DATA diagnostic shape differs")
+        row = result["commands"][-1]
+        flags = ("originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow")
+        require(all(type(failure.get(key)) is bool and failure[key] is row[key] for key in flags)
+                and failure.get("kind") == "mrk-native-data-contract-failure-diagnostics-v1"
+                and type(failure.get("schemaVersion")) is int and failure["schemaVersion"] == 1
+                and (failure.get("originalReturncode") is None or type(failure["originalReturncode"]) is int)
+                and failure.get("originalReturncode") == row["returnCode"]
+                and failure.get("diagnosticOnly") is True and failure.get("productReady") is False
+                and failure.get("phase") == row["phase"]
+                and failure.get("source") == context["sourceSha"] and failure.get("workflowSource") == context["workflowSha"]
+                and failure.get("runId") == context["runId"] and failure.get("runAttempt") == context["attempt"]
+                and failure.get("target") == context["macCompile"]["target"],
+                "Observer DATA diagnostic original context differs")
+        guard = failure.get("guardCode")
+        require(type(guard) is str and guard in MAC_OBSERVER_DATA_GUARDS, "Observer DATA diagnostic guard differs")
+        result["guardCode"] = guard
+        classified = (all(row[key] is True for key in ("originalReturned", "outputComplete", "captureClosed"))
+                      and row["timedOut"] is False and row["outputOverflow"] is False)
+        panic = failure.get("rustPanic")
+        if panic is not None:
+            require(classified and row["phase"] == "rust" and row["returnCode"] == 101,
+                    "Observer DATA panic original differs")
+            closed_object(panic, {"source", "line", "column"}, "Observer DATA panic shape differs")
+            require(type(panic["source"]) is str and len(panic["source"]) <= 240
+                    and re.fullmatch(r"[A-Za-z0-9_./+-]+\.rs", panic["source"]) is not None
+                    and not panic["source"].startswith("/") and not any(part in {"", ".", ".."} for part in panic["source"].split("/"))
+                    and panic["source"] in source_names
+                    and (panic["source"].startswith("desktop/src-tauri/src/")
+                         or panic["source"] == "desktop/src-tauri/tests/installed_shell_observation.rs")
+                    and integer_between(panic["line"], 1, 1000000) and integer_between(panic["column"], 1, 1000000),
+                    "Observer DATA panic location differs")
+            result["rustPanic"] = {key: panic[key] for key in ("source", "line", "column")}
+        diagnostic = failure.get("rustPanicDiagnostic")
+        if diagnostic is not None:
+            require(classified and row["phase"] == "rust" and row["returnCode"] == 101,
+                    "Observer DATA opaque panic original differs")
+            closed_object(diagnostic, {"parseState", "spellingSha256", "line", "column"},
+                          "Observer DATA opaque panic shape differs")
+            state = diagnostic["parseState"]
+            require(type(state) is str and state in {"input-invalid", "empty", "bounds", "header-missing", "header-multiple",
+                    "header-format", "coordinate-range", "unmapped-source", "observed"},
+                    "Observer DATA opaque panic state differs")
+            if state in ("unmapped-source", "observed"):
+                require(sha256_value(diagnostic["spellingSha256"])
+                        and integer_between(diagnostic["line"], 1, 1000000)
+                        and integer_between(diagnostic["column"], 1, 1000000),
+                        "Observer DATA opaque panic location differs")
+            else:
+                require(all(diagnostic[key] is None for key in ("spellingSha256", "line", "column")),
+                        "Observer DATA refused panic contains location data")
+            require((state == "observed" and panic is not None
+                     and (diagnostic["line"], diagnostic["column"]) == (panic["line"], panic["column"]))
+                    or (state != "observed" and panic is None),
+                    "Observer DATA opaque panic verification differs")
+            # A spelling digest is not a SOURCE inventory membership assertion.
+            result["rustPanicDiagnostic"] = {key: diagnostic[key] for key in ("parseState", "spellingSha256", "line", "column")}
+        python = failure.get("python")
+        if python is not None:
+            require(classified and row["phase"] == "python", "Observer DATA Python diagnostic original differs")
+            count_keys = ("testsRun", "failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")
+            extra = ("actualHostBeforeAndAfter", "failureTests", "classifiedTestCount", "omittedTestCount", "unclassifiedTestCount")
+            closed_object(python, set(count_keys + extra), "Observer DATA Python diagnostic shape differs")
+            require(all(integer_between(python[key], 0, 84 if key == "testsRun" else 65535) for key in count_keys)
+                    and type(python["actualHostBeforeAndAfter"]) is bool
+                    and type(python["failureTests"]) is list and len(python["failureTests"]) <= 16,
+                    "Observer DATA Python diagnostic counts differ")
+            pairs, copied_rows = [], []
+            for item in python["failureTests"]:
+                closed_object(item, {"kind", "id"}, "Observer DATA failing test shape differs")
+                require(type(item["id"]) is str and item["id"] in names
+                        and type(item["kind"]) is str and item["kind"] in ("failure", "error"),
+                        "Observer DATA failing test differs")
+                pairs.append((item["kind"], item["id"]))
+                copied_rows.append({key: item[key] for key in ("kind", "id")})
+            expected = [(kind, name) for name in names for kind in ("failure", "error") if (kind, name) in pairs]
+            classified_count, omitted, unknown = (python[key] for key in extra[2:])
+            require(pairs == expected and len(set(pairs)) == len(pairs)
+                    and integer_between(classified_count, 0, 168) and integer_between(omitted, 0, 152)
+                    and integer_between(unknown, 0, 65535) and classified_count == len(pairs) + omitted
+                    and classified_count + unknown <= python["failures"] + python["errors"]
+                    and all(sum(item["kind"] == kind for item in copied_rows) <= python[key]
+                            for kind, key in (("failure", "failures"), ("error", "errors"))),
+                    "Observer DATA failing test order/counts differ")
+            result["pythonFailure"] = {key: python[key] for key in count_keys + extra if key != "failureTests"}
+            result["pythonFailure"]["failureTests"] = copied_rows
+    require(type(value.get("passed")) is bool, "Observer DATA private status differs")
+    if wrapper_returncode == 0:
+        require(value["passed"] is True and value.get("failure") is None,
+                "Observer DATA wrapper returned zero without a positive original result")
+        validate_mac_observer_data_result(result)
+    return result
+
+
+def mac_observer_data_checks(cargo, root, source, environment, remaining, context) -> dict:
+    """One exact SOURCE Python body owns the existing five bounded originals."""
+    check, returned_code, primary, projected = "mac-observer-fixed-data", None, None, None
+    require(context.get("executionScope") == MAC_COMPILE_SCOPE and context.get("platform") == "macos"
+            and context.get("macCompile", {}).get("mode") == MAC_OBSERVER_DATA_MODE
+            and context["macCompile"].get("target") == "aarch64-apple-darwin"
+            and context.get("workflowPath") == MAC_COMPILE_WORKFLOW
+            and Path(context["root"]) == root and Path(context["source"]) == source,
+            "Observer DATA requires its exact original CI context")
+    try:
+        selected, body, rows, _ = mac_observer_data_inputs(source)
+        require(same_compile_json(selected, context["macCompile"].get("data")), "Observer DATA source binding changed")
+        context_raw = mac_observer_data_read(root / "context.json", 128 * 1024, private=True)
+        require(same_compile_json(bounded_json(context_raw, 128 * 1024), context), "Observer DATA original context changed")
+        binary = Path("/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin")
+        require(cargo == str(binary / "cargo") and environment.get("RUSTC") == str(binary / "rustc")
+                and environment.get("RUSTUP_AUTO_INSTALL") == "0", "Observer DATA selected compiler differs")
+        observed = root.lstat()
+        require(stat.S_ISDIR(observed.st_mode) and observed.st_uid == os.geteuid()
+                and not observed.st_mode & 0o077, "Observer DATA original root differs")
+        allowance = remaining(1680)
+        require(type(allowance) is int and allowance > 30, "Observer DATA has no containing settlement reserve")
+        request = {"schemaVersion": 1, "admission": "ci-observer-data-v1",
+                   "contextSha256": hashlib.sha256(context_raw).hexdigest(),
+                   "rootIdentity": [observed.st_dev, observed.st_ino, observed.st_uid],
+                   "compiler": {**compiler_binding(context), "cargo": cargo, "rustc": str(binary / "rustc")},
+                   "inventory": {"files": rows},
+                   "deadlineMonotonicNs": time.monotonic_ns() + (allowance - 30) * 1000000000}
+        require(len(canonical_json(request)) + 1 <= 65536, "Observer DATA private request exceeds its bound")
+        write_json(root / "target/observer-data-request.json", request)
+        # Build from the fixed clean policy again, not any arbitrary extra key
+        # a caller placed in the already-checked compiler environment.
+        child_environment = clean_environment(root)
+        child_environment.update(PATH=str(binary) + os.pathsep + child_environment["PATH"],
+            RUSTC=str(binary / "rustc"), RUSTUP_AUTO_INSTALL="0", CARGO_TARGET_DIR=str(root / "target"), CARGO_BUILD_JOBS="1",
+            MRK_MACOS_DATA_MODE="ci-observer-data-v1", MRK_DESKTOP_CI_ROOT=str(root), MRK_MACOS_TARGET="aarch64-apple-darwin",
+            GITHUB_WORKSPACE=str(source), GITHUB_SHA=context["sourceSha"], GITHUB_WORKFLOW_SHA=context["workflowSha"],
+            GITHUB_WORKFLOW_REF=context["workflowRef"], GITHUB_RUN_ID=context["runId"], GITHUB_RUN_ATTEMPT=context["attempt"],
+            GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_REF=MAC_COMPILE_REF, MRK_EXPECTED_SHA=context["sourceSha"],
+            MRK_MACOS_INSTALL_SOURCE_COMMIT=context["sourceSha"], MRK_IMAGE_RELEASE_ID=context["macCompile"]["release"])
+        try:
+            run([sys.executable, "-I", "-S", "-B", "-c", body.decode("utf-8")], check=check, cwd=root,
+                env=child_environment, timeout=allowance, output=subprocess.DEVNULL, diagnostics=subprocess.DEVNULL)
+            returned_code = 0
+        except BaseException as error:
+            primary = error
+            if type(error) is CheckFailure:
+                witness = error.__dict__.get("_returned_command")
+                if (type(witness) is tuple and len(witness) == 2 and witness[0] == check
+                        and integer_between(witness[1], -255, 255) and witness[1] != 0):
+                    returned_code = witness[1]
+        # Never read a growing child result after an unknown return/timeout.
+        if returned_code is not None:
+            remaining(30)
+            private = bounded_json(mac_observer_data_read(root / "target/data-contracts/result.json", 4 * 1024 * 1024, private=True),
+                                   4 * 1024 * 1024)
+            projected = mac_observer_data_result(private, context, returned_code)
+            if returned_code != 0:
+                try:
+                    remaining(15)
+                    supplement = bounded_json(mac_observer_data_read(root / "target/data-contracts/failure-diagnostics.json", 16384, private=True), 16384)
+                    projected = mac_observer_data_result(private, context, returned_code, failure=supplement)
+                except BaseException:
+                    pass  # Optional diagnostics never replace the original or fixed phase facts.
+        if primary is not None:
+            raise primary
+        require(returned_code == 0 and projected is not None, "Observer DATA original result unavailable")
+        remaining(30)
+        require(same_compile_json(mac_observer_data_inputs(source)[0], selected), "Observer DATA SOURCE changed after originals")
+        return validate_mac_observer_data_result(projected)
+    except BaseException as error:
+        first = primary if primary is not None else error
+        failure = {"schemaVersion": 1, "scope": MAC_OBSERVER_DATA_EVIDENCE, "phase": "compile",
+                   "status": "failed-or-unknown", "lastFixedStage": check,
+                   "originalCommandReturnCode": returned_code, "dataResult": projected, "macCompile": context["macCompile"],
+                   **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")}}
+        try:
+            if len(canonical_json(failure)) + 1 > 16384 and projected is not None and "rustPanicDiagnostic" in projected:
+                projected = {key: value for key, value in projected.items() if key != "rustPanicDiagnostic"}
+                failure["dataResult"] = projected
+            for optional in ("pythonFailure", "guardCode", "rustPanic"):
+                if len(canonical_json(failure)) + 1 > 16384 and projected is not None:
+                    projected = {**projected, optional: None}
+                    failure["dataResult"] = projected
+            require(len(canonical_json(failure)) + 1 <= 16384, "Observer DATA public receipt exceeds its bound")
+            write_json(root / "compile-checks.json", failure)
+        except BaseException:
+            pass
+        raise first from None
+
+
+def mac_observer_compile(cargo: str, root: Path, source: Path, environment: dict, remaining, context: dict) -> None:
+    """One fixed no-run original through run(); no installed receipt or new owner."""
+    require(context.get("executionScope") == MAC_COMPILE_SCOPE
+            and context.get("workflowPath") == MAC_COMPILE_WORKFLOW
+            and context.get("macCompile", {}).get("mode") == MAC_OBSERVER_MODE
+            and context["macCompile"].get("target") == "aarch64-apple-darwin",
+            "Mac observer compiler context differs")
+    check = "mac-observer-compile-only"
+    # Same installed DATA compilation graph/cwd; only JSON rendering is shorter.
+    # Diagnostic argv differs without suppressing warnings/errors. Its independent
+    # cache/target is not a same-run effective-toolchain or installed package receipt.
+    argv = [cargo, "test", "--locked", "--no-default-features", "--features",
+            "desktop-shell,custom-protocol,macos-installed-observation", "--target",
+            "aarch64-apple-darwin", "--test", "installed-shell-observation",
+            "--no-run", "--message-format=json,json-diagnostic-short"]
+    environment = {**environment, "CARGO_TARGET_DIR": str(root / "target")}
+    output_path = root / "target/source-slots-compile.stdout"
+    stderr_path = root / "target/source-slots-compile.stderr"
+    primary, returned_code, compiler_diagnostic = None, None, None
+    capture_admission = None
+    try:
+        remaining(30)
+        with output_path.open("x", encoding="utf-8") as output, stderr_path.open("x", encoding="utf-8") as diagnostics:
+            before = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+            require(all(row[6] == 0 for row in before), "Mac observer private output was not fresh")
+            try:
+                run(argv, check=check, cwd=source / "desktop/src-tauri", env=environment,
+                    timeout=remaining(1440), output=output, diagnostics=diagnostics)
+                returned_code = 0
+            except BaseException as error:
+                primary = error
+                witness = error.__dict__.get("_returned_command") if type(error) is CheckFailure else None
+                if (type(witness) is tuple and len(witness) == 2 and witness[0] == check
+                        and type(witness[1]) is int and 0 < witness[1] <= 255):
+                    returned_code = witness[1]
+            output.flush()
+            diagnostics.flush()
+            originals = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+            require(all(old[:6] == new[:6] for old, new in zip(before, originals)), "Mac observer output identity changed")
+        # Both consuming closes must return before any diagnostic read. A
+        # failed close preserves the first failure but never grants custody.
+        if primary is not None:
+            if returned_code is not None:
+                compiler_diagnostic = source_slots_diagnostic_unavailable(returned_code, "capture-unavailable")
+                try:
+                    remaining(30)
+                    raw = source_slots_read(output_path, originals[0], retain=True, observer=True)
+                    stderr = source_slots_read(stderr_path, originals[1], retain=True, observer=True)
+                    compiler_diagnostic = source_slots_compiler_diagnostic(context, raw, stderr, returned_code,
+                                                                          timeout_for=remaining)
+                except BaseException as diagnostic_error:
+                    capture_admission = (diagnostic_error.__dict__.get("_source_slots_capture_admission")
+                                         if type(diagnostic_error) is CheckFailure else None)
+                    # Optional explanation must not replace this original.
+            raise primary
+        remaining(30)
+        source_slots_read(output_path, originals[0], observer=True)
+        source_slots_read(stderr_path, originals[1], observer=True)
+        remaining(30)
+    except BaseException as error:
+        first = primary if primary is not None else error
+        if capture_admission is None and type(error) is CheckFailure:
+            capture_admission = error.__dict__.get("_source_slots_capture_admission")
+        failure = {"schemaVersion": 1, "scope": "desktop-macos-normal-compile-only-v1", "phase": "compile",
+                   "status": "failed-or-unknown", "lastFixedStage": check,
+                   "originalCommandReturnCode": returned_code, "macCompile": context["macCompile"],
+                   **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha",
+                                                   "workflowRef", "workflowSha256", "runId", "attempt")}}
+        failure["compilerDiagnostic"] = compiler_diagnostic or source_slots_diagnostic_unavailable(
+            returned_code, "capture-unavailable" if returned_code is not None else "original-unavailable")
+        try:
+            facts = source_slots_capture_admission(capture_admission, observer=True)
+            if facts is not None and facts["output"] in {"source-slots-compile.stdout", "source-slots-compile.stderr"}:
+                explained = {**failure, "captureAdmission": facts}
+                if len(json.dumps(explained, sort_keys=True, separators=(",", ":")).encode()) + 1 <= 16384:
+                    failure = explained
+        except BaseException:
+            pass  # Optional partial facts never displace the original receipt/failure.
+        try:
+            if failure["compilerDiagnostic"]["state"] == "complete":
+                try:
+                    remaining(30)
+                except BaseException:
+                    failure["compilerDiagnostic"] = source_slots_diagnostic_unavailable(returned_code, "deadline-unavailable")
+            if len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 > 16384:
+                failure["compilerDiagnostic"] = source_slots_diagnostic_unavailable(returned_code, "output-bound")
+            require(len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 <= 16384,
+                    "Mac observer diagnostic exceeds the existing receipt bound")
+            write_json(root / "compile-checks.json", failure)
+        except BaseException:
+            pass
+        raise first from None
+
+
+def phase_mac_compile(name: str, context: dict) -> None:
+    """Fixed vault-first graphs through the SAME existing run/cleanup owner."""
+    require(context.get("executionScope") == MAC_COMPILE_SCOPE and context.get("platform") == "macos",
+            "Wrong normal Mac compiler scope")
+    require(name in ("acquire", "compile", "clean"), "Wrong normal Mac compiler phase")
+    mac = context.get("macCompile")
+    require(type(mac) is dict, "Normal Mac compiler context differs")
+    target, mode = mac.get("target"), mac.get("mode")
+    graphs = mac_compile_graphs(target, mode)
+    require(same_compile_json(mac.get("graphs"), [list(row) for row in graphs]),
+            "Normal Mac compiler selected graphs differ")
+    selected_checks = mac_compile_checks(target, mode)
+    if name == "clean":
+        source_unchanged(context)
+        mac_compile_source_guard(Path(context["source"]), Path(context["root"]))
+        require(mac == mac_compile_inputs(Path(context["source"]), target, mode),
+                "Normal Mac cleanup source inputs changed")
+        clean_compile(context)
+        return
+    started = time.monotonic()
+    # Actual Intel cold originals varied from1120s to an unfinished1500s cap.
+    # Keep jobs1/profiles; bounded scheduling margin is not runtime authority.
+    budget = 900 if name == "acquire" else 5400 if target == "x86_64-apple-darwin" else 1800 if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE) else 1500
+    deadline = started + budget
+    previous = started
+    def remaining(cap: int) -> int:
+        nonlocal previous
+        now = time.monotonic()
+        require(previous <= now < deadline - 30, "Normal Mac compiler endpoint expired or clock reversed")
+        previous = now
+        value = min(cap, int(deadline - now - 30))
+        require(value > 0, "Normal Mac compiler has no remaining original time")
+        return value
+    root, source = Path(context["root"]), Path(context["source"])
+    remaining(30)
+    source_unchanged(context, timeout_for=remaining)
+    mac_compile_source_guard(source, root)
+    require(mac == mac_compile_inputs(source, target, mode), "Normal Mac source inputs changed")
+    environment = clean_environment(root)
+    environment["GITHUB_SHA"] = context["sourceSha"]
+    remaining(30)
+    cargo, _ = tools(context, environment, timeout_for=remaining)
+    remaining(30)
+    desktop, manifest = source / "desktop", source / "desktop/src-tauri/Cargo.toml"
+    image_manifest = source / "desktop/helpers/macos-desktop-image/Cargo.toml"
+    vault_manifest = source / MAC_COMPILE_VAULT_GRAPH[1]
+    history_result = observer_result = None
+    if name == "acquire":
+        # Distinct locked graphs never unify their incompatible native roles.
+        # The actual vault metadata supplies the existing root slot when alone.
+        metadata = [("mac-vault-locked-metadata", vault_manifest, [],
+                     root / "metadata.json" if mode == "vault-only" else root / "target/mac-vault-metadata.json")]
+        if mode == "full4":
+            metadata.extend((
+                ("mac-normal-locked-metadata", manifest, ["--features", MAC_COMPILE_GRAPHS[1][3]], root / "metadata.json"),
+                ("mac-image-locked-metadata", image_manifest, [], root / "target/mac-image-metadata.json"),
+            ))
+        if mode == MAC_HISTORY_MODE:
+            metadata = [
+                ("mac-source-slots-locked-metadata", manifest, ["--features", "development-runtime"], root / "target/mac-history-metadata.json"),
+                ("mac-normal-locked-metadata", manifest, ["--features", MAC_COMPILE_GRAPHS[0][3]], root / "metadata.json"),
+            ]
+        if mode in (MAC_APP_MODE, MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE):
+            metadata = [("mac-normal-locked-metadata", manifest,
+                         ["--features", MAC_COMPILE_GRAPHS[1 if mode in (MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE) else 0][3]], root / "metadata.json")]
+        for check, cargo_manifest, features, output_path in metadata:
+            with output_path.open("x", encoding="utf-8") as output:
+                run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                     *features, "--filter-platform", target, "--manifest-path", str(cargo_manifest)],
+                    check=check, cwd=root, env=environment, timeout=remaining(600), output=output)
+            remaining(30)
+    else:
+        environment.update(MRK_MACOS_INSTALL_SOURCE_COMMIT=context["sourceSha"], MRK_IMAGE_RELEASE_ID=mac["release"])
+        common = ["--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", target,
+                  "--target-dir", str(root / "target")]
+        # Fail fast on the small separate helper BEFORE frontend or app linkage.
+        if mode == MAC_HISTORY_MODE:
+            history_result = mac_history_data_checks(cargo, root, source, target, environment, remaining, context)
+        elif mode not in (MAC_APP_MODE, MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE):
+            run([cargo, "build", *common, "--manifest-path", str(vault_manifest), "--release", "--bin", MAC_COMPILE_VAULT_GRAPH[4]],
+                check=MAC_COMPILE_VAULT_GRAPH[0], cwd=root, env=environment, timeout=remaining(1500))
+        remaining(30)
+    observed = None
+    if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE):
+        node = shutil.which("node")
+        require(node is not None, "Selected Node unavailable")
+        observed = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=remaining(15), capture=True)
+        require(observed == NODE, "Selected Node version differs")
+        if name == "acquire":
+            npm = Path(node).parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
+            ordinary(npm)
+            run([node, "--max-old-space-size=768", str(npm), "ci", "--ignore-scripts", "--no-audit", "--no-fund",
+                 "--userconfig", str(root / "npmrc-user"), "--globalconfig", str(root / "npmrc-global"),
+                 "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/"],
+                check="npm-locked-no-scripts", cwd=desktop, env=environment, timeout=remaining(300))
+        else:
+            run([node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.json"],
+                check="typescript-no-emit", cwd=desktop, env=environment, timeout=remaining(60))
+            run([node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
+                 str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
+                check="vite-assets", cwd=desktop, env=environment, timeout=remaining(90))
+            if mode == MAC_OBSERVER_MODE:
+                mac_observer_compile(cargo, root, source, environment, remaining, context)
+            if mode == MAC_OBSERVER_DATA_MODE:
+                observer_result = mac_observer_data_checks(cargo, root, source, environment, remaining, context)
+            for check, relative, profile, features, artifact in (() if mode in (MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE) else
+                    MAC_COMPILE_GRAPHS[:1] if mode in (MAC_HISTORY_MODE, MAC_APP_MODE) else MAC_COMPILE_GRAPHS):
+                argv = [cargo, "test" if profile == "test" else "build", *common, "--manifest-path", str(source / relative)]
+                if profile == "test":
+                    argv += ["--features", features, "--test", artifact, "--no-run"]
+                elif artifact == "lib":
+                    argv += ["--release", "--lib"]
+                else:
+                    argv += ["--release", "--features", features, "--bin", artifact]
+                run(argv, check=check, cwd=root, env=environment,
+                    timeout=remaining(2700 if target == "x86_64-apple-darwin" else 1500))
+                remaining(30)
+    remaining(30)
+    mac_compile_source_guard(source, root)
+    require(mac == mac_compile_inputs(source, target, mode), "Normal Mac source inputs changed after compilation")
+    remaining(30)
+    source_unchanged(context, timeout_for=remaining)
+    remaining(30)
+    if mode == MAC_HISTORY_MODE:
+        phase_receipt(context, name, list(selected_checks[name]), node=observed, mac_history_result=history_result)
+    elif mode == MAC_OBSERVER_DATA_MODE:
+        phase_receipt(context, name, list(selected_checks[name]), node=observed, mac_observer_result=observer_result)
+    else:
+        phase_receipt(context, name, list(selected_checks[name]), node=observed)
+    # Retained receipt bytes never override a late original phase failure.
+    remaining(30)
+
+
 def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, name)
     admit_platform(scope, platform)
+    if scope == MAC_COMPILE_SCOPE and name in {"acquire", "compile"}:
+        require(os.environ.get("MRK_COMPILE_SELECTION") != MAC_OBSERVER_DATA_MODE
+                and os.environ.get("MRK_MACOS_COMPILE_MODE") != MAC_OBSERVER_DATA_MODE,
+                "Standalone observer-data lacks source-bound runtime anchors; use the genuine desktop-macos-installed preview Rust+84 DATA gate")
     context = (load_context(platform, scope, retention_only=True) if (scope in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE} and name == "clean"
                or scope == ENVIRONMENT_NATIVE_SCOPE and name == "retain" or scope == OFFLINE_NATIVE_SCOPE)
                else load_context(platform, scope))
@@ -7925,12 +10344,20 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if scope == GITHUB_TLS_SCOPE:
         phase_github_tls(name, context)
         return
+    if scope == SOURCE_SLOTS_SCOPE:
+        phase_source_slots(name, context)
+        return
+    if scope == MAC_COMPILE_SCOPE:
+        phase_mac_compile(name, context)
+        return
     windows = scope == WINDOWS_SNAPSHOT_SCOPE
     root, source = Path(context["root"]), Path(context["source"])
     environment = clean_environment(root)
     # The owner fixture binds its compiled source to this exact event commit.
     # Compile and test must use the same value; no None/ambient/latest fallback.
     environment["GITHUB_SHA"] = context["sourceSha"]
+    if scope == ENGINEERING_COMPILE_SCOPE:
+        environment["TAURI_CONFIG"] = '{"identifier":"dev.mobile-release-kit.engineering-ui"}'
     manifest = source / "desktop/src-tauri/Cargo.toml"
     source_unchanged(context)
     no_cargo_configuration((root, *root.parents))
@@ -7938,10 +10365,12 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         clean_compile(context)
         return
     if name == "acquire":
-        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
-            check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
+        if scope != ENGINEERING_COMPILE_SCOPE:
+            run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+                check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
         cargo, _ = tools(context, environment)
-        features = "development-runtime" if windows else "desktop-shell,development-runtime"
+        features = (ENGINEERING_COMPILE_FEATURES if scope == ENGINEERING_COMPILE_SCOPE else
+                    "development-runtime" if windows else "desktop-shell,development-runtime")
         # Metadata filters acquisition to this platform and active feature graph.
         with (root / "metadata.json").open("x", encoding="utf-8") as output:
             run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
@@ -7965,7 +10394,8 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
              "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/"],
             check="npm-locked-no-scripts", cwd=source / "desktop", env=environment, timeout=300)
         source_unchanged(context)
-        phase_receipt(context, name, ["rust-toolchain-install", "rust-version-target", "locked-platform-metadata"]
+        phase_receipt(context, name, list(ENGINEERING_COMPILE_CHECKS["acquire"]) if scope == ENGINEERING_COMPILE_SCOPE else
+                      ["rust-toolchain-install", "rust-version-target", "locked-platform-metadata"]
                       + ["node-version", "npm-locked-no-scripts"], node=observed_node)
         return
     cargo, _ = tools(context, environment)
@@ -7989,8 +10419,9 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
             phase_receipt(context, name, ["rust-version-target", "headless-test-compile-only"],
                           scope=WINDOWS_SNAPSHOT_PUBLIC_SCOPE, compiled=compiled)
             return
-        run([cargo, "test", *common, "--lib", "--no-run", "--features", "development-runtime"],
-            check="headless-test-compile-only", cwd=root, env=environment, timeout=600)
+        if scope != ENGINEERING_COMPILE_SCOPE:
+            run([cargo, "test", *common, "--lib", "--no-run", "--features", "development-runtime"],
+                check="headless-test-compile-only", cwd=root, env=environment, timeout=600)
         node = shutil.which("node")
         require(node is not None, "Node unavailable after setup")
         observed_node = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=15, capture=True)
@@ -8001,11 +10432,15 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         run([node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
              str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
             check="vite-assets", cwd=desktop, env=environment, timeout=90)
-        run([cargo, "build", *common, "--features", "desktop-shell,development-runtime",
+        run([cargo, "build", *common, "--features",
+             ENGINEERING_COMPILE_FEATURES if scope == ENGINEERING_COMPILE_SCOPE else "desktop-shell,development-runtime",
              "--bin", "mobile-release-kit-desktop"], check="tauri-debug-compile-only", cwd=root, env=environment, timeout=1500)
+        main_compiled = copy_engineering_main(context) if scope == ENGINEERING_COMPILE_SCOPE else None
         source_unchanged(context)
-        phase_receipt(context, name, ["rust-version-target", "headless-test-compile-only"]
-                      + ["node-version", "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"], node=observed_node)
+        phase_receipt(context, name, list(ENGINEERING_COMPILE_CHECKS["compile"]) if scope == ENGINEERING_COMPILE_SCOPE else
+                      ["rust-version-target", "headless-test-compile-only"]
+                      + ["node-version", "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"], node=observed_node,
+                      main_compiled=main_compiled)
     elif name == "windows-snapshot":
         require(windows and platform == "windows", "Windows snapshot phase requires its dedicated scope")
         windows_inputs(context, create=True)
@@ -12970,7 +15405,7 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
         require(key in locked and key not in identities, "Windows app package is duplicated/outside the original lock")
         identities.add(key)
         if key[2] is None:
-            require(key[0] in active_locals and key[0] not in local and key[1] == "0.1.0"
+            require(key[0] in active_locals and key[0] not in local and key[1] == WINDOWS_INSTALLED_APP_LOCK_LOCALS[key[0]]
                     and package["manifest_path"] == str(source / WINDOWS_INSTALLED_APP_LOCALS[key[0]]),
                     "Windows app declared local path differs")
             local[key[0]] = package["id"]
@@ -13161,7 +15596,7 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
             ("crypto-common", "0.1.7", "^1.14", True, []),
             ("generic-array", "0.14.7", "^1.12", True, []))),
         ("tokio", "1.48.0", tokio_definitions, (
-            ("mobile-release-kit-desktop", "0.1.0", "=1.48.0", True,
+            ("mobile-release-kit-desktop", "0.1.1", "=1.48.0", True,
              ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"]),)),
         ("syn", "2.0.119", syn_definitions, (
             ("serde_derive", "1.0.228", "^2.0.81", False,
@@ -13171,10 +15606,10 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
         ("serde", "1.0.228", {
             "default": ["std"], "derive": ["serde_derive"],
             "serde_derive": ["dep:serde_derive"], "std": ["serde_core/std"],
-        }, (("mobile-release-kit-desktop", "0.1.0", "=1.0.228", True, ["derive"]),)),
+        }, (("mobile-release-kit-desktop", "0.1.1", "=1.0.228", True, ["derive"]),)),
         ("serde_json", "1.0.145", {
             "default": ["std"], "std": ["memchr/std", "serde_core/std"],
-        }, (("mobile-release-kit-desktop", "0.1.0", "=1.0.145", True, []),)),
+        }, (("mobile-release-kit-desktop", "0.1.1", "=1.0.145", True, []),)),
         # Parents precede core: metadata-only alloc/rc forwarding is not a
         # normal compiler grant. In this locked core manifest std does not
         # activate the alloc Cargo feature.
@@ -13218,7 +15653,7 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
             # that edge is DATA, not a normal compiler-feature grant.
             time_key, time_package = package("time", "0.3.55")
             plist_key, plist_package = package("plist", "1.10.1")
-            app_key, app_package = package("mobile-release-kit-desktop", "0.1.0", local=True)
+            app_key, app_package = package("mobile-release-kit-desktop", "0.1.1", local=True)
             library(time_package)
             library(plist_package)
             time_mapping, time_selected = feature_data(time_key, time_package)

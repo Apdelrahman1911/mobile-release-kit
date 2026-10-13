@@ -79,6 +79,9 @@ typedef struct {
     struct stat named;acl_expected expected;uint8_t digest[32];uint8_t actual[20];
     CFTypeRef acquired;OSStatus status;uint64_t offset;size_t count;
     mrk_e2_fixture_identity_facts returned;mrk_e2_fixture_checkpoint_api callback;
+    /* Main lookup adds only bounded local DATA and borrowed Foundation values. */
+    struct stat lookup_stat;mrk_e2_fixture_bundle_lookup lookup_data;
+    NSBundle *lookup_bundle;NSString *lookup_values[3];
 } identity_local_bound;
 _Static_assert(sizeof(identity_original)+1024u+sizeof(identity_local_bound)<=MRK_E2_IDENTITY_PROJECT_MAX,
     "complete fixed provider + ACL frame + supplied local/callback backing");
@@ -461,6 +464,62 @@ int mrk_e2_fixture_main_borrow_return(void *raw) {
         if (valid(p)) failed(&p->facts,now_ns(),1);return 0;
     }
     p->facts.borrow_count=0;return 1;
+}
+/* These getters may use the already-owned pool. No +1 reference, FD, path
+ * selection or service operation escapes; the caller catches exceptions into
+ * its ORIGINAL unknown-custody path after the actual service status return. */
+static uint32_t fixture_lookup_string(NSString *value,NSString *client,NSString *outer) {
+    if (!value) return 4;
+    if (![value isKindOfClass:[NSString class]] || [value length]>4096u) return 3;
+    if ([value isEqualToString:client]) return 1;
+    if ([value isEqualToString:outer]) return 2;
+    return 3;
+}
+/* Only the existing fixed parent chain. 1=original matches,0=mismatch,-1=a
+ * returned lookup failure. No new descriptor, adoption, symlink traversal or
+ * interpretation of a failed syscall as absence. This is not source authority. */
+static int fixture_lookup_original(identity_original *p,unsigned selected) {
+    struct stat observed;
+    for (unsigned count=0;count<MRK_E2_IDENTITY_FDS;count++) {
+        if (selected>=MRK_E2_IDENTITY_FDS || p->facts.fds[selected]!=ID_OWNED
+            || p->source[selected].fd<0) return 0;
+        const int parent=source_specs[selected].parent;
+        if (parent>=0 && ((unsigned)parent>=MRK_E2_IDENTITY_FDS
+            || p->facts.fds[parent]!=ID_OWNED || p->source[parent].fd<0)) return 0;
+        if (fstat(p->source[selected].fd,&observed)) return -1;
+        if (!source_policy(selected,&observed) || !same(&p->source[selected].original,&observed)) return 0;
+        if (named(p,selected,&observed)) return -1;
+        if (!same(&p->source[selected].original,&observed)) return 0;
+        if (fstat(p->source[selected].fd,&observed)) return -1;
+        if (!same(&p->source[selected].original,&observed)) return 0;
+        if (parent<0) return 1;
+        selected=(unsigned)parent;
+    }
+    return 0;
+}
+int mrk_e2_fixture_main_bundle_lookup(void *raw,mrk_e2_fixture_bundle_lookup *out) {
+    identity_original *p=raw;
+    if (!out || !valid(p) || p->facts.role!=ID_MAIN || atomic_load(&p->active)
+        || p->facts.in_call || !p->facts.ready || p->facts.failed || p->facts.unknown
+        || p->facts.pool!=4 || !p->pool || p->facts.borrow_count!=1) return 0;
+    NSBundle *bundle=[NSBundle mainBundle];
+    mrk_e2_fixture_bundle_lookup next={0};
+    next.bundle=fixture_lookup_string([bundle bundlePath],@MRK_E2_FIXTURE_CLIENT_APP,@MRK_E2_FIXTURE_APP);
+    next.executable=fixture_lookup_string([bundle executablePath],@MRK_E2_FIXTURE_CLIENT,@MRK_E2_FIXTURE_ENTRY);
+    next.identifier=fixture_lookup_string([bundle bundleIdentifier],@MRK_E2_FIXTURE_CLIENT_ID,@MRK_E2_FIXTURE_APP_ID);
+    if (next.bundle==1) {
+        const int original=fixture_lookup_original(p,26);
+        next.plist=original==1?1:original==0?2:6;
+    } else if (next.bundle==2) {
+        next.plist=6;
+        if (fixture_lookup_original(p,5)==1) {
+            const int rc=fstatat(p->source[5].fd,"Library",&p->scratch.info,AT_SYMLINK_NOFOLLOW);
+            const int returned_errno=rc<0?errno:0;
+            const int post=fixture_lookup_original(p,5);
+            if (post==1) next.plist=rc==0?4:returned_errno==ENOENT?3:6;
+        }
+    } else next.plist=next.bundle==3?5:6;
+    *out=next;return 1;
 }
 int mrk_e2_fixture_identity_close(void **original,const mrk_e2_fixture_checkpoint_api *api,mrk_e2_fixture_identity_facts *out) {
     if (!original || !out || !api_valid(api)) return 0;

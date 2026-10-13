@@ -1,4 +1,6 @@
-import { installationError, installationCheckError } from './installation.ts';
+import { artifactInspectionError } from './artifactInspectionProtocol.ts';
+import { initializationError } from './projectInitializationProtocol.ts';
+import { installationError, installationCheckError, installationPreparationError } from './installation.ts';
 import { projectRecoveryError } from './projectRecoveryProtocol.ts';
 import { offlinePreflightError } from './offlinePreflightProtocol.ts';
 import { androidBuildError } from './androidBuildProtocol.ts';
@@ -17,8 +19,10 @@ import { parseCredentialGuide } from './credentialGuide.ts';
 import { assetError } from './assetSessionProtocol.ts';
 import { workflowEditError } from './githubWorkflowEditProtocol.ts';
 import { githubConnectionError, parseGitHubConnectionHelp } from './githubConnectionProtocol.ts';
+import { githubRemoteSetupError } from './GitHubRemoteSetupProtocol.ts';
 import { githubPreflightError } from './githubPreflightProtocol.ts';
 import { githubReleaseError } from './githubReleaseProtocol.ts';
+import { githubHistoryError } from './githubHistoryProtocol.ts';
 import { metadataTextError, parseMetadataTextGuide } from './metadataTextProtocol.ts';
 import { environmentError, environmentRequestFits } from './environment.ts';
 import { environmentDiagnosticsError } from './environmentDiagnosticsProtocol.ts';
@@ -79,10 +83,13 @@ const editUnavailable = async (): Promise<never> => {
   throw { code: 'PreviewOnly', message: 'Browser preview has no native edit owner, save plan or finality. No save operation was performed.', retryable: false } satisfies ApiError;
 };
 const assetUnavailable = async (): Promise<never> => { throw assetError({ code: 'AssetSessionUnavailable' }); };
+const initializationUnavailable=async():Promise<never>=>{throw initializationError({code:'PreviewOnly'});};
 const workflowUnavailable = async (): Promise<never> => { throw workflowEditError({ code: 'PreviewOnly' }); };
 const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
+const githubRemoteSetupUnavailable = (): Promise<never> => Promise.reject(githubRemoteSetupError({ code: 'github_remote_setup_refused_runtime_unavailable' }));
 const githubPreflightUnavailable = (): Promise<never> => Promise.reject(githubPreflightError({ code: 'github_preflight_refused_unqualified' }));
 const githubReleaseUnavailable = (): Promise<never> => Promise.reject(githubReleaseError({ code: 'github_release_refused_unqualified' }));
+const githubHistoryUnavailable = (): Promise<never> => Promise.reject(githubHistoryError({ code: 'github_history_refused_runtime_unavailable' }));
 const versionEditUnavailable = (): Promise<never> => Promise.reject(versionEditError(null));
 const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextError(null));
 const recoveryUnavailable = (): Promise<never> => Promise.reject(projectRecoveryError({ code: 'project_recovery_unavailable' }));
@@ -130,6 +137,8 @@ function exampleEnvironment(request: EnvironmentRequest): EnvironmentResult {
     assurance: { ...assurance, basis: 'schema-policy' } };
 }
 
+const artifactInspectionUnavailable = async ():Promise<never> => { throw artifactInspectionError({code:'artifact_inspection_unavailable'}); };
+
 export const previewApi: DesktopApi = {
   mode: 'preview',
   appInfo: async () => ({
@@ -143,6 +152,8 @@ export const previewApi: DesktopApi = {
   installationStatus: async () => { throw installationCheckError({ code: 'installation_check_unavailable' }); },
   inspectInstallation: async () => { throw installationCheckError({ code: 'installation_check_unavailable' }); },
   cancelInstallation: async () => { throw installationCheckError({ code: 'installation_check_unavailable' }); },
+  installationPreparationStatus: async () => { throw installationPreparationError({ code: 'macos_maintenance_unavailable' }); },
+  prepareInstallationQuit: async () => { throw installationPreparationError({ code: 'macos_maintenance_unavailable' }); },
   chooseProject: async () => ({ id: 'preview-example', name: 'Northstar Notes', path: example.root }),
   // No invented relative path or successful native selection in design mode.
   chooseProjectPath: async () => { throw projectPathError({ code: 'project_path_unavailable' }); },
@@ -199,6 +210,13 @@ export const previewApi: DesktopApi = {
   iosArchiveStatus: iosUnavailable,
   cancelIOSArchive: iosUnavailable,
   subscribeIOSArchive: iosUnavailable,
+  pickArtifactInspection: artifactInspectionUnavailable,
+  prepareArtifactInspection: artifactInspectionUnavailable,
+  startArtifactInspection: artifactInspectionUnavailable,
+  cancelArtifactInspection: artifactInspectionUnavailable,
+  artifactInspectionStatus: artifactInspectionUnavailable,
+  discardArtifactInspection: artifactInspectionUnavailable,
+  subscribeArtifactInspection: artifactInspectionUnavailable,
   prepareOfflinePreflight: offlineUnavailable,
   startOfflinePreflight: offlineUnavailable,
   offlinePreflightStatus: offlineUnavailable,
@@ -211,9 +229,18 @@ export const previewApi: DesktopApi = {
   openConfigEdit: editUnavailable,
   prepareConfigEdit: editUnavailable,
   applyConfigEdit: editUnavailable,
+  openConfigRecovery: editUnavailable,
+  prepareConfigRecovery: editUnavailable,
+  applyConfigRecovery: editUnavailable,
   closeConfigEdit: editUnavailable,
   configEditStatus: editUnavailable,
   subscribeConfigEdit: editUnavailable,
+  openProjectInitialization: initializationUnavailable,
+  prepareProjectInitialization: initializationUnavailable,
+  applyProjectInitialization: initializationUnavailable,
+  discardProjectInitialization: initializationUnavailable,
+  projectInitializationStatus: initializationUnavailable,
+  subscribeProjectInitialization: initializationUnavailable,
   openGitHubWorkflowRecovery: workflowUnavailable,
   prepareGitHubWorkflowRecovery: workflowUnavailable,
   applyGitHubWorkflowRecovery: workflowUnavailable,
@@ -242,6 +269,16 @@ export const previewApi: DesktopApi = {
   refreshGitHubConnection: connectionUnavailable,
   disconnectGitHubConnection: connectionUnavailable,
   subscribeGitHubConnection: connectionUnavailable,
+  githubRemoteSetupStatus: githubRemoteSetupUnavailable,
+  githubRemoteSetupPrepare: githubRemoteSetupUnavailable,
+  githubRemoteSetupApply: githubRemoteSetupUnavailable,
+  githubRemoteSetupDiscard: githubRemoteSetupUnavailable,
+  githubRemoteSetupCancel: githubRemoteSetupUnavailable,
+  subscribeGitHubRemoteSetup: githubRemoteSetupUnavailable,
+  githubHistoryStatus: githubHistoryUnavailable,
+  startGitHubHistory: githubHistoryUnavailable,
+  cancelGitHubHistory: githubHistoryUnavailable,
+  subscribeGitHubHistory: githubHistoryUnavailable,
   githubPreflightStatus: githubPreflightUnavailable,
   githubReleaseStatus: githubReleaseUnavailable,
   prepareGitHubPreflight: githubPreflightUnavailable,

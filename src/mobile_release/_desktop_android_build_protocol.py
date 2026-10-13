@@ -21,9 +21,12 @@ SIGNED_CONSENT = "saved-android-local-sign-v1"
 SCOPE = "local-post-build-artifact-observation"
 TOOLCHAIN_PROFILE = "android-local-linux-gnu-x86_64-v1"
 MAC_TOOLCHAIN_PROFILE = "android-registered-macos-arm64-v1"
+MAC_X64_TOOLCHAIN_PROFILE = "android-registered-macos-x86_64-v1"
+MAC_TOOLCHAIN_PROFILES = {"macos-arm64": MAC_TOOLCHAIN_PROFILE, "macos-x86_64": MAC_X64_TOOLCHAIN_PROFILE}
 MAC_TOOLCHAIN_PREFIX = "/Library/Application Support/MobileReleaseKit/android"
 # Closed source contracts, NOT runtime/native qualification flags.
-PROFILES = {"linux-gnu-x86_64": ("linux", "x86_64"), "macos-arm64": ("macos", "arm64")}
+PROFILES = {"linux-gnu-x86_64": ("linux", "x86_64"), "macos-arm64": ("macos", "arm64"),
+            "macos-x86_64": ("macos", "x86_64")}
 RENDERER_REQUEST_LIMIT, REQUEST_LIMIT, RESPONSE_LIMIT = 8 * 1024, 32 * 1024, 64 * 1024
 INTENT_SECONDS, WORK_SECONDS, FINALITY_SECONDS = 300, 3000, 3010
 MAX_FRAMES, MAX_FINDINGS, MAX_ARTIFACTS = 8, 128, 1
@@ -278,12 +281,12 @@ def mac_toolchain_selection(value: object) -> dict:
 def _native(value: object, *, signed: bool = False) -> dict:
     value = _keys(value, {"profile", "projectRoot", "rootIdentity", "cwd", "toolchain"} | ({"signingContext"} if signed else set()))
     require(_enum(value["profile"], PROFILES))
-    mac = value["profile"] == "macos-arm64"
+    mac = value["profile"] in MAC_TOOLCHAIN_PROFILES
     require(not signed or mac)
     toolchain = _keys(value["toolchain"], {"schemaVersion", "profile", "root", "rootIdentity", "inventorySha256",
                                          *({"selection"} if mac else set())})
     require(type(toolchain["schemaVersion"]) is int and toolchain["schemaVersion"] == (2 if mac else 1)
-            and toolchain["profile"] == (MAC_TOOLCHAIN_PROFILE if mac else TOOLCHAIN_PROFILE)
+            and toolchain["profile"] == (MAC_TOOLCHAIN_PROFILES[value["profile"]] if mac else TOOLCHAIN_PROFILE)
             and _text(toolchain["inventorySha256"], _SHA))
     original = _identity(toolchain["rootIdentity"])
     root = _path(toolchain["root"])
@@ -491,7 +494,7 @@ def project_result(activity: object, artifact: object, *, used_config: object,
     require(type(signed) is bool)
     if signed:
         result["signing"] = "local-upload-key"
-    if toolchain_profile == MAC_TOOLCHAIN_PROFILE:
+    if toolchain_profile in MAC_TOOLCHAIN_PROFILES.values():
         result["schemaVersion"] = 2
         result["toolchainSelection"] = mac_toolchain_selection(toolchain_selection)
     else:
@@ -503,14 +506,14 @@ def project_result(activity: object, artifact: object, *, used_config: object,
 def validate_result(value: object) -> None:
     _structure(value)
     require(type(value) is dict)
-    mac = value.get("toolchainProfile") == MAC_TOOLCHAIN_PROFILE
+    mac = value.get("toolchainProfile") in MAC_TOOLCHAIN_PROFILES.values()
     signed = "signing" in value
     require(not signed or mac and value["signing"] == "local-upload-key")
     value = _keys(value, {"schemaVersion", "scope", "usedConfig", "usedVersion", "selection", "toolchainProfile",
                           "command", "findings", "summary", "artifacts", "assurances", "limitations", "artifactValidation",
                           *({"toolchainSelection"} if mac else set()), *({"signing"} if signed else set())})
     require(type(value["schemaVersion"]) is int and value["schemaVersion"] == (2 if mac else 1) and value["scope"] == SCOPE
-            and value["toolchainProfile"] == (MAC_TOOLCHAIN_PROFILE if mac else TOOLCHAIN_PROFILE)
+            and _enum(value["toolchainProfile"], (TOOLCHAIN_PROFILE, *MAC_TOOLCHAIN_PROFILES.values()))
             and type(value["limitations"]) is list
             and value["limitations"] == _limitations(artifact_validation(value["artifactValidation"]), signed=signed))
     if mac:

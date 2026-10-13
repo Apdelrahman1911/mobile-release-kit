@@ -8,13 +8,13 @@ use serde_json::Value;
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, ChildStdin, ChildStdout, ChildStderr},
     sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot, watch}, task::JoinHandle};
 #[cfg(any(all(unix, debug_assertions, feature = "development-runtime"),
-    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 use {std::process::Stdio, tokio::process::Command};
 use crate::{environment_diagnostics_protocol::{self as wire, Availability, Capability, Context, Finality, Frame,
     Outcome, Phase, Profile, Projection, Reason, Start, Status}, error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}};
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 use crate::installed_runtime::{CloseOutcome, EnvironmentDiagnosticsRuntimeSlots};
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 use crate::installed_runtime::AdmissionFailure;
 
 // Evidence limits, not ordinary selection switches. The original owner/live
@@ -26,11 +26,11 @@ const WORK: Duration = Duration::from_secs(6);
 const FINALITY: Duration = Duration::from_secs(10);
 
 #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 #[path = "environment_diagnostics_hosted_tests.rs"]
 pub(crate) mod hosted_tests;
 #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 pub(crate) use hosted_tests::{RegistrationPermit as EnvironmentRegistrationPermit, RuntimeSelection as EnvironmentRuntimeSelection};
 
 #[derive(Clone, Copy)]
@@ -51,7 +51,7 @@ struct Inner {
     runtime: RuntimeConfig, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify,
     poisoned: AtomicBool,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     fixture: Mutex<Option<std::sync::Weak<hosted_tests::Permit>>>,
 }
 struct Registry {
@@ -69,7 +69,7 @@ struct Session {
     installed_expected: bool,
     // Native callbacks publish DATA here, never through Registry while holding
     // the original Book. Only this Session's own absolute clocks apply.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     native_failure: Mutex<Option<(Reason, Instant)>>,
     registration: u32, project: PathBuf, draft: Mutex<Option<Value>>, request: AsyncMutex<Option<Vec<u8>>>,
     stop: watch::Sender<bool>, pipes: watch::Sender<Pipes>, frames: mpsc::Sender<Frame>, wake: Notify,
@@ -85,10 +85,10 @@ struct Session {
     observer_return: Mutex<Option<Result<bool, tokio::task::JoinError>>>,
     watchdog_return: Mutex<Option<Result<bool, tokio::task::JoinError>>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     fixture: Option<Arc<hosted_tests::Permit>>,
 }
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl Session {
     fn publish_native_failure(&self, first: Option<(AdmissionFailure, Instant)>) {
         let Some((failure, at)) = first else { return; };
@@ -140,11 +140,11 @@ struct Resources {
     inspection_started: bool, inspection_error: Option<tokio::task::JoinError>,
     acquisition: Option<JoinHandle<()>>, acquisition_joined: bool, acquisition_failed: bool,
     acquisition_started: bool, acquisition_error: Option<tokio::task::JoinError>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     installed: Option<Arc<Mutex<EnvironmentDiagnosticsRuntimeSlots>>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     installed_settlement: Option<JoinHandle<CloseOutcome>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     installed_return: Option<Result<CloseOutcome, tokio::task::JoinError>>,
     installed_started: bool, installed_joined: bool, installed_failed: bool,
     child: Option<Child>, waited: Option<ExitStatus>, wait_failed: bool,
@@ -209,7 +209,7 @@ impl EnvironmentDiagnosticsOwner {
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
             active: None, last: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-                any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+                any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
             fixture: Mutex::new(None),
         }) }
     }
@@ -263,25 +263,25 @@ impl EnvironmentDiagnosticsOwner {
             phase: Phase::Starting, outcome: None, finality: Finality::Pending, reason: Reason::None, result: None };
         let installed_expected = self.inner.installed_selected();
         let owner = Arc::new(Session { id: ticket.id, generation: ticket.generation, context, profile, clocks: ticket.clocks, installed_expected,
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_failure: Mutex::new(None),
             registration, project, draft: Mutex::new(Some(input.draft)), request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(),
             output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false),
             driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false), watchdog_joined: AtomicBool::new(false),
             watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),
             resources: AsyncMutex::new(Resources { frames: Some(receiver),
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 installed: installed_expected.then(|| Arc::new(Mutex::new(EnvironmentDiagnosticsRuntimeSlots::new()))),
                 ..Resources::default() }),
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())), error: Arc::new(AsyncMutex::new(Pipe::default())),
             driver: AsyncMutex::new(None), watchdog: Mutex::new(None), manager: AsyncMutex::new(None), observer: AsyncMutex::new(None),
             driver_return: Mutex::new(None), manager_return: Mutex::new(None), observer_return: Mutex::new(None), watchdog_return: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-                any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+                any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
             fixture: self.inner.fixture.lock().ok().and_then(|p| p.as_ref().and_then(std::sync::Weak::upgrade)),
         });
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         if let Some(permit) = &owner.fixture { permit.bind(&owner)?; }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if let Some(observation) = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?.as_mut() {
@@ -449,7 +449,7 @@ impl Inner {
     fn qualified(&self) -> bool {
         if self.installed_selected() { return true; }
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         if self.fixture.lock().ok().and_then(|p| p.as_ref().and_then(std::sync::Weak::upgrade)).is_some_and(|p| p.permits(self)) { return true; }
         false
     }
@@ -493,9 +493,9 @@ impl Inner {
         let at = at.min(owner.clocks.work).max(owner.clocks.admitted);
         let mut changed = false;
         let earlier = active.first_stop.is_none()
-            || cfg!(all(target_os = "macos", target_arch = "aarch64")) && active.first_stop.is_some_and(|first| at < first);
+            || cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && active.first_stop.is_some_and(|first| at < first);
         if earlier { active.first_stop = Some(at); changed = true; }
-        if (active.projection.reason == Reason::None || cfg!(all(target_os = "macos", target_arch = "aarch64")) && earlier) && reason != Reason::None {
+        if (active.projection.reason == Reason::None || cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && earlier) && reason != Reason::None {
             active.projection.reason = reason; changed = true;
         }
         if !active.unknown && active.projection.phase != Phase::Stopping { active.projection.phase = Phase::Stopping; changed = true; }
@@ -524,7 +524,7 @@ impl Inner {
         }
     }
     fn advance_locked(&self, r: &mut Registry, owner: &Session, now: Instant) {
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         if !original_session(r, owner) { return; }
         let Some(a) = r.active.as_ref().filter(|a| a.owner.id == owner.id) else { return; };
         let work_due = now >= owner.clocks.work && !a.work_expired;
@@ -533,7 +533,7 @@ impl Inner {
             if let Some(a) = r.active.as_mut() { a.work_expired = true; }
             self.stop_locked(r, owner, Reason::TimedOut, owner.clocks.work);
         }
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             // Preserve a real earlier F even if its publication is observed
             // after W. A later native return cannot displace the W timeout.
@@ -655,7 +655,7 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
         while !*stop.borrow_and_update() { if stop.changed().await.is_err() { failed = true; break; } }
     }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     if let Some(permit) = &owner.fixture { permit.boundary(&owner, hosted_tests::Boundary::WriterClose).await; }
     let closed = close_original(&mut input);
     if !closed { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner); }
@@ -688,7 +688,7 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                             else { Err(BridgeError::protocol()) };
                         let delivered = match frame { Ok(frame) => {
                             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-                                any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+                                any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
                             if matches!(&frame, Frame::Terminal(_)) { if let Some(permit) = &owner.fixture {
                                 permit.boundary(&owner, hosted_tests::Boundary::TerminalHandoff).await;
                             } }
@@ -705,7 +705,7 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
     let closed = close_original(&mut pipe);
     if failed || !closed || !eof { owner.resource_unknown.store(true, Ordering::SeqCst); inner.stop(&owner, Reason::ProtocolError); inner.unknown(&owner); }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     if !stderr { if let Some(permit) = &owner.fixture { permit.boundary(&owner, hosted_tests::Boundary::ReaderReturn).await; } }
     guard.complete = true; ReadEnd { frames, eof, closed, failed }
 }
@@ -741,7 +741,7 @@ async fn join_with_clock<T>(slot: &mut Option<JoinHandle<T>>, inner: &Inner, own
     }
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn installed_worker_lost(book: &Resources) {
     // Only after the actual original Ready JoinError; a deadline is not return.
     if let Some(native) = &book.installed {
@@ -753,7 +753,7 @@ fn original_worker_returned(started: bool, joined: bool, failed: bool, handle: b
     else if failed { !joined && handle && error }
     else { joined && !handle && !error }
 }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn installed_consumers_returned(book: &Resources, startup: &Startup, no_child_effect: bool) -> bool {
     if !original_worker_returned(book.inspection_started, book.inspection_joined, book.inspection_failed,
             book.inspection.is_some(), book.inspection_error.is_some())
@@ -780,7 +780,7 @@ fn installed_closure_ready(r: &Registry, owner: &Session, claimed: bool, direct_
         a.accepted && a.terminal && a.projection.result.as_ref().is_some_and(|t| t.lifetime.settled())))
 }
 fn installed_final(book: &Resources, owner: &Session) -> bool {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         if !owner.installed_expected {
             return book.installed.is_none() && !book.installed_started && !book.installed_joined && !book.installed_failed
@@ -790,16 +790,16 @@ fn installed_final(book: &Resources, owner: &Session) -> bool {
             && matches!(book.installed_return.as_ref(), Some(Ok(CloseOutcome::Settled)))
             && book.installed.as_ref().is_some_and(|native| native.try_lock().is_ok_and(|slots| slots.settled()))
     }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { !owner.installed_expected && !book.installed_started && !book.installed_joined && !book.installed_failed }
 }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn installed_claim_clear(inner: &Inner, r: &Registry, owner: &Session, now: Instant) -> bool {
     inner.installed_selected() && final_clock_clear(inner, r, owner, now)
         && !r.stopping && !r.document_lost && !*owner.stop.borrow() && now < owner.clocks.work
         && Profile::current() == Some(owner.profile)
 }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn transfer_installed(book: &Resources, inner: &Inner, owner: &Session) -> Result<(), BridgeError> {
     if !book.inspection_started || !book.inspection_joined || book.inspection_failed || book.inspection.is_some()
         || book.inspection_error.is_some() || book.acquisition_started || book.acquisition_joined || book.acquisition_failed
@@ -810,32 +810,32 @@ fn transfer_installed(book: &Resources, inner: &Inner, owner: &Session) -> Resul
     if !installed_claim_clear(inner, &r, owner, now) { return Err(unavailable()); }
     slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
 }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn acquire_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex<EnvironmentDiagnosticsRuntimeSlots>>) {
     if !inner.installed_selected() { inner.stop(owner, Reason::RuntimeUnavailable); return; }
     let mut slots = match native.lock() { Ok(slots) => slots, Err(_) => { inner.unknown(owner); return; } };
     let capability = match slots.capability() { Ok(capability) => capability, Err(_) => { inner.unknown(owner); return; } };
     let stop = owner.stop.subscribe();
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     let prepared = capability.prepare_once_observed(owner.clocks.work, &stop, &mut |first| owner.publish_native_failure(first));
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let prepared = capability.prepare_once(owner.clocks.work, &stop);
     let selected = match prepared {
         Ok(selected) => selected,
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         Err(failure) => {
             // Keep an earlier native F, or publish this real Err before Registry.
             owner.publish_native_failure(Some((failure, Instant::now())));
             inner.stop(owner, Reason::RuntimeUnavailable); return;
         },
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Err(_) => { inner.stop(owner, Reason::RuntimeUnavailable); return; }
     };
     let mut command = Command::new(&selected.python);
     command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
         .current_dir(&selected.cwd).env_clear().env("LANG", "C").env("LC_ALL", "C")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     if crate::runtime::macos_installed_environment(&mut command).is_err() {
         owner.publish_native_failure(Some((AdmissionFailure::Native, Instant::now())));
         inner.stop(owner, Reason::RuntimeUnavailable); return;
@@ -855,9 +855,9 @@ fn acquire_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex<Environm
     }
 }
 async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Session>) {
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { let _ = (book, inner, owner); }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         let Some(native) = book.installed.clone() else {
             if owner.installed_expected { inner.unknown(owner); }
@@ -887,7 +887,7 @@ async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<
             }); // Observer failure cannot prevent the original physical closes.
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             let hold_end = owner.clocks.finality;
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             let original_owner = owner.clone();
             let (release, enter) = oneshot::channel();
             book.installed_started = true;
@@ -897,9 +897,9 @@ async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<
                 if let Some(control) = hold { let _ = control.hold_settlement(hold_end); }
                 let mut slots = match native.lock() { Ok(slots) => slots,
                     Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 { slots.settle_originals(&mut |first| original_owner.native_cleanup_expired(first)) }
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { slots.settle_originals() }
             }));
             let _ = release.send(()); // The same original closer is registered before its first close.
@@ -929,7 +929,7 @@ fn spawn_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime) {
         if *owner.stop.borrow() || Instant::now() >= owner.clocks.work { return; }
         let mut bootstrap = runtime.bootstrap.clone(); let mut control: Option<PathBuf> = None;
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         if let Some(permit) = &owner.fixture {
             match permit.prepare_spawn(owner, &runtime) {
                 Ok(Some((shim, input))) => { bootstrap = shim; control = Some(input); }, Ok(None) => {},
@@ -963,20 +963,20 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     if *owner.stop.borrow() || Instant::now() >= owner.clocks.work { return; }
     let runtime = inner.runtime.clone(); let end = owner.clocks.work;
     let stop = owner.stop.subscribe();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let installed = book.installed.clone();
-    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))))]
+    #[cfg(any(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))))]
     let inspection_owner = owner.clone();
     let (inspect_start, inspect_enter) = oneshot::channel();
     book.inspection_started = true;
     book.inspection = Some(tokio::task::spawn_blocking(move || {
         inspect_enter.blocking_recv().map_err(|_| unavailable())?;
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let result = if let Some(native) = installed {
             match native.lock() {
                 Ok(mut slots) => {
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     {
                         let armed = slots.arm_acl_once(end, &stop);
                         inspection_owner.publish_native_failure(slots.first_failure()
@@ -984,22 +984,22 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                         armed.map_err(|_| unavailable())?;
                     }
                     let result = runtime.resolve_environment_diagnostics_installed(&mut slots, end, &stop);
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     inspection_owner.publish_native_failure(slots.first_failure()
                         .or_else(|| result.as_ref().err().map(|_| (AdmissionFailure::Native, Instant::now()))));
                     result
                 },
                 Err(_) => {
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     inspection_owner.publish_native_failure(Some((AdmissionFailure::Unknown, Instant::now())));
                     Err(BridgeError::cleanup_unknown())
                 },
             }
         } else { runtime.resolve_environment_diagnostics(end) };
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let result = { let _ = stop; runtime.resolve_environment_diagnostics(end) };
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         if let Some(permit) = &inspection_owner.fixture { permit.inspection_return(&inspection_owner); }
         result
     }));
@@ -1010,7 +1010,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         } },
         Err(error) => {
             book.inspection_failed = true; book.inspection_error = Some(error);
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             installed_worker_lost(&book);
             owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); return;
         },
@@ -1038,9 +1038,9 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     };
     match bytes { Ok(bytes) => *owner.request.lock().await = Some(bytes), Err(_) => { inner.stop(owner, Reason::ProtocolError); return; } }
     let acquisition_owner = owner.clone(); let acquisition_inner = inner.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let installed = book.installed.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if installed.is_some() && transfer_installed(&book, inner, owner).is_err() {
         inner.stop(owner, Reason::RuntimeUnavailable); return;
     }
@@ -1048,7 +1048,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     book.acquisition_started = true;
     book.acquisition = Some(tokio::task::spawn_blocking(move || {
         if acquire_enter.blocking_recv().is_ok() {
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             if let Some(native) = installed {
                 drop(runtime); // Selection DATA is never launch authority.
                 acquire_installed(&acquisition_inner, &acquisition_owner, &native); return;
@@ -1063,7 +1063,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Session>, enter: oneshot::Receiver<
     if enter.await.is_err() { inner.stop(&owner, Reason::Cancelled); }
     else {
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         if let Some(permit) = &owner.fixture { permit.boundary(&owner, hosted_tests::Boundary::Startup).await; }
         start_original(&inner, &owner).await;
     }
@@ -1077,11 +1077,11 @@ fn drain(book: &mut Resources, inner: &Inner, owner: &Session) {
 }
 fn deliver_frame(inner: &Inner, owner: &Session, frame: Frame) {
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     let accepted = matches!(&frame, Frame::Accepted);
     inner.accept(owner, frame);
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     if accepted { if let Some(permit) = &owner.fixture { permit.driver_boundary(owner); } }
 }
 fn require_terminal(inner: &Inner, owner: &Session) {
@@ -1107,7 +1107,7 @@ async fn continue_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
             Ok(_) => { book.inspection_joined = true; book.inspection.take(); }, // Late runtime DATA never launches.
             Err(error) => {
                 book.inspection_failed = true; book.inspection_error = Some(error);
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 installed_worker_lost(&book);
                 owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner);
             },
@@ -1118,7 +1118,7 @@ async fn continue_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
             Ok(()) => { book.acquisition_joined = true; book.acquisition.take(); },
             Err(error) => {
                 book.acquisition_failed = true; book.acquisition_error = Some(error);
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 installed_worker_lost(&book);
                 owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner);
             },
@@ -1267,12 +1267,12 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
     // ORIGINAL handle remains with the watchdog until its actual Ready join.
     { let mut r = inner.lock(); inner.bump(&mut r); }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     if let Some(permit) = &owner.fixture { permit.boundary(&owner, hosted_tests::Boundary::ObserverReturn).await; }
     guard.complete = true; settled
 }
 
-#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) fn installed_environment_owner_data_check() -> bool {
     tests::installed_macos_owner_data_check()
 }
@@ -1282,7 +1282,7 @@ mod tests {
     // State/clock DATA and actual finite in-memory task joins only. No runtime
     // inspection, files, native processes, tool permission or close evidence.
     use super::*;
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub(super) fn installed_macos_owner_data_check() -> bool {
         // Only original-owner, empty-resource and clock DATA. No Ticket,
         // Prepare/Start, entropy, task, runtime inspection or native receipt.
@@ -1426,7 +1426,7 @@ mod tests {
             || original.clocks.work != t + WORK || original.clocks.finality != t + FINALITY { return false; }
         true
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
     fn installed_macos_environment_uses_its_own_original_clocks_and_refusals() {
         assert!(installed_macos_owner_data_check());
@@ -1447,7 +1447,7 @@ mod tests {
         let (frames, receiver) = mpsc::channel(2);
         let session = Arc::new(Session { id: projection.run_id.clone(), generation: projection.owner_generation.clone(), context: projection.context.clone(),
             profile: Profile::LinuxX64, clocks: Clocks::new(admitted), installed_expected, registration: 1, project: PathBuf::from("/unopened-project"),
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_failure: Mutex::new(None),
             draft: Mutex::new(None), request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), output_bytes: AtomicUsize::new(0),
             resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
@@ -1457,7 +1457,7 @@ mod tests {
             watchdog: Mutex::new(None), manager: AsyncMutex::new(None), observer: AsyncMutex::new(None),
             driver_return: Mutex::new(None), manager_return: Mutex::new(None), observer_return: Mutex::new(None), watchdog_return: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-                any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+                any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
             fixture: None,
         });
         owner.inner.lock().active = Some(Active { owner: session.clone(), projection, first_stop: None, work_expired: false,

@@ -16,9 +16,11 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from mobile_release import github_workflow_recovery as recovery
+from mobile_release import config_edit as configuration
 from mobile_release import init_transaction as tx
 from mobile_release.api import _github_setup as setup
 from mobile_release.cancellation import CleanupScope, DefaultCancellation
@@ -476,6 +478,448 @@ class WorkflowRecoveryFilesystemTests(unittest.TestCase):
         self.assertTrue(lease.guard.lifetime_ledger.fatal)
         self.assert_restored()
 
+
+class ConfigurationRecoveryFilesystemTests(unittest.TestCase):
+    """Real fixed two-file journals; no synthesized restoration algorithm."""
+    @contextmanager
+    def project(self, *, missing_release=False):
+        self.assertTrue(sys.platform.startswith("linux") or sys.platform == "darwin")
+        with tempfile.TemporaryDirectory(prefix="mrk-configuration-recovery-") as temporary:
+            parent = Path(temporary).resolve()
+            root = parent / "project"
+            root.mkdir()
+            old = b'{"fixture":"original","padding":"' + b'a' * 20000 + b'"}\n'
+            new = b'{"fixture":"updated","padding":"' + b'b' * 21000 + b'"}\n'
+            initial = (None if missing_release else old, None)
+            if not missing_release:
+                (root / "release").mkdir()
+                (root / "release/mobile-release.json").write_bytes(old)
+                (root / "release/mobile-release.json").chmod(0o640)
+            sentinel = root / "unrelated.txt"
+            sentinel.write_bytes(b"unrelated original user bytes\n")
+            f = SimpleNamespace(root=root, parent=parent, initial=initial, new=(new, b"# updated ignore\n" * 1300),
+                                profile=tx.TypedEditProfile.CONFIGURATION, sentinel=sentinel,
+                                sentinel_before=full9(sentinel.stat()), missing_release=missing_release)
+            f.originals = {path: (root / path).stat() for path, raw in zip(f.profile.paths, initial) if raw is not None}
+            yield f
+
+    @contextmanager
+    def lease(self, f, *, recover=False, workflow=False):
+        registered = f.root.stat()
+        guard = DefaultCancellation(ValidationError, "configuration recovery test custody failed")
+        selected = PROFILE if workflow else f.profile
+        options = {"workflow_recovery": True} if workflow else {"configuration_recovery": True} if recover else {}
+        if recover or workflow:
+            options["registered_identity"] = {"device": registered.st_dev, "inode": registered.st_ino,
+                "mode": registered.st_mode, "uid": registered.st_uid, "gid": registered.st_gid}
+        lease = InitRootLease(f.root, cancellation=guard, profile=selected, **options)
+        cleanup = CleanupScope(guard, lease.close, owns_cancellation=True, first_primary=True)
+        try:
+            with cleanup:
+                guard.install()
+                guard.activate()
+                lease.acquire()
+                yield lease
+        finally:
+            cleanup.__exit__(*sys.exc_info())
+        self.assertTrue(lease.closed)
+        self.assertFalse(guard.lifetime_ledger.fatal)
+        self.assertEqual(guard.handler_state, "RESTORED")
+
+    def pending(self, f, point="mixed"):
+        if point == "rolled_back":
+            self.pending(f)
+            original = tx.InitWorkspace._move
+            stopped = False
+            failure = OSError("test-only stop after actual rollback marker rename")
+            def move(workspace, source_fd, source, destination_fd, destination, expected, **kwargs):
+                nonlocal stopped
+                value = original(workspace, source_fd, source, destination_fd, destination, expected, **kwargs)
+                if (source, destination) == ("rollback.pending", "ROLLED_BACK") and not stopped:
+                    stopped = True
+                    raise failure
+                return value
+            with self.lease(f, recover=True) as lease:
+                _, plan = self.prepared(f, lease)
+                with patch.object(tx.InitWorkspace, "_move", move):
+                    result = configuration.apply_configuration_recovery(lease, plan)
+                self.assertNotEqual(result.reason, "none")
+            self.assertTrue(stopped)
+            self.assertTrue((f.root / tx.READY / "ROLLED_BACK").is_file())
+            return
+        target = {"between": ("mobile-release.json", "old-0"), "mixed": ("new-1", ".gitignore"),
+                  "committed": ("commit.pending", "COMMITTED")}.get(point)
+        original_move, original_state = tx.InitWorkspace._move, tx.InitWorkspace._state_move
+        failure = OSError("test-only stopped original configuration transaction")
+        stopped = False
+        def move(workspace, source_fd, source, destination_fd, destination, expected, **kwargs):
+            nonlocal stopped
+            value = original_move(workspace, source_fd, source, destination_fd, destination, expected, **kwargs)
+            if (source, destination) == target and not stopped:
+                stopped = True
+                raise failure
+            return value
+        def state(workspace, source, destination):
+            nonlocal stopped
+            if point == "preparing" and (source, destination) == (tx.PREPARING, tx.READY) and not stopped:
+                stopped = True
+                raise failure
+            return original_state(workspace, source, destination)
+        with self.lease(f) as lease:
+            with lease.workspace_scope() as workspace:
+                originals = tuple(workspace.observe(path, limit=limit)
+                                  for path, limit in zip(f.profile.paths, f.profile.observation_limits))
+                revision = lease.bind_revision(workspace, originals)
+            with patch.object(tx.InitWorkspace, "_move", move), patch.object(tx.InitWorkspace, "_state_move", state), patch.object(
+                    tx.InitWorkspace, "_fixed_recovery", return_value=None):
+                with self.assertRaises(tx.InitOperationFailure) as caught:
+                    with lease.workspace_scope(revision) as workspace:
+                        workspace.apply_typed(list(zip(originals, f.new)))
+                self.assertIs(workspace._primary, failure)
+                self.assertEqual(caught.exception.outcome.journal, "recovery_required")
+        self.assertTrue(stopped)
+        self.assertTrue((f.root / (tx.PREPARING if point == "preparing" else tx.READY)).is_dir())
+
+    def prepared(self, f, lease):
+        before = namespace(f.root)
+        checkout = configuration.capture_configuration_recovery(lease)
+        self.assertEqual(checkout.view["state"], "recoverable")
+        self.assertEqual(namespace(f.root), before, "Capture writes no transaction bytes")
+        plan = configuration.prepare_configuration_recovery(lease, checkout, checkout.revision)
+        self.assertEqual(namespace(f.root), before, "Prepare is a second read-only inspection")
+        self.assertEqual([row["path"] for row in plan.view["files"]], list(f.profile.paths))
+        self.assertEqual([row["id"] for row in plan.view["files"]], ["configuration", "root-ignore"])
+        self.assertEqual(plan.view["privateCleanup"]["scope"], "inspected-configuration-journal-only")
+        self.assertLessEqual(plan.view["privateCleanup"]["directoryCount"], 1)
+        return checkout, plan
+
+    def restored(self, f):
+        self.assertFalse(any((f.root / name).exists() for name in tx.ALL_STATE_NAMES))
+        for path, raw in zip(f.profile.paths, f.initial):
+            if raw is None:
+                self.assertFalse((f.root / path).exists())
+            else:
+                self.assertEqual((f.root / path).read_bytes(), raw)
+                actual, original = (f.root / path).stat(), f.originals[path]
+                self.assertEqual((actual.st_dev, actual.st_ino, actual.st_mode),
+                                 (original.st_dev, original.st_ino, original.st_mode))
+        if f.missing_release:
+            self.assertFalse((f.root / "release").exists())
+        self.assertEqual(full9(f.sentinel.stat()), f.sentinel_before)
+
+    def test_all_four_actions_use_original_recover_once_with_readonly_preparation(self):
+        for point, action, effect in (("preparing", "preparing_cleanup", "not_started"),
+                                     ("between", "rollback", "rolled_back"),
+                                     ("committed", "committed_cleanup", "committed"),
+                                     ("rolled_back", "rolled_back_cleanup", "rolled_back")):
+            with self.subTest(action=action), self.project() as f:
+                self.pending(f, point)
+                original = tx.InitWorkspace.recover
+                seen = []
+                def recover(workspace):
+                    self.assertIsNone(workspace._typed_profile)
+                    self.assertEqual(workspace._creation["state"], "NEW")
+                    self.assertIs(workspace._scope.lease.profile, f.profile)
+                    self.assertTrue(workspace._scope.lease._configuration_recovery_mode)
+                    seen.append(workspace)
+                    return original(workspace)
+                with self.lease(f, recover=True) as lease, patch.object(tx.InitWorkspace, "__enter__", forbidden), patch.object(
+                        tx.InitWorkspace, "_prepare", forbidden), patch.object(tx.InitWorkspace, "_install", forbidden), patch.object(
+                        tx.InitWorkspace, "recover", recover):
+                    _, plan = self.prepared(f, lease)
+                    self.assertEqual(plan.view["action"], action)
+                    self.assertGreater(plan.view["files"][0]["after"]["size"], 16 * 1024)
+                    result = configuration.apply_configuration_recovery(lease, plan)
+                    self.assertEqual((result.effect, result.journal, result.resources, result.reason), (effect, "clean", "settled", "none"))
+                    self.assertEqual(len(seen), 1)
+                    self.assertNotEqual(configuration.apply_configuration_recovery(lease, plan).reason, "none")
+                    self.assertEqual(len(seen), 1)
+                if effect != "committed":
+                    self.restored(f)
+                else:
+                    self.assertEqual([(f.root / path).read_bytes() for path in f.profile.paths], list(f.new))
+                    self.assertFalse(any((f.root / name).exists() for name in tx.ALL_STATE_NAMES))
+
+    def test_complete_and_partial_preparing_cleanup_restores_absent_release_directory(self):
+        for partial in (False, True):
+            with self.subTest(partial=partial), self.project(missing_release=True) as f:
+                self.pending(f, "preparing")
+                if partial:
+                    (f.root / tx.PREPARING).rename(f.root / tx.CLEANUP)
+                    (f.root / tx.CLEANUP / "new-1").unlink()
+                with self.lease(f, recover=True) as lease:
+                    _, plan = self.prepared(f, lease)
+                    self.assertEqual(plan.view["action"], "preparing_cleanup")
+                    self.assertEqual(plan.view["privateCleanup"]["directoryCount"], 1)
+                    self.assertEqual(configuration.apply_configuration_recovery(lease, plan).reason, "none")
+                self.restored(f)
+        with self.project(missing_release=True) as f:
+            self.pending(f)
+            with self.lease(f, recover=True) as lease:
+                _, plan = self.prepared(f, lease)
+                self.assertEqual(configuration.apply_configuration_recovery(lease, plan).effect, "rolled_back")
+            self.restored(f)
+
+    def test_both_terminal_cleanup_actions_preserve_later_public_bytes_and_partial_cleanup(self):
+        for point in ("committed", "rolled_back"):
+            with self.subTest(point=point), self.project() as f:
+                self.pending(f, point)
+                (f.root / tx.READY).rename(f.root / tx.CLEANUP)
+                (f.root / tx.CLEANUP / ("old-0" if point == "committed" else "new-0")).unlink()
+                public = f.root / f.profile.paths[0]
+                public.write_bytes(b"later user content is not replay authority\n")
+                ignore = f.root / ".gitignore"
+                if ignore.exists():
+                    ignore.unlink()
+                before = full9(public.stat())
+                with self.lease(f, recover=True) as lease, patch.object(tx.InitWorkspace, "_current", forbidden), patch.object(
+                        recovery, "_current", forbidden):
+                    _, plan = self.prepared(f, lease)
+                    result = configuration.apply_configuration_recovery(lease, plan)
+                self.assertEqual(result.reason, "none")
+                self.assertEqual(result.effect, "committed" if point == "committed" else "rolled_back")
+                self.assertEqual(full9(public.stat()), before)
+                self.assertEqual(public.read_bytes(), b"later user content is not replay authority\n")
+                self.assertFalse(ignore.exists())
+                self.assertFalse(any((f.root / name).exists() for name in tx.ALL_STATE_NAMES))
+
+    def test_idle_incomplete_foreign_and_mixed_rosters_are_never_recovery_grants(self):
+        with self.project() as f, self.lease(f, recover=True) as lease:
+            before = namespace(f.root)
+            checkout = configuration.capture_configuration_recovery(lease)
+            self.assertEqual(checkout.view["state"], "idle")
+            with self.assertRaises(ConfigEditFailure):
+                configuration.prepare_configuration_recovery(lease, checkout, checkout.revision)
+            self.assertEqual(namespace(f.root), before)
+        for state, leaf in ((tx.PREPARING, None), (tx.PREPARING, "header.tmp"), (tx.CLEANUP, "COMMITTED")):
+            with self.subTest(state=state, leaf=leaf), self.project() as f:
+                journal = f.root / state
+                journal.mkdir(mode=0o700)
+                if leaf:
+                    (journal / leaf).write_bytes(b'{"incomplete":')
+                    (journal / leaf).chmod(0o600)
+                before = namespace(f.root)
+                with self.lease(f, recover=True) as lease:
+                    checkout = configuration.capture_configuration_recovery(lease)
+                    self.assertEqual(checkout.view["state"], "conflict")
+                    self.assertIsNone(checkout._revision)
+                    with self.assertRaises(ConfigEditFailure):
+                        configuration.prepare_configuration_recovery(lease, checkout, checkout.revision)
+                self.assertEqual(namespace(f.root), before)
+        for kind in ("foreign", "mixed", "workflow-reader"):
+            with self.subTest(kind=kind), self.project() as f:
+                self.pending(f)
+                if kind != "workflow-reader":
+                    journal = f.root / tx.READY
+                    data = json.loads((journal / "plan.json").read_bytes())
+                    if kind == "foreign":
+                        data["files"][0]["path"] = "release/foreign.json"
+                    else:
+                        data["files"].append({**data["files"][1], "path": ".extra-ignore"})
+                    (journal / "plan.json").write_bytes(tx._json(data))
+                    for marker, pending in (("COMMITTED", "commit.pending"), ("ROLLED_BACK", "rollback.pending")):
+                        (journal / pending).write_bytes(tx.InitWorkspace._marker(data, marker))
+                before = namespace(f.root)
+                with self.lease(f, recover=kind != "workflow-reader", workflow=kind == "workflow-reader") as lease:
+                    checkout = (recovery.capture_github_workflow_recovery(lease) if kind == "workflow-reader" else
+                                configuration.capture_configuration_recovery(lease))
+                    self.assertEqual(checkout.view["state"], "conflict")
+                    self.assertIsNone(checkout._revision)
+                self.assertEqual(namespace(f.root), before)
+
+    def test_profile_exchanges_replay_and_normal_scope_never_authorize_writes(self):
+        with self.project() as f:
+            self.pending(f)
+            before = namespace(f.root)
+            with self.lease(f) as normal:
+                with self.assertRaises(ConfigEditFailure):
+                    configuration.capture_configuration_recovery(normal)
+            with self.lease(f, recover=True) as lease:
+                with self.assertRaises(tx.InitOperationFailure):
+                    with lease.workspace_scope():
+                        self.fail("normal scope admitted a recovery lease")
+                checkout, plan = self.prepared(f, lease)
+                with self.assertRaises(ConfigEditFailure):
+                    recovery.discard_github_workflow_recovery(plan)
+                self.assertNotEqual(recovery.apply_github_workflow_recovery(lease, plan).reason, "none")
+                self.assertNotEqual(configuration.apply_configuration_recovery(lease, plan).reason, "none")
+            self.assertEqual(namespace(f.root), before)
+            with self.lease(f, recover=True) as lease:
+                checkout = configuration.capture_configuration_recovery(lease)
+                with self.assertRaises(ConfigEditFailure):
+                    recovery.prepare_github_workflow_recovery(lease, checkout, checkout.revision)
+                with self.assertRaises(ConfigEditFailure):
+                    configuration.prepare_configuration_recovery(lease, checkout, checkout.revision)
+            with self.lease(f, recover=True) as lease:
+                checkout, plan = self.prepared(f, lease)
+                for authority in (checkout, plan):
+                    with self.assertRaises(TypeError):
+                        copy.copy(authority)
+                mutable = plan.view
+                mutable["files"][0]["path"] = "release/other.json"
+                self.assertEqual(plan.view["files"][0]["path"], f.profile.paths[0])
+                configuration.discard_configuration_recovery(plan)
+                self.assertNotEqual(configuration.apply_configuration_recovery(lease, plan).reason, "none")
+            self.assertEqual(namespace(f.root), before)
+
+    def test_each_configuration_byte_limit_refuses_oversize_before_any_recovery(self):
+        for index, limit in enumerate(tx.TypedEditProfile.CONFIGURATION.payload_limits):
+            with self.subTest(index=index), self.project() as f:
+                self.pending(f, "preparing")
+                journal = f.root / tx.PREPARING
+                data = json.loads((journal / "plan.json").read_bytes())
+                target = journal / f"new-{index}"
+                target.write_bytes(b"x" * (limit + 1))
+                value = target.stat()
+                data["files"][index]["after"] = {"device": value.st_dev, "inode": value.st_ino,
+                    "mode": stat.S_IMODE(value.st_mode), "size": value.st_size,
+                    "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
+                (journal / "plan.json").write_bytes(tx._json(data))
+                for marker, pending in (("COMMITTED", "commit.pending"), ("ROLLED_BACK", "rollback.pending")):
+                    (journal / pending).write_bytes(tx.InitWorkspace._marker(data, marker))
+                before = namespace(f.root)
+                with self.lease(f, recover=True) as lease, patch.object(tx.InitWorkspace, "recover", forbidden):
+                    checkout = configuration.capture_configuration_recovery(lease)
+                    self.assertEqual(checkout.view["state"], "conflict")
+                    self.assertIsNone(checkout._revision)
+                self.assertEqual(namespace(f.root), before)
+
+    def test_changed_registered_root_parent_public_data_or_control_is_preserved(self):
+        for kind in ("root", "parent", "public", "data", "control", "symlink", "hardlink"):
+            with self.subTest(kind=kind), self.project() as f:
+                self.pending(f, "between")
+                with self.lease(f, recover=True) as lease:
+                    _, plan = self.prepared(f, lease)
+                    if kind == "root":
+                        f.root.rename(f.parent / "preserved-root")
+                        f.root.mkdir()
+                    elif kind == "parent":
+                        (f.root / "release").rename(f.root / "preserved-release")
+                        (f.root / "release").mkdir()
+                    elif kind == "public":
+                        (f.root / f.profile.paths[0]).write_bytes(b"new user original\n")
+                    elif kind == "symlink":
+                        (f.root / f.profile.paths[0]).symlink_to(f.sentinel)
+                    elif kind == "hardlink":
+                        os.link(f.root / tx.READY / "old-0", f.root / "user-hardlink")
+                    else:
+                        leaf = "new-0" if kind == "data" else "plan.json"
+                        (f.root / tx.READY / leaf).write_bytes(b"changed original is preserved\n")
+                    before = namespace(f.parent)
+                    with patch.object(tx.InitWorkspace, "recover", forbidden):
+                        result = configuration.apply_configuration_recovery(lease, plan)
+                    self.assertNotEqual(result.reason, "none")
+                    self.assertEqual(namespace(f.parent), before)
+
+    def test_original_control_consumption_and_terminal_exchange_cannot_retarget_recovery(self):
+        with self.project() as f:
+            self.pending(f, "between")
+            original = tx.InitWorkspace._load
+            changed = None
+            def load(workspace, fd):
+                nonlocal changed
+                if workspace._workflow_recovery_guard is not None and changed is None:
+                    journal = f.root / tx.READY
+                    data = json.loads((journal / "plan.json").read_bytes())
+                    data["files"][0]["path"] = "release/unapproved.json"
+                    (journal / "plan.json").write_bytes(tx._json(data))
+                    for marker, pending in (("COMMITTED", "commit.pending"), ("ROLLED_BACK", "rollback.pending")):
+                        (journal / pending).write_bytes(workspace._marker(data, marker))
+                    changed = namespace(f.root)
+                return original(workspace, fd)
+            with self.lease(f, recover=True) as lease:
+                _, plan = self.prepared(f, lease)
+                with patch.object(tx.InitWorkspace, "_load", load):
+                    result = configuration.apply_configuration_recovery(lease, plan)
+                self.assertIsNotNone(changed)
+                self.assertEqual(result.reason, "stale_revision")
+                self.assertEqual(namespace(f.root), changed)
+                self.assertFalse((f.root / "release/unapproved.json").exists())
+        with self.project() as f:
+            self.pending(f, "committed")
+            journal = f.root / tx.CLEANUP
+            (f.root / tx.READY).rename(journal)
+            (journal / "old-0").unlink()
+            with self.lease(f, recover=True) as lease:
+                _, plan = self.prepared(f, lease)
+                (journal / "COMMITTED").rename(journal / "commit.pending")
+                (journal / "rollback.pending").rename(journal / "ROLLED_BACK")
+                before = namespace(f.root)
+                result = configuration.apply_configuration_recovery(lease, plan)
+                self.assertEqual((result.effect, result.journal, result.reason), ("committed", "recovery_required", "stale_revision"))
+                self.assertEqual(namespace(f.root), before)
+
+    def test_lock_rename_sync_and_cancellation_failures_consume_one_grant(self):
+        for failure_kind in ("lock", "rename", "sync", "cancel"):
+            with self.subTest(failure_kind=failure_kind), self.project() as f:
+                self.pending(f)
+                with self.lease(f, recover=True) as lease:
+                    _, plan = self.prepared(f, lease)
+                    calls = []
+                    failure = KeyboardInterrupt("test-only cancellation") if failure_kind == "cancel" else OSError("test-only original failure")
+                    original_factory, original_sync, original_checkpoint = tx._rename_function, tx._fsync, tx.InitWorkspace._checkpoint
+                    if failure_kind == "lock":
+                        replacement = patch.object(LockedInitScope, "acquire", side_effect=_failure("busy"))
+                    elif failure_kind == "rename":
+                        def factory():
+                            native = original_factory()
+                            def rename(source_fd, source, destination_fd, destination):
+                                calls.append((source, destination))
+                                native(source_fd, source, destination_fd, destination)
+                                if source == "old-0":
+                                    raise failure
+                            return rename
+                        replacement = patch.object(tx, "_rename_function", factory)
+                    elif failure_kind == "sync":
+                        def sync(fd):
+                            original_sync(fd)
+                            calls.append(fd)
+                            raise failure
+                        replacement = patch.object(tx, "_fsync", sync)
+                    else:
+                        def checkpoint(workspace):
+                            if workspace._workflow_recovery_guard is not None and not calls:
+                                calls.append("cancel")
+                                raise failure
+                            return original_checkpoint(workspace)
+                        replacement = patch.object(tx.InitWorkspace, "_checkpoint", checkpoint)
+                    with replacement:
+                        result = configuration.apply_configuration_recovery(lease, plan)
+                    self.assertEqual(result.reason, {"lock": "busy", "rename": "filesystem_error", "sync": "filesystem_error", "cancel": "cancelled"}[failure_kind])
+                    self.assertEqual(result.journal, "recovery_required")
+                    if failure_kind != "lock":
+                        self.assertIs(lease._scopes[-1].workspace._primary, failure)
+                        self.assertTrue(calls)
+                    if failure_kind == "rename":
+                        self.assertEqual(calls[-1][0], "old-0")
+                    after = namespace(f.root)
+                    self.assertNotEqual(configuration.apply_configuration_recovery(lease, plan).reason, "none")
+                    self.assertEqual(namespace(f.root), after)
+
+    def test_original_late_close_cannot_promote_clean_journal_to_success(self):
+        with self.project() as f:
+            self.pending(f)
+            original = LockedInitScope.close
+            failure = OSError("test-only original close return lost")
+            fired = False
+            def close(scope):
+                nonlocal fired
+                original(scope)
+                if scope.workspace is not None and scope.workspace._journal_clean and not fired:
+                    fired = True
+                    raise failure
+            with self.assertRaisesRegex(ValidationError, "^configuration recovery test custody failed$"):
+                with self.lease(f, recover=True) as lease:
+                    _, plan = self.prepared(f, lease)
+                    with patch.object(LockedInitScope, "close", close):
+                        result = configuration.apply_configuration_recovery(lease, plan)
+                    self.assertTrue(fired)
+                    self.assertEqual((result.effect, result.journal, result.resources), ("rolled_back", "clean", "unknown"))
+                    self.assertNotEqual(result.reason, "none")
+            self.assertTrue(lease.closed)
+            self.assertEqual(lease.guard.handler_state, "RESTORED")
+            self.assertTrue(lease.guard.lifetime_ledger.fatal)
+            self.restored(f)
 
 if __name__ == "__main__":
     unittest.main()

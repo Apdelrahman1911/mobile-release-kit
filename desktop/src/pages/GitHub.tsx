@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { getValue } from '../catalog.ts';
-import { futureReason } from '../certainty.ts';
 import type { ProjectSession } from '../drafts.ts';
 import type { GitHubAssertionInput, GitHubSetupController, GitHubSetupState } from '../githubSetupController.ts';
 import { GITHUB_WORKFLOWS } from '../githubSetupProtocol.ts';
@@ -45,7 +44,7 @@ function draftBranch(session: ProjectSession | null, path: string): string {
 function Proposal({ result, credentialHelp, onHelp }: { result: GitHubSetupProposed; credentialHelp: CredentialHelp[] | null; onHelp: (help: HelpContent) => void }) {
   return <section className="github-proposal" aria-label="Read-only GitHub setup proposal">
     <div className="card">
-      <SectionHeading title="Passive proposal — nothing applied by this preview" description="Complete caller text from the shared core. This preview saves no files and observes no GitHub, Git or Store state. Any separate native operation is reported in Local workflow files."><Badge tone="info">GitHub not contacted</Badge></SectionHeading>
+      <SectionHeading title="Passive proposal — nothing applied by this preview" description="Complete caller text from the shared core. This preview saves no files and observes no GitHub, Git or Store state. Local caller installation is reported in Local workflow files; remote settings use their separate card."><Badge tone="info">GitHub not contacted</Badge></SectionHeading>
       <dl className="github-facts">
         <div><dt>Toolkit repository</dt><dd><code>{result.tooling.repository}</code></dd></div>
         <div><dt>Toolkit commit · format-only</dt><dd><code>{result.tooling.sha}</code></dd></div>
@@ -68,7 +67,7 @@ function Proposal({ result, credentialHelp, onHelp }: { result: GitHubSetupPropo
       </details>)}</div>
     </section>
     <section className="card">
-      <SectionHeading title="Environment checklist · not configured" description="Desired policy and unresolved administrator work, not remote API requests. Existing environments, approvals, permissions and values remain unknown." />
+      <SectionHeading title="Environment checklist · not observed by this preview" description="Desired policy only, not remote API requests. Use the separate remote setup card to review supported changes; this passive preview does not observe existing environments, approvals, permissions or values." />
       <dl className="github-facts">
         <div><dt>Caller configuration convention · not an observed file</dt><dd><code>{result.settings.configPath}</code></dd></div>
         <div><dt>Source basis</dt><dd>Configured policy only · protection unverified</dd></div>
@@ -97,7 +96,7 @@ function Proposal({ result, credentialHelp, onHelp }: { result: GitHubSetupPropo
   </section>;
 }
 
-export function GitHub({ info, session, state, controller, loading, onReload, onNavigate, credentialHelp, onHelp, nativeReview, connectionView }: {
+export function GitHub({ session, state, controller, loading, onReload, onNavigate, credentialHelp, onHelp, nativeReview, connectionView }: {
   info: AppInfo | null;
   session: ProjectSession | null;
   state: GitHubSetupState;
@@ -117,9 +116,9 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
   const shaHelp = state.help?.inputs.find((entry) => entry.id === 'toolingSha');
   const snapshotHelp = state.help?.inputs.find((entry) => entry.id === 'suppliedSnapshot');
   return <>
-    <PageHeading eyebrow="GITHUB" title="Review the setup. Keep authority separate." description="Preview four caller files and a core-sourced checklist. Local installation needs its own fresh native review and confirmation; remote GitHub setup remains unavailable." />
+    <PageHeading eyebrow="GITHUB" title="Review the setup. Keep authority separate." description="Preview four caller files and a core-sourced checklist. Local installation needs its own fresh native review and confirmation. On a qualified Mac runtime, use the separate remote setup card to review repository policies, environment protections, secrets and variables. Each change requires its own preview and confirmation." />
     {connectionView}
-    <div className="notice notice-info"><Icon name="shield" /><div><strong>Passive setup preview · remote authority unavailable</strong><p>This preview does not contact GitHub. Remote repository state, toolkit ref existence, template compatibility and release readiness remain unknown from a preview. A passive proposal never authorizes local writes or a release. Separate local operation outcomes are shown below.</p></div></div>
+    <div className="notice notice-info"><Icon name="shield" /><div><strong>Passive setup preview · no remote changes</strong><p>This preview does not contact GitHub. Remote repository state, toolkit ref existence, template compatibility and release readiness remain unknown from a preview. A passive proposal never authorizes local writes or a release. Separate local operation outcomes are shown below.</p></div></div>
     <form className="card github-form" onSubmit={(event) => { event.preventDefault(); void controller.propose(); }}>
       <SectionHeading title="Preview setup from your draft" description="Toolkit inputs are separate from the application’s source identity. No account or commit is preselected."><Badge>{state.pending ? 'Preparing preview…' : 'In-memory only'}</Badge></SectionHeading>
       <div className="github-draft">
@@ -133,7 +132,7 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
           <button type="button" className="button small secondary" onClick={() => onNavigate('settings')}>Review project settings<Icon name="arrow" size={15} /></button>
           <button type="button" className="button small secondary" onClick={() => onNavigate('credentials')}>Open Credentials &amp; Signing<Icon name="arrow" size={15} /></button>
         </div>
-        <p className="github-scope-note">Credentials &amp; Signing shows current native input availability and scope. Local session assets are not GitHub secrets. This page never selects files, uploads assets or provisions secrets.</p>
+        <p className="github-scope-note">Credentials &amp; Signing shows current native input availability and scope. Local session assets are not automatically GitHub secrets. This passive preview never selects files or provisions secrets. The separate remote setup card can use eligible assigned inputs after explicit review and confirmation.</p>
       </div>
       {state.helpState !== 'current' && <div className="notice notice-warning" role="status"><Icon name="info" /><div><strong>{state.help ? 'Previously loaded core guidance' : 'Core setup guidance unavailable'}</strong><p>{state.help ? 'This admitted guidance is retained only in memory. It is not evidence that the latest service request succeeded or that the service is currently available.' : 'Restore the packaged service and reload guidance. No substitute policy, template source or proposal is generated in this screen.'}</p><button type="button" className="button small secondary" disabled={loading} onClick={onReload}>Reload service and guidance</button></div></div>}
       <div className="form-grid">
@@ -162,7 +161,7 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
           </div>}
         </div>)}</div>}
       </fieldset>
-      {state.help && <section className="github-guidance" aria-label="Core setup guidance available before preview"><h3>Core setup guide · unresolved administrator work</h3><p>Local, core-sourced text only. Links, paths and commands mentioned in guidance are never opened or executed here.</p>{state.help.guidance.map((entry) => <details className="github-help" key={entry.id}><summary>{entry.label}</summary><HelpDefinitions help={entry} /></details>)}</section>}
+      {state.help && <section className="github-guidance" aria-label="Core setup guidance available before preview"><h3>Core setup guide · requirements to review</h3><p>Local, core-sourced text only. Links, paths and commands mentioned in guidance are never opened or executed here.</p>{state.help.guidance.map((entry) => <details className="github-help" key={entry.id}><summary>{entry.label}</summary><HelpDefinitions help={entry} /></details>)}</section>}
       <div className="github-propose-action"><button type="submit" className="button primary" disabled={reason !== null} aria-describedby="github-propose-reason"><Icon name={state.pending ? 'refresh' : 'github'} size={17} />{state.pending ? 'Preparing preview…' : 'Preview GitHub setup'}</button><p id="github-propose-reason">{reason ?? 'Uses the shared core only. No file write, GitHub call, credential access or workflow execution.'}</p></div>
     </form>
     {state.invalidated && <div className="notice notice-warning" role="status"><Icon name="info" /><div><strong>Previous preview discarded</strong><p>The project, draft, toolkit inputs, comparison or service generation changed. Preview again; an older reply cannot restore stale output.</p></div></div>}
@@ -170,10 +169,9 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
     {state.result?.state === 'invalid' && <section className="card"><SectionHeading title="Draft needs correction" description="The passive core returned no workflow or settings proposal. This preview saved or applied nothing and did not contact GitHub."><Badge tone="danger">Format invalid</Badge></SectionHeading><Issues issues={state.result.validation.issues} /><button type="button" className="button secondary" onClick={() => onNavigate('settings')}>Review the draft and field guidance</button></section>}
     {state.result?.state === 'proposed' && <Proposal result={state.result} credentialHelp={credentialHelp} onHelp={onHelp} />}
     {nativeReview}
-    <section className="card"><SectionHeading title="Remote authority stays disabled" description="Neither a preview nor local caller installation enables Connect, remote setup, credential provisioning, checks or dispatch. Those operations need separate reviewed ownership and authorization." /><div className="github-disabled-actions">
-      <DisabledAction label="Apply remote GitHub setup" icon="lock" reason={futureReason(info?.capabilities, 'github.setup', 'Authenticated repository setup and remote apply are not implemented. A local file plan has no remote authority.')} />
-      <DisabledAction label="Provision GitHub secrets" icon="key" reason={futureReason(info?.capabilities, 'github.setup', 'Environment and secret provisioning are not implemented. No credential values are accepted.')} />
-      <DisabledAction label="Run checks / dispatch" icon="rocket" reason={futureReason(info?.capabilities, 'release.candidate', 'Protected workflow dispatch and native release execution are not implemented.')} />
+    <section className="card"><SectionHeading title="Local setup is not remote authorization" description="Previewing or applying local caller files does not configure remote environments or secrets, or authorize workflow dispatch. Separate connection and workflow cards enforce their own native availability and user-consent requirements." /><div className="github-disabled-actions">
+      <p className="save-note">For supported environment protections, secrets and variables, use the separate remote setup card above. It reports current native availability, requires an eligible connection and assigned inputs where needed, and shows a review before each confirmed change. Local file approval never grants remote authority.</p>
+      <DisabledAction label="Dispatch from this setup preview" icon="rocket" reason="This preview cannot run checks or dispatch workflows. Use GitHub nonpublishing preflight on this page, or Protected release workflows in Releases; those separate actions may still be unavailable." />
     </div></section>
   </>;
 }

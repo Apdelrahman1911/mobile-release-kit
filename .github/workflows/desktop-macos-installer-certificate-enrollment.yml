@@ -1,0 +1,61 @@
+name: Fixed Installer public certificate enrollment only
+
+on:
+  push:
+    branches:
+      - verify/desktop-macos-installer-certificate-enrollment
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-installer-certificate-enrollment-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  public-leaf:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-installer-certificate-enrollment'
+    environment: macos-developer-id
+    runs-on: macos-26
+    timeout-minutes: 5
+    steps:
+      - name: Check out this exact source without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select the fixed owner interpreter
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Export only the expected public leaf after private cleanup
+        id: enroll
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_EXPECTED_SHA: ${{ github.sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_INSTALLER_P12_BASE64: ${{ secrets.MRK_MACOS_INSTALLER_P12_BASE64 }}
+          MRK_MACOS_INSTALLER_P12_PASSWORD: ${{ secrets.MRK_MACOS_INSTALLER_P12_PASSWORD }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          MRK_MACOS_INSTALLER_P12_BASE64="$MRK_MACOS_INSTALLER_P12_BASE64" \
+          MRK_MACOS_INSTALLER_P12_PASSWORD="$MRK_MACOS_INSTALLER_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_installer_certificate_enrollment.py
+          unset MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD
+      - name: Retain exactly one public DER certificate, not a signing receipt
+        if: success() && steps.enroll.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installer-public-leaf-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mrk-installer-public-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}/leaf.der
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1

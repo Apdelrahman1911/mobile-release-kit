@@ -2,14 +2,16 @@
 // filesystem handle, journal or write token independently of the native owner.
 import { sameJson } from './catalog.ts';
 import { methodReason } from './certainty.ts';
+import { savedTextRecoveryApplyBinding, savedTextRecoveryPreparedMatches, savedTextRecoverySettled, savedTextRecoverySucceeded } from './savedTextRecovery.ts';
+import type { SavedTextRecoveryApplyBinding, SavedTextRecoveryAttempt, SavedTextRecoveryContext, SavedTextRecoveryProjection } from './savedTextRecovery.ts';
 import { isU32, U32_MAX } from './configEditProtocol.ts';
 import { METADATA_TEXT_CACHE_BUNDLES, METADATA_TEXT_CACHE_BYTES, METADATA_TEXT_FIELD_BYTES,
   metadataCacheBytes, metadataCompareRetainedDraft, metadataConfiguredChoices, metadataConfigReason, metadataDraftFields, metadataObservedBaseline, metadataValidationFresh } from './metadataText.ts';
 import type { MetadataConfiguredContext, MetadataDisplayBinding, MetadataDraftBaseline, MetadataFieldId, MetadataTextBaseline, MetadataTextDraft,
-  MetadataRetainedDraftChange, MetadataTextEditProjection, MetadataTextEditStatus, MetadataTextField, MetadataTextGuide } from './metadataText.ts';
+  MetadataRetainedDraftChange, NormalMetadataTextEditProjection, MetadataTextEditProjection, MetadataTextEditStatus, MetadataTextField, MetadataTextGuide } from './metadataText.ts';
 import { metadataProjectionProgress, metadataStatusProgress, metadataTextError, metadataTextRequestFits,
   normalMetadataTextResult, parseMetadataTextEditStatus, parseMetadataTextGuide, parseMetadataTextObservation, parseMetadataTextValidation } from './metadataTextProtocol.ts';
-import type { ProjectSession } from './drafts.ts';
+import type { ProjectSession, WorkspaceAction } from './drafts.ts';
 import type { ApiError, AppInfo, BridgeMode, DesktopApi, EditAvailability, JsonValue } from './types.ts';
 
 export interface MetadataReviewBinding extends MetadataDisplayBinding {
@@ -45,7 +47,7 @@ export interface MetadataRetainedDraftReview {
 export interface MetadataAttempt {
   binding: MetadataReviewBinding;
   sessionId: string | null;
-  projection: MetadataTextEditProjection | null;
+  projection: NormalMetadataTextEditProjection | null;
   projectionRevision: number;
   prepareClaimed: boolean;
   applyClaimed: boolean;
@@ -69,6 +71,7 @@ interface MetadataOwnerState {
   unknownEvidence: MetadataTextEditProjection | null;
   recoveryProjects: readonly string[];
   attempt: MetadataAttempt | null;
+  recovery: SavedTextRecoveryAttempt<'metadata_text'> | null;
 }
 export interface MetadataTextState {
   mode: BridgeMode;
@@ -88,6 +91,7 @@ interface Context {
   selectedProject: () => ProjectSession | null;
   otherEditReason: (projectId: string) => string | null;
   otherOperationReason?: () => string | null;
+  onRecoveryBoundary?: (projectId: string) => void;
   now?: () => number;
 }
 function freeze<T>(value: T): T {
@@ -115,13 +119,15 @@ const availabilityCopy: Record<EditAvailability, string> = {
 export function metadataOwnerReason(state: MetadataTextState, projectId: string): string | null {
   const owner = state.edit;
   if (owner.nativeBlocked || owner.integrityFailed || owner.generationLost || owner.observationIssue) return 'Metadata edit ownership is unverified. Observe the original native status, not a competing edit.';
-  if (owner.status?.active || !settled(owner.attempt) || owner.attempt && !owner.attempt.handled) return 'A metadata-text edit is still owned or awaiting settlement. Finish or close that original session before another file edit.';
+  if (owner.status?.active || !settled(owner.attempt) || owner.attempt && !owner.attempt.handled ||
+      !savedTextRecoverySettled(owner.recovery) || owner.recovery && !owner.recovery.handled) return 'A metadata-text edit is still owned or awaiting settlement. Finish or close that original session before another file edit.';
   if (owner.recoveryProjects.includes(projectId)) return 'This project needs separate metadata transaction recovery. Another edit domain cannot reset or bypass its journal.';
   return null;
 }
 export function metadataRetainsDraft(state: MetadataTextState, projectId: string): boolean {
   const edit = state.edit;
   return edit.attempt?.binding.projectId === projectId && (!settled(edit.attempt) || edit.integrityFailed || edit.nativeBlocked || edit.observationIssue !== null) ||
+    edit.recovery?.binding.projectId === projectId && (!savedTextRecoverySettled(edit.recovery) || edit.integrityFailed || edit.nativeBlocked || edit.observationIssue !== null) ||
     edit.status?.active?.projectId === projectId || edit.unknownEvidence?.projectId === projectId;
 }
 export function metadataPreparedMatches(attempt: MetadataAttempt): boolean {
@@ -146,7 +152,7 @@ export class MetadataTextEditController {
     mode: 'unavailable', serviceGeneration: 0, selectionGeneration: 0, projectId: null, choices: [], selectedKey: null, entries: {},
     observeReason: 'Desktop capabilities are not loaded.', validateReason: 'Desktop capabilities are not loaded.', help: null, cacheError: null,
     edit: { mode: 'unavailable', listening: false, initialized: false, readPending: false, status: null, buffered: null, observationIssue: null,
-      integrityFailed: false, generationLost: false, nativeBlocked: false, unknownEvidence: null, recoveryProjects: [], attempt: null },
+      integrityFailed: false, generationLost: false, nativeBlocked: false, unknownEvidence: null, recoveryProjects: [], attempt: null, recovery: null },
   });
   private readonly context: Context;
   private api: DesktopApi | null = null;
@@ -161,7 +167,11 @@ export class MetadataTextEditController {
   private processAgain = false;
   private disposed = false;
   private selectionPending = false;
+  private recoveryVisible = true;
+  private recoveryNavigationGeneration = 0;
   private deadline: { sessionId: string; at: number } | null = null;
+  // One private, context-bound completion; never an owner-generation ordering.
+  private recoveryCompletion: { binding: SavedTextRecoveryContext; statusRevision: number } | null = null;
 
   constructor(context: Context) { this.context = context; }
   getSnapshot = (): MetadataTextState => this.state;
@@ -169,6 +179,9 @@ export class MetadataTextEditController {
   private publish(next: MetadataTextState): void {
     if (this.disposed || next === this.state) return;
     this.state = freeze(next);
+    if (this.recoveryCompletion && (!this.recoveryContextMatches(this.recoveryCompletion.binding) ||
+        this.state.edit.status?.windowGeneration !== this.recoveryCompletion.binding.windowGeneration ||
+        !usable(this.state.edit) || this.state.edit.unknownEvidence)) this.recoveryCompletion = null;
     for (const listener of this.listeners) listener();
   }
   private edit(next: MetadataOwnerState): void { this.publish({ ...this.state, edit: next }); }
@@ -199,6 +212,35 @@ export class MetadataTextEditController {
       validationError: entry.validationRequest ? metadataTextError({ code: 'MetadataTextContextChanged' }) : entry.validationError,
     };
     this.publish({ ...this.state, entries });
+  }
+  setVisible(value: boolean): void {
+    if (this.disposed || this.recoveryVisible === value) return;
+    this.recoveryCompletion = null;
+    this.recoveryVisible = value;
+    this.recoveryNavigationGeneration = Math.min(U32_MAX, this.recoveryNavigationGeneration + 1);
+    this.retireRecovery(true); this.process();
+  }
+  shutdownIntent(): void {
+    this.recoveryCompletion = null;
+    this.recoveryNavigationGeneration = Math.min(U32_MAX, this.recoveryNavigationGeneration + 1);
+    this.retireRecovery(true); this.process();
+  }
+  beforeWorkspaceAction(action: WorkspaceAction): void {
+    if (action.type === 'select' || action.type === 'switch' || action.projectId === this.state.projectId || action.projectId === this.state.edit.recovery?.binding.projectId) {
+      if (['select', 'switch', 'snapshot-start', 'snapshot-done', 'snapshot-failed', 'new-draft', 'edit', 'remove-forbidden', 'undo-removal', 'forget-removal',
+        'reset', 'adopt-suggestion', 'config-save-intent', 'config-save-final', 'config-save-recovery'].includes(action.type)) {
+        this.recoveryCompletion = null;
+        this.recoveryNavigationGeneration = Math.min(U32_MAX, this.recoveryNavigationGeneration + 1);
+        this.retireRecovery(true); this.process();
+      }
+    }
+  }
+  snapshotIntent(projectId: string): void {
+    if (projectId === this.state.projectId || projectId === this.state.edit.recovery?.binding.projectId) {
+      this.recoveryCompletion = null;
+      this.recoveryNavigationGeneration = Math.min(U32_MAX, this.recoveryNavigationGeneration + 1);
+      this.retireRecovery(true); this.process();
+    }
   }
   beginConnection(): void {
     this.passiveApi = null;
@@ -260,12 +302,14 @@ export class MetadataTextEditController {
   passiveBusyReason(): string | null { return this.passivePending > 0 ? 'An original public-text observation or validation is still pending.' : null; }
   loadReason(): string | null {
     const other = this.context.otherOperationReason?.(); if (other) return other;
+    if (!savedTextRecoverySettled(this.state.edit.recovery)) return 'Finish or close the original metadata recovery inspection before another text request.';
     return this.state.mode !== 'native' ? metadataTextError(null).message : this.state.observeReason ?? (!this.state.help ? metadataTextError({ code: 'MetadataTextHelpUnavailable' }).message : null) ??
       this.liveContextReason() ?? (this.passivePending >= 2 ? 'Two bounded passive requests are already in flight. Wait for them to settle; no queue or replacement request is created.' : null) ??
       (this.selectedEntry()?.loadRequest ? 'The original text observation is still pending.' : null);
   }
   validateReason(): string | null {
     const other = this.context.otherOperationReason?.(); if (other) return other;
+    if (!savedTextRecoverySettled(this.state.edit.recovery)) return 'Finish or close the original metadata recovery inspection before another text request.';
     if (this.state.mode !== 'native') return metadataTextError(null).message;
     if (this.state.validateReason) return this.state.validateReason;
     if (!this.state.help) return metadataTextError({ code: 'MetadataTextHelpUnavailable' }).message;
@@ -481,8 +525,20 @@ export class MetadataTextEditController {
   private observationFailed(protocol: boolean): void {
     this.edit({ ...this.state.edit, readPending: false, integrityFailed: this.state.edit.integrityFailed || protocol,
       observationIssue: protocol || this.state.edit.integrityFailed ? 'protocol' : 'bridge' });
-    if (protocol) this.requestRetire('invoke_failed');
+    if (protocol) { this.requestRetire('invoke_failed'); this.retireRecovery(true); }
     this.process();
+  }
+  private recoveryAttentionCovered(status: MetadataTextEditStatus, owner: MetadataTextEditProjection): boolean {
+    const completed = this.recoveryCompletion, core = owner.coreOutcome;
+    return completed !== null && this.recoveryContextMatches(completed.binding) && usable(this.state.edit) && !this.state.edit.unknownEvidence &&
+      owner.domain === 'metadata_text' && owner.projectId === completed.binding.projectId && owner.ownerGeneration === completed.binding.windowGeneration &&
+      status.windowGeneration === completed.binding.windowGeneration && status.statusRevision < completed.statusRevision &&
+      owner.phase === 'final' && owner.nativeFinality === 'settled' && !owner.lateSettled &&
+      core?.journal === 'recovery_required' && core.resources === 'settled' && core.effect !== 'unknown' && core.reason !== 'custody_unknown' &&
+      owner.nativeReason !== 'cleanup_unknown' && status.capability.reason !== 'cleanup_unknown' &&
+      [status.active, status.lastTerminal, this.state.edit.status?.active, this.state.edit.status?.lastTerminal].every((row) => !row || row.phase !== 'unknown' && row.nativeFinality !== 'unknown' &&
+        !row.lateSettled && row.nativeReason !== 'cleanup_unknown' && (!row.coreOutcome ||
+          row.coreOutcome.resources === 'settled' && row.coreOutcome.effect !== 'unknown' && row.coreOutcome.journal !== 'unknown' && row.coreOutcome.reason !== 'custody_unknown'));
   }
   private receive(value: unknown, source: 'read' | 'event' | 'reply'): void {
     if (this.disposed) return;
@@ -491,7 +547,7 @@ export class MetadataTextEditController {
     let status = freeze(structuredClone(parsed)); let edit = this.state.edit;
     for (const owner of [status.active, status.lastTerminal]) {
       if (owner && uncertain(owner)) edit = { ...edit, nativeBlocked: true, unknownEvidence: edit.unknownEvidence ?? owner };
-      if (owner?.phase === 'final' && owner.nativeFinality === 'settled' && owner.coreOutcome?.journal === 'recovery_required' && !edit.recoveryProjects.includes(owner.projectId)) {
+      if (owner?.phase === 'final' && owner.nativeFinality === 'settled' && owner.coreOutcome?.journal === 'recovery_required' && !this.recoveryAttentionCovered(status, owner) && !edit.recoveryProjects.includes(owner.projectId)) {
         if (edit.recoveryProjects.length >= 64) { this.observationFailed(true); return; }
         edit = { ...edit, recoveryProjects: [...edit.recoveryProjects, owner.projectId] };
       }
@@ -514,7 +570,7 @@ export class MetadataTextEditController {
     let attempt = edit.attempt;
     if (attempt) {
       const retained = attempt;
-      const owner = [status.active, status.lastTerminal].find((row) => row && row.projectId === retained.binding.projectId && row.ownerGeneration === retained.binding.windowGeneration &&
+      const owner = [status.active, status.lastTerminal].find((row): row is NormalMetadataTextEditProjection => !!row && !row.recovery && row.projectId === retained.binding.projectId && row.ownerGeneration === retained.binding.windowGeneration &&
         row.platform === retained.binding.context.platform && row.locale === retained.binding.context.locale &&
         (retained.sessionId ? row.sessionId === retained.sessionId : status.statusRevision > retained.binding.startStatusRevision && row.sessionId !== retained.binding.previousTerminalId));
       if (owner) {
@@ -524,16 +580,36 @@ export class MetadataTextEditController {
           const projection = attempt.projection ? { ...owner, reviewRemainingMs: Math.min(attempt.projection.reviewRemainingMs, owner.reviewRemainingMs) } : owner;
           attempt = { ...attempt, sessionId: owner.sessionId, projectionRevision: status.statusRevision, projection };
           const at = this.now() + projection.reviewRemainingMs;
-          this.deadline = { sessionId: owner.sessionId, at: this.deadline?.sessionId === owner.sessionId ? Math.min(this.deadline.at, at) : at };
+          if (!attempt.handled && !['final', 'unknown'].includes(projection.phase))
+            this.deadline = { sessionId: owner.sessionId, at: this.deadline?.sessionId === owner.sessionId ? Math.min(this.deadline.at, at) : at };
+        }
+      }
+    }
+    let recovery = edit.recovery;
+    if (recovery) {
+      const retained = recovery;
+      const owner = [status.active, status.lastTerminal].find((row): row is SavedTextRecoveryProjection<'metadata_text'> => !!row?.recovery &&
+        row.projectId === retained.binding.projectId && row.ownerGeneration === retained.binding.windowGeneration &&
+        (retained.sessionId ? row.sessionId === retained.sessionId : status.statusRevision > retained.binding.startStatusRevision && row.sessionId !== retained.binding.previousTerminalId));
+      if (owner) {
+        const older = status.statusRevision < recovery.projectionRevision;
+        if (recovery.projection && !(older ? metadataProjectionProgress(owner, recovery.projection) : metadataProjectionProgress(recovery.projection, owner))) { this.observationFailed(true); return; }
+        if (!older) {
+          const projection = recovery.projection ? { ...owner, reviewRemainingMs: Math.min(recovery.projection.reviewRemainingMs, owner.reviewRemainingMs) } : owner;
+          recovery = { ...recovery, sessionId: owner.sessionId, projectionRevision: status.statusRevision, projection };
+          if (!recovery.handled && !['final', 'unknown'].includes(projection.phase)) {
+            const at = this.now() + projection.reviewRemainingMs;
+            this.deadline = { sessionId: owner.sessionId, at: this.deadline?.sessionId === owner.sessionId ? Math.min(this.deadline.at, at) : at };
+          }
         }
       }
     }
     if (edit.status && status.statusRevision < edit.status.statusRevision) {
       if (!metadataStatusProgress(status, edit.status)) { this.observationFailed(true); return; }
-      this.edit({ ...edit, attempt }); this.process(); return;
+      this.edit({ ...edit, attempt, recovery }); this.process(); return;
     }
     if (edit.status && !metadataStatusProgress(edit.status, status)) { this.observationFailed(true); return; }
-    this.edit({ ...edit, attempt, initialized: true, status, buffered: null, observationIssue: edit.integrityFailed ? 'protocol' : null });
+    this.edit({ ...edit, attempt, recovery, initialized: true, status, buffered: null, observationIssue: edit.integrityFailed ? 'protocol' : null });
     this.process();
   }
   startReason(): string | null {
@@ -613,6 +689,150 @@ export class MetadataTextEditController {
         lastSave: { ...candidate.lastSave!, resultingBaselineGeneration: null }, editError: metadataTextError({ code: 'MetadataTextCacheFull' }) });
     }
   }
+
+  // Recovery shares this controller's ORIGINAL subscription, native commands
+  // and one live EditOwner. It never acquires a normal checkout or draft.
+  private recoveryPatch(patch: Partial<SavedTextRecoveryAttempt<'metadata_text'>>): void {
+    const recovery = this.state.edit.recovery;
+    if (recovery) this.edit({ ...this.state.edit, recovery: { ...recovery, ...patch } });
+  }
+  private recoveryContextMatches(binding: SavedTextRecoveryContext): boolean {
+    const project = this.context.selectedProject();
+    return !this.disposed && this.state.mode === 'native' && this.recoveryVisible && !this.selectionPending && !!project &&
+      project.project.id === binding.projectId && this.state.projectId === binding.projectId && project.snapshotRequest === null && !project.saveRecoveryRequired &&
+      project.revision === binding.configRevision && project.baselineGeneration === binding.configBaselineGeneration &&
+      project.observationGeneration === binding.configObservationGeneration && this.state.serviceGeneration === binding.serviceGeneration &&
+      this.state.selectionGeneration === binding.selectionGeneration && this.recoveryNavigationGeneration === binding.navigationGeneration;
+  }
+  inspectRecoveryReason(): string | null {
+    const edit = this.state.edit, project = this.context.selectedProject();
+    if (this.disposed || this.state.mode !== 'native' || edit.mode !== 'native') return 'Recovery inspection requires the qualified native metadata-text service; browser preview cannot inspect files.';
+    if (edit.integrityFailed || edit.generationLost || edit.nativeBlocked || edit.unknownEvidence || edit.observationIssue)
+      return 'Original native ownership or cleanup is unverified. Keep the original operation; recovery cannot reset that block.';
+    if (!edit.listening || !edit.initialized || !edit.status || edit.readPending) return 'Wait for the original native status before inspecting recovery.';
+    if (!edit.status.capability.available) return 'The native metadata-text recovery route is unavailable or another domain owns the service.';
+    if (!project || !this.recoveryVisible || this.selectionPending || project.snapshotRequest !== null) return 'Select a registered project and finish its current observation before inspecting this editor’s recovery.';
+    if (project.saveRecoveryRequired) return 'Configuration recovery is required. This editor cannot clear another domain’s journal.';
+    const other = this.context.otherEditReason(project.project.id) ?? this.context.otherOperationReason?.(); if (other) return other;
+    if (this.passivePending > 0) return 'Wait for the original text observation/validation to settle before inspecting recovery.';
+    if (edit.status.active || !settled(edit.attempt) || edit.attempt && !edit.attempt.handled || !savedTextRecoverySettled(edit.recovery) || edit.recovery && !edit.recovery.handled)
+      return 'Close the original edit/recovery review and wait for its settlement first. No competing inspection or automatic retry is started.';
+    if (![project.revision, project.baselineGeneration, project.observationGeneration, this.state.serviceGeneration, this.state.selectionGeneration, this.recoveryNavigationGeneration, edit.status.statusRevision]
+      .every((n) => isU32(n) && n < U32_MAX)) return 'An original recovery context counter is exhausted; no generation is reused.';
+    // Deliberately no normal draft, field, locale, source or baseline required.
+    // Only this domain's remembered journal attention is bypassed for Inspect.
+    return null;
+  }
+  inspectRecovery(): boolean {
+    if (!this.api || this.inspectRecoveryReason()) return false;
+    const project = this.context.selectedProject(), status = this.state.edit.status;
+    if (!project || !status) return false;
+    const binding = freeze<SavedTextRecoveryContext>({ projectId: project.project.id, configRevision: project.revision,
+      configBaselineGeneration: project.baselineGeneration, configObservationGeneration: project.observationGeneration,
+      serviceGeneration: this.state.serviceGeneration, selectionGeneration: this.state.selectionGeneration, navigationGeneration: this.recoveryNavigationGeneration,
+      windowGeneration: status.windowGeneration, startStatusRevision: status.statusRevision, previousTerminalId: status.lastTerminal?.sessionId ?? null });
+    this.edit({ ...this.state.edit, recovery: { binding, sessionId: null, projection: null, projectionRevision: status.statusRevision,
+      prepareClaimed: false, applyClaimed: false, submitted: null, closeRequested: false, closeClaimed: false, invalidated: false, handled: false, succeeded: false } });
+    if (this.state.edit.recovery?.binding !== binding) return false;
+    // Publication can synchronously invalidate consent. Still retain the exact
+    // original Open so it can be observed/closed; never start a replacement.
+    void this.recoveryCommand('open', binding, () => this.api!.openMetadataTextEdit({ projectId: binding.projectId, intent: 'recover' }));
+    return true;
+  }
+  recoveryTick(): void { this.process(); }
+  remainingRecoveryReviewMs(): number {
+    const owner = this.state.edit.recovery?.projection;
+    return owner && this.deadline?.sessionId === owner.sessionId ? Math.max(0, Math.min(owner.reviewRemainingMs, this.deadline.at - this.now())) : 0;
+  }
+  currentRecoveryApplyBinding(): SavedTextRecoveryApplyBinding<'metadata_text'> | null {
+    const edit = this.state.edit, recovery = edit.recovery;
+    if (!usable(edit) || edit.unknownEvidence || !recovery || !this.recoveryContextMatches(recovery.binding) || this.remainingRecoveryReviewMs() <= 0 ||
+        edit.status?.active?.sessionId !== recovery.sessionId || edit.status.windowGeneration !== recovery.binding.windowGeneration ||
+        this.context.otherEditReason(recovery.binding.projectId) || this.context.otherOperationReason?.()) return null;
+    const binding = savedTextRecoveryApplyBinding(recovery);
+    return binding ? freeze(binding) : null;
+  }
+  canApplyRecovery(binding: SavedTextRecoveryApplyBinding<'metadata_text'>): boolean {
+    const current = this.currentRecoveryApplyBinding();
+    return current !== null && same(current, binding);
+  }
+  private recoveryBoundary(projectId: string): void {
+    // Retire dependent consents without adopting values, advancing a baseline,
+    // deleting a draft, or relabeling an earlier normal Save outcome.
+    this.retirePassive();
+    const entries = { ...this.state.entries };
+    for (const [key, entry] of Object.entries(entries)) if (entry.context.projectId === projectId)
+      entries[key] = { ...entry, stale: true, observationPredatesSave: true, validation: null, validationRequest: null, loadRequest: null };
+    this.publish({ ...this.state, entries });
+    this.context.onRecoveryBoundary?.(projectId);
+  }
+  applyRecovery(binding: SavedTextRecoveryApplyBinding<'metadata_text'>): boolean {
+    if (this.disposed || !this.api || !this.canApplyRecovery(binding)) return false;
+    const original = this.state.edit.recovery!.binding;
+    this.recoveryPatch({ applyClaimed: true, submitted: freeze(structuredClone(binding)) });
+    this.recoveryBoundary(original.projectId);
+    if (this.state.edit.recovery?.binding === original && !this.state.edit.recovery.closeRequested)
+      void this.recoveryCommand('apply', original, () => this.api!.applyMetadataTextEdit(binding.sessionId, binding.planToken, 'recover'));
+    return true;
+  }
+  private retireRecovery(invalidated: boolean): void {
+    const recovery = this.state.edit.recovery;
+    if (!recovery || recovery.handled || savedTextRecoverySettled(recovery) || recovery.closeRequested || invalidated && recovery.applyClaimed) return;
+    this.recoveryPatch({ closeRequested: true, invalidated: recovery.invalidated || invalidated });
+  }
+  requestRecoveryClose(): void { if (!this.disposed) { this.retireRecovery(false); this.process(); } }
+  private processRecovery(): void {
+    let recovery = this.state.edit.recovery; if (!recovery || recovery.handled) return;
+    let owner = recovery.projection;
+    if (!recovery.applyClaimed && !['final', 'unknown'].includes(owner?.phase ?? '') &&
+        (!this.recoveryContextMatches(recovery.binding) || this.state.edit.generationLost || owner && this.remainingRecoveryReviewMs() <= 0)) this.retireRecovery(true);
+    if (owner?.recovery.prepared && !savedTextRecoveryPreparedMatches(recovery) && !this.state.edit.integrityFailed) { this.observationFailed(true); return; }
+    recovery = this.state.edit.recovery; if (!recovery) return; owner = recovery.projection;
+    if (owner?.phase === 'final' && owner.nativeFinality === 'settled') {
+      const edit = this.state.edit;
+      const succeeded = savedTextRecoverySucceeded(recovery) && !edit.integrityFailed && !edit.generationLost && !edit.nativeBlocked && !edit.unknownEvidence && !edit.observationIssue;
+      const observed = edit.status, context = recovery.binding;
+      // The exact successful projection, not a later unrelated publication,
+      // bounds which older attention is covered. Another pending row wins.
+      const clearsAttention = succeeded && usable(edit) && this.recoveryContextMatches(context) &&
+        observed?.windowGeneration === context.windowGeneration && observed.statusRevision === recovery.projectionRevision &&
+        [observed.active, observed.lastTerminal].every((row) => !row || row.phase !== 'unknown' && row.nativeFinality !== 'unknown' &&
+          !row.lateSettled && row.nativeReason !== 'cleanup_unknown' && (!row.coreOutcome ||
+            row.coreOutcome.resources === 'settled' && row.coreOutcome.effect !== 'unknown' && row.coreOutcome.journal !== 'unknown' &&
+            row.coreOutcome.reason !== 'custody_unknown' && !(row.domain === 'metadata_text' && row.projectId === context.projectId && row.coreOutcome.journal === 'recovery_required')));
+      if (clearsAttention) this.recoveryCompletion = { binding: context, statusRevision: recovery.projectionRevision };
+      this.edit({ ...edit, recovery: { ...recovery, handled: true, succeeded },
+        recoveryProjects: clearsAttention ? edit.recoveryProjects.filter((id) => id !== context.projectId) : edit.recoveryProjects });
+      if (recovery.applyClaimed) this.recoveryBoundary(recovery.binding.projectId);
+      return;
+    }
+    if (!owner || !recovery.sessionId || this.state.edit.generationLost || owner.ownerGeneration !== this.state.edit.status?.windowGeneration || owner.phase === 'unknown') return;
+    const sessionId = recovery.sessionId, binding = recovery.binding;
+    if (recovery.closeRequested && !recovery.closeClaimed) {
+      this.recoveryPatch({ closeClaimed: true });
+      void this.recoveryCommand('close', binding, () => this.api!.closeMetadataTextEdit(sessionId)); return;
+    }
+    const checkout = owner.recovery.checkout;
+    if (owner.phase === 'editing' && checkout?.view.state === 'recoverable' && !recovery.prepareClaimed && !recovery.applyClaimed &&
+        !recovery.closeRequested && !recovery.invalidated && usable(this.state.edit)) {
+      this.recoveryPatch({ prepareClaimed: true });
+      if (this.state.edit.recovery?.binding === binding && !this.state.edit.recovery.closeRequested)
+        void this.recoveryCommand('prepare', binding, () => this.api!.prepareMetadataTextEdit({ sessionId, revision: checkout.revision, intent: 'recover' }));
+    }
+  }
+  private async recoveryCommand(kind: 'open' | 'prepare' | 'apply' | 'close', binding: SavedTextRecoveryContext, call: () => Promise<MetadataTextEditStatus>): Promise<void> {
+    try { this.receive(await call(), 'reply'); }
+    catch (error) {
+      const recovery = this.state.edit.recovery;
+      if (this.disposed || recovery?.binding !== binding || savedTextRecoverySettled(recovery)) return;
+      const protocol = metadataTextError(error).code === 'MetadataTextStatusInvalid';
+      this.observationFailed(protocol);
+      if (kind === 'open' || kind === 'prepare' || protocol) this.retireRecovery(true);
+      this.process();
+      await this.checkStatus(); // Observe the ORIGINAL once; never resubmit Apply.
+    }
+  }
+
   private process(): void {
     if (this.disposed || !this.api) return;
     if (this.processing) { this.processAgain = true; return; }
@@ -620,6 +840,7 @@ export class MetadataTextEditController {
     try {
       do {
         this.processAgain = false;
+        this.processRecovery();
         let attempt = this.state.edit.attempt; if (!attempt) continue;
         let owner = attempt.projection;
         if (!attempt.applyClaimed && !attempt.handled && !['final', 'unknown'].includes(owner?.phase ?? '') &&
@@ -665,12 +886,19 @@ export class MetadataTextEditController {
   }
   dispose(): void {
     if (this.disposed) return;
+    this.recoveryCompletion = null;
     this.disposed = true;
     const attempt = this.state.edit.attempt;
     if (this.api?.mode === 'native' && attempt?.sessionId && attempt.projection && !attempt.closeClaimed && !this.state.edit.generationLost &&
         attempt.projection.ownerGeneration === this.state.edit.status?.windowGeneration && !['final', 'unknown'].includes(attempt.projection.phase)) {
       try { void this.api.closeMetadataTextEdit(attempt.sessionId).catch(() => { /* Original native owner retains cleanup/finality. */ }); }
       catch { /* No retry or successful completion claim on renderer disposal. */ }
+    }
+    const recovery = this.state.edit.recovery;
+    if (this.api?.mode === 'native' && recovery?.sessionId && recovery.projection && !recovery.closeClaimed && !this.state.edit.generationLost &&
+        recovery.projection.ownerGeneration === this.state.edit.status?.windowGeneration && !['final', 'unknown'].includes(recovery.projection.phase)) {
+      try { void this.api.closeMetadataTextEdit(recovery.sessionId).catch(() => { /* Original owner retains finality; never retry. */ }); }
+      catch { /* No successful settlement inferred from renderer disposal. */ }
     }
     try { this.unlisten?.(); } catch { /* Observer disposal is not native settlement. */ }
     this.unlisten = null; this.listeners.clear(); this.passiveApi = null;

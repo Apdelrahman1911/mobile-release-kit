@@ -19,7 +19,7 @@ const GENERATED_LIMIT: u32 = 16 * 1024;
 pub enum WorkflowId { Preflight, Candidate, ExternalTesting, ProductionSubmit }
 const IDS: [WorkflowId; 4] = [WorkflowId::Preflight, WorkflowId::Candidate, WorkflowId::ExternalTesting, WorkflowId::ProductionSubmit];
 impl WorkflowId {
-    fn path(self) -> &'static str {
+    pub(crate) fn path(self) -> &'static str {
         match self {
             Self::Preflight => ".github/workflows/mobile-preflight.yml",
             Self::Candidate => ".github/workflows/mobile-candidate.yml",
@@ -154,14 +154,19 @@ pub struct PreparedView {
     pub schema_version: u32, pub files: Vec<FileView>, pub create_directories: Vec<String>,
     pub template_set: TemplateSet, pub tooling: Tooling,
 }
+pub(crate) fn tooling_coordinate_valid(repository: &str, sha: &str) -> bool {
+    plain(repository, 140) && coordinate(repository) && hex(sha, 40)
+}
+pub(crate) fn template_tooling_valid(template: &TemplateSet, tooling: &Tooling) -> bool {
+    version(&template.core_version) && template.resource_version == 1 && hex(&template.resource_sha256, 64)
+        && tooling_coordinate_valid(&tooling.repository, &tooling.sha)
+        && tooling.schema_reference == format!("https://raw.githubusercontent.com/{}/{}/schemas/project.schema.json", tooling.repository, tooling.sha)
+        && tooling.state == "format-only"
+}
 impl PreparedView {
     fn valid(&self) -> bool {
         if self.schema_version != 1 || self.files.len() != 4 || bounded(self, RESPONSE_LIMIT).is_err()
-            || !version(&self.template_set.core_version) || self.template_set.resource_version != 1
-            || !hex(&self.template_set.resource_sha256, 64) || !plain(&self.tooling.repository, 140)
-            || !coordinate(&self.tooling.repository) || !hex(&self.tooling.sha, 40)
-            || self.tooling.schema_reference != format!("https://raw.githubusercontent.com/{}/{}/schemas/project.schema.json", self.tooling.repository, self.tooling.sha)
-            || self.tooling.state != "format-only" { return false; }
+            || !template_tooling_valid(&self.template_set, &self.tooling) { return false; }
         let mut generated_total = 0u32;
         let mut previous_total = 0u32;
         for (row, id) in self.files.iter().zip(IDS) {

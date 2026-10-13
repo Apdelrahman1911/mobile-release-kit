@@ -1,7 +1,7 @@
 import { useId } from 'react';
 import type { IOSArchiveController, IOSArchiveState } from '../iosArchive.ts';
 import { iosArchiveHelp, iosArchiveInputHelp, iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp, iosSigningHelp, iosRecoveryHelp, iosArchiveOwnerReason } from '../iosArchive.ts';
-import { isIOSRecoveryOperation, iosArchiveRoles, iosArchiveAvailabilityText, iosArchiveModeAvailability, iosArchiveFindingText, iosArchiveLimitationText, iosArchiveReasonText } from '../iosArchiveProtocol.ts';
+import { isIOSRecoveryOperation, sameIOSArchiveData, sameIOSArchiveIdentity, sameIOSArchiveSavedPair, iosArchiveRoles, iosArchiveAvailabilityText, iosArchiveModeAvailability, iosArchiveFindingText, iosArchiveLimitationText, iosArchiveReasonText } from '../iosArchiveProtocol.ts';
 import type { IOSArchiveCoreStatus, IOSArchivePhase, IOSArchiveRole, IOSArchiveStage, IOSRecoveryRowState } from '../iosArchiveTypes.ts';
 import type { HelpContent } from '../types.ts';
 import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
@@ -18,6 +18,32 @@ const stages: Record<IOSArchiveStage, string> = { accepted: 'Request accepted', 
 const roles: Record<IOSArchiveRole, string> = { 'xcode-version': 'Xcode version', 'ios-sdk': 'iOS SDK selection', prepare: 'Saved preparation', archive: 'Archive', export: 'Local IPA export' };
 const negative = (status: IOSArchiveCoreStatus) => ['FAIL', 'MISSING', 'BLOCKED', 'INVALID'].includes(status);
 
+// Traceability of the parsed current unsigned original only. These visible IDs
+// do not select files, grant consent or qualify an archive's current contents.
+function UnsignedArchiveDetails({ state, review = false }: { state: IOSArchiveState; review?: boolean }) {
+  const op = state.status?.operation, project = state.project;
+  if (state.mode !== 'native' || state.archiveMode !== 'unsigned' || !op || isIOSRecoveryOperation(op) ||
+      op.context.operation !== 'ios-unsigned-archive' || state.historical || state.integrityFailed || state.nativeBlocked ||
+      state.originalUnconfirmed || state.generationLost || state.selectionPending || !project?.savedConfig || !project.savedVersion ||
+      project.inputIssue !== null || op.context.projectId !== project.projectId || op.context.draftRevision !== project.draftRevision ||
+      op.context.baselineGeneration !== project.baselineGeneration ||
+      !sameIOSArchiveSavedPair(op.context, { savedConfig: project.savedConfig, savedVersion: project.savedVersion })) return null;
+  if (review) {
+    const consent = state.consent;
+    if (!consent || op.phase !== 'awaiting-consent' || !op.intentUsable || !sameIOSArchiveIdentity(op, consent) ||
+        !sameIOSArchiveData(op.context, consent.binding.context) || !sameIOSArchiveData(project.selection, consent.binding.selection) ||
+        consent.binding.connectionGeneration !== state.connectionGeneration || consent.binding.selectionGeneration !== state.selectionGeneration ||
+        consent.binding.contextGeneration !== state.contextGeneration || consent.binding.requestGeneration !== state.requestGeneration ||
+        consent.binding.observationGeneration !== project.observationGeneration ||
+        !sameIOSArchiveData(consent.binding.versionObservation, project.versionObservation)) return null;
+  }
+  return <div role="group" aria-label="Archive details">
+    <h4>Archive details</h4>
+    <p>Archive operation ID: {op.operationId}</p>
+    <p>Archive owner generation: {op.ownerGeneration}</p>
+  </div>;
+}
+
 // Only the original native completed status supplies this result. A selected
 // folder, a path label or a provisional core terminal cannot populate it.
 export function IOSArchiveResultView({ state, operationProjectName = null }: { state: IOSArchiveState; operationProjectName?: string | null }) {
@@ -28,6 +54,7 @@ export function IOSArchiveResultView({ state, operationProjectName = null }: { s
   return <section className="offline-report" aria-label={signed ? 'Completed local signed iOS artifact validation' : 'Completed local unsigned iOS archive observation'}>
     <div className="inline-heading"><h3>{signed ? 'Local signed iOS IPA' : 'Unsigned iOS archive'} · {operationProjectName ?? op.context.projectId}</h3><Badge tone={historical ? 'warning' : 'info'}>{historical ? 'Historical / retained context' : 'This local artifact only'}</Badge></div>
     {signed ? <p><strong>Signed IPA exported and validated against this retained archive.</strong> Review the core identity, signer, profile, entitlements and correspondence findings below. This is not Store readiness, authenticated source provenance or permission to publish.</p> : <p><strong>Archive created and structurally checked — not a signed release.</strong> Signing/profile authenticity, IPA export, Store readiness and authenticated source provenance were not assessed.</p>}
+    <UnsignedArchiveDetails state={state} />
     <p>Saved version {result.usedVersion.name} · build {result.usedVersion.build}. {result.entries} observed entries · {result.bytes} observed bytes.</p>
     <p>Retained location, relative to this run’s source project: <code>{result.archive}</code>.</p>
     {result.scope === 'local-signed-ios-artifact-validation' && <><p>Retained IPA: <code>{result.ipa}</code> · {result.ipaBytes} observed bytes.</p>
@@ -104,6 +131,7 @@ export function IOSArchive({ state, controller, projectName, operationProjectNam
     {!consent && <><button type="button" className="button" data-mrk-ios-archive-action="review" disabled={prepareReason !== null} onClick={() => void controller.prepare()}>Review saved iOS inputs</button>{prepareReason && <p className="review-caution">{prepareReason}</p>}</>}
     {consent && consent.binding.selection && consent.binding.context.operation !== 'ios-local-recovery' && <div className="session-review" role="group" aria-label={signed ? 'Confirm this saved signed iOS export intent' : 'Confirm this saved unsigned iOS archive intent'}>
       <h3>{signed ? 'Sign and export this saved app once?' : 'Create this unsigned archive once?'}</h3>
+      <UnsignedArchiveDetails state={state} review />
       <p>Project <strong>{consent.binding.context.projectId}</strong> · <code>{consent.binding.selection.container}</code> · scheme <code>{consent.binding.selection.scheme}</code> · configuration <code>{consent.binding.selection.configuration}</code>.</p>
       <p>Bundle ID <code>{consent.binding.selection.bundleId}</code> · saved version <strong>{consent.binding.context.savedVersion.name}</strong> · build <strong>{consent.binding.context.savedVersion.build}</strong>.</p>
       <p>Saved preparation {consent.binding.selection.preparationConfigured ? 'will execute' : 'is not configured'}. {signed ? 'The original archive and exported IPA are retained. Core must validate the exact signer/profile and artifact pair; failed or cancelled output remains incomplete.' : 'The resulting archive is retained; it is not a signed IPA.'}</p>
@@ -116,7 +144,8 @@ export function IOSArchive({ state, controller, projectName, operationProjectNam
     </div>}
     {state.error && <ErrorNotice error={state.error} title="No new iOS archive outcome was confirmed" />}
     {state.originalUnconfirmed && <p className="review-caution" role="status">The original acknowledgement is unconfirmed. Do not repeat Start. Check original Status to cancel or settle that operation; it cannot create new consent.</p>}
-    {op && <div className="session-progress" role="status" aria-live="polite">
+    {op && <div className="session-progress" role="status" aria-live="polite" aria-label="Original iOS archive status">
+      <UnsignedArchiveDetails state={state} />
       <div className="inline-heading"><h3>Archive status · {operationProjectName ?? op.context.projectId}</h3><Badge tone={op.phase === 'unknown' ? 'warning' : 'neutral'}>{phases[op.phase]}</Badge></div>
       {op.stage && <p>Reached stage: {stages[op.stage]}. A stage is not a completion percentage or proof that cleanup finished.</p>}
       {op.outcome && <p><strong>Outcome:</strong> {op.outcome}</p>}<p>{iosArchiveReasonText[op.reason]}</p>
@@ -146,6 +175,30 @@ const recoveryStates: Record<IOSRecoveryRowState, string> = {
   'cleanup-only': 'The exact project session retains cleanup-only state. Review the offered ordinary action; do not delete its controls manually.',
   'not-inspected': 'Project inspection was not entered after account attention or failure. No project recovery state is established.',
 };
+// Parsed current native identity/status only: not consent, file authority or a
+// claim that every worker lifetime settled. Recovery needs no saved inputs.
+function RecoveryDetails({ state }: { state: IOSArchiveState }) {
+  const op = state.status?.operation, project = state.project, consent = state.consent;
+  if (state.mode !== 'native' || !op || !isIOSRecoveryOperation(op) ||
+      state.historical || state.integrityFailed || state.nativeBlocked || state.originalUnconfirmed ||
+      state.generationLost || state.selectionPending || state.observationIssue !== null ||
+      !project || op.context.projectId !== project.projectId) return null;
+  if (consent && (op.phase !== 'awaiting-consent' || !op.intentUsable ||
+      !sameIOSArchiveIdentity(op, consent) || !sameIOSArchiveData(op.context, consent.binding.context) ||
+      consent.binding.connectionGeneration !== state.connectionGeneration ||
+      consent.binding.selectionGeneration !== state.selectionGeneration ||
+      consent.binding.contextGeneration !== state.contextGeneration ||
+      consent.binding.requestGeneration !== state.requestGeneration)) return null;
+  return <div className="save-note" role="group" aria-label="Recovery details">
+    <p><strong>Recovery request details.</strong> These IDs help support distinguish inspection from recovery. They do not authorize another action or prove that every worker finished cleanup.</p>
+    <p>Recovery operation ID: {op.operationId}</p>
+    <p>Recovery owner generation: {op.ownerGeneration}</p>
+    <p>Recovery phase: {op.phase}</p>
+    <p>Recovery outcome: {op.outcome ?? 'not-observed'}</p>
+    <p>Recovery reason: {op.reason}</p>
+  </div>;
+}
+
 export function IOSRecovery({ state, controller, projectName, operationProjectName, onHelp }: {
   state: IOSArchiveState; controller: IOSArchiveController; projectName: string | null; operationProjectName: string | null;
   onHelp?: (help: HelpContent) => void;
@@ -174,6 +227,7 @@ export function IOSRecovery({ state, controller, projectName, operationProjectNa
       <button type="button" className="button" data-mrk-ios-recovery-action="start" disabled={startReason !== null} onClick={() => void controller.start(consent.operationId, consent.ownerGeneration)}>{choice.action === 'inspect' ? 'Inspect local state once' : `Recover inspected ${choice.action} session`}</button>
       {startReason && <p className="review-caution">{startReason}</p>}
     </div>}
+    <RecoveryDetails state={state} />
     {state.error && <ErrorNotice error={state.error} title="No new local recovery outcome was confirmed" />}
     {state.originalUnconfirmed && <p className="review-caution">Do not repeat Start. Check the original iOS owner status to settle or cancel the unconfirmed request; no observation can rearm its consent.</p>}
     {recovery && <div className="session-progress" role="status" aria-live="polite"><h3>{operationProjectName ?? recovery.context.projectId} · {phases[recovery.phase]}</h3>
@@ -184,7 +238,7 @@ export function IOSRecovery({ state, controller, projectName, operationProjectNa
     {report && recovery && <div className="session-review" aria-label="Original native local recovery report">
       {(['account', 'project'] as const).map((domain) => { const row = report[domain]; if (!row) return null;
         const actionReason = controller.recoveryReason(domain, recovery);
-        return <div key={domain}><h4>{domain === 'account' ? 'Account signing state' : 'Project build-input state'} · {row.status}</h4><p>{recoveryStates[row.status]}</p>
+        return <div key={domain} role="group" aria-label={domain === 'account' ? 'Account signing recovery state' : 'Project build-input recovery state'}><h4>{domain === 'account' ? 'Account signing state' : 'Project build-input state'} · {row.status}</h4><p>{recoveryStates[row.status]}</p>
           {row.session && <p>Exact inspected session: <code>{row.session}</code>.</p>}
           {recovery.context.recovery.action === 'inspect' && <><button type="button" className="button secondary small" disabled={actionReason !== null} onClick={() => void controller.prepareRecovery(domain, recovery)}>Review ordinary {domain} recovery</button>{actionReason && <p className="save-note">{actionReason}</p>}</>}
         </div>;

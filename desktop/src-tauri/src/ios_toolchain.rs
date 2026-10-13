@@ -19,7 +19,7 @@ pub(crate) fn sibling_target(value: &str) -> Option<&str> {
         .then_some(name)
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use crate::installed_runtime::IOSXcodeSlots;
 
 #[cfg(test)]

@@ -917,6 +917,140 @@ FILE_NATIVE_PANELS = {case: {f"Session(Native({index}))": identifier for index, 
 IOS_CURRENT_CASES = IOS_CASES + ("ios-signing-inputs", *IOS_SIGNED_CASES, "ios-recovery-empty")
 IOS_OPERATION_CASES = IOS_CASES + IOS_SIGNED_CASES + ("ios-recovery-empty", IOS_ACCOUNT_CASE)
 PROJECT_FIELDS_CASE = "project-fields"
+# Fixed no-hook projects. No arbitrary project or configured program enters this
+# opt-in observation; arbitrary offline preflight remains potentially effectful.
+LOCAL_CHECK_SCOPE = "doctor-preflight2"
+LOCAL_CHECK_CASES = ("local-tool-observations", "local-saved-offline")
+LOCAL_CHECK_IDS = (("developer-selection", "git", "java", "javac"), ("developer-selection", "git", "xcode"))
+LOCAL_CHECK_STATUSES = ("PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE")
+LOCAL_CHECK_LIMITATIONS = ("saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated", "core-builds-disabled",
+                          "artifact-validation-not-requested", "toolkit-signing-credentials-store-not-requested", "release-readiness-not-assessed")
+LOCAL_CHECK_FINDINGS = ("version-source", "platform-selection", "android-module", "android-gradle-wrapper", "android-debug-identity",
+                       "workspace-private-output", "android-artifact", "preflight-early-exit", "configuration-policy", "metadata-policy",
+                       "configured-project-check", "core-lifecycle", "other-core-finding")
+LOCAL_CHECK_NOT_RUN = ("invalid-draft", "platform-disabled", "host-mismatch", "unsupported-host", "missing-in-supported-lookup",
+                       "unsupported-installation", "unselected-installation", "full-xcode-not-selected", "stopped")
+
+
+def local_check_fixture_data(case):
+    need(type(case) is str and case in LOCAL_CHECK_CASES, "fixture-case")
+    files = {".gitignore": IGNORE_PREFIX + IGNORE_RULES, "app/build.gradle.kts": SOURCE, "keep.txt": KEEP,
+             "release/mobile-release.json": local_edit_config("local-metadata-text") if case == LOCAL_CHECK_CASES[0] else CONFIG,
+             "version.properties": VERSION}
+    return files, {".": (0o700, (".gitignore", "app", "keep.txt", "release", "version.properties")),
+                   "app": (0o700, ("build.gradle.kts",)), "release": (0o700, ("mobile-release.json",))}
+
+
+def _local_checks_base(case):
+    files, _ = local_check_fixture_data(case)
+    return {"schemaVersion": 1, "case": case, "tools": [], "offline": None, "sameOriginalNativeTerminals": True,
+            "exactFixtureReadback": True, "fixture": {"files": 5, "directories": 3, "sha256": {p: digest(b) for p, b in files.items()}},
+            "releaseReadiness": "not-assessed", "physicalDropdownGestureTested": False}
+
+
+def _local_checks_report(value, case):
+    """Admit only actual returned finite facts; no generated terminal fallback."""
+    label = "local-checks-report"
+    target = _local_checks_base(case)
+    need(type(value) is dict and value.keys() == target.keys(), label)
+    def token(v):
+        return type(v) is str and re.fullmatch(r"[0-9a-f]{32}", v) is not None
+    def integer(v, maximum=2**32 - 2, minimum=0):
+        return type(v) is int and minimum <= v <= maximum
+    def version(v):
+        return type(v) is str and re.fullmatch(r"[0-9][A-Za-z0-9._+\-]{0,63}", v) is not None
+    def build(v):
+        return type(v) is str and re.fullmatch(r"[0-9]{1,3}[A-Z][0-9]{1,6}[a-z]?", v) is not None
+    def context(row, platform, operation, saved=False):
+        need(type(row) is dict and set(row) == {"projectId", "draftRevision", "baselineGeneration", "platform", "operation"} | ({"savedConfig"} if saved else set()), label)
+        need(type(row["projectId"]) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", row["projectId"])
+             and integer(row["draftRevision"]) and integer(row["baselineGeneration"])
+             and row["platform"] == platform and row["operation"] == operation, label)
+        if saved:
+            _exact(row["savedConfig"], {"bytes": len(CONFIG), "sha256": digest(CONFIG)})
+    def tool_row(row, role):
+        need(type(row) is dict and set(row) == {"id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment"} and row["id"] == role, label)
+        baseline = row["baseline"]
+        need(type(baseline) is dict and set(baseline) == {"kind", "version", "build"}, label)
+        if role in ("java", "javac"):
+            need(baseline["kind"] == "workflow-reference" and version(baseline["version"]) and baseline["build"] is None, label)
+        elif role == "xcode":
+            need(baseline["kind"] == "exact-pin" and version(baseline["version"]) and build(baseline["build"]), label)
+        else:
+            _exact(baseline, {"kind": "no-local-policy", "version": None, "build": None})
+        empty = row["version"] is None and row["build"] is None and row["assessment"] == "not-assessed"
+        if row["state"] == "not-run":
+            need(row["reason"] in LOCAL_CHECK_NOT_RUN and (row["reason"] != "full-xcode-not-selected" or role == "xcode") and empty and row["returnCode"] is None, label)
+            return
+        need(row["state"] == "completed" and row["reason"] in ("observed", "nonzero-exit", "version-unrecognized", "selection-unrecognized")
+             and integer(row["returnCode"], 2**31 - 1, -(2**31)) and (row["reason"] == "nonzero-exit") == (row["returnCode"] != 0), label)
+        if row["reason"] != "observed":
+            need(empty and (row["reason"] == "selection-unrecognized") == (role == "developer-selection" and row["reason"] != "nonzero-exit"), label)
+        elif role == "developer-selection":
+            need(empty, label)
+        elif role == "xcode":
+            need(version(row["version"]) and build(row["build"])
+                 and row["assessment"] == ("match" if row["version"] == baseline["version"] and row["build"] == baseline["build"] else "mismatch"), label)
+        else:
+            need(version(row["version"]) and row["build"] is None and row["assessment"] == "no-local-policy", label)
+    if case == LOCAL_CHECK_CASES[0]:
+        rows = value["tools"]
+        need(type(rows) is list and len(rows) == 2 and value["offline"] is None, label)
+        for index, row in enumerate(rows):
+            need(type(row) is dict and set(row) == {"runId", "ownerGeneration", "context", "statusRevision", "phase", "finality", "outcome", "commandsAttempted", "checks", "sameOriginal", "rendered", "staleAfterContextChange"}, label)
+            context(row["context"], ("android", "ios")[index], "build")
+            need(token(row["runId"]) and token(row["ownerGeneration"]) and integer(row["statusRevision"], minimum=1)
+                 and row["phase"] == "settled" and row["finality"] == "settled" and row["outcome"] == "complete"
+                 and row["sameOriginal"] is True and row["rendered"] is True and row["staleAfterContextChange"] is (index == 0), label)
+            checks = row["checks"]
+            need(type(checks) is list and len(checks) == len(LOCAL_CHECK_IDS[index]), label)
+            for check, role in zip(checks, LOCAL_CHECK_IDS[index]):
+                tool_row(check, role)
+            need(integer(row["commandsAttempted"], 4, 1) and row["commandsAttempted"] == sum(c["state"] == "completed" for c in checks)
+                 and any(c["id"] != "developer-selection" and c["reason"] == "observed" and c["returnCode"] == 0 and version(c["version"]) for c in checks), label)
+        first, second = rows
+        need(first["runId"] != second["runId"] and first["ownerGeneration"] != second["ownerGeneration"]
+             and first["statusRevision"] < second["statusRevision"]
+             and {**first["context"], "platform": "ios"} == second["context"], label)
+        target["tools"] = rows
+    else:
+        need(value["tools"] == [] and type(value["tools"]) is list, label)
+        row = value["offline"]
+        need(type(row) is dict and set(row) == {"operationId", "ownerGeneration", "context", "statusRevision", "phase", "outcome", "result", "sameOriginal", "dirtyDraftObserved", "explicitConsent", "startArrivalObserved", "startArrivalLate", "rendered", "draftDiscardedThroughUi"}, label)
+        context(row["context"], "android", "offline-preflight", True)
+        need(token(row["operationId"]) and token(row["ownerGeneration"]) and integer(row["statusRevision"], minimum=1)
+             and row["phase"] == "terminal" and row["outcome"] == "complete" and row["startArrivalLate"] is False
+             and all(row[k] is True for k in ("sameOriginal", "dirtyDraftObserved", "explicitConsent", "startArrivalObserved", "rendered", "draftDiscardedThroughUi")), label)
+        result = row["result"]
+        need(type(result) is dict and set(result) == {"schemaVersion", "scope", "usedConfig", "findings", "summary", "limitations"}, label)
+        _exact(result["schemaVersion"], 1)
+        _exact(result["scope"], "saved-offline-android-no-core-build")
+        _exact(result["usedConfig"], {"bytes": len(CONFIG), "sha256": digest(CONFIG)})
+        _exact(result["limitations"], list(LOCAL_CHECK_LIMITATIONS))
+        summary, findings = result["summary"], result["findings"]
+        need(type(summary) is dict and set(summary) == {"total", "shown", "omitted", "counts"}
+             and all(integer(summary[k], 4096) for k in ("total", "shown", "omitted"))
+             and summary["shown"] == min(summary["total"], 128) and summary["omitted"] == summary["total"] - summary["shown"]
+             and type(summary["counts"]) is dict and set(summary["counts"]) == set(LOCAL_CHECK_STATUSES)
+             and all(integer(n, 4096) for n in summary["counts"].values()) and sum(summary["counts"].values()) == summary["total"]
+             and type(findings) is list and len(findings) == summary["shown"], label)
+        shown = dict.fromkeys(LOCAL_CHECK_STATUSES, 0)
+        for index, finding in enumerate(findings):
+            need(type(finding) is dict and set(finding) == {"ordinal", "check", "status", "message", "projectCheckIndex"}
+                 and integer(finding["ordinal"], 127) and finding["ordinal"] == index and finding["check"] in LOCAL_CHECK_FINDINGS
+                 and finding["message"] == finding["check"] and finding["status"] in LOCAL_CHECK_STATUSES
+                 and finding["projectCheckIndex"] is None and finding["check"] != "configured-project-check", label)
+            shown[finding["status"]] += 1
+        need(all(shown[k] <= summary["counts"][k] and (summary["omitted"] != 0 or shown[k] == summary["counts"][k]) for k in shown), label)
+        need(all(any(f["check"] == k and f["status"] == v for f in findings) for k, v in
+                 (("android-gradle-wrapper", "MISSING"), ("version-source", "PASS"), ("workspace-private-output", "PASS"))), label)
+        target["offline"] = row
+    _exact(value, target, ("localChecks",))
+    return value
+
+
+LOCAL_EDITS_SCOPE = "local-edits3"
+LOCAL_EDIT_CASES = ("local-metadata-text", "local-release-version", "local-github-apply")
 INSTALLATION_INSPECTION_CASE = "installation-inspection"
 VAULT_HELPER_SCOPE = "vault-helper-shipping"
 VAULT_HELPER_CASES = ("vault-helper-roundtrip", "vault-helper-stop-before-go", "vault-helper-stop-after-add")
@@ -934,7 +1068,7 @@ PROJECT_FIELD_CHOICES = (
 )
 PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
-ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,)
+ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-aqua"
@@ -955,6 +1089,17 @@ FAILURE_STEPS = frozenset((
     "QuitCancel QuitCancelled RetainedReview Close Quit Exit PickerPending Reload Lost"
 ).split()) | frozenset(f"{name}({number})" for name in (
     "Prepare", "Review", "OpenConfirmation", "Confirmation", "Acknowledge", "Acknowledged", "Apply", "Applied") for number in (0, 1))
+FAILURE_STEPS |= frozenset(f"Checks({name})" for name in (
+    "Navigate ToolsSelect ToolsStale EditBranch EditedBranch Releases Prepare Intent Acknowledge Acknowledged Run OfflineWait OfflineRead Settings Discard ConfirmDiscard Discarded"
+).split()) | frozenset(f"Checks({name}({i}))" for name in ("ToolsStart", "ToolsWait", "ToolsRead") for i in (0, 1))
+
+FAILURE_STEPS |= frozenset(f"LocalEdits({name})" for name in (
+    "Navigate Name Build CloseReview Closed Repository Pin Propose Proposal Mutate Done"
+).split()) | frozenset(f"LocalEdits({name}({number}))" for name in (
+    "Context Loaded Load Inputs Validate Validated Open Opened Prepare OpenText Review Confirm Confirmation "
+    "Check Checked Type Typed Apply Result Refresh Readback"
+).split() for number in range(3)) | frozenset(
+    f"LocalEdits(Fill({round_number}, {field}))" for round_number, field in ((0, 1), (0, 2), (1, 0), (1, 4)))
 FAILURE_STEPS |= frozenset(f"Ios({name})" for name in (
     "Navigate SignedMode ReadVersion VersionRead Prepare Review Acknowledge Acknowledged MutateVersion Start Running Cancel Hold ReleaseHold Final "
     "AccountPrepare AccountReview AccountAcknowledge AccountAcknowledged AccountStart AccountRunning AccountFinal"
@@ -1011,6 +1156,8 @@ FAILURE_REASONS = frozenset((
     "ios-original-witness ios-request-contract ios-status-contract ios-version-contract "
     "ios-finality-contract ios-fixture-contract ios-dom-contract "
     "recovery-original-contract recovery-request-contract recovery-result-contract recovery-dom-contract recovery-fixture-contract "
+    "local-edits-original-contract local-edits-dom-contract local-edits-fixture-contract "
+    "local-checks-original-contract local-checks-dom-contract local-checks-fixture-contract local-checks-unexpected-cancel local-checks-start-arrival "
     "session-request-contract session-result-contract session-original-contract session-dom-contract "
     "project-fields-request-contract project-fields-result-contract project-fields-original-contract "
     "project-fields-fixture-contract project-fields-dom-contract "
@@ -1459,10 +1606,10 @@ IOS_WORKSPACE = b'''<?xml version="1.0" encoding="UTF-8"?>
 '''
 
 OWNER_PINS = {
-    "owned_process.py": "0c7c87c7eaf27629be2eb33c195a956b6c40b7b5883214a08e15f255ac4939b8",
-    "_command_process.py": "30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69",
+    "owned_process.py": 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59',
+    "_command_process.py": 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43',
     "_native_process.py": "70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4",
-    "cancellation.py": "5f469444f42b5ad6a69ecce8161a7d83e67303c92a221a31f88c079f4ff29d35",
+    "cancellation.py": "eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a",
 }
 
 
@@ -1479,23 +1626,41 @@ def digest(body):
     return hashlib.sha256(body).hexdigest()
 
 
+ARM_TARGET = "aarch64-apple-darwin"
+INTEL_TARGET = "x86_64-apple-darwin"
+
+
+def target_data(target):
+    need(type(target) is str and target in (ARM_TARGET, INTEL_TARGET), "native-target")
+    intel = target == INTEL_TARGET
+    return {"machine": "x86_64" if intel else "arm64", "runner": "X64" if intel else "ARM64",
+            "releaseInput": "build-release-intel.json" if intel else "build-release.json",
+            "sourceLock": "source-lock-intel.json" if intel else "source-lock.json",
+            "releasePrefix": "macos26-x86_64-" if intel else "macos26-arm64-",
+            "platform": "macOS26-x86_64" if intel else "macOS26-arm64",
+            "cargo": "/Users/runner/.rustup/toolchains/stable-" + target + "/bin/cargo",
+            "toolchain": "1.98.0" if intel else "1.98.1"}
+
+
 @dataclass(frozen=True)
 class Binding:
     source: str
     run: str
     attempt: str
+    target: str = ARM_TARGET
 
     def checked(self):
+        target_data(self.target)
         need(type(self.source) is str and re.fullmatch(r"[0-9a-f]{40}", self.source), "source-binding")
         need(all(type(v) is str and re.fullmatch(r"[1-9][0-9]{0,19}", v) for v in (self.run, self.attempt)), "run-binding")
         return self
 
-    def root(self, *, project_fields=False, vault_helper=False, installation_inspection=False, recovery=False):
+    def root(self, *, project_fields=False, vault_helper=False, installation_inspection=False, recovery=False, local_edits=False, local_checks=False):
         self.checked()
-        flags = (project_fields, vault_helper, installation_inspection, recovery)
+        flags = (project_fields, vault_helper, installation_inspection, recovery, local_edits, local_checks)
         need(all(type(flag) is bool for flag in flags) and sum(flags) <= 1, "scope-not-supported")
         suffix = ("-project-fields" if project_fields else "-vault-helper" if vault_helper
-                  else "-installation-inspection" if installation_inspection else "-project-recovery" if recovery else "")
+                  else "-installation-inspection" if installation_inspection else "-project-recovery" if recovery else "-local-edits" if local_edits else "-doctor-preflight" if local_checks else "")
         return Path("/private/tmp") / f"mrk-macos-aqua-{self.source}-{self.run}-{self.attempt}{suffix}"
 
     def public(self):
@@ -1526,7 +1691,11 @@ def _expected_completion_selection(case):
 
 
 def selected_cases(scope=None):
-    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE), "scope-not-supported")
+    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE), "scope-not-supported")
+    if scope == LOCAL_CHECK_SCOPE:
+        return LOCAL_CHECK_CASES
+    if scope == LOCAL_EDITS_SCOPE:
+        return LOCAL_EDIT_CASES
     if scope == VAULT_HELPER_SCOPE:
         return VAULT_HELPER_CASES
     if scope in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE):
@@ -1545,12 +1714,29 @@ def argument_scope(argv):
                                or argv == ["--scope", VAULT_HELPER_SCOPE]
                                or argv == ["--scope", INSTALLATION_INSPECTION_CASE]
                                or argv == ["--scope", RECOVERY_CASE]
-                               or argv == ["--scope", IOS_ACCOUNT_CASE]), "arguments-not-supported")
+                               or argv == ["--scope", IOS_ACCOUNT_CASE]
+                               or argv == ["--scope", LOCAL_EDITS_SCOPE]
+                               or argv == ["--scope", LOCAL_CHECK_SCOPE]), "arguments-not-supported")
     return argv[1] if argv else None
+
+
+def entry_arguments(argv):
+    # The fixed host target follows, never precedes/interleaves, the old scope.
+    need(type(argv) is list and all(type(value) is str for value in argv), "arguments-not-supported")
+    target = ARM_TARGET
+    if len(argv) >= 2 and argv[-2] == "--target":
+        target = argv[-1]
+        target_data(target)
+        argv = argv[:-2]
+    return argument_scope(argv), target
 
 
 def case_timeout(case):
     need(type(case) is str and case in ALL_CASES, "case-binding")
+    if case in LOCAL_CHECK_CASES:
+        return (105, 1875)[LOCAL_CHECK_CASES.index(case)]
+    if case in LOCAL_EDIT_CASES:
+        return (135, 105, 195)[LOCAL_EDIT_CASES.index(case)]
     return 525 if case == IOS_ACCOUNT_CASE else 95 if case == INSTALLATION_INSPECTION_CASE else 325 if case in IOS_OPERATION_CASES or case == RECOVERY_CASE else 135 if case in VAULT_HELPER_CASES else 60
 
 
@@ -1807,6 +1993,29 @@ def _expected_ios_pending_report():
             "archiveOrExportRequested": False, "workMs": 120000, "cleanupMs": 240000, "hardMs": 250000,
             "observationMs": 515000, "outerInvocationMs": 525000, "shippingBinaryQualified": False}
 
+
+
+def normal_account_observation(value, binding):
+    """Closed normal-accessibility comparison DATA, not worker-finality facts."""
+    binding.checked()
+    keys = {"schemaVersion", "sourceCommit", "target", "runId", "runAttempt", "fixtureSha256", "inspect", "recover",
+            "sessionSha256", "inspectUnchecked", "recoverUnchecked", "ordinaryQuit"}
+    need(type(value) is dict and set(value) == keys and type(value["schemaVersion"]) is int
+         and value["schemaVersion"] == 1 and value["sourceCommit"] == binding.source
+         and value["target"] == binding.target and value["runId"] == binding.run and value["runAttempt"] == binding.attempt
+         and value["fixtureSha256"] == digest(str(binding.root() / IOS_ACCOUNT_CASE).encode("utf-8"))
+         and type(value["sessionSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", value["sessionSha256"])
+         and all(value[key] is True for key in ("inspectUnchecked", "recoverUnchecked", "ordinaryQuit")),
+         "normal-account-observation")
+    for name, status in (("inspect", "pending"), ("recover", "recovered")):
+        row = value[name]
+        need(type(row) is dict and set(row) == {"operationId", "ownerGeneration", "phase", "outcome", "reason", "accountStatus"}
+             and all(type(row[key]) is str and re.fullmatch(r"[0-9a-f]{32}", row[key]) for key in ("operationId", "ownerGeneration"))
+             and row["phase"] == "terminal" and row["outcome"] == "complete" and row["reason"] == "none"
+             and row["accountStatus"] == status, "normal-account-observation-operation")
+    need(all(value["inspect"][key] != value["recover"][key] for key in ("operationId", "ownerGeneration")),
+         "normal-account-observation-reused")
+    return value
 
 def _ios_pending_report(value):
     expected = _expected_ios_pending_report()
@@ -2094,7 +2303,7 @@ def _expected_project_fields():
             "laterSyntheticNavigation": accepted, "exactNativeSelection": True if accepted else None,
             "sourceBookStarted": accepted and i != 6, "originalSourceChildGuiAndCoordinatorSettled": True,
             "relativePath": relative, "errorCode": error, "draftObserved": True})
-    return {"schemaVersion": 2, "oneUseOriginalDocumentRegistration": True, "normalProfileAvailable": False,
+    return {"schemaVersion": 2, "oneUseOriginalDocumentRegistration": True, "normalProfileAvailable": True,
         "selection": "original-bound-installed-macos-project-fields", "rows": rows, "originalOperations": 12,
         "allOriginalsSettled": True, "completeDraftAndBaselineMatched": True,
         "previewValidation": "invalid-retained-ios-fields", "fixtureMutationsRestored": True,
@@ -2275,9 +2484,13 @@ def expected_result(binding, case):
         value["native"]["panelAttachments"] = [False, True, False, False]
         value["reload"] = dict.fromkeys(value["reload"], False)
         return value
-    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES:
+    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES:
         value = expected_result(binding, "noop-stale")
         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
+        if case in LOCAL_CHECK_CASES:
+            value["localChecks"] = _local_checks_base(case)  # Shape DATA only; actual report required below.
+        if case in LOCAL_EDIT_CASES:
+            value["localEdits"] = _expected_local_edits(case)
         if case in IOS_OPERATION_CASES:
             value["iosArchive"] = _expected_ios_report(case)
         if case in SESSION_CASES:
@@ -2459,6 +2672,16 @@ RESULT_LOCATION_KEYS |= frozenset((
 
 RESULT_LOCATION_KEYS |= frozenset(("projectRecovery ordinaryProfileAvailableBeforeAdmission prepared projection noChild runtimeSettlementJoined coreTerminal coreFatal reviewMinted intentUsable action review observation recoveredSession roles quiescence requests replies freshUncheckedReview explicitAcknowledgement exactSessionReviewed commandDispatches signedModesActivated").split())
 
+RESULT_LOCATION_KEYS |= frozenset((
+    "localEdits domain sameOriginalSessions originalFinalities visibleReviewAndResult passiveReadbacks fixture directories "
+    "completedOriginals staleAppendReturnedAndClosed sessions apply close fileReadback controlIntegrationOnly "
+    "physicalDropdownGestureQualified imagesDoctorVaultRestartQualified"
+).split())
+
+
+RESULT_LOCATION_KEYS |= frozenset(("localChecks tools offline sameOriginalNativeTerminals exactFixtureReadback releaseReadiness physicalDropdownGestureTested runId context platform operation draftRevision baselineGeneration checks commandsAttempted state reason version build returnCode baseline kind assessment sameOriginal rendered staleAfterContextChange dirtyDraftObserved explicitConsent startArrivalObserved startArrivalLate draftDiscardedThroughUi usedConfig findings summary limitations total shown omitted counts ordinal check message projectCheckIndex savedConfig").split())
+
+
 def _result_location(parts):
     if type(parts) is not tuple or not 1 <= len(parts) <= 12 or type(parts[0]) is not str:
         return None
@@ -2513,6 +2736,9 @@ def parse_result(stdout, stderr, binding, case):
     except (ValueError, RecursionError, UnicodeError) as error:
         raise Refused("result-json") from error
     expected = expected_result(binding, case)
+    if case in LOCAL_CHECK_CASES:
+        need(type(value) is dict and "localChecks" in value, "local-checks-report")
+        expected["localChecks"] = _local_checks_report(value["localChecks"], case)
     if case == RECOVERY_CASE:
         need(type(value) is dict and "projectRecovery" in value, "recovery-report")
         expected["projectRecovery"] = _recovery_report(value["projectRecovery"])
@@ -3979,8 +4205,110 @@ def signature(info):
             info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+# Closed synthetic fixture bytes. The workflow strings are literal replacements
+# in the authenticated shipped github-setup-v1.json; they are NOT generated by
+# importing the core during qualification, and no workflow is dispatched.
+LOCAL_WORKFLOW_RESOURCE_SHA256 = "6fa1f3b7dd1907f56af44ccf050458626d702ec0a06e5578a7416986c46ad29a"
+LOCAL_STALE = b"# MRK local workflow original changed\n"
+LOCAL_VERSION_BEFORE = b"# Public local edit fixture\n  VERSION_NAME = 1.2.3  \nBUILD_NUMBER=7\nUNRELATED = keep-this-value\n"
+LOCAL_VERSION_AFTER = b"# Public local edit fixture\n  VERSION_NAME = 2.3.4  \nBUILD_NUMBER=8\nUNRELATED = keep-this-value\n"
+LOCAL_TEXT_FIELDS = (
+    ("android", "title.txt", b"Public title", b"Public title"),
+    ("android", "short_description.txt", b"Old summary", b"Public summary"),
+    ("android", "full_description.txt", None, b"Public description"),
+    ("ios", "description.txt", b"Old iOS description", b"Public iOS description"),
+    ("ios", "keywords.txt", b"public,example", b"public,example"),
+    ("ios", "privacy_url.txt", b"https://example.com/privacy", b"https://example.com/privacy"),
+    ("ios", "support_url.txt", b"https://example.com/support", b"https://example.com/support"),
+    ("ios", "release_notes.txt", None, b"Public release notes"),
+)
+LOCAL_WORKFLOWS = {
+    '.github/workflows/mobile-preflight.yml': b"name: Mobile release preflight\nrun-name: ${{ inputs.desktop_request != '' && format('MRK Desktop preflight [{0}]', inputs.desktop_request) || 'Mobile release preflight' }}\n\non:\n  workflow_dispatch:\n    inputs:\n      platform:\n        description: Platform to validate\n        required: true\n        default: both\n        type: choice\n        options:\n          - android\n          - ios\n          - both\n      desktop_request:\n        description: Optional Desktop request marker; use with the reviewed source and full ref.\n        required: false\n        default: ''\n        type: string\n      desktop_source_sha:\n        description: Optional Desktop-reviewed application commit (40 lowercase hexadecimal characters).\n        required: false\n        default: ''\n        type: string\n      desktop_expected_ref:\n        description: Optional Desktop-reviewed full branch ref, for example refs/heads/main.\n        required: false\n        default: ''\n        type: string\n\npermissions:\n  contents: read\n\njobs:\n  preflight:\n    uses: example/toolkit/.github/workflows/reusable-preflight.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    with:\n      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      source_sha: ${{ inputs.desktop_source_sha || github.sha }}\n      platform: ${{ inputs.platform }}\n      desktop_request: ${{ inputs.desktop_request }}\n      desktop_source_sha: ${{ inputs.desktop_source_sha }}\n      desktop_expected_ref: ${{ inputs.desktop_expected_ref }}\n",
+    '.github/workflows/mobile-candidate.yml': b"name: Mobile internal candidate\nrun-name: ${{ inputs.desktop_request != '' && format('MRK Desktop candidate [{0}]', inputs.desktop_request) || 'Mobile internal candidate' }}\non:\n  workflow_dispatch:\n    inputs:\n      platform:\n        description: Platform to build once and upload to internal testing\n        required: true\n        type: choice\n        options:\n        - android\n        - ios\n        - both\n      confirmation:\n        description: candidate:<platform>:<version>:<build>\n        required: true\n        type: string\n      recovery_run_id:\n        description: Run holding the original intent or selected complete final; never replaces authorization.\n        required: false\n        default: ''\n        type: string\n      recovery_confirmation:\n        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.\n        required: false\n        default: ''\n        type: string\n      desktop_request:\n        description: Optional exact Desktop request marker; use with reviewed source and full ref.\n        required: false\n        default: ''\n        type: string\n      desktop_source_sha:\n        description: Optional Desktop-reviewed current dispatch commit; not a replacement for original recovery source.\n        required: false\n        default: ''\n        type: string\n      desktop_expected_ref:\n        description: Optional Desktop-reviewed full branch ref; all three Desktop inputs must be supplied together.\n        required: false\n        default: ''\n        type: string\npermissions: {}\njobs:\n  candidate:\n    permissions:\n      actions: read\n      artifact-metadata: write\n      attestations: write\n      contents: read\n      id-token: write\n    uses: example/toolkit/.github/workflows/reusable-candidate.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    with:\n      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      source_sha: ${{ github.sha }}\n      platform: ${{ inputs.platform }}\n      confirmation: ${{ inputs.confirmation }}\n      recovery_run_id: ${{ inputs.recovery_run_id }}\n      recovery_confirmation: ${{ inputs.recovery_confirmation }}\n      desktop_request: ${{ inputs.desktop_request }}\n      desktop_source_sha: ${{ inputs.desktop_source_sha }}\n      desktop_expected_ref: ${{ inputs.desktop_expected_ref }}\n",
+    '.github/workflows/mobile-external-testing.yml': b"name: Mobile external testing\nrun-name: ${{ inputs.desktop_request != '' && format('MRK Desktop external-testing [{0}]', inputs.desktop_request) || 'Mobile external testing' }}\non:\n  workflow_dispatch:\n    inputs:\n      platform:\n        description: Platform whose exact internal build should be promoted\n        required: true\n        type: choice\n        options:\n        - android\n        - ios\n        - both\n      candidate_run_id:\n        description: Common candidate evidence run; leave blank for per-platform or preserved recovery inputs.\n        required: false\n        default: ''\n        type: string\n      confirmation:\n        description: external-testing:<platform>:<version>:<build>\n        required: true\n        type: string\n      recovery_run_id:\n        description: Run holding the original intent or selected complete final; never replaces authorization.\n        required: false\n        default: ''\n        type: string\n      recovery_confirmation:\n        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.\n        required: false\n        default: ''\n        type: string\n      candidate_android_run_id:\n        description: android candidate evidence run; cannot conflict with a common run.\n        required: false\n        default: ''\n        type: string\n      candidate_ios_run_id:\n        description: ios candidate evidence run; cannot conflict with a common run.\n        required: false\n        default: ''\n        type: string\n      desktop_request:\n        description: Optional exact Desktop request marker; use with reviewed source and full ref.\n        required: false\n        default: ''\n        type: string\n      desktop_source_sha:\n        description: Optional Desktop-reviewed current dispatch commit; not a replacement for original recovery source.\n        required: false\n        default: ''\n        type: string\n      desktop_expected_ref:\n        description: Optional Desktop-reviewed full branch ref; all three Desktop inputs must be supplied together.\n        required: false\n        default: ''\n        type: string\npermissions: {}\njobs:\n  external-testing:\n    permissions:\n      actions: read\n      artifact-metadata: write\n      attestations: write\n      contents: read\n      id-token: write\n    uses: example/toolkit/.github/workflows/reusable-external-testing.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    with:\n      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      source_sha: ${{ github.sha }}\n      platform: ${{ inputs.platform }}\n      candidate_run_id: ${{ inputs.candidate_run_id }}\n      confirmation: ${{ inputs.confirmation }}\n      recovery_run_id: ${{ inputs.recovery_run_id }}\n      recovery_confirmation: ${{ inputs.recovery_confirmation }}\n      candidate_android_run_id: ${{ inputs.candidate_android_run_id }}\n      candidate_ios_run_id: ${{ inputs.candidate_ios_run_id }}\n      desktop_request: ${{ inputs.desktop_request }}\n      desktop_source_sha: ${{ inputs.desktop_source_sha }}\n      desktop_expected_ref: ${{ inputs.desktop_expected_ref }}\n",
+    '.github/workflows/mobile-production-submit.yml': b"name: Mobile production submission\nrun-name: ${{ inputs.desktop_request != '' && format('MRK Desktop production-submit [{0}]', inputs.desktop_request) || 'Mobile production submission' }}\non:\n  workflow_dispatch:\n    inputs:\n      platform:\n        description: Exactly one platform to prepare for production review\n        required: true\n        type: choice\n        options:\n        - android\n        - ios\n      candidate_run_id:\n        description: Common candidate evidence run; leave blank for per-platform or preserved recovery inputs.\n        required: false\n        default: ''\n        type: string\n      external_run_id:\n        description: Common external evidence run; leave blank for per-platform or preserved recovery inputs.\n        required: false\n        default: ''\n        type: string\n      confirmation:\n        description: production-submit:<platform>:<version>:<build>\n        required: true\n        type: string\n      recovery_run_id:\n        description: Run holding the original intent or selected complete final; never replaces authorization.\n        required: false\n        default: ''\n        type: string\n      recovery_confirmation:\n        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.\n        required: false\n        default: ''\n        type: string\n      candidate_android_run_id:\n        description: android candidate evidence run; cannot conflict with a common run.\n        required: false\n        default: ''\n        type: string\n      candidate_ios_run_id:\n        description: ios candidate evidence run; cannot conflict with a common run.\n        required: false\n        default: ''\n        type: string\n      external_android_run_id:\n        description: android external evidence run; cannot conflict with a common run.\n        required: false\n        default: ''\n        type: string\n      external_ios_run_id:\n        description: ios external evidence run; cannot conflict with a common run.\n        required: false\n        default: ''\n        type: string\n      desktop_request:\n        description: Optional exact Desktop request marker; use with reviewed source and full ref.\n        required: false\n        default: ''\n        type: string\n      desktop_source_sha:\n        description: Optional Desktop-reviewed current dispatch commit; not a replacement for original recovery source.\n        required: false\n        default: ''\n        type: string\n      desktop_expected_ref:\n        description: Optional Desktop-reviewed full branch ref; all three Desktop inputs must be supplied together.\n        required: false\n        default: ''\n        type: string\npermissions: {}\njobs:\n  production-submit:\n    permissions:\n      actions: read\n      artifact-metadata: write\n      attestations: write\n      contents: read\n      id-token: write\n    uses: example/toolkit/.github/workflows/reusable-production-submit.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    with:\n      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      source_sha: ${{ github.sha }}\n      platform: ${{ inputs.platform }}\n      candidate_run_id: ${{ inputs.candidate_run_id }}\n      external_run_id: ${{ inputs.external_run_id }}\n      confirmation: ${{ inputs.confirmation }}\n      recovery_run_id: ${{ inputs.recovery_run_id }}\n      recovery_confirmation: ${{ inputs.recovery_confirmation }}\n      candidate_android_run_id: ${{ inputs.candidate_android_run_id }}\n      candidate_ios_run_id: ${{ inputs.candidate_ios_run_id }}\n      external_android_run_id: ${{ inputs.external_android_run_id }}\n      external_ios_run_id: ${{ inputs.external_ios_run_id }}\n      desktop_request: ${{ inputs.desktop_request }}\n      desktop_source_sha: ${{ inputs.desktop_source_sha }}\n      desktop_expected_ref: ${{ inputs.desktop_expected_ref }}\n",
+}
+
+
+def local_edit_config(case):
+    need(type(case) is str and case in LOCAL_EDIT_CASES, "fixture-case")
+    if case != "local-metadata-text":
+        return CONFIG
+    value = json.loads(CONFIG)
+    value["ios"] = {"archiveConfiguration": "Release", "bundleId": "org.example.mrk.observed", "enabled": True,
+                    "identityStatus": "unverified", "project": "ios/MRKObserved.xcodeproj",
+                    "scheme": "MRKObserved", "symbols": {"policy": "retain"}}
+    value["metadata"]["iosLocales"] = ["en-US"]
+    return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode("ascii")
+
+
+def local_fixture_data(case, final):
+    need(type(case) is str and case in LOCAL_EDIT_CASES and type(final) is bool, "fixture-case")
+    files = {".gitignore": IGNORE_PREFIX + IGNORE_RULES, "app/build.gradle.kts": SOURCE, "keep.txt": KEEP,
+             "release/mobile-release.json": local_edit_config(case), "version.properties": (
+                 LOCAL_VERSION_AFTER if final else LOCAL_VERSION_BEFORE) if case == "local-release-version" else VERSION}
+    if case == "local-metadata-text":
+        for platform, name, before, after in LOCAL_TEXT_FIELDS:
+            body = after if final else before
+            if body is not None:
+                files[f"release/store/{platform}/en-US/{name}"] = body
+        files["release/store/keep.txt"] = KEEP
+    if case == "local-github-apply":
+        files[".github/workflows/unrelated.yml"] = b"# Retained unrelated workflow; no dispatch\n"
+        if final:
+            files.update(LOCAL_WORKFLOWS)
+            files[".github/workflows/mobile-preflight.yml"] += LOCAL_STALE
+    # All ancestors exist before GUI entry; the only directory mutations are
+    # the actual transaction's temporary journals, which must be gone on return.
+    directories = {".": set()}
+    names = list(files)
+    if case == "local-metadata-text":
+        names += ["release/store/android/en-US/.not-a-file", "release/store/ios/en-US/.not-a-file"]
+    for path in names:
+        parts = path.split("/")
+        for index, name in enumerate(parts):
+            parent = "/".join(parts[:index]) or "."
+            children = directories.setdefault(parent, set())
+            if name != ".not-a-file":
+                children.add(name)
+    ordered = {path: (0o700, tuple(sorted(directories[path]))) for path in sorted(
+        directories, key=lambda value: (0 if value == "." else value.count("/") + 1, value))}
+    need(len(files) <= 32 and len(ordered) <= 24 and all(len(row[1]) <= 16 for row in ordered.values())
+         and sum(map(len, files.values())) <= 1024 * 1024, "fixture-roster")
+    return files, ordered
+
+
+def _expected_local_edits(case):
+    """Comparison DATA only; original native records must match without filling gaps."""
+    files, directories = local_fixture_data(case, True)
+    workflow = case == "local-github-apply"
+    count = 3 if workflow else 2 if case == "local-metadata-text" else 1
+    sessions = []
+    for index in range(count):
+        close, stale = workflow and index == 0, workflow and index == 2
+        sessions.append({"apply": not close, "close": close,
+            "outcome": {"effect": "not_started" if close or stale else "committed",
+                        "journal": "not_created" if close or stale else "clean", "resources": "settled",
+                        "reason": "stale_revision" if stale else "cancelled" if close else "none"},
+            "writerFrames": 2 if close else 3, "stdoutFrames": 3, "originalsJoined": True, "fileReadback": True})
+    return {"case": case, "domain": ("metadata_text", "release_version", "github_workflows")[LOCAL_EDIT_CASES.index(case)],
+            "sameOriginalSessions": count, "originalFinalities": True, "visibleReviewAndResult": True,
+            "passiveReadbacks": 0 if workflow else count,
+            "fixture": {"files": len(files), "directories": len(directories), "completedOriginals": count,
+                        "staleAppendReturnedAndClosed": workflow,
+                        "sha256": {name: digest(body) for name, body in sorted(files.items())}},
+            "sessions": sessions, "controlIntegrationOnly": True, "physicalDropdownGestureQualified": False,
+            "imagesDoctorVaultRestartQualified": False}
+
+
 def fixture_data(case, final, *, ios_output_created=None):
     need(case in ALL_CASES and type(final) is bool, "fixture-case")
+    if case in LOCAL_CHECK_CASES:
+        need(ios_output_created is None, "fixture-output-kind")
+        return local_check_fixture_data(case)
+    if case in LOCAL_EDIT_CASES:
+        need(ios_output_created is None, "fixture-output-kind")
+        return local_fixture_data(case, final)
     if case == RECOVERY_CASE:
         files = {name.removeprefix("project/"): body for name, body in RECOVERY_FILES.items()}
         directories = {".": (0o700, tuple(sorted(files)))}
@@ -4071,8 +4399,16 @@ def validate_snapshot(original, current, case, final, uid, gid, *, ios_output_cr
     _shape(current, case, final, uid, gid, ios_output_created=ios_output_created)
     for path, before in original.items():
         after = current[path]
-        if before.entries is not None:
-            need(after.identity[:5] == before.identity[:5], "fixture-directory-replaced")
+        if case in LOCAL_CHECK_CASES:
+            need(after.identity == before.identity, "fixture-original-changed")
+        elif before.entries is not None:
+            bound = 6 if case in LOCAL_EDIT_CASES else 5
+            need(after.identity[:bound] == before.identity[:bound], "fixture-directory-replaced")
+        elif final and (case == "local-release-version" and path == "version.properties" or
+                        case == "local-metadata-text" and path in ("release/store/android/en-US/short_description.txt",
+                                                                   "release/store/ios/en-US/description.txt")):
+            need(after.identity[0] == before.identity[0] and after.identity[1] != before.identity[1]
+                 and after.identity[2:6] == before.identity[2:6], "fixture-local-replacement")
         elif final and case == "first-save" and path == ".gitignore":
             need(after.identity[:2] != before.identity[:2], "save-ignore-not-replaced")
         elif final and case == "noop-stale" and path == ".gitignore":
@@ -4090,6 +4426,12 @@ def validate_snapshot(original, current, case, final, uid, gid, *, ios_output_cr
             "files": len(fixture_data(case, final, ios_output_created=ios_output_created)[0]),
             "configSha256": current.get("release/mobile-release.json").sha256 if "release/mobile-release.json" in current else None,
             "ignoreSha256": current[".gitignore"].sha256, "ignoreBytes": current[".gitignore"].identity[6]}
+    if case in LOCAL_CHECK_CASES:
+        result["localChecks"] = _local_checks_base(case)["fixture"]
+    if case in LOCAL_EDIT_CASES:
+        result["localEdits"] = {"files": len(fixture_data(case, final)[0]), "directories": len(fixture_data(case, final)[1]),
+            "sha256": {name: current[name].sha256 for name in sorted(fixture_data(case, final)[0])},
+            "sameDirectoryOriginals": True, "unchangedOriginalsPreserved": True}
     if case == PROJECT_FIELDS_CASE:
         result["projectFieldRestoration"] = {"originalFileMetadataExceptRenameCtimeMatched": True,
             "allowedRenameCtimeChanges": [name for name in ("inputs/link-input", "inputs/kind-input")
@@ -4136,7 +4478,8 @@ class Fixtures:
         self.binding, self.uid, self.gid = binding, uid, gid
         self.cases = selected_cases(scope)
         self.path = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
-                                 installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE))
+                                 installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
+                                 local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE))
         self.fds = set()
         self.close_errors = 0
         self.first_close_error = None
@@ -4158,6 +4501,8 @@ class Fixtures:
         self.recovery_runtime_originals, self.recovery_inventories = [], {}
         self.account_home = self.account_private = self.account_private_sha = self.account_private_file = None
         self.account_produced = self.account_app_returned = self.account_readback = False
+        self.normal_account_original = self.normal_account_observation_sha = None
+        self.normal_stager_registrations = []
         self.account_attempts = {"produce": False, "observe": False}
         self.account_producer_attestation = self.account_readback_attestation = self.account_lease = None
         self.account_fds, self.account_directories = set(), {}
@@ -4580,7 +4925,8 @@ class Fixtures:
         result["producer"] = self.recovery_attestation
         return result
 
-    def _recovery_read(self, parent, name, owner, limit, mode=None, *, retain=False):
+    def _recovery_read(self, parent, name, owner, limit, mode=None, *, retain=False, collect=False):
+        need(type(retain) is bool and type(collect) is bool and (not collect or type(limit) is int and 0 < limit <= 1024*1024), "recovery-runtime-collect-bound")
         before = signature(os.stat(name, dir_fd=parent, follow_symlinks=False))
         need(stat.S_ISREG(before[2]) and before[3] == owner and before[5] == 1 and 0 < before[6] <= limit
              and before[2] & 0o022 == 0 and (mode is None or before[2] == stat.S_IFREG | mode), "recovery-runtime-file")
@@ -4593,7 +4939,7 @@ class Fixtures:
                 if not chunk:
                     break
                 total += len(chunk); sha.update(chunk)
-                if not retain:
+                if not retain or collect:
                     chunks.append(chunk)
             need(total == before[6] and signature(os.fstat(fd)) == before
                  and signature(os.stat(name, dir_fd=parent, follow_symlinks=False)) == before, "recovery-runtime-read-race")
@@ -4605,31 +4951,42 @@ class Fixtures:
         with self._temporary(fd):
             return read_original()
 
-    def admit_recovery_runtime(self, source, work):
+    def admit_recovery_runtime(self, source, work, *, supplier_origin="historical", supplier_receipt_sha256=None):
+        recovery_supplier_route(supplier_origin, supplier_receipt_sha256)
+        target = target_data(self.binding.target)
+        need(self.binding.target == ARM_TARGET or supplier_origin == "fresh-public-source", "recovery-intel-fresh-supplier")
         need(self.cases in ((RECOVERY_CASE,), (IOS_ACCOUNT_CASE,)) and not self.inflight and self.recovery_runtime is None, "recovery-runtime-reused")
         need(type(work) is Path or isinstance(work, Path), "recovery-runtime-work")
         need(work.parent == Path("/Users/runner/work/_temp") and re.fullmatch(r"mrk-macos-aqua\.[A-Za-z0-9]{8}", work.name), "recovery-runtime-work-route")
         def private_json(path, limit):
             info, _, body = self._recovery_read(None, str(path), self.uid, limit)
             return json.loads(body, object_pairs_hook=_pairs)
-        release = private_json(source / "desktop/macos-installed-inputs/build-release.json", 4096)
+        release = private_json(source / "desktop/macos-installed-inputs" / target["releaseInput"], 4096)
         need(type(release) is dict and set(release) == {"schemaVersion", "packageVersion", "release"}
              and type(release["schemaVersion"]) is int and release["schemaVersion"] == 1
-             and type(release["release"]) is str and re.fullmatch(r"macos26-arm64-[a-z0-9_.-]*[a-z0-9]", release["release"])
+             and type(release["release"]) is str and re.fullmatch(re.escape(target["releasePrefix"]) + r"[a-z0-9_.-]*[a-z0-9]", release["release"])
              and len(release["release"]) <= 128, "recovery-runtime-release")
         # Current stager output, NOT the historical supplier digest. The same
         # actual reviewed workflow builds and installs these exact bytes first.
         result = private_json(work / "runtime-result.json", 16384)
+        recovery_supplier_matches(result, supplier_origin, supplier_receipt_sha256)
+        if supplier_origin == "fresh-public-source":
+            _, source_lock_sha, _ = self._recovery_read(None,
+                str(source / "desktop/macos-cpython-source-inputs" / target["sourceLock"]), self.uid, 16*1024)
+            need(result["supplierSourceLockSha256"] == source_lock_sha, "recovery-fresh-source-lock")
         _, manifest_sha, manifest_body = self._recovery_read(None, str(work / "runtime/manifest.json"), self.uid, 1024*1024)
         need(type(result) is dict and type(result.get("schemaVersion")) is int and result["schemaVersion"] == 1
-             and result.get("release") == release["release"] and result.get("target") == "aarch64-apple-darwin"
-             and result.get("qualification") == "current-source-staged-no-native-execution" and result.get("supplierOnlyReuse") is True
+             and result.get("release") == release["release"] and result.get("target") == self.binding.target
+             and result.get("qualification") == "current-source-staged-no-native-execution"
              and type(result.get("sourceInputsSha256")) is str and re.fullmatch(r"[0-9a-f]{64}", result["sourceInputsSha256"])
              and result.get("successorManifestSha256") == manifest_sha, "recovery-current-runtime-binding")
+        self._admit_recovery_runtime_files(result, manifest_sha, manifest_body, release["release"])
+
+    def _admit_recovery_runtime_files(self, result, manifest_sha, manifest_body, release):
         manifest = json.loads(manifest_body, object_pairs_hook=_pairs)
         need(type(manifest) is dict and set(manifest) == {"schemaVersion", "protocol", "coreVersion", "target", "coreSha256", "protocolSha256", "inventorySha256", "files"}
              and type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1
-             and type(manifest["protocol"]) is int and manifest["protocol"] == 1 and manifest["target"] == "aarch64-apple-darwin"
+             and type(manifest["protocol"]) is int and manifest["protocol"] == 1 and manifest["target"] == self.binding.target
              and manifest["protocolSha256"] == result.get("protocolSha256") and manifest["coreSha256"] == result.get("coreSha256")
              and type(manifest["files"]) is list and 1 <= len(manifest["files"]) <= 2048
              and manifest["inventorySha256"] == result.get("inventorySha256")
@@ -4646,7 +5003,7 @@ class Fixtures:
         need(list(entries) == sorted(entries) and {"core.zip", "python/bin/python3"} <= entries.keys()
              and sum(row["size"] for row in entries.values()) <= 512*1024*1024
              and manifest["coreSha256"] == entries["core.zip"]["sha256"], "recovery-current-runtime-roster")
-        installed = Path("/Library/Application Support/MobileReleaseKit/versions") / release["release"] / "runtime"
+        installed = Path("/Library/Application Support/MobileReleaseKit/versions") / release / "runtime"
         current = self._open("/", directory=True)
         before = signature(os.fstat(current))
         need(stat.S_ISDIR(before[2]) and before[3] == 0 and before[2] & 0o022 == 0, "recovery-runtime-ancestor")
@@ -4828,6 +5185,88 @@ class Fixtures:
         self._roster(self.account_lease, () if after else ("session-"+private["token"],), "ios-account-lease-roster")
         if self.account_private_file is not None:
             self._account_hash(self.account_private_file)
+
+
+    def admit_normal_account_runtime(self, source, work):
+        """Current signed installed route; never relabel the old Aqua supplier."""
+        need(self.cases == (IOS_ACCOUNT_CASE,) and not self.inflight and self.recovery_runtime is None,
+             "normal-account-runtime-order")
+        need(isinstance(source, Path) and source == Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
+             and isinstance(work, Path) and work.parent == Path("/Users/runner/work/_temp")
+             and re.fullmatch(r"mrk-macos-installed\.[A-Za-z0-9]{8}", work.name), "normal-account-runtime-context")
+        self.binding.checked()
+        stager, release = _gate_load_stager(self, source, target=self.binding.target, registrations=self.normal_stager_registrations)
+        pins = (
+            ("desktop/macos-installed-inputs/python-signed-runtime-binding.json", 1503,
+             "6793b36697e04264c6f627317906a6f143e47adb3443132beba05c6d14147e53"),
+            ("desktop/packaging/macos-install-producer-signing.profile", 488,
+             "2f42e8e333ceb5dd96089c3dd7c38fbe4aaa1c79b6ae7369157c06179f0c08f2"),
+            ("desktop/packaging/macos-android-service-signing.profile", 219,
+             "7f1a96c30d75d915e84f1a45095170ba6e4b2870203efda199515c7260e98663"),
+        )
+        bodies = []
+        for name, size, expected in pins:
+            body, original = _gate_file(self, str(source / name), None, size)
+            need(len(body) == size and original["sha256"] == expected, "normal-account-runtime-source")
+            bodies.append(body)
+        chosen = stager.signed_runtime_binding_data(*bodies, target=self.binding.target)
+        _, _, raw = self._recovery_read(None, str(work / "runtime-result.json"), self.uid, 16384, retain=True, collect=True)
+        result = json.loads(raw, object_pairs_hook=_pairs)
+        _, manifest_sha, manifest_body = self._recovery_read(None, str(work / "runtime/manifest.json"), self.uid,
+                                                           1024*1024, retain=True, collect=True)
+        need(type(result) is dict and type(result.get("schemaVersion")) is int and result["schemaVersion"] == 1
+             and result.get("release") == release.release and result.get("target") == self.binding.target
+             and result.get("qualification") == "current-source-staged-no-native-execution"
+             and result.get("sourceInputsSha256") == chosen["sourceInputsSha256"]
+             and result.get("successorManifestSha256") == manifest_sha == chosen["runtimeManifestSha256"]
+             and result.get("signedRuntimeBindingSha256") == digest(bodies[0])
+             and all(result.get(key) == chosen[key] for key in ("signedPythonSha256", "signingReceiptSha256",
+                    "signingSourceCommit", "signingRunId", "signingRunAttempt", "signingArtifactId")),
+             "normal-account-current-signed-runtime")
+        self._admit_recovery_runtime_files(result, manifest_sha, manifest_body, release.release)
+        for original in self.gate_files:
+            need(_gate_file_read(original)[1] == original["sha256"], "normal-account-runtime-source-post")
+
+    def accept_normal_account_app(self, observation, original, runner_facts):
+        """Accept actual normal UI only after the runner's POST and closes."""
+        need(not self.inflight and self.last_returned and self.account_produced and not self.account_app_returned
+             and self.normal_account_observation_sha is None and original is self.normal_account_original
+             and type(original) is subprocess.CompletedProcess and type(original.returncode) is int
+             and original.returncode == 0, "normal-account-app-order")
+        need(type(runner_facts) is dict and runner_facts.get("originalProductsPrePostMatched") is True
+             and runner_facts.get("originalClosesCompleted") is True
+             and runner_facts.get("strictCodesignOriginalZero") is True
+             and runner_facts.get("reSignedOrRepaired") is False,
+             "normal-account-runner-finality")
+        normal_account_observation(observation, self.binding)
+        need(observation["sessionSha256"] == digest(self.account_private["token"].encode("ascii")),
+             "normal-account-ui-session")
+        self._account_current(after=True)
+        self.normal_account_observation_sha = digest(json.dumps(observation, sort_keys=True,
+            separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii"))
+        self.account_app_returned = True
+
+    def readback_normal_account(self, observation):
+        need(not self.inflight and self.last_returned and self.account_produced and self.account_app_returned
+             and self.account_readback and self.normal_account_observation_sha is not None,
+             "normal-account-final-readback-order")
+        normal_account_observation(observation, self.binding)
+        need(digest(json.dumps(observation, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                               allow_nan=False).encode("ascii")) == self.normal_account_observation_sha,
+             "normal-account-ui-observation-changed")
+        self.stage = "independent-normal-account-readback"
+        self._account_current(after=True)
+        self.readback(IOS_ACCOUNT_CASE)
+        account = {
+            "producer": self.account_producer_attestation, "nativeReadback": self.account_readback_attestation,
+            "exactPendingSessionRecovered": True, "originalOwnedNativeAndControlsRemoved": True,
+            "persistentOriginalLeaseRetained": True, "nativeBaselineMembers": len(self.account_baseline_files),
+            "baselineIdentitiesMatched": True, "baselinePreferencesMatched": True, "projectMarkerUnchanged": True,
+            "privateContentsExported": False, "foreignPreferenceConflictInjected": False,
+            "appleSigningMaterialUsed": False, "signedExportQualified": False}
+        need(len(json.dumps(account, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")) <= 8192,
+             "normal-account-public-bound")
+        return account
 
     def accept_account_app(self, report):
         need(not self.inflight and self.last_returned and self.account_produced and not self.account_app_returned,
@@ -5122,7 +5561,8 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
     for case in cases:
         fixtures.before_call(case)
         state = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
-                                 installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE)) / "state" / case
+                                 installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
+                                 local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE)) / "state" / case
         argv = [EXECUTABLE, case]
         fixtures.stage, fixtures.inflight, fixtures.last_returned = "invocation", True, False
         fixtures.app_returncode = fixtures.inner_failure_step = fixtures.inner_failure_reason = None
@@ -5175,22 +5615,60 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
                 not_executed.append(case)
         else:
             readback = fixtures.readback_ios(case, report["iosArchive"]) if case in IOS_OPERATION_CASES else fixtures.readback(case)
+        if case in LOCAL_CHECK_CASES:
+            _exact(report["localChecks"]["fixture"], readback["localChecks"], ("localChecks", "fixture"))
+        if case in LOCAL_EDIT_CASES:
+            # Independent post-exit reads agree with the original app's retained
+            # same-session facts; neither source alone manufactures a receipt.
+            actual = report["localEdits"]["fixture"]
+            observed = readback["localEdits"]
+            need(actual["sha256"] == observed["sha256"] and actual["files"] == observed["files"]
+                 and actual["directories"] == observed["directories"]
+                 and observed["sameDirectoryOriginals"] is True and observed["unchangedOriginalsPreserved"] is True,
+                 "fixture-local-readback")
         emit({"schemaVersion": 1, "type": "macos-aqua-case", **binding.public(), "case": case,
               "originalCallReturned": True, "observer": report, "independentReadback": readback})
     return tuple(not_executed)
 
 
-def admit(environment, root):
+def recovery_supplier_route(origin, expected):
+    """Explicit reviewed caller selection; a receipt never selects its own mode."""
+    need(type(origin) is str and origin in ("historical", "fresh-public-source"), "recovery-supplier-origin")
+    need((origin == "historical" and expected is None) or
+         (origin == "fresh-public-source" and type(expected) is str and re.fullmatch(r"[0-9a-f]{64}", expected)),
+         "recovery-supplier-anchor")
+    return origin, expected
+
+
+def recovery_supplier_matches(result, origin, expected):
+    recovery_supplier_route(origin, expected)
+    fresh = {"supplierOrigin", "supplierReceiptSha256", "supplierSourceLockSha256", "supplierProfile", "pythonVersion", "gil"}
+    historical = {"acceptedArchiveSha256", "acceptedTarSha256", "originalManifestSha256", "supplierOnlyReuse", "addedNotices"}
+    need(type(result) is dict, "recovery-supplier-result")
+    if origin == "historical":
+        need(result.get("supplierOnlyReuse") is True and not fresh.intersection(result), "recovery-historical-supplier")
+    else:
+        need(fresh <= result.keys() and not historical.intersection(result)
+             and result["supplierOrigin"] == origin and result["supplierReceiptSha256"] == expected
+             and result["supplierProfile"] == "mrk-macos-cpython-source-supplier-v1"
+             and result["pythonVersion"] == "3.14.7" and result["gil"] is True
+             and type(result["supplierSourceLockSha256"]) is str
+             and re.fullmatch(r"[0-9a-f]{64}", result["supplierSourceLockSha256"]), "recovery-fresh-supplier")
+
+
+def admit(environment, root, *, target=ARM_TARGET):
     # Platform/user APIs are evaluated only in the actual native entry.
     import platform
     import pwd
     import threading
-    need(sys.platform == "darwin" and platform.machine() == "arm64" and platform.mac_ver()[0].split(".")[0] == "26", "native-platform")
+    selected = target_data(target)
+    need(sys.platform == "darwin" and sys.maxsize == 2 ** 63 - 1
+         and platform.machine() == selected["machine"] and platform.mac_ver()[0].split(".")[0] == "26", "native-platform")
     uid, gid = os.getuid(), os.getgid()
     need(uid == os.geteuid() and uid > 0 and gid == os.getegid()
          and threading.current_thread() is threading.main_thread(), "native-main-user")
-    binding = Binding(environment.get("GITHUB_SHA"), environment.get("GITHUB_RUN_ID"), environment.get("GITHUB_RUN_ATTEMPT")).checked()
-    required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64",
+    binding = Binding(environment.get("GITHUB_SHA"), environment.get("GITHUB_RUN_ID"), environment.get("GITHUB_RUN_ATTEMPT"), target).checked()
+    required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": selected["runner"],
                 "GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_REF": REF,
                 "GITHUB_WORKFLOW_REF": WORKFLOW, "GITHUB_WORKFLOW_SHA": binding.source, "GITHUB_WORKSPACE": str(root)}
     need(all(environment.get(key) == value for key, value in required.items()), "hosted-source-route")
@@ -5241,13 +5719,21 @@ SHIPPING_GATE_NATIVE_TESTS = tuple("vault_helper_filesystem::tests::" + name for
     "an_entered_unreturned_native_arm_is_never_empty_or_settled",
 ))
 SHIPPING_GATE_TEST = "vault_helper_filesystem::gate_custody_control::shipping_helper_retains_gate_after_parent_reference_close_until_actual_exit"
-SHIPPING_GATE_COMPILER_ARGV = ["cargo", "test", "--locked", "--no-default-features", "--jobs", "1",
+SHIPPING_GATE_COMPILER_ARGV = ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "test", "--locked", "--no-default-features", "--jobs", "1",
     "--target", "aarch64-apple-darwin", "--package", "mobile-release-kit-desktop",
     "--package", "mrk-macos-installed-native", "--lib", "--no-run", "--message-format=json",
     "--features", "mrk-macos-installed-native/installed-observation"]
+
+def shipping_gate_compiler_argv(target=ARM_TARGET):
+    argv = list(SHIPPING_GATE_COMPILER_ARGV)
+    argv[0], argv[7] = target_data(target)["cargo"], target
+    return argv
+
+
 SHIPPING_GATE_SOURCE_PINS = {
-    "desktop/tools/stage_macos_installed.py": "03a400dd9ba5086762ff06535004a56f8828592a38ae564d96ef0e46b6109490",
-    "desktop/macos-installed-inputs/build-release.json": "a71990f4eba76fb6c05e011799999decf8620c5ad8ea0471fb13cada37646630",
+    "desktop/tools/stage_macos_installed.py": '800143d5fc3ddf9d7d373c1cf71a44434010098ed662c64d456bdeacf90a7673',
+    "desktop/macos-installed-inputs/build-release.json": "521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512",
+    "desktop/macos-installed-inputs/build-release-intel.json": "5864c0efb2a66219cf7efa41d3863721327148ef7b4c6d6f3252de3ce20596e7",
 }
 SHIPPING_GATE_REPORT = "shipping-gate-control.receipt.json"
 SHIPPING_GATE_STATUS = "shipping-gate-control.status"
@@ -5287,11 +5773,12 @@ def _gate_libtest(stdout, stderr, returncode, names):
     return int(summary[1])
 
 
-def _gate_artifact(value, work, library):
+def _gate_artifact(value, work, library, *, target=ARM_TARGET):
+    target_data(target)
     need(type(value) is dict and set(value) == {"path", "sha256", "identity", "full9"}
          and type(value["path"]) is str and len(value["path"]) <= 4096 and _gate_sha(value["sha256"]), "gate-artifact-shape")
     path = Path(value["path"])
-    need(path.parent == work / "cargo-target/aarch64-apple-darwin/debug/deps"
+    need(path.parent == work / "cargo-target" / target / "debug/deps"
          and re.fullmatch(re.escape(library) + r"-[0-9a-f]{1,64}", path.name), "gate-artifact-route")
     full = _gate_integers(value["full9"], 9)
     need(full[0] >= 0 and full[1] > 0 and stat.S_ISREG(full[2]) and full[2] & 0o111
@@ -5311,7 +5798,7 @@ def _gate_headless(bodies, binding, checkout, work):
         "passed": True, "shippingBinaryQualified": False, "distributionQualified": False,
         "compilerOriginalReturned": True, "cargoTargetRetired": False, "cargoTargetOriginalClosed": True,
         "workOriginalClosed": True, "genuineServiceQualified": False, "protectedCopyQualified": False,
-        "compilerArgv": SHIPPING_GATE_COMPILER_ARGV, "ownerCallsEntered": 3, "ownerCallsReturned": 3,
+        "compilerArgv": shipping_gate_compiler_argv(binding.target), "ownerCallsEntered": 3, "ownerCallsReturned": 3,
         "headlessCustodyRetained": False, "cargoTargetRetentionReason": "required-follow-on-build-and-gate-control",
         "tests": 13, "failed": 0, "ignored": 0, "measured": 0}
     need(set(value) == set(fixed) | {"targets", "cargoTargetOriginal", "workOriginal", "compilerJsonSha256"}, "gate-headless-keys")
@@ -5338,7 +5825,7 @@ def _gate_headless(bodies, binding, checkout, work):
     native = None
     for record, (role, directory, package, library, features, names, prefix) in zip(value["targets"], libraries):
         need(type(record) is dict, "gate-library-record")
-        package_id = "path+" + (checkout / directory).as_uri() + "#" + package + "@0.1.0"
+        package_id = "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.1" if package == "mobile-release-kit-desktop" else "@0.1.0")
         expected = {"role": role, "packageId": package_id, "features": features, "names": list(names),
             "originalReturned": True, "artifactOriginalUnchanged": True, "artifactOriginalClosed": True,
             "testsPassed": True, "returncode": 0, "tests": len(names), "failed": 0, "ignored": 0, "measured": 0}
@@ -5349,7 +5836,7 @@ def _gate_headless(bodies, binding, checkout, work):
         need(bodies[prefix + "-tests.status"] == b"0\n" and record["stdoutSha256"] == digest(stdout)
              and record["stderrSha256"] == digest(stderr), "gate-data-output-binding")
         _exact(record["filtered"], _gate_libtest(stdout, stderr, 0, names))
-        artifact = _gate_artifact(record["artifact"], work, library)
+        artifact = _gate_artifact(record["artifact"], work, library, target=binding.target)
         matching = [row for row in targets if type(row.get("target")) is dict and row["target"].get("name") == library]
         need(len(matching) == 1, "gate-one-library")
         target = matching[0]
@@ -5365,34 +5852,154 @@ def _gate_headless(bodies, binding, checkout, work):
     return value, native
 
 
-def _gate_installation(body, status, binding, environment, stage):
-    value = _gate_json(body, 65536)
+def _gate_package_anchors(anchors, binding, environment, stage, selection):
+    # Five independent, same-book originals. Neither this receipt nor parsed
+    # producer DATA supplies its own original exit or signature authority.
+    binding.checked()
+    need(type(selection) is stage.BuildSelection and selection.target == binding.target, "gate-package-target")
+    stage.selected_build(selection)
     inventory, manifest = environment.get("MRK_MACOS_INSTALL_INVENTORY_SHA256"), environment.get("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")
-    need(_gate_sha(inventory) and _gate_sha(manifest) and status == b"0\n", "gate-installer-status-binding")
-    fixed = {"schemaVersion": 1, "sourceCommit": binding.source, "inventorySha256": inventory,
-        "runtimeManifestSha256": manifest, "release": stage.RELEASE, "installerDeadlineMetAfterFinalCloses": True,
-        "installerReportedOriginalsSettled": True, "applicationLaunched": False, "guiSaveQualified": False,
-        "aquaGate": "required-separate-actual-session", "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
-    need(set(value) == set(fixed) | {"nonrootReadbackFileCount", "originalInstallerResult", "installerResultExport",
-         "installationMetadata", "maintenanceGate"}, "gate-installation-keys")
+    need(_gate_sha(inventory) and _gate_sha(manifest) and type(anchors["package-install.status"]) is bytes
+         and anchors["package-install.status"] == b"0\n", "gate-package-original-status")
+    request_body = anchors["package-request-id.txt"]
+    need(type(request_body) is bytes and re.fullmatch(rb"[0-9a-f]{32}\n", request_body)
+         and request_body != b"0" * 32 + b"\n", "gate-package-request-original")
+    request = request_body[:-1].decode("ascii")
+    descriptor = anchors["producer-descriptor-input.json"]
+    producer = stage.maintenance_producer_data(descriptor, target=binding.target)
+    current = producer["releaseSet"]["current"]
+    for key, expected in {"release": selection.release, "packageVersion": selection.package_version,
+            "sourceCommit": binding.source, "protocolSha256": stage.CURRENT_PROTOCOL,
+            "inventorySha256": inventory, "runtimeManifestSha256": manifest}.items():
+        _exact(current[key], expected)
+    audit = _gate_json(anchors["package-audit.json"], 16384)
+    need(set(audit) == {"schemaVersion", "packageSha256", "packageSize", "originalPackageSha256", "packageInfoSha256",
+                       "packageIdentifier", "scriptFileCount", "finalDestinationPayloadEntries", "qualification"}, "gate-package-audit-keys")
+    for key, expected in {"schemaVersion": 1, "packageSha256": current["packageSha256"], "packageIdentifier": stage.PACKAGE_ID,
+            "finalDestinationPayloadEntries": 0, "qualification": "scripts-only-package-audited-not-installed-or-GUI-qualified"}.items():
+        _exact(audit[key], expected)
+    need(type(audit["packageSize"]) is int and 0 < audit["packageSize"] <= stage.MAX_BYTES
+         and type(audit["scriptFileCount"]) is int and 0 < audit["scriptFileCount"] <= stage.MAX_FILES
+         and all(_gate_sha(audit[key]) for key in ("originalPackageSha256", "packageInfoSha256")), "gate-package-audit-bound")
+    receipt = _gate_json(anchors["android-helper-package-install.json"], 16384)
+    fixed = {"schemaVersion": 1, "phase": "package-install", "target": binding.target, "source": binding.source,
+        "workflowSource": binding.source, "workflow": WORKFLOW, "runId": binding.run, "runAttempt": binding.attempt,
+        "packageRole": "installed-shell-observation", "toolchain": target_data(binding.target)["toolchain"],
+        "helperIdentifier": "dev.mobile-release-kit.desktop.android-register", "passed": True,
+        "originalClosesKnown": True, "targetRetired": True, "outerFinalityRequired": True,
+        "directStagerIOPending": None, "cleanupErrors": [], "androidServiceAuthenticated": False,
+        "androidRegisteredCopyQualified": False, "androidBuildQualified": False,
+        "developerIdOrNotarizationQualified": False, "productReady": False}
+    need(set(fixed) <= receipt.keys() and "failure" not in receipt, "gate-package-helper-keys")
+    for key, expected in fixed.items():
+        _exact(receipt[key], expected)
+    # Separate credential diagnostics may be added by the same owner. They
+    # cannot weaken these original package calls or independent saved status0.
+    calls = receipt.get("originalCalls")
+    need(type(calls) is list and len(calls) == len(stage.PACKAGING_CALL_ROLES), "gate-package-call-roster")
+    for call, role in zip(calls, stage.PACKAGING_CALL_ROLES):
+        need(type(call) is dict and set(call) == {"role", "entered", "returned", "capturesSettled", "returncode",
+                                                "stdoutSha256", "stderrSha256"}, "gate-package-call-shape")
+        for key, expected in {"role": role, "entered": True, "returned": True, "capturesSettled": True}.items():
+            _exact(call[key], expected)
+        codes = (0, 1) if role in ("installer-log-cursor", "installer-log-capture") else (0,)
+        need(type(call["returncode"]) is int and call["returncode"] in codes
+             and _gate_sha(call["stdoutSha256"]) and _gate_sha(call["stderrSha256"]), "gate-package-call-original")
+    _exact(receipt.get("packageMount"), {"attachEntered": True, "originalKnown": True, "detached": True, "retained": False,
+        "installerEntered": True, "installerOriginalZero": True, "sameRequestV2Readback": True, "systemServiceExitClaimed": False})
+    distribution = receipt.get("distribution")
+    fixed = {"schemaVersion": 1, "kind": "mrk-ordinary-package-observed-v2", "target": binding.target,
+        "packageVersion": selection.package_version, "release": selection.release, "requestId": request,
+        "packageSha256": audit["packageSha256"], "packageBytes": audit["packageSize"], "descriptorSha256": digest(descriptor),
+        "originalInstallerReturnedZero": True, "sameRequestV2Readback": True, "originalMountDetached": True,
+        "groupEndpointMet": True, "originalOuterReturnRequired": True,
+        "developerIdPurposeAuthority": "native-parent-and-application-checks-separate", "notarizationQualified": False,
+        "gatekeeperQualified": False, "systemServiceExitClaimed": False, "productReady": False}
+    need(type(distribution) is dict and set(distribution) == set(fixed) | {"signatureSha256", "producerSummary", "userImage",
+         "observationImage", "sourceProducerProfileSha256", "sourceServiceProfileSha256", "mountIdentity"}, "gate-package-distribution-keys")
+    for key, expected in fixed.items():
+        _exact(distribution[key], expected)
+    need(all(_gate_sha(distribution[key]) for key in ("signatureSha256", "sourceProducerProfileSha256", "sourceServiceProfileSha256")),
+         "gate-package-distribution-digests")
+    summary = distribution["producerSummary"]
+    need(type(summary) is dict and set(summary) == {"schemaVersion", "kind", "packageSha256", "descriptorSha256",
+         "signatureSha256", "descriptorBytes", "signatureBytes"}, "gate-package-producer-summary")
+    for key, expected in {"schemaVersion": 1, "kind": "mrk-package-producer-emitted", "packageSha256": audit["packageSha256"],
+            "descriptorSha256": digest(descriptor), "signatureSha256": distribution["signatureSha256"], "descriptorBytes": len(descriptor)}.items():
+        _exact(summary[key], expected)
+    need(type(summary["signatureBytes"]) is int and 0 < summary["signatureBytes"] <= stage.PRODUCER_SIGNATURE_BYTES,
+         "gate-package-signature-bound")
+    for key, name in (("userImage", "MobileReleaseKit.dmg"), ("observationImage", "MobileReleaseKit-Observation.dmg")):
+        image = distribution[key]
+        need(type(image) is dict and set(image) == {"file", "sha256", "bytes"} and image["file"] == name
+             and _gate_sha(image["sha256"]) and type(image["bytes"]) is int and 0 < image["bytes"] <= stage.MAX_BYTES,
+             "gate-package-image-data")
+    identity = distribution["mountIdentity"]
+    need(type(identity) is list and len(identity) == 5 and all(type(v) is int and 0 <= v < 1 << 64 for v in identity)
+         and identity[1] > 0 and stat.S_ISDIR(identity[2]), "gate-package-mount-data")
+    return producer, request, summary
+
+
+def _gate_installation(body, status, binding, environment, stage, selection, anchors):
+    need(type(status) is bytes and status == b"0\n", "gate-installer-status-binding")
+    producer, request, summary = _gate_package_anchors(anchors, binding, environment, stage, selection)
+    current = producer["releaseSet"]["current"]
+    value = _gate_json(body, 65536)
+    fixed = {"schemaVersion": 2, "sourceCommit": binding.source, "inventorySha256": current["inventorySha256"],
+        "runtimeManifestSha256": current["runtimeManifestSha256"], "completedPackageSha256": current["packageSha256"],
+        "release": selection.release, "requestId": request, "originalInstallerReturnedZero": True, "originalWriterJoined": True,
+        "producerSignatureAuthority": "native-parent-and-application-checks-separate", "historicalOuterExit": "unverified",
+        "applicationLaunched": False, "guiSaveQualified": False, "aquaGate": "required-separate-actual-session",
+        "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
+    need(set(value) == set(fixed) | {"invocation", "nonrootReadbackFileCount", "originalInstallerResult", "installerResultExport",
+                                   "installationMetadata", "maintenanceGate", "registrationReservation"}, "gate-installation-keys")
     for key, expected in fixed.items():
         _exact(value[key], expected)
-    need(type(value["nonrootReadbackFileCount"]) is int and 0 < value["nonrootReadbackFileCount"] <= 2048, "gate-installation-count")
-    original = value["originalInstallerResult"]
-    # Reuse the current pinned nested contract, never invoke observation_command.
-    stage.bound_original_result(original, (None, "confirmed", "confirmed", "installed", True, 0), binding.source, inventory, manifest)
-    need(type(original["staging"]) is str and re.fullmatch(r"\.install-[0-9a-f]{32}", original["staging"])
-         and original["staging"][9:] != "0" * 32, "gate-installation-instance")
+    # This is semantic validation by the current pinned parser, NOT the raw
+    # exported original's byte encoding, SHA or future finality. Its exception
+    # remains the same original object. No v1 or generic-success fallback.
+    original = stage.maintenance_result_data(stage.canonical(value["originalInstallerResult"]) + b"\n", request)
+    _exact(value["invocation"], original["invocation"])
+    count = value["nonrootReadbackFileCount"]
+    need(type(count) is int and 0 < count <= stage.MAX_FILES, "gate-installation-count")
     metadata = value["installationMetadata"]
-    need(type(metadata) is dict and set(metadata) == {"state", "instance", "inventoryBytes", "descriptorBytes", "originalFinality"}
-         and metadata["state"] == "recorded-current-data-correspondence" and metadata["instance"] == original["staging"][9:]
-         and metadata["originalFinality"] == "separate-Installer-status"
-         and type(metadata["inventoryBytes"]) is int and 0 < metadata["inventoryBytes"] <= 1024 * 1024
-         and type(metadata["descriptorBytes"]) is int and 0 < metadata["descriptorBytes"] <= stage.INSTALLATION_RECORD_LIMIT
-         and metadata["inventoryBytes"] + metadata["descriptorBytes"] == original["installationMetadata"]["plannedBytes"]
-             == original["installationMetadata"]["writtenBytes"], "gate-installation-metadata")
+    need(type(metadata) is list and 1 <= len(metadata) <= 9, "gate-installation-generations")
+    predecessors = {row["release"] for row in producer["releaseSet"]["acceptedPredecessors"]}
+    releases, instances, files, byte_count = set(), set(), 0, 0
+    for index, row in enumerate(metadata):
+        need(type(row) is dict and set(row) == {"release", "instance", "inventoryBytes", "descriptorBytes", "producerDescriptorBytes",
+             "producerSignatureBytes", "verifiedCurrentFiles", "declaredPayloadFiles", "declaredBytes", "historicalOuterExit"},
+             "gate-installation-metadata-keys")
+        release, instance = row["release"], row["instance"]
+        need(type(release) is str and release not in releases and (release == selection.release if index == 0 else release in predecessors)
+             and stage.maintenance_hex(instance, 32) and instance not in instances and row["historicalOuterExit"] == "unverified",
+             "gate-installation-generation-binding")
+        releases.add(release); instances.add(instance)
+        for key, limit in (("inventoryBytes", 1024 * 1024), ("descriptorBytes", stage.INSTALLATION_RECORD_LIMIT),
+                ("producerDescriptorBytes", stage.PRODUCER_DESCRIPTOR_BYTES), ("producerSignatureBytes", stage.PRODUCER_SIGNATURE_BYTES)):
+            need(type(row[key]) is int and 0 < row[key] <= limit, "gate-installation-metadata-bound")
+        declared, verified, extent = row["declaredPayloadFiles"], row["verifiedCurrentFiles"], row["declaredBytes"]
+        need(type(declared) is int and 0 < declared <= stage.MAX_FILES and type(verified) is int
+             and verified == (count if index == 0 else 0) and (index != 0 or declared == count)
+             and type(extent) is int and sum(row[key] for key in ("inventoryBytes", "descriptorBytes", "producerDescriptorBytes", "producerSignatureBytes"))
+                 <= extent <= stage.MAX_BYTES, "gate-installation-generation-accounting")
+        files += declared; byte_count += extent
+        need(files <= stage.MAX_FILES and byte_count <= stage.MAX_BYTES, "gate-installation-generation-total")
+    _exact(metadata[0]["producerDescriptorBytes"], summary["descriptorBytes"])
+    _exact(metadata[0]["producerSignatureBytes"], summary["signatureBytes"])
+    action = original["action"]
+    need((action != "fresh-install" or len(metadata) == 1) and (action != "update" or len(metadata) >= 2), "gate-installation-action-generations")
+    if action in ("fresh-install", "update"):
+        _exact(metadata[0]["instance"], original["invocation"])
+    # Noop/restore retain an older instance, not the new invocation. Full
+    # linked state/intent/capsule transitions and the current payload hashes
+    # were checked by maintenance_history_data + observation_command before
+    # the independent helper0. This reduced metadata cannot replay that history
+    # or establish a historical outer exit, exclusion or signature authority.
     _exact(value["maintenanceGate"], {"state": "protected-permanent-gate-data-correspondence", "bytes": len(stage.MAINTENANCE_GATE_BYTES),
                                     "exclusionObserved": False, "workerFinalityEstablished": False})
+    _exact(value["registrationReservation"], {"state": "protected-permanent-reservation-data-correspondence",
+        "bytes": len(stage.REGISTRATION_GATE_BYTES), "exclusionObserved": False, "workerFinalityEstablished": False})
     exported = value["installerResultExport"]
     need(type(exported) is dict and set(exported) == {"bytes", "sha256", "identity", "finalityBasis"}
          and type(exported["bytes"]) is int and 0 < exported["bytes"] <= 65536 and _gate_sha(exported["sha256"])
@@ -5449,26 +6056,36 @@ def _gate_recheck(fixtures):
         need(_gate_file_read(record)[1] == record["sha256"], "gate-original-hash-changed")
 
 
-def _gate_load_stager(fixtures, checkout):
+def _gate_load_stager(fixtures, checkout, *, target=ARM_TARGET, registrations=None):
     import importlib.util
-    selected = []
+    need(registrations is None or type(registrations) is list and not registrations, "gate-stager-registry-custody")
+    target_row = target_data(target)
+    selected, bodies = [], {}
     for relative, expected in SHIPPING_GATE_SOURCE_PINS.items():
-        body, original = _gate_file(fixtures, str(checkout / relative), None, 256 * 1024)
+        limit = 373689 if relative == "desktop/tools/stage_macos_installed.py" else 256 * 1024
+        body, original = _gate_file(fixtures, str(checkout / relative), None, limit)
         need(digest(body) == expected, "gate-stager-source-pin")
         selected.append(original)
+        bodies[relative] = body
     name = "_mrk_shipping_gate_stager"
     need(name not in sys.modules, "gate-stager-already-imported")
     spec = importlib.util.spec_from_file_location(name, checkout / "desktop/tools/stage_macos_installed.py")
     need(spec is not None and spec.loader is not None, "gate-stager-loader")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    # Import reads only pinned build-release SOURCE through the existing bounded
-    # stager reader (including its read-only source xattr check on Darwin).
+    if registrations is not None:
+        registrations.append(module)  # Actual original before any loader execution can fail.
+    # ARM is mandatory import support even on Intel. Both release originals
+    # remain in this same book; no second source_build_selection filesystem read.
     # No Installer, protected-installation readback or payload command is called.
     spec.loader.exec_module(module)
+    release = module.build_release_data(bodies["desktop/macos-installed-inputs/" + target_row["releaseInput"]], target=target)
+    selection = module.BuildSelection(target, release["packageVersion"], release["release"])
     for original in selected:
         need(_gate_file_read(original)[1] == original["sha256"], "gate-stager-source-changed")
-    return module
+    # Retained through use, rechecked by the ordinary gate POST, then consumed
+    # only by its existing final settlement. Import is never a close witness.
+    return module, selection
 
 
 def _gate_dependencies(fixtures, binding, checkout, work, environment):
@@ -5477,21 +6094,24 @@ def _gate_dependencies(fixtures, binding, checkout, work, environment):
          and environment.get("MRK_MACOS_AQUA_SCOPE") in SHIPPING_GATE_SCOPES, "gate-fixed-work-route")
     fixtures.gate_work = _gate_directory(fixtures, str(work), private=True)
     limits = {"headless-tests.receipt.json": 16384, "headless-build.jsonl": 4 * 1024 * 1024, "headless-build.status": 4,
-              "installation-observation.json": 65536, "installer-output.status": 4}
+              "installation-observation.json": 65536, "installer-output.status": 4,
+              "package-install.status": 4, "package-request-id.txt": 33, "package-audit.json": 16384,
+              "producer-descriptor-input.json": 65536, "android-helper-package-install.json": 16384}
     for prefix in ("headless", "headless-native"):
         limits.update({prefix + "-tests.stdout": 65536, prefix + "-tests.stderr": 65536, prefix + "-tests.status": 4})
     bodies = {name: _gate_file(fixtures, name, fixtures.gate_work, limit)[0] for name, limit in limits.items()}
     headless, native = _gate_headless(bodies, binding, checkout, work)
     need(_gate_integers(headless["workOriginal"], 5) == signature(os.fstat(fixtures.gate_work))[:5], "gate-original-work-binding")
-    stage = _gate_load_stager(fixtures, checkout)
-    _gate_installation(bodies["installation-observation.json"], bodies["installer-output.status"], binding, environment, stage)
+    stage, selection = _gate_load_stager(fixtures, checkout, target=binding.target)
+    _gate_installation(bodies["installation-observation.json"], bodies["installer-output.status"], binding, environment,
+                       stage, selection, bodies)
     return bodies, headless, native
 
 
 def _gate_new_report(binding, scope):
     return {"schemaVersion": 1, "type": "macos-installed-shipping-gate-control", **binding.public(),
-        "workflow": WORKFLOW, "workflowSource": binding.source, "aquaScope": scope, "platform": "macOS26-arm64",
-        "toolchain": "1.98.1", "testName": SHIPPING_GATE_TEST, "headlessReceiptSha256": None,
+        "workflow": WORKFLOW, "workflowSource": binding.source, "aquaScope": scope, "platform": target_data(binding.target)["platform"],
+        "toolchain": target_data(binding.target)["toolchain"], "testName": SHIPPING_GATE_TEST, "headlessReceiptSha256": None,
         "compilerJsonSha256": None, "installationReadbackSha256": None, "artifact": None,
         "ownerEntered": False, "originalCallReturned": False, "ownerReturncode": None, "ownerElapsedNanoseconds": None,
         "stdoutSha256": None, "stderrSha256": None, "stdoutBytes": None, "stderrBytes": None, "namedTestPassed": False,
@@ -5600,7 +6220,7 @@ def run_shipping_gate_control(binding, fixtures, run_owned, checkout, work, envi
         target = _gate_directory(fixtures, "cargo-target", fixtures.gate_work, private=True)
         need(signature(os.fstat(target))[:5] == _gate_integers(headless["cargoTargetOriginal"], 5), "gate-original-target-binding")
         parent = target
-        for name in ("aarch64-apple-darwin", "debug", "deps"):
+        for name in (binding.target, "debug", "deps"):
             parent = _gate_directory(fixtures, name, parent)
         binary = Path(native["path"])
         _body, original = _gate_file(fixtures, binary.name, parent, 1024 * 1024 * 1024, capture=False)
@@ -5691,11 +6311,11 @@ def require_shipping_gate_receipt(binding, uid, gid, checkout, work, environment
     return result
 
 
-def shipping_gate_control_main():
+def shipping_gate_control_main(*, target=ARM_TARGET):
     binding = None
     try:
         root = Path(__file__).absolute().parents[2]
-        binding, uid, gid, _username = admit(os.environ, root)
+        binding, uid, gid, _username = admit(os.environ, root, target=target)
         need(os.environ.get("MRK_MACOS_AQUA_SCOPE") in SHIPPING_GATE_SCOPES, "gate-fixed-shipping-scope")
         owner = load_owner(root)
         os.umask(0o077)
@@ -5743,8 +6363,8 @@ def _capacity_dependencies(fixtures, binding, checkout, work, environment):
 
 def _capacity_new_report(binding, scope):
     return {"schemaVersion": 1, "type": "macos-shipping-capacity-data", **binding.public(),
-        "workflow": WORKFLOW, "workflowSource": binding.source, "aquaScope": scope, "platform": "macOS26-arm64",
-        "toolchain": "1.98.1", "names": list(SHIPPING_CAPACITY_TESTS), "features": [],
+        "workflow": WORKFLOW, "workflowSource": binding.source, "aquaScope": scope, "platform": target_data(binding.target)["platform"],
+        "toolchain": target_data(binding.target)["toolchain"], "names": list(SHIPPING_CAPACITY_TESTS), "features": [],
         "headlessReceiptSha256": None, "compilerJsonSha256": None, "artifact": None,
         "ownerCallsEntered": 0, "ownerCallsReturned": 0, "originalCallReturned": False, "ownerReturncode": None,
         "ownerElapsedNanoseconds": None, "finalElapsedNanoseconds": None, "deadlineMetAfterFinalCloses": False,
@@ -5830,7 +6450,7 @@ def run_shipping_capacity_data(binding, fixtures, run_owned, checkout, work, env
         target = _gate_directory(fixtures, "cargo-target", fixtures.gate_work, private=True)
         need(signature(os.fstat(target))[:5] == _gate_integers(headless["cargoTargetOriginal"], 5), "capacity-original-target-binding")
         parent = target
-        for name in ("aarch64-apple-darwin", "debug", "deps"):
+        for name in (binding.target, "debug", "deps"):
             parent = _gate_directory(fixtures, name, parent)
         binary = Path(app["path"])
         _body, original = _gate_file(fixtures, binary.name, parent, 1024 * 1024 * 1024, capture=False)
@@ -5887,10 +6507,10 @@ def run_shipping_capacity_data(binding, fixtures, run_owned, checkout, work, env
     return report
 
 
-def shipping_capacity_data_main():
+def shipping_capacity_data_main(*, target=ARM_TARGET):
     try:
         root = Path(__file__).absolute().parents[2]
-        binding, uid, gid, _username = admit(os.environ, root)
+        binding, uid, gid, _username = admit(os.environ, root, target=target)
         need(os.environ.get("MRK_MACOS_AQUA_SCOPE") in SHIPPING_GATE_SCOPES, "capacity-fixed-shipping-scope")
         owner = load_owner(root)
         os.umask(0o077)
@@ -5968,9 +6588,13 @@ def main():
     not_executed = ()
     shipping_gate = None
     try:
-        scope = argument_scope(sys.argv[1:])
+        scope, target = entry_arguments(sys.argv[1:])
         root = Path(__file__).absolute().parents[2]
-        binding, uid, gid, username = admit(os.environ, root)
+        binding, uid, gid, username = admit(os.environ, root, target=target)
+        if scope in (RECOVERY_CASE, IOS_ACCOUNT_CASE):
+            supplier_origin, supplier_receipt_sha = recovery_supplier_route(
+                os.environ.get("MRK_MACOS_RUNTIME_SUPPLIER", "historical"),
+                os.environ.get("MRK_MACOS_PYTHON_SUPPLIER_SHA256"))
         owner = load_owner(root)  # Native main only; no module-import-time core.
         os.umask(0o077)
         if scope == VAULT_HELPER_SCOPE:
@@ -5980,7 +6604,8 @@ def main():
         fixtures = Fixtures(binding, uid, gid, scope)
         fixtures.prepare()
         if scope in (RECOVERY_CASE, IOS_ACCOUNT_CASE):
-            fixtures.admit_recovery_runtime(root, Path(os.environ["MRK_MACOS_WORK"]))
+            fixtures.admit_recovery_runtime(root, Path(os.environ["MRK_MACOS_WORK"]),
+                supplier_origin=supplier_origin, supplier_receipt_sha256=supplier_receipt_sha)
         not_executed = run_cases(binding, fixtures, owner.run_owned, uid, username, lambda value: emit_record(value, sys.stdout), scope)
     except BaseException as error:
         original_error = error

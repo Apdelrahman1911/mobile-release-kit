@@ -1,14 +1,13 @@
 # Private desktop configuration edit adapter
 
-This source is a **configuration-only create/save building block**, not an
-enabled passive API or a shipping/platform qualification. The ordinary desktop
-API and disposable read-only engine still reject `config.save`,
-`project.initialize` and `assets.import`. A separate configuration-only installed
-Linux x86-64 profile now connects this adapter to the existing native edit owner;
-its installed Save observation is still pending. The general packaged resolver,
-other edit domains and Windows mutation gates remain closed. Native-owner, UI
-and hosted filesystem verification are separate prerequisites; inert tests are
-not that evidence.
+This is the **configuration-only create/save adapter and explicit journal
+recovery flow**, not a passive API or a shipping/platform qualification. The
+ordinary read-only API still rejects `config.save`, `project.initialize` and
+`assets.import`. Mutations use the existing native EditOwner and its admitted
+runtime/platform, original project registration and finality rules. Recovery
+does not broaden those gates or enable Windows/browser mutation. Source,
+inert controller tests, real filesystem tests and installed/native observations
+prove different things; none substitutes for the others.
 
 ## Fixed scope and original authority
 
@@ -100,13 +99,12 @@ validated final draft. It is not another file revision or mutation authority.
 
 ## Conservative ignore behavior
 
-The ten fixed `init_transaction.IGNORE_LINES` are the only permitted rules:
-the original evidence/init/metadata seven plus `.mobile-release-version-prepare/`,
-`.mobile-release-version/` and `.mobile-release-version-cleanup/`. Configuration
-still has exactly its two writable destinations; metadata or version Save cannot
-add rules. Metadata explicitly retains its original seven-rule proof; only the
-separate [saved-version VALUE writer](desktop-release-version-edit.md) requires
-all ten. These source changes do not enable that writer.
+The thirteen fixed `init_transaction.IGNORE_LINES` are the only permitted
+rules: the original evidence/init/metadata seven, the three saved-version
+journal names, and the three metadata-image journal names. Configuration still
+has exactly its two writable destinations. Other editors keep their own scope
+and ignore-proof requirements; configuration recovery does not add ignore
+rules or enable another writer.
 Unprefixed or root-prefixed exact positive directory lines count as sufficient
 coverage. LF/optional preceding CR split patterns; leading spaces are meaningful.
 Any later syntactic negation (`!` in column zero) invalidates earlier proofs.
@@ -160,3 +158,81 @@ deep-copy isolation, typed outcomes, close failure and passive-gate cases.
 Neither suite executes a real root lease, file transaction or child owner, nor
 proves inode preservation, native cancellation safety, platform support or
 packaged readiness. Those require separately reviewed hosted checks.
+
+## Explicit configuration recovery
+
+Use **Inspect configuration recovery** for the original registered project,
+even if its interrupted configuration cannot be parsed or no draft is loaded.
+Inspection and its one Prepare are read-only. A complete, canonical two-file
+plan, every marker and the entire bounded private inventory must agree before
+the UI can offer a frozen review. Review the fixed paths, before/after hashes,
+sizes and modes, the restore/remove/preserve effects and private cleanup counts;
+then explicitly check the confirmation box and Apply once. Close preserves the
+journal and draft; it is not rollback or successful cleanup.
+
+The same transaction engine is reused with a private, immutable per-lease
+configuration profile. It admits only `release/mobile-release.json` and root
+`.gitignore`, with `release` the sole possible created directory. Configuration
+facts/data retain the original 512 KiB configuration and 1 MiB ignore limits.
+Control reads are separately bounded; the existing cumulative read limit and
+16-entry inventory are not increased. No caller selects paths, modes, payloads,
+profile, force or a new transaction. Recovery Apply calls the existing original
+`InitWorkspace.recover()` once, only after rechecking the same retained plan,
+root, lock, public files, private files and markers.
+
+| Inspected action | Successful transaction effect |
+| --- | --- |
+| `preparing_cleanup` | `not_started` |
+| `rollback` | `rolled_back` |
+| `committed_cleanup` | `committed` |
+| `rolled_back_cleanup` | `rolled_back` |
+
+Every success additionally requires a clean journal, settled core resources,
+no core/native failure and original native finality. Known commit/rollback and
+the first failure survive later cleanup trouble. Unknown custody, lost replies,
+timeouts or cancellation never justify retry, resending Apply or clearing
+attention. Check the original native status; do not open a replacement owner.
+
+The normal configuration commands and JSON stay unchanged. Recovery uses only
+the explicit fixed `intent: "recover"` variants of Open, Prepare and Apply;
+Close and Status remain shared. The renderer never supplies a root or identity.
+The native owner admits the original registered root, retains the intent and
+publishes separate recovery details instead of a fabricated normal checkout or
+save plan. Its existing single-owner exclusion and 64-project domain block
+remain authoritative.
+
+### Preserve legacy, mixed or incomplete records
+
+The shared init journal names alone do **not** identify a configuration save.
+A partial plan, unrelated full CLI initialization, mixed workflow/configuration
+inventory, changed control/data file, unsafe link or unverified terminal is a
+conflict: keep the journal and original files unchanged. This flow neither
+guesses ownership nor deletes/rebuilds those records. An idle inspection is not
+proof that earlier unknown evidence is resolved. A new explicit recovery review
+is permissible only after the prior owner actually settles; no automatic repair
+or fallback to blind CLI recovery is offered.
+
+### Recovery is not Saved
+
+A successful submitted recovery keeps the in-memory draft, comparison baseline,
+dirty state, undo copies and revision counters. It cannot synthesize a normal
+Save receipt. It clears only matching current configuration attention, retires
+stale observations/consents and requires **Reload saved observation after
+recovery** before a new Save review. A stale, failed or automatic snapshot does
+not satisfy that requirement. Reload preserves an existing draft and baseline;
+adopting a changed baseline still requires the separate explicit discard/reload
+workflow.
+
+Draft, selection/navigation, snapshot, service or shutdown intent invalidates an
+unsubmitted recovery confirmation immediately. After submission, the original
+historical outcome remains visible but cannot clear newer/foreign/unknown
+attention or grant authority in a replacement context. Only an exact current
+successful completion can cover a strictly older known-settled attention reply;
+equal/later observations and either status row's newer pending journal remain
+sticky. Opaque window generations are compared for equality, never ordered.
+
+Regression coverage lives in the existing configuration/workflow-recovery
+Python modules, inline Rust edit-owner/protocol tests and `config-edit.test.mjs`.
+The new filesystem cases use real typed transaction/recovery primitives and
+fault injection; controller cases use inert promises/events, not a native owner.
+No installed Mac recovery or shipping qualification is claimed by these tests.

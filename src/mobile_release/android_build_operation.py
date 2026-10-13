@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ._desktop_android_build_control import AndroidBuildInput
-from ._desktop_android_build_protocol import AndroidBuildRequest, REASONS, is_signed, stages, require
+from ._desktop_android_build_protocol import AndroidBuildRequest, MAC_TOOLCHAIN_PROFILES, REASONS, is_signed, stages, require
 from ._desktop_android_build_selection import (
     SavedAndroidSelection, bind_saved_android_validation, bind_saved_android_version, select_saved_android_configuration,
 )
@@ -189,7 +189,7 @@ class AndroidBuildOperation:
         from .android import _bundle_task
         self.inputs = BoundAndroidInputs(config, saved, _bundle_task(selected.module, selected.variant), check_signer)
         if self.signing is not None:
-            require(self.request.native["profile"] == "macos-arm64" and check_signer)
+            require(self.request.native["profile"] in MAC_TOOLCHAIN_PROFILES and check_signer)
             # savedConfig binds the exact original on-disk bytes above. The
             # asset session holds canonical serde_json UTF-8 draft bytes, not
             # that file's whitespace/escapes. Compare this SAME admitted parsed

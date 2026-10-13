@@ -35,6 +35,7 @@ class ProcessError(ValidationError, CredentialError):
         # Optional closed predicate DATA from this original owner's final
         # incomplete-result exception, never output or a lifetime capability.
         self.owner_failure_mask = owner_failure_mask
+        self.owner_finality_diagnostic = None  # Optional DATA, never lifetime authority.
 
     @property
     def fatal(self) -> bool:

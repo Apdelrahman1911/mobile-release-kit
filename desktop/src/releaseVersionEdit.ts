@@ -1,5 +1,7 @@
 // Saved-version VALUE DATA, separate from passive observation and config drafts.
 // Core alone decides policy and patches the original bytes.
+import { parseSavedTextRecoveryProjection, savedTextRecoveryDetailsProgress } from './savedTextRecovery.ts';
+import type { SavedTextRecoveryOpenRequest, SavedTextRecoveryPrepareRequest, SavedTextRecoveryProjection } from './savedTextRecovery.ts';
 import { sameJson } from './catalog.ts';
 import { isU32, U32_MAX } from './configEditProtocol.ts';
 import type { ApiError, CoreEditOutcome, EditAvailability, HelpContent, JsonValue, NativeEditReason } from './types.ts';
@@ -21,13 +23,15 @@ export interface VersionPreparedView {
   lineEndings: { before: string[]; after: string[]; finalNewlineBefore: boolean; finalNewlineAfter: boolean; preserved: boolean };
   validation: { valid: true; state: 'format-valid'; issues: [] };
 }
-export interface VersionEditProjection {
+export interface NormalVersionEditProjection {
+  recovery?: never;
   domain: 'release_version'; projectId: string; sessionId: string; ownerGeneration: string;
   phase: 'opening' | 'editing' | 'preparing' | 'reviewing' | 'applying' | 'finalizing' | 'final' | 'unknown';
   reviewRemainingMs: number; checkout: VersionCheckout | null;
   prepared: { revision: string; planToken: string; draftRevision: number; baselineGeneration: number; view: VersionPreparedView } | null;
   applySubmitted: boolean; coreOutcome: CoreEditOutcome | null; nativeReason: NativeEditReason; nativeFinality: 'pending' | 'settled' | 'unknown'; lateSettled: boolean;
 }
+export type VersionEditProjection = NormalVersionEditProjection | SavedTextRecoveryProjection<'release_version'>;
 export interface VersionEditStatus {
   schemaVersion: 1; domain: 'release_version'; windowGeneration: string; statusRevision: number;
   capability: { available: boolean; reason: EditAvailability }; active: VersionEditProjection | null; lastTerminal: VersionEditProjection | null;
@@ -36,9 +40,9 @@ export interface PrepareVersionEditRequest {
   sessionId: string; revision: string; expectedBaseline: VersionBaseline; intent: VersionIntent; values: VersionValues; draftRevision: number; baselineGeneration: number;
 }
 export interface ReleaseVersionEditApi {
-  openReleaseVersionEdit(input: { projectId: string }): Promise<VersionEditStatus>;
-  prepareReleaseVersionEdit(input: PrepareVersionEditRequest): Promise<VersionEditStatus>;
-  applyReleaseVersionEdit(sessionId: string, planToken: string): Promise<VersionEditStatus>;
+  openReleaseVersionEdit(input: { projectId: string } | SavedTextRecoveryOpenRequest): Promise<VersionEditStatus>;
+  prepareReleaseVersionEdit(input: PrepareVersionEditRequest | SavedTextRecoveryPrepareRequest): Promise<VersionEditStatus>;
+  applyReleaseVersionEdit(sessionId: string, planToken: string, intent?: 'recover'): Promise<VersionEditStatus>;
   closeReleaseVersionEdit(sessionId: string): Promise<VersionEditStatus>;
   releaseVersionEditStatus(): Promise<VersionEditStatus>;
   subscribeReleaseVersionEdit(onStatus: (status: unknown) => void): Promise<() => void>;
@@ -206,11 +210,15 @@ export type VersionEditCommand = 'release_version_edit_open' | 'release_version_
 export function versionEditRequestFits(command: VersionEditCommand, value: unknown): boolean {
   if (!boundedJson(value, 16 * 1024, 256, 16)) return false;
   switch (command) {
-    case 'release_version_edit_open': return keys(value, ['projectId']) && projectId(value.projectId);
-    case 'release_version_edit_prepare': return keys(value, ['sessionId', 'revision', 'expectedBaseline', 'intent', 'values', 'draftRevision', 'baselineGeneration']) &&
+    case 'release_version_edit_open': return (keys(value, ['projectId']) ||
+      keys(value, ['projectId', 'intent']) && value.intent === 'recover') && projectId(value.projectId);
+    case 'release_version_edit_prepare':
+      if (keys(value, ['sessionId', 'revision', 'intent']) && token(value.sessionId) && token(value.revision) && value.intent === 'recover') return true;
+      return keys(value, ['sessionId', 'revision', 'expectedBaseline', 'intent', 'values', 'draftRevision', 'baselineGeneration']) &&
       token(value.sessionId) && token(value.revision) && baseline(value.expectedBaseline) && value.intent === (value.expectedBaseline.savedVersion.state === 'absent' ? 'create' : 'edit') &&
       proposed(value.values) && isU32(value.draftRevision) && value.draftRevision < U32_MAX && isU32(value.baselineGeneration) && value.baselineGeneration < U32_MAX;
-    case 'release_version_edit_apply': return keys(value, ['sessionId', 'planToken']) && token(value.sessionId) && token(value.planToken);
+    case 'release_version_edit_apply': return (keys(value, ['sessionId', 'planToken']) ||
+      keys(value, ['sessionId', 'planToken', 'intent']) && value.intent === 'recover') && token(value.sessionId) && token(value.planToken);
     case 'release_version_edit_close': return keys(value, ['sessionId']) && token(value.sessionId);
     case 'release_version_edit_status': return keys(value, []);
   }
@@ -237,6 +245,7 @@ function outcome(value: unknown): value is CoreEditOutcome {
   return value.reason !== 'none' || value.resources === 'settled' && value.effect !== 'unknown' && !oneOf(value.journal, ['unknown', 'recovery_required']);
 }
 function projection(value: unknown): value is VersionEditProjection {
+  if (record(value) && Object.hasOwn(value, 'recovery')) return parseSavedTextRecoveryProjection(value, 'release_version') !== null;
   if (!keys(value, ['domain', 'projectId', 'sessionId', 'ownerGeneration', 'phase', 'reviewRemainingMs', 'checkout', 'prepared', 'applySubmitted', 'coreOutcome', 'nativeReason', 'nativeFinality', 'lateSettled']) ||
       value.domain !== 'release_version' || !projectId(value.projectId) || !token(value.sessionId) || !token(value.ownerGeneration) ||
       !oneOf(value.phase, phases) || !length(value.reviewRemainingMs, 900000) || typeof value.applySubmitted !== 'boolean' || typeof value.lateSettled !== 'boolean' ||
@@ -280,7 +289,7 @@ export function parseVersionEditStatus(value: unknown): VersionEditStatus | null
 }
 export function normalVersionEditResult(owner: VersionEditProjection): 'saved' | 'unchanged' | null {
   const core = owner.coreOutcome;
-  if (owner.domain !== 'release_version' || owner.phase !== 'final' || owner.nativeFinality !== 'settled' || owner.nativeReason !== 'none' || owner.lateSettled ||
+  if (owner.recovery || owner.domain !== 'release_version' || owner.phase !== 'final' || owner.nativeFinality !== 'settled' || owner.nativeReason !== 'none' || owner.lateSettled ||
       !core || core.resources !== 'settled' || core.reason !== 'none' || !owner.applySubmitted || !owner.checkout || !owner.prepared || owner.prepared.revision !== owner.checkout.revision) return null;
   if (core.effect === 'committed' && core.journal === 'clean' && !versionNoOp(owner.prepared.view)) return 'saved';
   if (core.effect === 'unchanged' && core.journal === 'not_created' && versionNoOp(owner.prepared.view)) return 'unchanged';
@@ -290,6 +299,7 @@ function sameFacts(first: VersionEditProjection, next: VersionEditProjection): b
   return equal({ ...first, reviewRemainingMs: 0 }, { ...next, reviewRemainingMs: 0 });
 }
 export function versionProjectionProgress(first: VersionEditProjection, next: VersionEditProjection): boolean {
+  if (!savedTextRecoveryDetailsProgress(first.recovery, next.recovery)) return false;
   if (first.domain !== next.domain || first.sessionId !== next.sessionId || first.projectId !== next.projectId || first.ownerGeneration !== next.ownerGeneration ||
       first.checkout !== null && !equal(first.checkout, next.checkout) ||
       first.prepared !== null && !equal(first.prepared, next.prepared) || first.applySubmitted && !next.applySubmitted || first.lateSettled && !next.lateSettled) return false;

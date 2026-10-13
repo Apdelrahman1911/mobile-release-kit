@@ -111,9 +111,9 @@ const controls: Record<string, Partial<HelpContent>> = {
     label: 'Unlock encrypted vault', requiredness: 'conditional', requiredWhen: 'Before preparing, saving, removing or assigning encrypted inputs.',
     what: 'Explicitly ask the qualified OS keyring for the existing vault key.',
     why: 'Locked storage cannot expose labels or supply credentials. Unlock authenticates the bounded descriptor listing; it does not assess every stored payload.',
-    where: 'Use Unlock vault. On macOS the existing login Keychain must already be unlocked: if needed, open Keychain Access yourself and unlock your login keychain there. Never enter the desktop or Keychain password into this app’s credential fields.',
+    where: 'Use Unlock vault. If a failed unlock closed the vault session, wait for known original cleanup, choose Open encrypted vault, then explicitly choose Unlock vault. On macOS the existing login Keychain must already be unlocked: if needed, open Keychain Access yourself and unlock your login keychain there. Never enter the desktop or Keychain password into this app’s credential fields.',
     format: 'On macOS this retrieves the exact existing key without asking for a Keychain prompt, creating or unlocking a Keychain, or replacing a key. There is no plaintext fallback. Saved records still need an explicit Assess and assign step for the current draft.',
-    failure: 'Locked, denied, missing and unavailable access have distinct reasons. Use the operating system’s own keyring controls when necessary; the app does not repair access or replay interrupted storage. Interrupted storage may permit read-only labels only, with no mutation or assignment.',
+    failure: 'Locked, denied, missing and unavailable access have distinct reasons. Pending, unknown or late-known cleanup does not authorize another attempt. Reopening is not initialization or repair, and does not read or assign a stored credential. Use the operating system’s own keyring controls when necessary; the app does not repair access or replay interrupted storage. Interrupted storage may permit read-only labels only, with no mutation or assignment.',
   },
   choose: {
     requiredWhen: 'For a supported file input after submitting the current context.',

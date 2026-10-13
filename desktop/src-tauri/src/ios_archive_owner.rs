@@ -57,7 +57,7 @@ impl IOSArchiveOwner {
     #[cfg(test)]
     pub(crate) fn original_for_test(&self) -> &SavedCommandOwner { &self.saved }
 }
-#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl IOSArchiveOwner {
     pub(crate) fn installed_ios_identity(&self) -> std::sync::Weak<()> { self.saved.installed_ios_identity() }
     pub(crate) fn observe_installed_unsigned_selection(&self) -> Result<(), BridgeError> {

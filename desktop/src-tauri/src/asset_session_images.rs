@@ -18,7 +18,7 @@ const PROJECTION_CONTROL_RESERVE: usize = 256 * 1024;
 const GUI_CONTROL_RESERVE: usize = 128 * 1024;
 const CONTROL_RESERVE: usize = NATIVE_IMAGE_CONTROL_RESERVE + SOURCE_IMAGE_CONTROL_RESERVE
     + PROJECTION_CONTROL_RESERVE + GUI_CONTROL_RESERVE;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 const _: () = {
     assert!(mrk_macos_installed_native::PUBLIC_IMAGE_CONTROL_BYTES <= NATIVE_IMAGE_CONTROL_RESERVE);
     assert!(asset_source::PUBLIC_IMAGES_SOURCE_CONTROL_BYTES <= SOURCE_IMAGE_CONTROL_RESERVE);
@@ -34,7 +34,7 @@ const _: () = {
 const DOCUMENT_CONTROL_RESERVE: usize = 3 * 1024 * 1024;
 const SELECTION_STATUS_LIMIT: usize = 32 * 1024;
 
-#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl DocumentBinding {
     pub(crate) fn assert_installed_macos_images_control_contract() {
         // Associated DATA check: no DocumentBinding/OriginalWork or permission
@@ -287,7 +287,7 @@ pub(super) fn refresh(state: &mut DocumentState) {
 // allocated; its controls are not recycled early. Persistent Session.bound
 // loans survive that retirement and must be followed even without records.
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-    all(target_os = "macos", target_arch = "aarch64")))]
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 mod persistent_memory {
     use super::*;
     use std::{alloc::Layout, mem::size_of};
@@ -585,10 +585,10 @@ mod persistent_memory {
 }
 fn persistent_bytes(state: &DocumentState) -> Result<usize, Reason> {
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-        all(target_os = "macos", target_arch = "aarch64")))]
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { persistent_memory::persistent_bytes(state) }
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-        all(target_os = "macos", target_arch = "aarch64"))))]
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { let _ = state; Err(Reason::UnsupportedPlatform) }
 }
 fn raw_allowance_from_persistent(bytes: usize) -> Result<usize, Reason> {
@@ -686,7 +686,7 @@ impl DocumentBinding {
         let unavailable = |reason| EditCapability { available: false, reason };
         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() { return unavailable(EditAvailability::CleanupUnknown); }
         if state.stopping || self.inner.bridge.supervisor.stopping() { return unavailable(EditAvailability::Shutdown); }
-        if !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))) { return unavailable(EditAvailability::UnsupportedPlatform); }
+        if !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))) { return unavailable(EditAvailability::UnsupportedPlatform); }
         if !edit.available { return edit; }
         if !state.lifetime.original_bound() || state.lost_observed || !self.inner.bridge.metadata_images_selection_available() {
             return unavailable(EditAvailability::RuntimeUnqualified);
@@ -900,7 +900,7 @@ mod tests {
     // Native success/cancel/import remains a separate qualification obligation.
     use super::*;
 
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
     fn macos_native_image_buffers_share_the_existing_quota_not_extra_payload_credit() {
         DocumentBinding::assert_installed_macos_images_control_contract();

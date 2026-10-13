@@ -265,6 +265,80 @@ class StartupAdapterData(unittest.TestCase):
         self.assertIn('"installedCallerQualified": False', source)
         self.assertNotIn("pass_fds", source)
 
+        # The ordinary workflows already select this separate helper graph on
+        # both native targets. This SOURCE policy does not execute/qualify it.
+        entry = (ROOT / "desktop/helpers/macos-vault-helper/src/main.rs").read_text()
+        lines = entry.splitlines()
+        profile = re.fullmatch(
+            r'#\[cfg\(not\(all\(target_os="([^"]+)",target_pointer_width="([^"]+)",'
+            r'any\(target_arch="([^"]+)",target_arch="([^"]+)"\)\)\)\)\]', lines[1])
+        self.assertIsNotNone(profile)
+        platform, width, arm, intel = profile.groups()
+        self.assertEqual((platform, width, arm, intel), ("macos", "64", "aarch64", "x86_64"))
+        for observed_os, observed_width, observed_arch, admitted in (
+            ("macos", "64", "aarch64", True),
+            ("macos", "64", "x86_64", True),
+            ("linux", "64", "aarch64", False),
+            ("windows", "64", "x86_64", False),
+            ("ios", "64", "aarch64", False),
+            ("macos", "32", "aarch64", False),
+            ("macos", "32", "x86_64", False),
+            ("macos", "64", "x86", False),
+            ("macos", "64", "arm", False),
+            ("macos", "64", "riscv64", False),
+        ):
+            with self.subTest(os=observed_os, width=observed_width, arch=observed_arch):
+                self.assertEqual(observed_os == platform and observed_width == width
+                                 and observed_arch in (arm, intel), admitted)
+        self.assertEqual(lines[0], "//! Fixed private helper main, no user commands or renderer entry points.")
+        self.assertEqual(lines[2:], [
+            'compile_error!("the fixed vault helper supports only the reviewed macOS LP64 arm64/x86_64 profiles");',
+            'const _:()=assert!(mrk_macos_installed_native::VAULT_HELPER_BUILD);',
+            '#[no_mangle]',
+            'pub extern "C" fn mrk_wrapping_vault_helper_role()->u32{3}',
+            'fn main(){std::process::exit(mrk_macos_installed_native::vault_helper::main_entry());}',
+        ])
+        cargo = (ROOT / "desktop/helpers/macos-vault-helper/Cargo.toml").read_text()
+        self.assertIn("\n[workspace]\n", cargo)
+        self.assertIn('mrk-macos-installed-native = { path = "../../native/macos-installed-native", '
+                      'features = ["vault-helper"] }', cargo)
+        self.assertEqual(re.findall(r'features\s*=\s*\[([^\]]*)\]', cargo), ['"vault-helper"'])
+        self.assertIn('[profile.release]\npanic = "unwind"', cargo)
+        native = (ROOT / "desktop/native/macos-installed-native/src/lib.rs").read_text()
+        self.assertIn('#![cfg(all(target_os = "macos", target_pointer_width = "64", '
+                      'any(target_arch = "aarch64", target_arch = "x86_64")))]', native)
+        for required in (
+            'pub const VAULT_HELPER_BUILD: bool = cfg!(feature = "vault-helper");',
+            'all(feature = "vault-helper", not(mrk_wrapping_vault_helper_native))',
+            'all(mrk_wrapping_vault_helper_native, not(feature = "vault-helper"))',
+            'all(feature = "vault-helper", any(feature = "installed-observation", mrk_wrapping_keychain_qualification))',
+            'compile_error!("vault helper requires its isolated matching native Cargo role");',
+        ):
+            self.assertIn(required, native)
+        build = (ROOT / "desktop/native/macos-installed-native/build.rs").read_text()
+        for required in (
+            'matches!(target.as_str(), "aarch64-apple-darwin" | "x86_64-apple-darwin")',
+            'std::env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref(), Ok("64")',
+            'let helper = std::env::var_os("CARGO_FEATURE_VAULT_HELPER").is_some();',
+            'std::env::var_os("CARGO_CFG_MRK_WRAPPING_VAULT_HELPER_NATIVE").is_none()',
+            'assert!(!helper || !observation && !qualification, "vault helper cannot contain observation/fixture roles");',
+            '("aarch64-apple-darwin", "release: 1.98.1", "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985")',
+            '("x86_64-apple-darwin", "release: 1.98.0", "commit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea")',
+            'build.define("MRK_WRAPPING_VAULT_HELPER", Some("1"));',
+            'build.file("src/vault_helper_auth.m");',
+            'println!("cargo:rustc-cfg=mrk_wrapping_vault_helper_native");',
+        ):
+            self.assertIn(required, build)
+        native_c = (ROOT / "desktop/native/macos-installed-native/src/native.m").read_text()
+        self.assertIn('#if !defined(__APPLE__) || !defined(__LP64__) || '
+                      '!defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__)', native_c)
+        self.assertIn('#if defined(__arm64__) && !defined(__x86_64__)\n'
+                      '#define MRK_NATIVE_MACHINE "arm64"\n'
+                      '#elif defined(__x86_64__) && !defined(__arm64__)\n'
+                      '#define MRK_NATIVE_MACHINE "x86_64"\n#else\n'
+                      '#error "the installed native seam requires exactly one supported Mac architecture"\n#endif', native_c)
+        self.assertIn('_Static_assert(sizeof(int) == 4 && sizeof(void *) == 8 && sizeof(size_t) == 8,', native_c)
+
 
 if __name__ == "__main__":
     unittest.main()

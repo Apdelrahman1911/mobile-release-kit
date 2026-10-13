@@ -132,6 +132,41 @@ def workflow_full9(value: os.stat_result) -> tuple[int, ...]:
             value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
 
 
+
+def apply_initialization_fixture(root: Path, *, recover: bool = False):
+    """Same original registered-root owner, one fixed initialization/restart role."""
+    from mobile_release import project_initialization as initialization
+    from mobile_release.init_workspace_custody import InitRootLease
+    from mobile_release.cancellation import CleanupScope, DefaultCancellation
+    registered = root.stat()
+    guard = DefaultCancellation(ValidationError, "typed initialization fixture custody failed")
+    lease = InitRootLease(root, cancellation=guard, profile=tx.TypedEditProfile.PROJECT_INITIALIZATION,
+        initialization_recovery=recover, registered_identity={
+            "device": registered.st_dev, "inode": registered.st_ino, "mode": registered.st_mode,
+            "uid": registered.st_uid, "gid": registered.st_gid})
+    cleanup = CleanupScope(guard, lease.close, owns_cancellation=True, first_primary=True)
+    try:
+        with cleanup:
+            guard.install()
+            guard.activate()
+            lease.acquire()
+            if recover:
+                checkout = initialization.capture_project_initialization_recovery(lease)
+                plan = initialization.prepare_project_initialization_recovery(lease, checkout, checkout.revision)
+                outcome = initialization.apply_project_initialization_recovery(lease, plan)
+            else:
+                _, proposed = cli._init_proposal(root, include_git=False)  # Fixture input only; no CLI apply/recovery.
+                checkout = initialization.capture_project_initialization(lease, proposed, "example/mobile-release-kit", "a" * 40)
+                plan = initialization.prepare_project_initialization(lease, checkout, checkout.revision)
+                outcome = initialization.apply_project_initialization(lease, plan)
+    finally:
+        cleanup.__exit__(*sys.exc_info())
+    assert lease.closed and not guard.lifetime_ledger.fatal and guard.handler_state == "RESTORED"
+    assert outcome.journal == "clean" and outcome.resources == "settled" and outcome.reason == "none", outcome
+    assert outcome.effect == ("rolled_back" if recover else "committed"), outcome
+    return {"effect": outcome.effect, "journal": outcome.journal, "resources": outcome.resources, "reason": outcome.reason}
+
+
 def workflow_namespace_facts(root: Path) -> dict[str, tuple[int, ...]]:
     return {path.relative_to(root).as_posix(): workflow_full9(path.lstat())
             for path in (root, *root.rglob("*"))}
@@ -1008,7 +1043,7 @@ class InitTransactionTests(unittest.TestCase):
             self.assertEqual(line, b"CHECKPOINT\n", f"child exited early: {line!r}")
             yield process
         finally:
-            # The fixed --child route only applies/recovers init or typed-workflow
+            # The fixed --child route only applies/recovers init or fixed typed edits
             # filesystem work; it has no descendants. Retain the original Popen owner,
             # never signal or probe its reusable numeric group after waiting.
             with contextlib.ExitStack() as streams:
@@ -1081,6 +1116,26 @@ class InitTransactionTests(unittest.TestCase):
                     selector.register.assert_called_once_with(process.stdout, selectors.EVENT_READ)
                     selector.select.assert_called_once_with(30)
                 self.assertEqual(calls, ["kill", "wait", "stderr", "stdout", "stdin"])
+
+    def test_actual_initialization_child_kill_then_fresh_descriptor_recovery(self) -> None:
+        # Exactly one additional real-process cut in the existing child owner;
+        # not a replay of the historical exhaustive CLI/process fault grids.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            fixture(root)
+            before = snapshot(root)
+            self.kill_at(root, "initialization-apply", "rename", "new-0>mobile-release.json")
+            self.assertTrue((root / "release/mobile-release.json").is_file())
+            header = json.loads((root / tx.READY / "header.json").read_bytes())
+            self.assertEqual((header["schemaVersion"], header["domain"]), (2, "project-initialization"))
+            # A new process has neither the previous checkout nor renderer draft.
+            # It uses the source-bound descriptor in the same original journal.
+            result = subprocess.run([sys.executable, "-P", str(Path(__file__).resolve()), "--child", str(root),
+                "initialization-recover", "never", "never", "after"], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"effect": "rolled_back", "journal": "clean", "resources": "settled", "reason": "none"})
+            self.assertEqual(snapshot(root), before)
+            self.assert_no_state(root)
 
     def test_real_typed_workflow_termination_then_fresh_recovery_restores_mixed_inputs(self) -> None:
         paths = tx.TypedEditProfile.GITHUB_WORKFLOWS.paths
@@ -1392,6 +1447,12 @@ def child() -> None:
             stopped.append(True)
             print("CHECKPOINT", flush=True)
             sys.stdin.buffer.read(1)
+
+    if mode in {"initialization-apply", "initialization-recover"}:
+        with boundaries(checkpoint):
+            result = apply_initialization_fixture(root, recover=mode == "initialization-recover")
+        print(json.dumps(result), flush=True)
+        raise SystemExit(0)
 
     if mode == "workflow-apply":
         with boundaries(checkpoint):

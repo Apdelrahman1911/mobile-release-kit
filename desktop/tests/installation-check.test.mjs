@@ -5,8 +5,11 @@ import test from 'node:test';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { InstallationCheckController } from '../src/installationController.ts';
+import { InstallationPreparationController } from '../src/installationController.ts';
 import { installationCheckActive, installationCheckError, installationCheckHelp, INSTALLATION_CHECK_GUIDANCE,
   parseInstallationCancel, parseInstallationStatus } from '../src/installation.ts';
+import { PREPARE_QUIT_CONFIRMATION, parseInstallationPreparationRequest, parseInstallationPreparationStatus,
+  installationPreparationHelp, installationPreparationError } from '../src/installation.ts';
 
 const initial = (revision = 1, patch = {}) => ({ schemaVersion: 1, statusRevision: revision,
   available: true, canStart: true, operationId: null, phase: 'not-checked', reason: 'none', settlement: 'not-started', assessment: null, ...patch });
@@ -211,4 +214,155 @@ test('contextual help explains where, limits, and non-maintenance recovery witho
   assert.match(INSTALLATION_CHECK_GUIDANCE.incomplete, /Keep the partial installation intact/);
   assert.match(INSTALLATION_CHECK_GUIDANCE.protection, /Do not change permissions/);
   assert.match(INSTALLATION_CHECK_GUIDANCE['cleanup-unknown'], /original owner/);
+});
+
+const prepInitial = (patch = {}) => ({ schemaVersion: 1, available: true, canStart: true,
+  operationId: null, generation: null, phase: 'not-started', reason: 'none', newWorkClosed: false,
+  assurance: 'preparation-status-only', ...patch });
+const prepRunning = (generation = 1, patch = {}) => prepInitial({ canStart: false, operationId: '12'.repeat(16),
+  generation, phase: 'preparing', newWorkClosed: true, ...patch });
+const prepRefused = (generation = 1) => prepRunning(generation, { phase: 'refused', reason: 'native', newWorkClosed: false, canStart: true });
+function prepHarness(enabled = true) {
+  const calls = [], frames = [];
+  const call = (kind, input) => { const task = deferred(); calls.push({ kind, input, ...task }); return task.promise; };
+  const controller = new InstallationPreparationController({ installationPreparationStatus: () => call('status'),
+    prepareInstallationQuit: (input) => call('start', input) }, enabled);
+  controller.attach((view) => frames.push(view));
+  return { controller, calls, frames, by: (kind) => calls.filter((item) => item.kind === kind),
+    last: (kind) => calls.filter((item) => item.kind === kind).at(-1) };
+}
+
+test('maintenance preparation protocol requires exact consent and excludes invented authority or completion', () => {
+  for (const value of [prepInitial(), prepInitial({ available: false, canStart: false, reason: 'unavailable-profile' }),
+    prepRunning(), prepRunning(1, { phase: 'unregistering' }), prepRunning(1, { phase: 'settling', reason: 'cancelled' }),
+    prepRunning(1, { phase: 'prepared' }), prepRefused(), prepRunning(1, { phase: 'refused', reason: 'native' }),
+    prepRunning(1, { phase: 'unknown', reason: 'cleanup-unknown' })]) assert.deepEqual(parseInstallationPreparationStatus(value), value);
+  let reads = 0;
+  for (const value of [null, [], { ...prepInitial(), get reason() { reads += 1; return 'none'; } },
+    { ...prepInitial(), path: '/inert' }, { ...prepInitial(), assurance: 'installer-authorized' },
+    { ...prepInitial(), available: false }, { ...prepInitial(), reason: 'busy' }, { ...prepInitial(), newWorkClosed: true },
+    { ...prepRunning(), operationId: '0'.repeat(32) }, { ...prepRunning(), operationId: 'A'.repeat(32) },
+    { ...prepRunning(), operationId: null }, { ...prepRunning(), generation: null },
+    ...[0, -1, 1.5, 0xffffffff, NaN, true].map((generation) => ({ ...prepRunning(), generation })),
+    { ...prepRunning(), canStart: true }, { ...prepRunning(), newWorkClosed: false },
+    { ...prepRunning(), phase: 'prepared', reason: 'deadline' },
+    { ...prepRunning(), phase: 'unknown', reason: 'none' }, { ...prepRunning(), phase: 'refused', reason: 'none' }]) {
+    assert.equal(parseInstallationPreparationStatus(value), null);
+  }
+  assert.equal(reads, 0);
+  assert.deepEqual(parseInstallationPreparationRequest({ confirmation: PREPARE_QUIT_CONFIRMATION }), { confirmation: PREPARE_QUIT_CONFIRMATION });
+  for (const value of [null, {}, { confirmation: true }, { confirmation: 'yes' }, { confirmation: PREPARE_QUIT_CONFIRMATION + ' ' },
+    { confirmation: PREPARE_QUIT_CONFIRMATION, path: '/inert' }]) assert.equal(parseInstallationPreparationRequest(value), null);
+  for (const key of ['what', 'why', 'where', 'format', 'failure', 'requiredWhen']) assert(installationPreparationHelp[key].length > 20);
+  assert.match(installationPreparationHelp.failure, /does not install, repair, update or uninstall/);
+});
+
+test('maintenance preparation bridge fixes both commands and refuses preview or arbitrary fields without invoking', async () => {
+  const calls = [];
+  const api = createNativeApi('native', async (command, input) => { calls.push({ command, input }); return prepRunning(); });
+  await api.installationPreparationStatus();
+  await api.prepareInstallationQuit({ confirmation: PREPARE_QUIT_CONFIRMATION });
+  assert.deepEqual(calls, [{ command: 'installation_preparation_status', input: {} },
+    { command: 'prepare_installation_quit', input: { confirmation: PREPARE_QUIT_CONFIRMATION } }]);
+  await assert.rejects(api.prepareInstallationQuit({ confirmation: PREPARE_QUIT_CONFIRMATION, verified: true }),
+    (error) => error.code === 'installation_preparation_invalid');
+  assert.equal(calls.length, 2);
+  for (const client of [previewApi, createNativeApi('unavailable', async () => assert.fail('no fallback'))]) {
+    await assert.rejects(client.installationPreparationStatus(), (error) => error.code === 'macos_maintenance_unavailable');
+    await assert.rejects(client.prepareInstallationQuit({ confirmation: PREPARE_QUIT_CONFIRMATION }),
+      (error) => error.code === 'macos_maintenance_unavailable');
+  }
+  const bad = createNativeApi('native', async () => ({ ...prepRunning(), privatePath: 'INERT_PRIVATE_CANARY' }));
+  await assert.rejects(bad.installationPreparationStatus(), (error) => error.code === 'installation_preparation_unconfirmed'
+    && !JSON.stringify(error).includes('INERT_PRIVATE_CANARY'));
+  assert(!JSON.stringify(installationPreparationError({ message: 'INERT_PRIVATE_CANARY' })).includes('INERT_PRIVATE_CANARY'));
+  assert.equal(installationPreparationError(installationPreparationError({ code: 'busy' })).code, 'macos_maintenance_busy');
+});
+
+test('maintenance preparation serializes refresh with one explicitly confirmed Start and no acknowledgement overtaking', async () => {
+  const h = prepHarness(), disabled = prepHarness(false);
+  try {
+    assert.equal(disabled.calls.length, 0); assert.equal(h.controller.start(true), false);
+    h.last('status').resolve(prepInitial()); await flush();
+    assert.equal(h.controller.start(false), false);
+    assert.equal(h.controller.start(true), true); assert.equal(h.controller.start(true), false); await flush();
+    assert.deepEqual(h.last('start').input, { confirmation: PREPARE_QUIT_CONFIRMATION });
+    void h.controller.refresh(); void h.controller.refresh();
+    assert.equal(h.by('status').length, 1);
+    h.last('start').resolve(prepRunning()); await flush();
+    assert.equal(h.by('status').length, 2); assert.equal(h.by('start').length, 1);
+    h.last('status').resolve(prepRunning(1, { phase: 'settling' })); await flush();
+    assert.equal(h.controller.snapshot().status.phase, 'settling');
+    assert.equal(h.controller.start(true), false);
+  } finally { h.controller.dispose(); disabled.controller.dispose(); }
+});
+
+test('maintenance preparation lost or displaced Start reply only reconciles the original status and never retries', async () => {
+  for (const reply of ['reject', prepInitial(), prepRefused(1)]) {
+    const h = prepHarness();
+    try {
+      const baseline = reply === 'reject' ? prepInitial() : prepRefused(1);
+      h.last('status').resolve(baseline); await flush();
+      assert.equal(h.controller.start(true), true); await flush();
+      if (reply === 'reject') h.last('start').reject({ message: 'INERT_PRIVATE_CANARY' });
+      else h.last('start').resolve(reply);
+      await flush();
+      assert.equal(h.by('start').length, 1); assert.equal(h.by('status').length, 2);
+      assert.equal(h.controller.start(true), false);
+      assert(!JSON.stringify(h.controller.snapshot()).includes('INERT_PRIVATE_CANARY'));
+      h.last('status').resolve(prepRunning(baseline.generation === null ? 1 : 2)); await flush();
+      assert.equal(h.controller.snapshot().error, null);
+      assert.equal(h.by('start').length, 1);
+    } finally { h.controller.dispose(); }
+  }
+});
+
+test('maintenance preparation refuses foreign generations, regressing phases and success or reopening after failure', async () => {
+  const failed = prepRunning(1, { reason: 'cancelled' });
+  const unknown = prepRunning(1, { phase: 'unknown', reason: 'cleanup-unknown' });
+  for (const [before, after] of [
+    [prepRunning(), prepRunning(1, { operationId: '34'.repeat(16) })],
+    [prepRunning(2), prepRunning(1)], [prepRunning(), prepRunning(2)],
+    [prepRunning(1, { phase: 'settling' }), prepRunning()],
+    [failed, prepRunning(1, { phase: 'prepared' })],
+    [unknown, prepRunning(1, { phase: 'prepared' })], [unknown, prepRunning(2)],
+    [prepRefused(), prepRunning()],
+    [prepRunning(1, { phase: 'refused', reason: 'native' }), prepRefused()],
+  ]) {
+    const h = prepHarness();
+    try {
+      h.last('status').resolve(before); await flush();
+      void h.controller.refresh(); h.last('status').resolve(after); await flush();
+      assert.deepEqual(h.controller.snapshot().status, before);
+      assert.equal(h.controller.snapshot().error.code, 'installation_preparation_unconfirmed');
+      assert.equal(h.controller.start(true), false);
+    } finally { h.controller.dispose(); }
+  }
+  const h = prepHarness();
+  try {
+    h.last('status').resolve(prepRefused()); await flush();
+    assert.equal(h.controller.start(true), true); await flush();
+    h.last('start').resolve(prepRunning(2)); await flush();
+    h.last('status').resolve(prepRunning(2)); await flush();
+    assert.equal(h.controller.snapshot().status.generation, 2); assert.equal(h.controller.snapshot().error, null);
+  } finally { h.controller.dispose(); }
+});
+
+test('maintenance preparation disposes only its timer and never turns UI unmount or status into native Quit', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = prepHarness(), notIssued = prepHarness();
+  try {
+    notIssued.last('status').resolve(prepInitial()); await flush();
+    assert.equal(notIssued.controller.start(true), true); notIssued.controller.dispose(); await flush();
+    assert.equal(notIssued.by('start').length, 0);
+    h.last('status').resolve(prepRunning()); await flush();
+    t.mock.timers.tick(1000); assert.equal(h.by('status').length, 2);
+    t.mock.timers.tick(5000); assert.equal(h.by('status').length, 2);
+    h.last('status').resolve(prepRunning(1, { phase: 'prepared' })); await flush();
+    t.mock.timers.tick(5000); assert.equal(h.by('status').length, 2);
+    void h.controller.refresh(); const frames = h.frames.length, view = h.controller.snapshot();
+    h.controller.dispose(); h.last('status').resolve(prepRunning(2)); await flush(); t.mock.timers.tick(5000);
+    assert.equal(h.frames.length, frames); assert.equal(h.controller.snapshot(), view);
+    assert.equal(h.by('start').length, 0); assert(h.calls.every((call) => call.kind === 'status'));
+  } finally { h.controller.dispose(); notIssued.controller.dispose(); t.mock.timers.reset(); }
 });

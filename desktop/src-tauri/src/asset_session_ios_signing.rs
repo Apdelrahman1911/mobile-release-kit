@@ -33,9 +33,9 @@ fn assigned_payload<'a>(state: &'a DocumentState, key: &RecordKey, kind: Kind,
         return state.records.iter().find(|record| record.key == *key && record.payload.kind == kind
             && !record.mutation_pending && record.payload.usable_source()).map(|record| &record.payload);
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { vault::assigned_payload(state, key, kind, native) }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { None }
 }
 
