@@ -9,13 +9,13 @@ from pathlib import Path
 import re
 import stat
 import sys
-import tempfile
 import time
 
 REF = 'refs/heads/verify/desktop-macos-package-format-diagnostic'
 SCRIPT = 'desktop/tools/macos_package_format_diagnostic.py'
 WORKFLOW = '.github/workflows/desktop-macos-package-format-diagnostic.yml'
 TARGET = 'x86_64-apple-darwin'
+SCRATCH_PARENT = Path('/Users/runner/work/_temp')
 TOOLS = ('/usr/bin/pkgbuild', '/usr/bin/bsdtar', '/usr/bin/xar', '/usr/bin/productbuild')
 FILE_LIMIT = 4 * 1024 * 1024
 TOTAL_LIMIT = 16 * 1024 * 1024
@@ -55,7 +55,8 @@ def context(environment, script, host, uid, euid):
              'GITHUB_REPOSITORY': 'Apdelrahman1911/mobile-release-kit',
              'GITHUB_WORKSPACE': str(root), 'GITHUB_WORKFLOW_SHA': source,
              'GITHUB_WORKFLOW_REF': 'Apdelrahman1911/mobile-release-kit/' + WORKFLOW + '@' + REF,
-             'RUNNER_ENVIRONMENT': 'github-hosted', 'RUNNER_OS': 'macOS', 'RUNNER_ARCH': 'X64'}
+             'RUNNER_ENVIRONMENT': 'github-hosted', 'RUNNER_OS': 'macOS', 'RUNNER_ARCH': 'X64',
+             'RUNNER_TEMP': str(SCRATCH_PARENT)}
     need(all(environment.get(k) == value for k, value in fixed.items())
          and re.fullmatch('[0-9a-f]{40}', source) and source != '0' * 40
          and Path(script).absolute() == root / SCRIPT and host.sysname == 'Darwin'
@@ -73,6 +74,7 @@ class Held:
     def __init__(self, deadline, anchor=None, diagnostics=None):
         self.deadline, self.files, self.parents, self.anchor = deadline, [], {}, anchor
         self.diagnostics = diagnostics
+        self.directories, self.scratch = [], None
 
     def note(self, check, facts, role=None):
         if self.diagnostics is not None:
@@ -80,6 +82,64 @@ class Held:
 
     def clock(self):
         need(time.monotonic() < self.deadline)
+
+    def add_directory(self, path, uid, gid, *, role):
+        """Acquire one absolute chain; only the final parent has account ownership."""
+        need(path.is_absolute() and not any(part in ('.', '..') for part in path.parts) and not self.directories)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        for number, part in enumerate(path.parts):
+            self.clock(); need(len(self.directories) < 16)
+            parent = self.directories[-1] if self.directories else None
+            named = Path('/') if parent is None else parent['path'] / part
+            self.note('directory-open', {}, role)
+            fd = os.open('/', flags) if parent is None else os.open(part, flags, dir_fd=parent['fd'])
+            row = {'path': named, 'fd': fd, 'parent': parent, 'name': None if parent is None else part,
+                   'retired': False}
+            self.directories.append(row)  # Custody precedes fallible fstat/metadata checks.
+            self.note('directory-shape', None, role)
+            info = os.fstat(fd)
+            self.note('directory-shape', {'directory': stat.S_ISDIR(info.st_mode),
+                'ownerMatched': info.st_uid == uid, 'groupMatched': info.st_gid == gid,
+                'notGroupOrWorldWritable': not bool(info.st_mode & 0o022)}, role)
+            row['identity'] = directory(info)
+            observed = named.lstat() if parent is None else os.stat(part, dir_fd=parent['fd'], follow_symlinks=False)
+            need(directory(observed) == row['identity'])
+            if number == len(path.parts) - 1:
+                need(info.st_uid == uid and info.st_gid == gid)
+            self.post()
+        return self.directories[-1]
+
+    def create_scratch(self, parent, uid, gid):
+        self.clock(); self.post(); need(parent is self.directories[-1] and self.scratch is None)
+        name = 'mrk-unsigned-format-' + os.urandom(16).hex()
+        self.note('scratch-create', {}, 'scratch-root')
+        os.mkdir(name, 0o700, dir_fd=parent['fd'])  # Exclusive: collision never retries/adopts.
+        row = {'path': parent['path'] / name, 'parent': parent, 'name': name,
+               'fd': None, 'retired': False, 'proven': False}
+        self.scratch = row  # Record the fresh name immediately; uncertain acquisition preserves it.
+        self.note('directory-open', {}, 'scratch-root')
+        row['fd'] = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                            dir_fd=parent['fd'])
+        self.directories.append(row)
+        self.note('directory-shape', None, 'scratch-root')
+        info = os.fstat(row['fd'])
+        self.note('directory-shape', {'directory': stat.S_ISDIR(info.st_mode),
+            'ownerMatched': info.st_uid == uid, 'groupMatched': info.st_gid == gid,
+            'privateMode': stat.S_IMODE(info.st_mode) == 0o700}, 'scratch-root')
+        need(stat.S_ISDIR(info.st_mode) and info.st_uid == uid and info.st_gid == gid
+             and stat.S_IMODE(info.st_mode) == 0o700)
+        row['identity'] = directory(info)
+        need(directory(os.stat(name, dir_fd=parent['fd'], follow_symlinks=False)) == row['identity'])
+        self.post(); row['proven'] = True
+        return row['path']
+
+    def retire_empty_scratch(self):
+        row = self.scratch
+        need(row is not None and row['proven'] and not row['retired'])
+        self.clock(); self.post(); need(not os.listdir(row['fd']))
+        os.rmdir(row['name'], dir_fd=row['parent']['fd'])
+        row['retired'] = True
+        self.post()
 
     def add(self, path, limit, uid, *, role=None):
         self.clock()
@@ -126,6 +186,21 @@ class Held:
         return bytes(body)
 
     def post(self):
+        for row in self.directories:
+            self.clock()
+            need(directory(os.fstat(row['fd'])) == row['identity'])
+            parent = row['parent']
+            if row['retired']:
+                try:
+                    os.stat(row['name'], dir_fd=parent['fd'], follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    need(False)
+            else:
+                observed = row['path'].lstat() if parent is None else os.stat(
+                    row['name'], dir_fd=parent['fd'], follow_symlinks=False)
+                need(directory(observed) == row['identity'])
         for path, before in self.parents.items():
             self.note('ancestor-post', None)
             self.clock()
@@ -139,6 +214,12 @@ class Held:
     def close(self):
         complete = True
         for row in reversed(self.files):
+            fd, row['fd'] = row['fd'], None
+            try:
+                os.close(fd)
+            except BaseException:
+                complete = False
+        for row in reversed(self.directories):
             fd, row['fd'] = row['fd'], None
             try:
                 os.close(fd)
@@ -361,14 +442,23 @@ def main():
         report['sourceSha256'] = {name: hashlib.sha256(body).hexdigest() for name, body in sources.items()}
         report['toolSha256'] = {str(row['path']): row['sha256'] for row in held.files if str(row['path']) in TOOLS}
         setup_stage(report, 'scratch-create')
-        root = Path(tempfile.mkdtemp(prefix='mrk-unsigned-format-', dir='/private/tmp'))
-        need(stat.S_IMODE(root.lstat().st_mode) == 0o700)
+        parent = held.add_directory(SCRATCH_PARENT, os.getuid(), os.getgid(), role='scratch-parent')
+        report['scratchRetired'] = False
+        root = held.create_scratch(parent, os.getuid(), os.getgid())
         setup_stage(report, 'probe')
         run_probe(stager, owner, root, held, report, work_end, hard_end)
+        if report.get('scratchRetired') is True:
+            held.scratch['retired'] = True
+        held.post()
     except BaseException as error:
         report['failed'] = True
         setup_failure(report, error)
     finally:
+        if held.scratch is not None and report.get('setupStage') == 'scratch-create':
+            try:
+                held.retire_empty_scratch(); report['scratchRetired'] = True
+            except BaseException:
+                report['scratchRetired'] = False
         report['sourceClosesKnown'] = held.close()
     report['diagnosticComplete'] = (report.get('sourcePost') is True and report['sourceClosesKnown']
         and report.get('originalsKnown') is True and report.get('scratchRetired') is True)

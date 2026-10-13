@@ -2587,12 +2587,13 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             'GITHUB_SHA': 'a' * 40, 'GITHUB_WORKFLOW_SHA': 'a' * 40,
             'GITHUB_WORKFLOW_REF': 'Apdelrahman1911/mobile-release-kit/' + probe.WORKFLOW + '@' + probe.REF,
             'RUNNER_ENVIRONMENT': 'github-hosted', 'RUNNER_OS': 'macOS', 'RUNNER_ARCH': 'X64',
-            'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'}
+            'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1',
+            'RUNNER_TEMP': '/Users/runner/work/_temp'}
         script = Path(environment['GITHUB_WORKSPACE']) / probe.SCRIPT
         host = SimpleNamespace(sysname='Darwin', machine='x86_64')
         self.assertFalse(probe.context(environment, script, host, 501, 501)[1]['productReady'])
         for key, value in (('GITHUB_REF', 'refs/heads/main'), ('RUNNER_ENVIRONMENT', 'self-hosted'),
-                           ('RUNNER_ARCH', 'ARM64'), ('GITHUB_WORKFLOW_SHA', 'b' * 40)):
+                           ('RUNNER_ARCH', 'ARM64'), ('GITHUB_WORKFLOW_SHA', 'b' * 40), ('RUNNER_TEMP', '/private/tmp')):
             with self.assertRaises(probe.Refused):
                 probe.context({**environment, key: value}, script, host, 501, 501)
         # Genuine bounded admission records only existing checked facts.
@@ -2635,6 +2636,93 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual(report['setupExceptionClass'], kind)
                 self.assertEqual(report['setupErrno'], number)
                 self.assertNotIn('PRIVATE_SENTINEL', json.dumps(report))
+        self.assertEqual(probe.SCRATCH_PARENT, Path('/Users/runner/work/_temp'))
+        # Real private original directory custody/allocation; no native command.
+        with tempfile.TemporaryDirectory() as folder:
+            parent = Path(folder); parent.chmod(0o700)
+            def facts(info, **changes):
+                return SimpleNamespace(**{**{key: getattr(info, key) for key in
+                    ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid')}, **changes})
+            def new_held():
+                return probe.Held(probe.time.monotonic() + 10, diagnostics={})
+            held = new_held()
+            try:
+                original = held.add_directory(parent, os.getuid(), os.getgid(), role='scratch-parent')
+                child = held.create_scratch(original, os.getuid(), os.getgid())
+                self.assertEqual((child.lstat().st_uid, child.lstat().st_gid, stat.S_IMODE(child.lstat().st_mode)),
+                                 (os.getuid(), os.getgid(), 0o700))
+                self.assertIs(held.scratch['proven'], True); held.post()
+                held.retire_empty_scratch(); self.assertFalse(child.exists()); held.post()
+            finally:
+                self.assertTrue(held.close())
+            for changed in ({'st_uid': os.getuid() + 1}, {'st_gid': os.getgid() + 1},
+                            {'st_mode': stat.S_IFDIR | 0o722}, {'st_mode': stat.S_IFREG | 0o700}):
+                held = new_held(); native_fstat = probe.os.fstat
+                def changed_parent(fd):
+                    info = native_fstat(fd)
+                    return facts(info, **changed) if info.st_ino == parent.stat().st_ino else info
+                try:
+                    with mock.patch.object(probe.os, 'fstat', side_effect=changed_parent):
+                        with self.assertRaises(probe.Refused):
+                            held.add_directory(parent, os.getuid(), os.getgid(), role='scratch-parent')
+                    self.assertIsNone(held.scratch)
+                finally:
+                    self.assertTrue(held.close())
+            alias = parent / 'alias'; alias.symlink_to(parent, target_is_directory=True)
+            held = new_held()
+            try:
+                with self.assertRaises(OSError):
+                    held.add_directory(alias, os.getuid(), os.getgid(), role='scratch-parent')
+            finally:
+                self.assertTrue(held.close()); alias.unlink()
+            for changed in ({'st_uid': os.getuid() + 1}, {'st_gid': os.getgid() + 1},
+                            {'st_mode': stat.S_IFDIR | 0o755}):
+                held = new_held(); original = held.add_directory(parent, os.getuid(), os.getgid(), role='scratch-parent')
+                native_fstat = probe.os.fstat
+                def changed_scratch(fd):
+                    info = native_fstat(fd)
+                    return facts(info, **changed) if held.scratch is not None and fd == held.scratch['fd'] else info
+                try:
+                    with mock.patch.object(probe.os, 'fstat', side_effect=changed_scratch):
+                        with self.assertRaises(probe.Refused): held.create_scratch(original, os.getuid(), os.getgid())
+                    child = held.scratch['path']
+                    self.assertTrue(child.exists()); self.assertIs(held.scratch['proven'], False)
+                    with self.assertRaises(probe.Refused): held.retire_empty_scratch()
+                finally:
+                    self.assertTrue(held.close())
+                    child.rmdir()  # Exact task-owned test fixture after originals joined/closed.
+            held = new_held(); original = held.add_directory(parent, os.getuid(), os.getgid(), role='scratch-parent')
+            collision = parent / ('mrk-unsigned-format-' + '00' * 16); collision.mkdir(mode=0o700)
+            try:
+                with mock.patch.object(probe.os, 'urandom', return_value=b'\x00' * 16):
+                    with self.assertRaises(FileExistsError): held.create_scratch(original, os.getuid(), os.getgid())
+                self.assertIsNone(held.scratch); held.post(); self.assertTrue(collision.is_dir())
+            finally:
+                self.assertTrue(held.close()); collision.rmdir()
+            held = new_held(); original = held.add_directory(parent, os.getuid(), os.getgid(), role='scratch-parent')
+            try:
+                child = held.create_scratch(original, os.getuid(), os.getgid())
+                marker = child / 'keep'; marker.write_bytes(b'owned')
+                with self.assertRaises(probe.Refused): held.retire_empty_scratch()
+                self.assertTrue(marker.exists()); marker.unlink(); held.retire_empty_scratch()
+            finally:
+                self.assertTrue(held.close())
+            held = new_held(); original = held.add_directory(parent, os.getuid(), os.getgid(), role='scratch-parent')
+            try:
+                child = held.create_scratch(original, os.getuid(), os.getgid())
+                moved = parent / 'moved'; child.rename(moved); child.mkdir(mode=0o700)
+                with self.assertRaises(probe.Refused): held.post()
+                with self.assertRaises(probe.Refused): held.retire_empty_scratch()
+            finally:
+                self.assertTrue(held.close()); child.rmdir(); moved.rmdir()
+            held = new_held(); original = held.add_directory(parent, os.getuid(), os.getgid(), role='scratch-parent')
+            displaced = parent.with_name(parent.name + '-held')
+            try:
+                parent.rename(displaced); parent.mkdir(mode=0o700)
+                with self.assertRaises(probe.Refused): held.create_scratch(original, os.getuid(), os.getgid())
+                self.assertIsNone(held.scratch)
+            finally:
+                self.assertTrue(held.close()); parent.rmdir(); displaced.rename(parent)
         self.assertEqual(probe.TOOLS, ('/usr/bin/pkgbuild', '/usr/bin/bsdtar', '/usr/bin/xar', '/usr/bin/productbuild'))
         self.assertEqual(probe.FILE_LIMIT, 4 * 1024 * 1024)
         class PackageRefused(Exception):
