@@ -2637,7 +2637,22 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertNotIn('PRIVATE_SENTINEL', json.dumps(report))
         self.assertEqual(probe.TOOLS, ('/usr/bin/pkgbuild', '/usr/bin/bsdtar', '/usr/bin/xar', '/usr/bin/productbuild'))
         self.assertEqual(probe.FILE_LIMIT, 4 * 1024 * 1024)
-        for scenario in ('pass', 'audit-refused', 'unknown-command', 'oversize'):
+        class PackageRefused(Exception):
+            pass
+        class PackageRefusedSubclass(PackageRefused):
+            pass
+        declared = SimpleNamespace(Refused=PackageRefused, PACKAGE_REFUSALS={'scripts-root-owner-mode': 'finite'},
+            INSTALL_PRODUCT_AUDIT_REASONS={'install-product-xar-metadata-tags'})
+        for error, expected_reason in ((PackageRefused('scripts-root-owner-mode'), 'scripts-root-owner-mode'),
+                (PackageRefused('install-product-xar-metadata-tags'), 'install-product-xar-metadata-tags'),
+                (PackageRefused('PRIVATE_SENTINEL'), None), (PackageRefused(3), None),
+                (PackageRefused('scripts-root-owner-mode', 'PRIVATE_SENTINEL'), None),
+                (PackageRefusedSubclass('scripts-root-owner-mode'), None), (ValueError('PRIVATE_SENTINEL'), None)):
+            report = {}
+            probe.package_failure(declared, report, error)
+            self.assertEqual(report['packageReason'], expected_reason)
+            self.assertNotIn('PRIVATE_SENTINEL', json.dumps(report))
+        for scenario in ('pass', 'prepare-refused', 'audit-refused', 'unknown-command', 'oversize'):
             # Exercise the exact boundary algorithm with small inert output,
             # without enlarging the focused execution owner's file-size cap.
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as folder, mock.patch.object(probe, 'FILE_LIMIT', 256):
@@ -2654,7 +2669,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     (args.output / 'input/readonly.txt').chmod(0o444)
                     (args.output / 'input').chmod(0o555)
                 def prepare(args):
-                    self.assertIs(args.fixture, False); write(args.output / 'PackageInfo')
+                    self.assertIs(args.fixture, False)
+                    if scenario == 'prepare-refused':
+                        raise AuditRefused('scripts-root-owner-mode')
+                    write(args.output / 'PackageInfo')
                 def presentation(args):
                     write(args.output / 'Distribution'); write(args.output / 'resources/InstallerReadMe.html')
                     (args.output / 'resources/InstallerReadMe.html').chmod(0o444)
@@ -2665,7 +2683,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertIs(args.fixture, False); stages.append('product-audit')
                     if scenario == 'audit-refused':
                         raise AuditRefused('install-product-xar-metadata-tags')
-                stager = SimpleNamespace(Refused=AuditRefused,
+                stager = SimpleNamespace(Refused=AuditRefused, PACKAGE_REFUSALS={'scripts-root-owner-mode': 'finite'},
                     INSTALL_PRODUCT_AUDIT_REASONS={'install-product-xar-metadata-tags'},
                     source_build_selection=lambda target: SimpleNamespace(package_version='0.3.0'),
                     package_format_input_command=source_input, prepare_package_command=prepare,
@@ -2691,7 +2709,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 now = probe.time.monotonic()
                 probe.run_probe(stager, SimpleNamespace(run_owned=original), root,
                     SimpleNamespace(post=lambda: None), report, now + 180, now + 195)
-                self.assertEqual(len(calls), 4)
+                self.assertEqual(len(calls), 1 if scenario == 'prepare-refused' else 4)
                 self.assertNotIn('PRIVATE_SENTINEL', json.dumps(report))
                 self.assertFalse(report['productReady'])
                 if scenario == 'pass':
@@ -2699,10 +2717,15 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 else:
                     self.assertFalse(report['auditPassed']); self.assertTrue(report['failed'])
                 self.assertEqual(report['auditReason'], 'install-product-xar-metadata-tags' if scenario == 'audit-refused' else None)
-                self.assertEqual(report['scratchRetired'], scenario in ('pass', 'audit-refused'))
+                self.assertEqual(report['packageReason'], 'scripts-root-owner-mode' if scenario == 'prepare-refused'
+                    else 'install-product-xar-metadata-tags' if scenario == 'audit-refused' else None)
+                self.assertEqual(report['stage'], 'original-prepare' if scenario == 'prepare-refused' else 'product-audit'
+                    if scenario in ('pass', 'audit-refused') else 'productbuild')
+                self.assertEqual(report['scratchRetired'], scenario in ('pass', 'prepare-refused', 'audit-refused'))
                 self.assertEqual(root.exists(), not report['scratchRetired'])
                 self.assertEqual(report['originalsKnown'], scenario != 'unknown-command')
-                self.assertEqual(stages, ['audit', 'product-audit'] if scenario in ('pass', 'audit-refused') else ['audit'])
+                self.assertEqual(stages, [] if scenario == 'prepare-refused' else ['audit', 'product-audit']
+                    if scenario in ('pass', 'audit-refused') else ['audit'])
 
     def notary_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None):
         """Actual copy/FD/parser code, inert app/runtime/key and native doubles.

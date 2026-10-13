@@ -235,9 +235,20 @@ def recipe(stager, root):
          '--resources', str(root / 'presentation/resources'), str(root / 'product/MobileReleaseKit.pkg')])
 
 
+def package_failure(stager, report, error):
+    """Only declared package reasons; child captures and exception text stay private."""
+    report['packageReason'] = None
+    if type(error) is not stager.Refused:
+        return
+    values = BaseException.args.__get__(error)
+    if (len(values) == 1 and type(values[0]) is str
+            and (values[0] in stager.PACKAGE_REFUSALS or values[0] in stager.INSTALL_PRODUCT_AUDIT_REASONS)):
+        report['packageReason'] = values[0]
+
+
 def run_probe(stager, owner, root, held, report, work_end, hard_end):
     calls, known = report['calls'], True
-    report.update({'auditPassed': False, 'auditReason': None, 'scratchRetired': False})
+    report.update({'auditPassed': False, 'auditReason': None, 'packageReason': None, 'stage': 'source-input', 'scratchRetired': False})
     tree = snapshot(root, hard_end)
     environment = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(root / 'home'),
         'TMPDIR': str(root / 'tmp'), 'LC_ALL': 'C', 'TZ': 'UTC', 'COPYFILE_DISABLE': '1',
@@ -253,6 +264,7 @@ def run_probe(stager, owner, root, held, report, work_end, hard_end):
         need(remaining >= 1)
         row = {'role': ('pkgbuild', 'tar', 'xar', 'productbuild')[len(calls)],
                'entered': True, 'returned': False, 'known': False, 'returncode': None}
+        report['stage'] = row['role']
         calls.append(row); known = False
         result = owner.run_owned(argv, environ=environment, cwd=cwd, timeout=min(30, remaining),
                                  capture=True, text=False, output_limit=65536)
@@ -263,15 +275,19 @@ def run_probe(stager, owner, root, held, report, work_end, hard_end):
     try:
         for name in ('home', 'tmp', 'component', 'product'):
             (root / name).mkdir(mode=0o700)
+        report['stage'] = 'source-input'
         stager.package_format_input_command(argparse.Namespace(output=root / 'scripts'))
         adopt(); argv = recipe(stager, root)
         call(argv[0], root)
+        report['stage'] = 'original-prepare'
         stager.prepare_package_command(argparse.Namespace(target=TARGET, fixture=False, scripts=root / 'scripts',
             package=root / 'original.pkg', output=root / 'parts'))
         adopt(); call(argv[1], root / 'scripts'); call(argv[2], root / 'parts')
         args = argparse.Namespace(target=TARGET, fixture=False, scripts=root / 'scripts',
             original_package=root / 'original.pkg', package=root / 'component/MobileReleaseKit.pkg')
+        report['stage'] = 'component-audit'
         stager.audit_command(args)
+        report['stage'] = 'product-prepare'
         stager.prepare_install_product_command(argparse.Namespace(target=TARGET, output=root / 'presentation'))
         adopt(); call(argv[3], root)
         args.package = root / 'product/MobileReleaseKit.pkg'
@@ -280,6 +296,7 @@ def run_probe(stager, owner, root, held, report, work_end, hard_end):
         stager.audit_install_product_command(args)
         report['auditPassed'] = True
     except stager.Refused as error:
+        package_failure(stager, report, error)
         values = BaseException.args.__get__(error)
         if (report.get('stage') == 'product-audit' and type(error) is stager.Refused and len(values) == 1
                 and type(values[0]) is str and values[0] in stager.INSTALL_PRODUCT_AUDIT_REASONS):
