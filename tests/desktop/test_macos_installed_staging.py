@@ -1847,6 +1847,29 @@ def without_primary_owner_runtime_source_pin(source):
 
 
 def without_intel_fetch_workflow(source):
+    # Exact ordinary compile boundary only, before unchanged historical oracles.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("ordinary compile boundary SOURCE bound differs")
+    split_marker = 'Compile the fixed ordinary root Installer before credential admission'
+    split_budget = 'Raw timed-step union585min'
+    if split_marker in source or split_budget in source:
+        new_step = '      - name: Compile the fixed ordinary root Installer before credential admission\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\'\n        timeout-minutes: 8\n        shell: bash\n        run: |\n          set -euo pipefail\n          set -o noclobber\n          (\n            cd desktop/src-tauri\n            PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer \\\n              --target "$MRK_MACOS_TARGET" --bin mrk-macos-install\n          )\n'
+        reduced_step = '      - name: Build the fixed one-shot root Installer and scripts-only package\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\'\n        timeout-minutes: 8\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}\n          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}\n        run: |\n          set +x\n          set +a\n          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD\n          set -euo pipefail\n          set -o noclobber\n          installer="$CARGO_TARGET_DIR/$MRK_MACOS_TARGET/release/mrk-macos-install"\n          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \\\n          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \\\n            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-root-installer --target "$MRK_MACOS_TARGET"\n          /usr/bin/codesign --verify --strict "$installer"\n          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py scripts --target "$MRK_MACOS_TARGET" \\\n            --input "$MRK_MACOS_WORK/input" --installer "$installer" \\\n            --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" --expected-source "$MRK_EXPECTED_SHA" \\\n            --output "$MRK_MACOS_WORK/scripts" > "$MRK_MACOS_WORK/scripts-result.json"\n          [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" ]] || exit 1\n          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts" \\\n            --identifier dev.mobile-release-kit.desktop.installed --version "$MRK_MACOS_SOURCE_PACKAGE_VERSION" \\\n            --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg"\n          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package --target "$MRK_MACOS_TARGET" \\\n            --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" \\\n            --output "$MRK_MACOS_WORK/package-parts" > "$MRK_MACOS_WORK/package-prepare.json"\n          # Native tools only write fresh outputs as this nonroot account.\n          # Preparation is not final0:0 acceptance; preserve the original pkg.\n          # BSD tar pads stdout even when compressed; use the fresh private file.\n          [[ ! -e "$MRK_MACOS_WORK/package-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-parts/Scripts" ]] || exit 1\n          set +e\n          (\n            cd "$MRK_MACOS_WORK/scripts" || exit\n            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \\\n              /usr/bin/tar -c -z -f "$MRK_MACOS_WORK/package-parts/Scripts" --format=odc --uid=0 --gid=0 \\\n              --no-acls --no-xattrs --no-fflags --no-mac-metadata .\n          )\n          tar_status=$?\n          set -e\n          printf \'%s\\n\' "$tar_status" > "$MRK_MACOS_WORK/package-tar.status"\n          [[ $tar_status == 0 ]] || exit "$tar_status"\n          # xar is not a streaming/O_EXCL tool: reserve its private output parent.\n          /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-component"\n          [[ ! -e "$MRK_MACOS_WORK/package-component/MobileReleaseKit.pkg" && ! -L "$MRK_MACOS_WORK/package-component/MobileReleaseKit.pkg" ]] || exit 1\n          set +e\n          (\n            cd "$MRK_MACOS_WORK/package-parts" || exit\n            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \\\n              /usr/bin/xar -c -f "$MRK_MACOS_WORK/package-component/MobileReleaseKit.pkg" \\\n              --compression=none PackageInfo Scripts\n          )\n          xar_status=$?\n          set -e\n          printf \'%s\\n\' "$xar_status" > "$MRK_MACOS_WORK/package-xar.status"\n          [[ $xar_status == 0 ]] || exit "$xar_status"\n          # This root-owned Scripts component is not final P. The next fixed owner\n          # first productbuilds the SOURCE ReadMe envelope, then signs the outer package.\n          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD\n'
+        cargo = '          (\n            cd desktop/src-tauri\n            PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer \\\n              --target "$MRK_MACOS_TARGET" --bin mrk-macos-install\n          )\n'
+        original_step_sha = 'f9db35612d667dac3129fc5c6443c3bc3aa8f89a12bfee7b779eb895a3c20b37'
+        previous_budget = '    # Raw timed-step union577min (ARM) /617min (Intel) includes the retained42min alternative.\n'
+        current_budget = '    # Raw timed-step union585min (ARM) /625min (Intel) includes the retained42min alternative.\n'
+        if (source.count(split_marker) != 1 or source.count(new_step) != 1
+                or source.count(reduced_step) != 1 or source.count(new_step + reduced_step) != 1
+                or source.count(current_budget) != 1 or previous_budget in source):
+            raise AssertionError("ordinary compile boundary exact regions differ")
+        insertion = reduced_step.index('          installer=')
+        original = reduced_step[:insertion] + cargo + reduced_step[insertion:]
+        if hashlib.sha256(original.encode()).hexdigest() != original_step_sha:
+            raise AssertionError("ordinary compile boundary original changed")
+        source = source.replace(new_step + reduced_step, original, 1).replace(current_budget, previous_budget, 1)
+        if split_marker in source or split_budget in source:
+            raise AssertionError("ordinary compile boundary partial delta remains")
     source = without_fresh_g2_supplier_workflow(source)
     source = without_primary_owner_runtime_source_pin(source)
     if type(source) is not str or len(source.encode()) > 512 * 1024:
@@ -10871,6 +10894,35 @@ class MacInstalledData(unittest.TestCase):
         # delta is independently composed/reviewed, not fictitiously exercised.
         path = Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml"
         current = path.read_text(encoding="utf-8")
+        # Actual Intel aggregate8min exhaustion: one compile is moved, not retried.
+        compile_name = 'Compile the fixed ordinary root Installer before credential admission'
+        build_name = 'Build the fixed one-shot root Installer and scripts-only package'
+        compile_step = workflow_step(current, compile_name)
+        build_step = workflow_step(current, build_name)
+        compile_run = compile_step.split('        run: |\n', 1)[1]
+        self.assertIn('        timeout-minutes: 8\n', compile_step)
+        self.assertIn('        timeout-minutes: 8\n', build_step)
+        gate = "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'\n"
+        self.assertIn(gate, compile_step); self.assertIn(gate, build_step)
+        self.assertNotIn('secrets.', compile_step); self.assertNotIn('MRK_MACOS_DEVELOPER_ID_', compile_step)
+        self.assertEqual(compile_run.count('cargo" build --locked --release --no-default-features --features macos-installed-installer'), 1)
+        self.assertNotIn('cargo" build', build_step)
+        self.assertIn('macos_android_helper_package.py sign-root-installer --target "$MRK_MACOS_TARGET"', build_step)
+        self.assertIn('stage_macos_installed.py scripts --target "$MRK_MACOS_TARGET"', build_step)
+        self.assertLess(current.index('      - name: ' + compile_name + '\n'), current.index('      - name: ' + build_name + '\n'))
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350", current)
+        # The unchanged inverse only owns the exact moved regions; external mutations
+        # survive for downstream whole-source checks, and partial/duplicate splits refuse.
+        normalized = without_intel_fetch_workflow(current)
+        self.assertEqual(without_intel_fetch_workflow(normalized), normalized)
+        for old, changed in ((compile_name, compile_name + ' altered'),
+            ('Raw timed-step union585min', 'Raw timed-step union584min'),
+            ('' + compile_run, compile_run.replace('--features macos-installed-installer', '--features macos-installed-installer-fixture', 1))):
+            self.assertIn(old, current)
+            with self.assertRaises(AssertionError): without_intel_fetch_workflow(current.replace(old, changed, 1))
+        with self.assertRaises(AssertionError): without_intel_fetch_workflow(current.replace('      - name: ' + compile_name + '\n', '      - name: ' + compile_name + '\n      - name: ' + compile_name + '\n', 1))
+        outside = current + '# unrelated-mutated-region\n'
+        self.assertTrue(without_intel_fetch_workflow(outside).endswith('# unrelated-mutated-region\n'))
         selected = workflow_step(current, "Exercise one selected saved-version recovery, GitHub refusal or saved evidence through the ordinary Mac UI")
         result_block = workflow_step(current, "Bind only the selected singleton to original XCTest and the same ordinary preview package")
         for token in ('release-evidence) singleton=release-evidence; singleton_method=testSyntheticProjectSavedReleaseEvidence ;;',
@@ -11344,6 +11396,22 @@ class MacInstalledData(unittest.TestCase):
         self.assertEqual(mixed["resultMarkerState"], "mixed")
         self.assertEqual(TOOL.select_installer_log(result_line * 2, binding)[1]["resultMarkerState"], "duplicate")
         self.assertEqual(TOOL.select_installer_log(lines[4], binding)[1]["resultMarkerState"], "missing")
+        completed = (b"MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=" + b"a" * 64
+                     + b";exit=1;originals=1;native=0;timely=1;unknown=1\n")
+        projected, facts = TOOL.select_installer_log(b"PackageKit: " + completed, binding)
+        self.assertEqual(projected, b"PackageKit: " + completed)
+        self.assertEqual(facts["markerCounts"]["completed-parent-diagnostic"], 1)
+        self.assertEqual(facts["resultMarkerState"], "missing")
+        self.assertEqual(TOOL.select_installer_log(completed * 2, binding)[1]["markerCounts"]["completed-parent-diagnostic"], 2)
+        self.assertEqual(TOOL.select_installer_log(completed.replace(b"exit=1;", b"exit=20;"), binding)[1]["resultMarkerState"], "missing")
+        with self.assertRaises(TOOL.Refused):
+            TOOL.installer_record(completed)
+        for invalid in (b"prefix" + completed, completed.replace(b"a" * 64,b"A" * 64),
+                        completed.replace(b"a" * 64,b"a" * 63), completed.replace(b"exit=1;",b"exit=0;"),
+                        completed.replace(b"originals=1;native=0;",b"native=0;originals=1;"),
+                        completed.replace(b"unknown=1",b"unknown=2"), completed[:-1] + b";extra=private\n"):
+            with self.subTest(diagnostic=invalid), self.assertRaises(TOOL.Refused):
+                TOOL.select_installer_log(invalid,binding)
         header = b"mrk-macos-install "
         limit_line = header + b"x" * (TOOL.LOG_LINE_BYTES - len(header) - 1) + b"\n"
         for bad in (b"", b"unrelated\n", b"MRK_MACOS_POSTINSTALL_PHASE=unknown-value\n", result_line[:-1],

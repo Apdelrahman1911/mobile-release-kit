@@ -30,7 +30,7 @@ SELF = "desktop/tools/macos_intel_os_providers.py"
 FIXTURE = "desktop/tools/macos_e2_native_fixture.py"
 QUALIFICATION = "desktop/tools/macos_aqua_qualification.py"
 SOURCE_PINS = {
-    'desktop/tools/macos_aqua_qualification.py': (464005, 'f0ba092245e7d7772a8ac02b837f32c3b718139a76f49a3d775404a92c627bbc'),
+    'desktop/tools/macos_aqua_qualification.py': (464005, '4363d4ba39f49f1752070baa0b144eae01e703be73d4c7f9bbadacbe30d07524'),
     'src/mobile_release/owned_process.py': (9127, 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59'),
     'src/mobile_release/_command_process.py': (177438, 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43'),
     'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'),

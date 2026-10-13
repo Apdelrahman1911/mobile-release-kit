@@ -3919,6 +3919,9 @@ def select_installer_log(body, binding):
         "native-executable": token(b"mrk-macos-install"),
         "fixture-result": re.compile(rb"(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_FIXTURE_RESULT="),
         "ordinary-result": re.compile(rb"(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_RESULT="),
+        "completed-parent-diagnostic": re.compile(
+            rb"(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=[0-9a-f]{64};exit=(?:1|20)"
+            rb";originals=[01];native=[01];timely=[01];unknown=[01](?=\r?\n$)"),
         "postinstall-phase": re.compile(rb"(?<![A-Za-z0-9_])MRK_MACOS_POSTINSTALL_PHASE=(?:entry|target-ok|relative-entry|absolute-entry|cwd-ok|pre-exec)(?![A-Za-z0-9_-])"),
         "postinstall-refusal": re.compile(rb"(?<![A-Za-z0-9_])MRK_MACOS_POSTINSTALL_REFUSED=(?:target|entry|cwd)(?![A-Za-z0-9_-])"),
         "acl-diagnostic": re.compile(

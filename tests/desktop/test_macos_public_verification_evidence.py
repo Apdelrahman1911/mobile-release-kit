@@ -1680,6 +1680,219 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 for private in ('PRIVATE', 'DO-NOT-EMIT', str(root)):
                     self.assertNotIn(private, json.dumps(item))
 
+        # Actual fixed Installer log originals: byte-preserving selector DATA,
+        # failed original hash/status/context join, never arbitrary line text.
+        stage_names = {'need', 'Refused', 'digest', 'select_installer_log', 'LOG_INTERVAL_BYTES', 'LOG_LINE_BYTES', 'LOG_SELECTED_BYTES'}
+        stage_nodes = [node for node in ast.parse(stager_path.read_bytes()).body if
+            isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in stage_names or
+            isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in stage_names]
+        self.assertEqual(len(stage_nodes), len(stage_names))
+        selector = {'re': re, 'hashlib': hashlib}
+        exec(compile(ast.Module(body=stage_nodes, type_ignores=[]), str(stager_path), 'exec'), selector)
+        binding = {'packageKind': 'ordinary', 'packageIdentifier': 'dev.mobile-release-kit.desktop.installed',
+            'packagePath': '/private/' + SENTINEL + '/package-mount/MobileReleaseKit-' + '7' * 32 + '.pkg',
+            'sourceCommit': CONTEXT['source'], 'inventorySha256': '8' * 64, 'runtimeManifestSha256': '9' * 64,
+            'runId': CONTEXT['runId'], 'runAttempt': CONTEXT['runAttempt'], 'requestId': '7' * 32}
+        phase_line = (SENTINEL + ' MRK_MACOS_POSTINSTALL_PHASE=entry\n').encode()
+        refusal_line = (SENTINEL + ' MRK_MACOS_POSTINSTALL_REFUSED=cwd\n').encode()
+        acl_line = (SENTINEL + ' MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role=input-directory;phase=fstatx-snapshot;'
+            'result=-1;call=-1;errno=13;freeCall=0;freeErrno=0\n').encode()
+        interval_body = b'unselected private line\n' + phase_line + refusal_line + acl_line
+        selected_body, selection = selector['select_installer_log'](interval_body, binding)
+        self.assertNotEqual(selected_body, interval_body)
+        self.assertEqual(selected_body, phase_line + refusal_line + acl_line)
+        metadata = {'schemaVersion': 1, 'kind': 'installer-log-capture', 'state': 'observed-project-correlated',
+            'binding': binding, 'logPath': '/var/log/install.log',
+            'identity': {'device': 1, 'inode': 2, 'mode': 0o100644, 'uid': 0, 'gid': 0, 'links': 1},
+            'cursorSha256': 'a' * 64, 'startOffsetBytes': 100, 'endOffsetBytes': 100 + len(interval_body),
+            'growthBeyondSnapshotBytes': 0, 'intervalBytes': len(interval_body),
+            'intervalSha256': hashlib.sha256(interval_body).hexdigest(), **selection,
+            'selectedData': {'file': 'installer-log-selected.txt', 'bytes': len(selected_body),
+                'sha256': hashlib.sha256(selected_body).hexdigest()},
+            'authority': DATA.INSTALLER_LOG_AUTHORITY, 'scriptOutputFinality': 'unestablished'}
+        payload_value = receipt('notarize-payload')
+        payload_value['payloadNotarization'] = payload_value.pop('finalImage')
+        payload_value['payloadNotarization'].update(inventorySha256='8' * 64, runtimeManifestSha256='9' * 64)
+        final_value = receipt('finalize-package'); final_value['finalPackage'] = final_value.pop('finalImage')
+        final_value['finalPackage']['kind'] = 'mrk-final-installer-package'
+        final_bytes = json.dumps(final_value).encode()
+        installer_value = receipt('package-install'); del installer_value['finalImage'], installer_value['notarySubmission']
+        installer_value.update(passed=False, targetRetired=False,
+            finalPackageReceiptSha256=hashlib.sha256(final_bytes).hexdigest(),
+            failure={'stage': 'standard-original-installer', 'type': 'Refused', 'reason': 'original-nonzero-installer'})
+        installer_value['originalCalls'] = [dict(role=role, entered=True, returned=True, capturesSettled=True,
+            returncode=status, stdoutSha256='a' * 64, stderrSha256=hashlib.sha256(b'').hexdigest())
+            for role, status in (('distribution-attach', 0), ('installer-log-cursor', 0), ('installer', 1), ('installer-log-capture', 0))]
+        statuses = {name: {'receiptState': 'observed', 'returncode': status} for name, status in
+            (('installer-log-cursor.status', 0), ('installer-output.status', 1), ('installer-log-capture.status', 0))}
+        def observed_phases(document):
+            current = copy.deepcopy(installer_value)
+            body = json.dumps(document).encode()
+            current['originalCalls'][-1]['stdoutSha256'] = hashlib.sha256(body).hexdigest()
+            current['originalCalls'][-1]['returncode'] = 1 if document['state'] == 'unknown' else 0
+            phase = DATA.project_receipt(current, CONTEXT, 'package-install')
+            phase['callerStatus'] = {'receiptState': 'observed', 'returncode': 1}
+            payload = DATA.project_receipt(payload_value, CONTEXT, 'notarize-payload')
+            payload['callerStatus'] = {'receiptState': 'observed', 'returncode': 0}
+            finalized = DATA.project_receipt(final_value, CONTEXT, 'finalize-package')
+            finalized.update(receiptSha256=hashlib.sha256(final_bytes).hexdigest(),
+                callerStatus={'receiptState': 'observed', 'returncode': 0})
+            return body, current, phase, payload, finalized
+        def diagnose(document, selected=selected_body, *, changed=None):
+            body, current, phase, payload, finalized = observed_phases(document)
+            scalar = copy.deepcopy(statuses)
+            scalar['installer-log-capture.status']['returncode'] = current['originalCalls'][-1]['returncode']
+            if changed is not None: changed(phase, scalar, payload, finalized)
+            return DATA.project_installer_failure_diagnostic(body, selected, phase, scalar, CONTEXT, payload, finalized,
+                {'nodes': 0, 'deadline': time.monotonic_ns() + 45_000_000_000})
+        diagnostic = diagnose(metadata)
+        self.assertEqual(diagnostic['postinstallPhaseCounts']['entry'], 1)
+        self.assertEqual(diagnostic['postinstallRefusalCounts']['cwd'], 1)
+        self.assertEqual(diagnostic['aclDiagnostics'][0], {'role': 'input-directory', 'phase': 'fstatx-snapshot',
+            'result': -1, 'call': -1, 'errno': 13, 'freeCall': 0, 'freeErrno': 0})
+        self.assertEqual(diagnostic['completedParentDiagnostic']['state'], 'missing')
+        self.assertFalse(diagnostic['originalInstallerReturnedZero']); self.assertTrue(diagnostic['diagnosticOnly'])
+        self.assertNotIn(SENTINEL, json.dumps(diagnostic)); self.assertNotIn('/private/', json.dumps(diagnostic))
+        # Exact future ninth grammar is pure DATA: no native symbol/error text.
+        parent_token = ('MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=' + 'b' * 64 +
+            ';exit=1;originals=1;native=0;timely=1;unknown=1\n').encode()
+        def parent_document(lines):
+            fresh = copy.deepcopy(metadata); body = b''.join(lines)
+            patterns = DATA.installer_log_patterns(binding, completed_parent=True)
+            fresh.update(linesObserved=len(lines), linesUnselected=0, startOffsetBytes=0, endOffsetBytes=len(body),
+                intervalBytes=len(body), intervalSha256=hashlib.sha256(body).hexdigest(), selectedLines=[],
+                markerCounts={key: 0 for key in patterns}, resultMarkerState='missing')
+            offset = 0
+            for line in lines:
+                matches = {key: len(list(pattern.finditer(line))) for key, pattern in patterns.items()}
+                fresh['selectedLines'].append({'relativeOffsetBytes': offset, 'retainedOffsetBytes': offset,
+                    'bytes': len(line), 'sha256': hashlib.sha256(line).hexdigest(),
+                    'anchors': [key for key, count in matches.items() if count]})
+                for key, count in matches.items(): fresh['markerCounts'][key] += count
+                offset += len(line)
+            fresh['selectedData'].update(bytes=len(body), sha256=hashlib.sha256(body).hexdigest())
+            return fresh, body
+        for lines, state in (([parent_token], 'observed'), ([parent_token, parent_token], 'duplicate'),
+            ([parent_token, parent_token.replace(b'unknown=1', b'unknown=0')], 'conflicting')):
+            document, selected = parent_document(lines); parent = diagnose(document, selected)['completedParentDiagnostic']
+            self.assertEqual(parent['state'], state)
+            self.assertEqual('reasonSha256' in parent, state == 'observed')
+            if state == 'observed':
+                self.assertEqual(parent['reasonSha256'], 'b' * 64); self.assertIs(parent['unknown'], True)
+                self.assertIs(parent['native'], False); self.assertEqual(parent['exit'], 1)
+        wrong_documents = []
+        for key, replacement in (('state', 'unknown'), ('authority', SENTINEL), ('cursorSha256', 'c' * 64),
+            ('resultMarkerState', 'unbound'), ('linesUnselected', 0), ('intervalBytes', len(interval_body) + 1),
+            ('identity', {'device': 1, 'inode': 2, 'mode': 0o100666, 'uid': 0, 'gid': 0, 'links': 1})):
+            wrong = copy.deepcopy(metadata); wrong[key] = replacement; wrong_documents.append(wrong)
+        for key, replacement in (('sourceCommit', '2' * 40), ('runAttempt', '99'), ('inventorySha256', '3' * 64),
+            ('runtimeManifestSha256', '4' * 64), ('requestId', '5' * 32), ('packagePath', '/private/other.pkg')):
+            wrong = copy.deepcopy(metadata); wrong['binding'][key] = replacement; wrong_documents.append(wrong)
+        for key, replacement in (('bytes', len(selected_body) + 1), ('sha256', 'c' * 64), ('file', SENTINEL)):
+            wrong = copy.deepcopy(metadata); wrong['selectedData'][key] = replacement; wrong_documents.append(wrong)
+        for key, replacement in (('relativeOffsetBytes', len(interval_body)), ('retainedOffsetBytes', 1),
+            ('bytes', 0), ('sha256', 'c' * 64), ('anchors', ['package-path'])):
+            wrong = copy.deepcopy(metadata); wrong['selectedLines'][0][key] = replacement; wrong_documents.append(wrong)
+        wrong = copy.deepcopy(metadata); wrong['selectedLines'].append(copy.deepcopy(wrong['selectedLines'][0])); wrong_documents.append(wrong)
+        wrong = copy.deepcopy(metadata); wrong['markerCounts']['arbitrary-private-key'] = 1; wrong_documents.append(wrong)
+        wrong = copy.deepcopy(metadata); wrong['markerCounts']['postinstall-phase'] += 1; wrong_documents.append(wrong)
+        for document in wrong_documents:
+            with self.assertRaises(DATA.Refused): diagnose(document)
+        for key, replacement in (('entered', False), ('returned', False), ('capturesSettled', False),
+            ('returncode', 2), ('returncode', True), ('stdoutSha256', 'd' * 64), ('stderrSha256', 'd' * 64)):
+            with self.assertRaises(DATA.Refused):
+                diagnose(metadata, changed=lambda p, s, n, f, key=key, replacement=replacement:
+                    p['originalCalls']['calls'][-1].update({key: replacement}))
+        for change in (lambda p, s, n, f: p.update(recordedPassed=True),
+            lambda p, s, n, f: p.update(callerStatus={'receiptState': 'observed', 'returncode': 0}),
+            lambda p, s, n, f: s['installer-output.status'].update(returncode=0),
+            lambda p, s, n, f: n.update(correlationMatches=False),
+            lambda p, s, n, f: n.update(receiptState='absent'),
+            lambda p, s, n, f: f.update(receiptSha256='e' * 64)):
+            with self.assertRaises(DATA.Refused): diagnose(metadata, changed=change)
+        with self.assertRaises(DATA.Refused): diagnose(metadata, selected_body + b'extra\n')
+        for body in (b'{"x":1,"x":2}', b'{"x":NaN}', b'{"x":1.5}', b'\xff', b'x' * (256 * 1024 + 1),
+            json.dumps({'x': [0] * 2049}).encode()):
+            with self.assertRaises(DATA.Refused):
+                DATA.decode_installer_diagnostic(body, {'nodes': 0, 'deadline': time.monotonic_ns() + 45_000_000_000})
+        large_metadata = json.dumps({'x': [0] * 2048, 'y': 'x' * 4096, 'z': [0] * 2048}).encode()
+        self.assertGreater(len(large_metadata), 16384)
+        self.assertEqual(len(DATA.decode_installer_diagnostic(large_metadata,
+            {'nodes': 0, 'deadline': time.monotonic_ns() + 45_000_000_000})['x']), 2048)
+        unavailable = {key: metadata[key] for key in ('schemaVersion', 'kind', 'binding', 'authority', 'scriptOutputFinality')}
+        unavailable.update(state='unknown', reason='log-output-readback', plannedSelectedData=metadata['selectedData'],
+            selectedOutputState='write-or-close-unknown-preserve-original')
+        self.assertEqual(diagnose(unavailable, None)['captureState'], 'unavailable')
+        self.assertFalse(diagnose(unavailable, None)['selectionOriginalAuthorized'])
+
+        # Both fixed attempts are precharged and consume once even on absence.
+        log_charge = 2 * (DATA.INSTALLER_DIAGNOSTIC_LIMIT + 1)
+        reserved = {'files': 126, 'bytes': DATA.INPUT_LIMIT - log_charge, 'deadline': time.monotonic_ns() + 45_000_000_000}
+        DATA.reserve_installer_diagnostic_reads(reserved)
+        self.assertEqual((reserved['files'], reserved['bytes']), (128, DATA.INPUT_LIMIT))
+        with self.assertRaises(DATA.Refused): DATA.reserve_installer_diagnostic_reads(reserved)
+        for key in ('files', 'bytes'):
+            bad_budget = {'files': 126, 'bytes': DATA.INPUT_LIMIT - log_charge, 'deadline': time.monotonic_ns() + 45_000_000_000}
+            bad_budget[key] += 1
+            with self.assertRaises(DATA.Refused): DATA.reserve_installer_diagnostic_reads(bad_budget)
+        for scenario in ('valid', 'absent', 'partial', 'wrong-context', 'hash', 'wrong-status', 'linked', 'symlink', 'oversize'):
+            with self.subTest(installer=scenario), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); body, current, phase, payload, finalized = observed_phases(metadata)
+                if scenario == 'wrong-context': current['runAttempt'] = '99'
+                if scenario == 'hash': current['originalCalls'][-1]['stdoutSha256'] = 'f' * 64
+                original = write(root, 'android-helper-package-install.json', current)
+                write(root, 'package-install.status', b'1\n')
+                write(root, 'android-helper-notarize-payload.json', payload_value)
+                write(root, 'android-helper-finalize-package.json', final_bytes); write(root, 'package-finalization.status', b'0\n')
+                for name, scalar in statuses.items(): write(root, name, (str(scalar['returncode']) + '\n').encode())
+                if scenario == 'wrong-status': write(root, 'installer-output.status', b'0\n')
+                for name, content in zip(DATA.INSTALLER_DIAGNOSTIC_INPUTS, (body, selected_body)):
+                    if scenario == 'absent' or scenario == 'partial' and name == 'installer-log-selected.txt': continue
+                    if scenario == 'oversize' and name.endswith('.txt'): content = b'x' * (256 * 1024 + 1)
+                    if scenario == 'symlink' and name.endswith('.txt'):
+                        private = write(root, 'private-installer-original', content); os.symlink(private.name, root / name)
+                    else:
+                        write(root, name, content)
+                        if scenario == 'linked' and name.endswith('.txt'): os.link(root / name, root / 'retained-installer-original')
+                before = original.read_bytes(); output = project(root); item = output['installerFailureDiagnostic']
+                self.assertEqual(item['receiptState'], 'observed' if scenario == 'valid' else 'absent' if scenario == 'absent' else 'refused')
+                self.assertFalse(output['productReady']); self.assertFalse(item['originalInstallerReturnedZero'])
+                self.assertEqual(original.read_bytes(), before)
+                self.assertNotIn(SENTINEL, json.dumps(output)); self.assertNotIn(str(root), json.dumps(output))
+        # Real fixed reader POST and one-shot close failures remain original
+        # errors, never converted into a successful diagnostic or retried.
+        for fault in ('post', 'close'):
+            with self.subTest(installer_reader=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); name = DATA.INSTALLER_DIAGNOSTIC_INPUTS[1]
+                write(root, name, selected_body); root_fd = DATA.open_root(str(root))
+                original_stat, original_close = DATA.os.stat, DATA.os.close
+                closed = []
+                try:
+                    def changed_stat(path, *args, **kwargs):
+                        value = original_stat(path, *args, **kwargs)
+                        if path == name and fault == 'post':
+                            return SimpleNamespace(st_dev=value.st_dev, st_ino=value.st_ino + 1, st_mode=value.st_mode,
+                                st_uid=value.st_uid, st_gid=value.st_gid, st_nlink=value.st_nlink, st_size=value.st_size,
+                                st_mtime_ns=value.st_mtime_ns, st_ctime_ns=value.st_ctime_ns)
+                        return value
+                    def failed_close(fd):
+                        closed.append(fd); original_close(fd)
+                        if fault == 'close': raise OSError('private-close-must-not-render')
+                    DATA.os.stat, DATA.os.close = changed_stat, failed_close
+                    live_budget = {'files': 0, 'bytes': 0, 'deadline': time.monotonic_ns() + 45_000_000_000}
+                    DATA.reserve_installer_diagnostic_reads(live_budget)
+                    with self.assertRaises(DATA.Refused if fault == 'post' else OSError):
+                        DATA.read_input(root_fd, name, DATA.INSTALLER_DIAGNOSTIC_LIMIT, live_budget,
+                            installer_diagnostic_reserved=True)
+                    self.assertEqual(len(closed), 1)
+                    with self.assertRaises(DATA.Refused):
+                        DATA.read_input(root_fd, name, DATA.INSTALLER_DIAGNOSTIC_LIMIT, live_budget,
+                            installer_diagnostic_reserved=True)
+                finally:
+                    DATA.os.stat, DATA.os.close = original_stat, original_close
+                    os.close(root_fd)
+
     def test_fixed_signature_and_notary_refusals_remain_distinguishable(self):
         reasons = ("package-signature-bound", "package-signature-header", "package-signature-trust-timestamp",
                    "package-signature-source-chain", "package-signature-source-fingerprint", "notary-submit-terminal",

@@ -5,7 +5,9 @@ Original receipts/captures remain local and authoritative to their existing
 validators. This script reads only the fixed roster below. Bounded exceptions
 to tool-output exclusion are the <=128-byte compile-fixed producer refusal token
 and two <=65536-byte original pkgutil preambles, joined to their failed original
-calls and projected only to finite diagnostics. No raw output fallback,
+calls and projected only to finite diagnostics. Two fixed <=256KiB Installer
+log metadata/selected originals are joined to the failed original and projected
+only to fixed markers/hashes, never line text. No raw output fallback,
 source-binding.json, private native reports, credentials or directory listings
 are read.
 """
@@ -1565,9 +1567,284 @@ def project_package_signature_diagnostic(captures, phase):
     return result
 
 
-def read_input(root, name, limit, budget, *, package_signature_reserved=False):
+INSTALLER_DIAGNOSTIC_INPUTS = ("installer-log-capture.json", "installer-log-selected.txt")
+INSTALLER_DIAGNOSTIC_LIMIT = 256 * 1024
+INSTALLER_LOG_AUTHORITY = "project-correlated-diagnostics-not-package-pid-authentication-or-original-fd-custody"
+INSTALLER_LOG_KEYS = ("package-identifier", "package-path", "native-executable", "fixture-result", "ordinary-result",
+                      "postinstall-phase", "postinstall-refusal", "acl-diagnostic")
+INSTALLER_PARENT_KEY = "completed-parent-diagnostic"
+INSTALLER_LOG_REFUSALS = frozenset(("log-input-binding", "log-file-policy", "log-file-identity", "log-cursor-shape",
+    "log-cursor-binding", "log-cursor-offset", "log-anchor-rewritten", "log-truncated", "log-incomplete-boundary",
+    "log-interval-bound", "log-line-bound", "log-selected-bound", "log-metadata-bound", "log-no-project-lines",
+    "log-read-incomplete", "log-output-readback", "original-close-unknown", "ancestor-close-unknown",
+    "log-input-or-capture-unavailable", "log-output-unavailable"))
+
+
+def reserve_installer_diagnostic_reads(budget):
+    """Exactly two fixed attempts/full bounds, charged before any original read."""
     clock(budget)
-    if package_signature_reserved:
+    need("installerDiagnosticReads" not in budget)
+    charge = len(INSTALLER_DIAGNOSTIC_INPUTS) * (INSTALLER_DIAGNOSTIC_LIMIT + 1)
+    need(budget["files"] + 2 <= 128 and budget["bytes"] + charge <= INPUT_LIMIT)
+    budget["files"] += 2
+    budget["bytes"] += charge
+    budget["installerDiagnosticReads"] = {name: True for name in INSTALLER_DIAGNOSTIC_INPUTS}
+
+
+def decode_installer_diagnostic(body, budget):
+    # Genuine log metadata can exceed generic16KiB/list128. This separate
+    # fixed grammar does not broaden any other input or claim preparse RSS.
+    need(type(body) is bytes and 0 < len(body) <= INSTALLER_DIAGNOSTIC_LIMIT)
+    def pairs(rows):
+        need(len(rows) <= 32 and len({key for key, _ in rows}) == len(rows))
+        return dict(rows)
+    def number(raw):
+        need(len(raw) <= 20)
+        return int(raw)
+    def no_float(_raw):
+        raise Refused("public-evidence-refused")
+    try:
+        value = json.loads(body.decode("utf-8"), object_pairs_hook=pairs, parse_int=number,
+                           parse_float=no_float, parse_constant=no_float)
+    except (UnicodeError, ValueError, RecursionError):
+        raise Refused("public-evidence-refused") from None
+    pending, count = [(value, 0)], 0
+    while pending:
+        item, depth = pending.pop()
+        count += 1; budget["nodes"] += 1
+        need(depth <= 16 and count <= 65536 and budget["nodes"] <= JSON_NODE_LIMIT)
+        if type(item) is dict:
+            need(len(item) <= 32)
+            pending.extend((part, depth + 1) for pair in item.items() for part in pair)
+        elif type(item) is list:
+            need(len(item) <= 2048)
+            pending.extend((part, depth + 1) for part in item)
+        elif type(item) is str:
+            need(len(item.encode("utf-8")) <= 4096)
+        else:
+            need(item is None or type(item) in (bool, int))
+    need(type(value) is dict)
+    clock(budget)
+    return value
+
+
+def installer_log_patterns(binding, *, completed_parent):
+    """Exact selector SOURCE grammars; no arbitrary raw token rendering."""
+    need(type(completed_parent) is bool)
+    def bounded_token(value, path=False):
+        chars = rb"A-Za-z0-9._+~%/-" if path else rb"A-Za-z0-9._+-"
+        return re.compile(rb"(?<![" + chars + rb"])" + re.escape(value) + rb"(?![" + chars + rb"])")
+    patterns = {
+        "package-identifier": bounded_token(binding["packageIdentifier"].encode()),
+        "package-path": bounded_token(binding["packagePath"].encode(), path=True),
+        "native-executable": bounded_token(b"mrk-macos-install"),
+        "fixture-result": re.compile(rb"(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_FIXTURE_RESULT="),
+        "ordinary-result": re.compile(rb"(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_RESULT="),
+        "postinstall-phase": re.compile(rb"(?<![A-Za-z0-9_])MRK_MACOS_POSTINSTALL_PHASE=(?:entry|target-ok|relative-entry|absolute-entry|cwd-ok|pre-exec)(?![A-Za-z0-9_-])"),
+        "postinstall-refusal": re.compile(rb"(?<![A-Za-z0-9_])MRK_MACOS_POSTINSTALL_REFUSED=(?:target|entry|cwd)(?![A-Za-z0-9_-])"),
+        "acl-diagnostic": re.compile(
+            rb"(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role="
+            rb"(?:input-directory|input-inventory|system-root|system-library|system-support|other-protected-object);phase="
+            rb"(?:filesec-allocation|fstatx-snapshot|snapshot-owner|snapshot-group|snapshot-mode|acl-presence|acl-conversion|"
+            rb"acl-object|acl-validation|acl-first-entry|acl-entry-present|acl-free|ffi-output)"
+            rb";result=-?[0-9]{1,10};call=-?[0-9]{1,10};errno=-?[0-9]{1,10};freeCall=-?[0-9]{1,10};freeErrno=-?[0-9]{1,10}(?=\r?\n$)"),
+    }
+    if completed_parent:
+        patterns[INSTALLER_PARENT_KEY] = re.compile(
+            rb"(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=[0-9a-f]{64};exit=(?:1|20)"
+            rb";originals=[01];native=[01];timely=[01];unknown=[01](?=\r?\n$)")
+    return patterns
+
+
+def installer_failure_originals(phase, statuses):
+    need(type(phase) is dict and phase.get("receiptState") == "observed"
+         and phase.get("correlationMatches") is True and phase.get("recordedPassed") is False)
+    caller = phase.get("callerStatus")
+    need(type(caller) is dict and caller.get("receiptState") == "observed"
+         and type(caller.get("returncode")) is int and caller["returncode"] != 0)
+    failure = phase.get("failure")
+    need(type(failure) is dict and failure.get("type") == "Refused"
+         and failure.get("stage") == "standard-original-installer"
+         and failure.get("reason") == "original-nonzero-installer")
+    originals = phase.get("originalCalls")
+    need(type(originals) is dict and type(originals.get("unclassifiedCount")) is int
+         and originals["unclassifiedCount"] == 0)
+    calls = originals.get("calls")
+    need(type(calls) is list and len(calls) <= 128 and all(type(row) is dict for row in calls)
+         and type(originals.get("recordedCount")) is int and originals["recordedCount"] == len(calls))
+    roles = ("installer-log-cursor", "installer", "installer-log-capture")
+    selected = []
+    for role, allowed, name in zip(roles, ((0,), (1,), (0, 1)),
+                                  ("installer-log-cursor.status", "installer-output.status", "installer-log-capture.status")):
+        matches = [row for row in calls if row.get("role") == role]
+        need(len(matches) == 1)
+        row = matches[0]
+        need(all(row.get(key) is True for key in ("entered", "returned", "capturesSettled"))
+             and type(row.get("returncode")) is int and row["returncode"] in allowed)
+        observed = statuses.get(name)
+        need(type(observed) is dict and observed.get("receiptState") == "observed"
+             and type(observed.get("returncode")) is int and observed["returncode"] == row["returncode"])
+        hex_value(row.get("stdoutSha256")); hex_value(row.get("stderrSha256"))
+        selected.append(row)
+    entered = [row for row in calls if row.get("entered") is True]
+    need(len(entered) >= 3 and all(entered[-3 + i] is row for i, row in enumerate(selected)))
+    empty = hashlib.sha256(b"").hexdigest()
+    need(selected[0]["stderrSha256"] == empty and selected[2]["stderrSha256"] == empty)
+    return selected
+
+
+def project_installer_failure_diagnostic(metadata_body, selected_body, phase, statuses, context, payload, finalized, budget):
+    """Same failed original/project-correlated selection, never Installer success."""
+    cursor, installer, capture = installer_failure_originals(phase, statuses)
+    need(type(metadata_body) is bytes and capture["stdoutSha256"] == hashlib.sha256(metadata_body).hexdigest())
+    metadata = decode_installer_diagnostic(metadata_body, budget)
+    need(type(metadata.get("schemaVersion")) is int and metadata["schemaVersion"] == 1
+         and metadata.get("kind") == "installer-log-capture" and metadata.get("authority") == INSTALLER_LOG_AUTHORITY
+         and metadata.get("scriptOutputFinality") == "unestablished")
+    # These are already-read original phase receipts. No self-derived anchor
+    # or extra file opens; unavailable preceding facts refuse this diagnosis.
+    for original in (payload, finalized):
+        need(type(original) is dict and original.get("receiptState") == "observed"
+             and original.get("correlationMatches") is True and original.get("recordedPassed") is True
+             and original.get("originalClosesKnown") is True and original.get("targetRetired") is True)
+    # notarize-payload has no scalar PHASE_STATUS in the existing workflow.
+    # Require its actual closed successful originals, never invent a status0.
+    payload_calls = payload.get("originalCalls")
+    need(type(payload_calls) is dict and type(payload_calls.get("unclassifiedCount")) is int
+         and payload_calls["unclassifiedCount"] == 0 and type(payload_calls.get("calls")) is list
+         and 0 < len(payload_calls["calls"]) <= 128 and type(payload_calls.get("recordedCount")) is int
+         and payload_calls["recordedCount"] == len(payload_calls["calls"]))
+    for call in payload_calls["calls"]:
+        need(type(call) is dict and all(call.get(key) is True for key in ("entered", "returned", "capturesSettled"))
+             and type(call.get("returncode")) is int and call["returncode"] == 0)
+    caller = finalized.get("callerStatus")
+    need(type(caller) is dict and caller.get("receiptState") == "observed"
+         and type(caller.get("returncode")) is int and caller["returncode"] == 0)
+    need(hex_value(finalized.get("receiptSha256")) == hex_value(phase.get("finalPackageReceiptSha256")))
+    notarized = payload.get("payloadNotarization")
+    need(type(notarized) is dict and notarized.get("status") == "Accepted"
+         and type(notarized.get("errorCount")) is int and notarized["errorCount"] == 0)
+    inventory, manifest = hex_value(notarized.get("inventorySha256")), hex_value(notarized.get("runtimeManifestSha256"))
+    binding = metadata.get("binding")
+    need(type(binding) is dict and set(binding) == {"packageKind", "packageIdentifier", "packagePath", "sourceCommit",
+         "inventorySha256", "runtimeManifestSha256", "runId", "runAttempt", "requestId"})
+    need(binding["packageKind"] == "ordinary" and binding["packageIdentifier"] == "dev.mobile-release-kit.desktop.installed"
+         and type(binding["sourceCommit"]) is str and binding["sourceCommit"] == context["source"]
+         and type(binding["runId"]) is str and binding["runId"] == context["runId"]
+         and type(binding["runAttempt"]) is str and binding["runAttempt"] == context["runAttempt"]
+         and binding["inventorySha256"] == inventory and binding["runtimeManifestSha256"] == manifest)
+    request = hex_value(binding["requestId"], 32)
+    path = binding["packagePath"]
+    need(type(path) is str and path.startswith("/") and len(path.encode("utf-8")) <= 4096
+         and all(ord(character) >= 32 and ord(character) != 127 for character in path)
+         and all(part and part not in (".", "..") for part in path.split("/")[1:])
+         and path.split("/")[-2:] == ["package-mount", "MobileReleaseKit-" + request + ".pkg"])
+    result = {"receiptState": "observed", "diagnosticOnly": True, "originalInstallerReturnedZero": False,
+              "nativeSuccessInferred": False, "policyUnchanged": True,
+              "binding": "same-source-run-target-failed-original-project-correlated",
+              "metadataSha256": hashlib.sha256(metadata_body).hexdigest()}
+    if capture["returncode"] == 1:
+        need(set(metadata) == {"schemaVersion", "kind", "state", "reason", "binding", "authority",
+             "scriptOutputFinality", "plannedSelectedData", "selectedOutputState"}
+             and metadata["state"] == "unknown" and type(metadata["reason"]) is str
+             and metadata["reason"] in INSTALLER_LOG_REFUSALS
+             and metadata["selectedOutputState"] in ("not-created", "write-or-close-unknown-preserve-original"))
+        planned = metadata["plannedSelectedData"]
+        need(planned is None or type(planned) is dict and set(planned) == {"file", "bytes", "sha256"})
+        if planned is not None:
+            need(planned["file"] == INSTALLER_DIAGNOSTIC_INPUTS[1])
+            integer(planned["bytes"], INSTALLER_DIAGNOSTIC_LIMIT, 1); hex_value(planned["sha256"])
+        need(metadata["selectedOutputState"] != "not-created" or planned is None)
+        return {**result, "captureState": "unavailable", "reason": metadata["reason"], "selectionOriginalAuthorized": False}
+    need(set(metadata) == {"schemaVersion", "kind", "state", "binding", "logPath", "identity", "cursorSha256",
+         "startOffsetBytes", "endOffsetBytes", "growthBeyondSnapshotBytes", "intervalBytes", "intervalSha256",
+         "linesObserved", "linesUnselected", "selectedLines", "markerCounts", "resultMarkerState", "selectedData",
+         "authority", "scriptOutputFinality"} and metadata["state"] == "observed-project-correlated"
+         and metadata["logPath"] == "/var/log/install.log" and metadata["cursorSha256"] == cursor["stdoutSha256"])
+    log_id = metadata["identity"]
+    need(type(log_id) is dict and set(log_id) == {"device", "inode", "mode", "uid", "gid", "links"}
+         and all(type(value) is int and value >= 0 for value in log_id.values())
+         and log_id["inode"] > 0 and stat.S_ISREG(log_id["mode"]) and log_id["uid"] == 0
+         and log_id["links"] == 1 and not log_id["mode"] & 0o022)
+    start = integer(metadata["startOffsetBytes"], 2**63 - 1)
+    end = integer(metadata["endOffsetBytes"], 2**63 - 1, start)
+    interval = integer(metadata["intervalBytes"], 1024 * 1024)
+    need(end - start == interval)
+    integer(metadata["growthBeyondSnapshotBytes"], 2**63 - 1); hex_value(metadata["intervalSha256"])
+    observed = integer(metadata["linesObserved"], 1024 * 1024)
+    unselected = integer(metadata["linesUnselected"], observed)
+    rows, counts, data = metadata["selectedLines"], metadata["markerCounts"], metadata["selectedData"]
+    need(type(rows) is list and 0 < len(rows) <= 2048 and observed - unselected == len(rows)
+         and type(counts) is dict and set(counts) in (set(INSTALLER_LOG_KEYS), set((*INSTALLER_LOG_KEYS, INSTALLER_PARENT_KEY)))
+         and type(data) is dict and set(data) == {"file", "bytes", "sha256"} and data["file"] == INSTALLER_DIAGNOSTIC_INPUTS[1])
+    need(type(selected_body) is bytes and 0 < len(selected_body) <= INSTALLER_DIAGNOSTIC_LIMIT
+         and integer(data["bytes"], INSTALLER_DIAGNOSTIC_LIMIT, 1) == len(selected_body)
+         and hex_value(data["sha256"]) == hashlib.sha256(selected_body).hexdigest())
+    parent_catalog = INSTALLER_PARENT_KEY in counts
+    patterns = installer_log_patterns(binding, completed_parent=parent_catalog)
+    need(tuple(patterns) == (*INSTALLER_LOG_KEYS, *((INSTALLER_PARENT_KEY,) if parent_catalog else ())))
+    actual_counts = {key: 0 for key in patterns}
+    for count in counts.values(): integer(count, 1024 * 1024)
+    retained, last_end, acl_rows, parent_rows = 0, 0, [], []
+    phase_counts = {key: 0 for key in ("entry", "target-ok", "relative-entry", "absolute-entry", "cwd-ok", "pre-exec")}
+    refusal_counts = {key: 0 for key in ("target", "entry", "cwd")}
+    for row in rows:
+        clock(budget)
+        need(type(row) is dict and set(row) == {"relativeOffsetBytes", "retainedOffsetBytes", "bytes", "sha256", "anchors"})
+        offset = integer(row["relativeOffsetBytes"], interval)
+        length = integer(row["bytes"], 128 * 1024, 1)
+        need(offset >= last_end and offset + length <= interval and row["retainedOffsetBytes"] == retained
+             and type(row["retainedOffsetBytes"]) is int and retained + length <= len(selected_body))
+        line = selected_body[retained:retained + length]
+        need(line.endswith(b"\n") and b"\n" not in line[:-1] and hex_value(row["sha256"]) == hashlib.sha256(line).hexdigest())
+        matches = {key: list(pattern.finditer(line)) for key, pattern in patterns.items()}
+        anchors = [key for key, matched in matches.items() if matched]
+        need(type(row["anchors"]) is list and row["anchors"] == anchors and bool(anchors))
+        for key, matched in matches.items(): actual_counts[key] += len(matched)
+        for key, prefix, catalog in (("postinstall-phase", b"MRK_MACOS_POSTINSTALL_PHASE=", phase_counts),
+                                     ("postinstall-refusal", b"MRK_MACOS_POSTINSTALL_REFUSED=", refusal_counts)):
+            for match in matches[key]: catalog[match.group()[len(prefix):].decode("ascii")] += 1
+        for match in matches["acl-diagnostic"]:
+            need(len(acl_rows) < 32)
+            fields = match.group()[len(b"MRK_MACOS_INSTALL_ACL_DIAGNOSTIC="):].decode("ascii").split(";")
+            values = dict(field.split("=", 1) for field in fields)
+            acl_rows.append({"role": values["role"], "phase": values["phase"],
+                **{key: integer(int(values[key]), 9999999999, -9999999999) for key in ("result", "call", "errno", "freeCall", "freeErrno")}})
+        if parent_catalog:
+            for match in matches[INSTALLER_PARENT_KEY]:
+                fields = match.group()[len(b"MRK_MACOS_INSTALL_COMPLETED_REFUSED="):].decode("ascii").split(";")
+                parent_rows.append(dict(field.split("=", 1) for field in fields))
+                need(len(parent_rows) <= 2048)
+        retained += length; last_end = offset + length
+    need(retained == len(selected_body) and actual_counts == counts)
+    state = "mixed" if counts["fixture-result"] else "duplicate" if counts["ordinary-result"] > 1 else "unbound" if counts["ordinary-result"] == 1 else "missing"
+    need(type(metadata["resultMarkerState"]) is str and metadata["resultMarkerState"] == state)
+    parent = {"state": "missing", "markerCount": len(parent_rows)}
+    if len(parent_rows) == 1:
+        item = parent_rows[0]
+        parent.update(state="observed", reasonSha256=hex_value(item["reasonSha256"]), exit=int(item["exit"]),
+                      **{key: item[key] == "1" for key in ("originals", "native", "timely", "unknown")})
+    elif parent_rows:
+        parent["state"] = "duplicate" if all(row == parent_rows[0] for row in parent_rows) else "conflicting"
+    # Counts and fixed labels only; original-selected bytes and hidden binding
+    # paths never enter the public object. Duplicates never pick a convenient row.
+    return {**result, "captureState": "observed-project-correlated", "selectionOriginalAuthorized": True,
+        "selectedBytes": len(selected_body), "selectedLineCount": len(rows), "selectedSha256": data["sha256"],
+        "selectorCatalog": "fixed9" if parent_catalog else "fixed8", "markerCounts": dict(counts),
+        "resultMarkerState": state, "postinstallPhaseCounts": phase_counts, "postinstallRefusalCounts": refusal_counts,
+        "aclDiagnostics": acl_rows, "completedParentDiagnostic": parent}
+
+
+def read_input(root, name, limit, budget, *, package_signature_reserved=False, installer_diagnostic_reserved=False):
+    clock(budget)
+    need(type(package_signature_reserved) is bool and type(installer_diagnostic_reserved) is bool
+         and not (package_signature_reserved and installer_diagnostic_reserved))
+    if installer_diagnostic_reserved:
+        need(limit == INSTALLER_DIAGNOSTIC_LIMIT and name in INSTALLER_DIAGNOSTIC_INPUTS)
+        reserved = budget.get("installerDiagnosticReads")
+        need(type(reserved) is dict and reserved.get(name) is True)
+        reserved[name] = False
+    elif package_signature_reserved:
         need(type(package_signature_reserved) is bool and limit == PACKAGE_SIGNATURE_CAPTURE_LIMIT
              and name in {path for _, path, _ in PACKAGE_SIGNATURE_CAPTURES})
         reserved = budget.get("packageSignatureReads")
@@ -1594,7 +1871,7 @@ def read_input(root, name, limit, budget, *, package_signature_reserved=False):
             before = os.fstat(fd)
             need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == os.geteuid()
                  and 0 < before.st_size <= limit)
-            if not package_signature_reserved:
+            if not (package_signature_reserved or installer_diagnostic_reserved):
                 budget["bytes"] += before.st_size + 1
             need(budget["bytes"] <= INPUT_LIMIT)
             body = os.pread(fd, before.st_size + 1, 0)
@@ -1974,11 +2251,12 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
     need(source == workflow_source and len(PHASES) <= 20 and len(STATUS_FILES) <= 100
          and len(set(STATUS_FILES)) == len(STATUS_FILES))
     # All fixed attempts count, including absent originals, before any read.
-    need(len(STATUS_FILES) + len(PHASES) + 4 + len(PACKAGE_SIGNATURE_CAPTURES)
+    need(len(STATUS_FILES) + len(PHASES) + 4 + len(PACKAGE_SIGNATURE_CAPTURES) + len(INSTALLER_DIAGNOSTIC_INPUTS)
          + (len(UI_DIAGNOSTICS) + 6 + len(POSITIVE_UI_INPUTS) if profile == "installed" else 0) <= 128)
     budget = {"deadline": time.monotonic_ns() + 45_000_000_000, "files": 0, "bytes": 0, "nodes": 0,
               "outputBytes": 16384}  # Reserve the fixed roster keys/envelope/caller-status duplicates.
     reserve_package_signature_reads(budget)
+    reserve_installer_diagnostic_reads(budget)
     root = open_root(work)
     try:
         root_id = directory_identity(os.fstat(root))
@@ -2003,7 +2281,7 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
         phases = {}
         def phase_receipt(body, phase):
             result = project_receipt(decode(body, budget), context, phase)
-            if "appAbsenceBaseline" in result:
+            if "appAbsenceBaseline" in result or phase == "finalize-package":
                 result["receiptSha256"] = hashlib.sha256(body).hexdigest()
             return result
         for phase in PHASES:
@@ -2035,6 +2313,29 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
                                  "diagnosticOnly": True, "nativeSuccessInferred": False, "policyUnchanged": True}
         del signature_captures
         budget["outputBytes"] += len(json.dumps(package_signature, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+        need(budget["outputBytes"] <= OUTPUT_LIMIT)
+        installer_inputs, installer_states = {}, {}
+        for name in INSTALLER_DIAGNOSTIC_INPUTS:
+            try:
+                installer_inputs[name] = read_input(root, name, INSTALLER_DIAGNOSTIC_LIMIT, budget,
+                    installer_diagnostic_reserved=True)
+                installer_states[name] = "observed"
+            except FileNotFoundError:
+                installer_states[name] = "absent"
+            except Refused:
+                installer_states[name] = "refused"
+        try:
+            need(installer_states[INSTALLER_DIAGNOSTIC_INPUTS[0]] == "observed")
+            installer_diagnostic = project_installer_failure_diagnostic(installer_inputs[INSTALLER_DIAGNOSTIC_INPUTS[0]],
+                installer_inputs.get(INSTALLER_DIAGNOSTIC_INPUTS[1]), phases["package-install"], statuses, context,
+                phases["notarize-payload"], phases["finalize-package"], budget)
+            need(installer_diagnostic.get("captureState") != "observed-project-correlated"
+                 or installer_states[INSTALLER_DIAGNOSTIC_INPUTS[1]] == "observed")
+        except Refused:
+            installer_diagnostic = {"receiptState": "absent" if all(state == "absent" for state in installer_states.values()) else "refused",
+                "diagnosticOnly": True, "originalInstallerReturnedZero": False, "nativeSuccessInferred": False, "policyUnchanged": True}
+        del installer_inputs
+        budget["outputBytes"] += len(json.dumps(installer_diagnostic, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
         need(budget["outputBytes"] <= OUTPUT_LIMIT)
         try:
             update = update_join(phases["update-baseline"], phases["package-install"])
@@ -2070,6 +2371,7 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
                  "diagnosticOnly": True, "productReady": False, "sourceInventory": inventory,
                  "phases": phases, "statuses": statuses, "deliveries": deliveries, "normalUiBuildDiagnostics": ui_diagnostics,
                  "producerFailureDiagnostic": producer_refusal, "packageSignatureDiagnostic": package_signature,
+                 "installerFailureDiagnostic": installer_diagnostic,
                  "dataContractFailure": data_failure, "buildSettingsDiagnostic": settings_diagnostic, "appAbsence": app_absence, "positiveUpdate": update}
         if profile == "installed":
             value["positiveUiObservations"] = positive_ui_observations(root, context, statuses, phases, inventory, budget)

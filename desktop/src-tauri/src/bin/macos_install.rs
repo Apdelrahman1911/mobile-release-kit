@@ -12667,6 +12667,31 @@ mod installer {
                 && entry == Some(CurrentProductResult::PurposeVerified)
                 && payload == Some(CurrentProductResult::PurposeVerified)
         }
+        // Failure-only diagnostic DATA, never a receipt or future-exit claim.
+        // The caller supplies only its first static Parent error after original settlement.
+        fn completed_failure_line_data(reason: Option<&'static str>, exit: i32, originals: bool,
+            native: bool, timely: bool, unknown: bool, native_settled: bool) -> Option<String> {
+            if !matches!(exit,1|20) || !originals || !timely || !native_settled { return None; }
+            let digest = hash(reason.unwrap_or("completed-original-finality-refused").as_bytes());
+            let line = format!("MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256={digest};exit={exit};originals={};native={};timely={};unknown={}\n",
+                u8::from(originals),u8::from(native),u8::from(timely),u8::from(unknown));
+            (line.len() <= 256).then_some(line)
+        }
+        #[cfg(test)]
+        pub(super) fn completed_failure_diagnostic_data_checks() {
+            // Pure diagnostic formatting only: no native/Installer/FD execution.
+            let refusal = completed_failure_line_data(Some("worker-self-image"),1,true,false,true,true,true).unwrap();
+            assert_eq!(refusal,format!("MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256={};exit=1;originals=1;native=0;timely=1;unknown=1\n",hash(b"worker-self-image")));
+            assert!(!refusal.contains("worker-self-image"));assert!(refusal.len()<=256 && refusal.is_ascii());
+            let partial = completed_failure_line_data(None,20,true,true,true,false,true).unwrap();
+            assert!(partial.starts_with(&format!("MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256={};exit=20;",hash(b"completed-original-finality-refused"))));
+            let private = completed_failure_line_data(Some("/private/example-not-an-output"),1,true,true,true,false,true).unwrap();
+            assert!(!private.contains("/private/") && !private.contains("example-not-an-output"));
+            for invalid in [0,2,-1,101] {assert!(completed_failure_line_data(None,invalid,true,true,true,false,true).is_none());}
+            for (originals,timely,settled) in [(false,true,true),(true,false,true),(true,true,false)] {
+                assert!(completed_failure_line_data(None,1,originals,true,timely,false,settled).is_none());
+            }
+        }
         fn completed_exit_data(writer_exit: Option<i32>, published: bool, exported: bool,
             originals: bool, native: bool, command_kernel_retained: bool, timely: bool,
             original_clean: bool, unknown: bool) -> i32 {
@@ -19390,9 +19415,19 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             // document claiming its own future close or the parent's return.
             // The one retained Command/OFD survives this Rust value's Drop and
             // retires only when the caller immediately returns to main's exit.
-            completed_exit_data(writer_exit,published,exported,originals,native,
+            let unknown = parent.book.unknown || parent.wait_unknown;
+            let exit = completed_exit_data(writer_exit,published,exported,originals,native,
                 parent.command_gate_kernel_retained && parent.command.is_some(),timely,
-                parent.errors.is_empty(),parent.book.unknown || parent.wait_unknown)
+                parent.errors.is_empty(),unknown);
+            // Missing producer is unentered-known for this diagnostic gate, not native success.
+            let native_settled = parent.producer.as_ref().is_none_or(|producer| producer.signature.settled()
+                && producer.entry.settled() && producer.payload.settled());
+            if let Some(line) = completed_failure_line_data(parent.errors.first().copied(),exit,
+                originals,native,timely,unknown,native_settled) {
+                // One bounded best-effort write; no retry, panic, or success-path output.
+                let _ = std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
+            }
+            exit
         }
         #[cfg(test)]
         mod tests {
@@ -20781,6 +20816,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         #[test]
         fn original_final_deadline_vetoes_late_known_closes_without_erasing_first_error() {
             assert!(super::close_deadline_policy_table());
+            super::worker::completed_failure_diagnostic_data_checks();
         }
     }
 }

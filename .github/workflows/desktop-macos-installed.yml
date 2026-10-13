@@ -25,7 +25,7 @@ jobs:
     environment: macos-developer-id
     name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}
     runs-on: ${{ matrix.runner }}
-    # Raw timed-step union577min (ARM) /617min (Intel) includes the retained42min alternative.
+    # Raw timed-step union585min (ARM) /625min (Intel) includes the retained42min alternative.
     # Remaining-three adds28 nominal minutes versus one singleton; no350min fit is claimed.
     # The unchanged350min job cap is containing authority, never renewed per case.
     # Historical pre-Remove baselines: preview345 / recovery339 / installed210, plus5 overhead.
@@ -1800,6 +1800,18 @@ jobs:
             --installer-status "$MRK_MACOS_WORK/installer-fixture-output.status" > "$MRK_MACOS_WORK/installer-fixture-observation.json"
           # Deterministic collisions and reported policy faults are not genuine
           # concurrent races, OS EIO/power-loss, native close failure or Aqua/Save.
+      - name: Compile the fixed ordinary root Installer before credential admission
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          (
+            cd desktop/src-tauri
+            PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer \
+              --target "$MRK_MACOS_TARGET" --bin mrk-macos-install
+          )
       - name: Build the fixed one-shot root Installer and scripts-only package
         if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
         timeout-minutes: 8
@@ -1814,11 +1826,6 @@ jobs:
           export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
           set -euo pipefail
           set -o noclobber
-          (
-            cd desktop/src-tauri
-            PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer \
-              --target "$MRK_MACOS_TARGET" --bin mrk-macos-install
-          )
           installer="$CARGO_TARGET_DIR/$MRK_MACOS_TARGET/release/mrk-macos-install"
           MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
           MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
