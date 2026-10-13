@@ -1,0 +1,57 @@
+name: Observe tiny original HFS readonly parser facts
+
+on:
+  push:
+    branches: [verify/desktop-macos-hfs-parser-probe]
+permissions:
+  contents: read
+concurrency:
+  group: desktop-macos-hfs-parser-probe-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  hfs-parser:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-hfs-parser-probe'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-26
+            target: aarch64-apple-darwin
+          - runner: macos-26-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 7
+    steps:
+      - name: Check out exact reviewed source without retained credentials
+        timeout-minutes: 2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Observe only synthetic readonly HFS DATA and retire originals
+        id: probe
+        timeout-minutes: 4
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_HFS_TARGET: ${{ matrix.target }}
+          MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
+          MRK_HFS_SOURCE_SHA256: 472f245d5aeb4ce0eb488cd1565b40a8978684433701ef4b02fd369c58784597
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          umask 077
+          /usr/bin/python3 -I -S -B desktop/tools/macos_hfs_readonly_parser_probe.py
+      - name: Preserve only the closed finite parser observation
+        if: always() && hashFiles('hfs-parser-public.json') != ''
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hfs-parser-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: hfs-parser-public.json
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 14
