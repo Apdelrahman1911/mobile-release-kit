@@ -1569,6 +1569,117 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 self.assertEqual(original.read_bytes(), before)
                 if scenario != "absent": self.assertEqual(path.read_bytes(), body)
 
+
+        # Pkgutil already has original captured bytes; expose finite positions,
+        # never raw dates/paths/certificates or weaker trust acceptance.
+        before_body = (b'Package "/private/DO-NOT-EMIT.pkg":\n'
+            b'Status: signed by a certificate trusted by macOS\n'
+            b'Signed with a trusted timestamp on: PRIVATE-DATE\n'
+            b'Certificate Chain:\n1. PRIVATE-CERTIFICATE\n')
+        after_body = before_body.replace(b'Certificate Chain:\n', b'Notarization: trusted by macOS\nCertificate Chain:\n')
+        facts = DATA.package_signature_preamble(after_body)
+        self.assertEqual((facts['statusClass'], facts['statusIndex'], facts['trustedTimestampIndex'],
+            facts['chainMarkerIndex'], facts['notarizationIndex']), ('macOS', 1, 2, 4, 3))
+        self.assertTrue(facts['statusAtIndex1Accepted']); self.assertTrue(facts['trustedTimestampAtIndex2'])
+        self.assertFalse(facts['chainMarkerAtIndex3']); self.assertEqual(facts['notarizationClass'], 'trustedByMacOS')
+        for body, expected in ((before_body.replace(b'trusted by macOS', b'trusted by Mac OS X'), 'macOSX'),
+            (before_body.replace(b'signed by a certificate trusted by macOS', b'signed by a developer certificate issued by Apple for distribution'), 'appleDistribution'),
+            (before_body.replace(b'trusted by macOS', SENTINEL.encode()), 'other')):
+            self.assertEqual(DATA.package_signature_preamble(body)['statusClass'], expected)
+        duplicated = DATA.package_signature_preamble(after_body + b'Notarization: trusted by macOS\n')
+        self.assertEqual(duplicated['notarizationCount'], 2); self.assertEqual(duplicated['notarizationClass'], 'other')
+        duplicate_status = DATA.package_signature_preamble(before_body + b'Status: signed by a certificate trusted by macOS\n')
+        self.assertEqual(duplicate_status['statusCount'], 2); self.assertEqual(duplicate_status['statusClass'], 'other')
+        bounded = DATA.package_signature_preamble(b'x' * 1024 + b'\n')
+        self.assertEqual(bounded['lineCount'], 1); self.assertEqual(bounded['statusClass'], 'absent')
+        self.assertFalse(DATA.package_signature_preamble(before_body.replace(b'PRIVATE-DATE', b'x' * 129))['trustedTimestampSuffixBounded'])
+        for invalid in (None, 'plain string', b'', before_body.rstrip(), b'\xff\n', b'bad\x00\n',
+            b'x' * 1025 + b'\n', b'x\n' * 257, b'x' * 65537):
+            with self.assertRaises(DATA.Refused): DATA.package_signature_preamble(invalid)
+        # Actual unchanged parser still rejects the informational-line shape.
+        parser_nodes = [node for node in helper_tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+                        and node.name in ('need', 'Refused', 'package_signature_data')]
+        self.assertEqual(len(parser_nodes), 3)
+        parser_namespace = {'Path': Path, 're': re, 'hashlib': hashlib}
+        exec(compile(ast.Module(body=parser_nodes, type_ignores=[]), str(helper_path), 'exec'), parser_namespace)
+        with self.assertRaisesRegex(parser_namespace['Refused'], '^package-signature-trust-timestamp$'):
+            parser_namespace['package_signature_data'](after_body.replace(b'Package "/private/DO-NOT-EMIT.pkg":', b'Package "MobileReleaseKit.pkg":'), {}, (b'a', b'b', b'c'), Path('MobileReleaseKit.pkg'))
+
+        signature_value = receipt('finalize-package'); signature_value['passed'] = False
+        del signature_value['finalImage'], signature_value['notarySubmission']
+        signature_value['failure'] = {'stage': 'final-package-signature-after', 'type': 'Refused', 'reason': 'package-signature-trust-timestamp'}
+        signature_value['originalCalls'] = [dict(role=role, entered=True, returned=True, capturesSettled=True,
+            returncode=0, stdoutSha256=hashlib.sha256(body).hexdigest(), stderrSha256=hashlib.sha256(b'').hexdigest())
+            for role, body in (('final-package-signature-before', before_body), ('final-package-signature-after', after_body))]
+        signature_phase = DATA.project_receipt(signature_value, CONTEXT, 'finalize-package')
+        signature_phase['callerStatus'] = {'receiptState': 'observed', 'returncode': 1}
+        captures = {'before': before_body, 'after': after_body}
+        diagnostic = DATA.project_package_signature_diagnostic(captures, signature_phase)
+        self.assertTrue(diagnostic['policyUnchanged']); self.assertFalse(diagnostic['nativeSuccessInferred'])
+        self.assertEqual(diagnostic['after']['chainMarkerIndex'], 4)
+        wrong = []
+        for key, changed in (('entered', False), ('returned', False), ('capturesSettled', False), ('returncode', True),
+            ('returncode', 1), ('stdoutSha256', '1' * 64), ('stderrSha256', '1' * 64), ('role', 'installer')):
+            altered = copy.deepcopy(signature_phase); altered['originalCalls']['calls'][1][key] = changed; wrong.append(altered)
+        for key, changed in (('recordedPassed', True), ('correlationMatches', False), ('callerStatus', {'receiptState': 'observed', 'returncode': 0}),
+            ('failure', {'type': 'Refused', 'stage': 'final-package-signature-before', 'reason': 'package-signature-trust-timestamp'})):
+            altered = copy.deepcopy(signature_phase); altered[key] = changed; wrong.append(altered)
+        altered = copy.deepcopy(signature_phase); altered['originalCalls']['unclassifiedCount'] = True; wrong.append(altered)
+        altered = copy.deepcopy(signature_phase); altered['originalCalls']['calls'].append(dict(role='installer', entered=True)); altered['originalCalls']['recordedCount'] += 1; wrong.append(altered)
+        altered = copy.deepcopy(signature_phase); altered['originalCalls']['calls'].append(copy.deepcopy(altered['originalCalls']['calls'][1])); altered['originalCalls']['recordedCount'] += 1; wrong.append(altered)
+        for altered in wrong:
+            with self.assertRaises(DATA.Refused): DATA.project_package_signature_diagnostic(captures, altered)
+        self.assertNotIn('PRIVATE', json.dumps(diagnostic)); self.assertNotIn('DO-NOT-EMIT', json.dumps(diagnostic))
+
+        # Both file attempts and complete raw bounds are admitted prospectively,
+        # consumed once including absence, never refunded or charged twice.
+        charge = 2 * (DATA.PACKAGE_SIGNATURE_CAPTURE_LIMIT + 1)
+        fixed_budget = {'files': 126, 'bytes': DATA.INPUT_LIMIT - charge, 'deadline': time.monotonic_ns() + 45_000_000_000}
+        DATA.reserve_package_signature_reads(fixed_budget)
+        self.assertEqual((fixed_budget['files'], fixed_budget['bytes']), (128, DATA.INPUT_LIMIT))
+        with self.assertRaises(DATA.Refused): DATA.reserve_package_signature_reads(fixed_budget)
+        for key in ('files', 'bytes'):
+            refused_budget = {'files': 126, 'bytes': DATA.INPUT_LIMIT - charge, 'deadline': time.monotonic_ns() + 45_000_000_000}
+            refused_budget[key] += 1
+            with self.assertRaises(DATA.Refused): DATA.reserve_package_signature_reads(refused_budget)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); name = DATA.PACKAGE_SIGNATURE_CAPTURES[0][1]
+            write(root, name, before_body); fd = DATA.open_root(str(root))
+            try:
+                reserved = {'files': 0, 'bytes': 0, 'deadline': time.monotonic_ns() + 45_000_000_000}
+                DATA.reserve_package_signature_reads(reserved)
+                self.assertEqual(DATA.read_input(fd, name, 65536, reserved, package_signature_reserved=True), before_body)
+                self.assertEqual((reserved['files'], reserved['bytes']), (2, charge))
+                with self.assertRaises(DATA.Refused): DATA.read_input(fd, name, 65536, reserved, package_signature_reserved=True)
+                missing = DATA.PACKAGE_SIGNATURE_CAPTURES[1][1]
+                with self.assertRaises(FileNotFoundError): DATA.read_input(fd, missing, 65536, reserved, package_signature_reserved=True)
+                with self.assertRaises(DATA.Refused): DATA.read_input(fd, missing, 65536, reserved, package_signature_reserved=True)
+                self.assertEqual((reserved['files'], reserved['bytes']), (2, charge))
+            finally: os.close(fd)
+
+        for scenario in ('valid', 'wrong-context', 'hash', 'wrong-status', 'linked', 'symlink', 'absent', 'partial', 'oversize'):
+            with self.subTest(signature=scenario), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); current = copy.deepcopy(signature_value)
+                if scenario == 'wrong-context': current['runAttempt'] = '99'
+                if scenario == 'hash': current['originalCalls'][1]['stdoutSha256'] = '1' * 64
+                original = write(root, 'android-helper-finalize-package.json', current)
+                write(root, 'package-finalization.status', b'0\n' if scenario == 'wrong-status' else b'1\n')
+                body_map = dict(captures)
+                if scenario == 'oversize': body_map['after'] = b'x' * 65537
+                for key, name, _ in DATA.PACKAGE_SIGNATURE_CAPTURES:
+                    if scenario == 'absent' or scenario == 'partial' and key == 'after': continue
+                    if scenario == 'symlink' and key == 'after':
+                        private = write(root, 'private-signature-original', body_map[key]); os.symlink(private.name, root / name)
+                    else:
+                        write(root, name, body_map[key])
+                        if scenario == 'linked' and key == 'after': os.link(root / name, root / 'retained-signature-original')
+                before = original.read_bytes(); output = project(root); item = output['packageSignatureDiagnostic']
+                self.assertEqual(item['receiptState'], 'observed' if scenario == 'valid' else 'absent' if scenario == 'absent' else 'refused')
+                self.assertFalse(output['productReady']); self.assertFalse(item['nativeSuccessInferred'])
+                self.assertEqual(original.read_bytes(), before)
+                for private in ('PRIVATE', 'DO-NOT-EMIT', str(root)):
+                    self.assertNotIn(private, json.dumps(item))
+
     def test_fixed_signature_and_notary_refusals_remain_distinguishable(self):
         reasons = ("package-signature-bound", "package-signature-header", "package-signature-trust-timestamp",
                    "package-signature-source-chain", "package-signature-source-fingerprint", "notary-submit-terminal",

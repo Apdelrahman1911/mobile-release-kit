@@ -3986,7 +3986,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertFalse(operation.mount_known)
                     source, _ = operation.mount_host_source
                     (operation.checkout / "desktop/tools/macos_xcode_host_preparation.py").write_bytes(b"changed SOURCE")
-                return {"typeName": "hfs", "fsid": [1, 2], "owner": os.getuid(), "type": 17, "flags": 0x1001,
+                return {"typeName": "hfs", "fsid": [1, 2], "owner": os.getuid(), "type": 17,
+                    "flags": 0x1021 if fault == "union" else 0x4001021 if fault == "union-multilabel" else 0x4001001,
                     "subtype": 0, "flagsExt": 0, "mountOn": str(operation.work / "package-mount"),
                     "mountFrom": "/dev/disk98s1" if fault == "device" else operation.mount_device}
             return SimpleNamespace(filesystem=filesystem)
@@ -4043,7 +4044,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             legacy.phase = "package-install"
             with self.assertRaisesRegex(module.Refused, "^package-original-mount-unavailable$"):
                 legacy.recheck_mount()
-        for fault in (None, "ambiguous", "device", "metadata", "source", "open", "captures", "close", "mounted-file-open"):
+        for fault in (None, "union", "union-multilabel", "ambiguous", "device", "metadata", "source", "open", "captures", "close", "mounted-file-open"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 checkout, work, environment, _owner, _ = self.fixture(Path(directory))
                 events, expected_error = [], TOOL.Refused("distribution-attach-mount")
@@ -4147,6 +4148,246 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 # Task-private temporary DATA is owned by this fixture, not a
                 # production authorization to repair any unknown mounted object.
                 self.assertTrue(all(entry["fd"] is None for entry in operation.entries))
+
+        # The removal fixture has a distinct failed pre-UI detach roster. All
+        # original open/stream/close/call/finally operations below are genuine;
+        # only native filesystem/ACL flags are explicit Linux DATA ports.
+        removal_methods = {n.name: ast.get_source_segment(source, n) for n in operation_node.body if isinstance(n, ast.FunctionDef)}
+        self.assertIn('owned=True', removal_methods['removal_runtime_images'])
+        self.assertIn('owned=False', removal_methods['removal_open_file'])
+        self.assertLess(removal_methods['removal_attach'].index('context["known"] = True'),
+                        removal_methods['removal_attach'].index('self.stager.distribution_mount_data('))
+        self.assertIn('self.removal_abort_detach()', removal_methods['execute'])
+        self.assertIn('self.removal_cleanup_ready()', removal_methods['finish'])
+        self.assertNotIn('removal_abort_known', removal_methods['removal_finish_ready'])
+        self.assertEqual(module.removal_runtime_roles('ordinary'), ('removal-target-attach', 'removal-observers-attach',
+            'removal-observer-before', 'removal-live-cancel', 'removal-observer-after-cancel', 'removal-live-continue',
+            'removal-observer-terminal', 'removal-observers-detach', 'removal-target-detach'))
+        for mounts, fault in ((1, None), (2, None), (1, 'capture'), (1, 'association'), (1, 'source'),
+                              (1, 'close'), (1, 'partial'), (1, 'ui'), (1, 'role'), (1, 'clock'),
+                              (1, 'detach-status'), (1, 'install-root')):
+            with self.subTest(removalMounts=mounts, fault=fault), tempfile.TemporaryDirectory() as directory:
+                checkout, work, environment, initial_owner, _ = self.fixture(Path(directory))
+                events, created = [], []
+                selected = module.Operation(initial_owner, checkout, work, 'package-removal-fixture', environment, TOOL)
+                state = self.credential_fixture(selected, clock=[10_000_000_000])
+                native_stat, native_fstat, native_close = module.os.stat, module.os.fstat, module.os.close
+                def flags_info(info):
+                    values = {key: getattr(info, key) for key in dir(info) if key.startswith('st_')}
+                    values['st_flags'] = 0
+                    return SimpleNamespace(**values)
+                def facts(entry, **policy):
+                    info = native_fstat(entry['fd'])
+                    named = native_stat(entry['name'], dir_fd=entry['parent'], follow_symlinks=False) if entry['name'] is not None else selected.work.lstat()
+                    self.assertEqual(module.signature(info), module.signature(named))
+                    readonly = policy.get('readonly', False)
+                    row = list(module.signature(info))
+                    if readonly: row[0] += 1  # Native device association is DATA, not Linux qualification.
+                    fs = {'flags': 0x1001 if readonly else 0x1000, 'typeName': 'hfs' if readonly else 'apfs',
+                          'mountOn': str(Path('/Volumes') / entry['name']) if readonly else '/DATA',
+                          'mountFrom': '/dev/disk99s1' if type(entry['name']) is str and entry['name'].endswith('-target') else '/dev/disk100s1'}
+                    if readonly and fault == 'association': fs['mountFrom'] = '/dev/disk98s1'
+                    return tuple(row), 0, fs
+                payloads = {'Remove.pkg': b'inert completed package', 'remove-producer.json': b'inert descriptor',
+                            'remove-producer.sig': b'inert signature'}
+                expected = {name: {'bytes': len(body), 'sha256': module.digest(body)} for name, body in payloads.items()}
+                def command(argv, **options):
+                    role = selected.calls[-1]['role']; events.append(role)
+                    if role.endswith('-attach'):
+                        purpose = 'target' if role == 'removal-target-attach' else 'observers'
+                        name = TOOL.removal_fixture_mount_path(selected.removal_correlation, purpose).name
+                        module.os.mkdir(name, 0o700, dir_fd=selected.removal_volumes['fd']); created.append(name)
+                        path = work / 'synthetic-volumes' / name
+                        if mounts == 2 and purpose == 'target':
+                            for name, body in payloads.items():
+                                (path / name).write_bytes(body); (path / name).chmod(0o444)
+                        device = '/dev/disk99s1' if purpose == 'target' else '/dev/disk100s1'
+                        return CompletedProcess(argv, 0, TOOL.plistlib.dumps({'system-entities': [
+                            {'dev-entry': device, 'mount-point': argv[argv.index('-mountpoint') + 1]}]}), b'')
+                    self.assertIn(role, ('removal-observers-detach', 'removal-target-detach'))
+                    self.assertTrue(selected.removal_abort_roles is not None and not selected.removal_ui_entered)
+                    purpose = 'target' if role == 'removal-target-detach' else 'observers'
+                    context = next(m for m in selected.removal_mounts if m['role'] == purpose)
+                    self.assertEqual(argv, ['/usr/bin/hdiutil', 'detach', context['device']])
+                    self.assertTrue(all(e['closed'] for e in context['entries']))
+                    path = work / 'synthetic-volumes' / context['name']
+                    for name in payloads:
+                        if (path / name).exists(): (path / name).unlink()
+                    path.rmdir()
+                    return CompletedProcess(argv, 1 if fault == 'detach-status' else 0, b'', b'')
+                selected.owner = SimpleNamespace(run_owned=command)
+                primary = TOOL.Refused('distribution-attach-mount')
+                policy_calls = []
+                def policy(stdout, stderr, code, path):
+                    policy_calls.append(str(path))
+                    self.assertTrue(selected.removal_mounts[-1]['known'])
+                    if mounts == 2 and len(policy_calls) == 1: return '/dev/disk99s1'
+                    raise primary
+                real_open = module.os.open
+                def acquire(name, flags, *args, **kwargs):
+                    if fault == 'partial' and isinstance(name, str) and name.endswith('-target') and flags & os.O_DIRECTORY:
+                        self.assertFalse(selected.removal_mounts[-1]['entries'][-1]['removal_acquired'])
+                        raise OSError('INERT unknown acquisition')
+                    return real_open(name, flags, *args, **kwargs)
+                def close(fd):
+                    native_close(fd)
+                    if fault == 'close' and any(m['entry'] is not None and m['entry']['fd'] is None
+                            and m['detachAttempted'] for m in selected.removal_mounts) and not selected.errors:
+                        raise OSError('INERT close uncertainty')
+                def flow():
+                    selected.removal_case, selected.removal_correlation = 'ordinary', 'a' * 32
+                    selected.package_started = selected.package_observed = module.time.monotonic_ns()
+                    selected.package_endpoint = selected.package_started + 990_000_000_000
+                    selected.removal_threading = __import__('threading')
+                    selected.removal_api = SimpleNamespace()
+                    selected.work_entry.update(removal_policy=(False, False, False), removal_facts=facts(selected.work_entry))
+                    for name in ('synthetic-volumes', 'synthetic-support', 'synthetic-slash'):
+                        module.os.mkdir(name, 0o700, dir_fd=selected.work_entry['fd'])
+                    selected.work_entry['removal_facts'] = facts(selected.work_entry)
+                    # Unlike mutable work/capture output, the genuine slash role
+                    # has no task-owned child creation during this operation.
+                    selected.removal_slash = selected.removal_open_directory(selected.work_entry, 'synthetic-slash', 'DATA-slash')
+                    selected.removal_volumes = selected.removal_open_directory(selected.work_entry, 'synthetic-volumes', 'DATA-volumes')
+                    selected.removal_output_parent = selected.removal_open_directory(selected.work_entry, 'synthetic-support', 'DATA-support')
+                    before = selected.removal_roster(selected.removal_output_parent)
+                    module.os.mkdir('installed-root', 0o700, dir_fd=selected.removal_output_parent['fd'])
+                    selected.removal_own_parent_post(selected.removal_output_parent, before, 'installed-root', present=True)
+                    selected.removal_install_root = selected.removal_open_directory(selected.removal_output_parent, 'installed-root', 'DATA-install-root')
+                    selected.removal_output_roster = selected.removal_roster(selected.removal_output_parent)
+                    if fault == 'install-root':
+                        original, flags, fs = selected.removal_install_root['removal_facts']
+                        changed = list(original); changed[1] += 1
+                        selected.removal_install_root['removal_facts'] = (tuple(changed), flags, fs)
+                    try:
+                        selected.removal_attach('target', Path('/INERT/target.dmg'), expected)
+                        selected.removal_attach('observers', Path('/INERT/observers.dmg'), {}, phases=('before', 'middle', 'terminal'))
+                    except BaseException:
+                        if fault == 'capture': selected.calls[-1]['capturesSettled'] = False
+                        if fault == 'source': selected.package_sources.append((selected.profile_entry, b'changed SOURCE DATA'))
+                        if fault == 'ui': selected.removal_ui_entered = True
+                        if fault == 'role': selected.calls[-1]['role'] = 'removal-live-cancel'
+                        if fault == 'clock': selected.package_endpoint = selected.package_observed
+                        raise
+                try:
+                    with (self.credential_fixture_call(selected, state),
+                          mock.patch.object(selected, 'package_removal_fixture', side_effect=flow),
+                          mock.patch.object(selected, 'removal_directory_facts', side_effect=facts),
+                          mock.patch.object(module.os, 'fstat', side_effect=lambda fd: flags_info(native_fstat(fd))),
+                          mock.patch.object(module.os, 'stat', side_effect=lambda *a, **k: flags_info(native_stat(*a, **k))),
+                          mock.patch.object(module.os, 'open', side_effect=acquire),
+                          mock.patch.object(module.os, 'close', side_effect=close),
+                          mock.patch.object(TOOL, 'distribution_mount_data', side_effect=policy)):
+                        with self.assertRaisesRegex(module.Refused, '^helper-package-incomplete$'): selected.execute()
+                    # A wrong early refusal must be diagnosed, not mistaken for
+                    # the intended policy failure or a successful cleanup vector.
+                    diagnostic = selected.diagnostic_failure
+                    context_facts = [(m['role'], m['known'], m['policyAccepted'], m['detachAttempted']) for m in selected.removal_mounts]
+                    message = repr((selected.receipt.get('failure'), diagnostic, selected.errors, events, context_facts))
+                    if fault not in ('association', 'partial'):
+                        self.assertEqual(diagnostic, {'type': 'stager-refused', 'reason': 'distribution-attach-mount', 'errno': None}, message)
+                        self.assertEqual(selected.receipt['failure']['reason'], 'distribution-attach-mount', message)
+                        self.assertEqual(len(policy_calls), mounts, message)
+                    elif fault == 'association':
+                        self.assertEqual(diagnostic, {'type': 'helper-refused', 'reason': 'unclassified', 'errno': None}, message)
+                        self.assertEqual(selected.receipt['failure']['reason'], 'removal-actual-mount-device', message)
+                        self.assertFalse(policy_calls, message)
+                    else:
+                        self.assertEqual(diagnostic, {'type': 'os-error', 'reason': 'unclassified', 'errno': None}, message)
+                        self.assertFalse(policy_calls, message)
+                    self.assertFalse(selected.receipt['passed'] or selected.removal_complete or selected.removal_ui_joined, message)
+                    expected_suffix = ['removal-target-detach'] if mounts == 1 else ['removal-observers-detach', 'removal-target-detach']
+                    actual_suffix = [role for role in events if role.endswith('-detach')]
+                    if fault is None:
+                        self.assertEqual(actual_suffix, expected_suffix)
+                        self.assertTrue(selected.removal_abort_known and selected.receipt['targetRetired'] and selected.receipt['originalClosesKnown'])
+                        self.assertEqual(selected.receipt['removalAbort']['detachCalls'], mounts)
+                    else:
+                        self.assertEqual(actual_suffix, expected_suffix if fault == 'detach-status' else [])
+                        self.assertFalse(selected.removal_abort_known or selected.receipt['targetRetired'])
+                        if fault == 'detach-status':
+                            self.assertTrue(selected.removal_mounts[0]['detachAttempted'])
+                            self.assertFalse(selected.removal_mounts[0]['detached'])
+                            self.assertEqual(selected.calls[-1]['returncode'], 1)
+                            self.assertTrue(selected.errors)
+                finally:
+                    for entry in selected.entries:
+                        # Fixture-owned consuming close only; no authority to
+                        # retire uncertain production mounts or repair inputs.
+                        if entry['fd'] is not None: selected.close(entry)
+                    self.assertTrue(all(entry['fd'] is None for entry in selected.entries))
+
+
+    def test_removal_directory_mac_labels_preserve_filesystem_and_original_guards(self):
+        """Real held/named directory originals; Darwin fs/ACL flags are DATA ports."""
+        module = ANDROID_HELPER
+        positives = (("readonly-hfs", 0x4001001), ("readonly-apfs", 0x4001001),
+                     ("private", 0x4001000), ("protected", 0x4001000),
+                     ("readonly-hfs", 0x4201001))  # Existing readonly ignore-ownership policy.
+        negatives = (("readonly-hfs", 0x1021, None), ("readonly-hfs", 0x4001021, None),
+                     ("private", 0x4001020, None), ("private", 0x4201000, None),
+                     ("protected", 0x4201000, None), ("readonly-hfs", 0x4000001, None),
+                     ("readonly-hfs", 0x4001000, None), ("readonly-hfs", True, None),
+                     ("private", 0x4001000, "wrong-type"), ("readonly-hfs", 0x4001001, "wrong-type"),
+                     ("private", 0x4001000, "registry"), ("private", 0x4001000, "named"),
+                     ("private", 0x4001000, "post"), ("private", 0x4001000, "mode"),
+                     ("protected", 0x4001000, "owner"), ("readonly-hfs", 0x4001001, "file-flags"))
+        for policy, fs_flags, fault, accepted in (
+                *((p, f, None, True) for p, f in positives),
+                *((p, f, x, False) for p, f, x in negatives)):
+            with self.subTest(policy=policy, flags=fs_flags, fault=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "leaf").mkdir(mode=0o700)
+                parent_fd = os.open(root, module.READ_FLAGS | os.O_DIRECTORY)
+                leaf_fd = None
+                try:
+                    leaf_fd = os.open("leaf", module.READ_FLAGS | os.O_DIRECTORY, dir_fd=parent_fd)
+                    operation = object.__new__(module.Operation)
+                    entry = {"fd": leaf_fd, "parent": parent_fd, "name": "leaf", "closed": False}
+                    operation.entry_registry = {id(entry): entry} if fault != "registry" else {}
+                    readonly, private, protected = policy.startswith("readonly"), policy == "private", policy == "protected"
+                    real_stat, real_fstat = module.os.stat, module.os.fstat
+                    calls = []
+                    def info(value, *, named=False, post=False):
+                        fields = {key: getattr(value, key) for key in (
+                            "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")}
+                        if protected: fields.update(st_uid=0, st_gid=0)
+                        if fault == "owner": fields["st_uid"] = 1
+                        if fault == "mode": fields["st_mode"] |= 0o002
+                        if (fault == "named" and named) or (fault == "post" and post): fields["st_ino"] += 1
+                        fields["st_flags"] = True if fault == "file-flags" else 0
+                        return SimpleNamespace(**fields)
+                    def fstat(fd):
+                        self.assertEqual(fd, leaf_fd)
+                        calls.append(fd)
+                        return info(real_fstat(fd), post=len(calls) > 1)
+                    def named(name, **kwargs):
+                        self.assertEqual((name, kwargs), ("leaf", {"dir_fd": parent_fd, "follow_symlinks": False}))
+                        return info(real_stat(name, **kwargs), named=True)
+                    fs = {"flags": fs_flags, "typeName": "hfs" if policy == "readonly-hfs" else "apfs"}
+                    if fault == "wrong-type": fs["typeName"] = "nfs"
+                    operation.removal_api = SimpleNamespace(filesystem=lambda fd: dict(fs))
+                    operation.stager = SimpleNamespace(no_xattrs=lambda fd: self.assertEqual(fd, leaf_fd))
+                    with (mock.patch.object(operation, "package_clock", return_value=100),
+                          mock.patch.object(operation, "removal_acl", return_value=0),
+                          mock.patch.object(module.os, "fstat", side_effect=fstat),
+                          mock.patch.object(module.os, "stat", side_effect=named)):
+                        if accepted:
+                            original, flags, result = operation.removal_directory_facts(
+                                entry, protected=protected, readonly=readonly, private=private)
+                            self.assertEqual(result, fs)
+                            self.assertEqual(flags, 0)
+                            self.assertEqual(original, module.signature(info(real_fstat(leaf_fd))))
+                            self.assertEqual(len(calls), 2)
+                        else:
+                            with self.assertRaises(module.Refused):
+                                operation.removal_directory_facts(entry, protected=protected, readonly=readonly, private=private)
+                    self.assertIs(module.os.stat, real_stat)
+                    self.assertIs(module.os.fstat, real_fstat)
+                    self.assertEqual(module.signature(real_fstat(leaf_fd)),
+                                     module.signature(real_stat("leaf", dir_fd=parent_fd, follow_symlinks=False)))
+                finally:
+                    if leaf_fd is not None: os.close(leaf_fd)
+                    os.close(parent_fd)
 
     def final_image_fixture(self, root, *, target="aarch64-apple-darwin", failure=None, inventory_body=None):
         """Same real S3 handoff/book and S4 files; no tool or mount executes.
@@ -15356,9 +15597,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # This exact helper is already in the readonly SOURCE closure. Inspect
         # its real caller without importing or invoking any operation owner.
         with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
-            helper_raw = original.read(533030 + 1)
+            helper_raw = original.read(539088 + 1)
             self.assertEqual(original.read(1), b"")
-        self.assertEqual(len(helper_raw), 533030)
+        self.assertEqual(len(helper_raw), 539088)
         helper_source = helper_raw.decode("utf-8", "strict")
         helper_tree = ast.parse(helper_source)
         helper_caps = [node.value for node in helper_tree.body

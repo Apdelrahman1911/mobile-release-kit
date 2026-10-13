@@ -2,10 +2,12 @@
 """Closed DATA projection for verification artifacts, never native acceptance.
 
 Original receipts/captures remain local and authoritative to their existing
-validators. This script reads only the fixed roster below. One exception to
-tool-output exclusion is the <=128-byte compile-fixed producer refusal token,
-joined to its failed original call. No raw fallback, source-binding.json, private
-native reports, credentials or directory listings are read.
+validators. This script reads only the fixed roster below. Bounded exceptions
+to tool-output exclusion are the <=128-byte compile-fixed producer refusal token
+and two <=65536-byte original pkgutil preambles, joined to their failed original
+calls and projected only to finite diagnostics. No raw output fallback,
+source-binding.json, private native reports, credentials or directory listings
+are read.
 """
 from __future__ import annotations
 
@@ -1478,10 +1480,102 @@ def open_root(work):
         raise
 
 
-def read_input(root, name, limit, budget):
+PACKAGE_SIGNATURE_CAPTURES = (
+    ("before", "android-helper-final-package-signature-before.stdout", "final-package-signature-before"),
+    ("after", "android-helper-final-package-signature-after.stdout", "final-package-signature-after"),
+)
+PACKAGE_SIGNATURE_CAPTURE_LIMIT = 65536
+
+
+def reserve_package_signature_reads(budget):
+    """Precharge both fixed attempts and full raw bounds, even when absent."""
     clock(budget)
-    budget["files"] += 1
-    need(budget["files"] <= 128)
+    need("packageSignatureReads" not in budget)
+    charge = len(PACKAGE_SIGNATURE_CAPTURES) * (PACKAGE_SIGNATURE_CAPTURE_LIMIT + 1)
+    need(budget["files"] + len(PACKAGE_SIGNATURE_CAPTURES) <= 128
+         and budget["bytes"] + charge <= INPUT_LIMIT)
+    budget["files"] += len(PACKAGE_SIGNATURE_CAPTURES)
+    budget["bytes"] += charge
+    budget["packageSignatureReads"] = {name: True for _, name, _ in PACKAGE_SIGNATURE_CAPTURES}
+
+
+def package_signature_preamble(body):
+    """Finite structural diagnostics only; never trust or chain acceptance."""
+    need(type(body) is bytes and 0 < len(body) <= PACKAGE_SIGNATURE_CAPTURE_LIMIT and body.endswith(b"\n"))
+    try:
+        text = body.decode("utf-8")
+    except UnicodeError:
+        raise Refused("public-evidence-refused") from None
+    need(all(character in "\n\t" or character.isprintable() for character in text))
+    lines = [line.strip(" \t") for line in text.splitlines() if line.strip(" \t")]
+    need(0 < len(lines) <= 256 and all(len(line) <= 1024 for line in lines))
+    trusted = {"Status: signed by a certificate trusted by macOS": "macOS",
+               "Status: signed by a certificate trusted by Mac OS X": "macOSX",
+               "Status: signed by a developer certificate issued by Apple for distribution": "appleDistribution"}
+    statuses = [i for i, line in enumerate(lines) if line.startswith("Status: ")]
+    timestamps = [i for i, line in enumerate(lines) if line.startswith("Signed with a trusted timestamp on: ")]
+    chains = [i for i, line in enumerate(lines) if line == "Certificate Chain:"]
+    notaries = [i for i, line in enumerate(lines) if line.startswith("Notarization: ")]
+    return {"lineCount": len(lines), "formatBounded": True,
+        "statusCount": len(statuses), "statusIndex": statuses[0] if statuses else -1,
+        "statusClass": trusted.get(lines[statuses[0]], "other") if len(statuses) == 1 else "absent" if not statuses else "other",
+        "statusAtIndex1Accepted": len(lines) > 1 and lines[1] in trusted,
+        "trustedTimestampCount": len(timestamps), "trustedTimestampIndex": timestamps[0] if timestamps else -1,
+        "trustedTimestampSuffixBounded": bool(timestamps) and all(0 < len(lines[i][len("Signed with a trusted timestamp on: "):]) <= 128 for i in timestamps),
+        "trustedTimestampAtIndex2": 2 in timestamps,
+        "chainMarkerCount": len(chains), "chainMarkerIndex": chains[0] if chains else -1, "chainMarkerAtIndex3": 3 in chains,
+        "notarizationCount": len(notaries), "notarizationIndex": notaries[0] if notaries else -1,
+        "notarizationClass": "trustedByMacOS" if len(notaries) == 1 and lines[notaries[0]] == "Notarization: trusted by macOS" else "absent" if not notaries else "other"}
+
+
+def project_package_signature_diagnostic(captures, phase):
+    need(type(captures) is dict and set(captures) == {key for key, _, _ in PACKAGE_SIGNATURE_CAPTURES}
+         and type(phase) is dict and phase.get("receiptState") == "observed"
+         and phase.get("correlationMatches") is True and phase.get("recordedPassed") is False)
+    caller = phase.get("callerStatus")
+    need(type(caller) is dict and caller.get("receiptState") == "observed"
+         and type(caller.get("returncode")) is int and caller["returncode"] != 0)
+    failure = phase.get("failure")
+    need(type(failure) is dict and failure.get("type") == "Refused"
+         and failure.get("stage") == "final-package-signature-after"
+         and failure.get("reason") == "package-signature-trust-timestamp")
+    originals = phase.get("originalCalls")
+    need(type(originals) is dict and type(originals.get("unclassifiedCount")) is int
+         and originals["unclassifiedCount"] == 0)
+    calls = originals.get("calls")
+    need(type(calls) is list and len(calls) <= 128 and all(type(row) is dict for row in calls)
+         and type(originals.get("recordedCount")) is int and originals["recordedCount"] == len(calls))
+    entered = [row for row in calls if row.get("entered") is True]
+    result = {"receiptState": "observed", "diagnosticOnly": True, "nativeSuccessInferred": False,
+              "policyUnchanged": True, "binding": "same-source-run-target-failed-original"}
+    empty = hashlib.sha256(b"").hexdigest()
+    for key, _, role in PACKAGE_SIGNATURE_CAPTURES:
+        body = captures[key]
+        need(type(body) is bytes and 0 < len(body) <= PACKAGE_SIGNATURE_CAPTURE_LIMIT)
+        selected = [row for row in calls if row.get("role") == role]
+        need(len(selected) == 1)
+        call = selected[0]
+        need(call.get("entered") is True and call.get("returned") is True and call.get("capturesSettled") is True
+             and type(call.get("returncode")) is int and call["returncode"] == 0
+             and call.get("stderrSha256") == empty and type(body) is bytes
+             and call.get("stdoutSha256") == hashlib.sha256(body).hexdigest())
+        if key == "after":
+            need(entered and entered[-1] is call)
+        result[key] = package_signature_preamble(body)
+    return result
+
+
+def read_input(root, name, limit, budget, *, package_signature_reserved=False):
+    clock(budget)
+    if package_signature_reserved:
+        need(type(package_signature_reserved) is bool and limit == PACKAGE_SIGNATURE_CAPTURE_LIMIT
+             and name in {path for _, path, _ in PACKAGE_SIGNATURE_CAPTURES})
+        reserved = budget.get("packageSignatureReads")
+        need(type(reserved) is dict and reserved.get(name) is True)
+        reserved[name] = False  # Consume before original open; absent attempts are not reusable.
+    else:
+        budget["files"] += 1
+        need(budget["files"] <= 128)
     parents, directory = [], root
     try:
         parts = name.split("/")  # name is from the fixed SOURCE roster only.
@@ -1500,7 +1594,8 @@ def read_input(root, name, limit, budget):
             before = os.fstat(fd)
             need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == os.geteuid()
                  and 0 < before.st_size <= limit)
-            budget["bytes"] += before.st_size + 1
+            if not package_signature_reserved:
+                budget["bytes"] += before.st_size + 1
             need(budget["bytes"] <= INPUT_LIMIT)
             body = os.pread(fd, before.st_size + 1, 0)
             need(len(body) == before.st_size and identity(before) == identity(os.fstat(fd))
@@ -1879,10 +1974,11 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
     need(source == workflow_source and len(PHASES) <= 20 and len(STATUS_FILES) <= 100
          and len(set(STATUS_FILES)) == len(STATUS_FILES))
     # All fixed attempts count, including absent originals, before any read.
-    need(len(STATUS_FILES) + len(PHASES) + 4
+    need(len(STATUS_FILES) + len(PHASES) + 4 + len(PACKAGE_SIGNATURE_CAPTURES)
          + (len(UI_DIAGNOSTICS) + 6 + len(POSITIVE_UI_INPUTS) if profile == "installed" else 0) <= 128)
     budget = {"deadline": time.monotonic_ns() + 45_000_000_000, "files": 0, "bytes": 0, "nodes": 0,
               "outputBytes": 16384}  # Reserve the fixed roster keys/envelope/caller-status duplicates.
+    reserve_package_signature_reads(budget)
     root = open_root(work)
     try:
         root_id = directory_identity(os.fstat(root))
@@ -1921,6 +2017,25 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
             phases[phase] = row
         producer_refusal = observe("android-helper-producer-emitter.stderr", 128,
             lambda body: project_producer_refusal(body, phases["package-install"]))
+        signature_captures, signature_states = {}, []
+        for key, name, _ in PACKAGE_SIGNATURE_CAPTURES:
+            try:
+                signature_captures[key] = read_input(root, name, PACKAGE_SIGNATURE_CAPTURE_LIMIT, budget,
+                    package_signature_reserved=True)
+                signature_states.append("observed")
+            except FileNotFoundError:
+                signature_states.append("absent")
+            except Refused:
+                signature_states.append("refused")
+        try:
+            need(all(state == "observed" for state in signature_states))
+            package_signature = project_package_signature_diagnostic(signature_captures, phases["finalize-package"])
+        except Refused:
+            package_signature = {"receiptState": "absent" if all(state == "absent" for state in signature_states) else "refused",
+                                 "diagnosticOnly": True, "nativeSuccessInferred": False, "policyUnchanged": True}
+        del signature_captures
+        budget["outputBytes"] += len(json.dumps(package_signature, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+        need(budget["outputBytes"] <= OUTPUT_LIMIT)
         try:
             update = update_join(phases["update-baseline"], phases["package-install"])
         except Refused:
@@ -1954,7 +2069,8 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
         value = {"schemaVersion": 1, "kind": "mrk-public-verification-evidence-v1", **context,
                  "diagnosticOnly": True, "productReady": False, "sourceInventory": inventory,
                  "phases": phases, "statuses": statuses, "deliveries": deliveries, "normalUiBuildDiagnostics": ui_diagnostics,
-                 "producerFailureDiagnostic": producer_refusal, "dataContractFailure": data_failure, "buildSettingsDiagnostic": settings_diagnostic, "appAbsence": app_absence, "positiveUpdate": update}
+                 "producerFailureDiagnostic": producer_refusal, "packageSignatureDiagnostic": package_signature,
+                 "dataContractFailure": data_failure, "buildSettingsDiagnostic": settings_diagnostic, "appAbsence": app_absence, "positiveUpdate": update}
         if profile == "installed":
             value["positiveUiObservations"] = positive_ui_observations(root, context, statuses, phases, inventory, budget)
         body = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")

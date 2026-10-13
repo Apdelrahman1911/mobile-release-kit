@@ -65,7 +65,7 @@ INTEL_TARGET = "x86_64-apple-darwin"
 MAX_HELPER = 32 * 1024 * 1024
 # Only nonshipping producer graphs; packaged programs keep release3.
 PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=0"
-HELPER_SOURCE_BYTES = 533030
+HELPER_SOURCE_BYTES = 539088
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -1837,6 +1837,10 @@ class Operation:
         self.removal_host_module = self.removal_api = None
         self.removal_thread = self.removal_threading = self.removal_runner = None
         self.removal_ui_joined = False
+        self.removal_ui_entered = self.removal_before_settled = self.removal_abort_known = False
+        self.removal_abort_roles = None
+        self.removal_channel = self.removal_channel_parent = self.removal_ui_deadline = None
+        self.removal_install_root = None
         self.removal_ui_result = self.removal_ui_error = self.removal_ui_facts = None
         self.removal_ui_outcome = {"done": False, "known": False}
         self.removal_scan_state = "closed"
@@ -2161,7 +2165,7 @@ class Operation:
                  "observer-preparation-original-order")
             self.notary_clock()
         if self.phase == "package-removal-fixture":
-            roles = removal_runtime_roles(self.removal_case)
+            roles = self.removal_abort_roles or removal_runtime_roles(self.removal_case)
             need(not self.removal_unknown and len(self.calls) < len(roles) and role == roles[len(self.calls)],
                  "removal-runtime-original-order")
             self.package_clock()
@@ -5447,14 +5451,11 @@ class Operation:
         return now, self.package_endpoint
 
     def removal_reserve(self, rows=1):
-        # Names are fixed SOURCE components. No process RSS or allocator claim.
         active_scan = int(self.removal_scan_state in ("acquiring", "owned", "closing", "unknown"))
         need(type(rows) is int and 0 <= rows <= 128 and len(self.entries) + rows <= 24576
              and sum(entry["fd"] is not None for entry in self.entries) + active_scan + rows <= 96,
              "removal-original-headroom")
         if self.removal_control_reserved == 0:
-            # The new protected baseline route uses this same bounded work
-            # before its first hold. Ordinary package routes never call here.
             self.removal_control_reserved = 8 * 1024 * 1024
         quote = removal_original_storage_data(self.entries, self.entry_registry, rows)
         reserved = max(self.removal_original_reserved, quote)
@@ -5481,6 +5482,7 @@ class Operation:
         return value["snapshotFlags"]
 
     def removal_directory_facts(self, entry, *, protected=False, readonly=False, private=False):
+        # MNT_MULTILABEL is MAC-label support, not MNT_UNION (Apple mount.h).
         self.package_clock()
         need(self.entry_registry.get(id(entry)) is entry and entry["fd"] is not None and not entry["closed"],
              "removal-directory-original")
@@ -5493,14 +5495,11 @@ class Operation:
         elif private:
             need((info.st_uid, info.st_gid) == (os.getuid(), os.getgid())
                  and stat.S_IMODE(info.st_mode) == 0o700, "removal-channel-directory")
-        # On the actual read-only distribution, identity is conserved but is
-        # NOT represented as root ownership or a producer/ACL authority. This
-        # is exactly completed_package::Held's distinct read-only policy.
         flags = getattr(info, "st_flags", None) if readonly else self.removal_acl(entry, info)
         need(type(flags) is int and 0 <= flags < 1 << 32, "removal-directory-flags")
         fs = self.removal_api.filesystem(entry["fd"])
         need(type(fs["flags"]) is int and fs["flags"] & 0x1000
-             and not fs["flags"] & (0x20 | 0x4000000)
+             and not fs["flags"] & 0x20
              and (readonly or not fs["flags"] & 0x200000), "removal-local-filesystem")
         if readonly:
             need(fs["flags"] & 1 and fs["typeName"] in ("hfs", "apfs"), "removal-readonly-filesystem")
@@ -5512,16 +5511,20 @@ class Operation:
         need(signature(os.fstat(entry["fd"])) == signature(info), "removal-directory-post")
         return signature(info), flags, fs
 
-    def removal_open_directory(self, parent, name, role, *, protected=False, readonly=False, private=False):
+    def removal_open_directory(self, parent, name, role, *, protected=False, readonly=False, private=False, context=None):
         self.removal_reserve()
         # Register acquisition custody BEFORE the syscall; an exception is not
         # an Absent or a known-close receipt.
         entry = self.register(None, role, "removal-directory", None if parent is None else parent["fd"], name)
         entry["parent_entry"] = parent
+        if context is not None:
+            entry["removal_acquired"] = False
+            context["entries"].append(entry)
         entry["fd"] = os.open("/" if parent is None else name, READ_FLAGS | os.O_DIRECTORY,
                               **({} if parent is None else {"dir_fd": parent["fd"]}))
         entry["removal_policy"] = (protected, readonly, private)
         entry["removal_facts"] = self.removal_directory_facts(entry, protected=protected, readonly=readonly, private=private)
+        if context is not None: entry["removal_acquired"] = True
         return entry
 
     def removal_directory_post(self, entry):
@@ -5670,10 +5673,13 @@ class Operation:
         need(expected is None or facts == expected, "removal-file-bytes-changed")
         return facts, b"".join(chunks) if keep else None
 
-    def removal_open_file(self, parent, name, role, limit, *, owned=False, keep=False, readonly=False):
+    def removal_open_file(self, parent, name, role, limit, *, owned=False, keep=False, readonly=False, context=None):
         self.removal_reserve()
         entry = self.register(None, role, "removal-file", parent["fd"], name)
         entry["parent_entry"] = parent
+        if context is not None:
+            entry["removal_acquired"] = False
+            context["entries"].append(entry)
         entry["fd"] = os.open(name, READ_FLAGS, dir_fd=parent["fd"])
         info = os.fstat(entry["fd"])
         need((readonly or (info.st_uid, info.st_gid) == ((os.getuid(), os.getgid()) if owned else (0, 0)))
@@ -5703,8 +5709,12 @@ class Operation:
         need(self.phase == "package-removal-fixture" and self.package_settled() and not self.removal_unknown,
              "removal-dispatch-custody")
         self.removal_reserve(0)
-        roster = removal_runtime_roles(self.removal_case)
+        roster = self.removal_abort_roles or removal_runtime_roles(self.removal_case)
         need(len(self.calls) < len(roster) and role == roster[len(self.calls)], "removal-original-role-order")
+        if self.removal_abort_roles is not None:
+            context = next((m for m in self.removal_mounts if role == "removal-" + m["role"] + "-detach"), None)
+            need(context is not None and context["known"] and context["detachAttempted"]
+                 and argv == ["/usr/bin/hdiutil", "detach", context["device"]], "removal-abort-original-device")
         now, endpoint = self.removal_clock(segment)
         timeout = min(maximum, (endpoint - now - 3_000_000_000) // 1_000_000_000)
         need(timeout >= minimum, "removal-original-budget-before-dispatch")
@@ -5720,23 +5730,27 @@ class Operation:
         self.removal_absent(self.removal_volumes, name)
         before = self.removal_roster(self.removal_volumes)
         context = {"role": role, "name": name, "path": mount_path, "entered": True,
-                   "known": False, "detached": False, "entry": None, "device": None, "files": [], "rosters": []}
+                   "known": False, "policyAccepted": False, "detached": False, "detachAttempted": False,
+                   "entry": None, "device": None, "files": [], "rosters": [], "entries": []}
         self.removal_mounts.append(context)  # Custody precedes original attach.
         result = self.removal_native_call("removal-" + role + "-attach", ["/usr/bin/hdiutil", "attach", str(path),
             "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", str(mount_path), "-plist"],
             segment="attach", maximum=30)
-        context["device"] = self.stager.distribution_mount_data(result.stdout, result.stderr, result.returncode, mount_path)
-        entry = self.removal_open_directory(self.removal_volumes, name, "removal-mounted-" + role, readonly=True)
+        context["device"] = cleanup_mount_device_data(result.stdout, result.stderr, result.returncode, mount_path)
+        entry = self.removal_open_directory(self.removal_volumes, name, "removal-mounted-" + role, readonly=True, context=context)
         context["entry"] = entry
         need(entry["removal_facts"][0][0] != self.removal_volumes["removal_facts"][0][0]
              and entry["removal_facts"][2]["mountOn"] == str(mount_path)
              and entry["removal_facts"][2]["mountFrom"] == context["device"], "removal-actual-mount-device")
         self.removal_own_parent_post(self.removal_volumes, before, name, present=True)
         context["known"] = True
+        need(self.stager.distribution_mount_data(result.stdout, result.stderr, result.returncode, mount_path)
+             == context["device"], "removal-policy-device")
+        context["policyAccepted"] = True
         groups = [(None, entry)]
         if role == "observers":
             need(self.removal_names(entry, len(phases)) == sorted(phases), "removal-observer-mount-roster")
-            groups = [(phase, self.removal_open_directory(entry, phase, "removal-mounted-observer-phase", readonly=True))
+            groups = [(phase, self.removal_open_directory(entry, phase, "removal-mounted-observer-phase", readonly=True, context=context))
                       for phase in phases]
             context["rosters"].append((entry, self.removal_roster(entry)))
         bundles = {}
@@ -5746,12 +5760,13 @@ class Operation:
             for leaf in REMOVAL_INPUT_NAMES:
                 limit = self.stager.MAX_BYTES if leaf == "Remove.pkg" else 16384 if leaf.endswith("json") else 512
                 original, body = self.removal_open_file(parent, leaf, "removal-mounted-input", limit,
-                    keep=leaf != "Remove.pkg", readonly=True)
+                    keep=leaf != "Remove.pkg", readonly=True, context=context)
                 context["files"].append(original)
                 row = original["removal_file_facts"]
                 selected = expected if phase is None else expected[phase]
                 need((row[0][6], row[1]) == (selected[leaf]["bytes"], selected[leaf]["sha256"]),
                      "removal-mounted-source-binding")
+                original["removal_acquired"] = True
                 facts[leaf], bodies[leaf] = row, body
             context["rosters"].append((parent, self.removal_roster(parent)))
             bundles[phase] = {"path": mount_path if phase is None else mount_path / phase,
@@ -5932,6 +5947,7 @@ class Operation:
             finally:
                 with self.removal_ui_lock:
                     self.removal_ui_outcome["done"] = True
+        self.removal_ui_entered = True
         self.removal_thread = self.removal_threading.Thread(target=run_ui, name="mrk-fixed-removal-ui", daemon=False)
         self.removal_thread.start()  # Entered before dispatch; no discovered thread/PID.
 
@@ -5981,18 +5997,14 @@ class Operation:
         self.removal_inputs_post()
         for context in reversed(self.removal_mounts):
             need(context["known"] and not context["detached"], "removal-mount-original")
-            for entry in context["files"]:
+            context["detachAttempted"] = True
+            for entry in reversed(context["entries"]):
                 self.close(entry)
-                need(entry["closed"], "removal-mounted-file-close")
-            for entry, _ in reversed(context["rosters"]):
-                self.close(entry)
-                need(entry["closed"], "removal-mounted-directory-close")
-            entry = context["entry"]
-            self.close(entry)
-            need(entry["closed"], "removal-mount-close")
+                need(entry["closed"], "removal-mounted-original-close")
             before = self.removal_roster(self.removal_volumes)
-            self.removal_native_call("removal-" + context["role"] + "-detach",
+            result = self.removal_native_call("removal-" + context["role"] + "-detach",
                 ["/usr/bin/hdiutil", "detach", context["device"]], segment="detach", maximum=15)
+            need(type(result.returncode) is int and result.returncode == 0, "removal-detach-original-status")
             self.removal_own_parent_post(self.removal_volumes, before, context["name"], present=False)
             context["detached"] = True
         self.removal_clock("settle")
@@ -6061,10 +6073,6 @@ class Operation:
         self.removal_case, self.removal_correlation = removal_context_data(self.environment, self.target)
         self.package_started = self.package_observed = time.monotonic_ns()
         self.package_endpoint = self.package_started + 990_000_000_000
-        # Reserve this fixed owner's bounded source/control/roster workspace
-        # BEFORE source loads, held inputs, JSON parses or UI overlap. Native
-        # root actors and the pre-existing UI owner retain their own caps;
-        # this is not a process RSS/allocator-overhead assertion.
         need(self.removal_control_reserved == 0, "removal-runtime-work-once")
         self.removal_control_reserved = 8 * 1024 * 1024
         self.removal_reserve(0)
@@ -6110,6 +6118,7 @@ class Operation:
         for name in names:
             self.removal_absent(self.removal_output_parent, name)
         before = self.removal_observe("before", segment="before")
+        self.removal_before_settled = True
         # Validate the fresh baseline BEFORE launching an app or sending Remove.
         need(not before["archives"] and before["appPresent"] and not before["firstEligibleAbsent"]
              and not before["allPayloadAbsent"]
@@ -6168,6 +6177,77 @@ class Operation:
             requestsDirectoryNamedOnly=True, mountedInputsDetached=True, sourcePrePostMatched=True,
             firstOriginalErrorPreserved=True, powerLossQualified=False, productReady=False)
         self.removal_clock("settle")
+
+    def removal_abort_post(self):
+        self.removal_clock()
+        need(self.removal_api is not None and self.removal_slash is not None and self.removal_volumes is not None,
+             "removal-abort-host-originals")
+        self.recheck_directory(self.work_entry)
+        self.recheck_directory(self.target_entry)
+        self.package_post()
+        self.removal_inputs_post()
+        self.removal_outputs_post()
+        if self.removal_install_root is not None: self.removal_directory_post(self.removal_install_root)
+        if self.removal_channel is not None:
+            self.removal_directory_post(self.removal_channel)
+            need(not self.removal_names(self.removal_channel, 0), "removal-abort-empty-channel")
+            self.removal_directory_post(self.removal_channel_parent)
+        for entry in self.entries:
+            need(entry["closed"] or type(entry["fd"]) is int, "removal-abort-unbound-original")
+            need(entry.get("removal_acquired", True), "removal-abort-partial-acquisition")
+        for context in self.removal_mounts:
+            need(context["entered"] and context["known"], "removal-abort-unknown-mount")
+            if context["detached"]: continue
+            for entry in context["entries"]:
+                if entry["kind"] == "removal-directory": self.removal_directory_post(entry)
+                else: self.removal_stream(entry, limit=entry["removal_limit"], expected=entry["removal_file_facts"])
+        self.removal_reserve(0)
+
+    def removal_abort_detach(self):
+        need(self.phase == "package-removal-fixture" and "failure" in self.receipt
+             and self.removal_abort_roles is None and not self.removal_abort_known
+             and not self.removal_ui_entered and self.removal_thread is None and not self.removal_ui_joined
+             and self.removal_ui_outcome == {"done": False, "known": False} and not self.removal_ui_facts and self.removal_ui_deadline is None
+             and not self.removal_markers and self.removal_requests is None and not self.removal_complete
+             and not self.removal_unknown and self.removal_scan_state == "closed" and self.package_settled()
+             and self.removal_threading is not None
+             and self.removal_threading.current_thread() is self.removal_threading.main_thread()
+             and len(self.removal_threading.enumerate()) == 1, "removal-abort-pre-ui-finality")
+        prefix = tuple(row["role"] for row in self.calls)
+        need(prefix in ((), ("removal-target-attach",), ("removal-target-attach", "removal-observers-attach"),
+                        ("removal-target-attach", "removal-observers-attach", "removal-observer-before"))
+             and (len(prefix) < 3 or self.removal_before_settled)
+             and all(row.get("returned") is True and row.get("capturesSettled") is True
+                     and type(row.get("returncode")) is int and row["returncode"] == 0 for row in self.calls)
+             and tuple(m["role"] for m in self.removal_mounts) == (("target", "observers")[:min(len(prefix), 2)])
+             and all(not m["detached"] and not m["detachAttempted"] for m in self.removal_mounts),
+             "removal-abort-original-prefix")
+        self.removal_abort_post()
+        suffix = tuple("removal-" + m["role"] + "-detach" for m in reversed(self.removal_mounts))
+        self.removal_abort_roles = prefix + suffix
+        for context in reversed(self.removal_mounts):
+            context["detachAttempted"] = True
+            for entry in reversed(context["entries"]):
+                self.close(entry)
+                need(entry["closed"], "removal-abort-mounted-close")
+            before = self.removal_roster(self.removal_volumes)
+            result = self.removal_native_call("removal-" + context["role"] + "-detach",
+                ["/usr/bin/hdiutil", "detach", context["device"]], segment="detach", maximum=15)
+            need(type(result.returncode) is int and result.returncode == 0, "removal-detach-original-status")
+            self.removal_own_parent_post(self.removal_volumes, before, context["name"], present=False)
+            context["detached"] = True
+        self.removal_abort_post()
+        self.removal_clock("settle")
+        self.removal_abort_known = True
+        self.receipt["removalAbort"] = {"preUI": True, "workCalls": len(prefix), "detachCalls": len(suffix),
+                                       "originalCleanupKnown": True, "passed": False}
+
+    def removal_cleanup_ready(self):
+        if self.phase == "package-removal-fixture" and self.removal_abort_known:
+            return ("failure" in self.receipt and not self.removal_ui_entered and self.removal_thread is None
+                    and not self.removal_unknown and all(m["known"] and m["detached"] for m in self.removal_mounts)
+                    and tuple(row["role"] for row in self.calls) == self.removal_abort_roles and self.package_settled())
+        return self.removal_finish_ready()
 
     def removal_finish_ready(self):
         if self.phase == "prepare-removal-observers":
@@ -6447,6 +6527,7 @@ class Operation:
         need(self.read(entry) == body, "package-mount-host-source-post")
 
     def mount_facts(self, entry):
+        # MNT_MULTILABEL is MAC-label support, not MNT_UNION (Apple mount.h).
         """Validate acquisition without publishing cleanup-known prematurely."""
         self.package_clock()
         self.recheck_directory(self.work_entry)
@@ -6467,7 +6548,7 @@ class Operation:
         self.package_clock()
         need(type(flags) is int and flags & os.ST_RDONLY and held.st_dev != self.work_entry["identity"][0]
              and type(fs) is dict and type(fs.get("flags")) is int and 0 <= fs["flags"] < 1 << 32
-             and fs["flags"] & 1 and fs["flags"] & 0x1000 and not fs["flags"] & (0x20 | 0x4000000)
+             and fs["flags"] & 1 and fs["flags"] & 0x1000 and not fs["flags"] & 0x20
              and fs.get("typeName") in ("hfs", "apfs")
              and fs.get("mountOn") == str(self.work / "package-mount")
              and fs.get("mountFrom") == self.mount_device, "package-readonly-mount-original")
@@ -7025,7 +7106,7 @@ class Operation:
                 self.tool_clock(work=False)
             except BaseException as error:
                 self.errors.append({"stage": "tool-retirement-clock", "type": type(error).__name__})
-        if (not self.removal_finish_ready()
+        if (not self.removal_cleanup_ready()
                 or self.android_support is not None and not self.android_support_module.finish_ready(self)
                 or self.app_absence is not None and not self.app_absence_module.finish_ready(self)
                 or self.update is not None and not self.update_module.finish_ready(self)):
@@ -7216,6 +7297,11 @@ class Operation:
                     self.detach_package_mount()  # Pure pre-Installer refusal only, original attach/close/clock known.
                 except BaseException as error:
                     self.errors.append({"stage": "package-mount-retained", "type": type(error).__name__})
+            if self.phase == "package-removal-fixture" and "failure" in self.receipt and not self.removal_ui_entered:
+                try:
+                    self.removal_abort_detach()
+                except BaseException as error:
+                    self.errors.append({"stage": "removal-pre-ui-retained", "type": type(error).__name__})
             self.finish()
         roles = (self.android_support_module.ROLES if self.android_support is not None else
                  UPDATE_ROLES if self.phase == UPDATE_PHASE else
