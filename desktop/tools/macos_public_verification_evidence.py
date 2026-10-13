@@ -907,6 +907,43 @@ def project_owner_finality(value):
             "predicateMask": outer, "cleanupMask": cleanup, "terminalFailureMask": terminal}
 
 
+NOTARY_SUBMIT_CLASSES = {"http-401": "http-authentication", "http-403": "http-permission",
+    "http-429": "http-rate-limit", **{f"http-{code}": "http-service" for code in (500, 502, 503, 504)},
+    "url-1001": "network-timeout", "url-1003": "network-dns", "url-1004": "network-connection",
+    "url-1005": "network-connection", "url-1006": "network-dns", "url-1009": "network-connection",
+    "url-1200": "network-tls", "url-1202": "network-tls"}
+
+
+def project_notary_submit_diagnostic(value, row):
+    """Closed same-original lexical facts, not a service or authentication verdict."""
+    fields = {"schemaVersion", "kind", "diagnosticOnly", "nativeSuccessInferred", "policyUnchanged",
+        "stderrBytes", "stderrSha256", "formatClass", "lexicalState", "errorClass", "matches", "matchesTruncated"}
+    need(type(value) is dict and set(value) == fields and row.get("role") == "payload-submit"
+         and all(row.get(name) is True for name in ("entered", "returned", "capturesSettled"))
+         and type(row.get("returncode")) is int and -65536 <= row["returncode"] <= 65535 and row["returncode"] != 0)
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["kind"] == "failure-only-notary-submit" and value["diagnosticOnly"] is True
+         and value["nativeSuccessInferred"] is False and value["policyUnchanged"] is True)
+    size = integer(value["stderrBytes"], 65536)
+    need(hex_value(value["stderrSha256"]) == hex_value(row.get("stderrSha256")))
+    form, state, error = value["formatClass"], value["lexicalState"], value["errorClass"]
+    need(form in ("empty", "bounded-utf8", "invalid-utf8") and (form == "empty") == (size == 0))
+    matches, truncated = value["matches"], value["matchesTruncated"]
+    need(type(matches) is list and len(matches) <= 16 and type(truncated) is bool
+         and all(type(key) is str and key in (*NOTARY_SUBMIT_CLASSES, "unsupported-http", "unsupported-url") for key in matches)
+         and (not truncated or len(matches) == 16)
+         and (form == "bounded-utf8" or not matches and not truncated))
+    expected_state, expected_error = "none", "unclassified"
+    if form == "invalid-utf8" or any(key.startswith("unsupported-") for key in matches):
+        expected_state = "unrecognized"
+    elif truncated or len(matches) > 1:
+        expected_state = "multiple-or-conflicting"
+    elif matches:
+        expected_state, expected_error = "single-known", NOTARY_SUBMIT_CLASSES[matches[0]]
+    need(state == expected_state and error == expected_error)
+    return dict(value)
+
+
 def project_calls(rows, *, credential=False):
     if rows is None:
         return None
@@ -925,6 +962,12 @@ def project_calls(rows, *, credential=False):
             lambda value: integer(value, 65535, -65536))
         if not credential:
             item.update({name: optional(row, name, hex_value) for name in ("stdoutSha256", "stderrSha256") if name in row})
+            if "notarySubmitDiagnostic" in row:
+                try:
+                    item["notarySubmitDiagnostic"] = project_notary_submit_diagnostic(row["notarySubmitDiagnostic"], row)
+                except Refused:
+                    item["notarySubmitDiagnostic"] = {"receiptState": "refused", "diagnosticOnly": True,
+                        "nativeSuccessInferred": False, "policyUnchanged": True}
             failure = row.get("originalFailure")
             need(failure is None or type(failure) is dict)
             if failure is not None:
@@ -1573,6 +1616,7 @@ INSTALLER_LOG_AUTHORITY = "project-correlated-diagnostics-not-package-pid-authen
 INSTALLER_LOG_KEYS = ("package-identifier", "package-path", "native-executable", "fixture-result", "ordinary-result",
                       "postinstall-phase", "postinstall-refusal", "acl-diagnostic")
 INSTALLER_PARENT_KEY = "completed-parent-diagnostic"
+INSTALLER_DIAGNOSTIC_REFUSAL_STAGES = ('metadata-original-read', 'selected-original-read', 'original-caller', 'metadata-original-hash', 'metadata-decode', 'metadata-schema', 'preceding-originals', 'payload-originals', 'finalizer-caller', 'finalizer-receipt-hash', 'payload-acceptance', 'binding-schema', 'binding-context', 'binding-path', 'capture-unavailable-schema', 'captured-schema', 'log-identity', 'interval', 'row-list', 'selected-body-hash', 'selector-catalog', 'row-shape', 'row-bounds', 'row-hash', 'row-anchors', 'acl-row-bound', 'parent-row-bound', 'count-correspondence', 'result-state')
 INSTALLER_LOG_REFUSALS = frozenset(("log-input-binding", "log-file-policy", "log-file-identity", "log-cursor-shape",
     "log-cursor-binding", "log-cursor-offset", "log-anchor-rewritten", "log-truncated", "log-incomplete-boundary",
     "log-interval-bound", "log-line-bound", "log-selected-bound", "log-metadata-bound", "log-no-project-lines",
@@ -1653,6 +1697,9 @@ def installer_log_patterns(binding, *, completed_parent):
         patterns[INSTALLER_PARENT_KEY] = re.compile(
             rb"(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=[0-9a-f]{64};exit=(?:1|20)"
             rb";originals=[01];native=[01];timely=[01];unknown=[01](?=\r?\n$)")
+    if completed_parent:
+        # The genuine selector inserts this ninth anchor before postinstall/ACL.
+        patterns = {key: patterns[key] for key in (*INSTALLER_LOG_KEYS[:5], INSTALLER_PARENT_KEY, *INSTALLER_LOG_KEYS[5:])}
     return patterns
 
 
@@ -1695,20 +1742,26 @@ def installer_failure_originals(phase, statuses):
 
 def project_installer_failure_diagnostic(metadata_body, selected_body, phase, statuses, context, payload, finalized, budget):
     """Same failed original/project-correlated selection, never Installer success."""
+    budget["installerDiagnosticStage"] = "original-caller"
     cursor, installer, capture = installer_failure_originals(phase, statuses)
+    budget["installerDiagnosticStage"] = "metadata-original-hash"
     need(type(metadata_body) is bytes and capture["stdoutSha256"] == hashlib.sha256(metadata_body).hexdigest())
+    budget["installerDiagnosticStage"] = "metadata-decode"
     metadata = decode_installer_diagnostic(metadata_body, budget)
+    budget["installerDiagnosticStage"] = "metadata-schema"
     need(type(metadata.get("schemaVersion")) is int and metadata["schemaVersion"] == 1
          and metadata.get("kind") == "installer-log-capture" and metadata.get("authority") == INSTALLER_LOG_AUTHORITY
          and metadata.get("scriptOutputFinality") == "unestablished")
     # These are already-read original phase receipts. No self-derived anchor
     # or extra file opens; unavailable preceding facts refuse this diagnosis.
+    budget["installerDiagnosticStage"] = "preceding-originals"
     for original in (payload, finalized):
         need(type(original) is dict and original.get("receiptState") == "observed"
              and original.get("correlationMatches") is True and original.get("recordedPassed") is True
              and original.get("originalClosesKnown") is True and original.get("targetRetired") is True)
     # notarize-payload has no scalar PHASE_STATUS in the existing workflow.
     # Require its actual closed successful originals, never invent a status0.
+    budget["installerDiagnosticStage"] = "payload-originals"
     payload_calls = payload.get("originalCalls")
     need(type(payload_calls) is dict and type(payload_calls.get("unclassifiedCount")) is int
          and payload_calls["unclassifiedCount"] == 0 and type(payload_calls.get("calls")) is list
@@ -1717,22 +1770,28 @@ def project_installer_failure_diagnostic(metadata_body, selected_body, phase, st
     for call in payload_calls["calls"]:
         need(type(call) is dict and all(call.get(key) is True for key in ("entered", "returned", "capturesSettled"))
              and type(call.get("returncode")) is int and call["returncode"] == 0)
+    budget["installerDiagnosticStage"] = "finalizer-caller"
     caller = finalized.get("callerStatus")
     need(type(caller) is dict and caller.get("receiptState") == "observed"
          and type(caller.get("returncode")) is int and caller["returncode"] == 0)
+    budget["installerDiagnosticStage"] = "finalizer-receipt-hash"
     need(hex_value(finalized.get("receiptSha256")) == hex_value(phase.get("finalPackageReceiptSha256")))
+    budget["installerDiagnosticStage"] = "payload-acceptance"
     notarized = payload.get("payloadNotarization")
     need(type(notarized) is dict and notarized.get("status") == "Accepted"
          and type(notarized.get("errorCount")) is int and notarized["errorCount"] == 0)
     inventory, manifest = hex_value(notarized.get("inventorySha256")), hex_value(notarized.get("runtimeManifestSha256"))
+    budget["installerDiagnosticStage"] = "binding-schema"
     binding = metadata.get("binding")
     need(type(binding) is dict and set(binding) == {"packageKind", "packageIdentifier", "packagePath", "sourceCommit",
          "inventorySha256", "runtimeManifestSha256", "runId", "runAttempt", "requestId"})
+    budget["installerDiagnosticStage"] = "binding-context"
     need(binding["packageKind"] == "ordinary" and binding["packageIdentifier"] == "dev.mobile-release-kit.desktop.installed"
          and type(binding["sourceCommit"]) is str and binding["sourceCommit"] == context["source"]
          and type(binding["runId"]) is str and binding["runId"] == context["runId"]
          and type(binding["runAttempt"]) is str and binding["runAttempt"] == context["runAttempt"]
          and binding["inventorySha256"] == inventory and binding["runtimeManifestSha256"] == manifest)
+    budget["installerDiagnosticStage"] = "binding-path"
     request = hex_value(binding["requestId"], 32)
     path = binding["packagePath"]
     need(type(path) is str and path.startswith("/") and len(path.encode("utf-8")) <= 4096
@@ -1744,6 +1803,7 @@ def project_installer_failure_diagnostic(metadata_body, selected_body, phase, st
               "binding": "same-source-run-target-failed-original-project-correlated",
               "metadataSha256": hashlib.sha256(metadata_body).hexdigest()}
     if capture["returncode"] == 1:
+        budget["installerDiagnosticStage"] = "capture-unavailable-schema"
         need(set(metadata) == {"schemaVersion", "kind", "state", "reason", "binding", "authority",
              "scriptOutputFinality", "plannedSelectedData", "selectedOutputState"}
              and metadata["state"] == "unknown" and type(metadata["reason"]) is str
@@ -1756,16 +1816,19 @@ def project_installer_failure_diagnostic(metadata_body, selected_body, phase, st
             integer(planned["bytes"], INSTALLER_DIAGNOSTIC_LIMIT, 1); hex_value(planned["sha256"])
         need(metadata["selectedOutputState"] != "not-created" or planned is None)
         return {**result, "captureState": "unavailable", "reason": metadata["reason"], "selectionOriginalAuthorized": False}
+    budget["installerDiagnosticStage"] = "captured-schema"
     need(set(metadata) == {"schemaVersion", "kind", "state", "binding", "logPath", "identity", "cursorSha256",
          "startOffsetBytes", "endOffsetBytes", "growthBeyondSnapshotBytes", "intervalBytes", "intervalSha256",
          "linesObserved", "linesUnselected", "selectedLines", "markerCounts", "resultMarkerState", "selectedData",
          "authority", "scriptOutputFinality"} and metadata["state"] == "observed-project-correlated"
          and metadata["logPath"] == "/var/log/install.log" and metadata["cursorSha256"] == cursor["stdoutSha256"])
+    budget["installerDiagnosticStage"] = "log-identity"
     log_id = metadata["identity"]
     need(type(log_id) is dict and set(log_id) == {"device", "inode", "mode", "uid", "gid", "links"}
          and all(type(value) is int and value >= 0 for value in log_id.values())
          and log_id["inode"] > 0 and stat.S_ISREG(log_id["mode"]) and log_id["uid"] == 0
          and log_id["links"] == 1 and not log_id["mode"] & 0o022)
+    budget["installerDiagnosticStage"] = "interval"
     start = integer(metadata["startOffsetBytes"], 2**63 - 1)
     end = integer(metadata["endOffsetBytes"], 2**63 - 1, start)
     interval = integer(metadata["intervalBytes"], 1024 * 1024)
@@ -1773,16 +1836,20 @@ def project_installer_failure_diagnostic(metadata_body, selected_body, phase, st
     integer(metadata["growthBeyondSnapshotBytes"], 2**63 - 1); hex_value(metadata["intervalSha256"])
     observed = integer(metadata["linesObserved"], 1024 * 1024)
     unselected = integer(metadata["linesUnselected"], observed)
+    budget["installerDiagnosticStage"] = "row-list"
     rows, counts, data = metadata["selectedLines"], metadata["markerCounts"], metadata["selectedData"]
     need(type(rows) is list and 0 < len(rows) <= 2048 and observed - unselected == len(rows)
          and type(counts) is dict and set(counts) in (set(INSTALLER_LOG_KEYS), set((*INSTALLER_LOG_KEYS, INSTALLER_PARENT_KEY)))
          and type(data) is dict and set(data) == {"file", "bytes", "sha256"} and data["file"] == INSTALLER_DIAGNOSTIC_INPUTS[1])
+    budget["installerDiagnosticStage"] = "selected-body-hash"
     need(type(selected_body) is bytes and 0 < len(selected_body) <= INSTALLER_DIAGNOSTIC_LIMIT
          and integer(data["bytes"], INSTALLER_DIAGNOSTIC_LIMIT, 1) == len(selected_body)
          and hex_value(data["sha256"]) == hashlib.sha256(selected_body).hexdigest())
+    budget["installerDiagnosticStage"] = "selector-catalog"
     parent_catalog = INSTALLER_PARENT_KEY in counts
     patterns = installer_log_patterns(binding, completed_parent=parent_catalog)
-    need(tuple(patterns) == (*INSTALLER_LOG_KEYS, *((INSTALLER_PARENT_KEY,) if parent_catalog else ())))
+    need(tuple(patterns) == ((*INSTALLER_LOG_KEYS[:5], INSTALLER_PARENT_KEY, *INSTALLER_LOG_KEYS[5:])
+         if parent_catalog else INSTALLER_LOG_KEYS))
     actual_counts = {key: 0 for key in patterns}
     for count in counts.values(): integer(count, 1024 * 1024)
     retained, last_end, acl_rows, parent_rows = 0, 0, [], []
@@ -1790,13 +1857,17 @@ def project_installer_failure_diagnostic(metadata_body, selected_body, phase, st
     refusal_counts = {key: 0 for key in ("target", "entry", "cwd")}
     for row in rows:
         clock(budget)
+        budget["installerDiagnosticStage"] = "row-shape"
         need(type(row) is dict and set(row) == {"relativeOffsetBytes", "retainedOffsetBytes", "bytes", "sha256", "anchors"})
+        budget["installerDiagnosticStage"] = "row-bounds"
         offset = integer(row["relativeOffsetBytes"], interval)
         length = integer(row["bytes"], 128 * 1024, 1)
         need(offset >= last_end and offset + length <= interval and row["retainedOffsetBytes"] == retained
              and type(row["retainedOffsetBytes"]) is int and retained + length <= len(selected_body))
+        budget["installerDiagnosticStage"] = "row-hash"
         line = selected_body[retained:retained + length]
         need(line.endswith(b"\n") and b"\n" not in line[:-1] and hex_value(row["sha256"]) == hashlib.sha256(line).hexdigest())
+        budget["installerDiagnosticStage"] = "row-anchors"
         matches = {key: list(pattern.finditer(line)) for key, pattern in patterns.items()}
         anchors = [key for key, matched in matches.items() if matched]
         need(type(row["anchors"]) is list and row["anchors"] == anchors and bool(anchors))
@@ -1805,6 +1876,7 @@ def project_installer_failure_diagnostic(metadata_body, selected_body, phase, st
                                      ("postinstall-refusal", b"MRK_MACOS_POSTINSTALL_REFUSED=", refusal_counts)):
             for match in matches[key]: catalog[match.group()[len(prefix):].decode("ascii")] += 1
         for match in matches["acl-diagnostic"]:
+            budget["installerDiagnosticStage"] = "acl-row-bound"
             need(len(acl_rows) < 32)
             fields = match.group()[len(b"MRK_MACOS_INSTALL_ACL_DIAGNOSTIC="):].decode("ascii").split(";")
             values = dict(field.split("=", 1) for field in fields)
@@ -1812,11 +1884,14 @@ def project_installer_failure_diagnostic(metadata_body, selected_body, phase, st
                 **{key: integer(int(values[key]), 9999999999, -9999999999) for key in ("result", "call", "errno", "freeCall", "freeErrno")}})
         if parent_catalog:
             for match in matches[INSTALLER_PARENT_KEY]:
+                budget["installerDiagnosticStage"] = "parent-row-bound"
                 fields = match.group()[len(b"MRK_MACOS_INSTALL_COMPLETED_REFUSED="):].decode("ascii").split(";")
                 parent_rows.append(dict(field.split("=", 1) for field in fields))
                 need(len(parent_rows) <= 2048)
         retained += length; last_end = offset + length
+    budget["installerDiagnosticStage"] = "count-correspondence"
     need(retained == len(selected_body) and actual_counts == counts)
+    budget["installerDiagnosticStage"] = "result-state"
     state = "mixed" if counts["fixture-result"] else "duplicate" if counts["ordinary-result"] > 1 else "unbound" if counts["ordinary-result"] == 1 else "missing"
     need(type(metadata["resultMarkerState"]) is str and metadata["resultMarkerState"] == state)
     parent = {"state": "missing", "markerCount": len(parent_rows)}
@@ -2325,15 +2400,23 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
             except Refused:
                 installer_states[name] = "refused"
         try:
+            budget["installerDiagnosticStage"] = "metadata-original-read"
             need(installer_states[INSTALLER_DIAGNOSTIC_INPUTS[0]] == "observed")
             installer_diagnostic = project_installer_failure_diagnostic(installer_inputs[INSTALLER_DIAGNOSTIC_INPUTS[0]],
                 installer_inputs.get(INSTALLER_DIAGNOSTIC_INPUTS[1]), phases["package-install"], statuses, context,
                 phases["notarize-payload"], phases["finalize-package"], budget)
+            budget["installerDiagnosticStage"] = "selected-original-read"
             need(installer_diagnostic.get("captureState") != "observed-project-correlated"
                  or installer_states[INSTALLER_DIAGNOSTIC_INPUTS[1]] == "observed")
-        except Refused:
+        except Refused as error:
+            stage = budget.get("installerDiagnosticStage")
             installer_diagnostic = {"receiptState": "absent" if all(state == "absent" for state in installer_states.values()) else "refused",
-                "diagnosticOnly": True, "originalInstallerReturnedZero": False, "nativeSuccessInferred": False, "policyUnchanged": True}
+                "diagnosticOnly": True, "originalInstallerReturnedZero": False, "nativeSuccessInferred": False, "policyUnchanged": True,
+                "inputStates": {"metadata": installer_states[INSTALLER_DIAGNOSTIC_INPUTS[0]],
+                                "selected": installer_states[INSTALLER_DIAGNOSTIC_INPUTS[1]]},
+                "refusalStage": stage if type(error) is Refused and type(stage) is str
+                    and stage in INSTALLER_DIAGNOSTIC_REFUSAL_STAGES
+                    and time.monotonic_ns() <= budget["deadline"] else "unclassified"}
         del installer_inputs
         budget["outputBytes"] += len(json.dumps(installer_diagnostic, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
         need(budget["outputBytes"] <= OUTPUT_LIMIT)

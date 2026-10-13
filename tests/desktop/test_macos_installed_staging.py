@@ -15665,9 +15665,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # This exact helper is already in the readonly SOURCE closure. Inspect
         # its real caller without importing or invoking any operation owner.
         with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
-            helper_raw = original.read(539088 + 1)
+            helper_raw = original.read(542125 + 1)
             self.assertEqual(original.read(1), b"")
-        self.assertEqual(len(helper_raw), 539088)
+        self.assertEqual(len(helper_raw), 542125)
         helper_source = helper_raw.decode("utf-8", "strict")
         helper_tree = ast.parse(helper_source)
         helper_caps = [node.value for node in helper_tree.body

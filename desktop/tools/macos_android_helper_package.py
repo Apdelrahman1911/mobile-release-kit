@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import codecs
 import contextlib
 import hashlib
 import importlib.util
@@ -65,7 +66,7 @@ INTEL_TARGET = "x86_64-apple-darwin"
 MAX_HELPER = 32 * 1024 * 1024
 # Only nonshipping producer graphs; packaged programs keep release3.
 PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=0"
-HELPER_SOURCE_BYTES = 539088
+HELPER_SOURCE_BYTES = 542125
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -320,6 +321,53 @@ NOTARY_TICKETS = ("Contents/CodeResources", "Contents/Helpers/MobileReleaseKitPa
 NOTARY_FREE_FLOOR = 3 * 1024 * 1024 * 1024
 NOTARY_STORAGE_RESERVE = 2 * 1024 * 1024 * 1024
 NOTARY_ZIP_LIMIT = 576 * 1024 * 1024
+
+
+NOTARY_SUBMIT_CLASSES = {"http-401": "http-authentication", "http-403": "http-permission",
+    "http-429": "http-rate-limit", **{f"http-{code}": "http-service" for code in (500, 502, 503, 504)},
+    "url-1001": "network-timeout", "url-1003": "network-dns", "url-1004": "network-connection",
+    "url-1005": "network-connection", "url-1006": "network-dns", "url-1009": "network-connection",
+    "url-1200": "network-tls", "url-1202": "network-tls"}
+NOTARY_SUBMIT_PREFIX = re.compile(rb"(?<![A-Za-z0-9_])(?:(?P<http>HTTP(?:/[0-9.]{1,8})?[ \t]+(?:status(?:[ \t]+code)?|code)[ \t]*(?:[:=][ \t]*)?)|(?P<url>NSURLErrorDomain[ \t]+Code[ \t]*=[ \t]*))")
+NOTARY_SUBMIT_NUMERIC = re.compile(rb"-?[0-9]{1,10}(?=$|[ \t\r\n,;.)])")
+
+
+def notary_submit_diagnostic(body):
+    """Finite lexical facts from one failed original; never authentication evidence."""
+    need(type(body) is bytes and len(body) <= 65536, "notary-submit-diagnostic-bound")
+    form = "empty" if not body else "bounded-utf8"
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    try:
+        view = memoryview(body)
+        for offset in range(0, len(body), 512):
+            decoder.decode(view[offset:offset + 512], final=False)
+        decoder.decode(b"", final=True)
+    except UnicodeError:
+        form = "invalid-utf8"
+    matches, truncated = [], False
+    if form == "bounded-utf8":
+        for match in NOTARY_SUBMIT_PREFIX.finditer(body):
+            if len(matches) == 16:
+                truncated = True
+                break
+            kind = "http" if match.lastgroup == "http" else "url"
+            numeric = NOTARY_SUBMIT_NUMERIC.match(body, match.end())
+            raw = numeric.group().decode("ascii") if numeric is not None else "malformed"
+            key = kind + raw if kind == "url" else kind + "-" + raw
+            matches.append(key if key in NOTARY_SUBMIT_CLASSES else "unsupported-" + kind)
+    state, error = "none", "unclassified"
+    if form == "invalid-utf8" or any(key.startswith("unsupported-") for key in matches):
+        state = "unrecognized"
+    elif truncated or len(matches) > 1:
+        state = "multiple-or-conflicting"
+    elif matches:
+        state, error = "single-known", NOTARY_SUBMIT_CLASSES[matches[0]]
+    result = {"schemaVersion": 1, "kind": "failure-only-notary-submit", "diagnosticOnly": True,
+        "nativeSuccessInferred": False, "policyUnchanged": True, "stderrBytes": len(body),
+        "stderrSha256": digest(body), "formatClass": form, "lexicalState": state,
+        "errorClass": error, "matches": matches, "matchesTruncated": truncated}
+    need(len(json.dumps(result, separators=(",", ":"))) <= 2048, "notary-submit-diagnostic-bound")
+    return result
 
 
 def notary_json(body, limit):
@@ -2229,6 +2277,11 @@ class Operation:
         if self.phase == "package-install" and role == "installer":
             self.publish("installer-output.txt", result.stdout + result.stderr)
         record["capturesSettled"] = True  # All original output/readback/closes returned.
+        if self.phase == "notarize-payload" and role == "payload-submit" and result.returncode != 0:
+            try:
+                record["notarySubmitDiagnostic"] = notary_submit_diagnostic(result.stderr)
+            except BaseException:
+                pass  # Never replace the same nonzero original or affect cleanup.
         if self.phase == "prepare" and role == "build" and result.returncode != 0:
             try:
                 self.compiler_failure = compiler_diagnostic(result.stdout, result.stderr, str(self.checkout))

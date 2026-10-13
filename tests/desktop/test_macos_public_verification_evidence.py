@@ -1739,13 +1739,13 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             finalized.update(receiptSha256=hashlib.sha256(final_bytes).hexdigest(),
                 callerStatus={'receiptState': 'observed', 'returncode': 0})
             return body, current, phase, payload, finalized
-        def diagnose(document, selected=selected_body, *, changed=None):
+        def diagnose(document, selected=selected_body, *, changed=None, trace=None):
             body, current, phase, payload, finalized = observed_phases(document)
             scalar = copy.deepcopy(statuses)
             scalar['installer-log-capture.status']['returncode'] = current['originalCalls'][-1]['returncode']
             if changed is not None: changed(phase, scalar, payload, finalized)
             return DATA.project_installer_failure_diagnostic(body, selected, phase, scalar, CONTEXT, payload, finalized,
-                {'nodes': 0, 'deadline': time.monotonic_ns() + 45_000_000_000})
+                trace if trace is not None else {'nodes': 0, 'deadline': time.monotonic_ns() + 45_000_000_000})
         diagnostic = diagnose(metadata)
         self.assertEqual(diagnostic['postinstallPhaseCounts']['entry'], 1)
         self.assertEqual(diagnostic['postinstallRefusalCounts']['cwd'], 1)
@@ -1758,19 +1758,10 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         parent_token = ('MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=' + 'b' * 64 +
             ';exit=1;originals=1;native=0;timely=1;unknown=1\n').encode()
         def parent_document(lines):
-            fresh = copy.deepcopy(metadata); body = b''.join(lines)
-            patterns = DATA.installer_log_patterns(binding, completed_parent=True)
-            fresh.update(linesObserved=len(lines), linesUnselected=0, startOffsetBytes=0, endOffsetBytes=len(body),
-                intervalBytes=len(body), intervalSha256=hashlib.sha256(body).hexdigest(), selectedLines=[],
-                markerCounts={key: 0 for key in patterns}, resultMarkerState='missing')
-            offset = 0
-            for line in lines:
-                matches = {key: len(list(pattern.finditer(line))) for key, pattern in patterns.items()}
-                fresh['selectedLines'].append({'relativeOffsetBytes': offset, 'retainedOffsetBytes': offset,
-                    'bytes': len(line), 'sha256': hashlib.sha256(line).hexdigest(),
-                    'anchors': [key for key, count in matches.items() if count]})
-                for key, count in matches.items(): fresh['markerCounts'][key] += count
-                offset += len(line)
+            fresh = copy.deepcopy(metadata); interval = b''.join(lines)
+            body, selection = selector['select_installer_log'](interval, binding)
+            fresh.update(startOffsetBytes=0, endOffsetBytes=len(interval), intervalBytes=len(interval),
+                intervalSha256=hashlib.sha256(interval).hexdigest(), **selection)
             fresh['selectedData'].update(bytes=len(body), sha256=hashlib.sha256(body).hexdigest())
             return fresh, body
         for lines, state in (([parent_token], 'observed'), ([parent_token, parent_token], 'duplicate'),
@@ -1781,6 +1772,59 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             if state == 'observed':
                 self.assertEqual(parent['reasonSha256'], 'b' * 64); self.assertIs(parent['unknown'], True)
                 self.assertIs(parent['native'], False); self.assertEqual(parent['exit'], 1)
+        # The same byte-preserved legacy8 metadata remains compatible without
+        # inventing a ninth zero key in the historical writer's original output.
+        legacy8 = copy.deepcopy(metadata); del legacy8['markerCounts'][DATA.INSTALLER_PARENT_KEY]
+        self.assertEqual(diagnose(legacy8)['selectorCatalog'], 'fixed8')
+        self.assertEqual(diagnose(metadata)['selectorCatalog'], 'fixed9')
+        # A line may match earlier postinstall data and the terminal parent marker.
+        # Ordered anchors must be the real selector's SOURCE order, not a copied projector list.
+        mixed_document, mixed_selected = parent_document([phase_line.rstrip(b'\n') + b' ' + parent_token])
+        self.assertEqual(mixed_document['selectedLines'][0]['anchors'],
+                         [DATA.INSTALLER_PARENT_KEY, 'postinstall-phase'])
+        mixed_result = diagnose(mixed_document, mixed_selected)
+        self.assertEqual(mixed_result['completedParentDiagnostic']['state'], 'observed')
+        self.assertEqual(mixed_result['postinstallPhaseCounts']['entry'], 1)
+        self.assertNotIn(SENTINEL, json.dumps(mixed_result))
+        wrong_order = copy.deepcopy(mixed_document)
+        wrong_order['selectedLines'][0]['anchors'].reverse()
+        with self.assertRaises(DATA.Refused): diagnose(wrong_order, mixed_selected)
+        # Each finite boundary is reached through the actual original validation,
+        # with the metadata digest genuinely rejoined before a selected mutation.
+        stage_vectors = [
+            ('metadata-schema', lambda d: d.update(kind='private-unknown')),
+            ('binding-schema', lambda d: d['binding'].update(extra=SENTINEL)),
+            ('binding-context', lambda d: d['binding'].update(runAttempt='99')),
+            ('binding-path', lambda d: d['binding'].update(packagePath='/private/other.pkg')),
+            ('captured-schema', lambda d: d.update(cursorSha256='c' * 64)),
+            ('log-identity', lambda d: d['identity'].update(links=2)),
+            ('interval', lambda d: d.update(intervalBytes=len(interval_body) + 1)),
+            ('row-list', lambda d: d.update(linesUnselected=0)),
+            ('selected-body-hash', lambda d: d['selectedData'].update(sha256='c' * 64)),
+            ('selector-catalog', lambda d: d['markerCounts'].update({'postinstall-phase': True})),
+            ('row-shape', lambda d: d['selectedLines'][0].update(extra=SENTINEL)),
+            ('row-bounds', lambda d: d['selectedLines'][0].update(retainedOffsetBytes=1)),
+            ('row-hash', lambda d: d['selectedLines'][0].update(sha256='c' * 64)),
+            ('row-anchors', lambda d: d['selectedLines'][0].update(anchors=['package-path'])),
+            ('count-correspondence', lambda d: d['markerCounts'].update({'postinstall-phase': 2})),
+            ('result-state', lambda d: d.update(resultMarkerState='unbound'))]
+        for expected, mutate in stage_vectors:
+            fresh = copy.deepcopy(metadata); mutate(fresh)
+            trace = {'nodes': 0, 'deadline': time.monotonic_ns() + 45_000_000_000}
+            with self.subTest(refusal_stage=expected), self.assertRaises(DATA.Refused):
+                diagnose(fresh, trace=trace)
+            self.assertEqual(trace['installerDiagnosticStage'], expected)
+        for expected, mutation in (
+            ('original-caller', lambda p, s, n, f: p.update(recordedPassed=True)),
+            ('preceding-originals', lambda p, s, n, f: n.update(correlationMatches=False)),
+            ('payload-originals', lambda p, s, n, f: n['originalCalls']['calls'][0].update(returncode=1)),
+            ('finalizer-caller', lambda p, s, n, f: f['callerStatus'].update(returncode=1)),
+            ('finalizer-receipt-hash', lambda p, s, n, f: f.update(receiptSha256='e' * 64)),
+            ('payload-acceptance', lambda p, s, n, f: n['payloadNotarization'].update(status='Invalid'))):
+            trace = {'nodes': 0, 'deadline': time.monotonic_ns() + 45_000_000_000}
+            with self.subTest(refusal_stage=expected), self.assertRaises(DATA.Refused):
+                diagnose(metadata, changed=mutation, trace=trace)
+            self.assertEqual(trace['installerDiagnosticStage'], expected)
         wrong_documents = []
         for key, replacement in (('state', 'unknown'), ('authority', SENTINEL), ('cursorSha256', 'c' * 64),
             ('resultMarkerState', 'unbound'), ('linesUnselected', 0), ('intervalBytes', len(interval_body) + 1),
@@ -1826,6 +1870,23 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         self.assertEqual(diagnose(unavailable, None)['captureState'], 'unavailable')
         self.assertFalse(diagnose(unavailable, None)['selectionOriginalAuthorized'])
 
+        for malformed in (b'{"x":1,"x":2}', b'\xff'):
+            body, current, phase, payload, finalized = observed_phases(metadata)
+            phase['originalCalls']['calls'][-1]['stdoutSha256'] = hashlib.sha256(malformed).hexdigest()
+            trace = {'nodes': 0, 'deadline': time.monotonic_ns() + 45_000_000_000}
+            with self.assertRaises(DATA.Refused):
+                DATA.project_installer_failure_diagnostic(malformed, selected_body, phase, statuses, CONTEXT,
+                    payload, finalized, trace)
+            self.assertEqual(trace['installerDiagnosticStage'], 'metadata-decode')
+        trace = {'nodes': 0, 'deadline': time.monotonic_ns() + 45_000_000_000}
+        with self.assertRaises(DATA.Refused):
+            diagnose(metadata, changed=lambda p, s, n, f: p['originalCalls']['calls'][-1].update(stdoutSha256='d' * 64), trace=trace)
+        self.assertEqual(trace['installerDiagnosticStage'], 'metadata-original-hash')
+        bad_unavailable = copy.deepcopy(unavailable); bad_unavailable['reason'] = SENTINEL
+        trace = {'nodes': 0, 'deadline': time.monotonic_ns() + 45_000_000_000}
+        with self.assertRaises(DATA.Refused): diagnose(bad_unavailable, None, trace=trace)
+        self.assertEqual(trace['installerDiagnosticStage'], 'capture-unavailable-schema')
+
         # Both fixed attempts are precharged and consume once even on absence.
         log_charge = 2 * (DATA.INSTALLER_DIAGNOSTIC_LIMIT + 1)
         reserved = {'files': 126, 'bytes': DATA.INPUT_LIMIT - log_charge, 'deadline': time.monotonic_ns() + 45_000_000_000}
@@ -1836,9 +1897,10 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             bad_budget = {'files': 126, 'bytes': DATA.INPUT_LIMIT - log_charge, 'deadline': time.monotonic_ns() + 45_000_000_000}
             bad_budget[key] += 1
             with self.assertRaises(DATA.Refused): DATA.reserve_installer_diagnostic_reads(bad_budget)
-        for scenario in ('valid', 'absent', 'partial', 'wrong-context', 'hash', 'wrong-status', 'linked', 'symlink', 'oversize'):
+        for scenario in ('valid', 'mixed', 'absent', 'partial', 'metadata-linked', 'metadata-symlink', 'wrong-context', 'hash', 'wrong-status', 'linked', 'symlink', 'oversize'):
             with self.subTest(installer=scenario), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory); body, current, phase, payload, finalized = observed_phases(metadata)
+                root = Path(directory); document, selected = (mixed_document, mixed_selected) if scenario == 'mixed' else (metadata, selected_body)
+                body, current, phase, payload, finalized = observed_phases(document)
                 if scenario == 'wrong-context': current['runAttempt'] = '99'
                 if scenario == 'hash': current['originalCalls'][-1]['stdoutSha256'] = 'f' * 64
                 original = write(root, 'android-helper-package-install.json', current)
@@ -1847,16 +1909,27 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 write(root, 'android-helper-finalize-package.json', final_bytes); write(root, 'package-finalization.status', b'0\n')
                 for name, scalar in statuses.items(): write(root, name, (str(scalar['returncode']) + '\n').encode())
                 if scenario == 'wrong-status': write(root, 'installer-output.status', b'0\n')
-                for name, content in zip(DATA.INSTALLER_DIAGNOSTIC_INPUTS, (body, selected_body)):
+                for name, content in zip(DATA.INSTALLER_DIAGNOSTIC_INPUTS, (body, selected)):
                     if scenario == 'absent' or scenario == 'partial' and name == 'installer-log-selected.txt': continue
                     if scenario == 'oversize' and name.endswith('.txt'): content = b'x' * (256 * 1024 + 1)
-                    if scenario == 'symlink' and name.endswith('.txt'):
+                    if scenario == 'symlink' and name.endswith('.txt') or scenario == 'metadata-symlink' and name.endswith('.json'):
                         private = write(root, 'private-installer-original', content); os.symlink(private.name, root / name)
                     else:
                         write(root, name, content)
-                        if scenario == 'linked' and name.endswith('.txt'): os.link(root / name, root / 'retained-installer-original')
+                        if scenario == 'linked' and name.endswith('.txt') or scenario == 'metadata-linked' and name.endswith('.json'):
+                            os.link(root / name, root / 'retained-installer-original')
                 before = original.read_bytes(); output = project(root); item = output['installerFailureDiagnostic']
-                self.assertEqual(item['receiptState'], 'observed' if scenario == 'valid' else 'absent' if scenario == 'absent' else 'refused')
+                self.assertEqual(item['receiptState'], 'observed' if scenario in ('valid', 'mixed') else 'absent' if scenario == 'absent' else 'refused')
+                if scenario in ('valid', 'mixed'):
+                    self.assertNotIn('refusalStage', item); self.assertNotIn('inputStates', item)
+                else:
+                    expected = 'metadata-original-read' if scenario in ('absent', 'metadata-linked', 'metadata-symlink') else \
+                        'original-caller' if scenario in ('wrong-context', 'wrong-status') else \
+                        'metadata-original-hash' if scenario == 'hash' else 'selected-body-hash'
+                    self.assertEqual(item['refusalStage'], expected)
+                    states = {'metadata': 'absent' if scenario == 'absent' else 'refused' if scenario in ('metadata-linked', 'metadata-symlink') else 'observed',
+                              'selected': 'absent' if scenario in ('absent', 'partial') else 'refused' if scenario in ('linked', 'symlink', 'oversize') else 'observed'}
+                    self.assertEqual(item['inputStates'], states)
                 self.assertFalse(output['productReady']); self.assertFalse(item['originalInstallerReturnedZero'])
                 self.assertEqual(original.read_bytes(), before)
                 self.assertNotIn(SENTINEL, json.dumps(output)); self.assertNotIn(str(root), json.dumps(output))
