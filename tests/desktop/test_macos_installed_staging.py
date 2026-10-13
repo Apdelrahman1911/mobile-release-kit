@@ -9115,12 +9115,27 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertNotEqual(fixture.signature_text, legacy_signature)
                 fixture.credentials.failure = failure
                 operation = fixture.operation
-                with self.final_package_fixture_call(fixture):
+                original_native = operation.owner.run_owned
+                signature_outputs = []
+                def post_staple_output(argv, **options):
+                    returned = original_native(argv, **options)
+                    role = operation.calls[-1]["role"]
+                    if role in ("final-package-signature-before", "final-package-signature-after"):
+                        self.assertEqual(returned.stdout, fixture.signature_text)
+                        signature_outputs.append(role)
+                    if role == "final-package-signature-after":
+                        returned = CompletedProcess(returned.args, returned.returncode,
+                            returned.stdout.replace(b'Signed with a trusted timestamp on:',
+                                b'Notarization: OPAQUE NONAUTHORITY DATA\nSigned with a trusted timestamp on:', 1), returned.stderr)
+                    return returned
+                with self.final_package_fixture_call(fixture), mock.patch.object(operation.owner, "run_owned", new=post_staple_output):
                     if failure is None:
                         operation.execute()
                     else:
                         with self.assertRaises(module.Refused):
                             operation.execute()
+                self.assertIs(operation.owner.run_owned, original_native)
+                self.assertEqual(signature_outputs, ["final-package-signature-before", "final-package-signature-after"] if failure is None else [])
                 originals = [row for row in operation.credential_calls if row["role"] == "installer-chain"]
                 self.assertEqual(len(originals), 1)
                 self.assertEqual(originals[0]["status"], 0 if failure is None else 1)
@@ -9144,6 +9159,39 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     for body in (legacy_signature, legacy_signature.replace(b'trusted by macOS', b'trusted by Mac OS X'),
                                  fixture.signature_text):
                         self.assertEqual(module.package_signature_data(body, selection, certificates, path), expected)
+                    # Only the post-staple caller can normalize one opaque row.
+                    for package in ("MobileReleaseKit.pkg", "Remove.pkg"):
+                        selected_path = path.with_name(package)
+                        plain = fixture.signature_text.replace(b'MobileReleaseKit.pkg', package.encode())
+                        for opaque in (b'OPAQUE NONAUTHORITY DATA', b'not accepted', b'x' * 128):
+                            row = b'Notarization: ' + opaque + b'\n'
+                            inserted = plain.replace(b'Signed with a trusted timestamp on:', row + b'Signed with a trusted timestamp on:', 1)
+                            self.assertEqual(module.package_signature_data(inserted, selection, certificates, selected_path, after_staple=True), expected)
+                            for flag in (False,):
+                                with self.assertRaises(module.Refused):
+                                    module.package_signature_data(inserted, selection, certificates, selected_path, after_staple=flag)
+                            with self.assertRaises(module.Refused):
+                                module.package_signature_data(inserted, selection, certificates, selected_path)
+                        self.assertEqual(module.package_signature_data(plain, selection, certificates, selected_path, after_staple=True), expected)
+                        for flag in (1, 0, None, "true"):
+                            with self.assertRaises(module.Refused):
+                                module.package_signature_data(plain, selection, certificates, selected_path, after_staple=flag)
+                        row = b'Notarization: OPAQUE NONAUTHORITY DATA\n'
+                        inserted = plain.replace(b'Signed with a trusted timestamp on:', row + b'Signed with a trusted timestamp on:', 1)
+                        bad_rows = (b'Notarization: \n', b'Notarization: ' + b'x' * 129 + b'\n',
+                            b'Notarization: DATA\t\n', b'\tNotarization: DATA\n', b'Notarization: DA\tTA\n',
+                            b'Notarization: DA\x00TA\n', b'Notarization: caf\xc3\xa9\n')
+                        damaged = [inserted.replace(row, bad, 1) for bad in bad_rows]
+                        damaged += [inserted + row, plain.replace(b'Status: ', row + b'Status: ', 1),
+                            plain.replace(b'Certificate Chain:', row + b'Certificate Chain:', 1), plain + row,
+                            inserted.replace(b'issued by Apple for distribution', b'issued by Apple for distribution untrusted'),
+                            inserted.replace(b'Signed with a trusted timestamp on: INERT DATA\n', b''),
+                            inserted.replace(selection["identityCommonName"].encode(), b'Developer ID Installer: FOREIGN (TEST000001)'),
+                            inserted.replace((' '.join(module.digest(certificates[1])[i:i + 2].upper() for i in range(0, 64, 2))).encode(), b'00 ' * 31 + b'00')]
+                        for value in damaged:
+                            self.assertNotEqual(value, inserted)
+                            with self.assertRaises(module.Refused):
+                                module.package_signature_data(value, selection, certificates, selected_path, after_staple=True)
                     fingerprint = ' '.join(module.digest(certificates[1])[i:i + 2].upper() for i in range(0, 64, 2)).encode()
                     for body in (fixture.signature_text.replace(b'issued by Apple for distribution', b'issued by Apple for Distribution'),
                                  fixture.signature_text.replace(b'issued by Apple for distribution', b'issued by Apple for distribution untrusted'),
@@ -15665,9 +15713,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # This exact helper is already in the readonly SOURCE closure. Inspect
         # its real caller without importing or invoking any operation owner.
         with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
-            helper_raw = original.read(542125 + 1)
+            helper_raw = original.read(542750 + 1)
             self.assertEqual(original.read(1), b"")
-        self.assertEqual(len(helper_raw), 542125)
+        self.assertEqual(len(helper_raw), 542750)
         helper_source = helper_raw.decode("utf-8", "strict")
         helper_tree = ast.parse(helper_source)
         helper_caps = [node.value for node in helper_tree.body

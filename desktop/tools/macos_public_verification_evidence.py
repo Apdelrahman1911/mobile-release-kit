@@ -1910,11 +1910,16 @@ def project_installer_failure_diagnostic(metadata_body, selected_body, phase, st
         "aclDiagnostics": acl_rows, "completedParentDiagnostic": parent}
 
 
-def read_input(root, name, limit, budget, *, package_signature_reserved=False, installer_diagnostic_reserved=False):
+def read_input(root, name, limit, budget, *, package_signature_reserved=False, installer_diagnostic_reserved=False, ordinary_ui_reserved=False):
     clock(budget)
-    need(type(package_signature_reserved) is bool and type(installer_diagnostic_reserved) is bool
-         and not (package_signature_reserved and installer_diagnostic_reserved))
-    if installer_diagnostic_reserved:
+    need(all(type(flag) is bool for flag in (package_signature_reserved, installer_diagnostic_reserved, ordinary_ui_reserved))
+         and sum((package_signature_reserved, installer_diagnostic_reserved, ordinary_ui_reserved)) <= 1)
+    if ordinary_ui_reserved:
+        need(limit == ORDINARY_UI_LIMIT and name in {row[1] for row in ORDINARY_UI_INPUTS})
+        reserved = budget.get("ordinaryUiReads")
+        need(type(reserved) is dict and reserved.get(name) is True)
+        reserved[name] = False
+    elif installer_diagnostic_reserved:
         need(limit == INSTALLER_DIAGNOSTIC_LIMIT and name in INSTALLER_DIAGNOSTIC_INPUTS)
         reserved = budget.get("installerDiagnosticReads")
         need(type(reserved) is dict and reserved.get(name) is True)
@@ -1946,7 +1951,7 @@ def read_input(root, name, limit, budget, *, package_signature_reserved=False, i
             before = os.fstat(fd)
             need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == os.geteuid()
                  and 0 < before.st_size <= limit)
-            if not (package_signature_reserved or installer_diagnostic_reserved):
+            if not (package_signature_reserved or installer_diagnostic_reserved or ordinary_ui_reserved):
                 budget["bytes"] += before.st_size + 1
             need(budget["bytes"] <= INPUT_LIMIT)
             body = os.pread(fd, before.st_size + 1, 0)
@@ -2257,7 +2262,359 @@ def project_ios_pending_recovery(facts, test, summary, context, statuses, phases
         "signedExportQualified": False, "fullUIQualified": False, "distributionQualified": False, "productReady": False}
 
 
-def positive_ui_observations(root, context, statuses, phases, inventory, budget):
+# Ordinary receipts are UI-only observations; their writers have separate finality.
+ORDINARY_UI_LIMIT = 16384
+ORDINARY_UI_OUTPUT_LIMIT = 8192
+ORDINARY_UI_COMMON = {'schemaVersion': 1,
+ 'workflow': '.github/workflows/desktop-macos-installed.yml',
+ 'cleanExitStatus': None,
+ 'allWorkerFinality': 'not-established-by-XCTest-UI-state',
+ 'fullUIQualified': False,
+ 'distributionQualified': False,
+ 'productReady': False}
+ORDINARY_UI_BINDINGS = ('applicationSourceCommit',
+ 'harnessSourceCommit',
+ 'sourceTree',
+ 'runId',
+ 'runAttempt',
+ 'target',
+ 'platform',
+ 'packageSha256',
+ 'packageSize',
+ 'runtimeManifestSha256',
+ 'installerInventorySha256',
+ 'normalBinaryBeforeSigningSha256',
+ 'signedAppBinarySha256')
+ORDINARY_UI_HASHES = ('generatedRunnerAdmissionSha256',
+ 'buildCommandAdmissionSha256',
+ 'summaryCommandAdmissionSha256',
+ 'nativeSummarySha256')
+# key, fixed path, count, methods, prerequisites, exact producer literals, extra fields
+ORDINARY_UI_INPUTS = (('launch',
+  'normal-ui/result.json',
+  1,
+  ('MRKNormalAppUITests/NormalAppUITests/testLaunchCancelAndQuit',),
+  (),
+  {'scope': 'normal-app-launch-cancel-navigation-quit-ui-only',
+   'sameOriginalApplicationTerminationAndGateClose': 'observed',
+   'ordinaryEntryPayloadPickerQuitAndGateExclusion': 'observed',
+   'gateProbeIsAuthentication': False,
+   'directPayloadPreMain': 'unqualified',
+   'fullM2Qualified': False,
+   'maintenanceQualified': False,
+   'originalCommandStatuses': {'build': 0, 'test': 0, 'summary': 0},
+   'testIdentifier': 'MRKNormalAppUITests/NormalAppUITests/testLaunchCancelAndQuit',
+   'launchRenderCancelNavigationQuitUI': 'passed',
+   'applicationStateAfterNormalQuit': 'notRunning'},
+  ('entryBundleIdentifier', 'payloadBundleIdentifier', 'signedEntryBinarySha256')),
+ ('project',
+  'normal-ui/project-result.json',
+  2,
+  ('MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages',
+   'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectPathFields'),
+  ('launch',),
+  {'scope': 'normal-app-project-config-workflows-text-version-images-ui',
+   'originalCommandStatuses': {'sharedBuild': 0, 'projectTest': 0, 'projectSummary': 0},
+   'testIdentifier': 'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages',
+   'testIdentifiers': ['MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages',
+                       'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectPathFields'],
+   'projectRelativeFieldBrowseUI': 'passed',
+   'fieldBrowseSavedConfiguration': False,
+   'androidToolSourceBrowseUI': 'passed',
+   'androidToolSourceBrowseTestIdentifier': 'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectPathFields',
+   'androidToolSourceBrowseScope': 'selection-only-three-roles-native-cancel-reselect-backend-source-refused',
+   'supplierInspectionQualified': False,
+   'protectedToolCopyQualified': False,
+   'androidBuildQualified': False,
+   'localProjectEditsAndImagesUI': 'passed',
+   'applicationStateAfterNormalQuit': 'notRunning'},
+  ()),
+ ('persistence',
+  'normal-ui/persistence-result.json',
+  1,
+  ('MRKNormalAppUITests/NormalAppUITests/testSyntheticPersistentCredentials',),
+  ('launch',),
+  {'scope': 'normal-app-synthetic-persistent-credentials-ui',
+   'originalCommandStatuses': {'sharedBuild': 0, 'persistenceTest': 0, 'persistenceSummary': 0},
+   'testIdentifier': 'MRKNormalAppUITests/NormalAppUITests/testSyntheticPersistentCredentials',
+   'normalPersistenceSelected': True,
+   'syntheticPersistenceCRUDUI': 'passed',
+   'applicationStateAfterNormalQuit': 'notRunning',
+   'applicationRestart': 'passed',
+   'ordinaryApplicationLifetimes': 2,
+   'originalReferenceAndGateTerminalObserved': True,
+   'signingOrStoreValidated': False},
+  ('vaultHelperBytes', 'vaultHelperSha256')),
+ ('diagnostics',
+  'normal-ui/diagnostics-result.json',
+  1,
+  ('MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectBuildToolDiagnostics',),
+  ('launch', 'project', 'persistence'),
+  {'scope': 'ordinary-ui-observed-original-diagnostics-report-and-settled-projection',
+   'originalCommandStatuses': {'sharedBuild': 0,
+                               'diagnosticsTestFileLimit': 0,
+                               'diagnosticsTestFileBudget': 0,
+                               'diagnosticsTest': 0,
+                               'diagnosticsSummary': 0},
+   'testIdentifier': 'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectBuildToolDiagnostics',
+   'diagnosticsReportAndSettledProjectionUI': 'passed',
+   'originalStartProvenance': 'acknowledged-current-context',
+   'diagnosticsPlatform': 'android',
+   'diagnosticsCoreHost': 'macos',
+   'coreOutcomeObserved': 'complete',
+   'coreCommandsAttemptedAssertion': 'one-through-four',
+   'nativeProjectionObserved': {'phase': 'settled', 'finality': 'settled'},
+   'applicationStateAfterNormalQuit': 'notRunning',
+   'independentOwnerResourceProof': False,
+   'fullDoctorExecuted': False,
+   'offlinePreflightExecuted': False,
+   'projectRecoveryExecuted': False,
+   'allToolVersionsMatched': None,
+   'releaseReadinessEstablished': False},
+  ('fileBudgetSha256', 'priorResultSha256', 'safeFactsSha256')),
+ ('savedChecks',
+  'normal-ui/saved-checks-result.json',
+  2,
+  ('MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedOfflineChecks',
+   'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectEmptyBuildInputInspection'),
+  ('launch', 'project', 'persistence', 'diagnostics'),
+  {'scope': 'ordinary-ui-observed-saved-offline-and-empty-build-input-inspection',
+   'originalCommandStatuses': {'sharedBuild': 0,
+                               'savedChecksTestFileLimit': 0,
+                               'savedChecksTestFileBudget': 0,
+                               'savedChecksTest': 0,
+                               'savedChecksSummary': 0},
+   'testIdentifiers': ['MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedOfflineChecks',
+                       'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectEmptyBuildInputInspection'],
+   'journeys': {'savedOfflineChecks': {'testIdentifier': 'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedOfflineChecks',
+                                       'scope': 'ordinary-ui-observed-saved-offline-report-and-settled-projection',
+                                       'savedOfflineReportAndSettledProjectionUI': 'passed',
+                                       'originalStartProvenance': 'acknowledged-current-saved-config',
+                                       'coreOutcomeObserved': 'complete',
+                                       'negativeFindingsAssertion': {'missingAtLeast': 2,
+                                                                     'skippedAtLeast': 1,
+                                                                     'moduleWrapperAndEarlyExitObserved': True},
+                                       'nativeProjectionObserved': {'phase': 'settled',
+                                                                    'finality': 'settled'},
+                                       'fixtureReadback': 'unchanged-before-and-after-normal-quit',
+                                       'applicationStateAfterNormalQuit': 'notRunning'},
+                'emptyBuildInputInspection': {'testIdentifier': 'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectEmptyBuildInputInspection',
+                                              'scope': 'ordinary-ui-observed-empty-build-input-inspection-and-settled-projection',
+                                              'emptyBuildInputInspectionAndSettledProjectionUI': 'passed',
+                                              'coreOutcomeObserved': 'complete',
+                                              'inspectionStatusObserved': 'idle',
+                                              'nativeProjectionObserved': {'phase': 'settled',
+                                                                           'finality': 'settled'},
+                                              'mutationRecoveryExecuted': False,
+                                              'projectCleanlinessEstablished': False,
+                                              'fixtureReadback': 'unchanged-before-and-after-normal-quit',
+                                              'applicationStateAfterNormalQuit': 'notRunning'}},
+   'applicationStateAfterBothNormalQuits': 'notRunning',
+   'independentOwnerResourceProof': False,
+   'fullDoctorExecuted': False,
+   'offlinePreflightExecuted': True,
+   'projectRecoveryInspectionExecuted': True,
+   'mutationRecoveryExecuted': False,
+   'zeroCommandEvidence': False,
+   'networkIsolationEstablished': False,
+   'releaseReadinessEstablished': False},
+  ('fileBudgetSha256', 'priorResultSha256', 'safeFactsSha256')),
+ ('workflowRefusal',
+  'normal-ui/workflow-refusal-result.json',
+  1,
+  ('MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectManagedWorkflowRefusal',),
+  ('diagnostics',),
+  {'applicationStateAfterNormalQuit': 'notRunning',
+   'originalReferenceAndGateTerminalObserved': True,
+   'independentOwnerResourceProof': False,
+   'savedOfflineAndEmptyBuildInputCohortObserved': False,
+   'scope': 'ordinary-ui-observed-original-managed-workflow-refusal',
+   'managedWorkflowRefusalUI': 'passed',
+   'managedWorkflowBundleRefused': True,
+   'fixtureOriginalsPreserved': True,
+   'workflowMutationObserved': False,
+   'remoteGitHubOperationObserved': False,
+   'releasePromotionObserved': False,
+   'coreOutcomeObserved': {'effect': 'not_started', 'journal': 'not_created', 'resources': 'settled'},
+   'nativeProjectionObserved': {'finality': 'settled'},
+   'testIdentifier': 'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectManagedWorkflowRefusal',
+   'selectedSavedFileScope': 'workflow-refusal'},
+  ('priorResultSha256',)),
+ ('releaseEvidence',
+  'normal-ui/release-evidence-result.json',
+  1,
+  ('MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedReleaseEvidence',),
+  ('diagnostics',),
+  {'applicationStateAfterNormalQuit': 'notRunning',
+   'originalReferenceAndGateTerminalObserved': True,
+   'independentOwnerResourceProof': False,
+   'savedOfflineAndEmptyBuildInputCohortObserved': False,
+   'scope': 'ordinary-ui-observed-original-saved-release-evidence-documents-only',
+   'savedReleaseEvidenceUI': 'passed',
+   'nativeEvidencePickerObserved': True,
+   'candidateDocumentsAgreeObserved': True,
+   'sharedCandidateGuidanceObserved': True,
+   'stageChangeRetainsCandidateObserved': True,
+   'replacementCancelStaleObserved': True,
+   'releaseInputsUnpopulatedObserved': True,
+   'fixtureOriginalsPreserved': True,
+   'remoteGitHubOperationObserved': False,
+   'releasePromotionObserved': False,
+   'artifactBytesVerified': False,
+   'signingAuthenticated': False,
+   'githubAuthenticityEstablished': False,
+   'storeStateEstablished': False,
+   'releaseReadinessEstablished': False,
+   'recoverySafetyEstablished': False,
+   'testIdentifier': 'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedReleaseEvidence',
+   'selectedSavedFileScope': 'release-evidence'},
+  ('priorResultSha256',)),
+ ('savedVersion',
+  'normal-ui/saved-version-recovery-result.json',
+  1,
+  ('MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedVersionRecovery',),
+  ('diagnostics',),
+  {'applicationStateAfterNormalQuit': 'notRunning',
+   'originalReferenceAndGateTerminalObserved': True,
+   'independentOwnerResourceProof': False,
+   'savedOfflineAndEmptyBuildInputCohortObserved': False,
+   'scope': 'ordinary-ui-observed-original-saved-version-rollback-and-fresh-load',
+   'savedVersionRecoveryUI': 'passed',
+   'coreOutcomeObserved': {'effect': 'rolled_back',
+                           'journal': 'clean',
+                           'resources': 'settled',
+                           'reason': 'none'},
+   'nativeProjectionObserved': {'finality': 'settled', 'reason': 'none'},
+   'freshSavedVersionObserved': {'name': '1.2.3', 'build': '7'},
+   'inspectionClosedWithoutApply': True,
+   'explicitFreshRecoveryConfirmation': True,
+   'interruptedGuiSaveObserved': False,
+   'configurationTextImagesRecoveryObserved': False,
+   'testIdentifier': 'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedVersionRecovery',
+   'selectedSavedFileScope': 'saved-version-recovery'},
+  ('priorResultSha256', 'savedVersionRecovery')))
+
+
+def reserve_ordinary_ui_reads(budget):
+    clock(budget)
+    need("ordinaryUiReads" not in budget)
+    charge = len(ORDINARY_UI_INPUTS) * (ORDINARY_UI_LIMIT + 1)
+    need(budget["files"] + len(ORDINARY_UI_INPUTS) <= 128
+         and budget["bytes"] + charge <= INPUT_LIMIT
+         and budget["outputBytes"] + ORDINARY_UI_OUTPUT_LIMIT <= OUTPUT_LIMIT)
+    budget["files"] += len(ORDINARY_UI_INPUTS)
+    budget["bytes"] += charge
+    budget["outputBytes"] += ORDINARY_UI_OUTPUT_LIMIT
+    budget["ordinaryUiOutputReserved"] = True
+    budget["ordinaryUiReads"] = {row[1]: True for row in ORDINARY_UI_INPUTS}
+
+
+def ordinary_ui_literal(value, expected):
+    # Exact finite producer literals, including nested bool/int distinctions.
+    if type(expected) is dict:
+        positive_ui_fixed(value, {}, expected)
+        for key, item in expected.items(): ordinary_ui_literal(value[key], item)
+    elif type(expected) is list:
+        need(type(value) is list and len(value) == len(expected))
+        for item, fixed in zip(value, expected): ordinary_ui_literal(item, fixed)
+    else:
+        need(type(value) is type(expected) and value == expected)
+
+
+def ordinary_ui_result(value, definition, context, statuses, phases, inventory, preview, prior, build_admission):
+    key, _path, count, methods, prerequisites, fixed, extra = definition
+    need(context["profile"] == "installed" and context["workflowSource"] == context["source"]
+         and inventory.get("receiptState") == "observed" and preview.get("receiptState") == "observed"
+         and preview.get("sourceTree") == inventory["tree"])
+    installed = phases.get("package-install", {})
+    need(installed.get("receiptState") == "observed" and installed.get("correlationMatches") is True
+         and installed.get("recordedPassed") is True and installed.get("originalClosesKnown") is True
+         and installed.get("targetRetired") is True)
+    role = {"launch": None, "savedChecks": "saved-checks", "savedVersion": "saved-version-recovery",
+            "workflowRefusal": "workflow-refusal", "releaseEvidence": "release-evidence"}.get(key, key)
+    required = ("package-install.status", "normal-ui/build.status") + (
+        ("normal-ui/test.status", "normal-ui/summary.status") if role is None else
+        ("normal-ui/" + role + "-test.status", "normal-ui/" + role + "-summary.status"))
+    for name in required: positive_ui_fixed(statuses.get(name), {"receiptState": "observed", "returncode": 0})
+    bindings = dict(applicationSourceCommit=context["source"], harnessSourceCommit=context["source"],
+        sourceTree=inventory["tree"], runId=context["runId"], runAttempt=context["runAttempt"], target=context["target"],
+        platform="macOS26-arm64" if context["target"] == TARGETS[0] else "macOS26-x86_64")
+    for name in ORDINARY_UI_BINDINGS[7:]:
+        bindings[name] = integer(preview.get(name), 2**40, 1) if name == "packageSize" else hex_value(preview.get(name))
+    expected = dict(ORDINARY_UI_COMMON, **fixed, **bindings)
+    positive_ui_fixed(value, {}, set(expected) | set(ORDINARY_UI_HASHES) | {"toolchain", "testCounts"} | set(extra))
+    for name, item in expected.items(): ordinary_ui_literal(value[name], item)
+    ordinary_ui_literal(value["testCounts"], dict(POSITIVE_UI_COUNTS, totalTestCount=count, passedTests=count))
+    hashes = {name: hex_value(value[name]) for name in ORDINARY_UI_HASHES}
+    toolchain = value["toolchain"]
+    positive_ui_fixed(toolchain, {}, ("xcode", "sdkPath", "sdkVersion", "sdkBuild"))
+    need(all(type(item) is str and 0 < len(item) <= 4096 and item.isascii() for item in toolchain.values()))
+    need(all(prior.get(name, {}).get("receiptState") == "observed" for name in prerequisites))
+    need(build_admission is None or hashes["buildCommandAdmissionSha256"] == build_admission)
+    if key in ("diagnostics", "savedChecks"):
+        ordinary_ui_literal(value["priorResultSha256"], {next(row[1].split("/")[-1] for row in ORDINARY_UI_INPUTS if row[0] == name): prior[name]["resultSha256"] for name in prerequisites})
+        for name in ("fileBudgetSha256", "safeFactsSha256"): hex_value(value[name])
+    elif key in ("workflowRefusal", "releaseEvidence", "savedVersion"):
+        need(hex_value(value["priorResultSha256"]) == prior["diagnostics"]["resultSha256"])
+    if key == "launch":
+        hex_value(value["signedEntryBinarySha256"])
+        need(value["signedEntryBinarySha256"] == hex_value(preview.get("signedEntryBinarySha256"))
+             and value["entryBundleIdentifier"] == "dev.mobile-release-kit.desktop.entry"
+             and value["payloadBundleIdentifier"] == "dev.mobile-release-kit.desktop")
+    if key == "persistence":
+        hex_value(value["vaultHelperSha256"]); integer(value["vaultHelperBytes"], 32 * 1024 * 1024, 1)
+    recovery = None
+    if key == "savedVersion":
+        recovery = value["savedVersionRecovery"]
+        digests = ("sourceInputsSha256", "runtimeManifestSha256", "runtimeResultSha256", "sourceClosureSha256",
+            "fixtureDataSha256", "producerSha256", "producerFramesSha256", "handoffSha256")
+        positives = ("originalFixtureRestored", "unrelatedOriginalsUnchanged", "readyJournalRemoved",
+            "sourcePrePostMatched", "uiOriginalMarkersObserved", "originalClosesCompleted")
+        expected_recovery = dict.fromkeys(positives, True)
+        expected_recovery.update(producerReturncode=86, publicOriginalCount=13, readyJournalFileCount=6,
+                                 interruptedGuiSaveObserved=False)
+        positive_ui_fixed(recovery, {}, set(digests) | set(expected_recovery))
+        for name in digests: hex_value(recovery[name])
+        for name, item in expected_recovery.items(): ordinary_ui_literal(recovery[name], item)
+        need(recovery["runtimeManifestSha256"] == bindings["runtimeManifestSha256"])
+    result = {"receiptState": "observed", "scope": fixed["scope"], "testIdentifiers": list(methods),
+        "testCounts": [value["testCounts"][name] for name in POSITIVE_UI_COUNTS], "admissionSha256": [hashes[name] for name in
+            ("generatedRunnerAdmissionSha256", "summaryCommandAdmissionSha256", "nativeSummarySha256")],
+        "resultWriterFinalityEstablished": False, "cleanExitStatus": None,
+        "allWorkerFinality": "not-established-by-XCTest-UI-state", "nativeSuccessInferred": False,
+        "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+    if "originalCommandStatuses" in value: result["originalCommandStatuses"] = dict(value["originalCommandStatuses"])
+    if recovery is not None:
+        result["producerReturncode"] = recovery["producerReturncode"]
+        result["recordedOriginalClosesCompleted"] = True
+    return result, bindings, hashes["buildCommandAdmissionSha256"]
+
+
+def ordinary_ui_observations(root, context, statuses, phases, inventory, preview, budget):
+    if "ordinaryUiReads" not in budget: reserve_ordinary_ui_reads(budget)
+    rows, bindings, build_admission = {}, None, None
+    for definition in ORDINARY_UI_INPUTS:
+        key, path = definition[:2]
+        try:
+            body = read_input(root, path, ORDINARY_UI_LIMIT, budget, ordinary_ui_reserved=True)
+            document = decode(body, budget)
+            row, current_bindings, current_build = ordinary_ui_result(document, definition, context, statuses, phases, inventory, preview, rows, build_admission)
+            row.update(resultSha256=hashlib.sha256(body).hexdigest(), resultBytes=len(body))
+            if bindings is None: bindings, build_admission = current_bindings, current_build
+            else: need(current_bindings == bindings)
+            rows[key] = row
+            del body, document
+        except FileNotFoundError: rows[key] = {"receiptState": "absent"}
+        except Refused: rows[key] = {"receiptState": "refused"}
+    result = {"receiptState": "absent" if all(row["receiptState"] == "absent" for row in rows.values()) else "recorded",
+        "results": rows, "binding": bindings, "buildCommandAdmissionSha256": build_admission,
+        "testCountOrder": list(POSITIVE_UI_COUNTS), "admissionHashOrder":
+        ["generatedRunnerAdmissionSha256", "summaryCommandAdmissionSha256", "nativeSummarySha256"]}
+    need(len(json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=True)) <= ORDINARY_UI_OUTPUT_LIMIT)
+    return result
+
+
+def positive_ui_observations(root, context, statuses, phases, inventory, budget, deliveries=None):
     inputs = {}
     for key, path, limit, admission in POSITIVE_UI_INPUTS:
         try:
@@ -2282,7 +2639,13 @@ def positive_ui_observations(root, context, statuses, phases, inventory, budget)
             result[name] = projector(*values, context, statuses, phases, inventory)
         except Refused:
             result[name] = {"receiptState": "refused"}
+    result["ordinary"] = ordinary_ui_observations(root, context, statuses, phases, inventory,
+        (deliveries or {}).get("preview", {}), budget)
     size = len(json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    need(budget.get("ordinaryUiOutputReserved") is True
+         and budget["outputBytes"] >= ORDINARY_UI_OUTPUT_LIMIT)
+    budget["ordinaryUiOutputReserved"] = False  # Consume once, never reusable after refusal.
+    budget["outputBytes"] -= ORDINARY_UI_OUTPUT_LIMIT
     need(size <= 16384 and budget["outputBytes"] + size <= OUTPUT_LIMIT)
     budget["outputBytes"] += size
     return result
@@ -2327,11 +2690,12 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
          and len(set(STATUS_FILES)) == len(STATUS_FILES))
     # All fixed attempts count, including absent originals, before any read.
     need(len(STATUS_FILES) + len(PHASES) + 4 + len(PACKAGE_SIGNATURE_CAPTURES) + len(INSTALLER_DIAGNOSTIC_INPUTS)
-         + (len(UI_DIAGNOSTICS) + 6 + len(POSITIVE_UI_INPUTS) if profile == "installed" else 0) <= 128)
+         + (len(UI_DIAGNOSTICS) + 6 + len(POSITIVE_UI_INPUTS) + len(ORDINARY_UI_INPUTS) if profile == "installed" else 0) <= 128)
     budget = {"deadline": time.monotonic_ns() + 45_000_000_000, "files": 0, "bytes": 0, "nodes": 0,
               "outputBytes": 16384}  # Reserve the fixed roster keys/envelope/caller-status duplicates.
     reserve_package_signature_reads(budget)
     reserve_installer_diagnostic_reads(budget)
+    if profile == "installed": reserve_ordinary_ui_reads(budget)
     root = open_root(work)
     try:
         root_id = directory_identity(os.fstat(root))
@@ -2457,7 +2821,7 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
                  "installerFailureDiagnostic": installer_diagnostic,
                  "dataContractFailure": data_failure, "buildSettingsDiagnostic": settings_diagnostic, "appAbsence": app_absence, "positiveUpdate": update}
         if profile == "installed":
-            value["positiveUiObservations"] = positive_ui_observations(root, context, statuses, phases, inventory, budget)
+            value["positiveUiObservations"] = positive_ui_observations(root, context, statuses, phases, inventory, budget, deliveries)
         body = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
         need(len(body) <= OUTPUT_LIMIT and directory_identity(os.fstat(root)) == root_id
              == directory_identity(os.stat(work, follow_symlinks=False)))

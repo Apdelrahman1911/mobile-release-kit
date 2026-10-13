@@ -1,11 +1,10 @@
 import type { ReactNode } from 'react';
-import type { AppInfo, HelpContent } from '../types.ts';
+import type { HelpContent } from '../types.ts';
 import type { RetainedEditAttention } from '../drafts.ts';
-import { futureReason } from '../certainty.ts';
-import { DisabledAction, EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
+import { EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
 
-export function Releases({ info, offlineChecks, androidBuild, iosArchive, evidence, protectedWorkflows }: { info: AppInfo | null; offlineChecks: ReactNode; androidBuild: ReactNode; iosArchive: ReactNode; evidence: ReactNode; protectedWorkflows?: ReactNode }) {
+export function Releases({ offlineChecks, androidBuild, iosArchive, evidence, protectedWorkflows, onOpenGitHub }: { offlineChecks: ReactNode; androidBuild: ReactNode; iosArchive: ReactNode; evidence: ReactNode; protectedWorkflows?: ReactNode; onOpenGitHub: () => void }) {
   return <>
     <PageHeading eyebrow="RELEASES" title="One candidate. A traceable journey." description="Inspect saved release documents, review local checks, and separately prepare a protected release workflow when its installed runtime is qualified." />
     {protectedWorkflows}
@@ -13,7 +12,7 @@ export function Releases({ info, offlineChecks, androidBuild, iosArchive, eviden
     {offlineChecks}
     {androidBuild}
     {iosArchive}
-    <section className="card"><EmptyState icon="rocket" title="Authenticated release history is not loaded" description="A selected local folder is not authenticated or global history. Missing desktop records do not mean the project has never released."><DisabledAction label="Load authenticated release history" icon="rocket" reason={futureReason(info?.capabilities, 'release.history', 'Remote authenticated artifact history is not implemented. A workflow observation or a selected local folder is not authentication.')} /></EmptyState></section>
+    <section className="card"><EmptyState icon="github" title="Read authenticated release history in GitHub" description="Open GitHub to connect the original project and choose one exact run, attempt, stage and platform. An authenticated read requires a qualified native runtime and a separate explicit Start. Missing evidence does not prove that no release happened; retained workflow evidence is not current Store state."><button type="button" className="button secondary" onClick={onOpenGitHub}>Open authenticated History in GitHub</button></EmptyState></section>
   </>;
 }
 

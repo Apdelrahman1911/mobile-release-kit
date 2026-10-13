@@ -30,8 +30,93 @@ fn main() { eprintln!("This Installer requires LP64 ARM64 or Intel macOS 26."); 
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 fn main() { std::process::exit(installer::run()); }
 
+// DATA classification only: the live caller supplies the SAME original fstat
+// scalars and platform type bits. No paths, calls, output or authority here.
+mod protection_data {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Role { InputDirectory, InputInventory, ScriptRoot, SelfImage, Other }
+    pub(crate) const LABELS: [[&str; 6]; 5] = [
+        ["protection-input-directory-kind", "protection-input-directory-owner", "protection-input-directory-writable-special", "protection-input-directory-links", "protection-input-directory-expected-group", "protection-input-directory-expected-mode"],
+        ["protection-input-inventory-kind", "protection-input-inventory-owner", "protection-input-inventory-writable-special", "protection-input-inventory-links", "protection-input-inventory-expected-group", "protection-input-inventory-expected-mode"],
+        ["protection-script-root-kind", "protection-script-root-owner", "protection-script-root-writable-special", "protection-script-root-links", "protection-script-root-expected-group", "protection-script-root-expected-mode"],
+        ["protection-self-image-kind", "protection-self-image-owner", "protection-self-image-writable-special", "protection-self-image-links", "protection-self-image-expected-group", "protection-self-image-expected-mode"],
+        ["protection-other-kind", "protection-other-owner", "protection-other-writable-special", "protection-other-links", "protection-other-expected-group", "protection-other-expected-mode"],
+    ];
+    #[derive(Clone, Copy)]
+    pub(crate) struct Observation { pub mode: u32, pub uid: u32, pub gid: u32, pub links: u64 }
+    pub(crate) fn refusal(role: Role, observed: Observation, directory: bool, expected_mode: Option<u32>,
+        kind_mask: u32, expected_kind: u32) -> Option<&'static str> {
+        let condition = if observed.mode & kind_mask != expected_kind { 0 }
+            else if observed.uid != 0 { 1 }
+            else if observed.mode & 0o7022 != 0 { 2 }
+            else if !directory && observed.links != 1 { 3 }
+            else if expected_mode.is_some() && observed.gid != 0 { 4 }
+            else if expected_mode.is_some_and(|mode| observed.mode & 0o7777 != mode) { 5 }
+            else { return None; };
+        let row = match role { Role::InputDirectory => 0, Role::InputInventory => 1,
+            Role::ScriptRoot => 2, Role::SelfImage => 3, Role::Other => 4 };
+        Some(LABELS[row][condition])
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn exact_original_conjunction_precedence_and_finite_labels() {
+            let roles = [Role::InputDirectory, Role::InputInventory, Role::ScriptRoot, Role::SelfImage, Role::Other];
+            let mut unique = std::collections::BTreeSet::new();
+            for row in LABELS { for label in row {
+                assert!(label.is_ascii() && label.len() <= 64 && label.starts_with("protection-"));
+                assert!(label.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'));
+                assert!(unique.insert(label));
+            } }
+            assert_eq!(unique.len(), 30);
+            // Every permission/special-bit combination, ordinary and wrong
+            // types, directory exemption, owner/group, optional exact modes,
+            // hardlink refusal and multiple simultaneous failures.
+            for permissions in 0..=0o7777u32 {
+                for kind in [0, 0o040000, 0o100000, 0o120000] {
+                    let mode = kind | permissions;
+                    for uid in [0, 1] { for gid in [0, 1] { for links in [0, 1, 2, u64::MAX] {
+                        for directory in [false, true] { for expected in [None, Some(0o444), Some(0o555), Some(0o755), Some(u32::MAX)] {
+                            let expected_kind = if directory { 0o040000 } else { 0o100000 };
+                            let observed = Observation { mode, uid, gid, links };
+                            let original = mode & 0o170000 == expected_kind && uid == 0
+                                && mode & 0o7022 == 0 && (directory || links == 1)
+                                && expected.is_none_or(|mode_expected| gid == 0 && mode & 0o7777 == mode_expected);
+                            let actual = refusal(Role::Other, observed, directory, expected, 0o170000, expected_kind);
+                            assert_eq!(actual.is_none(), original);
+                            let condition = [mode & 0o170000 != expected_kind, uid != 0, mode & 0o7022 != 0,
+                                !directory && links != 1, expected.is_some() && gid != 0,
+                                expected.is_some_and(|value| mode & 0o7777 != value)].iter().position(|failed| *failed);
+                            assert_eq!(actual, condition.map(|n| LABELS[4][n]));
+                        } }
+                    } } }
+                }
+            }
+            // Each compile-time role routes every fixed condition distinctly.
+            let failed = [
+                Observation { mode: 0o040555, uid: 0, gid: 0, links: 1 },
+                Observation { mode: 0o100555, uid: 1, gid: 0, links: 1 },
+                Observation { mode: 0o100557, uid: 0, gid: 0, links: 1 },
+                Observation { mode: 0o100555, uid: 0, gid: 0, links: 2 },
+                Observation { mode: 0o100555, uid: 0, gid: 1, links: 1 },
+                Observation { mode: 0o100444, uid: 0, gid: 0, links: 1 },
+            ];
+            for (row, role) in roles.into_iter().enumerate() { for (condition, observed) in failed.into_iter().enumerate() {
+                assert_eq!(refusal(role, observed, false, Some(0o555), 0o170000, 0o100000), Some(LABELS[row][condition]));
+            } }
+            // Extreme DATA cannot leak into the result or gain acceptance.
+            for role in roles {
+                let observed = Observation { mode: u32::MAX, uid: u32::MAX, gid: u32::MAX, links: u64::MAX };
+                assert!(unique.contains(refusal(role, observed, false, Some(u32::MAX), 0o170000, 0o100000).unwrap()));
+            }
+        }
+    }
+}
+
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 mod installer {
+    use crate::protection_data::{self, Observation as ProtectionObservation, Role as ProtectionRole};
     use std::{collections::{BTreeMap, BTreeSet}, os::fd::{AsFd, AsRawFd, OwnedFd}, path::Path, time::{Duration, Instant}};
     use nix::{errno::Errno, fcntl::{self, AtFlags, OFlag}, mount::MntFlags,
         sys::{stat::{self, FileStat, Mode, SFlag}, statfs}, unistd};
@@ -561,13 +646,19 @@ mod installer {
             self.protected_as(n, directory, mode, AclRole::Other)
         }
         fn protected_as(&self, n: usize, directory: bool, mode: Option<u32>, role: AclRole) -> Result<()> {
+            let protection_role = match role { AclRole::InputDirectory => ProtectionRole::InputDirectory,
+                AclRole::InputInventory => ProtectionRole::InputInventory, _ => ProtectionRole::Other };
+            self.protected_as_role(n, directory, mode, role, protection_role)
+        }
+        fn protected_as_role(&self, n: usize, directory: bool, mode: Option<u32>, role: AclRole,
+            protection_role: ProtectionRole) -> Result<()> {
             let fd = self.fd(n)?; let s = stat::fstat(fd).map_err(|_| "stat-refused")?;
             let kind = if directory { SFlag::S_IFDIR } else { SFlag::S_IFREG };
             // Existing system ancestors may have a non-wheel root-owned group.
             // They must never be writable by that group, or chmod'ed to pass.
-            check(s.st_mode & SFlag::S_IFMT.bits() == kind.bits() && s.st_uid == 0
-                && s.st_mode & 0o7022 == 0 && (directory || s.st_nlink == 1)
-                && mode.is_none_or(|mode| s.st_gid == 0 && u32::from(s.st_mode) & 0o7777 == mode), "protection-refused")?;
+            if let Some(reason) = protection_data::refusal(protection_role, ProtectionObservation {
+                mode: u32::from(s.st_mode), uid: s.st_uid, gid: s.st_gid, links: u64::from(s.st_nlink),
+            }, directory, mode, u32::from(SFlag::S_IFMT.bits()), u32::from(kind.bits())) { return Err(reason); }
             let fs = statfs::fstatfs(fd).map_err(|_| "mount-refused")?;
             check(fs.filesystem_type_name() == "apfs" && fs.flags().contains(MntFlags::MNT_LOCAL)
                 && !fs.flags().intersects(MntFlags::MNT_UNION | MntFlags::MNT_AUTOMOUNTED | MntFlags::MNT_IGNORE_OWNERSHIP), "mount-refused")?;
@@ -11630,14 +11721,14 @@ mod installer {
                 self.clock()?;
                 let script = self.originals.get(input).and_then(|r| r.parent).ok_or("worker-script-parent")?;
                 check(self.originals[input].name == "input", "worker-script-input")?;
-                self.protected(script, true, Some(0o755))?;
+                self.protected_as_role(script, true, Some(0o755), AclRole::Other, ProtectionRole::ScriptRoot)?;
                 native::no_xattrs(self.fd(script)?.as_fd()).map_err(|_| "worker-script-attributes")?;
                 let directory = source.strip_suffix("/input").filter(|s| !s.is_empty()).ok_or("worker-script-input")?;
                 let executable = format!("{directory}/mrk-macos-install");
                 let actual = std::env::current_exe().map_err(|_| "worker-self-image")?;
                 check(actual.as_os_str() == std::ffi::OsStr::new(&executable), "worker-self-image")?;
                 let image = self.open(Some(script), "mrk-macos-install", false)?;
-                self.protected(image, false, Some(0o555))?;
+                self.protected_as_role(image, false, Some(0o555), AclRole::Other, ProtectionRole::SelfImage)?;
                 native::no_xattrs(self.fd(image)?.as_fd()).map_err(|_| "worker-self-attributes")?;
                 let size = u64::try_from(self.identity(image)?.size).map_err(|_| "worker-self-bound")?;
                 check(size > 0 && size <= SELF_LIMIT, "worker-self-bound")?;
@@ -11647,9 +11738,9 @@ mod installer {
             fn source_post(&self, source: &Source) -> Result<()> {
                 self.clock()?;
                 for index in [source.script,source.image,source.input] { self.check_name(index, true)?; }
-                self.protected(source.script, true, Some(0o755))?;
-                self.protected(source.image, false, Some(0o555))?;
-                self.protected(source.input, true, Some(0o555))?;
+                self.protected_as_role(source.script, true, Some(0o755), AclRole::Other, ProtectionRole::ScriptRoot)?;
+                self.protected_as_role(source.image, false, Some(0o555), AclRole::Other, ProtectionRole::SelfImage)?;
+                self.protected_as_role(source.input, true, Some(0o555), AclRole::Other, ProtectionRole::InputDirectory)?;
                 self.clock()
             }
         }
@@ -11743,7 +11834,8 @@ mod installer {
             "write-zero-or-bound", "writer-finality",
         ];
         fn closed_reason(label: &str) -> &'static str {
-            FAILURE_LABELS.iter().copied().find(|known| *known == label).unwrap_or("other-original-refusal")
+            FAILURE_LABELS.iter().copied().chain(protection_data::LABELS.iter().flatten().copied())
+                .find(|known| *known == label).unwrap_or("other-original-refusal")
         }
         fn outcome_data(exit: i32, state: &str, originals: bool, payload: bool, verified: bool,
             runtime: &str, app: &str, timely: bool, unknown: bool, writes: u64, bytes: u64) -> bool {
@@ -20260,6 +20352,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let mut private = data.clone(); private["reason"] = json!("/private/unexpected/value");
                 assert!(PreExit::parse(&private,invocation,&sha).is_err());
                 assert_eq!(closed_reason("/private/unexpected/value"),"other-original-refusal");
+                for row in protection_data::LABELS { for label in row { assert_eq!(closed_reason(label), label); } }
                 assert!(PreExit::parse(&json!([]),invocation,&sha).is_err());
                 for (action,state,runtime,app,writes) in [
                     (ActionData::FreshInstall,"installed","confirmed","confirmed",24_577),

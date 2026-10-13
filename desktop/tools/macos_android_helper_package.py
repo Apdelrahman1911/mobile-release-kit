@@ -66,7 +66,7 @@ INTEL_TARGET = "x86_64-apple-darwin"
 MAX_HELPER = 32 * 1024 * 1024
 # Only nonshipping producer graphs; packaged programs keep release3.
 PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=0"
-HELPER_SOURCE_BYTES = 542125
+HELPER_SOURCE_BYTES = 542750
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -609,20 +609,30 @@ def installer_identity(identity_body, certificate_body, selection, certificates)
          and set(values) == set(certificates), "installer-private-source-certificates")
 
 
-def package_signature_data(body, selection, certificates, path):
+def package_signature_data(body, selection, certificates, path, *, after_staple=False):
     """Closed pkgutil trust/timestamp/complete-chain projection; no raw output."""
     need(type(body) is bytes and 0 < len(body) <= 65536 and body.endswith(b"\n")
          and type(selection) is dict and type(certificates) is tuple and len(certificates) == 3
-         and isinstance(path, Path) and path.name in ("MobileReleaseKit.pkg", "Remove.pkg"), "package-signature-bound")
+         and isinstance(path, Path) and path.name in ("MobileReleaseKit.pkg", "Remove.pkg")
+         and type(after_staple) is bool, "package-signature-bound")
     try:
         text = body.decode("utf-8")
     except UnicodeError:
         raise Refused("package-signature-utf8") from None
     need(all(character in "\n\t" or character.isprintable() for character in text), "package-signature-format")
-    lines = [line.strip(" \t") for line in text.splitlines() if line.strip(" \t")]
+    raw_lines = [line for line in text.splitlines() if line.strip(" \t")]
+    lines = [line.strip(" \t") for line in raw_lines]
     need(0 < len(lines) <= 256 and all(len(line) <= 1024 for line in lines)
          and lines[0] in ('Package "' + path.name + '":', 'Package "' + str(path) + '":'),
          "package-signature-header")
+    # Post-staple informational metadata is not signature/notary authority.
+    if after_staple and len(lines) > 2 and lines[2].startswith("Notarization: "):
+        prefix = "Notarization: "
+        need([i for i, line in enumerate(lines) if line.startswith("Notarization:")] == [2]
+             and 0 < len(lines[2][len(prefix):]) <= 128
+             and all(32 <= ord(character) <= 126 for character in raw_lines[2]),
+             "package-signature-notarization-metadata")
+        del lines[2]
     trusted = ("Status: signed by a certificate trusted by macOS", "Status: signed by a certificate trusted by Mac OS X",
                "Status: signed by a developer certificate issued by Apple for distribution")
     need(len(lines) > 4 and lines[1] in trusted
@@ -4436,7 +4446,7 @@ class Operation:
         self.final_package_call("final-package-validate", [tool, "validate", str(path)], developer=True)
         checked = self.final_package_call("final-package-signature-after", ["/usr/sbin/pkgutil", "--check-signature", str(path)])
         need(not checked.stderr, "final-package-signature-stderr")
-        after_signature = package_signature_data(checked.stdout, self.installer_selection, self.installer_certificates, path)
+        after_signature = package_signature_data(checked.stdout, self.installer_selection, self.installer_certificates, path, after_staple=True)
         need(after_signature == before_signature, "final-package-signature-changed")
         final_audit = self.final_package_audit(self.final_package_output, path)
         need({key: value for key, value in final_audit.items() if key not in ("packageSha256", "packageSize")}

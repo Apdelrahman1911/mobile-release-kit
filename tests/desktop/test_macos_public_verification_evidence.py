@@ -160,6 +160,89 @@ def normal_diagnostic_data(*, removal=False, positive=False):
     return namespace
 
 
+def ordinary_ui_producer_data(context):
+    """Evaluate actual producer result expressions with inert DATA ports only.
+
+    No workflow shell/owner/result writer runs. The actual singleton DATA
+    function validates its synthetic recovery input before producing a result.
+    """
+    lines = (ROOT / ".github/workflows/desktop-macos-installed.yml").read_text().splitlines()
+    blocks = []
+    for index, line in enumerate(lines):
+        if "<<'PY_" not in line: continue
+        delimiter = line.split("<<'", 1)[1].split("'", 1)[0]
+        if delimiter not in ("PY_UI_RESULT", "PY_PERSISTENCE_RESULT", "PY_DIAGNOSTICS_RESULT",
+                             "PY_SAVED_CHECKS_RESULT", "PY_SAVED_VERSION_RECOVERY_RESULT"): continue
+        end = next(j for j in range(index + 1, len(lines)) if lines[j].strip() == delimiter)
+        body = "\n".join(item[10:] for item in lines[index + 1:end]) + "\n"
+        module = ast.parse(body)
+        expression = next(node.value for node in module.body if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "result" for target in node.targets))
+        blocks.append((module, expression))
+    assert len(blocks) == 7 and ast.dump(blocks[-1][1]) == ast.dump(blocks[-2][1])
+    preview = dict(schemaVersion=2, scope="normal-macos-early-preview", sourceCommit=context["source"],
+        sourceTree="2" * 40, runId=context["runId"], runAttempt=context["runAttempt"],
+        platform="macOS26-arm64" if context["target"] == DATA.TARGETS[0] else "macOS26-x86_64",
+        packageSize=4096, entryBundleIdentifier="dev.mobile-release-kit.desktop.entry",
+        payloadBundleIdentifier="dev.mobile-release-kit.desktop")
+    preview.update({name: "a" * 64 for name in ("packageSha256", "runtimeManifestSha256",
+        "installerInventorySha256", "normalBinaryBeforeSigningSha256", "signedAppBinarySha256", "signedEntryBinarySha256")})
+    installation_receipt = receipt("package-install") | {name: context[name] for name in
+        ("source", "workflowSource", "runId", "runAttempt", "target")}
+    installation_receipt["finalImage"]["target"] = context["target"]
+    installed = DATA.project_receipt(installation_receipt, context, "package-install")
+    statuses = {"package-install.status": {"receiptState": "observed", "returncode": 0},
+                "normal-ui/build.status": {"receiptState": "observed", "returncode": 0}}
+    for definition in DATA.ORDINARY_UI_INPUTS:
+        key = definition[0]
+        role = {"launch": None, "savedChecks": "saved-checks", "savedVersion": "saved-version-recovery",
+                "workflowRefusal": "workflow-refusal", "releaseEvidence": "release-evidence"}.get(key, key)
+        for suffix in ("test", "summary"):
+            statuses["normal-ui/" + ((role + "-") if role else "") + suffix + ".status"] = {
+                "receiptState": "observed", "returncode": 0}
+    inventory = {"receiptState": "observed", "tree": preview["sourceTree"]}
+    ns = {"hashlib": hashlib, "re": re, "source": context["source"], "build_target": context["target"],
+        "target": context["target"], "preview": preview,
+        "os": SimpleNamespace(environ={"GITHUB_SHA": context["source"], "GITHUB_RUN_ID": context["runId"],
+                                      "GITHUB_RUN_ATTEMPT": context["runAttempt"]}),
+        "toolchain": {key: SENTINEL for key in ("xcode", "sdkPath", "sdkVersion", "sdkBuild")},
+        "helper": {"helperSha256": "b" * 64, "helperBytes": 4096},
+        "runner_bytes": b"runner", "build_bytes": b"build", "summary_admission_bytes": b"summary-owner",
+        "summary_owner_bytes": b"summary-owner", "summary_bytes": b"summary", "budget_bytes": b"budget",
+        "facts_bytes": b"facts"}
+    names = {"need", "singleton_selection", "digest", "hex64", "singleton_case_data"}
+    nodes = [node for node in blocks[-1][0].body if isinstance(node, ast.FunctionDef) and node.name in names]
+    assert {node.name for node in nodes} == names
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "ordinary-singleton-passive-data", "exec"), ns)
+    values, bodies = {}, {}
+    for index, definition in enumerate(DATA.ORDINARY_UI_INPUTS):
+        key, path, count, methods, prerequisites = definition[:5]
+        ns["expected"] = ns["counts"] = dict(DATA.POSITIVE_UI_COUNTS, totalTestCount=count, passedTests=count)
+        ns["prior_hashes"] = {DATA.ORDINARY_UI_INPUTS[j][1].split("/")[-1]: hashlib.sha256(bodies[name]).hexdigest()
+            for name in prerequisites for j in range(len(DATA.ORDINARY_UI_INPUTS)) if DATA.ORDINARY_UI_INPUTS[j][0] == name}
+        if index >= 5:
+            selected = ("workflow-refusal", "release-evidence", "saved-version-recovery")[index - 5]
+            recovery = {name: "c" * 64 for name in ("sourceInputsSha256", "runtimeManifestSha256", "runtimeResultSha256",
+                "sourceClosureSha256", "fixtureDataSha256", "producerSha256", "producerFramesSha256", "handoffSha256")}
+            recovery["runtimeManifestSha256"] = preview["runtimeManifestSha256"]
+            recovery.update({name: True for name in ("originalFixtureRestored", "unrelatedOriginalsUnchanged",
+                "readyJournalRemoved", "sourcePrePostMatched", "uiOriginalMarkersObserved", "originalClosesCompleted")})
+            recovery.update(producerReturncode=86, publicOriginalCount=13, readyJournalFileCount=6, interruptedGuiSaveObserved=False)
+            runner = ({"managedWorkflowRefusalMarkerObserved": True} if index == 5 else
+                {"savedReleaseEvidenceMarkerObserved": True} if index == 6 else
+                {"savedVersionRecovery": recovery, "commands": [{}, {}, {"stdoutSha256": "c" * 64,
+                    "stderrBytes": 0, "stderrSha256": hashlib.sha256(b"").hexdigest()}]})
+            ns.update(selected_scope=selected, method=methods[0].split("/")[-1], prior=values["diagnostics"],
+                prior_bytes=bodies["diagnostics"], case_data=ns["singleton_case_data"](selected, runner, preview,
+                    "c" * 64, "c" * 64 if index == 7 else None))
+        expression = blocks[index if index < 5 else -1][1]
+        value = eval(compile(ast.Expression(expression), "ordinary-result-passive-data", "eval"), ns)
+        assert value["scope"] == definition[5]["scope"]
+        values[key] = value
+        bodies[key] = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    return values, bodies, preview, statuses, {"package-install": installed}, inventory
+
+
 def build_diagnostic(normal, phase="build", *, fallback=False):
     original = CompletedProcess([], 70, b"Error Domain=NSPOSIXErrorDomain Code=2\n", (
         b"NormalAppUITests.swift:123:7: error: cannot find '" + SENTINEL.encode() + b"' in scope\n"
@@ -745,6 +828,130 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 run_id="123", run_attempt="2", target=CONTEXT["target"])
             self.assertNotIn("positiveUiObservations", result)
 
+        # Every document comes from the actual inert workflow result expression.
+        for target in DATA.TARGETS:
+            context = dict(CONTEXT, target=target)
+            values, bodies, preview, statuses, phases, inventory = ordinary_ui_producer_data(context)
+            with self.subTest(ordinaryTarget=target), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                originals = []
+                for key, path, *_ in DATA.ORDINARY_UI_INPUTS:
+                    item = write(root, path, bodies[key]); originals.append((item, bodies[key]))
+                fd = DATA.open_root(str(root))
+                try:
+                    b = dict(budget(), files=120, bytes=0, outputBytes=16384)
+                    result = DATA.ordinary_ui_observations(fd, context, statuses, phases, inventory,
+                        DATA.project_summary(preview, context, False), b)
+                    self.assertEqual((b["files"], b["bytes"]), (128, 8 * (16384 + 1)))
+                    self.assertTrue(all(value is False for value in b["ordinaryUiReads"].values()))
+                    self.assertIs(b["ordinaryUiOutputReserved"], True)
+                    self.assertEqual(b["outputBytes"], 16384 + 8192)
+                    with self.assertRaises(DATA.Refused):
+                        DATA.read_input(fd, DATA.ORDINARY_UI_INPUTS[0][1], 16384, b, ordinary_ui_reserved=True)
+                finally: os.close(fd)
+                self.assertLessEqual(len(json.dumps(result, sort_keys=True, separators=(",", ":"))), 8192)
+                for key, row in result["results"].items():
+                    self.assertEqual(row["receiptState"], "observed")
+                    self.assertEqual(row["testCounts"], [2, 2, 0, 0, 0] if key in ("project", "savedChecks") else [1, 1, 0, 0, 0])
+                    self.assertIs(row["resultWriterFinalityEstablished"], False)
+                    self.assertIsNone(row["cleanExitStatus"])
+                    self.assertIs(row["productReady"], False)
+                    self.assertEqual(row["resultSha256"], hashlib.sha256(bodies[key]).hexdigest())
+                self.assertEqual(result["results"]["savedVersion"]["producerReturncode"], 86)
+                for key in ("workflowRefusal", "releaseEvidence", "savedVersion"):
+                    self.assertNotIn("originalCommandStatuses", result["results"][key])
+                self.assertNotIn(SENTINEL, json.dumps(result))
+                for item, body in originals: self.assertEqual(item.read_bytes(), body)
+                # Full real project path, not just a copied positive-validator call.
+                write(root, "source-inventory.json", {"source": context["source"], "tree": inventory["tree"],
+                    "files": [{"path": "public.rs", "gitMode": "100644", "blob": "2" * 40,
+                               "size": 1, "sha256": "3" * 64}]})
+                write(root, "preview/PREVIEW.json", preview)
+                installation_receipt = receipt("package-install") | {name: context[name] for name in
+                    ("source", "workflowSource", "runId", "runAttempt", "target")}
+                installation_receipt["finalImage"]["target"] = context["target"]
+                write(root, "android-helper-package-install.json", installation_receipt)
+                for name, status in statuses.items(): write(root, name, (str(status["returncode"]) + "\n").encode())
+                complete = DATA.project(str(root), profile="installed", source=context["source"],
+                    workflow_source=context["workflowSource"], run_id=context["runId"],
+                    run_attempt=context["runAttempt"], target=context["target"])
+                combined = complete["positiveUiObservations"]
+                self.assertTrue(all(row["receiptState"] == "observed" for row in combined["ordinary"]["results"].values()))
+                self.assertEqual(combined["ordinary"]["binding"]["sourceTree"], complete["sourceInventory"]["tree"])
+                self.assertLessEqual(len(json.dumps(combined, sort_keys=True, separators=(",", ":"))), 16384)
+                self.assertLessEqual((root / DATA.OUTPUT).stat().st_size, DATA.OUTPUT_LIMIT)
+                self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
+                for item, body in originals: self.assertEqual(item.read_bytes(), body)
+                # Prospective ordinary charge survives until the real enclosing projection;
+                # all absent legacy rows still charge actual combined result bytes.
+                fd = DATA.open_root(str(root))
+                try:
+                    tight = dict(budget(), files=0, bytes=0, outputBytes=DATA.OUTPUT_LIMIT - 8192)
+                    DATA.reserve_ordinary_ui_reads(tight)
+                    self.assertEqual(tight["outputBytes"], DATA.OUTPUT_LIMIT)
+                    with self.assertRaises(DATA.Refused):
+                        DATA.positive_ui_observations(fd, context, statuses, phases, inventory, tight,
+                            {"preview": DATA.project_summary(preview, context, False)})
+                    self.assertIs(tight["ordinaryUiOutputReserved"], False)
+                    with self.assertRaises(DATA.Refused): DATA.reserve_ordinary_ui_reads(tight)
+                finally: os.close(fd)
+                # Missing saved-checks is legitimate for the genuine remaining-three cohort.
+                (root / DATA.ORDINARY_UI_INPUTS[4][1]).unlink()
+                fd = DATA.open_root(str(root))
+                try:
+                    result = DATA.ordinary_ui_observations(fd, context, statuses, phases, inventory,
+                        DATA.project_summary(preview, context, False), dict(budget(), files=0, bytes=0, outputBytes=16384))
+                finally: os.close(fd)
+                self.assertEqual(result["results"]["savedChecks"], {"receiptState": "absent"})
+                self.assertTrue(all(result["results"][key]["receiptState"] == "observed" for key in
+                    ("workflowRefusal", "releaseEvidence", "savedVersion")))
+            faults = ("missing", "oversize", "linked", "duplicate", "nonfinite", "unknown-key", "bool-count",
+                "source", "run", "tree", "package", "hash", "prior", "closed-false", "mixed-singleton", "status", "build-hash")
+            for fault in faults:
+                with self.subTest(ordinaryFault=fault, target=target), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory); bad = copy.deepcopy(values); changed_phases = copy.deepcopy(phases)
+                    changed_statuses = copy.deepcopy(statuses)
+                    if fault == "unknown-key": bad["launch"]["privateUnknown"] = SENTINEL
+                    if fault == "bool-count": bad["launch"]["testCounts"]["totalTestCount"] = True
+                    if fault == "source": bad["launch"]["harnessSourceCommit"] = "9" * 40
+                    if fault == "run": bad["launch"]["runId"] = "999"
+                    if fault == "tree": bad["launch"]["sourceTree"] = "9" * 40
+                    if fault == "package": bad["launch"]["packageSha256"] = "9" * 64
+                    if fault == "hash": bad["launch"]["nativeSummarySha256"] = SENTINEL
+                    if fault == "prior": bad["diagnostics"]["priorResultSha256"]["result.json"] = "9" * 64
+                    if fault == "closed-false": changed_phases["package-install"]["originalClosesKnown"] = False
+                    if fault == "mixed-singleton": bad["workflowRefusal"]["selectedSavedFileScope"] = "release-evidence"
+                    if fault == "status": changed_statuses["normal-ui/test.status"]["returncode"] = 70
+                    if fault == "build-hash": bad["project"]["buildCommandAdmissionSha256"] = "9" * 64
+                    for key, path, *_ in DATA.ORDINARY_UI_INPUTS:
+                        if fault == "missing" and key == "launch": continue
+                        raw = (json.dumps(bad[key], sort_keys=True, separators=(",", ":")) + "\n").encode()
+                        if key == "launch" and fault in ("duplicate", "nonfinite", "oversize"):
+                            raw = {"duplicate": b'{"schemaVersion":1,"schemaVersion":1}',
+                                "nonfinite": b'{"schemaVersion":NaN}', "oversize": b"x" * 16385}[fault]
+                        item = write(root, path, raw)
+                        if key == "launch" and fault == "linked": os.link(item, root / "second-original-link")
+                    fd = DATA.open_root(str(root))
+                    try:
+                        result = DATA.ordinary_ui_observations(fd, context, changed_statuses, changed_phases, inventory,
+                            DATA.project_summary(preview, context, False), dict(budget(), files=0, bytes=0, outputBytes=16384))
+                    finally: os.close(fd)
+                    selected = {"prior": "diagnostics", "mixed-singleton": "workflowRefusal", "build-hash": "project"}.get(fault, "launch")
+                    self.assertEqual(result["results"][selected], {"receiptState": "absent" if fault == "missing" else "refused"})
+                    self.assertNotIn(SENTINEL, json.dumps(result))
+        with tempfile.TemporaryDirectory() as directory:
+            fd = DATA.open_root(directory)
+            try:
+                empty = DATA.ordinary_ui_observations(fd, CONTEXT, {}, {}, {}, {},
+                    dict(budget(), files=120, bytes=0, outputBytes=16384))
+            finally: os.close(fd)
+            self.assertEqual(empty["receiptState"], "absent")
+            self.assertTrue(all(row == {"receiptState": "absent"} for row in empty["results"].values()))
+        for changes in ({"files": 121}, {"bytes": DATA.INPUT_LIMIT - 8 * (16384 + 1) + 1},
+                        {"outputBytes": DATA.OUTPUT_LIMIT - 8192 + 1}):
+            with self.assertRaises(DATA.Refused):
+                DATA.reserve_ordinary_ui_reads(dict(budget(), files=0, bytes=0, outputBytes=16384) | changes)
+
     def test_positive_ui_specific_decoder_and_complete_fixed_roster_bounds(self):
         def padded(size):
             prefix, suffix = b'{"opaque":"', b'"}'
@@ -761,10 +968,13 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             with self.assertRaises(DATA.Refused): DATA.decode(body, budget(), ui_admission=True)
         self.assertEqual(len(DATA.POSITIVE_UI_INPUTS), 7)
         self.assertEqual([item[2] for item in DATA.POSITIVE_UI_INPUTS], [16384, 16384, 32768, 32768, 16384, 32768, 32768])
-        attempts = len(DATA.STATUS_FILES) + len(DATA.PHASES) + 3 + len(DATA.UI_DIAGNOSTICS) + 6 + len(DATA.POSITIVE_UI_INPUTS)
+        attempts = (len(DATA.STATUS_FILES) + len(DATA.PHASES) + 4 + len(DATA.PACKAGE_SIGNATURE_CAPTURES)
+            + len(DATA.INSTALLER_DIAGNOSTIC_INPUTS) + len(DATA.UI_DIAGNOSTICS) + 6
+            + len(DATA.POSITIVE_UI_INPUTS) + len(DATA.ORDINARY_UI_INPUTS))
         self.assertEqual((len(DATA.STATUS_FILES), len(DATA.PHASES), len(DATA.UI_DIAGNOSTICS), len(DATA.POSITIVE_UI_INPUTS)),
                          (76, 20, 3, 7))
-        self.assertEqual(attempts, 115)
+        self.assertEqual(attempts, 128)
+        self.assertEqual(len(DATA.ORDINARY_UI_INPUTS), 8)
         self.assertLessEqual(attempts, 128)
         self.assertEqual((DATA.INPUT_LIMIT, DATA.OUTPUT_LIMIT), (3 * 1024 * 1024, 128 * 1024))
         # Each legal positive maximum remains finite without displacing old report facts.

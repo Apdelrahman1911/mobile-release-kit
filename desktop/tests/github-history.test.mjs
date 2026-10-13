@@ -340,6 +340,7 @@ test('History component SOURCE exposes exact read controls, contextual help and 
   // The tested controller is mounted by the real Desktop factory/App route,
   // not merely an unused component. These source joins do not claim native IO.
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const future = readFileSync(new URL('../src/pages/Future.tsx', import.meta.url), 'utf8');
   const bridge = readFileSync(new URL('../src/bridge.ts', import.meta.url), 'utf8');
   const api = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8');
   const types = readFileSync(new URL('../src/types.ts', import.meta.url), 'utf8');
@@ -382,6 +383,13 @@ test('History component SOURCE exposes exact read controls, contextual help and 
   assert.equal((app.match(/<GitHubHistory /g) ?? []).length, 2);
   assert.ok(app.includes("{page !== 'github' && <GitHubHistory state={githubHistoryState} controller={githubHistory} compact"));
   assert.ok(app.includes('<GitHubHistory state={githubHistoryState} controller={githubHistory} onHelp={setHelp} />'));
+  assert.ok(app.includes("{page === 'releases' && <Releases onOpenGitHub={() => navigate('github')}"));
+  assert.ok(future.includes('onOpenGitHub: () => void'));
+  assert.ok(future.includes('onClick={onOpenGitHub}>Open authenticated History in GitHub</button>'));
+  assert.ok(future.includes('An authenticated read requires a qualified native runtime and a separate explicit Start.'));
+  assert.ok(future.includes('Missing evidence does not prove that no release happened; retained workflow evidence is not current Store state.'));
+  for (const stale of ['Remote authenticated artifact history is not implemented', 'Load authenticated release history', 'DisabledAction', 'futureReason']) assert.equal(future.includes(stale), false);
+  for (const forbidden of ['GitHubHistoryController', 'controller.start(', 'githubHistory.start(']) assert.equal(future.includes(forbidden), false);
   assert.equal((app.match(/githubHistory\.start\(/g) ?? []).length, 0);
   for (const text of ['Authenticated release history panel below', 'Connect alone does not read History',
     'Contents and Actions read access', 'Missing native runtime or attestation provider stays unavailable']) assert.ok(connectionSource.includes(text), text);
