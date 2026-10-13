@@ -306,10 +306,12 @@ def dispatch(op, role, argv):
     index = len(op.calls)
     need(index < len(ROLES) and role == ROLES[index] and op.package_settled(), "update-fixed-original-order")
     selected = op.update["nomination"]
+    mount_path = op.update_api.transport_mount_path_data(op.environment, op.target, PHASE)
+    need(op.transport_mount == mount_path, "update-original-transport-path")
     commands = {
         ROLES[0]: ["/usr/bin/hdiutil", "attach", str(op.work / "update-predecessor" / selected["image"]["name"]),
-                   "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", str(op.work / "package-mount"), "-plist"],
-        ROLES[1]: ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg", str(op.work / "package-mount/Install.pkg"),
+                   "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", str(mount_path), "-plist"],
+        ROLES[1]: ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg", str(mount_path / "Install.pkg"),
                    "-target", "/", "-dumplog", "-verboseR"],
         ROLES[2]: ["/usr/bin/hdiutil", "detach", op.mount_device],
     }
@@ -368,31 +370,29 @@ def baseline(op):
     op.update["case"] = op.package_directory("update-baseline-case")
     os.mkdir("input", 0o700, dir_fd=op.update["case"]["fd"])
     case_input = op.directory(op.update["case"], "input", "update-case-input")
-    mount_path = op.work / "package-mount"
-    op.mount_placeholder = op.package_directory("package-mount")
+    op.normal_mount_host()
+    mount_path = op.transport_mount_admit()
     op.package_post()  # Same held complete artifact originals immediately before attach.
     attached = op.package_call(ROLES[0], ["/usr/bin/hdiutil", "attach", str(op.work / "update-predecessor" / selected["image"]["name"]),
         "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", str(mount_path), "-plist"], timeout=60)
-    op.mount_device = stager.distribution_mount_data(attached.stdout, attached.stderr, attached.returncode, mount_path)
-    fd = os.open("package-mount", api.READ_FLAGS | os.O_DIRECTORY, dir_fd=op.work_entry["fd"])
-    op.mount_entry = op.register(fd, "update-readonly-mount", "mount", op.work_entry["fd"], "package-mount")
-    info = os.fstat(fd)
-    op.mount_entry["identity"] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
-    op.mount_known = True
+    op.mount_custody(attached, "update-readonly-mount")
+    fd = op.mount_entry["fd"]
     op.package_name = "Install.pkg"
     need(set(os.listdir(fd)) == {"Install.pkg", "producer.json", "producer.sig"}, "update-mounted-roster")
     original = {}
     for key in ("package", "descriptor", "signature"):
         row = selected[key]
-        item_fd = os.open(row["name"], api.READ_FLAGS, dir_fd=fd)
-        entry = op.register(item_fd, "update-mounted-" + key, "mounted-file", fd, row["name"])
+        op.removal_reserve()
+        entry = op.register(None, "update-mounted-" + key, "mounted-file", fd, row["name"])
+        entry["fd"] = item_fd = os.open(row["name"], api.READ_FLAGS, dir_fd=fd)
         info = os.fstat(item_fd)
         need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o444
              and info.st_uid in (0, os.getuid()) and info.st_size == row["bytes"], "update-mounted-shape")
         entry["identity"] = api.signature(info)
         value = os.pread(item_fd, row["bytes"] + 1, 0)
         need(len(value) == row["bytes"] and sha(value) == row["sha256"]
-             and api.signature(os.fstat(item_fd)) == entry["identity"], "update-mounted-hash")
+             and api.signature(os.fstat(item_fd)) == entry["identity"]
+             == api.signature(os.stat(row["name"], dir_fd=fd, follow_symlinks=False)), "update-mounted-hash")
         entry["sha256"] = sha(value)
         original[row["name"]] = value
     stager.distribution_layout_data(os.listdir(fd), "Install.pkg", original, {k: (v, 0o444) for k, v in original.items()})
@@ -445,7 +445,7 @@ def baseline_args(op, request):
     return argparse.Namespace(target=op.target, fixture=False, input=case / "input", expected_source=old["sourceCommit"],
         expected_inventory=old["inventorySha256"], expected_manifest=old["runtimeManifestSha256"], expected_package=old["packageSha256"],
         request_id=request, producer_descriptor=case / "producer.json", producer_signature=case / "producer.sig",
-        installer_status=case / "installer-output.status", package=op.work / "package-mount/Install.pkg",
+        installer_status=case / "installer-output.status", package=op.transport_mount / "Install.pkg",
         run_id=op.environment["GITHUB_RUN_ID"], run_attempt=op.environment["GITHUB_RUN_ATTEMPT"])
 
 

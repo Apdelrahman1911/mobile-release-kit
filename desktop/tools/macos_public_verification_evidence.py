@@ -2001,7 +2001,8 @@ def positive_ui_counts(value):
 def positive_ui_facts(value, context, *, android):
     if android:
         fixed = dict(schemaVersion=1, scope="one-ordinary-local-signed-android-build", sourceCommit=context["source"],
-            target=context["target"], runId=context["runId"], runAttempt=context["runAttempt"], sourceRegistrationObserved=False,
+            target=context["target"], runId=context["runId"], runAttempt=context["runAttempt"], sourceRegistrationObserved=True,
+            serviceEnabledObserved=True, vendorAcknowledgementAutomated=True,
             nativeSigningVerified=True, privateOriginalsClosed=True, memorySessionDiscarded=True, parentReturncodeRequired=0,
             outputPostMatched=True, normalQuitObserved=True, releaseQualified=False)
         sizes = {"artifactBytes": 64 << 20, "outputEntries": 100000, "outputNameBytes": 2 << 20,
@@ -2015,7 +2016,8 @@ def positive_ui_facts(value, context, *, android):
             ipaExported=False, releaseQualified=False, parentReturncodeRequired=0)
         sizes = {"originalEntries": 100000, "originalBytes": 8 << 30}
         hashes = ()
-    positive_ui_fixed(value, fixed, {"operationId", "ownerGeneration", *sizes, *hashes})
+    extra = {"serviceRegistrationRequested", "protectedCopyInstance"} if android else set()
+    positive_ui_fixed(value, fixed, {"operationId", "ownerGeneration", *sizes, *hashes} | extra)
     for key in ("operationId", "ownerGeneration"):
         hex_value(value[key], 32)
     for key in hashes:
@@ -2023,6 +2025,8 @@ def positive_ui_facts(value, context, *, android):
     for key, cap in sizes.items():
         integer(value[key], cap, 1)
     if android:
+        need(type(value["serviceRegistrationRequested"]) is bool)
+        hex_value(value["protectedCopyInstance"], 32)
         need(value["outputLogicalBytes"] >= value["moduleLogicalBytes"] + value["artifactBytes"])
     return dict(value)
 
@@ -2115,8 +2119,8 @@ def project_android_positive(value, context, statuses, phases, inventory):
         applicationSourceCommit=context["source"], harnessSourceCommit=context["source"], sourceTree=inventory["tree"],
         workflow=".github/workflows/desktop-macos-installed.yml", runId=context["runId"], runAttempt=context["runAttempt"],
         testIdentifier="MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectAndroidSignedBuild",
-        resultOriginalReturncodeRequired=0, privateInputsPublished=False, vendorAcknowledgementAutomated=False,
-        newProtectedCopyRegistered=False, cleanExitStatus=None, allWorkerFinality="not-established-by-XCTest-UI-state",
+        resultOriginalReturncodeRequired=0, privateInputsPublished=False, vendorAcknowledgementAutomated=True,
+        newProtectedCopyRegistered=True, cleanExitStatus=None, allWorkerFinality="not-established-by-XCTest-UI-state",
         fullUIQualified=False, distributionQualified=False, productReady=False)
     extra = {"packageSha256", "packageBytes", "runtimeManifestSha256", "installerInventorySha256",
              "originalCommandStatuses", "testCounts", "observation"}
@@ -2126,7 +2130,9 @@ def project_android_positive(value, context, statuses, phases, inventory):
     integer(value["packageBytes"], 2**40, 1)
     positive_ui_fixed(value["originalCommandStatuses"], dict(packageInstall=0, installer=0, supplier=0, build=0, test=0, summary=0))
     positive_ui_counts(value["testCounts"])
-    positive_ui_facts(value["observation"], context, android=True)
+    facts = positive_ui_facts(value["observation"], context, android=True)
+    need(value["vendorAcknowledgementAutomated"] is facts["vendorAcknowledgementAutomated"]
+         and value["newProtectedCopyRegistered"] is facts["sourceRegistrationObserved"])
     return {"receiptState": "observed", "binding": "source-run-target-fields-and-current-statuses",
             "nativeSuccessInferred": False, "recordedResult": dict(value)}
 

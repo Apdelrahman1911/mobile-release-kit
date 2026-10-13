@@ -213,10 +213,17 @@ class UpdateDataTests(unittest.TestCase):
             with self.assertRaises(ValueError): DATA.phase_credit(bad, phase=DATA.PHASE)
         op = SimpleNamespace(phase=DATA.PHASE, calls=[], work=Path("/inert/work"), mount_device=None,
                              update={"nomination": nomination()["targets"][DATA.TARGETS[0]]}, package_settled=lambda: True,
-                             mount_entered=False, installer_entered=False, mount_known=False, mount_detached=False)
+                             mount_entered=False, installer_entered=False, mount_known=False, mount_detached=False,
+                             target=DATA.TARGETS[0], environment={"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"},
+                             update_api=HELPER)
+        op.transport_mount = HELPER.transport_mount_path_data(op.environment, op.target, DATA.PHASE)
         attach = ["/usr/bin/hdiutil", "attach", "/inert/work/update-predecessor/MobileReleaseKit.dmg", "-readonly", "-nobrowse",
-                  "-noautoopen", "-mountpoint", "/inert/work/package-mount", "-plist"]
+                  "-noautoopen", "-mountpoint", str(op.transport_mount), "-plist"]
         DATA.dispatch(op, DATA.ROLES[0], attach); self.assertTrue(op.mount_entered)
+        wrong = list(attach); wrong[wrong.index("-mountpoint") + 1] = "/inert/work/package-mount"
+        with self.assertRaises(ValueError): DATA.dispatch(op, DATA.ROLES[0], wrong)
+        wrong = list(attach); wrong[wrong.index("-mountpoint") + 1] = str(HELPER.transport_mount_path_data(op.environment, DATA.TARGETS[1], DATA.PHASE))
+        with self.assertRaises(ValueError): DATA.dispatch(op, DATA.ROLES[0], wrong)
         with self.assertRaises(ValueError): DATA.dispatch(op, DATA.ROLES[0], attach + ["-owners", "off"])
         op.update["nomination"] = nested_nomination()["targets"][DATA.TARGETS[0]]
         nested_attach = list(attach); nested_attach[2] = "/inert/work/update-predecessor/preview/MobileReleaseKit.dmg"

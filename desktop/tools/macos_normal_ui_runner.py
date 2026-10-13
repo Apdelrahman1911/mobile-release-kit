@@ -1254,15 +1254,18 @@ def android_signed_facts(value, *, source, run, attempt, target=ARM_TARGET):
          and all(type(item) is str and re.fullmatch(r"[1-9][0-9]{0,19}", item) for item in (run, attempt)),
          "android-signed-public-context")
     fixed = dict(schemaVersion=1, scope=ANDROID_FACTS_SCOPE, sourceCommit=source,
-        target=target, runId=run, runAttempt=attempt, sourceRegistrationObserved=False,
+        target=target, runId=run, runAttempt=attempt, sourceRegistrationObserved=True,
+        serviceEnabledObserved=True, vendorAcknowledgementAutomated=True,
         nativeSigningVerified=True, privateOriginalsClosed=True, memorySessionDiscarded=True, parentReturncodeRequired=0,
         outputPostMatched=True, normalQuitObserved=True, releaseQualified=False)
     variable = {"operationId", "ownerGeneration", "publicCertificateSha256", "artifactSha256", "artifactBytes",
-                "outputEntries", "outputNameBytes", "outputLogicalBytes", "moduleLogicalBytes", "outputCensusSha256"}
+                "outputEntries", "outputNameBytes", "outputLogicalBytes", "moduleLogicalBytes", "outputCensusSha256",
+                "serviceRegistrationRequested", "protectedCopyInstance"}
     need(type(value) is dict and set(value) == set(fixed) | variable
          and all(type(value[k]) is type(v) and value[k] == v for k, v in fixed.items())
          and len(encoded(value)) <= 16384, "android-signed-public-facts")
-    for key in ("operationId", "ownerGeneration"):
+    need(type(value["serviceRegistrationRequested"]) is bool, "android-signed-service-request-observation")
+    for key in ("operationId", "ownerGeneration", "protectedCopyInstance"):
         need(type(value[key]) is str and re.fullmatch(r"[0-9a-f]{32}", value[key]), "android-signed-current-id")
     for key in ("publicCertificateSha256", "artifactSha256", "outputCensusSha256"):
         need(type(value[key]) is str and re.fullmatch(r"[0-9a-f]{64}", value[key]), "android-signed-public-digest")

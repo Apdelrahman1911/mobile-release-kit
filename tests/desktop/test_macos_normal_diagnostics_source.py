@@ -679,7 +679,77 @@ def without_primary_owner_runtime_source_pin(source):
     return source
 
 
+def without_ordinary_app_assembly_budget_workflow(source):
+    # Three fixed SOURCE regions only; before every other historical inverse.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("ordinary app assembly SOURCE bound differs")
+    replacements = (('    # Raw timed-step union585min (ARM) /625min (Intel) includes the retained42min alternative.\n', '    # Raw timed-step union602min (ARM) /642min (Intel) includes the retained42min alternative.\n'), ('    # App-signature: ARM82 / Intel122 timed preparation +14 bounded setup\n', '    # App-signature: ARM99 / Intel139 timed preparation +14 bounded setup\n'), ('      - name: Assemble the ordinary image app and sign code inside-out (never --deep)\n        id: app_assemble\n        timeout-minutes: 3\n', '      - name: Assemble the ordinary image app and sign code inside-out (never --deep)\n        id: app_assemble\n        timeout-minutes: 20\n'))
+    if not any(current in source for previous, current in replacements):
+        return source
+    if not source.startswith("name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n"):
+        raise AssertionError("ordinary app assembly SOURCE route differs")
+    for previous, current in replacements:
+        if (source.count(current) != 1 or source.count("\n" + current) != 1
+                or previous in source):
+            raise AssertionError("ordinary app assembly complete exact budget differs")
+    prefix = '      - name: Assemble the ordinary image app and sign code inside-out (never --deep)\n'
+    step = prefix + source.split(prefix, 1)[1].split("      - name: ", 1)[0]
+    normalized_step = step.replace(replacements[-1][1], replacements[-1][0], 1)
+    if hashlib.sha256(normalized_step.encode()).hexdigest() != 'ba4cd3611e864c92b8f7073c11a3dfd447d40c511129c5a4189c8f6820427c8c':
+        raise AssertionError("ordinary app assembly original workload differs")
+    for previous, current in reversed(replacements):
+        source = source.replace("\n" + current, "\n" + previous, 1)
+    if any(current in source for previous, current in replacements):
+        raise AssertionError("ordinary app assembly partial budget remains")
+    return source
+
+
+def without_additive_saved_checks_workflow(source):
+    # Exact current preview2+3 DATA only, before every historical SOURCE oracle.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("additive saved-checks workflow SOURCE bound differs")
+    replacements = (('    # Remaining-three adds28 nominal minutes versus one singleton; no350min fit is claimed.\n', '    # Remaining-three additionally requires ordinary saved-checks2; both cohorts are independent.\n    # Adds28 singleton minutes plus17 saved-checks minutes; no350min fit is claimed.\n'), ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven')\n", "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three'))\n"), ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_diagnostics_ui_result.outcome == 'success')\n", "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success')\n"), ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))\n", "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))\n"), ('          stems = (("saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else\n', '          stems = (("saved-checks", "saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else\n'), ('          # remaining-three reaches this step only after all three original binders returned0.\n', '          # remaining-three reaches this step only after all four original binders returned0.\n'))
+    markers = ('    # Remaining-three additionally requires ordinary saved-checks2; both cohorts are independent.\n    # Adds28 singleton minutes plus17 saved-checks minutes; no350min fit is claimed.\n', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three'))\n", "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success')\n", "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))\n", '          stems = (("saved-checks", "saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else\n', '          # remaining-three reaches this step only after all four original binders returned0.\n')
+    if not any(marker in source for marker in markers):
+        return source
+    if not source.startswith("name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n"):
+        raise AssertionError("additive saved-checks workflow SOURCE route differs")
+    for previous, current in replacements:
+        if (source.count(current) != 1 or source.count("\n" + current) != 1
+                or source.count(previous) != current.count(previous)):
+            raise AssertionError("additive saved-checks workflow complete exact delta differs")
+    for previous, current in reversed(replacements):
+        source = source.replace("\n" + current, "\n" + previous, 1)
+    if any(marker in source for marker in markers):
+        raise AssertionError("additive saved-checks workflow partial delta remains")
+    return source
+
+
+def without_android_registration_workflow(source):
+    # Two SOURCE-fixed physical regions only; before current budget/savedChecks.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("Android registration workflow SOURCE bound differs")
+    replacements = (('          # No vendor-license click, service approval or copy registration.\n          # An independently lawful current copy is a prerequisite, not a skip.\n', '          # Inert until separately authorized SOURCE activation: service check,\n          # fresh vendor/copy consent, publication, recovery and selection.\n          # Code and synthetic receipts never grant owner/legal or OS approval.\n'), ("                  'vendorAcknowledgementAutomated': False, 'newProtectedCopyRegistered': False,\n", "                  'vendorAcknowledgementAutomated': facts['vendorAcknowledgementAutomated'],\n                  'newProtectedCopyRegistered': facts['sourceRegistrationObserved'],\n"))
+    markers = ('# Inert until separately authorized SOURCE activation: service check,', '# fresh vendor/copy consent, publication, recovery and selection.', '# Code and synthetic receipts never grant owner/legal or OS approval.', "'vendorAcknowledgementAutomated': facts['vendorAcknowledgementAutomated'],", "'newProtectedCopyRegistered': facts['sourceRegistrationObserved'],")
+    if not any(marker in source for marker in markers):
+        return source  # Earlier exact callers retain their unchanged whole guards.
+    if not source.startswith("name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n"):
+        raise AssertionError("Android registration workflow SOURCE route differs")
+    for previous, current in replacements:
+        if (source.count(current) != 1 or source.count("\n" + current) != 1
+                or previous in source):
+            raise AssertionError("Android registration workflow complete exact regions differ")
+    for previous, current in reversed(replacements):
+        source = source.replace("\n" + current, "\n" + previous, 1)
+    if any(marker in source for marker in markers):
+        raise AssertionError("Android registration workflow partial delta remains")
+    return source
+
+
 def without_intel_fetch_workflow(source):
+    source = without_android_registration_workflow(source)
+    source = without_ordinary_app_assembly_budget_workflow(source)
+    source = without_additive_saved_checks_workflow(source)
     # Exact ordinary compile boundary only, before unchanged historical oracles.
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("ordinary compile boundary SOURCE bound differs")
@@ -723,6 +793,26 @@ def without_intel_fetch_workflow(source):
     return source
 
 
+ANDROID_REGISTRATION_SWIFT_INVERSE = ((6017, 6350, '28a2054ede344daf3753c21047f06013d625cb4954a7da1a3ac6f7dd88bb5309', '    @MainActor func testSyntheticProjectAndroidSignedBuild() throws {\n        continueAfterFailure = false\n        executionTimeAllowance = 900\n        try beginCase(seconds: 900, androidPositive: true)\n        let fixture = LocalFixture()\n        ownedFixture = fixture\n        var inputs: LocalFixture.AndroidInputs?\n        var certificate = ""\n        try stage("android-private-admission") {\n            let admitted = try LocalFixture.AndroidInputs.admit { _ = try self.remaining(5) }\n            ownedAndroidInputs = admitted; inputs = admitted\n            certificate = admitted.publicCertificate\n            try fixture.prepare(.androidSignedBuild)\n            try fixture.prepareAndroidCertificate(certificate)\n        }\n        guard let initialInputs = inputs else { throw Refusal.condition("Android private input admission absent") }\n        let (app, window, renderer) = try launchForJourney()\n        try stage("android-public-project-and-certificate") {\n            try press(renderer, "Open project folder", renderer: renderer)\n            let sheet = try nativeSheet(window, title: "Choose a mobile project folder")\n            try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)\n            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")),\n                                in: renderer, failures: ["Static observation unavailable", "Only a partial static observation is available"])\n            _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "Android project selection differs")\n            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.example.saved"), in: renderer)\n            try press(renderer, "Project settings", renderer: renderer)\n            let settings = try waitElement(named(renderer, "Settings section"), in: renderer)\n            try press(settings, "Android", renderer: renderer)\n            try replace(field(renderer, "Android upload certificate"), with: certificate, renderer: renderer)\n            try press(renderer, "Validate only", renderer: renderer)\n            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Format validation complete")),\n                                in: renderer, failures: Self.configurationFailures)\n            try press(renderer, "Prepare save review", renderer: renderer, failures: Self.configurationFailures)\n            let review = try waitElement(named(renderer, "Native configuration save"), in: renderer)\n            try inventory(review, caption: "Exact native destination inventory", paths: ["release/mobile-release.json", ".gitignore"])\n            try fixture.assertUnchanged()\n            try press(review, "Apply reviewed save", renderer: renderer, failures: Self.configurationFailures, timeout: 48)\n            try confirmedDialog(renderer, title: "Apply this configuration save?", action: "Apply reviewed save",\n                                checkbox: "I reviewed this exact inventory and understand that cancellation may be too late after Apply.")\n            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Submitted configuration saved")),\n                                in: review, timeout: 48, failures: Self.configurationFailures)\n            try fixture.accept("android-public-certificate")\n            try initialInputs.post { _ = try self.remaining(5) }\n        }\n        try stage("android-saved-input-read") {\n            try press(renderer, "Releases", renderer: renderer)\n            try press(renderer, "Refresh saved configuration", renderer: renderer, timeout: 48)\n            try press(renderer, "Read saved version", renderer: renderer, timeout: 48)\n            _ = try waitElement(renderer.buttons.matching(identifier: "Review saved inputs"), in: renderer, timeout: 48)\n            try fixture.assertUnchanged()\n        }\n        try stage("android-source-inspection-without-license-acceptance") {\n            let roles = [("jdk", "Java development kit (JDK)", "Choose an installed Java 17 JDK folder", "temurin-17.jdk"),\n                         ("sdk", "Android SDK", "Choose the Android SDK folder", "sdk"),\n                         ("gradle", "Gradle distribution", "Choose an extracted Gradle distribution folder", "gradle")]\n            for (role, label, title, leaf) in roles {\n                let group = try waitElement(controls(renderer, [.group], label: label + " source folder"), in: renderer)\n                try press(group, "Browse for folder", renderer: renderer, timeout: 48)\n                let sheet = try nativeSheet(window, title: title)\n                try goToFolder(sheet, path: initialInputs.sourcePath(role)); try nativeOpen(sheet)\n                _ = try waitElement(group.staticTexts.matching(NSPredicate(format: "label == %@ OR label CONTAINS %@",\n                    leaf, "Selected folder: " + leaf + " · folder selection only.")), in: group, timeout: 48)\n                _ = try waitElement(group.buttons.matching(identifier: "Choose a different folder"), in: group, enabled: true, timeout: 48)\n                try initialInputs.post { _ = try self.remaining(5) }\n            }\n            try press(renderer, "Inspect selected sources", renderer: renderer, timeout: 48)\n            let review = try waitElement(controls(renderer, [.group], label: "Confirm this exact protected-copy review"),\n                in: renderer, timeout: 120, failures: ["Inspection or registration refused", "Original cleanup is unconfirmed"])\n            let text = try androidPublicText(review)\n            for fact in ["complete compatible role observation", try fixture.androidSavedDigest(LocalFixture.config),\n                         try fixture.androidSavedDigest(LocalFixture.version)] {\n                try require(text.contains(fact), "Android source review saved binding differs")\n            }\n            let license = try unique(review.checkBoxes.matching(NSPredicate(format: "label BEGINSWITH %@",\n                "I acknowledge the applicable vendor licenses")), "Android separate vendor consent absent")\n            try require((license.value as? String) == "0" || (license.value as? NSNumber)?.intValue == 0,\n                        "Android vendor consent must remain unchecked")\n            let register = try unique(review.buttons.matching(identifier: "Register protected tool copy"),\n                                      "Android separate protected registration unavailable")\n            try require(!register.isEnabled, "Android protected registration enabled without legal authorization")\n            // Deliberately NO vendor acknowledgement, registration or system approval.\n            try press(renderer, "Discard this source review", renderer: renderer, timeout: 48)\n            try waitGone(review)\n            _ = try waitElement(renderer.buttons.matching(identifier: "Inspect selected sources"), in: renderer, enabled: true, timeout: 48)\n            try fixture.assertUnchanged(); try initialInputs.post { _ = try self.remaining(5) }\n        }\n        try stage("android-existing-protected-copy-full-readback") {\n            let catalog = try waitElement(named(renderer, "Protected Android tools on this Mac"), in: renderer)\n            try press(catalog, "Refresh tool list", renderer: renderer, timeout: 48)\n            _ = try waitElement(catalog.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Tool catalog: ready.")), in: catalog, timeout: 48)\n            let text = try androidPublicText(catalog)\n            let instance = try Self.androidMatch(#"(?m)^Instance[ \\n]+([0-9a-f]{32})[ \\n]+· observed catalog"#, in: text)\n            try require(text.contains("Gradle 8.14.5 · Android plugin 8.9.2 · android-35 · build tools 35.0.0."),\n                        "Android existing protected tuple differs")\n            // A unique actual current copy is a prerequisite, not created by this test.\n            try press(catalog, "Recover (full verification)", renderer: renderer, timeout: 120)\n            _ = try waitElement(catalog.staticTexts.matching(identifier:\n                "Full original readback verified in this session. Choose is still a separate action; Build admits the originals again."),\n                in: catalog, timeout: 120)\n            try require(try Self.androidMatch(#"(?m)^Instance[ \\n]+([0-9a-f]{32})[ \\n]+· observed catalog"#,\n                in: androidPublicText(catalog)) == instance, "Android protected original changed during recovery")\n            try press(catalog, "Choose this tool copy", renderer: renderer, timeout: 48)\n            _ = try waitElement(catalog.buttons.matching(identifier: "This copy is selected"), in: catalog, timeout: 48)\n            try fixture.assertUnchanged()\n        }\n        try stage("android-memory-input-assignment") {\n            try press(renderer, "Credentials", renderer: renderer)\n            let storage = try waitElement(named(renderer, "Private-input storage controls"), in: renderer)\n            try select(storage, label: "Platform", value: "Android", renderer: renderer)\n            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)\n            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer)\n            try press(storage, "Start session — keep inputs in memory", renderer: renderer, failures: Self.privateInputFailures)\n            try privateStatus(storage, action: "open")\n            try privateContext(storage, renderer: renderer)\n            try privateRecordCount(storage, count: 0, assigned: 0)\n            try select(storage, label: "What would you like to provide?", value: "Android upload keystore", renderer: renderer)\n            try select(storage, label: "New or replacement copy?", value: "Keep a new session record", renderer: renderer)\n            try press(storage, "Select file…", renderer: renderer, failures: Self.privateInputFailures)\n            let sheet = try nativeSheet(window, title: "Choose a signing or iOS build-input file")\n            try goToFolder(sheet, path: initialInputs.credentialPath())\n            let selected = try waitElement(controls(sheet, [.cell, .outlineRow, .tableRow, .icon], label: "upload.jks"), in: sheet, enabled: true)\n            try require(selected.isHittable, "Android owned JKS picker item unavailable")\n            selected.click(); try require(selected.isSelected, "Android owned JKS picker selection missing")\n            try nativeOpen(sheet); try privateStatus(storage, action: "choose-file", phase: "selected")\n            for (label, key) in [("Keystore password", "storePassword"), ("Private-key alias", "alias"), ("Private-key password", "keyPassword")] {\n                let control = try waitElement(controls(storage, [.secureTextField], label: label, prefix: true),\n                                              in: storage, enabled: true, failures: Self.privateInputFailures)\n                try reveal(control, in: renderer); control.click()\n                // All three ordinary fields are write-only. Never inspect or print value.\n                control.typeText(try initialInputs.scalar(key))\n            }\n            try press(storage, "Prepare private review", renderer: renderer, failures: Self.privateInputFailures)\n            try privateStatus(storage, action: "prepare", phase: "preview")\n            let review = try privateReview(storage, title: "Keep this input for this session?", target: "New android upload keystore session record")\n            try press(review, "Keep for this session", renderer: renderer, failures: Self.privateInputFailures)\n            try privateStatus(storage, action: "commit")\n            let row = try waitElement(named(storage, "Private input · Android upload keystore · item 1"), in: storage, failures: Self.privateInputFailures)\n            try privateValue(storage, row, label: "Private-input record revision", value: "1")\n            try privateRecordCount(storage, count: 1, assigned: 0)\n            try press(row, "Review assignment", renderer: renderer, failures: Self.privateInputFailures)\n            try privateStatus(storage, action: "prepare", phase: "preview")\n            let assignment = try privateReview(storage, title: "Assign this record to the submitted context?", target: "Android upload keystore · item 1 · revision 1")\n            try press(assignment, "Assign to this context", renderer: renderer, failures: Self.privateInputFailures)\n            try privateStatus(storage, action: "bind")\n            try privateRecordCount(storage, count: 1, assigned: 1)\n            try fixture.assertUnchanged(); try initialInputs.post { _ = try self.remaining(5) }\n        }\n        var identity: LocalFixture.AndroidBuildIdentity?\n        try stage("android-one-signed-build-original") {\n            try press(renderer, "Releases", renderer: renderer)\n            let signing = try waitElement(renderer.checkBoxes.matching(identifier: "Sign locally with my upload key"), in: renderer, enabled: true)\n            try require((signing.value as? String) == "0" || (signing.value as? NSNumber)?.intValue == 0,\n                        "Android signing must start opt-in")\n            try reveal(signing, in: renderer); signing.click()\n            _ = try waitElement(renderer.staticTexts.matching(identifier:\n                "Current inputs are assigned. Passwords, private-key use and certificate policy will be checked during the owned run; file-format assessment alone is not signing verification."), in: renderer)\n            try press(renderer, "Review saved inputs", renderer: renderer, timeout: 48)\n            let review = try waitElement(controls(renderer, [.group], label: "Confirm this saved Android-build intent"), in: renderer, timeout: 48)\n            let text = try androidPublicText(review)\n            for fact in ["org.example.saved", ":app", "release", "1.2.3", "build", "7", certificate,\n                         try fixture.androidSavedDigest(LocalFixture.config), try fixture.androidSavedDigest(LocalFixture.version)] {\n                try require(text.contains(fact), "Android signed review saved-input binding differs")\n            }\n            let original = try androidCurrentBuildIdentity(review)\n            identity = original\n            try fixture.beginAndroidOutputObservation(original) { _ = try self.remaining(5) }\n            let consent = try unique(review.checkBoxes.matching(NSPredicate(format: "label BEGINSWITH %@",\n                "I trust this project and authorize one build")), "Android one-build consent unavailable")\n            try require((consent.value as? String) == "0" || (consent.value as? NSNumber)?.intValue == 0,\n                        "Android build consent unexpectedly checked")\n            try reveal(consent, in: renderer); consent.click()\n            try require(try androidCurrentBuildIdentity(review) == original, "Android consent identity changed")\n            try fixture.confirmAndroidStart(original) { _ = try self.remaining(5) }\n            try press(review, "Build, sign and validate", renderer: renderer, timeout: 48) // The sole Start.\n        }\n        guard let identity else { throw Refusal.condition("Android original build identity missing") }\n        var artifact: (Int, String)?\n        try stage("android-known-native-terminal") {\n            let status = try waitElement(named(renderer, "Original Android build status"), in: renderer, timeout: 48)\n            try require(try androidCurrentBuildIdentity(status) == identity, "Android running original identity differs")\n            try fixture.assertAndroidRunning(identity) { _ = try self.remaining(5) }\n            let terminal = try waitElement(named(renderer, "Completed local Android AAB observation"), in: renderer,\n                timeout: try remaining(780), failures: ["No new Android-build outcome was confirmed", "Cleanup needs attention",\n                "The original request acknowledgement is unconfirmed. Do not repeat Start. Original Status may help cancel or settle that operation, but cannot create new consent."])\n            _ = try waitElement(status.staticTexts.matching(identifier:\n                "Task work: removed. Local artifacts: retained-local-result. Disposition is not permission for blanket deletion or a rerun."), in: status)\n            try require(try androidCurrentBuildIdentity(status) == identity, "Android terminal status identity differs")\n            artifact = try androidResult(terminal, identity: identity, certificate: certificate)\n            // Original private POST -> ALL18 consuming closes -> clock -> drop\n            // scalar-owning references. No private reopening after this boundary.\n            try initialInputs.finish { _ = try self.remaining(5) }\n            try require(initialInputs.terminalClose, "Android private original close unconfirmed")\n            ownedAndroidInputs = nil; inputs = nil\n            try press(renderer, "Credentials", renderer: renderer)\n            let storage = try waitElement(named(renderer, "Private-input storage controls"), in: renderer)\n            try press(storage, "Discard session…", renderer: renderer, failures: Self.privateInputFailures)\n            let discard = try waitElement(named(storage, "Confirm private-input lock"), in: storage, failures: Self.privateInputFailures)\n            try press(discard, "Discard session copies", renderer: renderer, failures: Self.privateInputFailures)\n            try privateStatus(storage, action: "lock")\n            _ = try waitElement(storage.staticTexts.matching(identifier: "Storage closed"), in: storage, failures: Self.privateInputFailures)\n            try privateRecordCount(storage, count: 0, assigned: 0)\n        }\n        guard let artifact else { throw Refusal.condition("Android native artifact observation missing") }\n        var summary: LocalFixture.AndroidOutputSummary?\n        try stage("android-output-census-and-normal-quit") {\n            summary = try fixture.finishAndroidOutputObservation(identity, artifactBytes: Int64(artifact.0), artifactSHA256: artifact.1) {\n                _ = try self.remaining(5)\n            }\n            try press(renderer, "Artifacts", renderer: renderer)\n            let result = try waitElement(named(renderer, "Completed local Android AAB observation"), in: renderer)\n            let repeated = try androidResult(result, identity: identity, certificate: certificate)\n            try require(repeated.0 == artifact.0 && repeated.1 == artifact.1, "Android Artifacts observation changed")\n            try fixture.assertAndroidOutputClosure(identity) { _ = try self.remaining(5) }\n            let sheet = try quitSheet(app, window)\n            try click(sheet.buttons.matching(identifier: "Quit"), "Android ordinary Quit unavailable")\n            try completeNormalQuit(app)\n            try fixture.closeAndroidOriginals(identity) { _ = try self.remaining(5) }\n            ownedFixture = nil\n        }\n        guard let summary else { throw Refusal.condition("Android final output census missing") }\n        try acceptFinalScenario()\n        let env = ProcessInfo.processInfo.environment\n        let facts: [String: Any] = ["schemaVersion": 1, "scope": "one-ordinary-local-signed-android-build",\n            "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": LocalFixture.AndroidInputs.target,\n            "runId": env["MRK_NORMAL_UI_ANDROID_RUN_ID"] ?? "", "runAttempt": env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"] ?? "",\n            "sourceRegistrationObserved": false, "nativeSigningVerified": true, "privateOriginalsClosed": true,\n            "memorySessionDiscarded": true, "outputPostMatched": true, "normalQuitObserved": true,\n            "releaseQualified": false, "parentReturncodeRequired": 0, "operationId": identity.operationID,\n            "ownerGeneration": identity.ownerGeneration, "publicCertificateSha256": certificate,\n            "artifactSha256": artifact.1, "artifactBytes": artifact.0, "outputEntries": summary.entries,\n            "outputNameBytes": summary.nameBytes, "outputLogicalBytes": summary.logicalBytes,\n            "moduleLogicalBytes": summary.moduleBytes, "outputCensusSha256": summary.censusSHA256]\n        let raw = try JSONSerialization.data(withJSONObject: facts, options: [.sortedKeys, .withoutEscapingSlashes])\n        try require(raw.count <= 16 * 1024, "Android safe public result bound")\n        _ = try remaining(5)\n        print("MRK_MACOS_ANDROID_SIGNED_BUILD_UI=" + String(decoding: raw, as: UTF8.self))\n    }\n\n'),)
+
+def without_android_registration_source(source):
+    if type(source) is not str or len(source.encode()) > 1024 * 1024:
+        raise AssertionError("Android registration Swift SOURCE bound differs")
+    if 'android-separate-installed-service-setup' not in source:
+        if 'android-fresh-reviewed-protected-copy' in source or '"protectedCopyInstance": protectedCopyInstance' in source:
+            raise AssertionError("partial Android registration Swift SOURCE")
+        return source
+    rows = source.splitlines(keepends=True)
+    for start, end, expected, previous in reversed(ANDROID_REGISTRATION_SWIFT_INVERSE):
+        if hashlib.sha256(''.join(rows[start:end]).encode()).hexdigest() != expected:
+            raise AssertionError("Android registration Swift SOURCE region differs")
+        rows[start:end] = previous.splitlines(keepends=True)
+    source = ''.join(rows)
+    if hashlib.sha256(source.encode()).hexdigest() != "214023ac99ba5b87ebe89b06744ffcd39f6901d4caf651070c2ac18d740aba73":
+        raise AssertionError("Android registration Swift SOURCE predecessor differs")
+    return source
+
+
 def without_primary_owner_runtime_source(source):
     if type(source) is not str or len(source.encode()) > 1024 * 1024:
         raise AssertionError("primary owner Swift SOURCE bound differs")
@@ -737,6 +827,7 @@ def without_primary_owner_runtime_source(source):
 
 
 def without_normal_ios_pending_source(source):
+    source = without_android_registration_source(source)
     source = without_primary_owner_runtime_source(source)
     if type(source) is not str or len(source.encode()) > 1024 * 1024:
         raise AssertionError("normal iOS pending Swift SOURCE bound differs")
@@ -4043,6 +4134,52 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             body = stream.read(512 * 1024 + 1)
         self.assertLessEqual(len(body), 512 * 1024)
         source = body.decode("utf-8", "strict")
+        source = without_android_registration_workflow(source)
+        source = without_ordinary_app_assembly_budget_workflow(source)
+        # Inspect actual additive2+3 admission first; never change historical hashes.
+        live = source
+        live_blocks = {}
+        for text in live.split("      - name: ")[1:]:
+            block = "      - name: " + text
+            ids = [line.strip()[4:] for line in block.splitlines() if line.startswith("        id: ")]
+            if ids:
+                self.assertEqual(len(ids), 1)
+                self.assertNotIn(ids[0], live_blocks)
+                live_blocks[ids[0]] = block
+        saved_test = live_blocks["normal_saved_checks_ui_test"]
+        saved_result = live_blocks["normal_saved_checks_ui_result"]
+        live_bundle = live_blocks["normal_remaining_saved_file_ui"]
+        saved_run = saved_test.split("        run: |\n", 1)[1]
+        self.assertEqual(hashlib.sha256(saved_run.encode()).hexdigest(), "2c7b981d4394b0af7694a2923bdcbc1dc1ad70e38953624fe3553f58cb8249cf")
+        self.assertEqual(hashlib.sha256(saved_result.split("        run: |\n", 1)[1].encode()).hexdigest(), "8441d3c31cac68dc7a2c751becfa9a56bd9907c91836380ac5f2e4c5c4f7c463")
+        self.assertEqual(hashlib.sha256(live_bundle.split("        run: |\n", 1)[1].encode()).hexdigest(), "a1bb97dd58b52fb38d3a2c9026912eea7ebd15d5693ed699248d54bb041f1c22")
+        self.assertIn("env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three'", saved_test)
+        self.assertIn("steps.normal_diagnostics_ui_result.outcome == 'success'", saved_test)
+        self.assertIn("steps.normal_saved_checks_ui_test.outcome == 'success'", saved_result)
+        self.assertIn("steps.normal_saved_checks_ui_result.outcome == 'success'", live_bundle.split("        run: |\n", 1)[0])
+        self.assertEqual(saved_run.count("test-without-building"), 1)
+        for native_method in ("testSyntheticProjectSavedOfflineChecks", "testSyntheticProjectEmptyBuildInputInspection"):
+            self.assertEqual(saved_run.count("-only-testing:MRKNormalAppUITests/NormalAppUITests/" + native_method), 1)
+        self.assertNotIn("build-for-testing", saved_run)
+        self.assertLess(live.index(saved_test), live.index(saved_result))
+        self.assertLess(live.index(saved_result), live.index(live_bundle))
+        live_cleanup = live.split("      - name: Remove only this completed preview build's disposable compiler outputs\n", 1)[1]
+        self.assertIn("env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success'", live_cleanup.split("        run: |\n", 1)[0])
+        self.assertIn('stems = (("saved-checks", "saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else', live_cleanup)
+        self.assertIn('# remaining-three reaches this step only after all four original binders returned0.', live_cleanup)
+        source = without_additive_saved_checks_workflow(source)
+        self.assertEqual(hashlib.sha256(source.encode()).hexdigest(), "717f7646641a66f5d5dc0710159f2be1e0f87ebe1713521b554412d759fcfefd")
+        self.assertEqual(without_additive_saved_checks_workflow(source), source)
+        self.assertEqual(without_additive_saved_checks_workflow(live + "# unrelated mutation\n"), source + "# unrelated mutation\n")
+        for previous, current in (('    # Remaining-three adds28 nominal minutes versus one singleton; no350min fit is claimed.\n', '    # Remaining-three additionally requires ordinary saved-checks2; both cohorts are independent.\n    # Adds28 singleton minutes plus17 saved-checks minutes; no350min fit is claimed.\n'), ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven')\n", "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three'))\n"), ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_diagnostics_ui_result.outcome == 'success')\n", "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success')\n"), ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))\n", "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))\n"), ('          stems = (("saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else\n', '          stems = (("saved-checks", "saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else\n'), ('          # remaining-three reaches this step only after all three original binders returned0.\n', '          # remaining-three reaches this step only after all four original binders returned0.\n')):
+            for altered in (previous, current + current, current[:-1], current.replace(" ", "  ", 1)):
+                damaged = live.replace(current, altered, 1)
+                with self.assertRaises(AssertionError):
+                    without_additive_saved_checks_workflow(damaged)
+        for invalid in (None, b"DATA", "x" * (512 * 1024 + 1)):
+            with self.assertRaises(AssertionError):
+                without_additive_saved_checks_workflow(invalid)
+        self.assertEqual(without_additive_saved_checks_workflow("unchanged historical DATA\n"), "unchanged historical DATA\n")
         source = without_intel_resident_prepare_budget_workflow(source)
         for previous, current in REMAINING_THREE_WORKFLOW_INVERSE:
             self.assertEqual(source.count(current), 1)
@@ -4122,6 +4259,8 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         before_pins = {'desktop-macos-installed.yml': {'bytes': 474760, 'sha256': '7ca1cb29075ca0f14bd829f59f826e6da9830d61bb27a2cae5dd32bdb018c8f2'}, 'desktop-macos-aqua.yml': {'bytes': 133491, 'sha256': '36b53942b31b13337875fdd47872a2f54f0a285d746e071b33a42c157f74f57d'}}
         for filename, pin in before_pins.items():
             raw = (root / ".github/workflows" / filename).read_text()
+            # Retire only current supplier/S nominations before isolating the Intel budget delta.
+            raw = without_primary_owner_runtime_source_pin(without_fresh_g2_supplier_workflow(raw))
             self.assertEqual(raw.count("&& 26 || 10"), 1)
             self.assertIn("cancel-in-progress: false", raw)
             prior = without_intel_fetch_workflow(raw)
@@ -4131,9 +4270,19 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                              without_intel_resident_prepare_budget_workflow(prior))
             self.assertEqual(raw.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0],
                              prior.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0])
-            for previous, current in dict(INTEL_FETCH_WORKFLOW_INVERSE)[raw.splitlines()[0]]:
+            # Reconstruct the exact Intel-current cohort after the independently tested Cargo split.
+            intel_rows = dict(INTEL_FETCH_WORKFLOW_INVERSE)[prior.splitlines()[0]]
+            intel_current = prior
+            for previous, current in intel_rows:
+                self.assertEqual(intel_current.count(previous), 1)
+                self.assertNotIn(current, intel_current)
+                intel_current = intel_current.replace(previous, current, 1)
+            self.assertEqual(without_intel_fetch_workflow(intel_current), prior)
+            for previous, current in intel_rows:
+                self.assertEqual(intel_current.count(current), 1)
                 for damaged in (previous, current + current, current[:-1], current.replace(" ", "  ", 1)):
-                    changed = raw.replace(current, damaged, 1)
+                    changed = intel_current.replace(current, damaged, 1)
+                    self.assertNotEqual(changed, intel_current)
                     if changed == prior:
                         self.assertEqual(without_intel_fetch_workflow(changed), prior)
                         continue  # Complete exact predecessor is supported; partial mixtures are not.
@@ -5265,6 +5414,64 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
 
     def test_normal_diagnostics_workflow_has_one_bounded_original_result(self):
         raw = (ROOT / '.github/workflows/desktop-macos-installed.yml').read_text()
+        # Current dormant Android producer facts, before all historical inverses.
+        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '076dfc18029bb3e2f728e5ec81542cffcc07fe4b134c3162129bb534727ad662')
+        self.assertEqual(raw.count('      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n'), 1)
+        _, current_blocks = steps(raw)
+        self.assertIn('Code and synthetic receipts never grant owner/legal or OS approval.', current_blocks['normal_android_ui_test'])
+        current_result = current_blocks['normal_android_ui_result']
+        marker = 'PY_ANDROID_INSTALLED_RESULT'
+        head = '          "$MRK_PYTHON" -I -S -B - <<' + repr(marker) + ' > "$MRK_MACOS_WORK/normal-ui/android-signed-build-result.log" 2>&1\n'
+        self.assertEqual(current_result.count(head), 1)
+        self.assertEqual(current_result.count('          ' + marker + '\n'), 1)
+        part = current_result.split(head, 1)[1].split('          ' + marker + '\n', 1)[0]
+        self.assertTrue(all(not line.strip() or line.startswith('          ') for line in part.splitlines()))
+        code = ''.join(line[10:] if line.strip() else line for line in part.splitlines(keepends=True))
+        parsed = ast.parse(code)
+        values = [n.value for n in ast.walk(parsed) if isinstance(n, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == 'value' for t in n.targets)
+                  and isinstance(n.value, ast.Dict)
+                  and any(isinstance(k, ast.Constant) and k.value == 'scope'
+                          and isinstance(v, ast.Constant) and v.value == 'ordinary-installed-one-android-signed-build-ui'
+                          for k, v in zip(n.value.keys, n.value.values, strict=True))]
+        self.assertEqual(len(values), 1)
+        public = values[0]
+        self.assertTrue(all(isinstance(k, ast.Constant) and type(k.value) is str for k in public.keys))
+        self.assertEqual(len({k.value for k in public.keys}), len(public.keys))
+        fields = {k.value: v for k, v in zip(public.keys, public.values, strict=True)}
+        self.assertEqual(ast.unparse(fields['vendorAcknowledgementAutomated']), "facts['vendorAcknowledgementAutomated']")
+        self.assertEqual(ast.unparse(fields['newProtectedCopyRegistered']), "facts['sourceRegistrationObserved']")
+        for flag in ('privateInputsPublished', 'fullUIQualified', 'distributionQualified', 'productReady'):
+            self.assertIs(ast.literal_eval(fields[flag]), False)
+        self.assertIs(ast.literal_eval(fields['cleanExitStatus']), None)
+        self.assertEqual(ast.literal_eval(fields['allWorkerFinality']), 'not-established-by-XCTest-UI-state')
+        replacements = (('          # No vendor-license click, service approval or copy registration.\n          # An independently lawful current copy is a prerequisite, not a skip.\n', '          # Inert until separately authorized SOURCE activation: service check,\n          # fresh vendor/copy consent, publication, recovery and selection.\n          # Code and synthetic receipts never grant owner/legal or OS approval.\n'), ("                  'vendorAcknowledgementAutomated': False, 'newProtectedCopyRegistered': False,\n", "                  'vendorAcknowledgementAutomated': facts['vendorAcknowledgementAutomated'],\n                  'newProtectedCopyRegistered': facts['sourceRegistrationObserved'],\n"))
+        for previous, current in replacements:
+            self.assertEqual(raw.count(current), 1)
+            self.assertEqual(raw.count('\n' + current), 1)
+            self.assertNotIn(previous, raw)
+            for damaged in (previous, '', current + current, previous + current,
+                            current[:-1], current.replace(' ', '  ', 1)):
+                changed = raw.replace(current, damaged, 1)
+                self.assertNotEqual(changed, raw)
+                with self.assertRaises(AssertionError):
+                    without_android_registration_workflow(changed)
+        for invalid in (None, b'DATA', 'x' * (512 * 1024 + 1),
+                        raw.replace(raw.splitlines()[0], 'name: foreign', 1)):
+            with self.assertRaises(AssertionError):
+                without_android_registration_workflow(invalid)
+        prior = without_android_registration_workflow(raw)
+        self.assertEqual((len(prior.encode()), hashlib.sha256(prior.encode()).hexdigest()),
+                         (475408, '088544757e13966f4639af9148cef67469717e9766129e89cdabfacb28c521d6'))
+        self.assertEqual(without_android_registration_workflow(prior), prior)
+        unrelated = raw + '# unrelated Android mutation\n'
+        self.assertEqual(without_android_registration_workflow(unrelated), prior + '# unrelated Android mutation\n')
+        self.assertEqual(without_intel_fetch_workflow(unrelated),
+                         without_intel_fetch_workflow(raw) + '# unrelated Android mutation\n')
+        with self.assertRaises(AssertionError):
+            without_tool_enrollment_workflow(unrelated)
+        raw = without_additive_saved_checks_workflow(without_ordinary_app_assembly_budget_workflow(prior))
+        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '717f7646641a66f5d5dc0710159f2be1e0f87ebe1713521b554412d759fcfefd')
         ids, blocks = steps(raw)
         selected = blocks['normal_saved_version_recovery_ui_test']
         result = blocks['normal_saved_version_recovery_ui_result']

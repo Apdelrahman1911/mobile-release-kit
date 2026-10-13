@@ -25,8 +25,9 @@ jobs:
     environment: macos-developer-id
     name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}
     runs-on: ${{ matrix.runner }}
-    # Raw timed-step union585min (ARM) /625min (Intel) includes the retained42min alternative.
-    # Remaining-three adds28 nominal minutes versus one singleton; no350min fit is claimed.
+    # Raw timed-step union602min (ARM) /642min (Intel) includes the retained42min alternative.
+    # Remaining-three additionally requires ordinary saved-checks2; both cohorts are independent.
+    # Adds28 singleton minutes plus17 saved-checks minutes; no350min fit is claimed.
     # The unchanged350min job cap is containing authority, never renewed per case.
     # Historical pre-Remove baselines: preview345 / recovery339 / installed210, plus5 overhead.
     # Remove preview adds90 nominal step maxima; Intel app-build adds24 to the old allocation.
@@ -34,7 +35,7 @@ jobs:
     # Fixed removal uses its own two fresh ARM rows, the same350min ceiling,
     # separate baseline Install/UI-build preparation, O3 work1740/hard1800,
     # then one removal owner990 (fixed segment sum963); no budget restart.
-    # App-signature: ARM82 / Intel122 timed preparation +14 bounded setup
+    # App-signature: ARM99 / Intel139 timed preparation +14 bounded setup
     # +7 summary/cleanup/upload;7 overhead. Independent110 hard cap takes precedence.
     timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}
     strategy:
@@ -1384,7 +1385,7 @@ jobs:
           builtin source ./desktop/tools/macos_installed_data_contracts.sh
       - name: Assemble the ordinary image app and sign code inside-out (never --deep)
         id: app_assemble
-        timeout-minutes: 3
+        timeout-minutes: 20
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -2113,8 +2114,9 @@ jobs:
           umask 077
           # The fixed parent freshly admits private inputs and this exact run;
           # env strings and a handoff are never original-caller authorization.
-          # No vendor-license click, service approval or copy registration.
-          # An independently lawful current copy is a prerequisite, not a skip.
+          # Inert until separately authorized SOURCE activation: service check,
+          # fresh vendor/copy consent, publication, recovery and selection.
+          # Code and synthetic receipts never grant owner/legal or OS approval.
           ulimit -f 1048576
           set +e
           /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
@@ -2434,7 +2436,8 @@ jobs:
                   'originalCommandStatuses': {'packageInstall': 0, 'installer': 0, 'supplier': 0, 'build': 0, 'test': 0, 'summary': 0},
                   'testIdentifier': 'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectAndroidSignedBuild', 'testCounts': counts,
                   'observation': facts, 'resultOriginalReturncodeRequired': 0, 'privateInputsPublished': False,
-                  'vendorAcknowledgementAutomated': False, 'newProtectedCopyRegistered': False,
+                  'vendorAcknowledgementAutomated': facts['vendorAcknowledgementAutomated'],
+                  'newProtectedCopyRegistered': facts['sourceRegistrationObserved'],
                   'cleanExitStatus': None, 'allWorkerFinality': 'not-established-by-XCTest-UI-state',
                   'fullUIQualified': False, 'distributionQualified': False, 'productReady': False}
               body = N.encoded(value) + b'\n'
@@ -4109,7 +4112,7 @@ jobs:
 
       - name: Observe saved offline checks and empty build-input inspection through the ordinary Mac UI
         id: normal_saved_checks_ui_test
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven')
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three'))
         timeout-minutes: 17
         shell: bash
         env:
@@ -4728,7 +4731,7 @@ jobs:
           PY_SAVED_VERSION_RECOVERY_RESULT
       - name: Exercise and bind each remaining saved-file journey once in fixed order
         id: normal_remaining_saved_file_ui
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_diagnostics_ui_result.outcome == 'success')
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success')
         timeout-minutes: 42
         shell: bash
         env:
@@ -5011,7 +5014,7 @@ jobs:
       # The focused real Aqua/Save procedure and separate command/result gates
       # are in desktop/packaging/macos-installed.md.
       - name: Remove only this completed preview build's disposable compiler outputs
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))
         timeout-minutes: 3
         shell: bash
         run: |
@@ -5047,11 +5050,11 @@ jobs:
           scope = os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"]
           if scope not in ("ordinary-seven", "saved-version-recovery", "workflow-refusal", "release-evidence", "remaining-three"):
               raise ValueError("task cleanup SOURCE scope refused")
-          stems = (("saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else
+          stems = (("saved-checks", "saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else
                    ({"ordinary-seven": "saved-checks", "saved-version-recovery": "saved-version-recovery",
                      "workflow-refusal": "workflow-refusal", "release-evidence": "release-evidence"}[scope],))
           # The skipped cohort supplies no finality or cleanup authority.
-          # remaining-three reaches this step only after all three original binders returned0.
+          # remaining-three reaches this step only after all four original binders returned0.
           saved_directories = tuple(root / ("normal-ui/" + stem + "-test.xcresult") for stem in stems)
           saved_logs = tuple(name for stem in stems for name in
                              (stem + "-test.log", stem + "-summary.raw.json", stem + "-summary.stderr"))

@@ -421,7 +421,9 @@ def positive_ui_data(context=None, *, ios=False):
         originalEntries=100, originalBytes=10000), source=context["source"])
     android_facts = normal["android_signed_facts"](dict(schemaVersion=1,
         scope=normal["ANDROID_FACTS_SCOPE"], sourceCommit=context["source"], target=context["target"],
-        runId=context["runId"], runAttempt=context["runAttempt"], sourceRegistrationObserved=False,
+        runId=context["runId"], runAttempt=context["runAttempt"], sourceRegistrationObserved=True,
+        serviceEnabledObserved=True, serviceRegistrationRequested=False, vendorAcknowledgementAutomated=True,
+        protectedCopyInstance="b" * 32,
         nativeSigningVerified=True, privateOriginalsClosed=True, memorySessionDiscarded=True, parentReturncodeRequired=0,
         outputPostMatched=True, normalQuitObserved=True, releaseQualified=False, operationId="4" * 32,
         ownerGeneration="5" * 32, publicCertificateSha256="6" * 64, artifactSha256="7" * 64,
@@ -432,8 +434,8 @@ def positive_ui_data(context=None, *, ios=False):
         applicationSourceCommit=context["source"], harnessSourceCommit=context["source"], sourceTree=inventory["tree"],
         workflow=".github/workflows/desktop-macos-installed.yml", runId=context["runId"], runAttempt=context["runAttempt"],
         testIdentifier="MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectAndroidSignedBuild",
-        resultOriginalReturncodeRequired=0, privateInputsPublished=False, vendorAcknowledgementAutomated=False,
-        newProtectedCopyRegistered=False, cleanExitStatus=None, allWorkerFinality="not-established-by-XCTest-UI-state",
+        resultOriginalReturncodeRequired=0, privateInputsPublished=False, vendorAcknowledgementAutomated=True,
+        newProtectedCopyRegistered=True, cleanExitStatus=None, allWorkerFinality="not-established-by-XCTest-UI-state",
         fullUIQualified=False, distributionQualified=False, productReady=False, packageSha256="2" * 64, packageBytes=1024,
         runtimeManifestSha256="3" * 64, installerInventorySha256="4" * 64,
         originalCommandStatuses=dict(packageInstall=0, installer=0, supplier=0, build=0, test=0, summary=0),
@@ -708,9 +710,17 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         self.assertEqual(result["recordedResult"], value)
         self.assertIs(result["nativeSuccessInferred"], False)
         self.assertEqual(result["binding"], "source-run-target-fields-and-current-statuses")
+        for requested in (False, True):
+            observed = copy.deepcopy(value); observed["observation"]["serviceRegistrationRequested"] = requested
+            self.assertEqual(DATA.project_android_positive(observed, CONTEXT, statuses, phases, inventory)["recordedResult"], observed)
+        for missing in ("sourceRegistrationObserved", "serviceEnabledObserved", "serviceRegistrationRequested",
+                        "vendorAcknowledgementAutomated", "protectedCopyInstance"):
+            bad = copy.deepcopy(value); del bad["observation"][missing]
+            with self.subTest(missing=missing), self.assertRaises(DATA.Refused):
+                DATA.project_android_positive(bad, CONTEXT, statuses, phases, inventory)
         changes = (("applicationSourceCommit", "2" * 40), ("harnessSourceCommit", "2" * 40),
                    ("runAttempt", "3"), ("target", "x86_64-apple-darwin"), ("sourceTree", "2" * 40),
-                   ("vendorAcknowledgementAutomated", True), ("newProtectedCopyRegistered", True),
+                   ("vendorAcknowledgementAutomated", False), ("newProtectedCopyRegistered", False),
                    ("privateInputsPublished", True), ("cleanExitStatus", 0), ("productReady", True),
                    ("testIdentifier", SENTINEL), ("packageBytes", True), ("unexpected", SENTINEL))
         for key, item in changes:
@@ -722,7 +732,10 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             bad = copy.deepcopy(value); bad["testCounts"][key] = True
             with self.assertRaises(DATA.Refused):
                 DATA.project_android_positive(bad, CONTEXT, statuses, phases, inventory)
-        for key, item in (("sourceRegistrationObserved", True), ("nativeSigningVerified", False),
+        for key, item in (("sourceRegistrationObserved", False), ("nativeSigningVerified", False),
+                          ("serviceEnabledObserved", False), ("vendorAcknowledgementAutomated", False),
+                          ("serviceRegistrationRequested", 1), ("serviceRegistrationRequested", "true"),
+                          ("protectedCopyInstance", "private/path"), ("protectedCopyInstance", "A" * 32),
                           ("privateOriginalsClosed", False), ("memorySessionDiscarded", False),
                           ("releaseQualified", True), ("artifactBytes", (64 << 20) + 1)):
             bad = copy.deepcopy(value); bad["observation"][key] = item

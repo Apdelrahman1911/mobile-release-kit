@@ -6066,6 +6066,55 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(renderer.buttons.matching(identifier: "Review saved inputs"), in: renderer, timeout: 48)
             try fixture.assertUnchanged()
         }
+        // Inert while the SOURCE-owned Android lane is disabled. A later run
+        // needs separate owner authorization; these observations do not grant it.
+        var serviceEnabledObserved = false, serviceRegistrationRequested = false
+        var vendorAcknowledgementAutomated = false, sourceRegistrationObserved = false
+        var protectedCopyInstance = ""
+        try stage("android-separate-installed-service-setup") {
+            let service = try waitElement(named(renderer, "Android system service setup"), in: renderer)
+            let failures = ["Service action refused.", "Service cleanup is unconfirmed.", "No new service outcome was confirmed"]
+            try press(service, "Check installed service", renderer: renderer, failures: failures, timeout: 48)
+            _ = try waitElement(service.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Service action completed.")),
+                in: service, timeout: 48, failures: failures)
+            _ = try waitElement(service.buttons.matching(identifier: "Check installed service"), in: service, enabled: true, timeout: 48)
+            let consent = try unique(service.checkBoxes.matching(NSPredicate(format: "label BEGINSWITH %@",
+                "I authorize one registration request for the fixed Android helper")), "Android separate service consent absent")
+            try require((consent.value as? String) == "0" || (consent.value as? NSNumber)?.intValue == 0,
+                        "Android service consent must start unchecked")
+            let request = try unique(service.buttons.matching(identifier: "Request system-service registration"),
+                                     "Android service registration control absent")
+            try require(!request.isEnabled, "Android service registration enabled without separate consent")
+            if !(try androidPublicText(service)).contains("Enabled in macOS.") {
+                try require(try androidPublicText(service).contains("Not registered with macOS."),
+                            "Android service needs external macOS approval or publisher repair")
+                try reveal(consent, in: renderer); consent.click()
+                try require((consent.value as? String) == "1" || (consent.value as? NSNumber)?.intValue == 1,
+                            "Android separate service consent was not checked")
+                try press(service, "Request system-service registration", renderer: renderer, failures: failures, timeout: 48)
+                _ = try waitElement(service.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Service action completed.")),
+                    in: service, timeout: 48, failures: failures)
+                _ = try waitElement(service.buttons.matching(identifier: "Check installed service"), in: service, enabled: true, timeout: 48)
+                let text = try androidPublicText(service)
+                try require(text.contains("Registration request returned.") || text.contains("Service was already registered."),
+                            "Android service request needs external macOS approval or was not acknowledged")
+                serviceRegistrationRequested = true // Request returned; not a claim of native mutation.
+            }
+            // No scripted Settings approval, administrator command or retry. If
+            // macOS needs owner approval, this run stops without qualification.
+            try press(service, "Check installed service", renderer: renderer, failures: failures, timeout: 48)
+            _ = try waitElement(service.staticTexts.matching(NSPredicate(format: "label CONTAINS %@",
+                "Enabled in macOS. Read-only service observation returned.")), in: service, timeout: 48, failures: failures)
+            _ = try waitElement(service.buttons.matching(identifier: "Check installed service"), in: service, enabled: true, timeout: 48)
+            serviceEnabledObserved = true
+            let catalog = try waitElement(named(renderer, "Protected Android tools on this Mac"), in: renderer)
+            try press(catalog, "Refresh tool list", renderer: renderer, timeout: 48)
+            _ = try waitElement(catalog.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Tool catalog: ready.")), in: catalog, timeout: 48)
+            _ = try waitElement(catalog.staticTexts.matching(identifier:
+                "No protected registration, destination or lease instance was found for this macOS account."), in: catalog, timeout: 48)
+            try require(!(try androidPublicText(catalog)).contains("· observed catalog"), "Android fresh-copy baseline is not empty")
+            try fixture.assertUnchanged(); try initialInputs.post { _ = try self.remaining(5) }
+        }
         try stage("android-source-inspection-without-license-acceptance") {
             let roles = [("jdk", "Java development kit (JDK)", "Choose an installed Java 17 JDK folder", "temurin-17.jdk"),
                          ("sdk", "Android SDK", "Choose the Android SDK folder", "sdk"),
@@ -6095,21 +6144,60 @@ final class NormalAppUITests: XCTestCase {
             let register = try unique(review.buttons.matching(identifier: "Register protected tool copy"),
                                       "Android separate protected registration unavailable")
             try require(!register.isEnabled, "Android protected registration enabled without legal authorization")
-            // Deliberately NO vendor acknowledgement, registration or system approval.
+            // Negative review: NO vendor acknowledgement or protected registration.
             try press(renderer, "Discard this source review", renderer: renderer, timeout: 48)
             try waitGone(review)
             _ = try waitElement(renderer.buttons.matching(identifier: "Inspect selected sources"), in: renderer, enabled: true, timeout: 48)
             try fixture.assertUnchanged(); try initialInputs.post { _ = try self.remaining(5) }
         }
-        try stage("android-existing-protected-copy-full-readback") {
+        try stage("android-fresh-reviewed-protected-copy") {
+            try press(renderer, "Inspect selected sources", renderer: renderer, timeout: 48)
+            let review = try waitElement(controls(renderer, [.group], label: "Confirm this exact protected-copy review"),
+                in: renderer, timeout: 120, failures: ["Inspection or registration refused", "Original cleanup is unconfirmed"])
+            let text = try androidPublicText(review)
+            for fact in ["complete compatible role observation", try fixture.androidSavedDigest(LocalFixture.config),
+                         try fixture.androidSavedDigest(LocalFixture.version)] {
+                try require(text.contains(fact), "Android fresh protected-copy review saved binding differs")
+            }
+            let license = try unique(review.checkBoxes.matching(NSPredicate(format: "label BEGINSWITH %@",
+                "I acknowledge the applicable vendor licenses")), "Android fresh vendor consent absent")
+            try require((license.value as? String) == "0" || (license.value as? NSNumber)?.intValue == 0,
+                        "Android fresh review must not inherit vendor consent")
+            let register = try unique(review.buttons.matching(identifier: "Register protected tool copy"),
+                                      "Android fresh protected registration unavailable")
+            try require(!register.isEnabled, "Android fresh protected registration enabled before acknowledgement")
+            try reveal(license, in: renderer); license.click()
+            try require((license.value as? String) == "1" || (license.value as? NSNumber)?.intValue == 1,
+                        "Android vendor acknowledgement action was not observed")
+            vendorAcknowledgementAutomated = true // Observed UI action, never legal authority.
+            try press(review, "Register protected tool copy", renderer: renderer, timeout: 48) // One copy request.
+            let failures = ["Inspection or registration refused", "Original operation cancelled", "Original cleanup is unconfirmed",
+                            "No new source-inspection or protected-copy outcome was confirmed"]
+            // Published output can also survive a cancelled/refused operation.
+            // Require the existing complete-phase heading, not disposition alone.
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Protected copy published"), in: renderer,
+                timeout: 240, failures: failures)
+            let report = try waitElement(named(renderer, "Final original protected-copy observation"), in: renderer,
+                timeout: 48, failures: failures)
+            _ = try waitElement(report.staticTexts.matching(identifier:
+                "After settlement, explicitly Refresh tool list, Recover the copy for full verification, then Choose it. Nothing is auto-recovered, selected or built."),
+                in: report, timeout: 48)
+            let catalog = try waitElement(named(renderer, "Protected Android tools on this Mac"), in: renderer)
+            // Publication alone is not settlement. This existing controller gate
+            // also excludes pending/unconfirmed/cancel-pending/issue/held copy state.
+            _ = try waitElement(catalog.buttons.matching(identifier: "Refresh tool list"), in: renderer, enabled: true, timeout: 48, failures: failures)
+            sourceRegistrationObserved = true
+            try fixture.assertUnchanged(); try initialInputs.post { _ = try self.remaining(5) }
+        }
+        try stage("android-new-protected-copy-full-readback") {
             let catalog = try waitElement(named(renderer, "Protected Android tools on this Mac"), in: renderer)
             try press(catalog, "Refresh tool list", renderer: renderer, timeout: 48)
             _ = try waitElement(catalog.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Tool catalog: ready.")), in: catalog, timeout: 48)
             let text = try androidPublicText(catalog)
             let instance = try Self.androidMatch(#"(?m)^Instance[ \n]+([0-9a-f]{32})[ \n]+· observed catalog"#, in: text)
             try require(text.contains("Gradle 8.14.5 · Android plugin 8.9.2 · android-35 · build tools 35.0.0."),
-                        "Android existing protected tuple differs")
-            // A unique actual current copy is a prerequisite, not created by this test.
+                        "Android newly published protected tuple differs")
+            // Empty before, exactly one now: never substitute a pre-existing copy.
             try press(catalog, "Recover (full verification)", renderer: renderer, timeout: 120)
             _ = try waitElement(catalog.staticTexts.matching(identifier:
                 "Full original readback verified in this session. Choose is still a separate action; Build admits the originals again."),
@@ -6118,6 +6206,9 @@ final class NormalAppUITests: XCTestCase {
                 in: androidPublicText(catalog)) == instance, "Android protected original changed during recovery")
             try press(catalog, "Choose this tool copy", renderer: renderer, timeout: 48)
             _ = try waitElement(catalog.buttons.matching(identifier: "This copy is selected"), in: catalog, timeout: 48)
+            try require(try Self.androidMatch(#"(?m)^Instance[ \n]+([0-9a-f]{32})[ \n]+· observed catalog"#,
+                in: androidPublicText(catalog)) == instance, "Android protected original changed during selection")
+            protectedCopyInstance = instance
             try fixture.assertUnchanged()
         }
         try stage("android-memory-input-assignment") {
@@ -6235,12 +6326,16 @@ final class NormalAppUITests: XCTestCase {
             ownedFixture = nil
         }
         guard let summary else { throw Refusal.condition("Android final output census missing") }
+        try require(serviceEnabledObserved && vendorAcknowledgementAutomated && sourceRegistrationObserved
+                    && protectedCopyInstance.count == 32, "Android fresh-copy observations incomplete")
         try acceptFinalScenario()
         let env = ProcessInfo.processInfo.environment
         let facts: [String: Any] = ["schemaVersion": 1, "scope": "one-ordinary-local-signed-android-build",
             "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": LocalFixture.AndroidInputs.target,
             "runId": env["MRK_NORMAL_UI_ANDROID_RUN_ID"] ?? "", "runAttempt": env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"] ?? "",
-            "sourceRegistrationObserved": false, "nativeSigningVerified": true, "privateOriginalsClosed": true,
+            "sourceRegistrationObserved": sourceRegistrationObserved, "serviceEnabledObserved": serviceEnabledObserved,
+            "serviceRegistrationRequested": serviceRegistrationRequested, "vendorAcknowledgementAutomated": vendorAcknowledgementAutomated,
+            "protectedCopyInstance": protectedCopyInstance, "nativeSigningVerified": true, "privateOriginalsClosed": true,
             "memorySessionDiscarded": true, "outputPostMatched": true, "normalQuitObserved": true,
             "releaseQualified": false, "parentReturncodeRequired": 0, "operationId": identity.operationID,
             "ownerGeneration": identity.ownerGeneration, "publicCertificateSha256": certificate,

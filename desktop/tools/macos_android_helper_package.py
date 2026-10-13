@@ -66,7 +66,7 @@ INTEL_TARGET = "x86_64-apple-darwin"
 MAX_HELPER = 32 * 1024 * 1024
 # Only nonshipping producer graphs; packaged programs keep release3.
 PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=0"
-HELPER_SOURCE_BYTES = 542750
+HELPER_SOURCE_BYTES = 548173
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -1862,6 +1862,17 @@ def removal_prepared_data(value, environment, target, case, correlation):
     return value
 
 
+def transport_mount_path_data(environment, target, phase):
+    """Fixed namespace only; neither package authority nor collision retry."""
+    need(type(environment) is dict and target in (ARM_TARGET, INTEL_TARGET)
+         and phase in ("package-install", SAME_PACKAGE_PHASE, UPDATE_PHASE)
+         and all(type(environment.get(key)) is str
+                 and re.fullmatch(r"[1-9][0-9]{0,19}", environment[key])
+                 for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")), "package-transport-context")
+    context = "\n".join((environment["GITHUB_RUN_ID"], environment["GITHUB_RUN_ATTEMPT"], target, phase))
+    return Path("/Volumes") / ("MRK-Install-" + digest(context.encode("ascii"))[:32])
+
+
 class Operation:
     """Custody for this one fixed packaging operation and its finite outputs."""
 
@@ -1952,6 +1963,7 @@ class Operation:
         self.producer_profile_entry = self.distribution_entry = None
         self.mount_entry = self.mount_placeholder = self.mount_device = None
         self.mount_api = self.mount_host_source = None
+        self.transport_mount = self.transport_slash = self.transport_volumes = self.transport_roster = None
         self.mount_entered = self.mount_known = self.mount_detached = False
         self.installer_entered = self.installer_zero = self.installation_readback = False
         self.removal_package_complete = False
@@ -6572,7 +6584,7 @@ class Operation:
 
     def normal_mount_host(self):
         self.package_clock()
-        need(self.phase in ("package-install", SAME_PACKAGE_PHASE) + FINAL_IMAGE_PHASES
+        need(self.phase in ("package-install", SAME_PACKAGE_PHASE, UPDATE_PHASE) + FINAL_IMAGE_PHASES
              and self.removal_baseline_mount is None and not self.mount_entered
              and self.mount_api is None and self.mount_host_source is None and self.package_settled(),
              "package-mount-host-admission")
@@ -6586,8 +6598,66 @@ class Operation:
         need(self.read(entry) == body, "package-mount-host-source-post")
         self.package_clock()
         self.mount_api = module.DarwinAPI(_RemovalHostClock(self), target=self.target)
+        if self.phase in ("package-install", SAME_PACKAGE_PHASE, UPDATE_PHASE):
+            need(self.removal_host_module is None and self.removal_api is None, "package-transport-host-original")
+            self.removal_host_module, self.removal_api = module, self.mount_api
         self.package_clock()
         need(self.read(entry) == body, "package-mount-host-source-post")
+
+    def transport_source_post(self):
+        need(self.mount_host_source is not None and self.mount_api is self.removal_api,
+             "package-transport-host-unavailable")
+        source, body = self.mount_host_source
+        need(self.read(source) == body, "package-mount-host-source-post")
+        self.package_clock()
+
+    def transport_mount_admit(self):
+        need(self.transport_mount is None and not self.mount_entered and self.package_settled(),
+             "package-transport-one-admission")
+        path = transport_mount_path_data(self.environment, self.target, self.phase)
+        self.transport_source_post()
+        self.transport_slash = self.removal_open_directory(None, "/", "package-transport-system-root", protected=True)
+        self.transport_volumes = self.removal_open_directory(self.transport_slash, "Volumes", "package-transport-volumes", protected=True)
+        for entry in (self.transport_slash, self.transport_volumes):
+            need(not entry["removal_facts"][2]["flags"] & 0x400000, "package-transport-automounted")
+        self.removal_absent(self.transport_volumes, path.name)
+        self.transport_roster = self.removal_roster(self.transport_volumes)
+        self.transport_mount = path
+        self.transport_source_post()
+        return path
+
+    def transport_mount_facts(self):
+        self.transport_source_post()
+        need(self.transport_mount == transport_mount_path_data(self.environment, self.target, self.phase)
+             and self.mount_entry is not None, "package-transport-original-mount")
+        self.removal_directory_post(self.mount_entry)
+        self.removal_directory_post(self.transport_volumes)
+        self.removal_directory_post(self.transport_slash)
+        for entry in (self.mount_entry, self.transport_volumes, self.transport_slash):
+            need(not entry["removal_facts"][2]["flags"] & 0x400000, "package-transport-automounted")
+        need(self.mount_entry["removal_facts"][0][0] != self.transport_volumes["removal_facts"][0][0]
+             and self.mount_entry["removal_facts"][2]["mountOn"] == str(self.transport_mount)
+             and self.mount_entry["removal_facts"][2]["mountFrom"] == self.mount_device,
+             "package-transport-original-device")
+        wanted = dict(self.transport_roster)
+        wanted[self.transport_mount.name] = (self.mount_entry["identity"][0], self.mount_entry["identity"][1], stat.S_IFDIR)
+        need(self.removal_roster(self.transport_volumes) == wanted, "package-transport-mounted-namespace")
+        self.transport_source_post()
+
+    def transport_mount_detached(self):
+        role = UPDATE_ROLES[2] if self.phase == UPDATE_PHASE else "distribution-detach"
+        need(self.calls[-1]["role"] == role and self.calls[-1]["returned"]
+             and self.calls[-1].get("returncode") == 0 and self.calls[-1].get("capturesSettled") is True,
+             "package-transport-detach-original")
+        self.transport_source_post()
+        before = dict(self.transport_roster)
+        before[self.transport_mount.name] = (self.mount_entry["identity"][0], self.mount_entry["identity"][1], stat.S_IFDIR)
+        self.removal_own_parent_post(self.transport_volumes, before, self.transport_mount.name, present=False)
+        self.removal_absent(self.transport_volumes, self.transport_mount.name)
+        self.removal_directory_post(self.transport_slash)
+        for entry in (self.transport_slash, self.transport_volumes):
+            need(not entry["removal_facts"][2]["flags"] & 0x400000, "package-transport-automounted")
+        self.transport_source_post()
 
     def mount_facts(self, entry):
         # MNT_MULTILABEL is MAC-label support, not MNT_UNION (Apple mount.h).
@@ -6625,8 +6695,31 @@ class Operation:
     def mount_custody(self, attached, role):
         need(self.mount_entered and not self.mount_known and self.mount_entry is None
              and self.package_settled(), "package-mount-custody-admission")
-        path = self.work / "package-mount"
+        path = self.transport_mount if self.transport_mount is not None else self.work / "package-mount"
         self.mount_device = cleanup_mount_device_data(attached.stdout, attached.stderr, attached.returncode, path)
+        if self.transport_mount is not None:
+            self.transport_source_post()
+            self.removal_reserve()
+            entry = self.register(None, role, "mount", self.transport_volumes["fd"], path.name)
+            self.mount_entry = entry  # Acquisition custody BEFORE the syscall, including failure.
+            entry["parent_entry"] = self.transport_volumes
+            entry["fd"] = os.open(path.name, READ_FLAGS | os.O_DIRECTORY, dir_fd=self.transport_volumes["fd"])
+            entry["removal_policy"] = (False, True, False)
+            entry["removal_facts"] = self.removal_directory_facts(entry, readonly=True)
+            info = os.fstat(entry["fd"])
+            entry["identity"] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+            need(not entry["removal_facts"][2]["flags"] & 0x400000
+                 and entry["removal_facts"][0][0] != self.transport_volumes["removal_facts"][0][0]
+                 and entry["removal_facts"][2]["mountOn"] == str(path)
+                 and entry["removal_facts"][2]["mountFrom"] == self.mount_device,
+                 "package-transport-original-device")
+            self.removal_own_parent_post(self.transport_volumes, self.transport_roster, path.name, present=True)
+            self.transport_mount_facts()
+            self.package_post()
+            self.mount_known = True  # Original cleanup authority, NOT parser acceptance.
+            need(self.stager.distribution_mount_data(attached.stdout, attached.stderr, attached.returncode, path)
+                 == self.mount_device, "package-accepted-mount-device")
+            return
         self.package_clock()
         self.recheck_directory(self.work_entry)
         entry = self.register(None, role, "mount", self.work_entry["fd"], "package-mount")
@@ -6644,25 +6737,14 @@ class Operation:
         if self.removal_baseline_mount is not None:
             self.removal_baseline_mount_post()
             return
-        if self.phase == UPDATE_PHASE:
-            entry = self.mount_entry
-            self.package_clock()
-            self.recheck_directory(self.work_entry)
-            need(entry is not None and entry["fd"] is not None and not entry["closed"]
-                 and self.mount_known and not self.mount_detached, "package-original-mount-unavailable")
-            named, held = os.stat("package-mount", dir_fd=self.work_entry["fd"], follow_symlinks=False), os.fstat(entry["fd"])
-            def identity(info):
-                need(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, os.getuid()) and not info.st_mode & 0o022,
-                     "package-readonly-mount-shape")
-                return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
-            flags = os.fstatvfs(entry["fd"]).f_flag
-            need(type(flags) is int and flags & os.ST_RDONLY
-                 and identity(named) == identity(held) == entry["identity"]
-                 and held.st_dev != self.work_entry["identity"][0], "package-readonly-mount-original")
-            return
         need(self.mount_known and not self.mount_detached and self.mount_entry is not None,
              "package-original-mount-unavailable")
+        if self.transport_mount is not None:
+            self.transport_mount_facts()
+            return
+        need(self.phase in FINAL_IMAGE_PHASES, "package-transport-mount-required")
         need(self.mount_facts(self.mount_entry) == self.mount_entry["mount_facts"], "package-mount-facts-changed")
+
 
 
     def mount_inputs(self, expected, package_name):
@@ -6721,6 +6803,8 @@ class Operation:
                           ["/usr/bin/hdiutil", "detach", self.mount_device], timeout=60 if self.phase == UPDATE_PHASE else 30)
         if self.removal_baseline_mount is not None:
             self.removal_baseline_detached()
+        elif self.transport_mount is not None:
+            self.transport_mount_detached()
         else:
             self.recheck_directory(self.mount_placeholder)
             need(not os.listdir(self.mount_placeholder["fd"]), "package-detached-mountpoint-not-empty")
@@ -6786,20 +6870,20 @@ class Operation:
              "same-package-final-carrier-bytes")
         self.final_image_inputs.append((image, final["imageSha256"]))
         self.package_name = "Install.pkg"
-        self.mount_placeholder = self.package_directory("package-mount")
         self.same_package_post()
         self.normal_mount_host()
+        mount_path = self.transport_mount_admit()
         mounted = self.package_call("distribution-attach", ["/usr/bin/hdiutil", "attach",
             str(self.work / "distribution-final/MobileReleaseKit.dmg"), "-readonly", "-nobrowse", "-noautoopen",
-            "-mountpoint", str(self.work / "package-mount"), "-plist"], timeout=60)
+            "-mountpoint", str(mount_path), "-plist"], timeout=60)
         self.mount_custody(mounted, "same-package-readonly-mount")
         self.mount_inputs(expected, "Install.pkg")
         args = argparse.Namespace(target=self.target, fixture=False, input=self.work / "input",
             expected_source=self.image_source, expected_inventory=self.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"],
             expected_manifest=self.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"], request_id=binding["requestId"],
-            expected_package=binding["packageSha256"], producer_descriptor=self.work / "package-mount/producer.json",
-            producer_signature=self.work / "package-mount/producer.sig", installer_status=self.work / "installer-output.status",
-            package=self.work / "package-mount/Install.pkg")
+            expected_package=binding["packageSha256"], producer_descriptor=mount_path / "producer.json",
+            producer_signature=mount_path / "producer.sig", installer_status=self.work / "installer-output.status",
+            package=mount_path / "Install.pkg")
         self.same_package_post()
         baseline = self.package_stager_io("v2-readback", args)
         need(baseline["originalInstallerResult"]["action"] == "fresh-install", "same-package-fresh-baseline")
@@ -6944,10 +7028,9 @@ class Operation:
         if self.removal_baseline_mount is not None:
             mount_path = self.removal_baseline_attach(observation_path)
         else:
-            mount_path = self.work / "package-mount"
-            self.mount_placeholder = self.package_directory("package-mount")
             self.stage = "package-readonly-attach"
             self.normal_mount_host()
+            mount_path = self.transport_mount_admit()
             attached = self.package_call("distribution-attach", ["/usr/bin/hdiutil", "attach", str(observation_path), "-readonly", "-nobrowse",
                 "-noautoopen", "-mountpoint", str(mount_path), "-plist"], timeout=60)
             self.mount_custody(attached, "package-readonly-mount")
