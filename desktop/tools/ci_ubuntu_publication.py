@@ -40,10 +40,20 @@ REF = "refs/heads/verify/desktop-ubuntu-publication"
 INSTALLED_REF = "refs/heads/verify/desktop-installed-passive"
 INSTALLED_CASES = {"positive", "refuse-writable", "refuse-pth"}
 SHELL_REF = "refs/heads/verify/desktop-installed-shell"
+SHELL_RECOVERY_REF = "refs/heads/verify/desktop-project-recovery"
+SHELL_METADATA_REF = "refs/heads/verify/desktop-shell-host-metadata"
+SHELL_GITHUB_REF = "refs/heads/verify/desktop-installed-github-readonly"
+SHELL_GITHUB_BOUNDARY_REF = "refs/heads/verify/desktop-installed-github-normal-boundaries"
+SHELL_GITHUB_PREFLIGHT_REF = "refs/heads/verify/desktop-installed-github-preflight"
+SHELL_GITHUB_RELEASE_REF = "refs/heads/verify/desktop-installed-github-release"
+SHELL_GITHUB_RELEASE_ENVIRONMENT = frozenset(("MRK_GITHUB_RELEASE_TOOLING_SHA", "MRK_GITHUB_RELEASE_CANDIDATE_SHA256",
+                                             "MRK_GITHUB_RELEASE_EXTERNAL_SHA256", "MRK_GITHUB_RELEASE_PRODUCTION_SHA256"))
 SHELL_FEATURES = ["custom-protocol", "desktop-shell"]
 SHELL_FEATURE_ARG = "desktop-shell,custom-protocol"
 SHELL_PERMISSIONS = "desktop/src-tauri/permissions"
 SHELL_GENERATED = ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/gen", SHELL_PERMISSIONS)
+SHELL_CLEANUP_SUCCESS = {"generatedRootsRemoved": list(SHELL_GENERATED), "workRemoved": True,
+                         "sourceClean": True, "originalOwnersReturned": True, "exportsRetained": True}
 SHELL_EXPORTS = {"normal": "mobile-release-kit-desktop", "observer": "installed-shell-observation"}
 SHELL_METADATA_LIMIT = 8 << 20
 SHELL_COMPILE_LIMIT = 8 << 20
@@ -87,48 +97,64 @@ SHELL_MODULE_ROOTS = tuple(SHELL_LIBRARY_ROOT + suffix for suffix in (
     *("/gtk-3.0/" + prefix + leaf for prefix in ("3.0.0/linux/", "3.0.0/", "linux/", "")
       for leaf in ("immodules", "modules"))))
 SHELL_MAX_LIBRARIES = 256  # Historical DATA already requires >214 names; fail closed beyond this fixed cap.
-# Independently accepted U35533243674/1: original lifecycle and finality.
+SHELL_TOOLS_JDK_ROOT = "/usr/lib/jvm/java-17-openjdk-amd64"
+SHELL_TOOLS_PROGRAMS = ("/usr/bin/git", "/usr/bin/python3.12", SHELL_TOOLS_JDK_ROOT + "/bin/java", SHELL_TOOLS_JDK_ROOT + "/bin/javac")
+SHELL_TOOLS_LINKS = {"/usr/bin/java": "/etc/alternatives/java", "/usr/bin/javac": "/etc/alternatives/javac",
+    "/etc/alternatives/java": SHELL_TOOLS_JDK_ROOT + "/bin/java", "/etc/alternatives/javac": SHELL_TOOLS_JDK_ROOT + "/bin/javac"}
+SHELL_TOOLS_DIRECTORIES = ("/", "/usr", "/usr/bin", "/usr/lib", "/usr/lib/jvm", SHELL_TOOLS_JDK_ROOT,
+    SHELL_TOOLS_JDK_ROOT + "/bin", "/etc", "/etc/alternatives")
+SHELL_TOOLS_PACKAGES = ("git", "python3.12", "openjdk-17-jdk-headless", "openjdk-17-jre-headless")
+
+SHELL_TOOLS_NAMESPACE_PARENT = "/usr/lib/jvm"
+SHELL_TOOLS_NAMESPACE_PARENTS = ("/", "/usr", "/usr/bin", "/usr/lib", "/etc", "/etc/alternatives")
+SHELL_TOOLS_NAMESPACE_SOURCES = {".github/workflows/desktop-ubuntu-publication.yml": 64 << 10,
+                                 "desktop/tools/ci_ubuntu_publication.py": 1 << 20}
+SHELL_TOOLS_NAMESPACE_FILES = {"namespace-before.json": 64 << 10, "namespace.stdout": 16 << 10,
+                              "namespace.stderr": 4096, "namespace.exit": 4}
+SHELL_TOOLS_JDK_MISSING = (b"dpkg-query: no packages found matching openjdk-17-jdk-headless\n"
+                         b"dpkg-query: no packages found matching openjdk-17-jre-headless\n")
+# Independently accepted U36284691187/1: original lifecycle and finality.
 # Complete producer-bound roster; every downloaded member is checked before use.
 # This evidence qualifies neither the new installed candidate nor the product.
 INSTALLED_U_INPUTS = {
-    "sourceSha": "74803bea3f3099608e92852496f087f13265a1ef",
-    "runId": "35533243674",
+    "sourceSha": "b8305d31d0492beae55c9ac7c242ab280ba31bb0",
+    "runId": "36284691187",
     "attempt": "1",
-    "artifactId": "10611313562",
+    "artifactId": "10920207680",
     "files": [
-        {"path": "F1.deb", "sha256": "442a6b9e2dbb3f57a1b73a7625db212c41664a500e2849307355eeffd6d9aa99", "size": 312412352},
-        {"path": "P0.deb", "sha256": "270c2375f4fa40b930487f07fcdf41785006770eac7a19e0940d2fdd3999a5e6", "size": 312412352},
+        {"path": "F1.deb", "sha256": "4aae4317eff6a64376efa5f0dd0df5da6346db148a148fe73a28eebc350c0528", "size": 314368192},
+        {"path": "P0.deb", "sha256": "523981c912e04727502a503b381d219ef5f623bd080ddea318a08faa3d93d644", "size": 314368192},
         {"path": "acquired-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "acquired-head.stdout", "sha256": "57778430359effe06ab7036285b9521f174d0af8f7b5454545d52eddd06fe05b", "size": 41},
+        {"path": "acquired-head.stdout", "sha256": "18a5601f7b4ad251b0260425b67f5d853915342f65b45952ce19b2602f046b96", "size": 41},
         {"path": "acquired-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "acquired-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "after-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "after-head.stdout", "sha256": "57778430359effe06ab7036285b9521f174d0af8f7b5454545d52eddd06fe05b", "size": 41},
+        {"path": "after-head.stdout", "sha256": "18a5601f7b4ad251b0260425b67f5d853915342f65b45952ce19b2602f046b96", "size": 41},
         {"path": "after-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "after-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "before-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "before-head.stdout", "sha256": "57778430359effe06ab7036285b9521f174d0af8f7b5454545d52eddd06fe05b", "size": 41},
+        {"path": "before-head.stdout", "sha256": "18a5601f7b4ad251b0260425b67f5d853915342f65b45952ce19b2602f046b96", "size": 41},
         {"path": "before-root-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "before-root-head.stdout", "sha256": "57778430359effe06ab7036285b9521f174d0af8f7b5454545d52eddd06fe05b", "size": 41},
+        {"path": "before-root-head.stdout", "sha256": "18a5601f7b4ad251b0260425b67f5d853915342f65b45952ce19b2602f046b96", "size": 41},
         {"path": "before-root-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "before-root-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "before-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "before-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "cargo-selection.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "cargo-selection.stdout", "sha256": "63344e29cd9bc5c8697ad7197884b6340e5540df44a78b2c6e61ce6b73aff6ff", "size": 132},
+        {"path": "cargo-selection.stdout", "sha256": "5cc2eab7646b7ee673f3744ef207383cbf99f0bbc91f5f8bbdfd875c0bf1375e", "size": 132},
         {"path": "compiled-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "compiled-head.stdout", "sha256": "57778430359effe06ab7036285b9521f174d0af8f7b5454545d52eddd06fe05b", "size": 41},
+        {"path": "compiled-head.stdout", "sha256": "18a5601f7b4ad251b0260425b67f5d853915342f65b45952ce19b2602f046b96", "size": 41},
         {"path": "compiled-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "compiled-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "compiler-F1.json", "sha256": "43e5213230979b68ace75bade8cf9d733a018b559f8ea00df3b367f511766045", "size": 635},
-        {"path": "compiler-P0.json", "sha256": "8e243cc22dd5072068fb2d538f805909e9594a2a20ceaa19bdc48256781854a3", "size": 632},
-        {"path": "compiler-fixture.json", "sha256": "406a23373fd569e8522e1fad1320cc9f3151bcc0a5d82958b5391a3226b66b26", "size": 580},
-        {"path": "compiler-libtest.json", "sha256": "c9dd611be4d98fe814cd496b2471c41dddc4596c1877acfb95378781e51e796d", "size": 651},
-        {"path": "compiler.json", "sha256": "be8385d53ee7c5afce42850f78ecffc08846df7ca5a78bdbd8e99198e68d10e2", "size": 94649},
+        {"path": "compiler-F1.json", "sha256": "0e6295d9585578d46bd1e718eacad362945958cea278b109a747b46f58fb3d75", "size": 639},
+        {"path": "compiler-P0.json", "sha256": "4375d0a69097357ce26e279ae1aeb5d9cbbdb5c96e36a150d9f91cc0568dc120", "size": 636},
+        {"path": "compiler-fixture.json", "sha256": "de0476ab7dae5a2286f24ae49b55c0a67029dfcdf326c3e1f2fe859c9a767a71", "size": 580},
+        {"path": "compiler-libtest.json", "sha256": "7f6740e9b665656c1decc67e1bf4702ca436208e01cca69940efb4fc1d8792b1", "size": 651},
+        {"path": "compiler.json", "sha256": "7990a3b3fe35415b481b7206abe8217c927d4922b2d4c3a647cfa28244350023", "size": 112840},
         {"path": "deb-build-F1.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "deb-build-F1.stdout", "sha256": "e0219b661f1eb5bfb258266eb2debe44d028f4d6af351e6a6e2a669d973d31e5", "size": 143},
+        {"path": "deb-build-F1.stdout", "sha256": "f386022b28f87e71d97c5e1198de74f16bed710204a3bb99d690378b38a3fc0a", "size": 143},
         {"path": "deb-build-P0.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "deb-build-P0.stdout", "sha256": "87b3733eebc942d2cbf3e5c066ef84f0ccaabb085cdf9cc935ac611e8606be2b", "size": 143},
+        {"path": "deb-build-P0.stdout", "sha256": "8caf99e39b52e88427cf95557d8ca1b662ae887dbeb1d2d2fb4a1e2ea3f2718d", "size": 143},
         {"path": "fixture-app", "sha256": "1035e72810205075e5dc5a7d4f238015eebcfb92981c16811be26d4b09725375", "size": 4501512},
         {"path": "fixture-compile.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "fixture-compile.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
@@ -136,56 +162,56 @@ INSTALLED_U_INPUTS = {
         {"path": "kernel-packages.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "kernel-packages.stdout", "sha256": "7eb291cfd444858529d37c0869507eeca8e235b938dad14f9fe7f830e192f09f", "size": 290},
         {"path": "kernel-selector.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "kernel-selector.stdout", "sha256": "82aa69c787d486c971aa0d018928eb8b03145e753fa2013f112c871f6c8448d3", "size": 189},
-        {"path": "libtest", "sha256": "bd58709dce364d13b93f8c8cd5310c18ae508f39a59fcf1abc040588399a3a55", "size": 29018840},
-        {"path": "libtest-compile.stderr", "sha256": "04f220e35442671ffc9efd5e16edd0c6746353b7c629edee32d15f450bb37d10", "size": 1362},
-        {"path": "libtest-compile.stdout", "sha256": "056c276af01b37da715973ae8d2857b4ef94d0dbab5cf171f9cc1a9805908f39", "size": 411642},
-        {"path": "lifecycle-binaries-unpacked.json", "sha256": "5a8af30caa02698a760a28fa3f1fe410ede796e8a0c6b5d750fae00df7a121b2", "size": 472},
-        {"path": "lifecycle-binaries-upgrade.json", "sha256": "da2f87dbc50ae76adc0d2fc2a5ec04c06442495b80e194f655a9b2b7510b0eea", "size": 473},
+        {"path": "kernel-selector.stdout", "sha256": "40330ddebb9207662363df02221b8dcc015e75e724df0412be5df2a4103ca157", "size": 189},
+        {"path": "libtest", "sha256": "b8e845ee29ff26bc0ba264646c0feae463f0e6bd82918bb1c8ea8d419841f14b", "size": 46042008},
+        {"path": "libtest-compile.stderr", "sha256": "f51eafc97dc29e7e5478fb1e880fb09ec61adf5eaa33a5f64bd0c38e8e55065e", "size": 3741},
+        {"path": "libtest-compile.stdout", "sha256": "f7c35bbc4fb2eb05b3e6d802694658277671c6205956296e54231470cd05e761", "size": 488317},
+        {"path": "lifecycle-binaries-unpacked.json", "sha256": "a8dbd4dc92450945cde960fdcf80da251d2c6cb8a862d20343b07c3964ee159d", "size": 475},
+        {"path": "lifecycle-binaries-upgrade.json", "sha256": "906231306a6e7d2ef9fc303060d4987c47b8ff69202c6df5c2d0fb36bdbfbeaf", "size": 475},
         {"path": "lifecycle-client.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "lifecycle-client.stdout", "sha256": "668e34f3b738ae5ca8af5d91743e6fe1d236c0c875a0b863df625e917110d5bf", "size": 109},
         {"path": "lifecycle-configure.stderr", "sha256": "cb9277feeaf7900ddc2fd0dbad25556ce5920f65a500038a9afe1616667d9397", "size": 89},
         {"path": "lifecycle-configure.stdout", "sha256": "4c3d415d83a0d67f6cc5de6d323083fb43e90cfa57e65f5f78c1377b724c45b5", "size": 142},
-        {"path": "lifecycle-dpkg-policy.json", "sha256": "0569d0316ac816e6cbd1cf7419ca5b575c56eb56f2af9f7beae747ab8140ca49", "size": 4586},
-        {"path": "lifecycle-duplicate.stderr", "sha256": "0ef25c1e2c33385e1b95c5e0c5c2d6e0eac6c53d58787bde8e62ca9869e73a69", "size": 1483},
-        {"path": "lifecycle-duplicate.stdout", "sha256": "6a0fae4b065fb455db10455f705bf17cfd87426cf29c21d5ebc0b4f21ee2797c", "size": 276},
-        {"path": "lifecycle-inputs.json", "sha256": "bd8e6cd9c41105a79256b09a308a2be628aed3459f894a9836fc0512db738467", "size": 95790},
+        {"path": "lifecycle-dpkg-policy.json", "sha256": "df89b6c7407c4fccd14bd32152e0aca3167bffcb38659124299bb6d3df3a63e8", "size": 4581},
+        {"path": "lifecycle-duplicate.stderr", "sha256": "0321112dac440f25bc464f5e74cf9fd3cb0ac4edfd0b874504c3767e82f227f9", "size": 1483},
+        {"path": "lifecycle-duplicate.stdout", "sha256": "9ba01bdc2bf3b6d07656b2c6ee8e8e65f508d1524c3319c1ae1092b43a71b0ca", "size": 276},
+        {"path": "lifecycle-inputs.json", "sha256": "ba1c106612e8a4b96e4d6745772d5a4b50a048de71c11c3370a5f7c0b13e1d2c", "size": 113982},
         {"path": "lifecycle-mutation-denials.txt", "sha256": "d3900e18332f28f6f2dc07b287818220f6e16f499a4507f192733300d95895f9", "size": 1447},
         {"path": "lifecycle-native-root.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-native-root.stdout", "sha256": "8d9f0492793ae74300439d876019b62077154f1a008428e01a061b0790a83ce7", "size": 197},
+        {"path": "lifecycle-native-root.stdout", "sha256": "3a5e0dfd2c427b9c7b18799917cd1ce9a8368e978cd8e034b5c2e529fa04653d", "size": 197},
         {"path": "lifecycle-native-user.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-native-user.stdout", "sha256": "c364f073643918170cf144e671e3c5a18b94928d814431af7cbcf184839f16ab", "size": 198},
+        {"path": "lifecycle-native-user.stdout", "sha256": "6b71714b172f348732dce16945a6c47ff2d5343238332e75632376ceab22a41b", "size": 198},
         {"path": "lifecycle-nonroot-helper.stderr", "sha256": "a75fe26ceeebd7df5c4d046a02d306f04ea88d4a42ce345555433114675ebb4f", "size": 174},
         {"path": "lifecycle-nonroot-helper.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "lifecycle-observe-duplicate.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-duplicate.stdout", "sha256": "27711e4f6c96cd762f0dfc5acc9a0640c83d118d6cf84662d168bba6ed73b82c", "size": 276296},
+        {"path": "lifecycle-observe-duplicate.stdout", "sha256": "1b644cdd8d235c542b3718db5249422080c38a4fa0f82cfff470bf413531dc93", "size": 277906},
         {"path": "lifecycle-observe-p0.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-p0.stdout", "sha256": "f2c8a5144839529b139ea6a9d02f03c24ba2682d482bbedee15d5bb40f57e927", "size": 276136},
+        {"path": "lifecycle-observe-p0.stdout", "sha256": "0bae2bce07fab706050db8be48b42e09773b774828cbbcd26632ef5d1ee68b40", "size": 277746},
         {"path": "lifecycle-observe-purge.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-purge.stdout", "sha256": "32a428eca31962aa3c6b07a6ea824c0249081de7d3f0ada5bb1c53bf529f15ae", "size": 276292},
+        {"path": "lifecycle-observe-purge.stdout", "sha256": "d4084264b73c8ce6586a399e2193582e5b6dabe605fd39cd6ddd0ef6de6f784e", "size": 277902},
         {"path": "lifecycle-observe-remove.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-remove.stdout", "sha256": "3b129de857f63317e556f5643e8f4339a58d741bc4bf2e71d0301025ebfa8e42", "size": 276293},
+        {"path": "lifecycle-observe-remove.stdout", "sha256": "3f590f2c4a2c71d9efe24efca0e3f0f6b3a0c3ac5c77eefa6889f9daaffc2efc", "size": 277903},
         {"path": "lifecycle-observe-unpacked.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-unpacked.stdout", "sha256": "175af4c97f93f111a260137789898ef760e1256f0087e8aa133a476be7627087", "size": 137859},
+        {"path": "lifecycle-observe-unpacked.stdout", "sha256": "353ec03c63507dbc59ad338ffcc92df4dd9fb4dde57853bf92eb1d9f774a4ac4", "size": 138664},
         {"path": "lifecycle-observe-upgrade.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-upgrade.stdout", "sha256": "cd56a38e9b350a0c96a180415670f01fca307363403bcbe631bdacc1a3955674", "size": 414078},
-        {"path": "lifecycle-published-after-duplicate.txt", "sha256": "9541f7f4e304962f1191101d03bf93611c124d09edb7bd378aee3e970ae6749a", "size": 275570},
-        {"path": "lifecycle-published-after-purge.txt", "sha256": "9541f7f4e304962f1191101d03bf93611c124d09edb7bd378aee3e970ae6749a", "size": 275570},
-        {"path": "lifecycle-published-after-remove.txt", "sha256": "9541f7f4e304962f1191101d03bf93611c124d09edb7bd378aee3e970ae6749a", "size": 275570},
-        {"path": "lifecycle-published-after-upgrade.txt", "sha256": "9541f7f4e304962f1191101d03bf93611c124d09edb7bd378aee3e970ae6749a", "size": 275570},
-        {"path": "lifecycle-published-before-upgrade.txt", "sha256": "d7426e9dfa8d39b56a90ff0657be010a7b2dacfcb0ef5e281f56e7dcbfc89aa1", "size": 137786},
+        {"path": "lifecycle-observe-upgrade.stdout", "sha256": "036fcd287a7839c46ef0ca9dc534081cf29e516fbc3b9a8a92efebffa484ab6a", "size": 416493},
+        {"path": "lifecycle-published-after-duplicate.txt", "sha256": "bfd009762fedc94b328c66c8801a9868ef8ddf55420c65653de53b2cd1e8f979", "size": 277180},
+        {"path": "lifecycle-published-after-purge.txt", "sha256": "bfd009762fedc94b328c66c8801a9868ef8ddf55420c65653de53b2cd1e8f979", "size": 277180},
+        {"path": "lifecycle-published-after-remove.txt", "sha256": "bfd009762fedc94b328c66c8801a9868ef8ddf55420c65653de53b2cd1e8f979", "size": 277180},
+        {"path": "lifecycle-published-after-upgrade.txt", "sha256": "bfd009762fedc94b328c66c8801a9868ef8ddf55420c65653de53b2cd1e8f979", "size": 277180},
+        {"path": "lifecycle-published-before-upgrade.txt", "sha256": "f816e62597b6f761c2a80ad6cbad4adcab6ae699b098722105a40a20c455757f", "size": 138591},
         {"path": "lifecycle-purge.stderr", "sha256": "8b6571b7c06cc6e2c89c1d4125d23aee98ac3ad846a2f2a4704ec0ea7e40d9ed", "size": 82},
-        {"path": "lifecycle-purge.stdout", "sha256": "e2734c29e4fb52bd84fd2f26f924f1999dceabf0bb376eca996287efa28bfd49", "size": 160},
+        {"path": "lifecycle-purge.stdout", "sha256": "dbe8beef1a4de8d6bb4f944ed619afa04cd1df8b96411d2fb4b7ca8b5b32ca6d", "size": 160},
         {"path": "lifecycle-remove.stderr", "sha256": "cd97eb555af1f9c7e0db23ed401483d9f3b88b6d8b40db0f1c662ee8e7c124db", "size": 434},
-        {"path": "lifecycle-remove.stdout", "sha256": "4973803ea17208a7fe1e9719ad59b32e1f533f5b312cc9a8e43f89191a64ad8b", "size": 137},
-        {"path": "lifecycle-scripts-before-upgrade.json", "sha256": "8fcaee32000849eda4e3452dc94ac07bf8c8a34d3f90f4cf2e98c70f2bba629d", "size": 730},
-        {"path": "lifecycle-scripts-duplicate.json", "sha256": "ba1f71621d602703032b8fdaba155853676d7b63f1bbc9eea273287922e964ce", "size": 730},
+        {"path": "lifecycle-remove.stdout", "sha256": "2ea2b04fefed1c5cdafbe7c605f1ad3676699a7add655ee960d9b104e991e90f", "size": 137},
+        {"path": "lifecycle-scripts-before-upgrade.json", "sha256": "5cdc0d635dcaba57635443c717dbba42632d77249e047a4c48df8b031a3b330c", "size": 730},
+        {"path": "lifecycle-scripts-duplicate.json", "sha256": "d962287ae2cebfbd143efc4d52efe04427d2cf999cc1d114855e2edc94fa50e2", "size": 730},
         {"path": "lifecycle-scripts-purge.json", "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356", "size": 3},
-        {"path": "lifecycle-scripts-remove.json", "sha256": "73637ca2f53d860021597ee0a12108ca1ef3732e031e7d663f0dc218a8454292", "size": 244},
-        {"path": "lifecycle-scripts-unpacked.json", "sha256": "8fcaee32000849eda4e3452dc94ac07bf8c8a34d3f90f4cf2e98c70f2bba629d", "size": 730},
-        {"path": "lifecycle-scripts-upgrade.json", "sha256": "1359dee6f0a5d137af73fe653c17792d458ea1d3bdc1b55ee53b8dfcf94a386f", "size": 730},
+        {"path": "lifecycle-scripts-remove.json", "sha256": "dc0bec92a95f44d21a03c3a4612ef82ee846432b3770b2f17940836c059785fb", "size": 244},
+        {"path": "lifecycle-scripts-unpacked.json", "sha256": "5cdc0d635dcaba57635443c717dbba42632d77249e047a4c48df8b031a3b330c", "size": 730},
+        {"path": "lifecycle-scripts-upgrade.json", "sha256": "7fcb208d4f46b09bc2e72aa7fdef22484ac2e73524a24ba45cbe99006a81e90e", "size": 730},
         {"path": "lifecycle-start-unit-show.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-start-unit-show.stdout", "sha256": "f31834f870955c99fb70bfc7ede992a60d25489d232ed90adbed671d825d1f66", "size": 578},
+        {"path": "lifecycle-start-unit-show.stdout", "sha256": "7b800a5b0f34101ec5a67d7d4e364191d8a061bb3b4c178d781fba6681b4685d", "size": 578},
         {"path": "lifecycle-state-duplicate.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "lifecycle-state-duplicate.stdout", "sha256": "278598bf429592cb02fc8b25a9e69fee793c72ea27b364e3226d6252c7523794", "size": 49},
         {"path": "lifecycle-state-initial.stderr", "sha256": "01042c2b38915cf55a07ca91be671bf863ee638cc5974c9350091e541076bf8a", "size": 66},
@@ -201,18 +227,18 @@ INSTALLED_U_INPUTS = {
         {"path": "lifecycle-state-upgrade.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "lifecycle-state-upgrade.stdout", "sha256": "dde135efd3a6186b9d7a27a1a3bdd7d2cdc1bd9abdf11e35af8ec1fee8a3f6c2", "size": 43},
         {"path": "lifecycle-stop-unit-show.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-stop-unit-show.stdout", "sha256": "f31834f870955c99fb70bfc7ede992a60d25489d232ed90adbed671d825d1f66", "size": 578},
-        {"path": "lifecycle-unit-result.json", "sha256": "3afc88b4eed18dd5fa24d9a79df8378e3771ed0a6e6717744327909202b8a51d", "size": 19832},
-        {"path": "lifecycle-unit-start.json", "sha256": "a1857f1f39e2520e98141378cbbad21a658ca7d76ef2808bb5bdcc8b4289e1e9", "size": 1353},
-        {"path": "lifecycle-unit-stop.json", "sha256": "29c1c2f4acd26d441cdb3ec6d28531280681118bd3d7d5d0dbba77aa5405cee6", "size": 2281},
-        {"path": "lifecycle-unpack.stderr", "sha256": "deff21ac2546a815780222cfb42f071efb719ed60c037139a28a53e8029714f2", "size": 713},
-        {"path": "lifecycle-unpack.stdout", "sha256": "102e930374ddfa07b114422741551fedeceaab467a06edde7cfd6710d8b873de", "size": 249},
-        {"path": "lifecycle-upgrade.stderr", "sha256": "5494c7f69d0db3faac28e811c4e6fb1434ce9309733ae0fecc52c7d6b1ee4bd5", "size": 1073},
-        {"path": "lifecycle-upgrade.stdout", "sha256": "deb86711f47c8d6473d02bdabb31e3d409110edefae508cbcddf432cf48c738f", "size": 352},
-        {"path": "locked-inputs.stderr", "sha256": "34a798a7f1f65ae2c3ca9d1136651a78a83fcdde434136d0008f999342bc2766", "size": 1085},
-        {"path": "locked-inputs.stdout", "sha256": "be8f870de0982f10126271b1cbd2e6f13f7b9e7e22888029b89bf08810ed2c57", "size": 221847},
-        {"path": "mrk-runtime-publish", "sha256": "4ff598a84721b5516f6a758d584d82624644130e6eb150dd6258b005514a3232", "size": 995160},
-        {"path": "mrk-runtime-publish-F1", "sha256": "919fed49fb52ba3b980e42601c0c5f5e2d45e8124b0c2c693f7d60c7c0aa030a", "size": 995160},
+        {"path": "lifecycle-stop-unit-show.stdout", "sha256": "7b800a5b0f34101ec5a67d7d4e364191d8a061bb3b4c178d781fba6681b4685d", "size": 578},
+        {"path": "lifecycle-unit-result.json", "sha256": "e2e372fcadf944174c2b2ee00f27eee4ba8bc3954d5276e18d29641a0ea3a470", "size": 19834},
+        {"path": "lifecycle-unit-start.json", "sha256": "3ffde15da6a374b3b03da370b6fbd9817abfb0d0bfda39af5af67b72808e592a", "size": 1354},
+        {"path": "lifecycle-unit-stop.json", "sha256": "c79b8024cf5dd6698ef56a2b4af73878bfa9a1fb5772e3f46793721e93077b14", "size": 2282},
+        {"path": "lifecycle-unpack.stderr", "sha256": "b2205a3d8d284f1c76fc95f8263906f1ba4f29ac81788ed57548266214488269", "size": 713},
+        {"path": "lifecycle-unpack.stdout", "sha256": "44ffd25bc797611f9bb33b48ddd506a74380301d78e5718f483b8b6e7223cfb0", "size": 249},
+        {"path": "lifecycle-upgrade.stderr", "sha256": "8e05fb4936e637826e388766b859a23e3930629b99e84f2b6a0d0ad9e75536a2", "size": 1073},
+        {"path": "lifecycle-upgrade.stdout", "sha256": "319904fb237a0c22f55977be5edd0cbcbf8ff4b0a4fd4ba91c68dc1d5d251f3c", "size": 352},
+        {"path": "locked-inputs.stderr", "sha256": "49eec81d442d4514fd3146ae264958b1b2595e6ec82b7a868d1fdab41122aece", "size": 5499},
+        {"path": "locked-inputs.stdout", "sha256": "2a045e360fe54b62ec28660cfdac8b5c1b512efbc6252820462441bac3567293", "size": 554740},
+        {"path": "mrk-runtime-publish", "sha256": "1abc5321b6510d8dc3b56bfe35f39c68d7bf7f32f814c18ba1439d46e73c9f6e", "size": 1878024},
+        {"path": "mrk-runtime-publish-F1", "sha256": "61cbab8fc6cd80402beb1bbd08b1025d8415326888acd6ed82a0ecc18f8d4946", "size": 1878064},
         {"path": "native-file-owner-1.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-file-owner-1.stdout", "sha256": "406ecb79cc447cf72749ab0591bc1aa03582603d084238183d667848ad135175", "size": 58},
         {"path": "native-file-owner-11.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
@@ -286,13 +312,13 @@ INSTALLED_U_INPUTS = {
         {"path": "native-gcc-version.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-gcc-version.stdout", "sha256": "bb6aade8c4ca40cae9cb1be8abe12377f651fccd82954af74ec61703b6608fc5", "size": 7},
         {"path": "native-package-10.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "native-package-10.stdout", "sha256": "ed171deb90b856fe942486030574b2a2072083190b2f987d8af0510c8448efd5", "size": 70},
+        {"path": "native-package-10.stdout", "sha256": "e511fbe8cc3abe9c3a62dd53d6b100ead746a655199a3e4a2d974917d3e4592b", "size": 70},
         {"path": "native-package-14.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-14.stdout", "sha256": "70a0e64fdcef9cfbf5ca20d68b6c12d2be2bfde4f89e72803fa77403e846f193", "size": 91},
         {"path": "native-package-2.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-2.stdout", "sha256": "8869b8ba8020db04e229e6baa4f2110da6719d275dc30166778b88da09ff9cf9", "size": 95},
         {"path": "native-package-26.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "native-package-26.stdout", "sha256": "512e69aa8bfe9f2eb09922ebc755453a1045577db66e0bc43141143b69d31b70", "size": 66},
+        {"path": "native-package-26.stdout", "sha256": "96f259bf445f93fd14b50047e46045ab232798bc3770bd56f6eec5ff5327a702", "size": 66},
         {"path": "native-package-27.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-27.stdout", "sha256": "67f8a4dad70880e873ea3464dbbfc27a6e7dd6bcedbac4527a9d0adbc5e108fc", "size": 87},
         {"path": "native-package-28.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
@@ -336,37 +362,37 @@ INSTALLED_U_INPUTS = {
         {"path": "native-package-recheck-4.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-recheck-4.stdout", "sha256": "a6862d1e918c0d29ef6f0e641de2b7aee63f95e2ca9c940643b3f072756536f0", "size": 81},
         {"path": "native-package-recheck-5.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "native-package-recheck-5.stdout", "sha256": "ed171deb90b856fe942486030574b2a2072083190b2f987d8af0510c8448efd5", "size": 70},
+        {"path": "native-package-recheck-5.stdout", "sha256": "e511fbe8cc3abe9c3a62dd53d6b100ead746a655199a3e4a2d974917d3e4592b", "size": 70},
         {"path": "native-package-recheck-6.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-recheck-6.stdout", "sha256": "70a0e64fdcef9cfbf5ca20d68b6c12d2be2bfde4f89e72803fa77403e846f193", "size": 91},
         {"path": "native-package-recheck-7.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "native-package-recheck-7.stdout", "sha256": "512e69aa8bfe9f2eb09922ebc755453a1045577db66e0bc43141143b69d31b70", "size": 66},
+        {"path": "native-package-recheck-7.stdout", "sha256": "96f259bf445f93fd14b50047e46045ab232798bc3770bd56f6eec5ff5327a702", "size": 66},
         {"path": "native-package-recheck-8.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-recheck-8.stdout", "sha256": "67f8a4dad70880e873ea3464dbbfc27a6e7dd6bcedbac4527a9d0adbc5e108fc", "size": 87},
         {"path": "native-package-recheck-9.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-recheck-9.stdout", "sha256": "f2d0890fa73109b0bc2d1b661282b0dee93b34bd88928cf0a956a59664207af8", "size": 89},
-        {"path": "package-members.txt", "sha256": "fea7f6cf5c7b17353bde59889ba6c1a38e31859390f33ad6f6a5db0d76592d28", "size": 441502},
-        {"path": "publisher-F1-compile.stderr", "sha256": "3b8f3416fd064468992620e67803aa3618ae462e1bb04d6608370da38fe0cdac", "size": 186},
-        {"path": "publisher-F1-compile.stdout", "sha256": "94b0e67ead5c83c25533613f050f713efdde75d86cd25b11dccd9e1775e3928f", "size": 1518440},
-        {"path": "publisher-compile.stderr", "sha256": "9ff3edd18be6525d1952ccb80e58adfb582bb56479919eba952c9e4fefd4afa9", "size": 1363},
-        {"path": "publisher-compile.stdout", "sha256": "580760e2b1960d32f303da04d202f06f7f23c25f3969d5de82ce07fc7fb67ced", "size": 1518486},
-        {"path": "result.json", "sha256": "7ec58758144188c62852f51f3e757531b2fd2e028cda1488f6144921fdf90084", "size": 36503},
+        {"path": "package-members.txt", "sha256": "42e6c8d07dbc64e13da460fd39c2dd89570ed5d99da008c7bc31af97ee5988d2", "size": 513264},
+        {"path": "publisher-F1-compile.stderr", "sha256": "ded330d1a8fcf78429d65ab4673c3b8a38ae74387c26f34fcb853f0715ad89f2", "size": 186},
+        {"path": "publisher-F1-compile.stdout", "sha256": "742c518341d1872e6ae859f51ebe8da6c128c000ec9abe61ff17c04cb237d491", "size": 2047897},
+        {"path": "publisher-compile.stderr", "sha256": "d6485bd0256350645d2927bc403d2cd97f082c36e4a9dcc854b499aeff5252e1", "size": 3742},
+        {"path": "publisher-compile.stdout", "sha256": "2e753164d4c8b09e8515487eeeb0d4056bbf8d5f155e4bd9996e9de4d2309ab5", "size": 2048028},
+        {"path": "result.json", "sha256": "beedb32bf2c31bf8367f3cfe4fa83aceb6ee2e7f348b7916da232cd5a361d0f7", "size": 36504},
         {"path": "root-lifecycle.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "root-lifecycle.stdout", "sha256": "668e34f3b738ae5ca8af5d91743e6fe1d236c0c875a0b863df625e917110d5bf", "size": 109},
-        {"path": "runtime-inputs.json", "sha256": "a1a9561db3def48996e1ff84db413189c2d1f4ec17b143b476ceea5b4506391f", "size": 6822},
+        {"path": "runtime-inputs.json", "sha256": "f7ccbe408e944e37003975710376d45bfd5645fbae74d85d079ea03eb79fcea9", "size": 6822},
         {"path": "rust-acquire.stderr", "sha256": "3c6a4fcab6187ee7881c52ec7ee91a2d4f0003c665973b190ec0fde5e0985c35", "size": 236},
         {"path": "rust-acquire.stdout", "sha256": "3d00ee031f9ca6c5c559d3cb02f8765b38c2df6afc15bb6f80de52687f2e6909", "size": 84},
         {"path": "rust-version.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "rust-version.stdout", "sha256": "3975d062e234a9f3921955bf6ae5b90f5819df94fa825d057f76b34a35ed0f4d", "size": 196},
         {"path": "rustc-selection.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "rustc-selection.stdout", "sha256": "4d52c6378c3b1370fac9a31693ead0fc93da4259ac55300cedb77ae51a05d1d2", "size": 132},
+        {"path": "rustc-selection.stdout", "sha256": "cfe2f3dd6a6796175128590816cfaa0a1c3969caf2947cb34bc0d2789c1bd1f3", "size": 132},
         {"path": "source-tree.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "source-tree.stdout", "sha256": "c5d04c0297707aba9c822be82dc781a4128aec72c1a7cdd4e3fe57ce5b00584b", "size": 41},
-        {"path": "source.json", "sha256": "29939717f82b9b16b73da432f894a6161c18f004dcddd45614b9810e0e8a95b9", "size": 792},
+        {"path": "source-tree.stdout", "sha256": "1aabdd8a3e0e3672737d88c8f4404523999e88f85b2665363796cba99181a2c6", "size": 41},
+        {"path": "source.json", "sha256": "702a4f23854f218d708a1e4fba64bb9c5e701d945ff8d0fcdec35f0fc3d6fc1f", "size": 793},
         {"path": "stage-F1.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "stage-F1.stdout", "sha256": "8d7084fca43e9ef3d3ba261fdf5e868137d7d12ca7090e86d7dd2ad560f4afe0", "size": 167},
+        {"path": "stage-F1.stdout", "sha256": "985ec45f7dee6ab37a9d094fdfde86697ab353efccc376e5967ce2ed24bca06c", "size": 167},
         {"path": "stage-P0.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "stage-P0.stdout", "sha256": "9f61d09db3ae0108eaf7981c62a80b67e95c008acab908bc607c3a55c63aabc0", "size": 167},
+        {"path": "stage-P0.stdout", "sha256": "0d85861a796dacf8211625a207a78aa0305bd6ba733c47004353b65676595448", "size": 167},
         {"path": "version-signature.txt", "sha256": "df40e94048e7d33fe5eb703e6adf4f644a283079fd7acaf8d47d7447cdc5d7ea", "size": 36},
     ],
 }
@@ -387,9 +413,9 @@ LOG_TOTAL = 64 << 20
 MAX_BINARY = 512 << 20
 MAX_DEB = 512 << 20
 KERNEL_SELECTOR = "installed_runtime::pure_tests::kernel_scope_is_reviewed_ubuntu"
-F1_MANIFEST_SHA256 = "3a075688d6bc7f69dbdaa017b5327d8ca892e12b49b0c2012a6cbea1f79a6061"
+F1_MANIFEST_SHA256 = "2e6ca2cac4939019e2ab720eb782ba4ae4e0a61d528e68bbbdc38fa0a53e0e80"
 FIXTURE_SOURCE = b"fn main() { std::process::exit(78); }\n"
-NOTICE_INPUTS_SHA256 = "2fbc48569a79952aa40ac99c4ce8dc875723d3369e712c7981456dfd6a304791"
+NOTICE_INPUTS_SHA256 = "88405397949e3528141d0b9adb5246b72e4d052e1e802df8855c8bc8c8adbe6c"
 SONAME_PACKAGES = {name: "libc6:amd64" for name in (
     "libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
     "libpthread.so.0", "librt.so.1", "libutil.so.1")}
@@ -406,7 +432,17 @@ def route(env):
     installed = env.get("MRK_INSTALLED_CASE")
     shell = env.get("MRK_INSTALLED_SHELL_CASE")
     if shell is not None:
-        fixed = (installed is None and env.get("GITHUB_REF") == SHELL_REF and shell in {"compile", "observe"})
+        fixed = (installed is None and env.get("GITHUB_REF") in {SHELL_REF, SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF, SHELL_GITHUB_PREFLIGHT_REF} and shell in {"compile", "observe"}
+                 and env.get("GITHUB_JOB") == "compile")
+        if env.get("GITHUB_REF") == SHELL_RECOVERY_REF:
+            fixed = installed is None and (
+                env.get("GITHUB_JOB") == "compile" and shell in {"compile", "observe"}
+                and env.get("MRK_INSTALLED_SHELL_SCOPE") == "project-recovery-native3-v1"
+                or env.get("GITHUB_JOB") == "recovery-negative" and shell == "observe"
+                and env.get("MRK_INSTALLED_SHELL_SCOPE") == "project-recovery-unknown1-v1")
+        elif env.get("GITHUB_REF") == SHELL_GITHUB_RELEASE_REF:
+            fixed = (installed is None and shell in {"compile", "observe"} and env.get("GITHUB_JOB") == "compile"
+                     and env.get("MRK_INSTALLED_SHELL_SCOPE") == "github-release-native3-v1")
     else:
         fixed = (env.get("GITHUB_REF") == INSTALLED_REF and installed in INSTALLED_CASES | {"compile"}
                  if installed is not None else env.get("GITHUB_REF") == REF)
@@ -555,7 +591,7 @@ def exact_test_result(stdout, stderr, name):
            "Exact singleton test did not pass once")
 
 
-def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, shell_provider=False):
+def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, shell_provider=False, android_data=False):
     """Bounded ELF DATA, including required/exported symbol-version labels.
 
     No binary, loader, ldd or readelf execution. The caller binds the actual
@@ -567,6 +603,8 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, sh
     D.need(type(shell_provider) is bool and (not shell_provider or shell), "Provider role requires the shell ELF profile")
     D.need(shell_path is None or shell and type(shell_path) is str and Path(shell_path).is_absolute()
            and ".." not in Path(shell_path).parts, "Only the isolated shell profile has a requester path")
+    D.need(type(android_data) is bool and (not android_data or runtime_path is None and not shell
+           and shell_path is None and not shell_provider), "Separate Android ELF DATA inspection required")
 
     def unpack(fmt, offset):
         size = struct.calcsize(fmt)
@@ -577,6 +615,7 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, sh
     D.need(ident[:7] == b"\x7fELF\x02\x01\x01" and kind in (2, 3) and machine == 62
            and version == 1 and ehsize == 64 and phsize == 56 and 0 < phnum <= 128,
            "Expected bounded ELF64 little-endian x86_64")
+    D.need(not android_data or ident[7] in (0, 3), "Android native DATA is not GNU/Linux ELF")
     D.need(not shell_provider or kind == 3, "Shell provider must be an ET_DYN shared object")
     headers = [unpack("<IIQQQQQQ", phoff + i * phsize) for i in range(phnum)]
     for p in headers:
@@ -607,8 +646,9 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, sh
         if tag == 0:
             finished = True
             break
-        D.need(tag not in {15, 0x6FFFFEFB, 0x6FFFFEFC, 0x7FFFFFFD, 0x7FFFFFFF}
-               and (tag != 29 or runtime_path is not None or shell_path in SHELL_RUNPATHS),
+        D.need(tag not in {0x6FFFFEFB, 0x6FFFFEFC, 0x7FFFFFFD, 0x7FFFFFFF}
+               and (tag != 15 or android_data)
+               and (tag != 29 or android_data or runtime_path is not None or shell_path in SHELL_RUNPATHS),
                "ELF search/audit/filter override refused")
         tags.setdefault(tag, []).append(value)
     D.need(finished, "Unterminated ELF dynamic table")
@@ -624,9 +664,13 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, sh
         # role instead; providers never become approved subprocess programs.
         flags = single(0x6FFFFFFB, True)  # DT_FLAGS_1
         D.need(flags is None or flags & 0x08000000 == 0, "Shell provider must not be a PIE executable")
+    if android_data:
+        flags = single(0x6FFFFFFB, True)
+        D.need(flags is None or flags & 0x800 == 0,  # DF_1_NODEFLIB changes cache/default selection.
+               "Android native DATA has an unsupported loader search flag")
 
     size = single(10)
-    D.need(0 < size <= (16 << 20 if shell else 2 << 20), "ELF string table bound")
+    D.need(0 < size <= (16 << 20 if shell or android_data else 2 << 20), "ELF string table bound")
     offset = address(single(5), size)
     strings = raw[offset:offset + size]
 
@@ -638,14 +682,14 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, sh
 
     needed = [string(value) for value in tags.get(1, [])]
     allowed = set(SONAME_PACKAGES) | ({"libssl.so.3", "libcrypto.so.3"} if runtime_path is not None else set())
-    D.need(len(needed) <= (128 if shell else 32) and len(set(needed)) == len(needed)
+    D.need(len(needed) <= (128 if shell or android_data else 32) and len(set(needed)) == len(needed)
            and all((re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_+.-]{0,191}", name) is not None and ".so" in name)
-                   if shell else name in allowed for name in needed), "Unreviewed/duplicate native ELF dependency")
+                   if shell or android_data else name in allowed for name in needed), "Unreviewed/duplicate native ELF dependency")
     requirements, definitions = {}, []
     pointer, count = single(0x6FFFFFFE, True), single(0x6FFFFFFF, True)
     D.need((pointer is None) == (count is None), "Incomplete ELF version-needs")
     if pointer is not None:
-        D.need(0 < count <= (128 if shell else 32), "ELF version-need count")
+        D.need(0 < count <= (128 if shell or android_data else 32), "ELF version-need count")
         seen = set()
         for i in range(count):
             D.need(pointer not in seen, "ELF version-need cycle")
@@ -699,6 +743,13 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, sh
         D.need((result["soname"], string(runpath)) == SHELL_RUNPATHS[shell_path]
                and interpreter is None, "Fixed shell requester/SONAME/private RUNPATH differs")
         result["runpath"] = string(runpath)
+    elif android_data:
+        # Inspection only: the caller must compare every field with its exact
+        # source object and resolve paths in that launch's requester context.
+        # No old shell/A consumer receives permission to accept these tags.
+        for key, tag in (("rpath", 15), ("runpath", 29)):
+            index = single(tag, True)
+            result[key] = string(index) if index is not None else None
     return result
 
 
@@ -869,20 +920,64 @@ def artifact_record(path, *, copy_to=None):
 
 
 class Check:
-    def __init__(self, root, owner, *, deadline=None):
+    def __init__(self, root, owner, *, deadline=None, private=False):
         self.root, self.owner = root, owner
         self.end = time.monotonic() + 1200 if deadline is None else deadline
         self.retained = 0
         self.phase = "admission"
         self.commands = []
+        self.original_commands = []
         self.failed = False
+        D.need(type(private) is bool, "Compiler capture mode differs")
+        self.private = private
+        self.private_roots = {}
+        self.private_metadata = {"compiler": [], "material": []}
+
+    @property
+    def evidence_root(self):
+        return self._private_capture_root("compiler") if self.private else self.root / "public"
+
+    def _private_capture_root(self, role):
+        # Fixed task-owned sibling of disposable work, never an upload path.
+        D.need(role in {"compiler", "material"}, "Private capture role differs")
+        path = self.root / ("private-" + role)
+        if role not in self.private_roots:
+            path.mkdir(mode=0o700)
+            self.private_roots[role] = directory_identity(path)
+        D.need(directory_identity(path) == self.private_roots[role],
+               "Original private compiler capture directory changed")
+        return path
 
     def command(self, label, argv, env, cwd, *, timeout=600, codes=(0,), limit=LOG_LIMIT):
+        return self._command(label, argv, env, cwd, timeout=timeout, codes=codes, limit=limit,
+                             private="compiler" if self.private else None)
+
+    def private_command(self, label, argv, env, cwd, *, timeout=600, codes=(0,), limit=LOG_LIMIT):
+        """Same original owner/endpoint/latch; raw private inputs never exported."""
+        return self._command(label, argv, env, cwd, timeout=timeout, codes=codes, limit=limit, private="material")
+
+    def _command(self, label, argv, env, cwd, *, timeout, codes, limit, private):
         D.need(not self.failed, "Prior command failed; no further launch")
+        if private:
+            D.need(type(label) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}", label) is not None,
+                   "Fixed private command evidence label differs")
         self.phase = label
         self.failed = True
         remaining = min(timeout, int(self.end - time.monotonic()))
         D.need(remaining >= 1, "Common publisher-check endpoint expired")
+        capture_root = self._private_capture_root(private) if private else self.root / "public"
+        request_pin = None
+        pending = {"phase": label, "exitCode": None, "timeoutSeconds": remaining, "ordinaryOwnerReturned": False}
+        if private:
+            request = {"phase": label, "argv": argv, "timeoutSeconds": remaining}
+            raw = D.canonical(request)
+            D.need(len(raw) <= 64 << 10 and self.retained + len(raw) <= LOG_TOTAL,
+                   "Private command request retention bound")
+            self.retained += len(raw)  # A partial write remains charged.
+            request_pin = D.write(capture_root / (label + ".request.json"), raw)
+            self.private_metadata[private].append(request_pin)
+            pending["privateRequest"] = {key: request_pin[key] for key in ("size", "sha256")}
+            self.commands.append(pending)
         print("Publisher check: " + label, flush=True)
         result = self.owner(argv, environ=env, cwd=cwd, timeout=remaining, capture=True, text=False, output_limit=limit)
         D.need(type(result) is subprocess.CompletedProcess and result.args == argv
@@ -891,10 +986,24 @@ class Check:
         size = len(result.stdout) + len(result.stderr)
         D.need(size <= limit and self.retained + size <= LOG_TOTAL, "Original command capture bound")
         self.retained += size
+        captures = {}
         for suffix, raw in (("stdout", result.stdout), ("stderr", result.stderr)):
-            D.write(self.root / "public" / (label + "." + suffix), raw)
-        self.commands.append({"phase": label, "argv": argv, "exitCode": result.returncode,
-                              "timeoutSeconds": remaining, "ordinaryOwnerReturned": True})
+            pin = D.write(capture_root / (label + "." + suffix), raw)
+            captures[suffix] = {key: pin[key] for key in ("size", "sha256")}
+        original = {"phase": label, "argv": argv, "exitCode": result.returncode,
+                    "timeoutSeconds": remaining, "ordinaryOwnerReturned": True}
+        self.original_commands.append(original)
+        if private:
+            D.need(directory_identity(capture_root) == self.private_roots[private], "Private capture directory changed during command")
+            raw = D.canonical({**original, "captures": captures})
+            D.need(len(raw) <= 128 << 10 and self.retained + len(raw) <= LOG_TOTAL, "Private result retention bound")
+            self.retained += len(raw)
+            result_pin = D.write(capture_root / (label + ".result.json"), raw)
+            self.private_metadata[private].append(result_pin)
+            pending.update(exitCode=result.returncode, ordinaryOwnerReturned=True, privateCaptures=captures,
+                           privateResult={key: result_pin[key] for key in ("size", "sha256")})
+        else:
+            self.commands.append(original)
         on_time = time.monotonic() < self.end
         D.need(result.returncode in codes and on_time, "Original command failed or finished late: " + label
                + f" (exitCode={result.returncode}, endpointExpired={not on_time})")
@@ -902,8 +1011,412 @@ class Check:
         return result
 
 
-def failure_reason(error):
+def android_close_compiler_metadata(check):
+    """Coalesce only our redundant request/result DATA, not raw compiler output.
+
+    The original compiler already has ~1400 stream/record files. Preserve the
+    unchanged1536-file transport cap by retaining these new tiny metadata bodies
+    exactly in one private index after every original owner has returned. The
+    stdout/stderr files and complete original argv records remain untouched.
+    """
+    D.need(check.private and not check.failed and check.commands
+           and all(row["ordinaryOwnerReturned"] is True for row in check.commands),
+           "Private compiler metadata cannot close with an unsettled owner")
+    check.failed = True
+    root = check.evidence_root
+    original_root = directory_identity(root)
+    rows = check.private_metadata["compiler"]
+    D.need(0 < len(rows) <= 3072 and len({row["path"] for row in rows}) == len(rows),
+           "Private compiler command metadata roster differs")
+    documents, originals = [], {}
+    for row in rows:
+        name = row["path"]
+        D.need(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}\.(request|result)\.json", name) is not None
+               and time.monotonic() < check.end, "Private compiler metadata member/endpoint differs")
+        path = root / name
+        item = path.lstat()
+        D.need(stat.S_IMODE(item.st_mode) == 0o600 and (item.st_uid, item.st_gid) == (os.getuid(), os.getgid())
+               and not os.listxattr(path, follow_symlinks=False), "Private compiler metadata owner/mode differs")
+        originals[name] = (*D.state(item), item.st_uid, item.st_gid)
+        D.bound(path, row)
+        raw = D.read(path, 128 << 10)
+        body = D.decode(raw, 128 << 10)
+        D.need(D.canonical(body) == raw, "Private compiler metadata is not its original canonical body")
+        documents.append({**row, "body": body})
+    raw = D.canonical({"schemaVersion": 1, "scope": "original-private-compiler-command-metadata-v1", "files": documents})
+    D.need(len(raw) <= SHELL_METADATA_LIMIT and check.retained + len(raw) <= LOG_TOTAL
+           and time.monotonic() < check.end, "Private compiler metadata retained-byte/endpoint bound")
+    check.retained += len(raw)  # Partial index/deletion failures never receive cleanup credit.
+    pin = D.write(root / "private-command-metadata.json", raw, 0o400)
+    directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(directory_fd)
+        D.need((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid, opened.st_gid) == original_root,
+               "Private compiler metadata directory changed before retirement")
+        for row in rows:
+            name = row["path"]
+            item = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            D.need(time.monotonic() < check.end and (*D.state(item), item.st_uid, item.st_gid) == originals[name]
+                   and directory_identity(root) == original_root, "Private compiler metadata original changed before retirement")
+            D.bound(root / name, row)
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            D.need((*D.state(current), current.st_uid, current.st_gid) == originals[name],
+                   "Private compiler metadata changed during retirement readback")
+            os.unlink(name, dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+    D.need(directory_identity(root) == original_root and time.monotonic() < check.end
+           and all(not (root / row["path"]).exists() and not (root / row["path"]).is_symlink() for row in rows),
+           "Private compiler metadata retirement incomplete")
+    D.bound(root / pin["path"], pin)
+    check.failed = False
+    return pin
+
+
+def android_private_pin(row):
+    """An explicit content-only public projection, never a private pathname."""
+    D.need(type(row) is dict and type(row.get("size")) is int and 0 <= row["size"] <= MAX_BINARY,
+           "Private Android record size differs")
+    return {"size": row["size"], "sha256": D.sha(row.get("sha256"))}
+
+
+def android_public_profile(preparation):
+    """Only the accepted profile identifiers, content pins and finite counts."""
+    materials, publication = preparation["materials"], preparation["publication"]
+    D.need(type(materials) is dict and set(materials) == {"instance", "manifestSha256", "osContractSha256", "distributionSha256"}
+           and type(materials["instance"]) is str and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", materials["instance"]) is not None,
+           "Public Android profile identifiers differ")
+    selectors = {"instance": materials["instance"], **{key: D.sha(materials[key])
+        for key in ("manifestSha256", "osContractSha256", "distributionSha256")}}
+    D.need(type(publication) is dict and set(publication) == {"documents", "totals"}
+           and type(publication["documents"]) is dict and set(publication["documents"]) == {"manifest", "osContract", "sources"},
+           "Public Android profile document roster differs")
+    documents = {key: android_private_pin(publication["documents"][key]) for key in ("manifest", "osContract", "sources")}
+    D.need(documents["manifest"]["sha256"] == selectors["manifestSha256"]
+           and documents["osContract"]["sha256"] == selectors["osContractSha256"], "Public Android profile anchors differ")
+    totals = publication["totals"]
+    D.need(type(totals) is dict and set(totals) == {"toolFiles", "toolDirectories", "toolBytes", "osFiles", "osAliases", "osBytes"}
+           and all(type(value) is int and value >= 0 for value in totals.values())
+           and 0 < totals["toolFiles"] <= 16384 and 0 < totals["toolDirectories"]
+           and totals["toolFiles"] + totals["toolDirectories"] + 1 <= 32768
+           and 0 < totals["osFiles"] <= 256 and totals["osAliases"] <= 128
+           and 0 < totals["toolBytes"] + totals["osBytes"] <= 1 << 30, "Public Android profile totals differ")
+    return {"materials": selectors, "publication": {"documents": documents, "totals": dict(totals)},
+            "policySha256": D.sha(preparation["provenance"]["policySha256"])}
+
+
+def android_compiler_public_summary(compiler, result, preparation, records, commands):
+    """Public DATA is not a replacement for complete original private records."""
+    identity = {key: compiler[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")}
+    D.need(all(type(identity[key]) is str and re.fullmatch(r"[0-9a-f]{40}", identity[key]) is not None
+               for key in ("sourceSha", "sourceTree"))
+           and all(type(identity[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", identity[key]) is not None
+                   for key in ("runId", "attempt"))
+           and all(result[key] == identity[key] for key in identity), "Private Android compiler identity differs")
+    D.need(compiler["features"] == result["features"] == SHELL_FEATURES
+           and result["compilations"] == ["normal", "observer"]
+           and type(result["cargoBuilds"]) is int and result["cargoBuilds"] == 1
+           and type(result["frontendBuilds"]) is int and result["frontendBuilds"] == 1
+           and all(result[key] is False for key in ("shellExecuted", "observerExecuted", "supplierRebuilt", "packageBuilt", "helper11Rerun", "qualified"))
+           and D.same(result["compilerCleanup"], SHELL_CLEANUP_SUCCESS), "Private Android compiler result is not closed")
+    projected_commands = []
+    for row in commands:
+        D.need(type(row) is dict and set(row) == {"phase", "exitCode", "timeoutSeconds", "ordinaryOwnerReturned",
+                 "privateRequest", "privateCaptures", "privateResult"}
+               and type(row["phase"]) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}", row["phase"]) is not None
+               and type(row["exitCode"]) is int and type(row["timeoutSeconds"]) is int and 0 < row["timeoutSeconds"] <= 1200
+               and row["ordinaryOwnerReturned"] is True and set(row["privateCaptures"]) == {"stdout", "stderr"},
+               "Private Android command summary is not closed")
+        projected_commands.append({**{key: row[key] for key in ("phase", "exitCode", "timeoutSeconds", "ordinaryOwnerReturned")},
+            "privateRequest": android_private_pin(row["privateRequest"]), "privateResult": android_private_pin(row["privateResult"]),
+            "privateCaptures": {key: android_private_pin(row["privateCaptures"][key]) for key in ("stdout", "stderr")}})
+    D.need(0 < len(projected_commands) <= 1536 and set(compiler["exportedArtifacts"]) == set(SHELL_EXPORTS),
+           "Private Android compiler command/output roster differs")
+    return {"schemaVersion": 1, "scope": "android-same-job-private-compiler-summary-v1", **identity,
+            "features": list(SHELL_FEATURES), "compilations": ["normal", "observer"], "cargoBuilds": 1, "frontendBuilds": 1,
+            "androidProfile": android_public_profile(preparation),
+            "outputs": {role: {"path": name, **android_private_pin(compiler["exportedArtifacts"][role])}
+                        for role, name in SHELL_EXPORTS.items()},
+            "privateRecords": {name: android_private_pin(records[name])
+                               for name in ("compiler.json", "source.json", "result.json", "shell-roster.json")},
+            "commands": projected_commands, "compilerCleanup": dict(SHELL_CLEANUP_SUCCESS),
+            "shellExecuted": False, "observerExecuted": False, "packageBuilt": False,
+            "crossJobReusePermitted": False, "qualified": False}
+
+
+def android_original_context(root, source_sha, source_tree):
+    """The existing compiler preparation, not an environment-selected file."""
+    run, attempt, job = (os.environ[name] for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB"))
+    D.need(all(re.fullmatch(r"[1-9][0-9]{0,19}", item) for item in (run, attempt))
+           and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job) is not None
+           and all(type(item) is str and re.fullmatch(r"[0-9a-f]{40}", item) is not None for item in (source_sha, source_tree))
+           and root.name == "mrk-desktop-ubuntu-publisher-" + run + "-" + attempt + "-compile"
+           and root.parent == Path(os.environ["RUNNER_TEMP"]),
+           "Android original compiler namespace/source differs")
+    path = root / "preparation.json"
+    pin = {**D.file_record(path, 16384), "path": str(path)}
+    original = D.decode(D.read(path, 16384), 16384)
+    D.need(type(original) is dict and set(original) == {"sourceSha", "runId", "attempt", "source", "root", "deadline",
+           "runnerUid", "runnerGid", "rootIdentity", "workIdentity", "shellCase", "job"}
+           and (original["sourceSha"], original["runId"], original["attempt"], original["job"], original["shellCase"])
+               == (source_sha, run, attempt, job, "compile")
+           and original["root"] == str(root) and original["rootIdentity"] == list(directory_identity(root))
+           and original["source"] == str(SOURCE) and type(original["deadline"]) is str
+           and re.fullmatch(r"[0-9]+\.[0-9]+", original["deadline"]) is not None
+           and original["runnerUid"] == os.getuid() and original["runnerGid"] == os.getgid(),
+           "Android original preparation/source/owner changed")
+    if (root / "work").exists() or (root / "work").is_symlink():
+        D.need(original["workIdentity"] == list(directory_identity(root / "work")), "Android original compiler work changed")
+    D.bound(path, pin)
+    return {"sourceCommit": source_sha, "sourceTree": source_tree, "runId": run, "runAttempt": attempt,
+            "job": job, "preparation": pin}
+
+
+def android_local_transport_record(root, compiler, preparation, roster):
+    """Closed same-job authority; there is deliberately no Actions artifact ID."""
+    context = android_original_context(root, compiler["sourceSha"], compiler["sourceTree"])
+    material = root.parent / ("mrk-android-material-" + context["runId"] + "-" + context["runAttempt"])
+    D.need(preparation["materialRoot"] == str(material)
+           and compiler["runId"] == context["runId"] and compiler["attempt"] == context["runAttempt"]
+           and compiler["androidBuildMaterials"] == preparation["materials"]
+           and compiler["androidBuildPublication"] == preparation["publication"], "Android compiler/material context differs")
+    evidence = root / "private-compiler"
+    D.bound(evidence / "shell-roster.json", roster)
+    prepared = material / "private/prepared.json"
+    return {"schemaVersion": 1, "kind": "android-same-job-local-v1", "context": context,
+            "compilerRoot": {"path": str(root), "identity": list(directory_identity(root))},
+            "compilerEvidence": {"path": str(evidence), "identity": list(directory_identity(evidence))},
+            "materialRoot": {"path": str(material), "identity": list(directory_identity(material))},
+            "compilerRoster": {"path": str(evidence / "shell-roster.json"), **android_private_pin(roster)},
+            "materialRecord": {**D.file_record(prepared, 64 << 10), "path": str(prepared)}}
+
+
+def android_local_transport_context(transport, *, compiler_root, source_sha, source_tree):
+    """Refuse other attempts/jobs before any destination creation or copying."""
+    D.need(type(transport) is dict and set(transport) == {"schemaVersion", "kind", "context", "compilerRoot",
+           "compilerEvidence", "materialRoot", "compilerRoster", "materialRecord"}
+           and type(transport["schemaVersion"]) is int and transport["schemaVersion"] == 1
+           and transport["kind"] == "android-same-job-local-v1", "Android local transport schema differs")
+    context = android_original_context(compiler_root, source_sha, source_tree)
+    D.need(D.same(transport["context"], context), "Android local transport changed source/run/attempt/job/preparation")
+    material = compiler_root.parent / ("mrk-android-material-" + context["runId"] + "-" + context["runAttempt"])
+    for key, path in (("compilerRoot", compiler_root), ("compilerEvidence", compiler_root / "private-compiler"),
+                      ("materialRoot", material)):
+        D.need(type(transport[key]) is dict and set(transport[key]) == {"path", "identity"}
+               and transport[key]["path"] == str(path) and transport[key]["identity"] == list(directory_identity(path)),
+               "Android local transport original directory changed")
+    for key, path, limit in (("compilerRoster", compiler_root / "private-compiler/shell-roster.json", SHELL_ROSTER_LIMIT),
+                             ("materialRecord", material / "private/prepared.json", 64 << 10)):
+        pin = transport[key]
+        D.need(type(pin) is dict and set(pin) == {"path", "size", "sha256"} and pin["path"] == str(path)
+               and type(pin["size"]) is int and 0 < pin["size"] <= limit, "Android local transport fixed reference differs")
+        D.bound(path, pin)
+    return context
+
+
+def android_private_inventory(root, files, directories, *, role, executable, deadline, copied=False):
+    """Android-only finite tree check; the ordinary 8192-entry reader is unchanged.
+
+    D.copy hashes each source/readback; android_copy_private_tree also rechecks
+    all original and destination bodies after the transfer. This retains node
+    identities separately and refuses extra/empty directories rather than
+    adopting them. Metadata identity alone is not proof of file contents.
+    """
+    wanted = set(files) | set(directories)
+    originals, pending, seen, pairs = {}, [(root, "")], set(), set()
+    device = root.lstat().st_dev
+    while pending:
+        path, name = pending.pop()
+        D.need(time.monotonic() < deadline, "Android private inventory endpoint expired")
+        info = path.lstat()
+        D.need(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700
+               and (info.st_uid, info.st_gid) == (os.getuid(), os.getgid()) and info.st_dev == device
+               and not os.listxattr(path, follow_symlinks=False), "Android private directory custody differs")
+        originals[name] = (*D.state(info), info.st_uid, info.st_gid)
+        with os.scandir(path) as children:
+            for child in children:
+                relative = child.name if not name else name + "/" + child.name
+                D.need(relative in wanted and relative not in seen and len(seen) < len(wanted),
+                       "Android private tree has an extra or duplicated member")
+                seen.add(relative)
+                member = path / child.name
+                value = member.lstat()
+                if relative in directories:
+                    D.need(stat.S_ISDIR(value.st_mode), "Android private directory was replaced")
+                    pending.append((member, relative))
+                    continue
+                mode = stat.S_IMODE(value.st_mode)
+                allowed = ({0o500} if relative in executable else {0o400}) if copied or role == "material" else (
+                    {0o555} if relative in executable else {0o400, 0o600})
+                pair = (value.st_dev, value.st_ino)
+                D.need(stat.S_ISREG(value.st_mode) and value.st_nlink == 1 and mode in allowed
+                       and (value.st_uid, value.st_gid) == (os.getuid(), os.getgid()) and value.st_dev == device
+                       and value.st_size == files[relative]["size"] and pair not in pairs
+                       and not os.listxattr(member, follow_symlinks=False), "Android private file custody differs")
+                pairs.add(pair)
+                originals[relative] = (*D.state(value), value.st_uid, value.st_gid)
+    D.need(seen == wanted, "Android private tree is missing an admitted member")
+    return originals
+
+
+def android_copy_private_tree(source, target, rows, directories, *, deadline, role, executable=()):
+    """One bounded fresh same-job transfer; no ordinary cap change or adoption."""
+    D.need(role in {"shell", "material"} and type(deadline) in {int, float} and math.isfinite(deadline),
+           "Android private transfer role/endpoint differs")
+    file_limit, entry_limit, byte_limit = ((1536, 8192, 1536 << 20) if role == "shell" else (16384, 32768, 1 << 30))
+    D.need(type(rows) is list and 0 < len(rows) <= file_limit and type(directories) is list
+           and len(rows) + len(directories) + 1 <= entry_limit, "Android private transfer entry bound")
+    files = D.records(rows)
+    required_directories = {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
+    D.need(directories == sorted(required_directories, key=lambda name: (name.count("/"), name))
+           and set(executable) <= set(files), "Android private transfer order/roles differ")
+    wanted = set(files) | set(directories)
+    D.need(not set(files).intersection(directories)
+           and all(len(name.split("/")) <= 16 for name in wanted)
+           and len({name.casefold() for name in wanted}) == len(wanted), "Android private transfer namespace collision")
+    required = sum(row["size"] for row in rows)
+    D.need(required <= byte_limit and all(row["size"] <= MAX_BINARY for row in rows), "Android private transfer byte bound")
+    source_id, parent_id = directory_identity(source), directory_identity(target.parent)
+    parents = {path: shell_directory_identity(path) for path in {*source.parents, *target.parents}}
+    originals = android_private_inventory(source, files, directories, role=role, executable=executable, deadline=deadline)
+    fs = os.statvfs(target.parent)
+    D.need(time.monotonic() < deadline and fs.f_bavail * fs.f_frsize >= required + (len(wanted) + 1) * fs.f_frsize
+           and fs.f_favail >= len(wanted) + 1, "Android private transfer lacks simultaneous byte/inode capacity")
+    target.mkdir(mode=0o700)
+    target_id = directory_identity(target)
+    targets = {target: target_id}
+    for name in directories:
+        D.need(time.monotonic() < deadline, "Android private transfer endpoint expired")
+        destination = target / name
+        for parent in (destination.parent, *destination.parents):
+            if parent in targets:
+                D.need(directory_identity(parent) == targets[parent], "Android private destination directory changed")
+        destination.mkdir(mode=0o700)
+        targets[destination] = directory_identity(destination)
+    pairs, copied_originals = {row[:2] for row in originals.values()}, {}
+    for name, row in files.items():
+        D.need(time.monotonic() < deadline and directory_identity(source) == source_id
+               and directory_identity(target.parent) == parent_id and directory_identity(target) == target_id,
+               "Android private transfer original changed")
+        for parent in ((source / name).parent, *(source / name).parents):
+            if parent == source or parent.is_relative_to(source):
+                key = "" if parent == source else parent.relative_to(source).as_posix()
+                item = parent.lstat()
+                D.need((*D.state(item), item.st_uid, item.st_gid) == originals[key], "Android private source directory changed")
+            elif parent in parents:
+                D.need(shell_directory_identity(parent) == parents[parent], "Android private source ancestry changed")
+        for parent in ((target / name).parent, *(target / name).parents):
+            expected = targets.get(parent, parents.get(parent))
+            D.need(expected is not None and shell_directory_identity(parent) == expected,
+                   "Android private destination ancestry changed")
+        item = (source / name).lstat()
+        D.need((*D.state(item), item.st_uid, item.st_gid) == originals[name], "Android private source file changed")
+        D.copy(source / name, target / name, row, 0o500 if name in executable else 0o400)
+        item = (target / name).lstat()
+        pair = (item.st_dev, item.st_ino)
+        D.need(item.st_uid == os.getuid() and item.st_gid == os.getgid() and item.st_nlink == 1
+               and pair not in pairs, "Android private copy is not a fresh original")
+        pairs.add(pair)
+        copied_originals[name] = (*D.state(item), item.st_uid, item.st_gid)
+    for name, row in files.items():
+        D.need(time.monotonic() < deadline, "Android private transfer endpoint expired")
+        D.bound(source / name, row)
+        D.bound(target / name, row)
+    after = android_private_inventory(source, files, directories, role=role, executable=executable, deadline=deadline)
+    final = android_private_inventory(target, files, directories, role=role, executable=executable, deadline=deadline, copied=True)
+    D.need(after == originals and directory_identity(source) == source_id and directory_identity(target.parent) == parent_id
+           and all(final[name] == original for name, original in copied_originals.items())
+           and all(shell_directory_identity(path) == item for path, item in {**parents, **targets}.items())
+           and time.monotonic() < deadline, "Android private transfer changed or completed late")
+    return {"source": str(source), "sourceIdentity": list(source_id), "target": str(target),
+            "targetIdentity": list(target_id), "files": len(rows), "directories": len(directories),
+            "bytes": required, "freshCopies": True}
+
+
+def android_stage_local_inputs(check, sha, lifecycle):
+    """Bounded same-job copies into the existing native task, never an artifact."""
+    check.phase = "android-local-inputs"
+    D.need(not check.failed and os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") == "android-same-job-local-v1"
+           and not os.environ.get("MRK_INSTALLED_SHELL_ARTIFACT_ID"), "Android private transport cannot use Actions compiler artifacts")
+    check.failed = True
+    run, attempt = os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"]
+    root = check.root.parent / ("mrk-desktop-ubuntu-publisher-" + run + "-" + attempt + "-compile")
+    transport_path = root / "android-local-transport.json"
+    raw = D.read(transport_path, 64 << 10)
+    D.need(hashlib.sha256(raw).hexdigest() == D.sha(os.environ.get("MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256")),
+           "Android original local transport bytes differ")
+    transport = D.decode(raw, 64 << 10)
+    context = android_local_transport_context(transport, compiler_root=root, source_sha=sha,
+                                              source_tree=transport["context"]["sourceTree"])
+    material_root = Path(transport["materialRoot"]["path"])
+    pin = transport["materialRecord"]
+    material = D.decode(D.read(Path(pin["path"]), pin["size"]), 64 << 10)
+    host_pin = material["provenance"]["documents"]["host"]
+    D.need(type(host_pin) is dict and set(host_pin) == {"path", "size", "sha256"} and host_pin["path"] == "host.json"
+           and type(host_pin["size"]) is int and 0 < host_pin["size"] <= 32 << 20, "Android original private host reference differs")
+    host_path = material_root / "private/host.json"
+    D.bound(host_path, host_pin)
+    host = D.decode(D.read(host_path, host_pin["size"]), 32 << 20)
+    engine = local("android_material_preparation")
+    material = engine.read_record(Path(pin["path"]), android_private_pin(pin), context=context, host=host, deadline=check.end)
+    lifecycle.bind_shell_android_profile(material["materials"], material["publication"])
+    documents = {key: D.read(material_root / name, lifecycle.SHELL_ANDROID_DOCUMENT_LIMITS[key])
+                 for key, name in lifecycle.SHELL_ANDROID_DOCUMENT_NAMES.items()}
+    plan = lifecycle._android_publication_plan(documents)
+    roster_pin = transport["compilerRoster"]
+    D.need(roster_pin["sha256"] == D.sha(os.environ.get("MRK_INSTALLED_SHELL_ROSTER_SHA256"))
+           and os.environ.get("MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT") == attempt,
+           "Android local compiler roster/attempt output differs")
+    roster = D.decode(D.read(Path(roster_pin["path"]), SHELL_ROSTER_LIMIT), SHELL_ROSTER_LIMIT)
+    rows = sorted([*roster["files"], {"path": "shell-roster.json", **android_private_pin(roster_pin)}], key=lambda row: row["path"])
+    files = D.records(rows)
+    shell_directories = sorted({str(parent) for name in files for parent in Path(name).parents if str(parent) != "."},
+                               key=lambda name: (name.count("/"), name))
+    work = check.root / "work"
+    total_bytes = sum(row["size"] for row in rows) + plan["totals"]["toolBytes"] + sum(len(body) for body in documents.values())
+    entries = len(rows) + len(shell_directories) + plan["totals"]["toolFiles"] + plan["totals"]["toolDirectories"] + 6
+    space = os.statvfs(work)
+    D.need(time.monotonic() < check.end and space.f_bavail * space.f_frsize >= total_bytes + entries * space.f_frsize
+           and space.f_favail >= entries, "Android complete simultaneous native copies lack capacity")
+    shell_copy = android_copy_private_tree(root / "private-compiler", work / "admitted-shell", rows, shell_directories,
+        deadline=check.end, role="shell", executable=tuple(SHELL_EXPORTS.values()))
+    admitted = work / "admitted-android"
+    admitted.mkdir(mode=0o700)
+    admitted_identity = directory_identity(admitted)
+    copied_documents = {}
+    for key, name in lifecycle.SHELL_ANDROID_DOCUMENT_NAMES.items():
+        D.need(time.monotonic() < check.end and directory_identity(admitted) == admitted_identity,
+               "Android local document destination changed or expired")
+        D.copy(material_root / name, admitted / name, {"path": name, **plan["documents"][key]}, 0o400)
+        item = (admitted / name).lstat()
+        copied_documents[name] = (*D.state(item), item.st_uid, item.st_gid)
+    tool_rows = [{key: row[key] for key in ("path", "size", "sha256")} for row in plan["files"]]
+    tool_copy = android_copy_private_tree(material_root / "tools", admitted / "tools", tool_rows, plan["directories"],
+        deadline=check.end, role="material", executable=tuple(row["path"] for row in plan["files"] if row["mode"] & 0o111))
+    D.need({path.name for path in admitted.iterdir()} == {"tools", *lifecycle.SHELL_ANDROID_DOCUMENT_NAMES.values()}
+           and directory_identity(admitted) == admitted_identity, "Android local material has extra/changed members")
+    for key, name in lifecycle.SHELL_ANDROID_DOCUMENT_NAMES.items():
+        D.bound(admitted / name, {"path": name, **plan["documents"][key]})
+        item = (admitted / name).lstat()
+        D.need((*D.state(item), item.st_uid, item.st_gid) == copied_documents[name], "Android copied document original changed")
+    engine.validate(material, context=context, host=host, deadline=check.end)
+    android_local_transport_context(transport, compiler_root=root, source_sha=sha, source_tree=context["sourceTree"])
+    D.write(check.evidence_root / "android-local-copy.json", D.canonical({"transport": transport,
+        "shellCopy": shell_copy, "materialCopy": tool_copy, "qualified": False}), 0o400)
+    check.failed = False
+    return transport, material
+
+
+def failure_reason(error, *, private=False):
     """Only source-labelled invariant text; never arbitrary exception bodies."""
+    if private:
+        # Even a source-owned Refused can include a private path. Public output
+        # keeps only this fixed taxonomy; original messages remain task-private.
+        if isinstance(error, OSError):
+            return "private-filesystem-error"
+        if isinstance(error, (ValueError, KeyError, TypeError)):
+            return "private-input-refused"
+        return "private-operation-refused"
     if (type(error) in (D.Refused, C.CheckFailure)
             or type(error).__module__.startswith(("_publisher_", "_deb_"))
             and type(error).__name__ in {"Refused", "PreparationError", "SmokeRefused"}):
@@ -915,18 +1428,29 @@ def failure_reason(error):
     return type(error).__name__
 
 
-def retain_failure(root, phase, commands, error):
+def retain_failure(root, phase, commands, error, *, private=False):
     # Diagnostic retention must not replace the original failure or launch any
     # follow-up process. Never inspect a possibly-live privileged service tree.
-    reason = failure_reason(error)
+    reason = failure_reason(error, private=private)
+    if private:
+        phase = phase if type(phase) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}", phase) else "private-android"
+        # Never trust a caller-supplied command dictionary as a public serializer.
+        # Complete originals have already been retained in the private role roots.
+        commands = [{"phase": row["phase"], "ordinaryOwnerReturned": row.get("ordinaryOwnerReturned") is True,
+                     "exitCode": row.get("exitCode") if type(row.get("exitCode")) is int else None}
+                    for row in commands if type(row) is dict and type(row.get("phase")) is str
+                    and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}", row["phase"])]
     print("Publisher check refused in " + phase + ": " + reason, file=sys.stderr, flush=True)
     try:
         directory_identity(root)
         directory_identity(root / "public")
         D.write(root / "public/failure.json", D.canonical({"phase": phase, "reason": reason, "commands": commands,
                 "qualified": False, "partialOutputsMayRemain": True, "cleanupEstablished": False}))
+        if private:
+            D.write(root / "private-failure.json", D.canonical({"phase": phase, "errorType": type(error).__name__,
+                "reason": str(error)[:4096], "qualified": False, "cleanupEstablished": False}))
     except Exception as diagnostic_error:
-        print("Publisher failure evidence could not be retained: " + failure_reason(diagnostic_error), file=sys.stderr, flush=True)
+        print("Publisher failure evidence could not be retained: " + failure_reason(diagnostic_error, private=private), file=sys.stderr, flush=True)
 
 
 def hosted_paths():
@@ -941,7 +1465,25 @@ def hosted_paths():
         D.need(path.resolve(strict=True) == path, "Noncanonical hosted directory")
     D.need(source == SOURCE, "Publisher checkout source differs")
     root = temporary / ("mrk-desktop-ubuntu-publisher-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"])
+    if "MRK_INSTALLED_SHELL_CASE" in os.environ:
+        # Two original tasks on one VM, not renewal/reuse of the compiler root.
+        root = root.with_name(root.name + "-" + os.environ["MRK_INSTALLED_SHELL_CASE"])
     return sha, source, temporary, root
+
+
+def preparation_route():
+    """Bind the fixed same-job role in each shell preparation, not a caller path."""
+    result = ({"shellCase": os.environ["MRK_INSTALLED_SHELL_CASE"], "job": os.environ["GITHUB_JOB"]}
+              if "MRK_INSTALLED_SHELL_CASE" in os.environ else {})
+    if os.environ.get("MRK_INSTALLED_SHELL_SCOPE") not in (None, ""):
+        lifecycle = local("ubuntu_publication_lifecycle")
+        ordinary = installed_shell_scope(lifecycle)
+        release = installed_shell_release_selection(lifecycle)
+        D.need(result.get("shellCase") in ("compile", "observe"), "Named preparation requires its original installed shell owner")
+        result.update(installed_shell_scope_fields(ordinary, lifecycle))
+        if release is not None:
+            result["githubRelease"] = release
+    return result
 
 
 def prepare():
@@ -963,7 +1505,8 @@ def prepare():
         row = {"sourceSha": sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                "source": str(source), "root": str(root), "deadline": deadline,
                "runnerUid": os.getuid(), "runnerGid": os.getgid(),
-               "rootIdentity": list(directory_identity(root)), "workIdentity": list(directory_identity(root / "work"))}
+               "rootIdentity": list(directory_identity(root)), "workIdentity": list(directory_identity(root / "work")),
+               **preparation_route()}
         pin = D.write(root / "preparation.json", D.canonical(row))
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
             output.write("preparation_sha256=" + pin["sha256"] + "\ndeadline=" + deadline + "\n")
@@ -982,7 +1525,8 @@ def resumed_preparation():
     expected = {"sourceSha": sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                 "source": str(source), "root": str(root), "deadline": os.environ.get("MRK_UBUNTU_PUBLICATION_DEADLINE"),
                 "runnerUid": os.getuid(), "runnerGid": os.getgid(),
-                "rootIdentity": list(directory_identity(root)), "workIdentity": list(directory_identity(root / "work"))}
+                "rootIdentity": list(directory_identity(root)), "workIdentity": list(directory_identity(root / "work")),
+                **preparation_route()}
     D.need(D.same(row, expected) and type(row["deadline"]) is str
            and re.fullmatch(r"[0-9]+\.[0-9]+", row["deadline"]) is not None, "Original preparation binding changed")
     deadline = float(row["deadline"])
@@ -991,15 +1535,61 @@ def resumed_preparation():
     return sha, source, temporary, root, deadline
 
 
-def protected_host_file(path, limit=MAX_BINARY):
-    """Root-owned OS DATA, resolving only protected original link ancestry."""
+ANDROID_PUBLIC_DATA_ROLES = (
+    "/imagegeneration/imagedata.json",
+    "/usr/local/lib/android/sdk/licenses/android-sdk-license",
+    "/usr/local/lib/android/sdk/platforms/android-35/package.xml",
+    "/usr/local/lib/android/sdk/platforms/android-35/source.properties",
+    "/usr/local/lib/android/sdk/build-tools/35.0.0/package.xml",
+    "/usr/local/lib/android/sdk/build-tools/35.0.0/source.properties",
+    "/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf",
+    "/run/systemd/resolve/stub-resolv.conf",
+)
+
+
+def protected_host_file(path, limit=MAX_BINARY, *, fixed_android_data=False):
+    """Root-owned OS DATA, resolving only protected original link ancestry.
+
+    The finite Android DATA subset adds failure metadata to the original error,
+    not a second filesystem walk or an admission exception. Only its one fixed
+    resolver alias may be followed. Ordinary callers keep their existing route.
+    """
     path = Path(path)
     D.need(path.is_absolute() and ".." not in path.parts, "Absolute native OS input required")
+    D.need(not fixed_android_data or str(path) in ANDROID_PUBLIC_DATA_ROLES,
+           "Native fixed Android DATA role differs")
+
+    def diagnostic(error, index, item, failed):
+        if fixed_android_data:
+            mode = item.st_mode if item is not None else None
+            error.host_file_failure = {"role": str(path), "componentIndex": index,
+                "kind": ("unobserved" if mode is None else "directory" if stat.S_ISDIR(mode)
+                         else "file" if stat.S_ISREG(mode) else "link" if stat.S_ISLNK(mode) else "other"),
+                "uid": item.st_uid if item is not None else None,
+                "gid": item.st_gid if item is not None else None,
+                "mode": stat.S_IMODE(mode) if mode is not None else None,
+                "links": item.st_nlink if item is not None else None, "failedInvariants": failed}
+        return error
+
+    def checked(conditions, message, index, item):
+        failed = [name for name, ok in conditions.items() if not ok]
+        if failed:
+            raise diagnostic(D.Refused(message), index, item, failed)
+
+    def original_stat(name, index):
+        if not fixed_android_data:
+            return name.lstat()
+        try:
+            return name.lstat()
+        except OSError as error:
+            raise diagnostic(error, index, None, ["component-stat"]) from None
+
     links, ancestry, pending, resolved = [], {}, list(path.parts[1:]), Path("/")
-    root_stat = resolved.lstat()
-    D.need(stat.S_ISDIR(root_stat.st_mode) and root_stat.st_uid == root_stat.st_gid == 0
-           and not root_stat.st_mode & 0o7022, "Unprotected native OS root")
+    root_stat = original_stat(resolved, 0)
+    checked({"directory": stat.S_ISDIR(root_stat.st_mode), "root-owner": root_stat.st_uid == root_stat.st_gid == 0,
+             "protected-mode": not root_stat.st_mode & 0o7022}, "Unprotected native OS root", 0, root_stat)
     ancestry[str(resolved)] = [root_stat.st_dev, root_stat.st_ino, root_stat.st_mode, root_stat.st_uid, root_stat.st_gid]
+    positions = {str(resolved): 0}
     steps = 0
     while pending:
         steps += 1
@@ -1011,12 +1601,21 @@ def protected_host_file(path, limit=MAX_BINARY):
             resolved = resolved.parent
             continue
         candidate = resolved / part
-        st = candidate.lstat()
-        D.need(st.st_uid == st.st_gid == 0, "Native OS input has a nonroot owner")
+        st = original_stat(candidate, steps)
+        checked({"root-owner": st.st_uid == st.st_gid == 0}, "Native OS input has a nonroot owner", steps, st)
         if stat.S_ISLNK(st.st_mode):
+            if fixed_android_data:
+                checked({"fixed-resolver-alias": path == candidate == Path("/etc/resolv.conf") and not links},
+                        "Native fixed Android DATA alias differs", steps, st)
             target = os.readlink(candidate)
-            D.need(len(links) < 40 and 0 < len(target) <= 4096 and D.state(candidate.lstat()) == D.state(st),
-                   "Native OS input link changed/exceeded bound")
+            if fixed_android_data:
+                checked({"fixed-resolver-target": target in ("/run/systemd/resolve/stub-resolv.conf",
+                                                               "../run/systemd/resolve/stub-resolv.conf")},
+                        "Native fixed Android DATA alias differs", steps, st)
+            observed = original_stat(candidate, steps)
+            checked({"link-bound": len(links) < 40 and 0 < len(target) <= 4096,
+                     "original-link": D.state(observed) == D.state(st)},
+                    "Native OS input link changed/exceeded bound", steps, observed)
             links.append([str(candidate), list(D.state(st)), target])
             target = Path(target)
             if target.is_absolute():
@@ -1025,24 +1624,28 @@ def protected_host_file(path, limit=MAX_BINARY):
                 parts = target.parts
             pending = [*parts, *pending]
         else:
-            D.need(not st.st_mode & 0o7022 and (stat.S_ISDIR(st.st_mode) if pending else stat.S_ISREG(st.st_mode)),
-                   "Native OS input has nonordinary/writable/special ancestry")
+            checked({"protected-mode": not st.st_mode & 0o7022,
+                     "directory" if pending else "regular-file": stat.S_ISDIR(st.st_mode) if pending else stat.S_ISREG(st.st_mode)},
+                    "Native OS input has nonordinary/writable/special ancestry", steps, st)
             resolved = candidate
             if pending:
                 ancestry[str(candidate)] = [st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid]
+                positions[str(candidate)] = steps
     D.need(path.resolve(strict=True) == resolved, "Resolved native OS input differs")
-    st = resolved.lstat()
-    D.need(stat.S_ISREG(st.st_mode) and st.st_nlink == 1, "Native OS input is not an ordinary file")
+    st = original_stat(resolved, steps)
+    checked({"regular-file": stat.S_ISREG(st.st_mode), "single-link": st.st_nlink == 1},
+            "Native OS input is not an ordinary file", steps, st)
     row = D.file_record(resolved, limit)
     for name, expected in ancestry.items():
-        observed = Path(name).lstat()
-        D.need([observed.st_dev, observed.st_ino, observed.st_mode, observed.st_uid, observed.st_gid] == expected,
-               "Native OS ancestry changed while reading")
+        observed = original_stat(Path(name), positions[name])
+        checked({"original-ancestry": [observed.st_dev, observed.st_ino, observed.st_mode, observed.st_uid, observed.st_gid] == expected},
+                "Native OS ancestry changed while reading", positions[name], observed)
     for name, expected, target in links:
         D.need(list(D.state(Path(name).lstat())) == expected and os.readlink(name) == target,
                "Native OS link changed while reading")
-    D.need(D.state(resolved.lstat()) == D.state(st) and path.resolve(strict=True) == resolved,
-           "Native OS input binding changed")
+    observed = original_stat(resolved, steps)
+    checked({"original-file": D.state(observed) == D.state(st) and path.resolve(strict=True) == resolved},
+            "Native OS input binding changed", steps, observed)
     return {**row, "path": str(resolved), "selectedPath": str(path), "identity": list(D.state(st)),
             "links": links, "ancestry": ancestry}
 
@@ -1166,7 +1769,182 @@ def ubuntu_package_notice(admitted, rows, notices, actual, owned_files):
             "commonLicenseSource": admitted["ubuntu"]["commonLicenseSource"], "commonLicenses": selected}
 
 
-def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw):
+def linux_local_cargo_sources(packages, nodes, root, source):
+    """The shared four-local/eight-declaration Linux source contract."""
+    # The Linux-filtered graph includes the two maintained SDK sources, not
+    # additional native platforms or arbitrary path/registry replacements.
+    local_paths = {
+        "mobile-release-kit-desktop": ("0.1.1", source / "desktop/src-tauri/Cargo.toml"),
+        "mrk-linux-mount-observation": ("0.1.0", source / "desktop/native/linux-mount-observation/Cargo.toml"),
+        "secret-service": ("5.2.0", source / "desktop/vendor/secret-service-5.2.0/Cargo.toml"),
+        "zbus": ("5.19.0", source / "desktop/vendor/zbus-5.19.0/Cargo.toml"),
+    }
+    local = [row for row in packages if row.get("source") is None]
+    D.need(len(local) == len(local_paths) and {row["name"] for row in local} == set(local_paths)
+           and all((row["version"], row["manifest_path"]) == (local_paths[row["name"]][0], str(local_paths[row["name"]][1]))
+                   for row in local),
+           "Linux Cargo local source roster differs")
+    D.need(all(row["id"] in nodes for row in local), "Linux Cargo active local graph differs")
+    # Other-target helpers remain root dependency declarations, not packages.
+    declarations = root.get("dependencies")
+    D.need(type(declarations) is list
+           and all(type(row) is dict and type(row.get("name")) is str for row in declarations),
+           "Linux Cargo root dependency declarations differ")
+    expected_declarations = [
+        {"name": name, "path": str(source / ("desktop/native/" + directory)), "target": cfg,
+         "source": None, "req": "*", "kind": None, "rename": None, "optional": False,
+         "uses_default_features": True, "features": [], "registry": None}
+        for name, directory, cfg in (
+            ("mrk-linux-mount-observation", "linux-mount-observation",
+             'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'),
+            ("mrk-macos-installed-native", "macos-installed-native",
+             'cfg(all(target_os = "macos", target_arch = "aarch64"))'),
+            ("mrk-windows-installed-native", "windows-installed-native",
+             'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'),
+        )
+    ]
+    # Cargo retains the other-target dev declaration even in the filtered
+    # Linux graph. It is not an active Windows package or compiler unit.
+    expected_declarations.append({
+        "name": "mrk-windows-installed-native", "path": str(source / "desktop/native/windows-installed-native"),
+        "target": 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))',
+        "source": None, "req": "*", "kind": "dev", "rename": None, "optional": False,
+        "uses_default_features": True, "features": ["qualification-result"], "registry": None,
+    })
+    for kind, support in ((None, []), ("dev", ["mrk-retrieval-test-support"])):
+        expected_declarations.append({
+            "name": "secret-service", "path": str(source / "desktop/vendor/secret-service-5.2.0"),
+            "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
+            "source": None, "req": "=5.2.0", "kind": kind, "rename": None, "optional": False,
+            "uses_default_features": False, "features": ["rt-tokio-crypto-rust", *support], "registry": None,
+        })
+    # Cargo retains registry declarations for the patched SDK. Both roles must
+    # resolve to the one exact local zbus above; a registry fallback is refused.
+    for kind, support in ((None, []), ("dev", ["mrk-owned-test-support"])):
+        expected_declarations.append({
+            "name": "zbus", "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
+            "source": "registry+https://github.com/rust-lang/crates.io-index", "req": "=5.19.0", "kind": kind,
+            "rename": None, "optional": False, "uses_default_features": False,
+            "features": ["tokio", *support], "registry": None,
+        })
+    local_names = {row["name"] for row in expected_declarations}
+    local_declarations = [row for row in declarations
+                          if row.get("source") is None or "path" in row or row["name"] in local_names]
+    D.need(len(local_declarations) == len(expected_declarations)
+           and sorted(D.canonical(row) for row in local_declarations)
+           == sorted(D.canonical(row) for row in expected_declarations),
+           "Linux Cargo local dependency declarations differ")
+    return local_paths
+
+
+def native_cargo_metadata(raw, source, target, notice_crates, locked, *, candidate=False):
+    """Bind one fixed Linux profile to its exact original-notice input set.
+
+    Package accounting is conservative: an admitted registry input need not
+    have an active resolve node. This is not compiled/linked-unit attribution.
+    """
+    D.need(type(candidate) is bool and type(notice_crates) is list and notice_crates
+           and all(type(row) is dict and all(type(row.get(key)) is str and row[key]
+                   for key in ("name", "version", "license", "archiveSha256"))
+                   and re.fullmatch(r"[0-9a-f]{64}", row["archiveSha256"]) is not None
+                   for row in notice_crates), "Native notice crate roster is invalid")
+    expected = {(row["name"], row["version"]): row for row in notice_crates}
+    D.need(len(expected) == len(notice_crates), "Duplicate native notice crate")
+    metadata = C.bounded_json(raw, LOG_LIMIT)
+    packages, resolve = metadata.get("packages"), metadata.get("resolve")
+    D.need(type(packages) is list and len(packages) == len(expected) + 4
+           and type(resolve) is dict and type(metadata.get("version")) is int and metadata["version"] == 1
+           and metadata.get("workspace_root") == str(source / "desktop/src-tauri")
+           and metadata.get("target_directory") == str(target)
+           and metadata.get("build_directory") == str(target), "Native Cargo roster/root/target differs")
+    D.need(all(type(row) is dict and all(type(row.get(key)) is str and row[key]
+                   for key in ("id", "name", "version", "manifest_path"))
+                   and "source" in row and (row["source"] is None or type(row["source"]) is str)
+                   for row in packages), "Native Cargo package identity is invalid")
+    node_rows = resolve.get("nodes")
+    D.need(type(node_rows) is list and all(type(row) is dict and type(row.get("id")) is str
+           and row["id"] for row in node_rows), "Native Cargo resolve nodes are invalid")
+    by_id = {row["id"]: row for row in packages}
+    nodes = {row["id"]: row for row in node_rows}
+    D.need(len(by_id) == len(packages) and len(nodes) == len(node_rows) and set(nodes) <= set(by_id),
+           "Native Cargo metadata IDs differ/duplicate")
+    roots = [row for row in packages if row["manifest_path"] == str(source / "desktop/src-tauri/Cargo.toml")]
+    D.need(len(roots) == 1 and roots[0]["name"] == "mobile-release-kit-desktop" and roots[0]["version"] == "0.1.1"
+           and resolve.get("root") == roots[0]["id"] and roots[0]["id"] in nodes
+           and metadata.get("workspace_members") == [roots[0]["id"]]
+           and metadata.get("workspace_default_members") == [roots[0]["id"]]
+           and nodes[roots[0]["id"]].get("features") == ([] if candidate else FEATURES),
+           "Native Cargo root/workspace/profile differs")
+    for row in nodes.values():
+        features, deps, dependencies = row.get("features"), row.get("deps"), row.get("dependencies")
+        D.need(type(features) is list and all(type(name) is str for name in features)
+               and len(features) == len(set(features)) and type(deps) is list
+               and all(type(dep) is dict and type(dep.get("name")) is str and dep["name"]
+                       and type(dep.get("pkg")) is str and dep["pkg"] in nodes for dep in deps)
+               and len(deps) == len({(dep["name"], dep["pkg"]) for dep in deps})
+               and type(dependencies) is list and all(type(item) is str for item in dependencies)
+               and len(dependencies) == len(set(dependencies))
+               and set(dependencies) == {dep["pkg"] for dep in deps}, "Native resolved Cargo edge/features differ")
+        for dep in deps:
+            kinds = dep.get("dep_kinds")
+            D.need(type(kinds) is list and kinds and all(type(kind) is dict
+                   and set(kind) == {"kind", "target"} and kind["kind"] in (None, "dev", "build")
+                   and (kind["target"] is None or type(kind["target"]) is str) for kind in kinds)
+                   and len(kinds) == len({D.canonical(kind) for kind in kinds}),
+                   "Native resolved Cargo dependency roles differ")
+    local_paths = linux_local_cargo_sources(packages, nodes, roots[0], source)
+    local_ids = {row["id"] for row in packages if row["source"] is None}
+    D.need(local_ids - {roots[0]["id"]} <= {dep["pkg"] for dep in nodes[roots[0]["id"]]["deps"]},
+           "Native Cargo root lost an active local dependency")
+    registry_rows = [row for row in packages if row["source"] is not None]
+    registry = {(row["name"], row["version"]): row for row in registry_rows}
+    D.need(len(registry) == len(registry_rows) and set(registry) == set(expected)
+           and all(row["name"] not in local_paths for row in registry_rows),
+           "Native Cargo source versions differ from original notices")
+    registry_source = "registry+https://github.com/rust-lang/crates.io-index"
+    D.need(type(locked) is dict and type(locked.get("package")) is list, "Native Cargo lock is invalid")
+    lock_rows = [row for row in locked["package"] if "source" in row]
+    lock = {(row["name"], row["version"]): row for row in lock_rows}
+    D.need(len(lock) == len(lock_rows), "Duplicate native Cargo lock source")
+    for key, row in expected.items():
+        D.need(key in lock and registry[key]["source"] == registry_source
+               and registry[key].get("license") == row["license"] and lock[key]["source"] == registry_source
+               and lock[key].get("checksum") == row["archiveSha256"],
+               "Cargo original notice/checksum correspondence differs")
+    for row in packages:
+        origin = registry_source if row["source"] is not None else "path+" + Path(row["manifest_path"]).parent.as_uri()
+        D.need(row["id"] == origin + "#" + row["name"] + "@" + row["version"],
+               "Native Cargo ID does not identify its exact source")
+    return metadata, by_id, nodes
+
+
+def native_source_notice_inputs(source, admitted, rows):
+    """Bind reviewed archive-member references and maintained local originals."""
+    for crate in admitted["crates"]:
+        for member in crate.get("noticeMembers", []):
+            prefix = crate["name"] + "-" + crate["version"] + "/"
+            path = member["noticePath"]
+            D.need(member["member"].startswith(prefix) and path == "notices/crates/" + member["member"]
+                   and rows.get(path) == {"path": path, "size": member["size"], "sha256": member["sha256"]},
+                   "Native original archive notice member differs")
+    originals = admitted["localSourceNotices"]
+    D.need(type(originals) is list and originals and all(type(row) is dict
+           and set(row) == {"sourcePath", "noticePath"} for row in originals),
+           "Native local source notice roster differs")
+    D.need(len({row["sourcePath"] for row in originals}) == len(originals)
+           and len({row["noticePath"] for row in originals}) == len(originals),
+           "Duplicate native local source notice")
+    inputs = []
+    for row in originals:
+        path = source / D.relative(row["sourcePath"])
+        notice = D.relative(row["noticePath"])
+        D.need(notice in rows, "Native local original notice is missing")
+        D.bound(path, rows[notice])
+        inputs.append({**D.file_record(path, 2 << 20), "path": str(path)})
+    return inputs
+
+
+def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw, *, candidate=False):
     """Standard toolchain/support input provenance, not a linked-object census."""
     notice_source = source / "desktop/packaging/debian/native-notices"
     raw = D.read(notice_source / "inputs.json", 1 << 20)
@@ -1181,21 +1959,14 @@ def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw):
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         D.copy(notice_source / name, destination, row, 0o644)
     D.copy(notice_source / "inputs.json", notices / "inputs.json", D.file_record(notice_source / "inputs.json"), 0o644)
-    D.bound(source / "LICENSE", rows["notices/mobile-release-kit/LICENSE"])
-    metadata = C.bounded_json(metadata_raw, LOG_LIMIT)
-    packages = metadata.get("packages")
-    D.need(type(packages) is list and len(packages) == 36, "Native Cargo roster differs")
-    registry = {(p["name"], p["version"]): p for p in packages if p["source"] is not None}
-    expected = {(p["name"], p["version"]): p for p in admitted["crates"]}
-    D.need(set(registry) == set(expected) and len([p for p in packages if p["source"] is None]) == 2,
-           "Native Cargo source versions differ from original notices")
     locked = tomllib.loads(D.read(source / "desktop/src-tauri/Cargo.lock", 256 << 10).decode("utf-8"))
-    lock = {(p["name"], p["version"]): p for p in locked["package"] if "source" in p}
-    inputs = []
-    for key, row in expected.items():
-        D.need(registry[key]["source"] == "registry+https://github.com/rust-lang/crates.io-index"
-               and registry[key]["license"] == row["license"] and lock[key]["checksum"] == row["archiveSha256"],
-               "Cargo original notice/checksum correspondence differs")
+    # Cargo metadata has its own target root. The later compilation command's
+    # private work/target output is a different path, not metadata authority.
+    native_cargo_metadata(metadata_raw, source, source / "desktop/src-tauri/target",
+                          admitted["crates"], locked, candidate=candidate)
+    inputs = native_source_notice_inputs(source, admitted, rows)
+    for row in admitted["crates"]:
+        key = (row["name"], row["version"])
         candidates = list((work / "cargo/registry/cache").glob("*/" + key[0] + "-" + key[1] + ".crate"))
         D.need(len(candidates) == 1, "Native locked crate cache is ambiguous")
         record = D.file_record(candidates[0], 8 << 20)
@@ -1518,8 +2289,334 @@ def installed_candidate(work, sha):
     return {**rows["candidate"], "path": str(artifact / "candidate")}, compiler, graph, digest, producer_attempt, artifact_id
 
 
-def installed_shell_candidate(work, sha):
+def android_original_command_records(artifact, rows, result, transport, *, deadline):
+    """Validate all original argv/status/capture DATA in its retained role root.
+
+    Compiler request/result bodies are coalesced, never rewritten. Material
+    capture files stay private in the original compiler task on the same VM.
+    No original command is inferred from a phase prefix or rerun here.
+    """
+    D.need(type(deadline) in {int, float} and math.isfinite(deadline) and time.monotonic() < deadline,
+           "Android original command validation endpoint differs")
+    metadata_pin = result.get("privateCommandMetadata")
+    D.need(type(metadata_pin) is dict and metadata_pin.get("path") == "private-command-metadata.json"
+           and metadata_pin == rows.get("private-command-metadata.json"), "Android complete private command index is missing")
+    D.bound(artifact / "private-command-metadata.json", metadata_pin)
+    index = D.decode(D.read(artifact / "private-command-metadata.json", SHELL_METADATA_LIMIT), SHELL_METADATA_LIMIT)
+    D.need(type(index) is dict and set(index) == {"schemaVersion", "scope", "files"} and type(index["schemaVersion"]) is int
+           and index["schemaVersion"] == 1 and index["scope"] == "original-private-compiler-command-metadata-v1"
+           and type(index["files"]) is list and 0 < len(index["files"]) <= 3072,
+           "Android original private command index shape differs")
+    metadata = {}
+    for row in index["files"]:
+        D.need(type(row) is dict and set(row) == {"path", "size", "sha256", "body"}
+               and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}\.(request|result)\.json", row["path"]) is not None
+               and row["path"] not in metadata, "Android original command index member differs")
+        body = D.canonical(row["body"])
+        D.need(len(body) == row["size"] and hashlib.sha256(body).hexdigest() == row["sha256"],
+               "Android original command body was not preserved")
+        metadata[row["path"]] = row["body"]
+    # Roles originate in the two fixed capture roots, not a label prefix.
+    roles = result.get("privateCommandRoles")
+    D.need(type(roles) is dict and set(roles) == {"compiler", "material"}
+           and all(type(values) is list and all(type(phase) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}", phase)
+                   for phase in values) and len(values) == len(set(values)) for values in roles.values())
+           and type(result["commands"]) is list and 0 < len(result["commands"]) <= 1536
+           and all(type(row) is dict and set(row) == {"phase", "argv", "exitCode", "timeoutSeconds", "ordinaryOwnerReturned"}
+                   and type(row["exitCode"]) is int and row["exitCode"] == 0 and row["ordinaryOwnerReturned"] is True
+                   and type(row["timeoutSeconds"]) is int and 0 < row["timeoutSeconds"] <= 1200
+                   and type(row["argv"]) is list and 0 < len(row["argv"]) <= 256
+                   and all(type(arg) is str and "\0" not in arg for arg in row["argv"])
+                   for row in result["commands"])
+           and len({row["phase"] for row in result["commands"]}) == len(result["commands"])
+           and not set(roles["compiler"]).intersection(roles["material"])
+           and set(roles["compiler"]) | set(roles["material"]) == {row["phase"] for row in result["commands"]},
+           "Android original command role roster differs")
+    roots = result.get("privateCaptureRoots")
+    D.need(type(roots) is dict and set(roots) == {role for role in roles if roles[role]}
+           and roots.get("compiler") == transport["compilerEvidence"]["identity"],
+           "Android original command capture-root roster differs")
+    originals = {}
+    for role, original in roots.items():
+        path = Path(transport["compilerRoot"]["path"]) / ("private-" + role)
+        D.need(type(original) is list and len(original) == 5 and all(type(item) is int for item in original)
+               and list(directory_identity(path)) == original, "Android original command capture root changed")
+        originals[path] = original
+    compiler_commands = [row for row in result["commands"] if row["phase"] in roles["compiler"]]
+    D.need(set(metadata) == {row["phase"] + suffix for row in compiler_commands for suffix in (".request.json", ".result.json")},
+           "Android private compiler command index is incomplete")
+    for command in compiler_commands:
+        phase = command["phase"]
+        D.need(metadata[phase + ".request.json"] == {key: command[key] for key in ("phase", "argv", "timeoutSeconds")}
+               and metadata[phase + ".result.json"] == {**command, "captures": {
+                   suffix: {key: rows[phase + "." + suffix][key] for key in ("size", "sha256")}
+                   for suffix in ("stdout", "stderr")}}, "Android private original argv/stream/result correspondence differs")
+    # Material request/result bodies and captures remain in the SAME
+    # original compiler task, not an Actions artifact or the public roster.
+    material_pins = result.get("privateMaterialMetadata")
+    D.need(type(material_pins) is list and len(material_pins) == 2 * len(roles["material"])
+           and all(type(row) is dict and set(row) == {"path", "size", "sha256"}
+                   and type(row["path"]) is str for row in material_pins),
+           "Android private material command index is incomplete")
+    material_index = {row["path"]: row for row in material_pins}
+    D.need(len(material_index) == len(material_pins)
+           and set(material_index) == {phase + suffix for phase in roles["material"] for suffix in (".request.json", ".result.json")},
+           "Android private material command role correspondence differs")
+    material_root = Path(transport["compilerRoot"]["path"]) / "private-material"
+    material_files = dict(material_index)
+    for command in (row for row in result["commands"] if row["phase"] in roles["material"]):
+        D.need(time.monotonic() < deadline, "Android original material metadata validation was late")
+        phase, documents = command["phase"], {}
+        for suffix in ("request", "result"):
+            row = material_index[phase + "." + suffix + ".json"]
+            D.need(set(row) == {"path", "size", "sha256"} and type(row["size"]) is int
+                   and 0 < row["size"] <= (64 << 10 if suffix == "request" else 128 << 10),
+                   "Android private material metadata bound differs")
+            D.bound(material_root / row["path"], row)
+            documents[suffix] = D.decode(D.read(material_root / row["path"], row["size"]), 128 << 10)
+        captures = documents["result"].get("captures")
+        D.need(type(captures) is dict and set(captures) == {"stdout", "stderr"},
+               "Android original material capture roster differs")
+        for suffix, pin in captures.items():
+            D.need(type(pin) is dict and set(pin) == {"size", "sha256"}
+                   and type(pin["size"]) is int and 0 <= pin["size"] <= LOG_LIMIT,
+                   "Android original material capture bound differs")
+            row = {"path": phase + "." + suffix, **android_private_pin(pin)}
+            D.bound(material_root / row["path"], row)
+            material_files[row["path"]] = row
+        D.need(documents["request"] == {key: command[key] for key in ("phase", "argv", "timeoutSeconds")}
+               and documents["result"] == {**command, "captures": captures},
+               "Android original material argv/capture/result correspondence differs")
+    if material_files:
+        D.need(sum(row["size"] for row in material_files.values()) <= LOG_TOTAL,
+               "Android original material capture retained-byte bound differs")
+        before = android_private_inventory(material_root, material_files, [], role="shell", executable=(), deadline=deadline)
+        for row in material_files.values():
+            D.need(time.monotonic() < deadline, "Android original material capture validation was late")
+            D.bound(material_root / row["path"], row)
+        D.need(android_private_inventory(material_root, material_files, [], role="shell", executable=(), deadline=deadline) == before,
+               "Android original material capture identity changed during validation")
+    D.need(time.monotonic() < deadline and all(list(directory_identity(path)) == original for path, original in originals.items()),
+           "Android original command capture root changed or validation was late")
+
+
+def installed_shell_scope(lifecycle):
+    """Explicit finite execution scope; Q3/negative1 reuse one common Q4 build."""
+    D.need(not SHELL_GITHUB_RELEASE_ENVIRONMENT & set(os.environ), "Ambient release compiler binding present")
+    scope = os.environ.get("MRK_INSTALLED_SHELL_SCOPE")
+    D.need(scope in (None, "", lifecycle.SHELL_ORDINARY_PROFILE, lifecycle.SHELL_RECOVERY_PROFILE,
+                    lifecycle.SHELL_RECOVERY_NEGATIVE_PROFILE, lifecycle.SHELL_GITHUB_RELEASE_PROFILE), "Unknown installed shell scope")
+    if scope in (None, ""):
+        D.need(os.environ.get("GITHUB_REF") not in (SHELL_RECOVERY_REF, SHELL_GITHUB_RELEASE_REF),
+               "Recovery/release cannot silently select a historical scope")
+        return None
+    if scope == lifecycle.SHELL_GITHUB_RELEASE_PROFILE:
+        D.need(installed_shell_release_selection(lifecycle) is not None, "Release scope requires its own fixed route")
+        return None  # Explicit R selection, never an ordinary/Android selection.
+    recovery = scope in (lifecycle.SHELL_RECOVERY_PROFILE, lifecycle.SHELL_RECOVERY_NEGATIVE_PROFILE)
+    D.need(os.environ.get("GITHUB_REF") == (SHELL_RECOVERY_REF if recovery else SHELL_REF)
+           and os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") == "actions-artifact-v1"
+           and not os.environ.get("MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256"),
+           "Named non-Android scope requires its fixed artifact route")
+    if recovery:
+        D.need(lifecycle.SHELL_RECOVERY_REF == SHELL_RECOVERY_REF
+               and ((scope == lifecycle.SHELL_RECOVERY_PROFILE and os.environ.get("GITHUB_JOB") == "compile")
+                    or (scope == lifecycle.SHELL_RECOVERY_NEGATIVE_PROFILE and os.environ.get("GITHUB_JOB") == "recovery-negative"
+                        and os.environ.get("MRK_INSTALLED_SHELL_CASE") == "observe")),
+               "Recovery positive/failed-unit consumer job roles differ")
+        return lifecycle.shell_recovery_compile_selection()
+    return lifecycle.shell_ordinary_selection()
+
+
+def installed_shell_scope_fields(selection, lifecycle):
+    if selection is None:
+        return {}
+    recovery = selection.get("profile") == lifecycle.SHELL_RECOVERY_COMPILE_PROFILE
+    wanted = lifecycle.shell_recovery_compile_selection() if recovery else lifecycle.shell_ordinary_selection()
+    D.need(D.canonical(selection) == D.canonical(wanted), "Different closed installed compiler selection")
+    return {"projectRecovery" if recovery else "ordinary21": selection}
+
+
+def installed_shell_scope_record(record, lifecycle, ordinary, *, android_contract=False):
+    """Bind SOURCE scope, not arbitrary renderer cases or a shortened full25."""
+    fields = installed_shell_scope_fields(ordinary, lifecycle)
+    D.need(type(record) is dict and ({"ordinary21", "projectRecovery"} & set(record)) == set(fields)
+           and all(D.canonical(record[key]) == D.canonical(value) for key, value in fields.items()),
+           "Original installed shell scope is missing, mixed or downgraded")
+    if ordinary is not None:
+        recovery = "projectRecovery" in fields
+        D.need("remainingRequiredCases" not in record if recovery else
+               "remainingRequiredCases" not in record or D.canonical(record["remainingRequiredCases"]) == D.canonical(ordinary["remainingRequiredCases"]),
+               "Named scope remaining-required-case disclosure differs")
+        D.need(not {"githubReadOnly", "githubReadOnlyProfile", "githubPreflight", "githubRelease", "androidPreparation", "androidOsContractInput",
+                    "androidPublication", "androidBuild", "localTransport", "shellLocalTransport",
+                    "privateCommandRoles", "privateCommandMetadata", "privateCaptureRoots", "privateMaterialMetadata"} & set(record),
+               "Named non-Android scope adopts another installed scope or Android preparation")
+        if android_contract:
+            fields = {"androidBuildMaterials": None, "androidBuildBindings": {}, "androidBuildPublication": None}
+            D.need(set(fields) <= set(record) and all(D.canonical(record[key]) == D.canonical(value) for key, value in fields.items()),
+                   "Named non-Android scope requires the exact null/empty/null Android compile contract")
+
+
+def installed_shell_preflight_selection(lifecycle):
+    if os.environ.get("GITHUB_REF") != SHELL_GITHUB_PREFLIGHT_REF:
+        return None
+    D.need(lifecycle.SHELL_GITHUB_PREFLIGHT_REF == SHELL_GITHUB_PREFLIGHT_REF
+           and os.environ.get("MRK_INSTALLED_SHELL_SCOPE") in (None, "")
+           and os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") in (None, "actions-artifact-v1")
+           and not os.environ.get("MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256"),
+           "Preflight requires its exact separate non-Android artifact route")
+    return lifecycle.shell_github_preflight_selection()
+
+
+def installed_shell_preflight_record(record, lifecycle, selection, *, android_contract=False):
+    D.need(selection is None or type(selection) is dict
+           and D.canonical(selection) == D.canonical(lifecycle.shell_github_preflight_selection()),
+           "Different source-bound GitHub preflight selection")
+    D.need(type(record) is dict and ("githubPreflight" in record) == (selection is not None)
+           and (selection is None or D.canonical(record["githubPreflight"]) == D.canonical(selection)),
+           "Original GitHub preflight source/compile/consumer scope differs")
+    if selection is not None:
+        D.need(not {"ordinary21", "projectRecovery", "githubReadOnly", "githubReadOnlyProfile", "githubRelease", "androidPreparation", "androidOsContractInput",
+                    "androidPublication", "androidBuild", "localTransport", "shellLocalTransport", "privateCommandRoles",
+                    "privateCommandMetadata", "privateCaptureRoots", "privateMaterialMetadata"} & set(record),
+               "GitHub preflight record adopts another scope")
+        if android_contract:
+            fields = {"androidBuildMaterials": None, "androidBuildBindings": {}, "androidBuildPublication": None}
+            D.need(set(fields) <= set(record) and all(D.canonical(record[key]) == D.canonical(value) for key, value in fields.items()),
+                   "GitHub preflight requires the exact null/empty/null Android compiler contract")
+
+
+def installed_shell_preflight_environment(environment, lifecycle, selection):
+    # Presence of even an empty selector invokes build.rs's strict parser.
+    # Only this fixed G compilation receives it; never forward an ambient value.
+    D.need("MRK_GITHUB_PREFLIGHT_TOOLING_SHA" not in environment, "Ambient preflight compiler selector present")
+    if selection is not None:
+        D.need(D.canonical(selection) == D.canonical(lifecycle.shell_github_preflight_selection()),
+               "Preflight compiler selection differs")
+        environment["MRK_GITHUB_PREFLIGHT_TOOLING_SHA"] = lifecycle.SHELL_GITHUB_PREFLIGHT_TOOLING_SHA
+
+
+def installed_shell_preflight_sources(source, lifecycle, selection):
+    if selection is None:
+        return
+    D.need(D.canonical(selection) == D.canonical(lifecycle.shell_github_preflight_selection()),
+           "Preflight SOURCE selection differs")
+    ca = lifecycle.SHELL_GITHUB_PEER_PINS["github_tls/root-ca.pem"]
+    rows = [*selection["peerSources"], selection["caller"]["template"],
+            {"path": "desktop/src-tauri/tests/fixtures/github_tls/root-ca.pem", "size": ca[0], "sha256": ca[1]}]
+    for row in rows:
+        actual = D.file_record(source / row["path"], row["size"])
+        D.need(all(actual[key] == row[key] for key in ("size", "sha256")),
+               "Preflight fixed peer/template/derivative SOURCE differs before preparation")
+
+
+def installed_shell_release_selection(lifecycle):
+    D.need(not SHELL_GITHUB_RELEASE_ENVIRONMENT & set(os.environ), "Ambient release compiler binding present")
+    if os.environ.get("GITHUB_REF") != SHELL_GITHUB_RELEASE_REF:
+        D.need(os.environ.get("MRK_INSTALLED_SHELL_SCOPE") != lifecycle.SHELL_GITHUB_RELEASE_PROFILE,
+               "Release scope was adopted by another route")
+        return None
+    D.need(lifecycle.SHELL_GITHUB_RELEASE_REF == SHELL_GITHUB_RELEASE_REF
+           and os.environ.get("MRK_INSTALLED_SHELL_SCOPE") == lifecycle.SHELL_GITHUB_RELEASE_PROFILE
+           and os.environ.get("GITHUB_JOB") == "compile" and os.environ.get("MRK_INSTALLED_SHELL_CASE") in ("compile", "observe")
+           and os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") == "actions-artifact-v1"
+           and not os.environ.get("MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256")
+           and not {"MRK_GITHUB_PREFLIGHT_TOOLING_SHA", "MRK_GITHUB_PREFLIGHT_CALLER_SHA256"} & set(os.environ),
+           "Release requires its exact separate non-Android artifact route, never a G selector")
+    return lifecycle.shell_github_release_selection()
+
+
+def installed_shell_release_record(record, lifecycle, selection, *, android_contract=False):
+    D.need(selection is None or type(selection) is dict
+           and D.canonical(selection) == D.canonical(lifecycle.shell_github_release_selection()),
+           "Different source-bound GitHub release selection")
+    D.need(type(record) is dict and ("githubRelease" in record) == (selection is not None)
+           and (selection is None or D.canonical(record["githubRelease"]) == D.canonical(selection)),
+           "Original GitHub release source/compile/consumer scope differs")
+    if selection is not None:
+        D.need(not {"ordinary21", "projectRecovery", "githubReadOnly", "githubReadOnlyProfile", "githubPreflight",
+                    "androidPreparation", "androidOsContractInput", "androidPublication", "androidBuild", "localTransport",
+                    "shellLocalTransport", "privateCommandRoles", "privateCommandMetadata", "privateCaptureRoots", "privateMaterialMetadata"} & set(record),
+               "GitHub release record adopts another scope")
+        if android_contract:
+            fields = {"androidBuildMaterials": None, "androidBuildBindings": {}, "androidBuildPublication": None}
+            D.need(set(fields) <= set(record) and all(D.canonical(record[key]) == D.canonical(value) for key, value in fields.items()),
+                   "GitHub release requires the exact null/empty/null Android compiler contract")
+
+
+def installed_shell_release_environment(environment, lifecycle, selection):
+    # build.rs alone derives all three caller digests. No ambient value or G pin
+    # is forwarded; this fixed candidate is observation SOURCE, not delivery.
+    D.need(not SHELL_GITHUB_RELEASE_ENVIRONMENT & set(environment), "Ambient release compiler selector present")
+    if selection is not None:
+        D.need(D.canonical(selection) == D.canonical(lifecycle.shell_github_release_selection())
+               and not {"MRK_GITHUB_PREFLIGHT_TOOLING_SHA", "MRK_GITHUB_PREFLIGHT_CALLER_SHA256"} & set(environment),
+               "Release compiler selection differs or mixes G")
+        environment["MRK_GITHUB_RELEASE_TOOLING_SHA"] = lifecycle.SHELL_GITHUB_RELEASE_TOOLING_SHA
+
+
+def installed_shell_release_sources(source, lifecycle, selection):
+    if selection is None:
+        return
+    D.need(D.canonical(selection) == D.canonical(lifecycle.shell_github_release_selection()), "Release SOURCE selection differs")
+    ca = lifecycle.SHELL_GITHUB_PEER_PINS["github_tls/root-ca.pem"]
+    rows = [*selection["peerSources"], *(row["template"] for row in selection["callers"].values()),
+            {"path": "desktop/src-tauri/tests/fixtures/github_tls/root-ca.pem", "size": ca[0], "sha256": ca[1]}]
+    for row in rows:
+        actual = D.file_record(source / row["path"], row["size"])
+        D.need(all(actual[key] == row[key] for key in ("size", "sha256")), "Release fixed peer/caller-template SOURCE differs")
+
+
+def installed_shell_source_admission():
+    """Read-only SOURCE gate before workflow acquisition, preparation or build."""
+    sha = route(os.environ)
+    D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "compile"
+           or (os.environ.get("GITHUB_REF") == SHELL_RECOVERY_REF and os.environ.get("GITHUB_JOB") == "recovery-negative"
+               and os.environ.get("MRK_INSTALLED_SHELL_CASE") == "observe"),
+           "Source admission requires the fixed compiler or separate Recovery negative route")
+    lifecycle = local("ubuntu_publication_lifecycle")
+    ordinary = installed_shell_scope(lifecycle)
+    preflight = installed_shell_preflight_selection(lifecycle)
+    release = installed_shell_release_selection(lifecycle)
+    transport = os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT")
+    github = os.environ.get("GITHUB_REF") in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF, SHELL_GITHUB_PREFLIGHT_REF, SHELL_GITHUB_RELEASE_REF)
+    D.need(transport in (None, "actions-artifact-v1", "android-same-job-local-v1")
+           and not (github and transport == "android-same-job-local-v1"), "Source admission transport differs")
+    entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
+    D.need(D.file_record(SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
+           "Workflow reviewed shell lifecycle entry differs before preparation")
+    lifecycle.check_source_pins(SOURCE, android=transport == "android-same-job-local-v1")
+    installed_shell_preflight_sources(SOURCE, lifecycle, preflight)
+    installed_shell_release_sources(SOURCE, lifecycle, release)
+    if transport == "android-same-job-local-v1":
+        D.need(type(local("android_material_preparation").policy().get("hostPolicy")) is dict,
+               "Android same-VM supplier/generated-input policy is not yet admitted")
+    elif ordinary is None and not github:
+        lifecycle.shell_android_materials()  # Full25 is still closed without its original materials.
+        lifecycle.shell_android_publication_data()
+    shell_source_manifest(SOURCE)
+    print("Fixed installed shell SOURCE admitted before acquisition/preparation; no compiler or native entry.", flush=True)
+    return {"sourceSha": sha, **installed_shell_scope_fields(ordinary, lifecycle),
+            **({"githubPreflight": preflight} if preflight is not None else {}),
+            **({"githubRelease": release} if release is not None else {})}
+
+
+def installed_shell_candidate(work, sha, *, lifecycle=None, local_transport=None, deadline=None, github=False, ordinary=None):
     """Admit both exact original shell outputs, including failed-job-only reuse."""
+    lifecycle = local("ubuntu_publication_lifecycle") if lifecycle is None else lifecycle
+    preflight = installed_shell_preflight_selection(lifecycle)
+    release = installed_shell_release_selection(lifecycle)
+    D.need(D.canonical(ordinary) == D.canonical(installed_shell_scope(lifecycle))
+           and (ordinary is None or not github and local_transport is None),
+           "Candidate/consumer ordinary21 scope or transport differs")
+    D.need(type(github) is bool and github == (os.environ.get("GITHUB_REF") in
+           (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF, SHELL_GITHUB_PREFLIGHT_REF, SHELL_GITHUB_RELEASE_REF))
+           and (not github or local_transport is None),
+           "GitHub shell candidate requires its fixed artifact-only route")
+    android_materials = None if github or ordinary is not None else lifecycle.shell_android_materials()
+    android_bindings = {} if github or ordinary is not None else lifecycle.shell_android_compile_environment()
+    android_publication = None if github or ordinary is not None else lifecycle.shell_android_publication_data()
     artifact = work / "admitted-shell"
     raw = D.read(artifact / "shell-roster.json", SHELL_ROSTER_LIMIT)
     digest = D.sha(os.environ.get("MRK_INSTALLED_SHELL_ROSTER_SHA256"))
@@ -1527,10 +2624,19 @@ def installed_shell_candidate(work, sha):
     roster = D.decode(raw, SHELL_ROSTER_LIMIT)
     producer_attempt = os.environ.get("MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT", "")
     artifact_id = os.environ.get("MRK_INSTALLED_SHELL_ARTIFACT_ID", "")
-    D.need(re.fullmatch(r"[1-9][0-9]{0,19}", producer_attempt) is not None
-           and re.fullmatch(r"[1-9][0-9]{0,19}", artifact_id) is not None
-           and int(producer_attempt) <= int(os.environ["GITHUB_RUN_ATTEMPT"]),
-           "Original shell producer attempt/artifact identity differs")
+    if local_transport is None:
+        D.need(re.fullmatch(r"[1-9][0-9]{0,19}", producer_attempt) is not None
+               and re.fullmatch(r"[1-9][0-9]{0,19}", artifact_id) is not None
+               and int(producer_attempt) <= int(os.environ["GITHUB_RUN_ATTEMPT"]),
+               "Original shell producer attempt/artifact identity differs")
+    else:
+        D.need(not artifact_id and producer_attempt == os.environ["GITHUB_RUN_ATTEMPT"]
+               and local_transport["compilerRoster"]["sha256"] == digest,
+               "Android same-job candidate cannot adopt artifact/cross-attempt compiler output")
+        android_local_transport_context(local_transport, compiler_root=work.parent.parent /
+            ("mrk-desktop-ubuntu-publisher-" + os.environ["GITHUB_RUN_ID"] + "-" + producer_attempt + "-compile"),
+            source_sha=sha, source_tree=roster["sourceTree"])
+        artifact_id = None
     D.need(type(roster) is dict and set(roster) == {"sourceSha", "sourceTree", "runId", "attempt", "files"}
            and (roster["sourceSha"], roster["runId"], roster["attempt"])
                == (sha, os.environ["GITHUB_RUN_ID"], producer_attempt)
@@ -1546,6 +2652,21 @@ def installed_shell_candidate(work, sha):
     compiler = D.decode(D.read(artifact / "compiler.json", SHELL_METADATA_LIMIT), SHELL_METADATA_LIMIT)
     source_record = D.decode(D.read(artifact / "source.json", 1 << 20), 1 << 20)
     result = D.decode(D.read(artifact / "result.json", 1 << 20), 1 << 20)
+    installed_shell_scope_record(source_record, lifecycle, ordinary)
+    installed_shell_preflight_record(source_record, lifecycle, preflight)
+    installed_shell_release_record(source_record, lifecycle, release)
+    for record in (compiler, result):
+        installed_shell_scope_record(record, lifecycle, ordinary, android_contract=True)
+        installed_shell_preflight_record(record, lifecycle, preflight, android_contract=True)
+        installed_shell_release_record(record, lifecycle, release, android_contract=True)
+    installed_shell_preflight_sources(SOURCE, lifecycle, preflight)
+    installed_shell_release_sources(SOURCE, lifecycle, release)
+    if local_transport is not None:
+        D.need(all(row.get("androidPreparation") == local_transport["materialRecord"] for row in (compiler, result))
+               and compiler.get("androidOsContractInput") == result.get("androidOsContractInput")
+               and compiler["androidOsContractInput"] == {"path": str(Path(local_transport["materialRoot"]["path"]) / "os-contract.json"),
+                    **android_publication["documents"]["osContract"]}, "Android original compiler material/input record differs")
+        android_original_command_records(artifact, rows, result, local_transport, deadline=deadline)
     identity = (sha, roster["sourceTree"], os.environ["GITHUB_RUN_ID"], producer_attempt)
     D.need(all(tuple(row[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")) == identity
                and row["features"] == SHELL_FEATURES for row in (compiler, source_record, result))
@@ -1556,8 +2677,13 @@ def installed_shell_candidate(work, sha):
            and type(result["cargoBuilds"]) is int and result["cargoBuilds"] == 1
            and type(result["frontendBuilds"]) is int and result["frontendBuilds"] == 1
            and all(result[key] is False for key in ("shellExecuted", "observerExecuted", "supplierRebuilt",
-                                                    "packageBuilt", "helper11Rerun", "qualified")),
+                                                    "packageBuilt", "helper11Rerun", "qualified"))
+           and D.same(result.get("compilerCleanup"), SHELL_CLEANUP_SUCCESS),
            "Original shell source/anchors/features/compile-only result differs")
+    D.need(all(D.canonical(row.get("androidBuildMaterials")) == D.canonical(android_materials)
+               and D.canonical(row.get("androidBuildBindings")) == D.canonical(android_bindings)
+               and D.canonical(row.get("androidBuildPublication")) == D.canonical(android_publication) for row in (compiler, result)),
+           "Normal and observer did not compile with the same fixed reviewed Android material/OS selectors")
     source, target = Path(compiler["source"]), Path(compiler["target"])
     D.need(source.is_absolute() and target.is_absolute() and ".." not in (*source.parts, *target.parts),
            "Original shell compiler source/target path differs")
@@ -1594,7 +2720,6 @@ def installed_shell_candidate(work, sha):
     bindings = D.decode(D.read(artifact / "shell-host-bindings.json", SHELL_METADATA_LIMIT), SHELL_METADATA_LIMIT)
     D.need({path: shell_file_projection(row) for path, row in bindings["files"].items()} == native["osFiles"],
            "Complete original shell host bindings differ from the portable native graph")
-    lifecycle = local("ubuntu_publication_lifecycle")
     data = native["runtimeData"]
     D.need(len(data["records"]) == len(lifecycle.SHELL_DATA_ROOTS)
            and set(data["suppliers"]["roots"]) == set(data["caches"]["roots"]) == {path for path, _ in lifecycle.SHELL_DATA_ROOTS},
@@ -1799,7 +2924,7 @@ def installed_shell_os_inputs(check, work, native, compiler, u_compiler):
            and D.same(snapshot["eglLibraries"], native["runtimeData"]["eglLibraries"])
            and all(set(paths) <= set(modules) for paths in snapshot["moduleSelections"].values()),
            "Actual VM supplier DATA or generated module selection differs from the admitted profile")
-    runtime_data = shell_data_records(snapshot, check.root / "public", "shell-consumer-data")
+    runtime_data = shell_data_records(snapshot, check.evidence_root, "shell-consumer-data")
     fields = "${binary:Package}\t${db:Status-Status}\t${Version}\t${Architecture}\t${source:Package}\t${source:Version}\n"
     environment = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
     packages = {}
@@ -1879,11 +3004,11 @@ def package_inputs(source, work, *, fixtures=True):
     stager = local("stage_ubuntu_deb")
     p0 = work / "prepared/runtime"
     runtime_rows = stager.runtime_records(p0, admission["manifestSha256"], admission["protocolSha256"])
-    D.need(len(runtime_rows) == 607, "Original A runtime roster differs")
+    D.need(len(runtime_rows) == 611, "Original A runtime roster differs")
     for name, row in runtime_rows.items():
         D.bound(p0 / name, row)
     raw = D.read(p0 / "manifest.json", 1 << 20)
-    D.need(len(raw) == 85440 and hashlib.sha256(raw + b"\n").hexdigest() == F1_MANIFEST_SHA256,
+    D.need(len(raw) == 85945 and hashlib.sha256(raw + b"\n").hexdigest() == F1_MANIFEST_SHA256,
            "Fixed F1 trailing-whitespace anchor differs")
     if not fixtures:
         return stager, artifact, original, p0, runtime_rows, None, None, None
@@ -1906,8 +3031,10 @@ def shell_source_manifest(source):
     features = manifest.get("features", {})
     D.need(features.get("default") == [] and features.get("custom-protocol") == ["tauri/custom-protocol"]
            and features.get("development-runtime") == [], "Shell production feature forwarding differs")
-    D.need(manifest.get("profile", {}).get("dev", {}).get("package", {}).get("sha2") == {
-        "opt-level": 3, "debug-assertions": True, "overflow-checks": True},
+    # The maintained SDK also uses sha2 0.11.0. Bind the complete override map
+    # to the application's actual hashing version, without ambiguous names.
+    D.need(D.same(manifest.get("profile", {}).get("dev", {}).get("package", {}), {
+        "sha2:0.10.9": {"opt-level": 3, "debug-assertions": True, "overflow-checks": True}}),
         "Shell dev profile must preserve complete bounded runtime hashing")
     normal = [row for row in manifest.get("bin", []) if row.get("name") == SHELL_EXPORTS["normal"]]
     observer = [row for row in manifest.get("test", []) if row.get("name") == SHELL_EXPORTS["observer"]]
@@ -1921,10 +3048,89 @@ def shell_source_manifest(source):
     D.need(config["build"] == {"frontendDist": "../dist"} and config["bundle"]["active"] is False,
            "Shell must embed the fixed frontend, without a dev server or bundle build")
     paths = ("desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
+             "desktop/macos-installed-inputs/build-release.json", "desktop/src-tauri/src/macos_build_release.rs",
+             "desktop/src-tauri/src/macos_install_fixed_paths.rs", "desktop/src-tauri/src/macos_install_paths.rs",
              "desktop/src-tauri/src/main.rs", "desktop/src-tauri/tests/installed_shell_observation.rs",
+             "desktop/src-tauri/src/error.rs", "desktop/src-tauri/src/protocol.rs", "desktop/src-tauri/src/installed_runtime.rs",
+             "desktop/src-tauri/src/passive_management_tests.rs", "desktop/src-tauri/src/credential_assessment.rs",
+             "desktop/src-tauri/src/edit_owner.rs", "desktop/src-tauri/src/release_version_edit_commands.rs",
+             "desktop/src-tauri/src/release_version_edit_protocol.rs", "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/bridge.rs", "desktop/src-tauri/src/asset_session.rs",
+             "desktop/src-tauri/src/asset_source.rs", "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/src/installed_shell_observation.rs",
+             "desktop/src-tauri/src/candidate_evidence_protocol.rs", "desktop/src-tauri/src/lifecycle_evidence_protocol.rs",
+             "desktop/src-tauri/capabilities/main.json",
+             "desktop/src-tauri/src/supervisor.rs", "desktop/src-tauri/src/installed_shell_shutdown_observation.rs",
+             "desktop/src-tauri/src/installed_tools_observation.rs", "desktop/src-tauri/src/environment_diagnostics_owner.rs",
+             "desktop/src-tauri/src/environment_diagnostics_protocol.rs", "desktop/src-tauri/src/saved_command_owner.rs",
+             "desktop/src-tauri/src/offline_preflight_owner.rs", "desktop/src-tauri/src/offline_preflight_owner_tests.rs",
+             "desktop/src-tauri/src/offline_preflight_protocol.rs",
              "desktop/src-tauri/tauri.conf.json", "desktop/package.json", "desktop/package-lock.json",
              "desktop/vite.config.mjs", "desktop/tsconfig.json", "desktop/src/App.tsx",
-             "desktop/tools/ci_ubuntu_publication.py", "desktop/tools/ubuntu_publication_lifecycle.py")
+             "desktop/src/api.ts", "desktop/src/types.ts", "desktop/src/candidateEvidence.ts", "desktop/src/lifecycleEvidence.ts",
+             "desktop/src/components/ReleaseEvidence.tsx", "desktop/src/pages/Artifacts.tsx", "desktop/src/pages/Future.tsx",
+             "desktop/tests/fixtures/lifecycle-evidence.json", "desktop/tests/lifecycle-evidence.test.mjs",
+             "desktop/src/components/ReleaseVersionEditor.tsx", "desktop/src/releaseVersionEdit.ts",
+             "desktop/src/releaseVersionEditController.ts", "desktop/src/components/EnvironmentDiagnostics.tsx", "desktop/tests/environment-diagnostics.test.mjs",
+             "desktop/tools/ci_ubuntu_publication.py", "desktop/tools/ubuntu_publication_lifecycle.py",
+             "desktop/tools/prepare_hosted_ubuntu_data.py",
+             'desktop/src-tauri/src/github_connection_session.rs',
+             'desktop/src-tauri/src/github_tls_peer_owner.rs',
+             'desktop/src-tauri/src/installed_shell_github_observation.rs',
+             'desktop/src-tauri/src/github_preflight_protocol.rs',
+             'desktop/src-tauri/src/github_preflight_session.rs',
+             'desktop/src-tauri/src/github_preflight_native_observation.rs',
+             'desktop/src-tauri/src/installed_shell_preflight_observation.rs',
+             'desktop/src-tauri/src/github_release_protocol.rs',
+             'desktop/src-tauri/src/github_release_session.rs',
+             'desktop/src-tauri/src/github_release_native_observation.rs',
+             'desktop/src-tauri/src/installed_shell_release_observation.rs',
+             'desktop/src-tauri/src/hosted_tests.rs',
+             'desktop/src/githubConnectionProtocol.ts',
+             'desktop/src/bridge.ts',
+             'desktop/src/components/GitHubConnection.tsx',
+             'desktop/src/components/GitHubPreflight.tsx',
+             'desktop/src/githubPreflightController.ts',
+             'desktop/src/githubPreflightProtocol.ts',
+             'desktop/src/githubPreflightTypes.ts',
+             'desktop/src/components/GitHubRelease.tsx',
+             'desktop/src/githubReleaseController.ts',
+             'desktop/src/githubReleaseProtocol.ts',
+             'desktop/src/githubReleaseTypes.ts',
+             'desktop/src/pages/GitHub.tsx',
+             'desktop/tests/github-connection.test.mjs',
+             'desktop/tests/github-preflight.test.mjs',
+             'src/mobile_release/github_preflight.py',
+             'src/mobile_release/github_release.py',
+             'src/mobile_release/_desktop_github_preflight_engine.py',
+             'src/mobile_release/_github_preflight_journal.py',
+             'templates/workflows/mobile-preflight.yml',
+             'templates/workflows/mobile-candidate.yml',
+             'templates/workflows/mobile-external-testing.yml',
+             'templates/workflows/mobile-production-submit.yml',
+             '.github/workflows/reusable-candidate.yml',
+             '.github/workflows/reusable-external-testing.yml',
+             '.github/workflows/reusable-production-submit.yml',
+             'desktop/github_release_bootstrap.py',
+             'desktop/src-tauri/tests/fixtures/github_release_peer.py',
+             'desktop/src-tauri/tests/fixtures/github_preflight_peer.py',
+             'desktop/src-tauri/tests/fixtures/github_tls_peer.py',
+             'desktop/src-tauri/tests/fixtures/github_tls/api-expired.pem',
+             'desktop/src-tauri/tests/fixtures/github_tls/api-valid.pem',
+             'desktop/src-tauri/tests/fixtures/github_tls/other-root-ca.pem',
+             'desktop/src-tauri/tests/fixtures/github_tls/root-ca.pem',
+             'desktop/src-tauri/tests/fixtures/github_tls/server-key.pem',
+             'desktop/src-tauri/tests/fixtures/github_tls/wrong-san.pem',
+             'desktop/tools/hosted_glibc_policy.py',
+             'desktop/tools/observe_hosted_python.py',
+             "desktop/tools/ci_foundation.py", "desktop/tools/android_material_preparation.py",
+             "desktop/tools/stock_trust_correspondence.py", "desktop/tools/ubuntu_stock_ca_policy.json",
+             "desktop/tools/android_material_data/policy.json", "desktop/tools/android_material_data/suppliers.json",
+             "desktop/tools/android_material_data/layout.json.gz", "desktop/tools/android_material_data/archives.json.gz",
+             "desktop/tools/android_material_data/fonts.json", "desktop/tools/android_material_data/providers.json",
+             "desktop/src-tauri/src/android_toolchain.rs",
+             "desktop/src-tauri/src/project_recovery_owner.rs", "desktop/src-tauri/src/project_recovery_protocol.rs",
+             "desktop/src-tauri/src/saved_command_recovery_observation.rs", "desktop/src-tauri/src/installed_project_recovery_observation.rs",
+             "desktop/src/projectRecoveryTypes.ts", "desktop/src/projectRecoveryProtocol.ts",
+             "desktop/src/projectRecoveryController.ts", "desktop/src/components/ProjectRecovery.tsx")
     return [{**D.file_record(source / path, 2 << 20), "path": path} for path in sorted(paths)]
 
 
@@ -1991,6 +3197,96 @@ def shell_permissions_tree(path):
     return tree
 
 
+def shell_directory_identity(path):
+    """Stable directory binding; timestamps/link counts change during removal."""
+    D.directory(path)
+    value = path.lstat()
+    return value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid
+
+
+def shell_remove_owned_directory(path, expected, parents, deadline):
+    """Retire one known compiler directory through its original no-follow FD.
+
+    Only the four initially absent generated roots and original private work
+    call this function, after their original workers have returned. rmtree is
+    confined below the opened target, never a fresh lookup of the target path.
+    A stalled filesystem call is not made interruptible by endpoint checks;
+    any late/uncertain return blocks the next stage rather than claiming cleanup.
+    """
+    D.need(shutil.rmtree.avoids_symlink_attacks, "FD-relative compiler cleanup is unavailable")
+    D.need(path.parent in parents and len(expected) == 5 and expected[3] == os.geteuid()
+           and stat.S_ISDIR(expected[2]) and not expected[2] & 0o7022,
+           "Unowned compiler cleanup target")
+    original_fds, problem = [], None
+
+    def identity(value):
+        return value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid
+
+    def recheck():
+        D.need(time.monotonic() < deadline, "Original compiler cleanup endpoint expired")
+        D.need(all(shell_directory_identity(parent) == wanted for parent, wanted in parents.items()),
+               "Original compiler cleanup ancestry changed")
+
+    try:
+        recheck()
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        parent_fd = os.open(path.parent, flags)
+        original_fds.append(parent_fd)
+        D.need(identity(os.fstat(parent_fd)) == parents[path.parent], "Compiler cleanup parent binding changed")
+        D.need(identity(os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)) == expected,
+               "Original compiler cleanup directory was replaced")
+        target_fd = os.open(path.name, flags, dir_fd=parent_fd)
+        original_fds.append(target_fd)
+        D.need(identity(os.fstat(target_fd)) == expected, "Compiler cleanup original open differs")
+        entries = sorted(os.listdir(target_fd))
+        D.need(len(entries) <= 32768, "Compiler cleanup direct-entry bound")
+        # Precheck the complete direct roster before deleting any entry. The
+        # generated trees additionally have full byte inventories at the caller.
+        entries = [(name, os.stat(name, dir_fd=target_fd, follow_symlinks=False)) for name in entries]
+        D.need(all(value.st_uid == os.geteuid() and value.st_dev == expected[0]
+                   and (stat.S_ISREG(value.st_mode) or stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode))
+                   for _, value in entries), "Unowned or nonordinary compiler cleanup member")
+        for name, value in entries:
+            recheck()
+            D.need(identity(os.fstat(parent_fd)) == parents[path.parent]
+                   and identity(os.fstat(target_fd)) == expected
+                   and identity(os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)) == expected,
+                   "Compiler cleanup original binding changed")
+            D.need(D.state(os.stat(name, dir_fd=target_fd, follow_symlinks=False)) == D.state(value),
+                   "Compiler cleanup member changed before removal")
+            if stat.S_ISDIR(value.st_mode):
+                shutil.rmtree(name, dir_fd=target_fd)
+            else:
+                os.unlink(name, dir_fd=target_fd)
+        recheck()
+        D.need(os.listdir(target_fd) == [] and identity(os.fstat(target_fd)) == expected
+               and identity(os.fstat(parent_fd)) == parents[path.parent]
+               and identity(os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)) == expected,
+               "Original compiler cleanup directory is not empty/bound")
+        os.rmdir(path.name, dir_fd=parent_fd)
+        try:
+            os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise D.Refused("Compiler cleanup name remains present")
+        D.need(os.fstat(target_fd).st_nlink == 0, "Original compiler cleanup directory remains linked")
+        recheck()
+    except BaseException as error:
+        problem = error
+    # Retire every original once, retaining the first error. Neither Drop nor
+    # a later successful lookup can replace a failed consuming close.
+    for fd in reversed(original_fds):
+        try:
+            os.close(fd)
+        except BaseException as error:
+            if problem is None:
+                problem = error
+    if problem is not None:
+        raise problem
+    D.need(time.monotonic() < deadline, "Original compiler cleanup closed late")
+
+
 def shell_cargo_metadata(raw, source, target):
     """Validate the actual full Cargo graph, not a remembered Tauri subset."""
     metadata = C.bounded_json(raw, SHELL_METADATA_LIMIT, max_nodes=200000)
@@ -2003,22 +3299,19 @@ def shell_cargo_metadata(raw, source, target):
     D.need(len(by_id) == len(packages) and len(nodes) == len(resolve["nodes"])
            and set(nodes) <= set(by_id), "Shell Cargo metadata IDs differ/duplicate")
     roots = [row for row in packages if row.get("manifest_path") == str(source / "desktop/src-tauri/Cargo.toml")]
-    D.need(len(roots) == 1 and roots[0]["name"] == "mobile-release-kit-desktop" and roots[0]["version"] == "0.1.0"
-           and resolve.get("root") == roots[0]["id"] and nodes[roots[0]["id"]]["features"] == SHELL_FEATURES,
+    D.need(len(roots) == 1 and roots[0]["name"] == "mobile-release-kit-desktop" and roots[0]["version"] == "0.1.1"
+           and resolve.get("root") == roots[0]["id"] and roots[0]["id"] in nodes
+           and nodes[roots[0]["id"]]["features"] == SHELL_FEATURES,
            "Shell root feature graph is not the fixed production graph")
     for row in nodes.values():
         D.need(type(row.get("features")) is list and all(type(name) is str for name in row["features"])
                and type(row.get("deps")) is list and all(dep.get("pkg") in nodes for dep in row["deps"]),
                "Shell resolved Cargo edge/features differ")
-    local_paths = {"mobile-release-kit-desktop": source / "desktop/src-tauri/Cargo.toml",
-                   "mrk-linux-mount-observation": source / "desktop/native/linux-mount-observation/Cargo.toml"}
-    local = [row for row in packages if row.get("source") is None]
-    D.need(len(local) == 2 and {row["name"] for row in local} == set(local_paths)
-           and all(row["version"] == "0.1.0" and row["manifest_path"] == str(local_paths[row["name"]]) for row in local),
-           "Shell Cargo local source roster differs")
+    local_paths = linux_local_cargo_sources(packages, nodes, roots[0], source)
     registry = [row for row in packages if row.get("source") is not None]
     keys = {(row["name"], row["version"]) for row in registry}
-    D.need(len(keys) == len(registry) and all(row["source"] == "registry+https://github.com/rust-lang/crates.io-index"
+    D.need(len(keys) == len(registry) and all(row["name"] not in local_paths
+           and row["source"] == "registry+https://github.com/rust-lang/crates.io-index"
            and re.fullmatch(r"[A-Za-z0-9_-]+", row["name"]) is not None
            and re.fullmatch(r"[0-9][A-Za-z0-9.+_-]+", row["version"]) is not None for row in registry),
            "Shell Cargo registry/source identity differs")
@@ -2343,7 +3636,7 @@ def shell_native_inputs(check, work, environment):
     lifecycle = local("ubuntu_publication_lifecycle")
     check.phase = "shell-runtime-data"
     snapshot = lifecycle.shell_data_snapshot(shell_host_binding)
-    runtime_data = shell_data_records(snapshot, check.root / "public", "shell-data")
+    runtime_data = shell_data_records(snapshot, check.evidence_root, "shell-data")
     check.phase = "shell-module-roots"
     roots, root_bindings, module_paths = shell_module_inventory()
     D.need(all(set(names) <= set(module_paths) for names in snapshot["moduleSelections"].values()),
@@ -2557,16 +3850,37 @@ def prepare_packages(check, source, work, public, environment, binaries, native_
 def verify_installed_shell_compile():
     D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "compile" and "MRK_INSTALLED_CASE" not in os.environ,
            "Fixed production shell compiler route differs")
+    lifecycle = local("ubuntu_publication_lifecycle")
+    ordinary = installed_shell_scope(lifecycle)
+    preflight = installed_shell_preflight_selection(lifecycle)
+    release = installed_shell_release_selection(lifecycle)
+    same_job = os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") == "android-same-job-local-v1"
+    github = os.environ.get("GITHUB_REF") in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF, SHELL_GITHUB_PREFLIGHT_REF, SHELL_GITHUB_RELEASE_REF)
+    D.need(not (github and same_job), "GitHub shell cannot use Android same-job transport")
+    material_engine, material_preparation, material_host = None, None, None
+    if same_job or github or ordinary is not None:
+        android_materials, android_bindings, android_publication = None, {}, None
+    else:
+        android_materials = lifecycle.shell_android_materials()
+        android_bindings = lifecycle.shell_android_compile_environment()
+        android_publication = lifecycle.shell_android_publication_data()
     sha, source, temporary, root, deadline = resumed_preparation()
     os.umask(0o077)
     work, public = root / "work", root / "public"
     identities = {str(path): directory_identity(path) for path in (root, work, public, root / "cases")}
+    cleanup_paths = {parent for path in (root, source, source / "desktop", source / "desktop/src-tauri")
+                     for parent in (path, *path.parents)}
+    cleanup_parents = {path: shell_directory_identity(path) for path in sorted(cleanup_paths)}
     sys.path.insert(0, str(source / "src"))
     from mobile_release.owned_process import run_owned
-    check = Check(root, run_owned, deadline=deadline)
+    check = Check(root, run_owned, deadline=deadline, private=same_job)
+    public = check.evidence_root  # Android originals are private; public/ is projections only.
     environment = C.clean_environment(work)
     environment.update(CARGO_TARGET_DIR=str(work / "target"), CC="/usr/bin/cc", CXX="/usr/bin/c++",
                        PKG_CONFIG="/usr/bin/pkg-config", CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="/usr/bin/cc")
+    environment.update(android_bindings)  # One Cargo command builds BOTH original outputs.
+    installed_shell_preflight_environment(environment, lifecycle, preflight)
+    installed_shell_release_environment(environment, lifecycle, release)
     git = shutil.which("git", path=environment["PATH"])
     rustup = shutil.which("rustup", path=environment["PATH"])
     node = shutil.which("node", path=environment["PATH"])
@@ -2577,6 +3891,8 @@ def verify_installed_shell_compile():
         C.conventional_host(D)
         D.need(all(directory_identity(Path(path)) == identity for path, identity in identities.items()),
                "Original shell task root changed")
+        D.need(all(shell_directory_identity(path) == identity for path, identity in cleanup_parents.items()),
+               "Original shell source/cleanup ancestry changed")
         C.no_cargo_configuration((work, root, *root.parents, temporary, *temporary.parents,
                                   source / "desktop/src-tauri", source / "desktop", source, *source.parents,
                                   work / "cargo", work / "home"))
@@ -2590,7 +3906,7 @@ def verify_installed_shell_compile():
             if relative in generated:
                 value = path.lstat()
                 D.directory(path)
-                D.need((value.st_dev, value.st_ino, value.st_uid) == generated[relative],
+                D.need(shell_directory_identity(path) == generated[relative],
                        "Original generated shell directory changed")
             else:
                 D.need(not path.exists() and not path.is_symlink(), "Preexisting/unowned shell compiler output")
@@ -2612,12 +3928,22 @@ def verify_installed_shell_compile():
         D.directory(path)
         value = path.lstat()
         D.need(value.st_uid == os.getuid() and not value.st_mode & 0o7022, "Generated shell root owner/mode differs")
-        generated[relative] = value.st_dev, value.st_ino, value.st_uid
+        generated[relative] = shell_directory_identity(path)
 
     try:
+        D.need(same_job or os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") in (None, "actions-artifact-v1"),
+               "Unknown installed shell compiler transport")
+        if same_job:
+            check.phase = "android-material-policy-admission"
+            lifecycle.check_source_pins(source, android=True)
+            material_engine = local("android_material_preparation")
+            D.need(type(material_engine.policy().get("hostPolicy")) is dict,
+                   "Android same-VM supplier/generated-input policy is not yet admitted")
         D.need(all(value is not None and Path(value).is_absolute() for value in (git, rustup, node)),
                "Selected shell compiler/frontend/source tools missing")
         source_check("before")
+        installed_shell_preflight_sources(source, lifecycle, preflight)
+        installed_shell_release_sources(source, lifecycle, release)
         source_inputs = shell_source_manifest(source)
         tree_result = check.command("source-tree", [git, "rev-parse", "HEAD^{tree}"], environment, source, timeout=15)
         tree = tree_result.stdout.strip().decode("ascii")
@@ -2625,14 +3951,37 @@ def verify_installed_shell_compile():
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed shell lifecycle entry differs")
+        local("ubuntu_publication_lifecycle").check_source_pins(source)
         source_record = {"sourceSha": sha, "sourceTree": tree, "sourceInputs": source_inputs,
                          "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                          "workflow": D.file_record(source / WORKFLOW, 128 << 10), "features": SHELL_FEATURES,
                          "imageOS": os.environ["ImageOS"], "imageVersion": os.environ["ImageVersion"],
                          "kernel": {key: getattr(os.uname(), key) for key in ("sysname", "machine", "release", "version")},
                          "lifecycleEntrySha256": entry_sha, "originalDeadline": repr(deadline),
-                         "nativeQualification": False, "scope": "Fresh normal shell and distinct observer compile only; no new package."}
+                         "nativeQualification": False, "scope": "Fresh normal shell and distinct observer compile only; no new package.",
+                         **installed_shell_scope_fields(ordinary, lifecycle),
+                         **({"githubPreflight": preflight} if preflight is not None else {}),
+                         **({"githubRelease": release} if release is not None else {})}
+        installed_shell_scope_record(source_record, lifecycle, ordinary)
+        installed_shell_preflight_record(source_record, lifecycle, preflight)
+        installed_shell_release_record(source_record, lifecycle, release)
         D.write(public / "source.json", D.canonical(source_record))
+        if os.environ["GITHUB_REF"] == SHELL_GITHUB_BOUNDARY_REF:
+            # This is the SAME compiler consumer, before any package/compiler
+            # work. Read-only DATA is retained on refusal; it is not a runtime
+            # admission token, an nft invocation, or a normal DNS/HTTP action.
+            check.phase = "normal-boundary-read-only-host-materials"
+            lifecycle = local("ubuntu_publication_lifecycle")
+            D.need(lifecycle.SHELL_GITHUB_BOUNDARY_REF == SHELL_GITHUB_BOUNDARY_REF,
+                   "Fixed normal-boundary material route differs")
+            materials = lifecycle.shell_github_boundary_host_materials()
+            D.write(public / "github-boundary-host-materials.json", D.canonical({
+                "schema": "installed-github-normal-boundary-engineering-data-v1",
+                "sourceSha": sha, "sourceTree": tree, "runId": os.environ["GITHUB_RUN_ID"],
+                "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "profile": lifecycle.SHELL_GITHUB_BOUNDARY_PROFILE,
+                "materials": materials, "qualified": False, "nativeEntry": False, "compilerStarted": False,
+                "runtimeSelfAdmission": False, "normalDestinationAction": False, "normalHttpRequests": False}))
+            lifecycle._github_boundary_host_admit(materials)  # Closed until a separately reviewed SOURCE tuple exists.
         check.phase = "original-shell-a-data"
         prepared = package_inputs(source, work, fixtures=False)
         D.write(public / "runtime-inputs.json", D.canonical({"admission": C.CONVENTIONAL_SMOKE_INPUTS,
@@ -2685,6 +4034,21 @@ def verify_installed_shell_compile():
         check.command("typescript-no-emit", [node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.json"],
                       environment, desktop, timeout=60)
         native, native_bindings = shell_native_inputs(check, work, environment)
+        if same_job:
+            check.phase = "android-same-vm-material"
+            material_context = android_original_context(root, sha, tree)
+            material_host = material_engine.android_host_inputs(native, native_bindings,
+                bind_path=shell_host_binding, deadline=deadline)
+            material_root = root.parent / ("mrk-android-material-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"])
+            material_preparation = material_engine.prepare(check, source, material_root,
+                context=material_context, host=material_host)
+            material_engine.validate(material_preparation, context=material_context, host=material_host, deadline=deadline)
+            lifecycle.bind_shell_android_profile(material_preparation["materials"], material_preparation["publication"])
+            android_materials = lifecycle.shell_android_materials()
+            android_bindings = lifecycle.shell_android_compile_environment()
+            android_publication = lifecycle.shell_android_publication_data()
+            environment.update(android_bindings)
+            environment["MRK_ANDROID_OS_CONTRACT_INPUT"] = str(material_root / "os-contract.json")
         check.command("vite-assets", [node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
                       str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
                       environment, desktop, timeout=90)
@@ -2715,6 +4079,8 @@ def verify_installed_shell_compile():
                    and all(originals[role][key] == exports[role][key] for key in ("size", "sha256")),
                    "Shell original/fresh export differ or alias")
         native = finish_shell_native_inputs(native, {role: Path(row["path"]) for role, row in exports.items()}, native_bindings)
+        if same_job:
+            material_engine.validate(material_preparation, context=material_context, host=material_host, deadline=deadline)
         native["hostBindingsRecord"] = D.write(public / "shell-host-bindings.json", D.canonical(native_bindings))
         native.update(shell_runtime_graph(prepared[3], prepared[4], native["sharedObjects"]))
         native_pin = D.write(public / "shell-native.json", D.canonical(native))
@@ -2736,26 +4102,104 @@ def verify_installed_shell_compile():
                     "compilerInputs": compiler_inputs, "nativeInputs": native,
                     "nativeRecord": native_pin, "frontendRecord": frontend_pin,
                     "originalArtifacts": originals, "exportedArtifacts": exports, "selections": selections,
-                    "compilerUnits": units, "generatedRoots": list(SHELL_GENERATED), "generatedPermissions": permissions}
+                    "compilerUnits": units, "generatedRoots": list(SHELL_GENERATED), "generatedPermissions": permissions,
+                    "androidBuildMaterials": android_materials, "androidBuildBindings": android_bindings,
+                    "androidBuildPublication": android_publication,
+                    **installed_shell_scope_fields(ordinary, lifecycle),
+                    **({"githubPreflight": preflight} if preflight is not None else {}),
+                    **({"githubRelease": release} if release is not None else {})}
+        if same_job:
+            compiler["androidPreparation"] = {**D.file_record(material_root / "private/prepared.json", 64 << 10),
+                "path": str(material_root / "private/prepared.json")}
+            compiler["androidOsContractInput"] = {**D.file_record(material_root / "os-contract.json", 1 << 20),
+                "path": str(material_root / "os-contract.json")}
+        installed_shell_scope_record(compiler, lifecycle, ordinary, android_contract=True)
+        installed_shell_preflight_record(compiler, lifecycle, preflight, android_contract=True)
+        installed_shell_release_record(compiler, lifecycle, release, android_contract=True)
         D.write(public / "compiler.json", D.canonical(compiler))
         source_check("after")
-        D.write(public / "result.json", D.canonical({"sourceSha": sha, "sourceTree": tree,
+        check.phase = "shell-generated-cleanup"
+        D.need(not check.failed and check.commands and all(row["ordinaryOwnerReturned"] is True for row in check.commands),
+               "Compiler owners have not all returned before cleanup")
+        inventories = {"desktop/node_modules": npm_tree, "desktop/dist": frontend,
+                       "desktop/src-tauri/gen": shell_generated_tree(source / "desktop/src-tauri/gen"),
+                       SHELL_PERMISSIONS: permissions}
+        # Validate every deletion root before the first deletion, including the
+        # whole permissions parent rather than silently ignoring sibling inputs.
+        for relative, expected_tree in inventories.items():
+            actual = (shell_permissions_tree(source / relative) if relative == SHELL_PERMISSIONS else
+                      shell_generated_tree(source / relative, links=relative == "desktop/node_modules"))
+            D.need(actual == expected_tree and shell_directory_identity(source / relative) == generated[relative],
+                   "Original generated shell inventory changed before cleanup")
+        for relative in SHELL_GENERATED:
+            shell_remove_owned_directory(source / relative, generated[relative], cleanup_parents, deadline)
+            del generated[relative]
+        permissions = None
+        # This live clean check still has its original private Git environment.
+        source_check("clean")
+        clean_tree = check.command("clean-tree", [git, "rev-parse", "HEAD^{tree}"], environment, source, timeout=15)
+        D.need(clean_tree.stdout == tree.encode("ascii") + b"\n" and clean_tree.stderr == b"",
+               "Original shell source tree changed during cleanup")
+        check.phase = "shell-work-cleanup"
+        shell_remove_owned_directory(work, identities[str(work)], cleanup_parents, deadline)
+        del identities[str(work)]
+        D.need(all(directory_identity(Path(path)) == identity for path, identity in identities.items())
+               and all(shell_directory_identity(path) == identity for path, identity in cleanup_parents.items())
+               and shell_source_manifest(source) == source_inputs,
+               "Original surviving shell source/public bindings changed after cleanup")
+        for path in (work, *(source / relative for relative in SHELL_GENERATED)):
+            D.need(not path.exists() and not path.is_symlink(), "Compiler output remains after original cleanup")
+        result = {"sourceSha": sha, "sourceTree": tree,
             "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
-            "features": SHELL_FEATURES, "compilations": ["normal", "observer"], "cargoBuilds": 1,
+            "features": SHELL_FEATURES, "compilations": ["normal", "observer"], "androidBuildMaterials": android_materials,
+            "androidBuildBindings": android_bindings, "androidBuildPublication": android_publication, "cargoBuilds": 1,
             "frontendBuilds": 1, "shellExecuted": False, "observerExecuted": False, "supplierRebuilt": False,
-            "packageBuilt": False, "helper11Rerun": False, "commands": check.commands, "qualified": False,
-            "scope": "installed-shell-production-compiler-and-separate-harness-free-observer-only"}))
+            "packageBuilt": False, "helper11Rerun": False,
+            "commands": check.original_commands if same_job else check.commands, "qualified": False,
+            "compilerCleanup": SHELL_CLEANUP_SUCCESS,
+            "scope": "installed-shell-production-compiler-and-separate-harness-free-observer-only",
+            **installed_shell_scope_fields(ordinary, lifecycle),
+            **({"githubPreflight": preflight} if preflight is not None else {}),
+            **({"githubRelease": release} if release is not None else {})}
+        if same_job:
+            result["androidPreparation"] = compiler["androidPreparation"]
+            result["androidOsContractInput"] = compiler["androidOsContractInput"]
+            result["privateCommandRoles"] = {role: [row["path"].removesuffix(".request.json")
+                for row in rows if row["path"].endswith(".request.json")] for role, rows in check.private_metadata.items()}
+            result["privateCaptureRoots"] = {role: list(identity) for role, identity in check.private_roots.items()}
+            result["privateMaterialMetadata"] = list(check.private_metadata["material"])
+            result["privateCommandMetadata"] = android_close_compiler_metadata(check)
+        installed_shell_scope_record(result, lifecycle, ordinary, android_contract=True)
+        installed_shell_preflight_record(result, lifecycle, preflight, android_contract=True)
+        installed_shell_release_record(result, lifecycle, release, android_contract=True)
+        D.write(public / "result.json", D.canonical(result))
         files = [{**D.file_record(path, MAX_BINARY), "path": path.name} for path in sorted(public.iterdir())]
+        retained = {row["path"]: row for row in files}
+        D.need(all(all(retained[SHELL_EXPORTS[role]][key] == exports[role][key] for key in ("size", "sha256"))
+                   for role in SHELL_EXPORTS), "Original shell exports changed during compiler cleanup")
         D.need(len(files) <= 1536 and sum(row["size"] for row in files) <= 1536 << 20 and time.monotonic() < deadline,
                "Original shell artifact roster/endpoint bound")
         pin = D.write(public / "shell-roster.json", D.canonical({"sourceSha": sha, "sourceTree": tree,
             "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "files": files}))
+        transport_pin = None
+        if same_job:
+            transport = android_local_transport_record(root, compiler, material_preparation, pin)
+            transport_pin = D.write(root / "android-local-transport.json", D.canonical(transport), 0o400)
+            summary = android_compiler_public_summary(compiler, result, material_preparation,
+                {**retained, "shell-roster.json": pin}, check.commands)
+            D.write(root / "public/android-compiler-summary.json", D.canonical(summary))
+            D.need({path.name for path in (root / "public").iterdir()} == {"android-compiler-summary.json"},
+                   "Private Android compiler leaked an unapproved public member")
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
             output.write("shell_roster_sha256=" + pin["sha256"] + "\nshell_producer_attempt=" + os.environ["GITHUB_RUN_ATTEMPT"] + "\n")
+            output.write("shell_transport=" + ("android-same-job-local-v1" if same_job else "actions-artifact-v1") + "\n")
+            output.write("shell_scope=" + (os.environ["MRK_INSTALLED_SHELL_SCOPE"] if ordinary is not None or release is not None else "") + "\n")
+            if transport_pin is not None:
+                output.write("shell_local_transport_sha256=" + transport_pin["sha256"] + "\n")
         D.need(time.monotonic() < deadline, "Original shell compiler closed late")
         print("Both fresh shell outputs and embedded frontend retained; no shell, observer or installed runtime executed.", flush=True)
     except BaseException as error:
-        retain_failure(root, check.phase, check.commands, error)
+        retain_failure(root, check.phase, check.commands, error, private=same_job)
         raise
 
 
@@ -2803,6 +4247,7 @@ def verify(*, installed_compile=False):
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed lifecycle entry differs")
+        local("ubuntu_publication_lifecycle").check_source_pins(source)
         kernel = os.uname()
         metadata = {"sourceSha": sha, "sourceTree": tree, "workflow": D.file_record(source / WORKFLOW, 64 << 10),
                     "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
@@ -2816,9 +4261,9 @@ def verify(*, installed_compile=False):
         check.phase = "original-a-data"
         prepared = package_inputs(source, work, fixtures=not installed_compile)
         D.write(public / "runtime-inputs.json", D.canonical({"admission": C.CONVENTIONAL_SMOKE_INPUTS,
-                "runtimeFiles": 607, "fixtureManifestSha256": F1_MANIFEST_SHA256,
+                "runtimeFiles": 611, "fixtureManifestSha256": F1_MANIFEST_SHA256,
                 "fixtureChange": ("F1 anchor checked as DATA; no F1 copy or package materialized in this compile-only job."
-                    if installed_compile else "Exactly one LF appended to the original 85440-byte manifest; all606 payload bodies unchanged.")}))
+                    if installed_compile else "Exactly one LF appended to the original 85945-byte manifest; all610 payload bodies unchanged.")}))
         # Current-job package metadata, not invented historical H evidence.
         check.phase = "kernel-package-metadata"
         D.need(re.fullmatch(r"[0-9][0-9A-Za-z.+-]{0,127}", kernel.release) is not None, "Kernel package query name differs")
@@ -2856,7 +4301,7 @@ def verify(*, installed_compile=False):
             "--manifest-path", str(source / "desktop/src-tauri/Cargo.toml")], environment, work).stdout
         source_check("acquired")
         check.phase = "native-input-provenance"
-        native = native_inputs(check, source, work, environment, cargo, rustc, metadata_raw)
+        native = native_inputs(check, source, work, environment, cargo, rustc, metadata_raw, candidate=installed_compile)
         environment.update(GITHUB_SHA=sha, MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=C.CONVENTIONAL_SMOKE_INPUTS["manifestSha256"],
                            MRK_BUNDLED_PROTOCOL_SHA256=C.CONVENTIONAL_SMOKE_INPUTS["protocolSha256"])
         originals, exports, export_identities = {}, {}, {}
@@ -2999,6 +4444,7 @@ def verify_installed():
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed installed lifecycle entry differs")
+        local("ubuntu_publication_lifecycle").check_source_pins(source)
         library, packages, old_compiler, accepted = installed_u_inputs(work)
         candidate, compiler, graph, roster_sha, producer_attempt, candidate_artifact_id = installed_candidate(work, sha)
         D.need(elf_dependencies(D.read(Path(library["path"]), MAX_BINARY)) == old_compiler["nativeInputs"]["outputs"]["libtest"]["elf"],
@@ -3060,24 +4506,73 @@ def verify_installed():
         raise
 
 
-def shell_project_draft_observation(observed, lifecycle):
+def _shell_ordinary_exports(observed, lifecycle, ordinary):
+    """Correspond only the complete original exports; never inspect live work."""
+    root_value = {"shell": {"ordinary21": ordinary}}
+    names = {"lifecycle-" + name for name in lifecycle.public_files(root_value) | {"client.stdout", "client.stderr"}}
+    files = observed["files"]
+    D.need(type(files) is list and len(files) == len(names) <= lifecycle.SHELL_PUBLIC_FILE_LIMIT + 2,
+           "Ordinary21 original export count differs")
+    indexed = {}
+    for row in files:
+        D.need(type(row) is dict and set(row) == {"path", "size", "sha256"} and type(row["path"]) is str
+               and row["path"] in names and row["path"] not in indexed and type(row["size"]) is int
+               and 0 <= row["size"] <= lifecycle.LIMIT and type(row["sha256"]) is str
+               and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None, "Ordinary21 original export record differs")
+        indexed[row["path"]] = row
+    D.need(set(indexed) == names and sum(row["size"] for row in files) <= lifecycle.TOTAL_LIMIT + lifecycle.LIMIT,
+           "Ordinary21 original export roster or aggregate differs")
+    raw_cases = D.canonical(observed["cases"])
+    D.need(indexed["lifecycle-shell-cases.json"] == {"path": "lifecycle-shell-cases.json", "size": len(raw_cases),
+            "sha256": hashlib.sha256(raw_cases).hexdigest()}, "Ordinary21 case mapping differs from the original capture")
+    placeholders = observed.get("namespacePlaceholders")
+    D.need(type(placeholders) is dict and set(placeholders) == {"fixture", "names", "namespaceOnly", "empty",
+                "originalsAccounted", "rootRetained", "before", "after"}
+           and placeholders["fixture"] == "ordinary21-inert-placeholders-v1"
+           and placeholders["names"] == ordinary["namespacePlaceholders"]
+           and all(placeholders[key] is True for key in ("namespaceOnly", "empty", "originalsAccounted", "rootRetained"))
+           and D.canonical(placeholders["before"]) == D.canonical(placeholders["after"]),
+           "Ordinary21 inert namespace proof is missing or relabelled")
+    for phase in ("before", "after"):
+        name = "lifecycle-shell-ordinary21-placeholders-" + phase + ".json"
+        pin = placeholders[phase]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int
+               and 0 < pin["size"] <= 8192 and indexed[name] == {"path": name, **pin},
+               "Ordinary21 placeholder proof differs from its original export")
+
+
+def shell_project_draft_observation(observed, lifecycle, *, ordinary=None):
     """Consume only verify_service_result's original-finality-gated DATA."""
-    D.need(type(observed) is dict and observed.get("state") == "normal-shell-installed-runtime-connection-observed"
+    installed_shell_scope_record(observed, lifecycle, ordinary)
+    selection = {"shell": {"ordinary21": ordinary}} if ordinary is not None else {"shell": {}}
+    D.need(type(observed) is dict and observed.get("state") == lifecycle.result_state(selection)
            and observed.get("productQualified") is False and observed.get("packageLifecycleQualified") is False
            and observed.get("shellPackageBuilt") is False, "Closed project/draft observation was relabelled as qualification")
     cases, combined, files = observed.get("cases"), observed.get("projectDraft"), observed.get("files")
-    # The unchanged root cap is 128; its exporter adds the original client's
-    # stdout/stderr, not two more root evidence slots or another capture.
-    D.need(type(cases) is dict and set(cases) == {"normal", "positive", "quit-outstanding", "project-paths"}
+    # Historical full25:188 root/190 exported. Ordinary21:170 root/172 exported,
+    # including two original inert-placeholder captures. No ceiling is raised.
+    D.need(type(cases) is dict and set(cases) == set(lifecycle.shell_cases(selection))
            and type(combined) is dict and set(combined) == {"native", "fixture"}
-           and type(files) is list and len(files) <= 130, "Closed project/draft receipt or exported original roster is missing")
+           and type(files) is list and len(files) <= lifecycle.SHELL_PUBLIC_FILE_LIMIT + 2,
+           "Closed project/draft receipt or exported original roster is missing")
+    if ordinary is not None:
+        _shell_ordinary_exports(observed, lifecycle, ordinary)
     positive = cases["positive"]
-    D.need(type(positive) is dict and set(positive) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "projectDraft", "candidateDocuments"}
+    D.need(type(positive) is dict and set(positive) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "projectDraft", "lifecycleDocuments"}
            and positive["case"] == "positive" and type(positive["exitCode"]) is int and positive["exitCode"] == 0
            and positive["bootstrapReturned"] is True and positive["domAndGtkObserved"] is True and positive["maps"] == [],
            "Closed positive original result is incomplete")
     D.need(all(type(cases[name]) is dict and set(cases[name]) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps"}
                for name in ("normal", "quit-outstanding")), "A nonpositive case advertised a document receipt")
+    negative = cases["settled-failure"]
+    D.need(type(negative) is dict and set(negative) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps",
+                                                     "qualified", "expectedFailureObserved", "failureHandoff"}
+           and negative["case"] == "settled-failure" and type(negative["exitCode"]) is int and negative["exitCode"] == 1
+           and negative["bootstrapReturned"] is True and negative["domAndGtkObserved"] is True and negative["maps"] == []
+           and negative["qualified"] is False and negative["expectedFailureObserved"] is True
+           and negative["failureHandoff"] == "original-quit-relay-loop-returned"
+           and D.canonical(observed.get("settledFailure")) == D.canonical(negative),
+           "Closed expected-negative original failure/handoff is missing or relabelled")
     receipt = lifecycle.shell_project_receipt(D.canonical(positive["projectDraft"]))
     D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed positive native receipt correspondence differs")
     fixture = combined["fixture"]
@@ -3114,8 +4609,15 @@ def shell_project_draft_observation(observed, lifecycle):
                and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"]
                and matches[0]["sha256"] == pin["sha256"], "Original positive before/after export pin differs")
     D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Save fixture incorrectly claims an unchanged inventory")
-    _shell_candidate_documents_observation(positive, observed.get("candidateDocuments"), files, lifecycle)
+    _shell_lifecycle_documents_observation(positive, observed.get("lifecycleDocuments"), files, lifecycle)
     _shell_project_paths_observation(cases["project-paths"], observed.get("projectPaths"), files, lifecycle)
+    _shell_workflow_apply_observation(cases["workflow-apply"], observed.get("workflowApply"), files, lifecycle)
+    _shell_session_inputs_observation(cases, observed.get("sessionInputs"), files, lifecycle)
+    _shell_metadata_save_observation(cases["metadata-save"], observed.get("metadataSave"), files, lifecycle)
+    _shell_version_save_observation(cases["version-save"], observed.get("versionSave"), files, lifecycle)
+    _shell_tools_offline_observation(cases, observed.get("toolsOffline"), files, lifecycle)
+    if ordinary is None:
+        _shell_android_observation(cases, observed.get("androidBuild"), files, lifecycle)
     return {"native": receipt, "fixture": fixture}
 
 
@@ -3127,11 +4629,11 @@ def shell_handoff_bytes(request, deadline):
     return raw
 
 
-def _shell_candidate_documents_observation(positive, combined, files, lifecycle):
-    """The companion receipt/fixture is mandatory, never standalone success."""
-    D.need(type(combined) is dict and set(combined) == {"native", "fixture"}, "Closed candidate documents observation is missing")
-    receipt = lifecycle.shell_candidate_receipt(D.canonical(positive["candidateDocuments"]))
-    D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed candidate native receipt correspondence differs")
+def _shell_lifecycle_documents_observation(positive, combined, files, lifecycle):
+    """New lifecycle receipt, unchanged candidate fixture; never legacy proof."""
+    D.need(type(combined) is dict and set(combined) == {"native", "fixture"}, "Closed lifecycle documents observation is missing")
+    receipt = lifecycle.shell_lifecycle_receipt(D.canonical(positive["lifecycleDocuments"]))
+    D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed lifecycle native receipt correspondence differs")
     fixture = combined["fixture"]
     D.need(type(fixture) is dict and set(fixture) == {"fixture", "rootRetained", "documentsUnchanged", "noUnexpectedEntries",
                                                    "artifactTargetsAbsent", "entryCount", "documentBytes", "directoryMode", "fileMode",
@@ -3192,23 +4694,1006 @@ def _shell_project_paths_observation(case, combined, files, lifecycle):
     D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Project-path inventory incorrectly claims unchanged fixture state")
 
 
+def _shell_workflow_apply_observation(case, combined, files, lifecycle):
+    """Require the fifth original plus its exact post-exit three-create inventory."""
+    D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "workflowApply"}
+           and case["case"] == "workflow-apply" and type(case["exitCode"]) is int and case["exitCode"] == 0
+           and case["bootstrapReturned"] is True and case["domAndGtkObserved"] is True and case["maps"] == [],
+           "Closed workflow original result is incomplete")
+    D.need(type(combined) is dict and set(combined) == {"native", "fixture"}, "Closed workflow Apply observation is missing")
+    receipt = lifecycle.shell_workflow_receipt(D.canonical(case["workflowApply"]))
+    D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed workflow native receipt correspondence differs")
+    fixture = combined["fixture"]
+    expected = {"fixture": "android-workflow-apply-v1", "rootRetained": True, "originalsRetained": True, "createdCount": 3,
+                "beforeCount": 9, "afterCount": 12, "configurationAbsent": True, "noUnexpectedEntries": True, "noPendingState": True,
+                "callers": [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o640 if index == 0 else 0o600}
+                            for index, (name, raw) in enumerate(lifecycle.SHELL_WORKFLOW_CALLERS.items())]}
+    D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}
+           and D.canonical({key: fixture[key] for key in expected}) == D.canonical(expected),
+           "Closed workflow fixture originals or exact caller bytes differ")
+    for phase in ("before", "after"):
+        pin = fixture[phase]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int and 0 < pin["size"] <= 8192
+               and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+               "Closed workflow original inventory pin differs")
+        matches = [row for row in files if type(row) is dict and row.get("path") == "lifecycle-shell-workflow-apply-" + phase + ".json"]
+        D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+               and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
+               "Original workflow before/after export pin differs")
+    D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Workflow inventory incorrectly claims no created callers")
+
+
+def _shell_session_inputs_observation(cases, combined, files, lifecycle):
+    """Original native receipts and exact private fixture export pins agree.
+
+    The five admitted session observers cannot relabel the unchanged ordinary
+    twelve-method cases, qualify persistence or activate the normal product.
+    """
+    D.need(type(combined) is dict and set(combined) == set(lifecycle.SHELL_SESSION_CASES),
+           "Closed five-case session observation is missing")
+    for name in lifecycle.SHELL_SESSION_CASES:
+        case, pair = cases[name], combined[name]
+        D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "sessionInputs"}
+               and case["case"] == name and type(case["exitCode"]) is int and case["exitCode"] == 0
+               and case["bootstrapReturned"] is True and case["domAndGtkObserved"] is True,
+               "Closed session original result is incomplete")
+        D.need(type(pair) is dict and set(pair) == {"native", "fixture"}, "Closed session receipt or fixture is missing")
+        receipt = lifecycle.shell_session_receipt(D.canonical(case["sessionInputs"]), name)
+        D.need(D.canonical(pair["native"]) == D.canonical(receipt), "Closed session native receipt correspondence differs")
+        # The root's closed-result gate already replays every map against its
+        # independently admitted loader identities. Preserve those originals,
+        # not just a receipt count; this is DATA validation, not readmission.
+        maps = case["maps"]
+        D.need(type(maps) is list and 1 <= len(maps) <= lifecycle.SHELL_SESSION_R1_LIMIT
+               and len(maps) == receipt["behavior"]["assessments"], "Closed session original R1 map count differs")
+        for rows in maps:
+            D.need(type(rows) is list and len(rows) == 6 and all(type(row) is dict for row in rows)
+                   and [row.get("role") for row in rows] == sorted(lifecycle.PRIVATE_SONAMES | {"python", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"}),
+                   "Closed session original R1 map roles differ")
+            for row in rows:
+                D.need(set(row) == {"role", "path", "deviceMajor", "deviceMinor", "inode"}
+                       and type(row["path"]) is str and row["path"].startswith("/") and len(row["path"]) <= 4096 and "\0" not in row["path"]
+                       and all(type(row[key]) is int and 0 <= row[key] < 1 << 32 for key in ("deviceMajor", "deviceMinor"))
+                       and type(row["inode"]) is int and 0 < row["inode"] < 1 << 64,
+                       "Closed session original R1 map shape differs")
+        changed = name == "session-refusals"
+        ios = name == "session-ios-firebase"
+        expected = {"fixture": "ios-firebase-session-v1" if ios else "four-kind-session-v1", "case": name, "rootRetained": True, "originalsAccounted": True,
+            "projectUnchanged": True, "sourcesOutsideProject": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "beforeCount": 15 if changed else 8 if ios else 9, "afterCount": 14 if changed else 8 if ios else 9,
+            "mutations": ["changed-leaf-rename"] if changed else []}
+        fixture = pair["fixture"]
+        D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}
+               and D.canonical({key: fixture[key] for key in expected}) == D.canonical(expected),
+               "Closed session private fixture correspondence differs")
+        for phase in ("before", "after"):
+            pin = fixture[phase]
+            D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int
+                   and 0 < pin["size"] <= lifecycle.SHELL_SESSION_INVENTORY_LIMIT
+                   and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+                   "Closed session original inventory pin differs")
+            matches = [row for row in files if type(row) is dict and row.get("path") == "lifecycle-shell-" + name + "-" + phase + ".json"]
+            D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+                   and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
+                   "Original session before/after export pin differs")
+        D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"] if changed else fixture["before"] == fixture["after"],
+               "Closed session inventory changed outside its fixed mutation")
+
+
+def _shell_metadata_save_observation(case, combined, files, lifecycle):
+    """Require the metadata original, both real Reviews and the exact saved locale."""
+    D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "metadataSave"}
+           and case["case"] == "metadata-save" and type(case["exitCode"]) is int and case["exitCode"] == 0
+           and case["bootstrapReturned"] is True and case["domAndGtkObserved"] is True and case["maps"] == [],
+           "Closed metadata original result is incomplete")
+    D.need(type(combined) is dict and set(combined) == {"native", "fixture"}, "Closed metadata Save observation is missing")
+    receipt = lifecycle.shell_metadata_receipt(D.canonical(case["metadataSave"]))
+    D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed metadata native receipt correspondence differs")
+    fixture = combined["fixture"]
+    expected = {"fixture": "android-metadata-save-v1", "rootRetained": True, "preservedOriginals": True,
+                "createdCount": 1, "replacedCount": 1, "beforeCount": 13, "afterCount": 14,
+                "configurationUnchanged": True, "noUnexpectedEntries": True, "noPendingState": True,
+                "files": [{"path": lifecycle.SHELL_METADATA_LOCALE + "/" + name, "size": len(raw),
+                           "sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o600}
+                          for name, raw in (("title.txt", lifecycle.SHELL_METADATA_TITLE),
+                                            ("short_description.txt", lifecycle.SHELL_METADATA_SHORT_AFTER),
+                                            ("keep.txt", lifecycle.SHELL_METADATA_KEEP),
+                                            ("full_description.txt", lifecycle.SHELL_METADATA_FULL))]}
+    D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}
+           and D.canonical({key: fixture[key] for key in expected}) == D.canonical(expected),
+           "Closed metadata fixture originals or exact saved bytes differ")
+    for phase in ("before", "after"):
+        pin = fixture[phase]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int and 0 < pin["size"] <= 8192
+               and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+               "Closed metadata original inventory pin differs")
+        matches = [row for row in files if type(row) is dict and row.get("path") == "lifecycle-shell-metadata-save-" + phase + ".json"]
+        D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+               and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
+               "Original metadata before/after export pin differs")
+    D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Metadata inventory incorrectly claims no saved text")
+
+
+def _shell_version_save_observation(case, combined, files, lifecycle):
+    """Require the three original Reviews/Applies and the exact final saved source."""
+    D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "versionSave"}
+           and case["case"] == "version-save" and type(case["exitCode"]) is int and case["exitCode"] == 0
+           and case["bootstrapReturned"] is True and case["domAndGtkObserved"] is True and case["maps"] == [],
+           "Closed version original result is incomplete")
+    D.need(type(combined) is dict and set(combined) == {"native", "fixture"}, "Closed version Save observation is missing")
+    receipt = lifecycle.shell_version_receipt(D.canonical(case["versionSave"]))
+    D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed version native receipt correspondence differs")
+    fixture = combined["fixture"]
+    expected = {"fixture": "release-version-save-v1", "rootRetained": True, "preservedOriginals": True,
+                "createdFileCount": 1, "beforeCount": 5, "afterCount": 6,
+                "configurationUnchanged": True, "ignoreUnchanged": True, "sentinelUnchanged": True,
+                "noUnexpectedEntries": True, "noPendingState": True,
+                "version": {"path": "version.properties", "size": len(lifecycle.SHELL_VERSION_EDITED),
+                            "sha256": hashlib.sha256(lifecycle.SHELL_VERSION_EDITED).hexdigest(), "mode": 0o600}}
+    D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}
+           and D.canonical({key: fixture[key] for key in expected}) == D.canonical(expected),
+           "Closed version fixture originals or exact saved bytes differ")
+    for phase in ("before", "after"):
+        pin = fixture[phase]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int and 0 < pin["size"] <= 8192
+               and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+               "Closed version original inventory pin differs")
+        matches = [row for row in files if type(row) is dict and row.get("path") == "lifecycle-shell-version-save-" + phase + ".json"]
+        D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+               and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
+               "Original version before/after export pin differs")
+    D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Version inventory incorrectly claims no saved source")
+
+
+def shell_tools_input_root():
+    """Only the fixed disposable job; this DATA helper owns no process runner."""
+    ref = os.environ.get("GITHUB_REF")
+    D.need((ref == SHELL_REF or (ref == SHELL_METADATA_REF
+            and os.environ.get("MRK_INSTALLED_SHELL_CASE") == "host-metadata-only"
+            and os.environ.get("GITHUB_JOB") == "compile" and os.environ.get("GITHUB_RUN_ATTEMPT") == "1"))
+           and os.environ.get("GITHUB_ACTIONS") == "true"
+           and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and os.geteuid() != 0,
+           "Tools input preparation is restricted to the nonroot disposable hosted job")
+    if ref == SHELL_METADATA_REF:
+        # Metadata collection does not acquire a shell/compiler route. Bind its
+        # complete source/event identity before even addressing its output root.
+        local("observe_hosted_python").context(os.environ)
+    C.conventional_host(D)
+    run, attempt = os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    D.need(all(re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None for value in (run, attempt)), "Tools input original run identity differs")
+    parent = Path(os.environ.get("RUNNER_TEMP", ""))
+    D.need(parent.is_absolute() and ".." not in parent.parts, "Tools input original parent differs")
+    root = parent / ("mrk-desktop-tools-" + run + "-" + attempt)
+    directory_identity(root)
+    return root
+
+
+def shell_tools_input_nodes():
+    """Bound literal public metadata/bytes only; never follow an unknown alias."""
+    nodes, originals = {}, []
+    for name in (*SHELL_TOOLS_DIRECTORIES, *SHELL_TOOLS_PROGRAMS, *SHELL_TOOLS_LINKS):
+        path = Path(name)
+        if name != "/" and nodes.get(str(path.parent), {}).get("kind") != "directory":
+            nodes[name] = {"kind": "parent-unavailable"}
+            continue
+        try:
+            before = path.lstat()
+        except FileNotFoundError:
+            nodes[name] = {"kind": "absent"}
+            originals.append((path, None))
+            continue
+        original = [before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid,
+                    before.st_nlink, before.st_size, before.st_mtime_ns, before.st_ctime_ns]
+        row = {"kind": "refused", "identity": original}
+        protected = before.st_uid == before.st_gid == 0 and before.st_mode & 0o022 == 0
+        if name in SHELL_TOOLS_DIRECTORIES and protected and stat.S_ISDIR(before.st_mode) and before.st_mode & 0o005 == 0o005:
+            row["kind"] = "directory"
+        elif name in SHELL_TOOLS_PROGRAMS and protected and stat.S_ISREG(before.st_mode) and before.st_nlink == 1 \
+                and before.st_mode & 0o6000 == 0 and before.st_mode & 0o111 == 0o111 and 0 < before.st_size <= 16 << 20:
+            row.update(kind="file", **D.file_record(path, 16 << 20))
+        elif name in SHELL_TOOLS_LINKS and before.st_uid == before.st_gid == 0 and stat.S_ISLNK(before.st_mode) \
+                and before.st_nlink == 1 and 0 < before.st_size <= 4096:
+            target = os.readlink(path)
+            D.need(target.isascii() and all(32 <= ord(char) < 127 for char in target) and len(target) == before.st_size,
+                   "Tools public alias DATA exceeds its fixed shape")
+            row.update(kind="symlink", target=target)
+        nodes[name] = row
+        originals.append((path, original))
+    for path, original in originals:
+        if original is None:
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            D.need(False, "Absent Tools input appeared during its original snapshot")
+        after = path.lstat()
+        D.need(original == [after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid,
+                           after.st_nlink, after.st_size, after.st_mtime_ns, after.st_ctime_ns], "Tools input changed during its original snapshot")
+    return nodes
+
+
+def shell_tools_package_data(raw):
+    D.need(type(raw) is bytes and len(raw) <= 64 << 10 and raw.endswith(b"\n"), "Tools package query DATA is incomplete")
+    rows = {}
+    for line in raw.decode("ascii").split("\n")[:-1]:
+        fields = line.split("\t")
+        D.need(len(fields) == 6 and all(0 < len(field) <= 256 and all(32 <= ord(char) < 127 for char in field) for field in fields),
+               "Tools package query fields differ")
+        name = fields[0].removesuffix(":amd64")
+        D.need(name in SHELL_TOOLS_PACKAGES and name not in rows and fields[0] in (name, name + ":amd64"),
+               "Tools package query roster differs")
+        rows[name] = fields
+    D.need({"git", "python3.12"} <= set(rows), "Tools original Git/Python package query is missing")
+    for name, fields in rows.items():
+        D.need(fields[1] == "installed" and fields[3] == "amd64" and all(fields[index] for index in (2, 4, 5)),
+               "Tools original package is not an installed amd64 supplier")
+    return rows
+
+
+def _shell_tools_input_document(raw, phase, root):
+    """Closed preparation DATA, not an alternate executable-admission policy."""
+    data = D.decode(raw, 64 << 10)
+    D.need(type(data) is dict and set(data) == {"schema", "phase", "qualified", "sourceSha", "runId", "attempt", "rootIdentity",
+                                               "originalStepExit", "nodes", "packageQuery"}
+           and D.canonical(data) == raw and data["schema"] == "fixed-disposable-shell-tools-inputs-v1" and data["phase"] == phase
+           and data["qualified"] is False and data["sourceSha"] == os.environ["GITHUB_SHA"]
+           and data["runId"] == os.environ["GITHUB_RUN_ID"] and data["attempt"] == os.environ["GITHUB_RUN_ATTEMPT"]
+           and type(data["rootIdentity"]) is list and all(type(n) is int for n in data["rootIdentity"])
+           and data["rootIdentity"] == list(directory_identity(root)), "Original Tools preparation identity differs")
+    D.need(data["originalStepExit"] is None if phase in ("before", "namespace-before") else
+           type(data["originalStepExit"]) is int and 0 <= data["originalStepExit"] <= 255,
+           "Tools original preparation return is not typed DATA")
+    nodes = data["nodes"]
+    D.need(type(nodes) is dict and set(nodes) == set((*SHELL_TOOLS_DIRECTORIES, *SHELL_TOOLS_PROGRAMS, *SHELL_TOOLS_LINKS)),
+           "Tools original public node roster differs")
+    for name, row in nodes.items():
+        D.need(type(row) is dict and row.get("kind") in ("absent", "parent-unavailable", "refused", "directory", "file", "symlink"),
+               "Tools original node kind differs")
+        kind = row["kind"]
+        fields = {"kind"} if kind in ("absent", "parent-unavailable") else {"kind", "identity"}
+        fields |= {"path", "size", "sha256"} if kind == "file" else {"target"} if kind == "symlink" else set()
+        D.need(set(row) == fields, "Tools original node fields differ")
+        if "identity" not in row:
+            continue
+        identity = row["identity"]
+        D.need(type(identity) is list and len(identity) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in identity)
+               and identity[0] > 0 and identity[1] > 0 and identity[5] > 0, "Tools original node identity differs")
+        if kind == "refused":
+            continue  # Retained failure DATA can never establish a successful pair.
+        D.need(identity[3:5] == [0, 0], "Tools original public supplier is not root-owned")
+        if kind == "directory":
+            D.need(name in SHELL_TOOLS_DIRECTORIES and stat.S_ISDIR(identity[2]) and identity[2] & 0o022 == 0
+                   and identity[2] & 0o005 == 0o005, "Tools original protected directory differs")
+        elif kind == "file":
+            D.need(name in SHELL_TOOLS_PROGRAMS and stat.S_ISREG(identity[2]) and identity[2] & 0o6022 == 0
+                   and identity[2] & 0o111 == 0o111 and identity[5] == 1 and 0 < identity[6] <= 16 << 20
+                   and row["path"] == Path(name).name and type(row["size"]) is int and row["size"] == identity[6]
+                   and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None,
+                   "Tools original public executable DATA differs")
+        else:
+            D.need(name in SHELL_TOOLS_LINKS and stat.S_ISLNK(identity[2]) and identity[5] == 1
+                   and type(row["target"]) is str and row["target"].isascii() and 0 < len(row["target"]) == identity[6] <= 4096
+                   and all(32 <= ord(char) < 127 for char in row["target"]), "Tools original literal alias DATA differs")
+    query = data["packageQuery"]
+    D.need(type(query) is dict and set(query) == {"stdout", "stderr", "exitCode"}
+           and type(query["exitCode"]) is int and 0 <= query["exitCode"] <= 255, "Tools original package query return differs")
+    for key, limit in (("stdout", 64 << 10), ("stderr", 4096)):
+        pin = query[key]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int and 0 <= pin["size"] <= limit
+               and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+               "Tools original package query pin differs")
+    return data
+
+
+def _shell_tools_namespace_sources():
+    """Current source DATA only; never a privileged module/dispatcher import."""
+    return [{**D.file_record(SOURCE / path, limit), "path": path}
+            for path, limit in SHELL_TOOLS_NAMESPACE_SOURCES.items()]
+
+
+def _shell_tools_namespace_query(root):
+    return (D.read(root / "before-packages.tsv", 64 << 10),
+            D.read(root / "before-packages.stderr", 4096), D.read(root / "before-packages.exit", 4))
+
+
+def _shell_tools_namespace_identity(value):
+    D.need(type(value) is list and len(value) == 9
+           and all(type(n) is int and 0 <= n < 1 << 64 for n in value)
+           and value[0] > 0 and value[1] > 0 and value[5] > 0, "JVM namespace original identity differs")
+    return value
+
+
+def shell_tools_namespace_disposition(raw, root, query):
+    """Closed DATA decision only. Refused payloads are never repaired/admitted."""
+    data = D.decode(raw, 64 << 10)
+    D.need(type(data) is dict and set(data) == {"schema", "qualified", "source", "sourceFiles", "snapshot"}
+           and D.canonical(data) == raw and data["schema"] == "fixed-disposable-shell-jvm-namespace-before-v1"
+           and data["qualified"] is False and data["source"] == str(SOURCE), "JVM namespace source envelope differs")
+    sources = data["sourceFiles"]
+    D.need(type(sources) is list and len(sources) == len(SHELL_TOOLS_NAMESPACE_SOURCES), "JVM namespace source roster differs")
+    for row, (path, limit) in zip(sources, SHELL_TOOLS_NAMESPACE_SOURCES.items()):
+        D.need(type(row) is dict and set(row) == {"path", "size", "sha256"} and row["path"] == path
+               and type(row["size"]) is int and 0 < row["size"] <= limit
+               and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None,
+               "JVM namespace original source pin differs")
+    snapshot = _shell_tools_input_document(D.canonical(data["snapshot"]), "namespace-before", root)
+    D.need(type(query) is tuple and len(query) == 3, "JVM namespace package query DATA differs")
+    package_raw, stderr, exit_raw = query
+    D.need(type(stderr) is bytes and len(stderr) <= 4096 and type(exit_raw) is bytes
+           and re.fullmatch(rb"(?:0|[1-9][0-9]{0,2})\n", exit_raw) is not None and int(exit_raw) <= 255,
+           "JVM namespace original package return differs")
+    packages = shell_tools_package_data(package_raw)
+    D.need(snapshot["packageQuery"] == {"stdout": {"size": len(package_raw), "sha256": hashlib.sha256(package_raw).hexdigest()},
+                                      "stderr": {"size": len(stderr), "sha256": hashlib.sha256(stderr).hexdigest()},
+                                      "exitCode": int(exit_raw)}, "JVM namespace original package bytes changed")
+    absent = set(packages) == {"git", "python3.12"}
+    D.need(absent and stderr == SHELL_TOOLS_JDK_MISSING and exit_raw == b"1\n"
+           or set(packages) == set(SHELL_TOOLS_PACKAGES) and stderr == b"" and exit_raw == b"0\n",
+           "JVM namespace package pair is partial, unknown or ambiguously absent")
+    nodes = snapshot["nodes"]
+    D.need(all(nodes[path]["kind"] == "directory" for path in SHELL_TOOLS_NAMESPACE_PARENTS)
+           and all(nodes[path]["kind"] == "file" for path in SHELL_TOOLS_PROGRAMS[:2])
+           and all(nodes[path]["kind"] in ("symlink", "absent") for path in SHELL_TOOLS_LINKS),
+           "JVM namespace must not repair an unrelated refused input")
+    original = nodes[SHELL_TOOLS_NAMESPACE_PARENT]
+    if original["kind"] == "directory":
+        return data, "protected"
+    descendants = (SHELL_TOOLS_JDK_ROOT, SHELL_TOOLS_JDK_ROOT + "/bin", *SHELL_TOOLS_PROGRAMS[2:])
+    D.need(all(nodes[path] == {"kind": "parent-unavailable"} for path in descendants),
+           "Refused/absent JVM descendants are not admitted missing payloads")
+    if original["kind"] == "absent":
+        return data, "absent"
+    D.need(original["kind"] == "refused" and original["identity"][2:5] == [stat.S_IFDIR | 0o777, 0, 0]
+           and absent, "Only an original root-owned ordinary0777 JVM with a genuinely absent pair may be preserved")
+    return data, "preserve-create"
+
+
+def shell_tools_namespace_snapshot():
+    """Preserve the actual unsafe observation before any namespace constructor."""
+    root = shell_tools_input_root()
+    original_root = directory_identity(root)
+    raw, stderr, exit_raw = query = _shell_tools_namespace_query(root)
+    D.need(re.fullmatch(rb"(?:0|[1-9][0-9]{0,2})\n", exit_raw) is not None and int(exit_raw) <= 255,
+           "JVM namespace original package return is missing")
+    snapshot = {"schema": "fixed-disposable-shell-tools-inputs-v1", "phase": "namespace-before", "qualified": False,
+        "sourceSha": os.environ["GITHUB_SHA"], "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+        "rootIdentity": list(original_root), "originalStepExit": None, "nodes": shell_tools_input_nodes(),
+        "packageQuery": {"stdout": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+                         "stderr": {"size": len(stderr), "sha256": hashlib.sha256(stderr).hexdigest()}, "exitCode": int(exit_raw)}}
+    document = {"schema": "fixed-disposable-shell-jvm-namespace-before-v1", "qualified": False,
+                "source": str(SOURCE), "sourceFiles": _shell_tools_namespace_sources(), "snapshot": snapshot}
+    body = D.canonical(document)
+    D.need(len(body) <= 64 << 10, "JVM namespace original snapshot exceeds its bound")
+    D.write(root / "namespace-before.json", body)  # Failure DATA is retained before the disposition assertion.
+    D.need(directory_identity(root) == original_root, "JVM namespace original evidence root changed")
+    _, disposition = shell_tools_namespace_disposition(body, root, query)
+    print(disposition, flush=True)  # Informational only; never passed to root as effect authority.
+
+
+def _shell_tools_namespace_result(root, *, before=None):
+    """Require the original returned construction, never a success boolean alone."""
+    contents = {name: D.read(root / name, limit) for name, limit in SHELL_TOOLS_NAMESPACE_FILES.items()}
+    pins = {name: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()} for name, raw in contents.items()}
+    original, disposition = shell_tools_namespace_disposition(contents["namespace-before.json"], root, _shell_tools_namespace_query(root))
+    snapshot = original["snapshot"]
+    D.need(contents["namespace.exit"] == b"0\n" and contents["namespace.stderr"] == b"",
+           "JVM namespace original constructor did not return cleanly")
+    result = D.decode(contents["namespace.stdout"], 16 << 10)
+    fields = {"schema", "qualified", "sourceSha", "runId", "attempt", "root", "rootIdentity", "source", "sourceFiles",
+              "namespaceBefore", "disposition", "stage", "parents", "original", "preservation", "preserved", "fresh",
+              "query", "actions", "originalFdsClosed", "completed", "failure"}
+    D.need(type(result) is dict and set(result) == fields and D.canonical(result) == contents["namespace.stdout"]
+           and result["schema"] == "fixed-disposable-shell-jvm-namespace-result-v1" and result["qualified"] is False
+           and result["sourceSha"] == snapshot["sourceSha"] and result["runId"] == snapshot["runId"] and result["attempt"] == snapshot["attempt"]
+           and result["root"] == str(root) and D.same(result["rootIdentity"], snapshot["rootIdentity"])
+           and result["source"] == original["source"] and D.same(result["sourceFiles"], original["sourceFiles"])
+           and D.same(result["sourceFiles"], _shell_tools_namespace_sources())
+           and D.same(result["namespaceBefore"], pins["namespace-before.json"])
+           and result["disposition"] == disposition and result["stage"] == "complete"
+           and result["originalFdsClosed"] is True and result["completed"] is True and result["failure"] is None,
+           "JVM namespace original source/run/root/result binding differs")
+    parents = result["parents"]
+    D.need(type(parents) is dict and set(parents) == set(SHELL_TOOLS_NAMESPACE_PARENTS), "JVM namespace protected parent roster differs")
+    for path in SHELL_TOOLS_NAMESPACE_PARENTS:
+        identity = _shell_tools_namespace_identity(parents[path])
+        D.need(identity[:5] == snapshot["nodes"][path]["identity"][:5], "JVM namespace protected parent changed")
+    actions = result["actions"]
+    D.need(type(actions) is dict and set(actions) == {"preservationCreated", "renameReturned", "freshCreated"}
+           and all(type(value) is bool for value in actions.values())
+           and all(value is (disposition == "preserve-create") for value in actions.values()),
+           "JVM namespace original effect returns differ")
+    old_node = snapshot["nodes"][SHELL_TOOLS_NAMESPACE_PARENT]
+    if disposition == "preserve-create":
+        old = _shell_tools_namespace_identity(result["original"])
+        preserved = _shell_tools_namespace_identity(result["preserved"])
+        fresh = _shell_tools_namespace_identity(result["fresh"])
+        container = result["preservation"]
+        D.need(type(container) is dict and set(container) == {"path", "identity"}
+               and container["path"] == "/usr/lib/mrk-desktop-jvm-original-" + snapshot["runId"] + "-" + snapshot["attempt"],
+               "JVM namespace preservation path differs")
+        parent = _shell_tools_namespace_identity(container["identity"])
+        D.need(old == old_node["identity"] and preserved[:5] == old[:5]
+               and fresh[2:5] == [stat.S_IFDIR | 0o755, 0, 0] and parent[2:5] == [stat.S_IFDIR | 0o700, 0, 0]
+               and old[0] == fresh[0] == parent[0] == parents["/usr/lib"][0]
+               and len({tuple(old[:2]), tuple(fresh[:2]), tuple(parent[:2])}) == 3,
+               "JVM namespace must preserve the old inode and construct a distinct protected one")
+        query = result["query"]
+        D.need(type(query) is dict and set(query) == {"stdout", "stderr", "exitCode", "originalReturned", "stdoutEof", "stderrEof", "streamsClosed", "stopSent"}
+               and query["stdout"] == "" and query["stderr"] == SHELL_TOOLS_JDK_MISSING.decode("ascii")
+               and type(query["exitCode"]) is int and query["exitCode"] == 1
+               and all(query[key] is True for key in ("originalReturned", "stdoutEof", "stderrEof", "streamsClosed"))
+               and query["stopSent"] is False, "JVM namespace original bounded root query is not absent-pair finality")
+        expected_node = {"kind": "directory", "identity": fresh}
+    else:
+        expected_original = old_node.get("identity")
+        D.need(D.same(result["original"], expected_original)
+               and all(result[key] is None for key in ("preservation", "preserved", "fresh", "query")),
+               "No-op JVM namespace must not claim relocation, creation or package query")
+        expected_node = old_node
+    if before is None:
+        nodes = shell_tools_input_nodes()
+    else:
+        D.need(before["phase"] == "before" and before["packageQuery"] == snapshot["packageQuery"],
+               "Strict pair-before is not the original pre-installation package query")
+        nodes = before["nodes"]
+    actual = nodes[SHELL_TOOLS_NAMESPACE_PARENT]
+    D.need(actual["kind"] == expected_node["kind"] and
+           (actual == expected_node if actual["kind"] == "absent" else actual["identity"][:5] == expected_node["identity"][:5]),
+           "Constructed JVM namespace is not the original strict-before namespace")
+    D.need(all(nodes[path] == snapshot["nodes"][path] for path in (*SHELL_TOOLS_PROGRAMS[:2], *SHELL_TOOLS_LINKS))
+           and all(nodes[path]["kind"] == "directory" and nodes[path]["identity"][:5] == snapshot["nodes"][path]["identity"][:5]
+                   for path in SHELL_TOOLS_NAMESPACE_PARENTS),
+           "JVM namespace construction changed an original unrelated input")
+    return pins
+
+
+def shell_tools_namespace_check():
+    _shell_tools_namespace_result(shell_tools_input_root())
+
+
+def shell_tools_input_snapshot(phase):
+    """Snapshot even an actual failed preparation; no installation/launch here."""
+    D.need(phase in ("before", "after"), "Different fixed Tools preparation phase")
+    root = shell_tools_input_root()
+    original_root = directory_identity(root)
+    raw = D.read(root / (phase + "-packages.tsv"), 64 << 10)
+    stderr = D.read(root / (phase + "-packages.stderr"), 4096)
+    exit_raw = D.read(root / (phase + "-packages.exit"), 4)
+    D.need(re.fullmatch(rb"(?:0|[1-9][0-9]{0,2})\n", exit_raw) is not None and int(exit_raw) <= 255,
+           "Tools package original return DATA differs")
+    step = os.environ.get("MRK_SHELL_TOOLS_PREPARATION_EXIT", "") if phase == "after" else None
+    D.need(phase == "before" or re.fullmatch(r"0|[1-9][0-9]{0,2}", step) is not None and int(step) <= 255,
+           "Tools original preparation return is missing")
+    nodes = shell_tools_input_nodes()
+    source_sha = os.environ.get("GITHUB_SHA", "")
+    D.need(re.fullmatch(r"[0-9a-f]{40}", source_sha) is not None, "Tools original source identity differs")
+    document = {"schema": "fixed-disposable-shell-tools-inputs-v1", "phase": phase, "qualified": False,
+        "sourceSha": source_sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+        "rootIdentity": list(original_root), "originalStepExit": int(step) if step is not None else None, "nodes": nodes,
+        "packageQuery": {"stdout": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+                         "stderr": {"size": len(stderr), "sha256": hashlib.sha256(stderr).hexdigest()}, "exitCode": int(exit_raw)}}
+    # Preserve the actual snapshot before any successful-pair assertion. A
+    # missing/failed after snapshot remains failure, never cleanup evidence.
+    D.write(root / (phase + ".json"), D.canonical(document))
+    D.need(directory_identity(root) == original_root and int(exit_raw) in ((0, 1) if phase == "before" else (0,)),
+           "Tools original directory or package query failed")
+    packages = shell_tools_package_data(raw)
+    D.need(all(nodes[path].get("kind") == "file" for path in SHELL_TOOLS_PROGRAMS[:2])
+           and all(row["kind"] in ("directory", "file", "symlink", "absent", "parent-unavailable") for row in nodes.values()),
+           "Tools preparation must not repair a refused original Git/Python/JDK path")
+    if phase == "before":
+        _shell_tools_namespace_result(root, before=document)
+        print("present" if all(nodes[path].get("kind") == "file" for path in SHELL_TOOLS_PROGRAMS[2:]) else "absent", flush=True)
+        return
+    before_raw = D.read(root / "before.json", 64 << 10)
+    before = _shell_tools_input_document(before_raw, "before", root)
+    old_packages_raw = D.read(root / "before-packages.tsv", 64 << 10)
+    D.need(before["packageQuery"]["stdout"] == {"size": len(old_packages_raw), "sha256": hashlib.sha256(old_packages_raw).hexdigest()},
+           "Tools original before package bytes changed")
+    old_packages = shell_tools_package_data(old_packages_raw)
+    D.need(step == "0" and stderr == b"" and set(packages) == set(SHELL_TOOLS_PACKAGES)
+           and all(nodes[path].get("kind") == "file" for path in SHELL_TOOLS_PROGRAMS)
+           and all(nodes[path].get("kind") == "symlink" and nodes[path].get("target") == target for path, target in SHELL_TOOLS_LINKS.items())
+           and all(nodes[path].get("kind") == "directory" for path in SHELL_TOOLS_DIRECTORIES),
+           "Original disposable Tools preparation did not establish the fixed pair")
+    D.need(all(nodes[path] == before["nodes"][path] for path in SHELL_TOOLS_PROGRAMS[:2])
+           and all(packages[name] == old_packages[name] for name in ("git", "python3.12")),
+           "JDK preparation changed the original Git/Python input")
+    D.need(all(before["nodes"][path].get("kind") != "directory" or before["nodes"][path]["identity"][:5] == nodes[path]["identity"][:5]
+               for path in SHELL_TOOLS_DIRECTORIES), "JDK preparation replaced an original protected ancestor")
+
+
+def shell_tools_inputs_for_observation():
+    """Rebind the actual prepared pair, Git and Python before/after native work."""
+    root = shell_tools_input_root()
+    snapshots, packages, pins = {}, {}, {}
+    for phase in ("before", "after"):
+        raw = D.read(root / (phase + ".json"), 64 << 10)
+        data = _shell_tools_input_document(raw, phase, root)
+        pins[phase + ".json"] = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        for suffix, key, limit in ((".tsv", "stdout", 64 << 10), (".stderr", "stderr", 4096), (".exit", None, 4)):
+            name = phase + "-packages" + suffix
+            content = D.read(root / name, limit)
+            pin = {"size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+            if key is not None:
+                D.need(data["packageQuery"][key] == pin, "Tools original package query bytes changed")
+            else:
+                D.need(content == (str(data["packageQuery"]["exitCode"]) + "\n").encode("ascii"), "Tools original package query return changed")
+            pins[name] = pin
+            if key == "stdout":
+                packages[phase] = shell_tools_package_data(content)
+        snapshots[phase] = data
+    before, after = snapshots["before"], snapshots["after"]
+    D.need(before["originalStepExit"] is None and type(after["originalStepExit"]) is int and after["originalStepExit"] == 0
+           and before["packageQuery"]["exitCode"] in (0, 1)
+           and type(after["packageQuery"]["exitCode"]) is int and after["packageQuery"]["exitCode"] == 0
+           and after["packageQuery"]["stderr"]["size"] == 0 and set(packages["after"]) == set(SHELL_TOOLS_PACKAGES)
+           and all(packages["before"][name] == packages["after"][name] for name in ("git", "python3.12")),
+           "Tools original preparation failed or changed Git/Python packages")
+    current = shell_tools_input_nodes()
+    D.need(set(after["nodes"]) == set(before["nodes"]) == set(current)
+           and all(current[path].get("kind") == "file" and current[path] == after["nodes"][path] for path in SHELL_TOOLS_PROGRAMS)
+           and all(current[path] == after["nodes"][path] and current[path].get("kind") == "symlink"
+                   and current[path].get("target") == target for path, target in SHELL_TOOLS_LINKS.items())
+           and all(current[path].get("kind") == "directory" and current[path]["identity"][:5] == after["nodes"][path]["identity"][:5]
+                    for path in SHELL_TOOLS_DIRECTORIES)
+           and all(before["nodes"][path].get("kind") != "directory" or before["nodes"][path]["identity"][:5] == current[path]["identity"][:5]
+                   for path in SHELL_TOOLS_DIRECTORIES)
+           and all(row["kind"] != "refused" for row in before["nodes"].values())
+           and all(before["nodes"][path] == current[path] for path in SHELL_TOOLS_PROGRAMS[:2]),
+           "Actual Git/Python/JDK pair drifted from the original disposable preparation")
+    # Ordinary P0 publication can change directory timestamps/size. Preserve
+    # those original snapshot facts, but only stable protected parent identity
+    # is authority across native work; executable and alias rows remain exact.
+    bound_nodes = {path: {**row, "identity": row["identity"][:5]} if row["kind"] == "directory" else row
+                   for path, row in current.items()}
+    pins.update(_shell_tools_namespace_result(root, before=before))
+    return {"schema": after["schema"], "qualified": False, "preparationFiles": pins, "nodes": bound_nodes, "packages": packages["after"]}
+
+
+def _shell_tools_offline_observation(cases, combined, files, lifecycle):
+    """Eight original engineering cases, including negative/refused outcomes.
+
+    This never activates ordinary Tools/Offline or claims the full1800s expiry.
+    Native booleans alone cannot replace the retained exact fixture inventories.
+    """
+    D.need(type(cases) is dict and set(lifecycle.SHELL_TOOLS_OFFLINE_CASES) <= set(cases)
+           and type(combined) is dict and set(combined) == set(lifecycle.SHELL_TOOLS_OFFLINE_CASES),
+           "Closed eight-case Tools/Offline observation is missing")
+    for name in lifecycle.SHELL_TOOLS_OFFLINE_CASES:
+        case, pair = cases[name], combined[name]
+        D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "toolsOffline"}
+               and case["case"] == name and type(case["exitCode"]) is int and case["exitCode"] == 0
+               and case["bootstrapReturned"] is True and case["domAndGtkObserved"] is True and case["maps"] == [],
+               "Closed Tools/Offline original result is incomplete")
+        D.need(type(pair) is dict and set(pair) == {"native", "fixture"}, "Closed Tools/Offline receipt or fixture is missing")
+        receipt = lifecycle.shell_tools_offline_receipt(D.canonical(case["toolsOffline"]), name)
+        D.need(D.canonical(pair["native"]) == D.canonical(receipt), "Closed Tools/Offline native receipt correspondence differs")
+        config = lifecycle.SHELL_TOOLS_OFFLINE_CONFIGS[name]
+        drift = name == "offline-drift"
+        mutations = (["project/release/mobile-release.json"] if drift else
+                     ["project/script.trace"] if lifecycle.SHELL_TOOLS_OFFLINE_TRACES[name] else [])
+        expected = {"fixture": "installed-tools-offline-fixture-v1", "case": name, "rootRetained": True, "originalsAccounted": True,
+            "noUnexpectedEntries": True, "noPendingState": True, "beforeCount": 21, "afterCount": 21, "mutations": mutations,
+            "scriptTrace": lifecycle.SHELL_TOOLS_OFFLINE_TRACES[name].decode("ascii"), "laterTrace": "", "savedConfigChanged": drift,
+            "savedConfigBefore": {"bytes": len(config), "sha256": hashlib.sha256(config).hexdigest()},
+            "savedConfigAfter": {"bytes": len(config) + drift, "sha256": hashlib.sha256(config + (b"\n" if drift else b"")).hexdigest()}}
+        fixture = pair["fixture"]
+        D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}
+               and D.canonical({key: fixture[key] for key in expected}) == D.canonical(expected)
+               and D.canonical(receipt["fixture"]) == D.canonical({key: fixture[key]
+                   for key in ("scriptTrace", "laterTrace", "savedConfigChanged")}),
+               "Closed Tools/Offline synthetic fixture or same-original changes differ")
+        for phase in ("before", "after"):
+            pin = fixture[phase]
+            D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int
+                   and 0 < pin["size"] <= lifecycle.SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT
+                   and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+                   "Closed Tools/Offline original inventory pin differs")
+            matches = [row for row in files if type(row) is dict and row.get("path") == "lifecycle-shell-" + name + "-" + phase + ".json"]
+            D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+                   and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
+                   "Original Tools/Offline before/after export pin differs")
+        D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"] if mutations else fixture["before"] == fixture["after"],
+               "Closed Tools/Offline inventory changed outside its fixed in-place mutation")
+
+
+
+def shell_github_observation(observed, lifecycle, profile="github-readonly-installed-tls-v1", *, runner_uid=None, runner_gid=None):
+    """Reconcile only the existing service-finality-gated exports and receipt."""
+    selection = lifecycle.shell_github_selection(profile)
+    normal_boundaries = profile == lifecycle.SHELL_GITHUB_BOUNDARY_PROFILE
+    selected_cases = tuple(selection["cases"])
+    state = "installed-github-normal-boundaries-observed" if normal_boundaries else "installed-github-readonly-synthetic-observed"
+    D.need(type(observed) is dict and not {"ordinary21", "projectRecovery", "githubPreflight", "githubRelease"} & set(observed) and observed.get("state") == state
+           and observed.get("productQualified") is False and observed.get("packageLifecycleQualified") is False
+           and observed.get("shellPackageBuilt") is False, "GitHub closed observation was relabelled as qualification")
+    github, cases, files = observed.get("githubReadOnly"), observed.get("cases"), observed.get("files")
+    fields = {"selection", "expectedMaps", "materials", "fixture", "casesCapture",
+              "normalDestinationAction", "normalTransportPositive", "remainingCoverage"}
+    if normal_boundaries:
+        fields |= {"normalNetworkScope", "normalHttpRequests", "boundaries"}
+    remaining = (["current-twenty-two-synthetic-regressions", "separately-approved-normal-destination-negative"]
+                 if normal_boundaries else ["normal-resolver-withholding", "real-stalled-tcp-connect",
+                                            "separately-approved-normal-destination-negative"])
+    D.need(type(github) is dict and set(github) == fields
+           and D.canonical(github["selection"]) == D.canonical(selection)
+           and github["normalDestinationAction"] is normal_boundaries and github["normalTransportPositive"] is False
+           and github["remainingCoverage"] == remaining, "GitHub closed scope/selection differs")
+    if normal_boundaries:
+        D.need(github["normalNetworkScope"] == "normal-dns-and-scoped-https-acquisition-syns-only"
+               and github["normalHttpRequests"] is False, "Normal DNS/SYN boundaries were relabelled as HTTP transport")
+    D.need(type(cases) is dict and set(cases) == set(selected_cases)
+           and type(observed.get("sourceSha")) is str and re.fullmatch(r"[0-9a-f]{40}", observed["sourceSha"]) is not None,
+           "GitHub closed SOURCE/case roster differs")
+    maps = lifecycle.shell_github_maps(github["expectedMaps"])
+    for name in selected_cases:
+        row = cases[name]
+        D.need(type(row) is dict and set(row) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "githubReadOnly"},
+               "GitHub closed native case fields differ")
+        receipt = lifecycle.shell_github_receipt(D.canonical(row["githubReadOnly"]), name, maps)
+        wanted = {"case": name, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [], "githubReadOnly": receipt}
+        D.need(D.canonical(row) == D.canonical(wanted) and receipt["sourceCommit"] == observed["sourceSha"],
+               "GitHub closed native receipt/source correspondence differs")
+    root_value = {"shell": {"githubReadOnly": selection}}
+    names = {"lifecycle-" + name for name in lifecycle.public_files(root_value) | {"client.stdout", "client.stderr"}}
+    D.need(type(files) is list and len(files) == len(names) <= lifecycle.SHELL_GITHUB_PUBLIC_FILE_LIMIT + 2,
+           "GitHub original export count differs")
+    indexed = {}
+    for row in files:
+        D.need(type(row) is dict and set(row) == {"path", "size", "sha256"} and type(row["path"]) is str
+               and row["path"] in names and row["path"] not in indexed and type(row["size"]) is int
+               and 0 <= row["size"] <= lifecycle.LIMIT and type(row["sha256"]) is str
+               and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None, "GitHub original export record differs")
+        indexed[row["path"]] = row
+    D.need(set(indexed) == names, "GitHub original public export roster differs")
+
+    def captured(name, pin, limit):
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int
+               and 0 < pin["size"] <= limit and type(pin["sha256"]) is str
+               and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None
+               and D.canonical(indexed["lifecycle-" + name]) == D.canonical({"path": "lifecycle-" + name, **pin}),
+               "GitHub original closed export pin differs")
+
+    material = github["materials"]
+    D.need(type(material) is dict and set(material) == {"before", "after"}
+           and D.canonical(material["before"]) == D.canonical(material["after"]), "GitHub N/D/peer interval changed")
+    for phase in ("before", "after"):
+        captured("shell-github-materials-" + phase + ".json", material[phase], lifecycle.SHELL_GITHUB_MATERIAL_LIMIT)
+    fixture = github["fixture"]
+    D.need(type(fixture) is dict and set(fixture) == {"project", "namespace", "unchanged", "sourceSha256", "versionSha256",
+           "releaseConfigCreated", "sourceSha", "before", "after"} and fixture["unchanged"] is True
+           and fixture["releaseConfigCreated"] is False and fixture["sourceSha"] == observed["sourceSha"]
+           and fixture["sourceSha256"] == hashlib.sha256(lifecycle.SHELL_PROJECT_SOURCE).hexdigest()
+           and fixture["versionSha256"] == hashlib.sha256(lifecycle.SHELL_PROJECT_VERSION).hexdigest()
+           and D.canonical(fixture["before"]) == D.canonical(fixture["after"]),
+           "GitHub registered read-only fixture changed or invented release outputs")
+    D.need(type(observed.get("unit")) is str, "GitHub original service identity is missing")
+    unit = re.fullmatch(r"mrk-ubuntu-native-([1-9][0-9]{0,19})-([1-9][0-9]{0,19})\.service", observed["unit"])
+    D.need(unit is not None and unit.group(2) == observed.get("consumerAttempt"), "GitHub original service/attempt differs")
+    root_value.update(runId=unit.group(1), attempt=unit.group(2))
+    namespace = lifecycle._shell_namespace_data(root_value, fixture["namespace"])
+    D.need(fixture["project"] == str(Path(namespace["root"]) / "github-project"), "GitHub registered project path differs")
+    for phase in ("before", "after"):
+        captured("shell-github-project-" + phase + ".json", fixture[phase], lifecycle.SHELL_GITHUB_FIXTURE_LIMIT)
+    captured("shell-cases.json", github["casesCapture"], lifecycle.LIMIT)
+    D.need(D.canonical(github["casesCapture"]) == D.canonical(lifecycle._shell_github_pin(D.canonical(cases))),
+           "GitHub closed case copy is not the original exported capture")
+    if normal_boundaries:
+        D.need(all(type(number) is int and 0 < number < 1 << 31 for number in (runner_uid, runner_gid))
+               and type(observed.get("invocationId")) is str
+               and re.fullmatch(r"[0-9a-f]{32}", observed["invocationId"]) is not None,
+               "Normal-boundary CI requires the actual original nonroot UID and service invocation")
+        root_value.update(sourceSha=observed["sourceSha"], runnerUid=runner_uid, runnerGid=runner_gid)
+        boundary = github["boundaries"]
+        D.need(type(boundary) is dict and set(boundary) == {"host", "policies", "normalResolverWithholdingObserved",
+               "realStalledTcpConnectObserved", "rootUidAndCgroupScoped", "normalHttpRequests"}
+               and all(boundary[name] is True for name in ("normalResolverWithholdingObserved", "realStalledTcpConnectObserved",
+                                                         "rootUidAndCgroupScoped"))
+               and boundary["normalHttpRequests"] is False, "Closed normal-boundary root proof is missing")
+        host = boundary["host"]
+        D.need(type(host) is dict and set(host) == {"before", "after"}
+               and D.canonical(host["before"]) == D.canonical(host["after"]), "Normal-boundary host interval changed")
+        for phase in ("before", "after"):
+            captured("github-boundary-host-" + phase + ".json", host[phase], lifecycle.SHELL_GITHUB_BOUNDARY_LIMIT)
+        policies = boundary["policies"]
+        D.need(type(policies) is dict and set(policies) == set(selected_cases), "Closed original boundary policy roster differs")
+        original_domain = None
+        for name in selected_cases:
+            row = policies[name]
+            D.need(type(row) is dict and set(row) == {"capture", "evidence"}, "Closed original policy record differs")
+            proof = lifecycle.shell_github_boundary_policy_data(root_value, name, row["evidence"], cases[name]["githubReadOnly"])
+            D.need(proof["domain"]["invocationId"] == observed["invocationId"]
+                   and (original_domain is None or D.canonical(original_domain) == D.canonical(proof["domain"])),
+                   "Normal-boundary proof adopted another service/cgroup/UID original")
+            original_domain = proof["domain"]
+            prefix = lifecycle._github_boundary_prefix(name)
+            captured(prefix + "-policy.json", row["capture"], lifecycle.SHELL_GITHUB_BOUNDARY_LIMIT)
+            D.need(D.canonical(row["capture"]) == D.canonical(lifecycle._shell_github_pin(D.canonical(proof))),
+                   "Closed policy summary is not the original exported root capture")
+            captured(prefix + "-absence.stdout", proof["absence"], lifecycle.SHELL_GITHUB_BOUNDARY_LIMIT)
+    return github
+
+
+def shell_github_preflight_observation(observed, lifecycle, *, runner_uid, runner_gid):
+    """G-only closed receipt correspondence; not a normal/network action grant."""
+    selection = lifecycle.shell_github_preflight_selection()
+    D.need(type(observed) is dict and not {"ordinary21", "projectRecovery", "githubReadOnly", "githubRelease", "androidBuild", "androidPublication"} & set(observed)
+           and observed.get("state") == "installed-github-preflight-synthetic-observed"
+           and all(observed.get(key) is False for key in ("productQualified", "packageLifecycleQualified", "shellPackageBuilt", "serviceQualified")),
+           "Preflight closed observation was mixed or relabelled as qualification")
+    github, cases, files = observed.get("githubPreflight"), observed.get("cases"), observed.get("files")
+    D.need(type(github) is dict and set(github) == {"selection", "expectedMaps", "materials", "fixture", "casesCapture",
+           "journals", "normalDestinationAction", "normalTransportPositive", "remainingCoverage"}
+           and D.canonical(github["selection"]) == D.canonical(selection)
+           and github["normalDestinationAction"] is False and github["normalTransportPositive"] is False
+           and github["remainingCoverage"] == list(lifecycle.SHELL_GITHUB_PREFLIGHT_NOT_PROVEN),
+           "Preflight closed SOURCE selection/limits differ")
+    D.need(type(cases) is dict and set(cases) == set(lifecycle.SHELL_GITHUB_PREFLIGHT_CASES)
+           and type(observed.get("sourceSha")) is str and re.fullmatch(r"[0-9a-f]{40}", observed["sourceSha"]) is not None
+           and all(type(n) is int and 0 < n < 1 << 31 for n in (runner_uid, runner_gid)),
+           "Preflight original SOURCE/case/owner binding differs")
+    maps = lifecycle.shell_github_maps(github["expectedMaps"])
+    for case in lifecycle.SHELL_GITHUB_PREFLIGHT_CASES:
+        row = cases[case]
+        D.need(type(row) is dict and set(row) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "githubPreflight"},
+               "Preflight original native case fields differ")
+        receipt = lifecycle.shell_github_preflight_receipt(D.canonical(row["githubPreflight"]), case, maps)
+        wanted = {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [], "githubPreflight": receipt}
+        D.need(D.canonical(row) == D.canonical(wanted) and receipt["sourceCommit"] == observed["sourceSha"],
+               "Preflight native source/original capture differs")
+    D.need(type(observed.get("unit")) is str, "Preflight original service identity missing")
+    unit = re.fullmatch(r"mrk-ubuntu-native-([1-9][0-9]{0,19})-([1-9][0-9]{0,19})\.service", observed["unit"])
+    D.need(unit is not None and unit.group(2) == observed.get("consumerAttempt"), "Preflight original service/attempt differs")
+    root_value = {"shell": {"githubPreflight": selection}, "runId": unit.group(1), "attempt": unit.group(2),
+                  "sourceSha": observed["sourceSha"], "runnerUid": runner_uid, "runnerGid": runner_gid}
+    names = {"lifecycle-" + name for name in lifecycle.public_files(root_value) | {"client.stdout", "client.stderr"}}
+    D.need(type(files) is list and len(files) == len(names) <= lifecycle.SHELL_GITHUB_PUBLIC_FILE_LIMIT + 2,
+           "Preflight original export count differs")
+    indexed = {}
+    for row in files:
+        D.need(type(row) is dict and set(row) == {"path", "size", "sha256"} and type(row["path"]) is str
+               and row["path"] in names and row["path"] not in indexed and type(row["size"]) is int
+               and 0 <= row["size"] <= lifecycle.LIMIT and type(row["sha256"]) is str
+               and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None, "Preflight original export differs")
+        indexed[row["path"]] = row
+    D.need(set(indexed) == names, "Preflight original export roster differs")
+
+    def captured(name, pin, limit):
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int
+               and 0 < pin["size"] <= limit and type(pin["sha256"]) is str
+               and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None
+               and D.canonical(indexed["lifecycle-" + name]) == D.canonical({"path": "lifecycle-" + name, **pin}),
+               "Preflight closed original export pin differs")
+
+    material = github["materials"]
+    D.need(type(material) is dict and set(material) == {"before", "after"}
+           and D.canonical(material["before"]) == D.canonical(material["after"]), "Preflight N/D/peer originals changed")
+    fixture = github["fixture"]
+    D.need(type(fixture) is dict and set(fixture) == {"project", "namespace", "unchanged", "sourceSha256", "versionSha256",
+           "releaseConfigCreated", "sourceSha", "before", "after"} and fixture["unchanged"] is True
+           and fixture["releaseConfigCreated"] is False and fixture["sourceSha"] == observed["sourceSha"]
+           and fixture["sourceSha256"] == hashlib.sha256(lifecycle.SHELL_PROJECT_SOURCE).hexdigest()
+           and fixture["versionSha256"] == hashlib.sha256(lifecycle.SHELL_PROJECT_VERSION).hexdigest()
+           and D.canonical(fixture["before"]) == D.canonical(fixture["after"]), "Preflight registered project changed")
+    namespace = lifecycle._shell_namespace_data(root_value, fixture["namespace"])
+    D.need(fixture["project"] == str(Path(namespace["root"]) / "github-project"), "Preflight registered project path differs")
+    for phase in ("before", "after"):
+        captured("shell-github-materials-" + phase + ".json", material[phase], lifecycle.SHELL_GITHUB_MATERIAL_LIMIT)
+        captured("shell-github-project-" + phase + ".json", fixture[phase], lifecycle.SHELL_GITHUB_FIXTURE_LIMIT)
+    captured("shell-cases.json", github["casesCapture"], lifecycle.LIMIT)
+    D.need(D.canonical(github["casesCapture"]) == D.canonical(lifecycle._shell_github_pin(D.canonical(cases))),
+           "Preflight original cases capture changed")
+    journals = github["journals"]
+    D.need(type(journals) is dict and set(journals) == set(lifecycle.SHELL_GITHUB_PREFLIGHT_CASES),
+           "Preflight original journal case roster differs")
+    pairs, original_root = set(), None
+    for case, pair in journals.items():
+        D.need(type(pair) is dict and set(pair) == {"capture", "originals"}, "Preflight journal export projection differs")
+        raw = D.canonical(pair["originals"])
+        journal = lifecycle.shell_github_preflight_journal_data(root_value, case, raw, cases[case]["githubPreflight"])
+        D.need(D.canonical(pair["capture"]) == D.canonical(lifecycle._shell_github_pin(raw)),
+               "Preflight journal summary is not original exported DATA")
+        captured("shell-" + case + "-journal.json", pair["capture"], lifecycle.SHELL_GITHUB_PREFLIGHT_JOURNAL_LIMIT)
+        root = journal["created"]["root"]
+        current = {tuple(row[:2]) for row in journal["directories"].values()}
+        current.update(tuple(row["identity"][:2]) for row in journal["files"].values())
+        D.need(current.isdisjoint(pairs) and (original_root is None or root == original_root),
+               "Preflight original case HOME/journal was reused or replaced")
+        pairs.update(current)
+        original_root = root
+    return github
+
+
+def shell_github_release_observation(observed, lifecycle, *, runner_uid, runner_gid):
+    """R-only original export correspondence; not release evidence or delivery."""
+    selection = lifecycle.shell_github_release_selection()
+    D.need(type(observed) is dict and not {"ordinary21", "projectRecovery", "githubReadOnly", "githubPreflight", "androidBuild", "androidPublication"} & set(observed)
+           and observed.get("state") == "installed-github-release-native3-observed"
+           and all(observed.get(key) is False for key in ("productQualified", "packageLifecycleQualified", "shellPackageBuilt", "serviceQualified")),
+           "Release closed observation was mixed or relabelled as qualification")
+    github, cases, files = observed.get("githubRelease"), observed.get("cases"), observed.get("files")
+    D.need(type(github) is dict and set(github) == {"selection", "expectedMaps", "materials", "fixture", "casesCapture",
+           "journals", "normalDestinationAction", "normalTransportPositive", "remainingCoverage"}
+           and D.canonical(github["selection"]) == D.canonical(selection)
+           and github["normalDestinationAction"] is False and github["normalTransportPositive"] is False
+           and github["remainingCoverage"] == list(lifecycle.SHELL_GITHUB_RELEASE_NOT_PROVEN),
+           "Release closed SOURCE selection/limits differ")
+    D.need(type(cases) is dict and set(cases) == set(lifecycle.SHELL_GITHUB_RELEASE_CASES)
+           and type(observed.get("sourceSha")) is str and re.fullmatch(r"[0-9a-f]{40}", observed["sourceSha"]) is not None
+           and all(type(n) is int and 0 < n < 1 << 31 for n in (runner_uid, runner_gid)),
+           "Release original SOURCE/case/owner binding differs")
+    maps = lifecycle.shell_github_maps(github["expectedMaps"])
+    for case in lifecycle.SHELL_GITHUB_RELEASE_CASES:
+        row = cases[case]
+        D.need(type(row) is dict and set(row) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "githubRelease"},
+               "Release original native case fields differ")
+        receipt = lifecycle.shell_github_release_receipt(D.canonical(row["githubRelease"]), case, maps)
+        wanted = {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [], "githubRelease": receipt}
+        D.need(D.canonical(row) == D.canonical(wanted) and receipt["sourceCommit"] == observed["sourceSha"],
+               "Release native source/original capture differs")
+    D.need(type(observed.get("unit")) is str, "Release original service identity missing")
+    unit = re.fullmatch(r"mrk-ubuntu-native-([1-9][0-9]{0,19})-([1-9][0-9]{0,19})\.service", observed["unit"])
+    D.need(unit is not None and unit.group(2) == observed.get("consumerAttempt"), "Release original service/attempt differs")
+    root_value = {"shell": {"githubRelease": selection}, "runId": unit.group(1), "attempt": unit.group(2),
+                  "sourceSha": observed["sourceSha"], "runnerUid": runner_uid, "runnerGid": runner_gid}
+    names = {"lifecycle-" + name for name in lifecycle.public_files(root_value) | {"client.stdout", "client.stderr"}}
+    D.need(type(files) is list and len(files) == len(names) <= lifecycle.SHELL_GITHUB_PUBLIC_FILE_LIMIT + 2,
+           "Release original export count differs")
+    indexed = {}
+    for row in files:
+        D.need(type(row) is dict and set(row) == {"path", "size", "sha256"} and type(row["path"]) is str
+               and row["path"] in names and row["path"] not in indexed and type(row["size"]) is int
+               and 0 <= row["size"] <= lifecycle.LIMIT and type(row["sha256"]) is str
+               and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None, "Release original export differs")
+        indexed[row["path"]] = row
+    D.need(set(indexed) == names, "Release original export roster differs")
+
+    def captured(name, pin, limit):
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int
+               and 0 < pin["size"] <= limit and type(pin["sha256"]) is str
+               and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None
+               and D.canonical(indexed["lifecycle-" + name]) == D.canonical({"path": "lifecycle-" + name, **pin}),
+               "Release closed original export pin differs")
+
+    material = github["materials"]
+    D.need(type(material) is dict and set(material) == {"before", "after"}
+           and D.canonical(material["before"]) == D.canonical(material["after"]), "Release N/D/peer originals changed")
+    fixture = github["fixture"]
+    D.need(type(fixture) is dict and set(fixture) == {"project", "namespace", "unchanged", "sourceSha256", "versionSha256",
+           "releaseConfigCreated", "sourceSha", "before", "after"} and fixture["unchanged"] is True
+           and fixture["releaseConfigCreated"] is False and fixture["sourceSha"] == observed["sourceSha"]
+           and fixture["sourceSha256"] == hashlib.sha256(lifecycle.SHELL_PROJECT_SOURCE).hexdigest()
+           and fixture["versionSha256"] == hashlib.sha256(lifecycle.SHELL_PROJECT_VERSION).hexdigest()
+           and D.canonical(fixture["before"]) == D.canonical(fixture["after"]), "Release registered project changed")
+    namespace = lifecycle._shell_namespace_data(root_value, fixture["namespace"])
+    D.need(fixture["project"] == str(Path(namespace["root"]) / "github-project"), "Release registered project path differs")
+    for phase in ("before", "after"):
+        captured("shell-github-materials-" + phase + ".json", material[phase], lifecycle.SHELL_GITHUB_MATERIAL_LIMIT)
+        captured("shell-github-project-" + phase + ".json", fixture[phase], lifecycle.SHELL_GITHUB_FIXTURE_LIMIT)
+    captured("shell-cases.json", github["casesCapture"], lifecycle.LIMIT)
+    D.need(D.canonical(github["casesCapture"]) == D.canonical(lifecycle._shell_github_pin(D.canonical(cases))),
+           "Release original cases capture changed")
+    journals = github["journals"]
+    D.need(type(journals) is dict and set(journals) == set(lifecycle.SHELL_GITHUB_RELEASE_CASES),
+           "Release original journal case roster differs")
+    pairs, original_root = set(), None
+    for case, pair in journals.items():
+        D.need(type(pair) is dict and set(pair) == {"capture", "originals"}, "Release journal export projection differs")
+        raw = D.canonical(pair["originals"])
+        journal = lifecycle.shell_github_release_journal_data(root_value, case, raw, cases[case]["githubRelease"])
+        D.need(D.canonical(pair["capture"]) == D.canonical(lifecycle._shell_github_pin(raw)),
+               "Release journal summary is not original exported DATA")
+        captured("shell-" + case + "-journal.json", pair["capture"], lifecycle.SHELL_GITHUB_RELEASE_JOURNAL_LIMIT)
+        root = journal["created"]["root"]
+        current = {tuple(row[:2]) for row in journal["directories"].values()}
+        current.update(tuple(row["identity"][:2]) for row in journal["files"].values())
+        D.need(root == namespace["control"]["identity"]
+               and current.isdisjoint(pairs) and (original_root is None or root == original_root),
+               "Release original case HOME/journal was reused or replaced")
+        pairs.update(current)
+        original_root = root
+    return github
+
+
+def _shell_android_observation(cases, combined, files, lifecycle):
+    """Four original Android engineering cases, not normal/native qualification."""
+    D.need(type(cases) is dict and set(lifecycle.SHELL_ANDROID_CASES) <= set(cases)
+           and type(combined) is dict and set(combined) == set(lifecycle.SHELL_ANDROID_CASES),
+           "Closed four-case Android observation is missing")
+    for name in lifecycle.SHELL_ANDROID_CASES:
+        case, pair = cases[name], combined[name]
+        D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "androidBuild"}
+               and case["case"] == name and type(case["exitCode"]) is int and case["exitCode"] == 0
+               and case["bootstrapReturned"] is True and case["domAndGtkObserved"] is True and case["maps"] == [],
+               "Closed Android original result is incomplete")
+        D.need(type(pair) is dict and set(pair) == {"native", "fixture"}, "Closed Android native/fixture pair is missing")
+        receipt = lifecycle.shell_android_receipt(D.canonical(case["androidBuild"]), name)
+        D.need(D.canonical(pair["native"]) == D.canonical(receipt), "Closed Android native receipt correspondence differs")
+        expected = lifecycle._shell_android_fixture_facts(name)
+        fixture = pair["fixture"]
+        D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}
+               and D.canonical({key: fixture[key] for key in expected}) == D.canonical(expected)
+               and D.canonical(receipt["fixture"]) == D.canonical({key: fixture[key] for key in receipt["fixture"]}),
+               "Closed Android source controls, material or excluded output scopes differ")
+        for phase in ("before", "after"):
+            pin = fixture[phase]
+            D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int
+                   and 0 < pin["size"] <= lifecycle.SHELL_ANDROID_INVENTORY_LIMIT
+                   and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+                   "Closed Android original inventory pin differs")
+            matches = [row for row in files if type(row) is dict and row.get("path") == "lifecycle-shell-" + name + "-" + phase + ".json"]
+            D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+                   and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
+                   "Original Android before/after export pin differs")
+        D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"],
+               "Closed Android inventory lost its fixed source mutation")
+
+
+def android_native_public_summary(source, observed, preparation, records, lifecycle):
+    """Small typed projection after full original root/client/case validation.
+
+    No raw fixture, host input, transcript, private path or compiler record is
+    copied into the public upload directory, including nested native receipts.
+    """
+    identity = {key: source[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")}
+    D.need(all(type(identity[key]) is str and re.fullmatch(r"[0-9a-f]{40}", identity[key]) for key in ("sourceSha", "sourceTree"))
+           and all(type(identity[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", identity[key]) for key in ("runId", "attempt")),
+           "Android native public source identity differs")
+    D.need(observed["state"] == lifecycle.result_state({"shell": {}}) and observed["productQualified"] is False
+           and observed["sourceSha"] == identity["sourceSha"] and observed["consumerAttempt"] == identity["attempt"]
+           and observed["packageLifecycleQualified"] is False and observed["shellPackageBuilt"] is False
+           and type(observed["cases"]) is dict and set(observed["cases"]) == set(lifecycle.SHELL_CASES),
+           "Android native original finality/case result is incomplete")
+    cases = []
+    for name in lifecycle.SHELL_CASES:
+        row = observed["cases"][name]
+        code = 1 if name == "settled-failure" else 0
+        D.need(type(row) is dict and type(row.get("exitCode")) is int and row["exitCode"] == code
+               and row.get("qualified", False) is False, "Android native case status differs")
+        cases.append({"case": name, "exitCode": code, "qualified": False})
+    return {"schemaVersion": 1, "scope": "android-same-job-private-native-summary-v1", **identity,
+            "localTransportSha256": D.sha(observed["shellLocalTransport"]["sha256"]),
+            "androidProfile": android_public_profile(preparation), "cases": cases,
+            "originalFinalityVerified": True, "state": observed["state"],
+            "privateRecords": {key: android_private_pin(records[key]) for key in ("source.json", "result.json", "private-evidence-roster.json")},
+            "compilerRerun": False, "supplierRebuilt": False, "packageBuilt": False, "signingExercised": False,
+            "androidBuildLimits": dict(lifecycle.SHELL_ANDROID_LIMITS), "qualified": False}
+
+
 def verify_installed_shell():
     """One installed connection gate; reuse U, not its entire lifecycle again."""
     D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "observe", "Only the fixed shell observation job is accepted")
+    lifecycle = local("ubuntu_publication_lifecycle")
+    ordinary = installed_shell_scope(lifecycle)
+    recovery = ordinary is not None and ordinary.get("profile") == lifecycle.SHELL_RECOVERY_COMPILE_PROFILE
+    recovery_scope = lifecycle.shell_recovery_selection(os.environ["MRK_INSTALLED_SHELL_SCOPE"]) if recovery else None
+    preflight = installed_shell_preflight_selection(lifecycle)
+    release = installed_shell_release_selection(lifecycle)
     sha, source, _, root, deadline = resumed_preparation()
+    github = os.environ["GITHUB_REF"] in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF, SHELL_GITHUB_PREFLIGHT_REF, SHELL_GITHUB_RELEASE_REF)
+    normal_boundaries = os.environ["GITHUB_REF"] == SHELL_GITHUB_BOUNDARY_REF
     work, public = root / "work", root / "public"
+    same_job = os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") == "android-same-job-local-v1"
+    D.need(not (github and same_job), "GitHub shell cannot use Android same-job transport")
     check, phase = None, "accepted-shell-data"
     try:
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed shell lifecycle entry differs")
-        library, packages, old_compiler, accepted = installed_u_inputs(work)
-        binaries, compiler, native, roster_sha, producer_attempt, artifact_id = installed_shell_candidate(work, sha)
-        D.need(elf_dependencies(D.read(Path(library["path"]), MAX_BINARY)) == old_compiler["nativeInputs"]["outputs"]["libtest"]["elf"],
-               "Accepted U platform executable closure differs")
+        lifecycle.check_source_pins(source, android=same_job)
+        D.need(same_job or os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") in (None, "actions-artifact-v1"),
+               "Unknown installed shell compiler transport")
         sys.path.insert(0, str(source / "src"))
         from mobile_release.owned_process import run_owned
-        check = Check(root, run_owned, deadline=deadline)
+        check = Check(root, run_owned, deadline=deadline, private=same_job)
+        public = check.evidence_root
+        library, packages, old_compiler, accepted = installed_u_inputs(work)
+        transport, material = android_stage_local_inputs(check, sha, lifecycle) if same_job else (None, None)
+        binaries, compiler, native, roster_sha, producer_attempt, artifact_id = installed_shell_candidate(
+            work, sha, lifecycle=lifecycle, local_transport=transport, deadline=check.end, github=github, ordinary=ordinary)
+        D.need(elf_dependencies(D.read(Path(library["path"]), MAX_BINARY)) == old_compiler["nativeInputs"]["outputs"]["libtest"]["elf"],
+               "Accepted U platform executable closure differs")
         environment = C.clean_environment(work)
         original = {str(path): directory_identity(path) for path in (root, work, public, root / "cases")}
 
@@ -3222,23 +5707,79 @@ def verify_installed_shell():
                    "Shell source is not the exact original clean checkout")
 
         source_check("before")
+        tools_inputs = None if github or recovery else shell_tools_inputs_for_observation()
         policy = installed_shell_os_inputs(check, work, native, compiler, old_compiler)
         check.phase = "shell-handoff"
-        lifecycle = local("ubuntu_publication_lifecycle")
         policy = lifecycle.compact_shell_loader_policy(policy, compiler)
         # Compile-only dependency/unit evidence stays in its already admitted
         # original artifact. The root service receives only the relevant typed
         # projection, plus the full original record's content binding.
         projection = {key: compiler[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "features",
-            "manifestSha256", "protocolSha256", "exportedArtifacts", "nativeRecord", "frontendRecord")}
+            "manifestSha256", "protocolSha256", "exportedArtifacts", "nativeRecord", "frontendRecord",
+            "androidBuildMaterials", "androidBuildBindings", "androidBuildPublication")}
         projection["originalRecord"] = D.file_record(work / "admitted-shell/compiler.json", SHELL_METADATA_LIMIT)
+        if ordinary is not None:
+            projection.update(installed_shell_scope_fields(ordinary, lifecycle))
+        if preflight is not None:
+            projection["githubPreflight"] = preflight
+        if release is not None:
+            projection["githubRelease"] = release
+        installed_shell_scope_record(projection, lifecycle, ordinary, android_contract=True)
+        installed_shell_preflight_record(projection, lifecycle, preflight, android_contract=True)
+        installed_shell_release_record(projection, lifecycle, release, android_contract=True)
         shell = {"binaries": binaries, "compiler": projection, "rosterSha256": roster_sha,
-                 "producerAttempt": producer_attempt, "artifactId": artifact_id, "acceptedU": accepted, "loaderPolicy": policy}
+                 "producerAttempt": producer_attempt, "acceptedU": accepted, "loaderPolicy": policy}
+        if recovery:
+            shell["projectRecovery"] = recovery_scope
+        elif ordinary is not None:
+            shell["ordinary21"] = ordinary
+        elif not github:
+            shell["androidPublication"] = lifecycle.shell_android_publication_request(root)
+        if same_job:
+            projection.update({key: compiler[key] for key in ("androidPreparation", "androidOsContractInput")})
+            transport_path = Path(transport["compilerRoot"]["path"]) / "android-local-transport.json"
+            shell["localTransport"] = {**D.file_record(transport_path, 64 << 10), "path": str(transport_path), "record": transport}
+        else:
+            shell["artifactId"] = artifact_id
+        if release is not None:
+            shell["githubRelease"] = release
+        elif preflight is not None:
+            shell["githubPreflight"] = preflight
+        elif github:
+            D.need(lifecycle.SHELL_GITHUB_REF == SHELL_GITHUB_REF
+                   and lifecycle.SHELL_GITHUB_BOUNDARY_REF == SHELL_GITHUB_BOUNDARY_REF,
+                   "GitHub source-bound fixed verification routes differ")
+            github_profile = lifecycle.SHELL_GITHUB_BOUNDARY_PROFILE if normal_boundaries else lifecycle.SHELL_GITHUB_PROFILE
+            shell["githubReadOnly"] = lifecycle.shell_github_selection(github_profile)
         source_record = {"sourceSha": sha, "sourceTree": compiler["sourceTree"], "runId": os.environ["GITHUB_RUN_ID"],
             "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "features": SHELL_FEATURES, "acceptedU": accepted,
-            "shellRosterSha256": roster_sha, "shellProducerAttempt": producer_attempt, "shellArtifactId": artifact_id,
+            "shellRosterSha256": roster_sha, "shellProducerAttempt": producer_attempt, **lifecycle.shell_transport_provenance(shell),
             "platformLibrarySourceSha": old_compiler["sourceSha"], "imageOS": os.environ["ImageOS"],
-            "imageVersion": os.environ["ImageVersion"], "originalDeadline": repr(deadline), "qualified": False}
+            "imageVersion": os.environ["ImageVersion"], "originalDeadline": repr(deadline), "qualified": False,
+            "toolsInputPreparation": tools_inputs}
+        if release is not None:
+            source_record.update(githubRelease=release, normalDestinationAction=False,
+                                 toolsInputPreparationRun=False, unrelatedShellCasesRun=False, productionToolingDelivered=False)
+            installed_shell_release_record(source_record, lifecycle, release)
+        elif preflight is not None:
+            source_record.update(githubPreflight=preflight, normalDestinationAction=False,
+                                 toolsInputPreparationRun=False, unrelatedShellCasesRun=False)
+            installed_shell_preflight_record(source_record, lifecycle, preflight)
+            installed_shell_release_record(source_record, lifecycle, release)
+        elif github:
+            source_record.update(githubReadOnlyProfile=github_profile, normalDestinationAction=normal_boundaries,
+                                 toolsInputPreparationRun=False, unrelatedShellCasesRun=False)
+            if normal_boundaries:
+                source_record.update(normalNetworkScope="normal-dns-and-scoped-https-acquisition-syns-only",
+                                     normalHttpRequests=False)
+        if ordinary is not None:
+            source_record.update(**installed_shell_scope_fields(ordinary, lifecycle),
+                **({"recoveryExecution": recovery_scope, "toolsInputPreparationRun": False, "unrelatedShellCasesRun": False}
+                   if recovery else {"remainingRequiredCases": ordinary["remainingRequiredCases"]}),
+                **{key: compiler[key] for key in ("androidBuildMaterials", "androidBuildBindings", "androidBuildPublication")})
+            installed_shell_scope_record(source_record, lifecycle, ordinary, android_contract=True)
+        elif not github:
+            source_record["androidBuildPublication"] = compiler["androidBuildPublication"]
         D.write(public / "source.json", D.canonical(source_record))
         request = {"sourceSha": sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
             "deadline": deadline, "runnerUid": os.getuid(), "runnerGid": os.getgid(), "source": str(source), "taskRoot": str(root),
@@ -3249,20 +5790,110 @@ def verify_installed_shell():
         argv = lifecycle.service_argv(path, pin["sha256"], entry_sha)
         client = check.command("root-shell-connection", argv,
             {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "HOME": str(work / "home")},
-            work, timeout=1200, limit=2 << 20)
-        observed = lifecycle.verify_service_result(path, pin["sha256"], entry_sha, client, public)
-        project_draft = shell_project_draft_observation(observed, lifecycle)
+            work, timeout=1200, codes=(1,) if recovery and recovery_scope["expectedRetainedUnknown"] else (0,), limit=2 << 20)
+        observed = (lifecycle.verify_project_recovery_negative_service_result(path, pin["sha256"], entry_sha, client, public)
+                    if recovery and recovery_scope["expectedRetainedUnknown"] else
+                    lifecycle.verify_service_result(path, pin["sha256"], entry_sha, client, public))
+        if recovery:
+            D.need(observed["projectRecovery"] == recovery_scope and observed["ordinaryActivation"] is False
+                   and observed["sourceSha"] == sha and observed["state"] == lifecycle.result_state(request),
+                   "Recovery original native result/source scope differs")
+            source_check("after")
+            D.need(not check.failed and time.monotonic() < deadline, "Recovery original outer owner/endpoint is incomplete")
+            D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed, "commands": check.commands,
+                "cases": recovery_scope["cases"], "compilerRerun": False, "supplierRebuilt": False, "packageBuilt": False,
+                "upgradeOrRefusalRerun": False, "ordinaryActivation": False,
+                "scope": "project-recovery-retained-unknown-experiment-only" if recovery_scope["expectedRetainedUnknown"]
+                         else "project-recovery-native3-qualification-only"}))
+            D.need(time.monotonic() < deadline, "Recovery result close/readback was late")
+            print("Original project-recovery Q evidence retained; ordinary activation and delivery are not granted.", flush=True)
+            return
+        if release is not None:
+            github_release = shell_github_release_observation(observed, lifecycle, runner_uid=os.getuid(), runner_gid=os.getgid())
+            source_check("after")
+            D.need(not check.failed and time.monotonic() < deadline, "Original GitHub release result endpoint/finality incomplete")
+            D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
+                "githubRelease": github_release, "commands": check.commands, "cases": list(release["cases"]),
+                "compilerRerun": False, "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
+                "normalDestinationAction": False, "normalTransportPositive": False, "serviceQualified": False,
+                "productionToolingDelivered": False, "remainingCoverage": github_release["remainingCoverage"],
+                "scope": "installed-github-release-three-original-journeys-only"}))
+            D.need(time.monotonic() < deadline, "Original release result close/readback was late")
+            print("Three original GitHub release journeys retained after service finality; no normal API action, release evidence, qualification or delivery.", flush=True)
+            return
+        if preflight is not None:
+            github_preflight = shell_github_preflight_observation(observed, lifecycle, runner_uid=os.getuid(), runner_gid=os.getgid())
+            source_check("after")
+            D.need(time.monotonic() < deadline, "Original GitHub preflight result endpoint expired")
+            D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
+                "githubPreflight": github_preflight, "commands": check.commands, "cases": list(preflight["cases"]),
+                "compilerRerun": False, "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
+                "normalDestinationAction": False, "normalTransportPositive": False, "serviceQualified": False,
+                "remainingCoverage": github_preflight["remainingCoverage"],
+                "scope": "installed-github-preflight-five-synthetic-journeys-only"}))
+            D.need(time.monotonic() < deadline, "Original preflight result close/readback was late")
+            print("Five synthetic GitHub preflight journeys retained after original service finality; no normal API action, platform/service qualification or delivery.", flush=True)
+            return
+        if github:
+            github_readonly = shell_github_observation(observed, lifecycle, github_profile, runner_uid=os.getuid(), runner_gid=os.getgid())
+            source_check("after")
+            D.need(time.monotonic() < deadline, "Original GitHub shell result endpoint expired")
+            D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
+                "githubReadOnly": github_readonly, "commands": check.commands,
+                "cases": list(shell["githubReadOnly"]["cases"]), "compilerRerun": False,
+                "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
+                "normalDestinationAction": normal_boundaries, "normalTransportPositive": False,
+                "remainingCoverage": github_readonly["remainingCoverage"],
+                "scope": ("installed-github-normal-DNS-and-scoped-SYN-boundaries-no-normal-HTTP"
+                          if normal_boundaries else "installed-github-readonly-N-startup-and-separated-D-synthetic-cases-only")}))
+            D.need(time.monotonic() < deadline, "Original GitHub result close/readback was late")
+            if normal_boundaries:
+                print("Two original N DNS/SYN boundaries and root policy retirement retained after service finality; no normal HTTP, twenty-two regression rerun, or delivery.", flush=True)
+            else:
+                print("Twenty-two original GitHub synthetic cases retained after service finality; N/D roles remain separate, no normal-destination action or delivery.", flush=True)
+            return
+        project_draft = shell_project_draft_observation(observed, lifecycle, ordinary=ordinary)
         source_check("after")
+        D.need(D.canonical(shell_tools_inputs_for_observation()) == D.canonical(tools_inputs),
+               "Original Tools input preparation or live Git/Python/JDK nodes changed during shell observations")
         D.need(time.monotonic() < deadline, "Original shell result endpoint expired")
-        D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
-            "projectDraft": project_draft, "candidateDocuments": observed["candidateDocuments"], "projectPaths": observed["projectPaths"],
-            "commands": check.commands, "cases": ["normal", "positive", "quit-outstanding", "project-paths"], "compilerRerun": False,
+        native_metadata = android_close_compiler_metadata(check) if same_job else None
+        final_result = {**source_record, "lifecycle": observed,
+            "projectDraft": project_draft, "lifecycleDocuments": observed["lifecycleDocuments"], "projectPaths": observed["projectPaths"],
+            "workflowApply": observed["workflowApply"], "sessionInputs": observed["sessionInputs"], "metadataSave": observed["metadataSave"],
+            "versionSave": observed["versionSave"],
+            "toolsOffline": observed["toolsOffline"], "toolsOfflineQualificationOnly": True, "offlineFullWorkDeadlineExercised": False,
+            **({"namespacePlaceholders": observed["namespacePlaceholders"]} if ordinary is not None else
+               {"androidBuild": observed["androidBuild"], "androidBuildQualificationOnly": True, "androidBuildLimits": lifecycle.SHELL_ANDROID_LIMITS,
+                "androidPublication": observed["androidPublication"]}),
+            "settledFailure": observed["settledFailure"],
+            "commands": check.original_commands if same_job else check.commands, "cases": list(lifecycle.shell_cases(request)), "compilerRerun": False,
             "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
-            "scope": "normal-shell-to-accepted-installed-runtime-connection-only"}))
+            "scope": ("ordinary21-shell-to-accepted-installed-runtime-connection-only" if ordinary is not None
+                      else "normal-shell-to-accepted-installed-runtime-connection-only")}
+        if same_job:
+            final_result["privateCommandMetadata"] = native_metadata
+        installed_shell_scope_record(final_result, lifecycle, ordinary, android_contract=True)
+        D.write(public / "result.json", D.canonical(final_result))
+        if same_job:
+            records = [{**D.file_record(path, MAX_BINARY), "path": path.name} for path in sorted(public.iterdir())]
+            D.need(len(records) + 1 <= 1536 and sum(row["size"] for row in records) <= 2 * LOG_TOTAL
+                   and not check.failed and all(row["ordinaryOwnerReturned"] is True for row in check.commands),
+                   "Android complete native private evidence/owner bound differs")
+            roster_pin = D.write(public / "private-evidence-roster.json", D.canonical({"files": records,
+                "sourceSha": sha, "originalDeadline": repr(deadline), "cleanupClaimed": False}), 0o400)
+            summary = android_native_public_summary(source_record, observed, material,
+                {**{row["path"]: row for row in records}, "private-evidence-roster.json": roster_pin}, lifecycle)
+            D.write(root / "public/android-native-summary.json", D.canonical(summary))
+            D.need({path.name for path in (root / "public").iterdir()} == {"android-native-summary.json"},
+                   "Private Android native output leaked an unapproved public member")
         D.need(time.monotonic() < deadline, "Original shell result close/readback was late")
-        print("Normal window and three original observer cases retained with service finality; no product/package qualification.", flush=True)
+        if ordinary is not None:
+            print("Ordinary21: normal window, nineteen success-requiring observers and one raw-exit1 expected negative retained with service finality; four Android cases remain required; no product/package qualification.", flush=True)
+        else:
+            print("Normal window, twenty-three success-requiring observers and one raw-exit1 expected negative retained with service finality; no product/package qualification.", flush=True)
     except BaseException as error:
-        retain_failure(root, phase if check is None else check.phase, [] if check is None else check.commands, error)
+        retain_failure(root, phase if check is None else check.phase, [] if check is None else check.commands, error, private=same_job)
         raise
 
 
@@ -3276,11 +5907,23 @@ if __name__ == "__main__":
             verify_installed()
         elif sys.argv[1:] == ["installed-shell-compile"]:
             verify_installed_shell_compile()
+        elif sys.argv[1:] == ["installed-shell-source-admission"]:
+            installed_shell_source_admission()
         elif sys.argv[1:] == ["installed-shell"]:
             verify_installed_shell()
+        elif sys.argv[1:] == ["installed-shell-tools-namespace-before"]:
+            shell_tools_namespace_snapshot()
+        elif sys.argv[1:] == ["installed-shell-tools-namespace-check"]:
+            shell_tools_namespace_check()
+        elif sys.argv[1:] == ["installed-shell-tools-before"]:
+            shell_tools_input_snapshot("before")
+        elif sys.argv[1:] == ["installed-shell-tools-after"]:
+            shell_tools_input_snapshot("after")
         else:
             D.need(len(sys.argv) == 1, "Expected a fixed preparation/compiler/installed entry or no-argument lifecycle entry")
             verify()
     except Exception as error:
-        print("Publisher check refused: " + failure_reason(error) + ". Preserve original evidence; no qualification.", file=sys.stderr)
+        private = sys.argv[1:] in (["installed-shell-compile"], ["installed-shell"]) \
+            or os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") == "android-same-job-local-v1"
+        print("Publisher check refused: " + failure_reason(error, private=private) + ". Preserve original evidence; no qualification.", file=sys.stderr)
         raise SystemExit(1)

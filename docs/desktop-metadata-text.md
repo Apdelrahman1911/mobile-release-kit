@@ -1,16 +1,22 @@
 # Guided public metadata text
 
-## Status: source implementation, Save still gated
+## Status: installed Linux Save routing implemented, verification pending
 
 The narrow desktop path is **configure locale → load public text → edit and
 validate → review exact files → confirm typed Save**. This is an app-managed
 preview/save implementation, not a manual-copy substitute. The fixed installed
-Linux profile includes passive text observation and validation; its native
-verification remains pending. The metadata writer and its native qualification
-and packaged-runtime gates remain closed. A visible
-editor, source-authored inert tests, another edit domain's evidence or a browser
-preview does not enable or qualify Save. No test execution or native/Store
-readiness is asserted by this document.
+Linux profile includes passive text observation and validation and now a
+separately sealed metadata writer route. Its installed native verification
+remains pending. General native qualification and packaged-runtime gates
+remain closed. A visible editor, source-authored inert tests, another edit
+domain's evidence or a browser preview does not qualify Save. No new test
+execution or native/Store readiness is asserted by this document.
+
+The source also implements **Inspect recovery → read-only review → separately
+confirm recovery** for this editor's complete, independently checkable persisted
+journals. That does not enable a platform or qualify restart/UI behavior. It uses
+the same gated native domain and original owner; browser preview cannot inspect
+or recover files. Incomplete and legacy journals remain protected conflicts.
 
 The separate metadata writer gate targets Linux x86_64 GNU with strong original
 root registration. It does not inherit configuration/workflow fixture
@@ -19,6 +25,13 @@ uses only the supported POSIX named reader; the staged Windows snapshot reader
 does not enable it. Pure validation is portable. Browser preview may display
 the shipped help, but refuses actual file observation, core validation and Save
 rather than returning successful fixtures.
+
+Only the normal Linux x86_64 GNU `desktop-shell` profile can select this
+installed route, using the existing fixed runtime, original custody and
+platform checks. Development/publisher builds and generic resolvers cannot
+substitute for it. The same edit owner and ledger keep metadata separate from
+configuration and workflows through inspection, preparation, registered-root
+claim, the exact `metadata_text` bootstrap selector and final settlement.
 
 ## One enabled platform and one saved locale
 
@@ -120,7 +133,8 @@ originals/absences and parent facts. Config and ignore are **read-only
 dependencies**, never metadata writable entries. Dependency-only parents are
 not part of target-directory staging or creation.
 
-Before Open, `.gitignore` must conservatively cover the fixed private rules:
+Before metadata Open, `.gitignore` must conservatively cover these original
+**seven** private rules (explicit `METADATA_IGNORE_LINES`):
 
 ```text
 .mobile-release/
@@ -136,7 +150,10 @@ Missing or ambiguous coverage, including conflicting negations, requires a
 separate reviewed configuration save. That configuration operation still has
 exactly two writable destinations: `release/mobile-release.json` and
 `.gitignore`. Only its fixed ignore vocabulary expands; metadata never writes
-ignore rules or bypasses their proof.
+ignore rules or bypasses their proof. Configuration now knows ten rules for
+the separately gated [saved-version VALUE writer](desktop-release-version-edit.md),
+but metadata admission deliberately remains valid with the seven-only list
+above. The version namespace/profile cannot be borrowed as metadata authority.
 
 Prepare accepts the original revision, complete field/text bundle and expected
 baseline. Baseline config and per-file digest/length/absence assertions detect
@@ -177,20 +194,86 @@ Metadata state names are selected **before the first mkdir**:
 .mobile-release-metadata-text-cleanup
 ```
 
-The legacy three-state list/recovery dispatch remains separate. All domains
-reserve both sets and refuse foreign states/aliases before opening or adopting
-them, including an empty metadata preparation or one containing only
+The legacy initialization state list/recovery dispatch remains separate. All
+domains reserve the fixed namespaces and refuse foreign states/aliases before
+opening or adopting them, including an empty preparation or one containing only
 `header.tmp`. Metadata cleanup requires original domain/header/plan/control/
-inventory authority. Incomplete or uncertain preparation is retained. There
-is no generic persisted/crash metadata recovery, automatic journal deletion,
-`init --recover` fallback or mutation retry.
+inventory authority. Incomplete or uncertain preparation is retained.
 
-One original rollback or committed-cleanup attempt is allowed. Known committed
-effect, journal cleanup and resource settlement are separate facts; cleanup
-uncertainty cannot erase a known commit. Only the exact submitted plan with
-ordinary settled native/core finality advances the matching text baseline.
-Unknown/recovery-required state blocks further edit domains rather than
-displaying an unsupported “Saved” or “nothing to recover” claim.
+A normal Save allows only its original rollback or committed-cleanup attempt.
+Known committed effect, journal cleanup and resource settlement are separate
+facts; cleanup uncertainty cannot erase a known commit. Only the exact normal
+submitted plan with ordinary settled native/core finality advances the matching
+text baseline. Recovery never advances that baseline or marks the current draft
+Saved.
+
+## Explicit recovery after interruption or restart
+
+When the native metadata writer is available and its original process/resources
+are known settled, use **Metadata → Inspect recovery** for the registered project.
+First close any live review and wait for its original settlement. Inspection
+requires no normal text checkout, loaded locale or draft; it does not guess a
+journal target from the currently selected locale. A live owner, native-unknown
+resources, configuration/other-domain block or changed registration cannot be
+bypassed by this action.
+
+Only new text/version schema-2 journals contain the original recovery context:
+exact configuration and ignore byte digests plus the saved derived selection.
+On restart, the core's fresh original registered-root lease must independently
+verify those dependencies and the complete bounded control, identity and
+public/private location graph. The selection is still exactly three Android or
+five iOS files. Neither a renderer path/digest summary nor a serialized token
+reconstructs that capability. Read-only dependencies are never writable targets.
+
+Inspect and its read-only Prepare return a closed summary, not raw file text:
+the actual saved platform/locale/root, journal transaction, exact selected paths,
+recorded before/after byte lengths, digests and modes, per-file effects and
+inspected owned-private cleanup counts. Only one supported action is offered:
+
+| Inspected state | Separately confirmed action | Required clean effect |
+| --- | --- | --- |
+| Complete preparation, public originals unchanged | Clean private preparation only | `not_started` |
+| Complete ready journal, no terminal marker | Roll back the interrupted save; never continue it | `rolled_back` |
+| Independently bound prior commit | Keep committed public files; clean its private journal | `committed` |
+| Independently bound prior rollback | Keep rolled-back public files; finish private cleanup | `rolled_back` |
+
+A partly cleaned state is eligible only while enough complete original evidence
+survives to prove one of those actions and its remaining owned subset. An unknown
+empty folder is not proof of ownership or permission to remove it.
+
+Review every summary and open the separate confirmation. A checked
+acknowledgement plus exact typed **RECOVER** submits only that frozen original
+session/revision/plan/action/context. Project, navigation, service generation or
+review-expiry changes retire pre-Apply consent. Closing keeps drafts. A lost
+reply observes the original operation once; it never repeats Apply, opens a
+replacement writer or silently retries cleanup.
+
+Success additionally requires the action-specific effect above, clean journal,
+settled core and native resources, no failure reason and no prior uncertainty or
+late-settled promotion. It clears only this editor's own project journal alert.
+Idle/conflict inspection, discard, cancellation and a historical commit alone do
+not clear attention. Other or unattributed/native-unknown blocks remain.
+
+Every unsaved/newer field, retained normal Save outcome and comparison baseline
+stays separate. Recovery marks earlier observations stale and invalidates existing
+passive/build/offline consent, without making a replacement read or save. Use
+**Load/Refresh**, then the existing explicit comparison/discard controls, to
+reconcile files and drafts before another normal save. Cleaning an earlier commit
+is not saving today's draft. The Recovery page is only a session alert list with
+navigation to this inspection, not a persistent scanner or project-clean check.
+
+### When recovery cannot be proved
+
+Schema-1 legacy journals lack the original context and are not upgraded by
+inference. Incomplete/unreadable controls, contradictory markers, foreign state,
+extra/replaced private objects or changed dependencies/required targets are
+explicit conflicts or truthful I/O/custody failures, not “nothing to recover”.
+Leave public files and private journal names and contents in place. Keep original
+operation details and unsaved drafts separately. Do not delete, rename or reset
+journals, force another edit, use generic `init --recover`, or repeatedly retry.
+Obtain manual reconciliation assistance when the supported route cannot prove
+its action. This is not generic project recovery or a promise to repair every
+interruption state.
 
 ## Bounds and qualification
 
@@ -210,3 +293,24 @@ command admission. Real Save enablement additionally requires independent
 exact-source native original-owner/direct-child, filesystem replacement/fault,
 cancellation/STOP/settlement and installed-resource qualification. None is
 inferred from source review, inert checks or another domain's qualification.
+
+Persisted recovery additionally needs writer-produced complete/partial journals,
+joined first-process interruption and a genuinely new process inspecting and
+confirming them, plus refusal/fault cases and original-resource settlement.
+Frontend promise/DTO regressions prove neither these filesystem facts nor native
+UI restart behavior. The changed core needs a genuine rebuilt source-bound
+runtime and inventory before installed recovery evidence; no old payload or
+other domain's qualification is credited as covering it. Recovery retains the
+existing owner/time/resource caps; its summary alone is at most 16 KiB.
+
+The added installed `metadata-save` observation exercises a real saved Android
+locale, two explicit Reviews and one Apply. Closing the first Review must
+settle its original child and retain the draft; reopening is a new explicit
+review, not a retry of an uncertain write. Save remains disabled until both
+acknowledgment and exact typed `SAVE`. The observer correlates the actual
+plan/revision/session and finality before accepting Saved, then uses Load to
+read the persisted text and quits through the original GUI/relay lifecycle.
+Post-exit inventories separately verify one replaced short description, one
+created full description, preserved title/sentinel/configuration/inputs and
+no pending state. Its 45-second case, 128 DOM evaluations and 2048-byte receipt
+ceilings are unchanged. These are required checks, not claimed native results.

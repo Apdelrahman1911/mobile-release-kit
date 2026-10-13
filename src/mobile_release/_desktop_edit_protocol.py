@@ -9,10 +9,16 @@ from typing import Any
 from ._desktop_engine import ProtocolError, _check_depth, _check_values, _pairs, _constant
 from .metadata_text import (MAX_PREPARED_BYTES, MetadataTextInputError, admit_baseline,
                              locale_value, platform_value, text_fields)
+from .version_text import (MAX_REQUEST_BYTES as VERSION_REQUEST_LIMIT, MAX_OPENED_BYTES as VERSION_OPENED_LIMIT,
+                           MAX_PREPARED_BYTES as VERSION_PREPARED_LIMIT, MAX_RESULT_BYTES as VERSION_RESPONSE_LIMIT,
+                           VersionTextInputError, admit_baseline as version_baseline, values_input)
 
 PROTOCOL = "mrk-config-edit/1"
 WORKFLOW_PROTOCOL = "mrk-github-workflows/1"
 METADATA_PROTOCOL = "mrk-metadata-text/1"
+VERSION_PROTOCOL = "mrk-release-version/1"
+IMAGES_PROTOCOL = "mrk-metadata-images/1"
+INITIALIZATION_PROTOCOL = "mrk-project-initialization/1"
 REQUEST_LIMIT = 1024 * 1024
 RESPONSE_LIMIT = 4 * 1024 * 1024
 WORKFLOW_RESPONSE_LIMIT = 256 * 1024
@@ -75,8 +81,14 @@ def _workflow_value(value: object, *, depth_limit: int, byte_limit: int) -> None
 
 def parse_request(raw: bytes, *, sequence: int, session: str | None,
                   protocol: str = PROTOCOL) -> EditRequest:
-    if (type(protocol) is not str or protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL}
-            or type(raw) is not bytes or not 2 <= len(raw) <= REQUEST_LIMIT
+    if protocol == INITIALIZATION_PROTOCOL:
+        from ._desktop_initialization_protocol import parse_request as parse_initialization
+        return parse_initialization(raw, sequence=sequence, session=session)
+    if protocol == IMAGES_PROTOCOL:
+        from ._desktop_images_protocol import parse_request as parse_images
+        return parse_images(raw, sequence=sequence, session=session)
+    if (type(protocol) is not str or protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL}
+            or type(raw) is not bytes or not 2 <= len(raw) <= (VERSION_REQUEST_LIMIT if protocol == VERSION_PROTOCOL else REQUEST_LIMIT)
             or not raw.endswith(b"\n") or raw[:1] != b"{" or raw[-2:-1] != b"}"
             or b"\r" in raw or b"\n" in raw[:-1]):
         raise ProtocolError("Invalid edit frame")
@@ -101,16 +113,26 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
         raise ProtocolError("Invalid edit envelope")
     op, params = value["op"], value["params"]
     if sequence == 0:
-        if protocol == METADATA_PROTOCOL:
+        recovering_text = protocol in {METADATA_PROTOCOL, VERSION_PROTOCOL} and "intent" in params
+        recovering_config = protocol == PROTOCOL and "intent" in params
+        if recovering_text or recovering_config:
+            names = {"root", "registeredIdentity", "intent"}
+        elif protocol == METADATA_PROTOCOL:
             names = {"root", "registeredIdentity", "platform", "locale"}
-        elif protocol == WORKFLOW_PROTOCOL:
+        elif protocol in {WORKFLOW_PROTOCOL, VERSION_PROTOCOL}:
             names = {"root", "registeredIdentity"}
+            if protocol == WORKFLOW_PROTOCOL and "intent" in params:
+                names.add("intent")
         else:
             names = {"root"}
         valid = op == "open" and set(params) == names and type(params["root"]) is str
-        if valid and protocol in {WORKFLOW_PROTOCOL, METADATA_PROTOCOL}:
+        if valid and (recovering_config or protocol in {WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL}):
             registered_identity(params["registeredIdentity"])
-        if valid and protocol == METADATA_PROTOCOL:
+        if valid and protocol == WORKFLOW_PROTOCOL and "intent" in params:
+            valid = params["intent"] == "recover"
+        if valid and (recovering_text or recovering_config):
+            valid = params["intent"] == "recover"
+        if valid and protocol == METADATA_PROTOCOL and not recovering_text:
             try:
                 platform_value(params["platform"])
                 locale_value(params["locale"])
@@ -118,6 +140,20 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
                 valid = False
     elif op == "discard":
         valid = not params
+    elif sequence == 1 and protocol in {PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL} and params.get("intent") == "recover":
+        valid = (op == "prepare" and set(params) == {"revision", "intent"}
+                 and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None)
+    elif sequence == 1 and protocol == VERSION_PROTOCOL:
+        valid = (op == "prepare" and set(params) == {"revision", "expectedBaseline", "intent", "values"}
+                 and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None
+                 and type(params["intent"]) is str and params["intent"] in {"edit", "create"})
+        if valid:
+            try:
+                values_input(params["values"])
+                expected = version_baseline(params["expectedBaseline"])
+                valid = params["intent"] == ("create" if expected["savedVersion"]["state"] == "absent" else "edit")
+            except VersionTextInputError:
+                valid = False
     elif sequence == 1 and protocol == METADATA_PROTOCOL:
         valid = (op == "prepare" and set(params) == {"revision", "expectedBaseline", "fields"}
                  and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None
@@ -132,18 +168,25 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
             except MetadataTextInputError:
                 valid = False
     elif sequence == 1 and protocol == WORKFLOW_PROTOCOL:
-        valid = (op == "prepare" and set(params) == {"revision", "draft", "toolingRepository", "toolingSha"}
-                 and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None
-                 and type(params["draft"]) is dict
-                 and type(params["toolingRepository"]) is str and len(params["toolingRepository"].encode("utf-8")) <= 140
-                 and type(params["toolingSha"]) is str and len(params["toolingSha"].encode("utf-8")) <= 40)
-        if valid:
-            _workflow_value(params["draft"], depth_limit=28, byte_limit=512 * 1024)
+        if "intent" in params:
+            valid = (op == "prepare" and set(params) == {"revision", "intent"} and params["intent"] == "recover"
+                     and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None)
+        else:
+            valid = (op == "prepare" and set(params) == {"revision", "draft", "toolingRepository", "toolingSha"}
+                     and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None
+                     and type(params["draft"]) is dict
+                     and type(params["toolingRepository"]) is str and len(params["toolingRepository"].encode("utf-8")) <= 140
+                     and type(params["toolingSha"]) is str and len(params["toolingSha"].encode("utf-8")) <= 40)
+            if valid:
+                _workflow_value(params["draft"], depth_limit=28, byte_limit=512 * 1024)
     elif sequence == 1 and protocol == PROTOCOL:
         valid = (op == "prepare" and set(params) == {"revision", "expectedBase", "draft"}
                  and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None
                  and (params["expectedBase"] is None or type(params["expectedBase"]) is dict)
                  and type(params["draft"]) is dict)
+    elif sequence == 2 and protocol in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL} and "intent" in params:
+        valid = (op == "apply" and set(params) == {"planToken", "intent"} and params["intent"] == "recover"
+                 and type(params["planToken"]) is str and TOKEN.fullmatch(params["planToken"]) is not None)
     else:
         valid = (op == "apply" and set(params) == {"planToken"}
                  and type(params["planToken"]) is str and TOKEN.fullmatch(params["planToken"]) is not None)
@@ -153,9 +196,40 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
 
 
 def response(request: EditRequest, kind: str, result: dict[str, Any]) -> bytes:
-    if kind not in {"opened", "prepared", "terminal"} or request.protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL}:
+    if request.protocol == INITIALIZATION_PROTOCOL:
+        from ._desktop_initialization_protocol import response as initialization_response
+        return initialization_response(request, kind, result)
+    if request.protocol == IMAGES_PROTOCOL:
+        from ._desktop_images_protocol import response as images_response
+        return images_response(request, kind, result)
+    if kind not in {"opened", "prepared", "terminal"} or request.protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL}:
         raise ProtocolError("Invalid edit response")
-    if request.protocol == METADATA_PROTOCOL:
+    if request.protocol == PROTOCOL and request.params.get("intent") == "recover" and kind != "terminal":
+        keys = {"revision", "recovery", "scopeResources"} | ({"planToken"} if kind == "prepared" else set())
+        if (type(result) is not dict or set(result) != keys or result["scopeResources"] != "settled"
+                or type(result["recovery"]) is not dict
+                or type(result["recovery"].get("privateCleanup")) is not dict
+                or result["recovery"]["privateCleanup"].get("scope") != "inspected-configuration-journal-only"):
+            raise ProtocolError("Invalid configuration recovery response")
+        _workflow_value(result["recovery"], depth_limit=16, byte_limit=4096)
+    recovering_text = (request.protocol in {METADATA_PROTOCOL, VERSION_PROTOCOL}
+                       and request.params.get("intent") == "recover" and kind != "terminal")
+    if recovering_text:
+        keys = {"revision", "recovery", "scopeResources"} | ({"planToken"} if kind == "prepared" else set())
+        if (type(result) is not dict or set(result) != keys or result["scopeResources"] != "settled"
+                or type(result["recovery"]) is not dict
+                or result["recovery"].get("domain") != ("metadata_text" if request.protocol == METADATA_PROTOCOL else "release_version")):
+            raise ProtocolError("Invalid saved-text recovery response")
+        _workflow_value(result["recovery"], depth_limit=16, byte_limit=16 * 1024)
+    if request.protocol == VERSION_PROTOCOL and not recovering_text:
+        keys = ({"revision", "source", "nameKey", "buildKey", "iosEnabled", "values", "baseline", "scopeResources"}
+                if kind == "opened" else {"revision", "planToken", "view", "scopeResources"} if kind == "prepared" else
+                {"kind", "planToken", "effect", "journal", "resources", "reason"})
+        if (type(result) is not dict or set(result) != keys
+                or kind == "terminal" and result["kind"] != "outcome"
+                or kind != "terminal" and result["scopeResources"] != "settled"):
+            raise ProtocolError("Invalid saved-version edit response")
+    if request.protocol == METADATA_PROTOCOL and not recovering_text:
         keys = ({"revision", "metadataRoot", "baseline", "scopeResources"} if kind == "opened" else
                 {"revision", "planToken", "view", "scopeResources"} if kind == "prepared" else
                 {"kind", "planToken", "effect", "journal", "resources", "reason"})
@@ -169,15 +243,20 @@ def response(request: EditRequest, kind: str, result: dict[str, Any]) -> bytes:
     try:
         if request.protocol == WORKFLOW_PROTOCOL:
             _workflow_value(result, depth_limit=16, byte_limit=WORKFLOW_RESPONSE_LIMIT)
+        elif request.protocol == VERSION_PROTOCOL:
+            _workflow_value(result, depth_limit=16, byte_limit=VERSION_OPENED_LIMIT if kind == "opened" else VERSION_RESPONSE_LIMIT)
+            if kind == "prepared" and not recovering_text:
+                _workflow_value(result["view"], depth_limit=16, byte_limit=VERSION_PREPARED_LIMIT)
         elif request.protocol == METADATA_PROTOCOL:
             _workflow_value(result, depth_limit=16, byte_limit=METADATA_RESPONSE_LIMIT)
-            if kind == "prepared":
+            if kind == "prepared" and not recovering_text:
                 _workflow_value(result["view"], depth_limit=16, byte_limit=MAX_PREPARED_BYTES)
         raw = json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8") + b"\n"
     except (ValueError, UnicodeError, RecursionError, OverflowError):
         raise ProtocolError("Invalid edit response JSON") from None
     limit = (WORKFLOW_RESPONSE_LIMIT if request.protocol == WORKFLOW_PROTOCOL else
-             METADATA_RESPONSE_LIMIT if request.protocol == METADATA_PROTOCOL else RESPONSE_LIMIT)
+             METADATA_RESPONSE_LIMIT if request.protocol == METADATA_PROTOCOL else
+             VERSION_RESPONSE_LIMIT if request.protocol == VERSION_PROTOCOL else RESPONSE_LIMIT)
     if len(raw) > (TERMINAL_LIMIT if kind == "terminal" else limit):
         raise ProtocolError("Edit response exceeded its bound")
     return raw

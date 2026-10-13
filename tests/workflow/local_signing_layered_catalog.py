@@ -139,7 +139,7 @@ SEMANTIC_PLANNING = MappingProxyType({
     "F/15": (19, 3, "Catalog proposal §5 auto-add-ambiguous-create; seed + actual refusal + final locked recovery/fixture-owner; no post-success absent worker"),
     "H/full-context": (50, 1, "PB2 accepted H50/H11/H7; one original full credential/setup/build/cleanup flow; observation adds no model command"),
     "N/native-prefix/database": (19, 3, "PB2 N3 supplement; original3 + fresh automatic refusal0 + actual locked resolution16"),
-    "N/native-prefix/lock": (19, 3, "PB2 N3 supplement; original3 + fresh automatic refusal0 + actual locked resolution16"),
+    "N/native-prefix/lock": (19, 3, "AtomicFile empty-lock create-after; original3 + fresh automatic refusal0 + actual locked resolution16"),
     "N/native-prefix/transaction-stage": (20, 3, "PB2 N3 supplement; original4 + fresh automatic refusal0 + actual locked resolution16"),
     "R/01": (6, 3, "Catalog proposal §3; original seed + interrupted original recovery + fresh declared final recovery"),
     "R/02": (4, 3, "Catalog proposal §3; original seed + interrupted original recovery + fresh declared final recovery"),

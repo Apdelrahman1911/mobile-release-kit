@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::{edit_protocol::{self as edit, bounded, token, Capability, ChildFrame,
     CoreEditOutcome, CoreReason, Effect, Journal, NativeEditReason, NativeFinality, Phase, ResourceState},
     error::BridgeError, github_workflow_edit_protocol::{value_bounds, RegisteredIdentity},
+    saved_text_recovery_protocol as recovery,
     protocol::{check_value, strict_json}};
 
 pub const PROTOCOL: &str = "mrk-metadata-text/1";
@@ -74,7 +75,7 @@ fn relative(path: &str) -> bool {
     }
     true
 }
-fn field_path(root: &str, platform: Platform, locale: &str, id: FieldId) -> String {
+pub(crate) fn field_path(root: &str, platform: Platform, locale: &str, id: FieldId) -> String {
     format!("{}/{}/{}/{}", root, platform.name(), locale, id.name())
 }
 pub(crate) fn target_context(root: &str, platform: Platform, locale: &str) -> bool {
@@ -278,19 +279,28 @@ pub struct Checkout { pub revision: String, pub metadata_root: String, pub basel
 pub struct Prepared { pub revision: String, pub plan_token: String, pub draft_revision: u32, pub baseline_generation: u32, pub view: PreparedView }
 #[derive(Clone)]
 pub(crate) struct Details {
-    pub(crate) platform: Platform, pub(crate) locale: String, pub(crate) checkout: Option<Checkout>, pub(crate) prepared: Option<Prepared>,
-    pub(crate) submission: Option<Submission>,
+    pub(crate) platform: Option<Platform>, pub(crate) locale: Option<String>, pub(crate) checkout: Option<Checkout>, pub(crate) prepared: Option<Prepared>,
+    pub(crate) submission: Option<Submission>, pub(crate) recovery: Option<recovery::Details>,
 }
 impl Details {
-    pub(crate) fn new(context: Context) -> Self { Self { platform: context.platform, locale: context.locale, checkout: None, prepared: None, submission: None } }
+    pub(crate) fn recovery() -> Self { Self { platform: None, locale: None, checkout: None, prepared: None, submission: None, recovery: Some(recovery::Details::default()) } }
+    pub(crate) fn normal_context(&self) -> Option<Context> {
+        if self.recovery.is_some() { return None; }
+        Some(Context { platform: self.platform?, locale: self.locale.clone()? })
+    }
+    pub(crate) fn revision(&self) -> Option<&str> { self.recovery.as_ref().map_or_else(|| self.checkout.as_ref().map(|c| c.revision.as_str()), recovery::Details::revision) }
+    pub(crate) fn plan_token(&self) -> Option<&str> { self.recovery.as_ref().map_or_else(|| self.prepared.as_ref().map(|p| p.plan_token.as_str()), recovery::Details::plan_token) }
+    pub(crate) fn new(context: Context) -> Self { Self { platform: Some(context.platform), locale: Some(context.locale), checkout: None, prepared: None, submission: None, recovery: None } }
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Projection {
     pub domain: &'static str, pub project_id: String, pub session_id: String, pub owner_generation: String,
-    pub platform: Platform, pub locale: String, pub phase: Phase, pub review_remaining_ms: u32,
+    pub platform: Option<Platform>, pub locale: Option<String>, pub phase: Phase, pub review_remaining_ms: u32,
     pub checkout: Option<Checkout>, pub prepared: Option<Prepared>, pub apply_submitted: bool, pub core_outcome: Option<CoreEditOutcome>,
     pub native_reason: NativeEditReason, pub native_finality: NativeFinality, pub late_settled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<recovery::Details>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -332,6 +342,7 @@ pub(crate) fn request(session: &str, seq: u32, op: &str, params: Value) -> Resul
     if !token(session) || seq > 2 { return Err(BridgeError::invalid()); }
     value_bounds(&params, 16, edit::REQUEST_LIMIT)?;
     let legal = match (seq, op) {
+        (0, "open") | (1, "prepare") | (2, "apply") if params["intent"] == "recover" => recovery::private_request(seq, op, &params),
         (0, "open") => PrivateOpen::deserialize(&params).is_ok_and(|p| p.root.len() > 1 && p.root.len() <= 4096
             && !p.root.contains('\0') && p.registered_identity.valid() && (Context { platform: p.platform, locale: p.locale }).valid()),
         (1, "prepare") => PrivatePrepare::deserialize(&params).is_ok_and(|p| token(&p.revision)
@@ -346,6 +357,9 @@ pub(crate) fn request(session: &str, seq: u32, op: &str, params: Value) -> Resul
     let mut bytes = bounded(&value, edit::REQUEST_LIMIT - 1)?; bytes.push(b'\n'); Ok(bytes)
 }
 pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
+    decode_with_intent(bytes, session, false)
+}
+pub(crate) fn decode_with_intent(bytes: &[u8], session: &str, recovering: bool) -> Result<ChildFrame, BridgeError> {
     if !token(session) || bytes.len() > RESPONSE_LIMIT || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
     let body = &bytes[..bytes.len() - 1];
     if body.first() != Some(&b'{') || body.last() != Some(&b'}') || body.iter().any(|b| matches!(*b, b'\r' | b'\n')) { return Err(BridgeError::protocol()); }
@@ -355,13 +369,15 @@ pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeEr
     let raw = &value["result"];
     value_bounds(raw, 16, RESPONSE_LIMIT).map_err(|_| BridgeError::protocol())?;
     match value["kind"].as_str() {
-        Some("opened") if seq == 0 => {
+        Some("opened") if seq == 0 && recovering => Ok(ChildFrame::MetadataTextRecoveryOpened(recovery::opened(raw, edit::EditDomain::MetadataText)?)),
+        Some("prepared") if seq == 1 && recovering => Ok(ChildFrame::MetadataTextRecoveryPrepared(recovery::prepared(raw, edit::EditDomain::MetadataText)?)),
+        Some("opened") if seq == 0 && !recovering => {
             let result = Opened::deserialize(raw).map_err(|_| BridgeError::protocol())?;
             if !token(&result.revision) || !relative(&result.metadata_root) || result.baseline.platform().is_none()
                 || result.scope_resources != ResourceState::Settled { return Err(BridgeError::protocol()); }
             Ok(ChildFrame::MetadataTextOpened(result))
         },
-        Some("prepared") if seq == 1 => {
+        Some("prepared") if seq == 1 && !recovering => {
             let result = PreparedReply::deserialize(raw).map_err(|_| BridgeError::protocol())?;
             if !token(&result.revision) || !token(&result.plan_token) || result.revision == result.plan_token
                 || result.scope_resources != ResourceState::Settled || !result.view.valid() { return Err(BridgeError::protocol()); }
@@ -370,7 +386,7 @@ pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeEr
         Some("terminal") if bytes.len() <= edit::TERMINAL_LIMIT => {
             if !keys(raw, &["kind", "planToken", "effect", "journal", "resources", "reason"]) { return Err(BridgeError::protocol()); }
             let result = TerminalReply::deserialize(raw).map_err(|_| BridgeError::protocol())?;
-            if !result.outcome().valid() || result.plan_token.as_deref().is_some_and(|s| !token(s)) { return Err(BridgeError::protocol()); }
+            if !(if recovering { recovery::outcome_valid(&result.outcome()) } else { result.outcome().valid() }) || result.plan_token.as_deref().is_some_and(|s| !token(s)) { return Err(BridgeError::protocol()); }
             Ok(ChildFrame::MetadataTextTerminal(seq, result))
         },
         _ => Err(BridgeError::protocol()),
@@ -445,6 +461,24 @@ mod tests {
     // In-memory DTO/grammar/correlation only. No filesystem, child, runtime,
     // native registration, credentials or policy qualification is exercised.
     use super::*;
+    #[test]
+    fn saved_text_recovery_frames_require_captured_intent_and_do_not_relax_normal_outcomes() {
+        let session="a".repeat(32); let revision="b".repeat(32);
+        let identity=json!({"device":1,"inode":2,"owner":3,"mode":16832,"ctimeNs":4});
+        // Actual identity spelling is covered by the existing registered-root tests;
+        // public recovery never accepts a caller-supplied identity or source.
+        let public=json!({"projectId":"p","intent":"recover"});
+        assert!(recovery::open(&public).is_ok());
+        let mut bad=public; bad["registeredIdentity"]=identity; assert!(recovery::open(&bad).is_err());
+        let view=json!({"schemaVersion":1,"kind":"saved-text-recovery","domain":DOMAIN,"state":"idle","reason":"none",
+            "action":null,"transactionId":null,"selection":null,"files":[],"privateCleanup":{"fileCount":0,"directoryCount":0,"scope":"inspected-owned-journal-only"}});
+        let mut frame=serde_json::to_vec(&json!({"protocol":PROTOCOL,"session":session,"seq":0,"kind":"opened",
+            "result":{"revision":revision,"recovery":view,"scopeResources":"settled"}})).unwrap(); frame.push(b'\n');
+        assert!(decode(&frame,&session).is_err()); assert!(decode_with_intent(&frame,&session,true).is_ok());
+        let mut frame=serde_json::to_vec(&json!({"protocol":PROTOCOL,"session":session,"seq":0,"kind":"terminal",
+            "result":{"kind":"outcome","planToken":null,"effect":"committed","journal":"recovery_required","resources":"settled","reason":"none"}})).unwrap(); frame.push(b'\n');
+        assert!(decode(&frame,&session).is_err()); assert!(decode_with_intent(&frame,&session,true).is_ok());
+    }
     const SESSION: &str = "0123456789abcdef0123456789abcdef";
     const REVISION: &str = "fedcba9876543210fedcba9876543210";
     const PLAN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -597,9 +631,9 @@ mod tests {
         let encoded = serde_json::to_value(&checkout).unwrap();
         assert!(encoded.get("fields").is_none() && encoded["baseline"]["fields"][0].get("text").is_none());
         let projection = Projection { domain:DOMAIN,project_id:"project-1".into(),session_id:SESSION.into(),owner_generation:REVISION.into(),
-            platform:Platform::Android,locale:"en-US".into(),phase:Phase::Reviewing,review_remaining_ms:900_000,
+            platform:Some(Platform::Android),locale:Some("en-US".into()),phase:Phase::Reviewing,review_remaining_ms:900_000,
             checkout:Some(checkout),prepared:Some(Prepared { revision:REVISION.into(),plan_token:PLAN.into(),draft_revision:1,baseline_generation:0,view }),
-            apply_submitted:false,core_outcome:None,native_reason:NativeEditReason::None,native_finality:NativeFinality::Pending,late_settled:false };
+            apply_submitted:false,core_outcome:None,native_reason:NativeEditReason::None,native_finality:NativeFinality::Pending,late_settled:false,recovery:None };
         let status = MetadataTextEditStatus { schema_version:1,domain:DOMAIN,window_generation:REVISION.into(),status_revision:1,
             capability:Capability { available:false,reason:edit::EditAvailability::RuntimeUnqualified },active:Some(projection.clone()),last_terminal:Some(projection) };
         assert!(bounded(&status,STATUS_LIMIT).is_ok());

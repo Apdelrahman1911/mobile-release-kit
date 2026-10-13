@@ -139,6 +139,43 @@ def expected_result(documents: list[dict]) -> dict:
 
 
 class CandidateEvidenceAdmissionTests(unittest.TestCase):
+    def test_platform_and_posix_prerequisites_control_both_methods_without_io(self):
+        params = {"root": "/selected/evidence", "expectedRoot": {"device": "1", "inode": "2", "mode": 0o40700, "uid": 0, "gid": 0}}
+        methods = ("artifacts.candidate.observe", "release.evidence.observe")
+        for host in ("linux", "linux2", "darwin", "win32", "freebsd", "darwin-extra"):
+            for primitives in (False, True):
+                expected = (host.startswith("linux") or host == "darwin") and primitives
+                with self.subTest(host=host, primitives=primitives), patch.object(sys, "platform", host), \
+                     patch.object(snapshot, "posix_snapshot_available", return_value=primitives), \
+                     patch.object(os, "open", side_effect=AssertionError("filesystem admission")):
+                    self.assertEqual(evidence.candidate_evidence_observation_available(), expected)
+                    rows = {row["method"]: row for row in execute("capabilities", {})["methods"]}
+                    for method in methods:
+                        self.assertIs(rows[method]["available"], expected)
+                        if not expected:
+                            request = params if method == methods[0] else {**params, "stage": "candidate"}
+                            with self.assertRaises(ApiError) as refused:
+                                execute(method, request)
+                            self.assertEqual(refused.exception.code, "artifacts_unavailable")
+
+    def test_darwin_requires_every_original_posix_descriptor_primitive(self):
+        def forbidden(*args, **kwargs):
+            raise AssertionError("availability must not perform IO")
+        facts = {"name": "posix", "O_DIRECTORY": 1, "O_NOFOLLOW": 2, "O_NONBLOCK": 4,
+                 "open": forbidden, "stat": object(), "scandir": object()}
+        facts["supports_dir_fd"] = {facts["open"], facts["stat"]}
+        facts["supports_fd"] = {facts["scandir"]}
+        cases = [("complete", facts, True), ("non-posix", {**facts, "name": "nt"}, False)]
+        for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK"):
+            cases.append((name, {key: value for key, value in facts.items() if key != name}, False))
+        for primitive in ("open", "stat"):
+            cases.append((primitive, {**facts, "supports_dir_fd": facts["supports_dir_fd"] - {facts[primitive]}}, False))
+        cases.append(("scandir", {**facts, "supports_fd": set()}, False))
+        for name, supplied, expected in cases:
+            with self.subTest(prerequisite=name), patch.object(sys, "platform", "darwin"), \
+                 patch.object(snapshot, "os", SimpleNamespace(**supplied)):
+                self.assertIs(evidence.candidate_evidence_observation_available(), expected)
+
     def test_exact_private_identity_params_precede_filesystem_admission(self):
         valid = {"root": "/selected/evidence", "expectedRoot": {"device": "1", "inode": "2", "mode": 0o40700, "uid": 0, "gid": 0}}
         bad = [None, [], {}, {**valid, "path": "PRIVATE"}, {"root": valid["root"]},
@@ -158,7 +195,7 @@ class CandidateEvidenceAdmissionTests(unittest.TestCase):
 
     def test_unsupported_profiles_are_closed_without_io(self):
         params = {"root": "/selected/evidence", "expectedRoot": {"device": "1", "inode": "2", "mode": 0o40700, "uid": 0, "gid": 0}}
-        for platform in ("darwin", "win32", "freebsd"):
+        for platform in ("win32", "freebsd", "darwin-extra"):
             with self.subTest(platform=platform), patch.object(sys, "platform", platform), \
                  patch.object(os, "open", side_effect=AssertionError("filesystem admission")):
                 self.assertFalse(evidence.candidate_evidence_observation_available())
@@ -167,7 +204,7 @@ class CandidateEvidenceAdmissionTests(unittest.TestCase):
                 self.assertEqual(refused.exception.code, "artifacts_unavailable")
 
 
-@unittest.skipUnless(evidence.candidate_evidence_observation_available(), "Linux descriptor reader required")
+@unittest.skipUnless(evidence.candidate_evidence_observation_available(), "Supported POSIX descriptor reader required")
 class CandidateEvidenceObservationTests(unittest.TestCase):
     def assert_error(self, root: Path, code: str, *, params: dict | None = None) -> None:
         with self.assertRaises(ApiError) as refused:
@@ -175,11 +212,25 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
         self.assertEqual(refused.exception.code, code)
         self.assertEqual(refused.exception.message, evidence._ERRORS[code])
 
+    def test_darwin_route_uses_the_original_host_reader_without_more_authority(self):
+        # Platform DATA plus the actual host reader, not AppKit/APFS qualification.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(strict=True)
+            documents = fixture_documents("ios")
+            populate(root, documents)
+            with patch.object(sys, "platform", "darwin"), \
+                 patch.object(snapshot, "_named_text_reads", wraps=snapshot._named_text_reads) as reader:
+                self.assertTrue(evidence.candidate_evidence_observation_available())
+                result = execute("artifacts.candidate.observe", parameters(root))
+            self.assertEqual(reader.call_count, 1)
+            self.assertEqual(result, expected_result(documents))
+            self.assertEqual(result["assurance"], ASSURANCE)
+
     def test_android_and_ios_use_real_validators_and_exact_redacted_contract(self):
         for platform in ("android", "ios"):
             documents = fixture_documents(platform)
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 populate(root, documents)
                 with patch.object(evidence, "validate_evidence_document", wraps=provenance.validate_evidence_document) as document_check, \
                      patch.object(evidence, "validate_operation_intent", wraps=provenance.validate_operation_intent) as intent_check, \
@@ -210,7 +261,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
         documents[2]["artifacts"] = copy.deepcopy(documents[0]["artifacts"])
         fixture_rebind(documents)
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, documents)
             result = execute("artifacts.candidate.observe", parameters(root))
             self.assertEqual(result, expected_result(documents))
@@ -227,7 +278,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
             documents[2][key]["tree"] = "B" * 40
         fixture_rebind(documents)
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, documents)
             result = execute("artifacts.candidate.observe", parameters(root))
             self.assertEqual(result["outcome"], "consistent")
@@ -248,7 +299,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
         documents[2]["artifacts"] = copy.deepcopy(artifacts)
         fixture_rebind(documents)
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, documents)
             result = execute("artifacts.candidate.observe", parameters(root))
             self.assertEqual(result["outcome"], "consistent")
@@ -258,7 +309,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
     def test_only_three_fixed_documents_are_opened_no_publishers_or_payloads(self):
         documents = fixture_documents()
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, documents)
             for name in ("reader-1.2.3-42.aab", "release/mobile-release.json", "release/version.properties", "private.json"):
                 put(root, name, "PRIVATE_SENTINEL")
@@ -288,7 +339,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
 
     def test_missing_is_incomplete_and_present_invalid_dominates_missing(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             result = execute("artifacts.candidate.observe", parameters(root))
             self.assertEqual(result, {"schemaVersion": 1, "outcome": "incomplete", "summary": None,
                                       "documents": [{"kind": kind, "state": "missing"} for kind in KINDS], "assurance": ASSURANCE})
@@ -299,7 +350,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
             self.assertEqual(result["assurance"], ASSURANCE)
         for index in range(3):
             with self.subTest(missing=index), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 documents = fixture_documents()
                 for offset, (name, document) in enumerate(zip(NAMES, documents)):
                     if offset != index:
@@ -322,13 +373,13 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
         values.append(tampered)
         for value in values:
             with self.subTest(value=str(value)[:80]), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 put(root, NAMES[0], value)
                 result = execute("artifacts.candidate.observe", parameters(root))
                 self.assertEqual((result["outcome"], result["summary"]), ("invalid", None))
         for index in (1, 2):
             with self.subTest(stage=index), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 document = copy.deepcopy(baseline[index])
                 document["stage"] = "external-testing"
                 put(root, NAMES[index], fixture_seal(document))
@@ -342,7 +393,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
                 documents = fixture_documents()
                 documents[index][field] = "0" * 64
                 fixture_seal(documents[index])
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 populate(root, documents)
                 result = execute("artifacts.candidate.observe", parameters(root))
                 self.assertEqual(result, {"schemaVersion": 1, "outcome": "inconsistent", "summary": None,
@@ -350,7 +401,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
 
     def test_private_or_legacy_validator_messages_are_never_forwarded(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, fixture_documents())
             with patch.object(evidence, "validate_evidence_document", side_effect=ValidationError("authenticated operation intent PRIVATE_SENTINEL")):
                 result = execute("artifacts.candidate.observe", parameters(root))
@@ -365,11 +416,11 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
                   "[" * 33 + "0" + "]" * 33, json.dumps([0] * 20_000)]
         for value in values:
             with self.subTest(size=len(value)), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 put(root, NAMES[0], value)
                 self.assert_error(root, "artifacts_limit")
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, fixture_documents())
             with patch.object(evidence, "MAX_RESULT_BYTES", 1):
                 self.assert_error(root, "artifacts_limit")
@@ -383,7 +434,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
     def test_exact_two_mib_each_and_six_mib_total_are_admitted_without_extra_files(self):
         documents = fixture_documents()
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             for name, document in zip(NAMES, documents):
                 text = json.dumps(document, separators=(",", ":")).encode()
                 put(root, name, text + b" " * (2 * 1024 * 1024 - len(text)))
@@ -399,7 +450,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
             documents[2]["storePrecondition"]["appIdentity"] = value
             fixture_rebind(documents)
             with self.subTest(value=value), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 populate(root, documents)
                 self.assert_error(root, "artifacts_limit")
         documents = fixture_documents()
@@ -409,13 +460,13 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
         documents[2]["authorizedBy"]["runId"] = "9" * 65
         fixture_rebind(documents)
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, documents)
             self.assert_error(root, "artifacts_limit")
 
     def test_utf8_and_unsafe_root_refusals_are_constant(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             put(root, NAMES[0], b"\xffPRIVATE_SENTINEL")
             self.assert_error(root, "artifacts_encoding")
             for value in (str(root) + "/../alias", "/" + "x" * 4096, "/" + "/".join(["x"] * 129)):
@@ -424,7 +475,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
 
     def test_read_io_refusal_does_not_reflect_path_or_native_exception(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, fixture_documents())
             params = parameters(root)
             original_open = os.open
@@ -440,7 +491,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
 
     def test_original_root_identity_is_checked_before_any_document_read(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, fixture_documents())
             for key in ("device", "inode", "mode", "uid", "gid"):
                 params = parameters(root)
@@ -452,7 +503,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
     def test_root_parent_leaf_links_and_portable_aliases_are_not_followed(self):
         for case in ("root", "parent", "symlink", "hardlink", "alias"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
-                base = Path(temporary)
+                base = Path(temporary).resolve(strict=True)
                 root = base / "evidence"
                 root.mkdir()
                 populate(root, fixture_documents())
@@ -470,12 +521,13 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
                 elif case == "hardlink":
                     os.link(root / NAMES[0], base / "linked-manifest")
                 else:
-                    put(root, "Candidate-Manifest.json", "{}")
+                    # Rename, rather than overwrite a case-insensitive APFS alias.
+                    (root / NAMES[0]).rename(root / "Candidate-Manifest.json")
                 self.assert_error(root, "artifacts_unsafe")
 
     def test_special_foreign_owner_and_foreign_device_refuse_before_leaf_open(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, fixture_documents())
             params = parameters(root)
             original_stat, original_open = os.stat, os.open
@@ -500,7 +552,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
         original_check = snapshot._NamedTextReads.check
         for case in ("leaf", "absence", "ancestor"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
-                base = Path(temporary)
+                base = Path(temporary).resolve(strict=True)
                 root = base / "evidence"
                 root.mkdir()
                 if case != "absence":
@@ -523,7 +575,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
 
     def test_one_cooperative_deadline_includes_pure_validation_and_final_checks(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, fixture_documents())
             clock = [0.0]
             original = evidence.validate_evidence_document
@@ -540,7 +592,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
 
     def test_descriptor_close_uncertainty_attempts_all_original_closes_once(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, fixture_documents())
             params = parameters(root)
             original_open, original_close = os.open, os.close
@@ -569,7 +621,7 @@ class CandidateEvidenceObservationTests(unittest.TestCase):
 
     def test_original_iterator_close_uncertainty_is_not_incomplete(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             put(root, "unrelated", "not opened")
             params = parameters(root)
             original_scandir = os.scandir

@@ -12,6 +12,7 @@ import errno
 import fcntl
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import math
 import os
@@ -28,9 +29,9 @@ import time
 ENTRY = "desktop/tools/ubuntu_publication_lifecycle.py"
 TARGET = "x86_64-unknown-linux-gnu"
 PACKAGE = "mobile-release-kit-desktop"
-M = "e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801"
-F1 = "3a075688d6bc7f69dbdaa017b5327d8ca892e12b49b0c2012a6cbea1f79a6061"
-Q = "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"
+M = "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba"
+F1 = "2e6ca2cac4939019e2ab720eb782ba4ae4e0a61d528e68bbbdc38fa0a53e0e80"
+Q = "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"
 VERSIONS = {"P0": (M, "0.0.0+mrk.lifecycle.0"), "F1": (F1, "0.0.0+mrk.lifecycle.1")}
 ROOT_TEST = "runtime_publication::platform_native_tests::root_exact_ubuntu_platform"
 USER_TEST = "installed_runtime::platform_native_tests::nonroot_exact_ubuntu_platform"
@@ -44,7 +45,622 @@ INSTALLED_TESTS = {key: "supervisor::tests::installed_candidate_a_" + suffix for
     ("overlap", "child_spans_f1_publication"))}
 CHILD_MARKER = "MRK_INSTALLED_NATIVE_CHILD="
 EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
-SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths")
+SHELL_SESSION_CASES = ("session-inputs", "session-refusals", "session-loss", "session-deadline", "session-ios-firebase")
+SHELL_TOOLS_OFFLINE_CASES = ("tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
+                           "offline-drift", "offline-cancel", "offline-settlement")
+SHELL_ANDROID_CASES = ("android-build", "android-build-failure", "android-build-cancel", "android-build-refusals")
+# The historical full25 profile remains exact. The separately selected ordinary
+# profile executes these established21 cases, never four missing Android rows.
+SHELL_ORDINARY_PROFILE = "ordinary21-v1"
+SHELL_ORDINARY_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES, "metadata-save",
+                      *SHELL_TOOLS_OFFLINE_CASES, "settled-failure", "version-save")
+SHELL_CASES = (*SHELL_ORDINARY_CASES, *SHELL_ANDROID_CASES)
+SHELL_RECOVERY_REF = "refs/heads/verify/desktop-project-recovery"
+SHELL_RECOVERY_PROFILE = "project-recovery-native3-v1"
+SHELL_RECOVERY_NEGATIVE_PROFILE = "project-recovery-unknown1-v1"
+SHELL_RECOVERY_COMPILE_PROFILE = "project-recovery-q4-build-v1"
+SHELL_RECOVERY_CASES = ("project-recovery-pending", "project-recovery-cancel", "project-recovery-cleanup-only")
+SHELL_RECOVERY_PARTIAL = "project-recovery-partial"
+SHELL_RECOVERY_ALL_CASES = (*SHELL_RECOVERY_CASES, SHELL_RECOVERY_PARTIAL)
+SHELL_RECOVERY_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_RECOVERY="
+SHELL_RECOVERY_REPORT_LIMIT = 8192
+SHELL_RECOVERY_INVENTORY_LIMIT = 128 << 10
+SHELL_RECOVERY_LOADER_BEFORE = "project-recovery-negative-loader-before.json"
+SHELL_RECOVERY_INTERVAL = "project-recovery-negative-interval.json"
+SHELL_RECOVERY_NEGATIVE_SECONDS = 30
+SHELL_RECOVERY_BYTES = {
+    "android-original": b"synthetic original Android input\n",
+    "ios-original": b"synthetic original iOS input\n",
+    "android-foreign": b"synthetic foreign Android input; preserve\n",
+    "ios-foreign": b"synthetic foreign iOS input; preserve\n",
+    "later-edit": b"synthetic legitimate edit after original cleanup\n",
+    "unrelated": b"unrelated synthetic file; preserve\n",
+    "ignore": b".mobile-release/\n",
+}
+# Executed once only by the already admitted original command owner, using the
+# accepted installed interpreter/core. No subprocess, invented journal, guard
+# override or copied-owner recovery. The two observation seams are restored
+# across the full original scope unwind. A child0 attests expected *failed*
+# materialization generation, never successful core cleanup.
+SHELL_RECOVERY_PRODUCER = r'''import errno, json, os, sys, threading
+from pathlib import Path, PurePosixPath
+def need(ok):
+    if not ok: raise RuntimeError("fixed recovery fixture refused")
+need(len(sys.argv)==4 and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode)
+core, raw_root, case=sys.argv[1:]
+need(case in ("project-recovery-pending","project-recovery-cancel","project-recovery-cleanup-only","project-recovery-partial"))
+root=Path(raw_root)
+need(root.is_absolute() and root.name=="project" and root.parent.name==case and Path(core).is_absolute())
+need(threading.current_thread() is threading.main_thread() and threading.active_count()==1)
+sys.path.insert(0, core)
+from mobile_release import build_inputs as inputs
+from mobile_release.owned_process import ProcessError
+need(inputs.__file__.startswith(core+"/") and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)
+original_init=inputs._FD.__init__
+original_retire=inputs._retire_terminal
+slots=[]
+retirement_calls=[]
+def observed_init(self, guard):
+    original_init(self, guard)
+    need(len(slots)<2048)
+    slots.append(self)
+def retirement_stop(project, terminal, binding):
+    need(case=="project-recovery-cleanup-only" and not retirement_calls)
+    need(project is invocation._original_project and terminal["quiescence"]=="original")
+    retirement_calls.append(True)
+    raise OSError(errno.EIO,"fixed synthetic metadata retirement interruption")
+def foreign(original, name, content):
+    slot=inputs._FD(original.cancellation)
+    with inputs._fd_cleanup(slot):
+        fd=slot.open(root/name, os.O_WRONLY|os.O_TRUNC|os.O_NOFOLLOW)
+        need(os.write(fd,content)==len(content))
+        os.fsync(fd)
+invocation=original=None
+caught=None
+inputs._FD.__init__=observed_init
+if case=="project-recovery-cleanup-only": inputs._retire_terminal=retirement_stop
+try:
+    try:
+        with inputs.invocation_custody(root,mode="build") as invocation:
+            with invocation.project(signing_lease=None):
+                with invocation.materialization(signing_lease=None) as original:
+                    original.replace_all((
+                        inputs.TargetReplacement("android-services",PurePosixPath("google-services.json"),b"synthetic temporary Android input\n"),
+                        inputs.TargetReplacement("ios-services",PurePosixPath("GoogleService-Info.plist"),b"synthetic temporary iOS input\n"),
+                    ))
+                    if case=="project-recovery-partial":
+                        foreign(original,"google-services.json",b"synthetic foreign Android input; preserve\n")
+                    if case!="project-recovery-cleanup-only":
+                        foreign(original,"GoogleService-Info.plist",b"synthetic foreign iOS input; preserve\n")
+    except BaseException as error:
+        caught=error
+finally:
+    inputs._FD.__init__=original_init
+    inputs._retire_terminal=original_retire
+# NO core operation or filesystem access below: inspect the original retained
+# objects and emit bounded closed DATA to the original stdout only.
+need(type(caught) is ProcessError and invocation is not None and original is not None
+     and caught.dispatched is False and caught.contained is True and caught.cleanup_complete is False)
+guard=invocation.cancellation
+ledger=guard._ledger
+project=invocation._original_project
+attempted=[slot for slot in slots if slot.open_state!="NEW"]
+never_opened=[slot for slot in slots if slot.open_state=="NEW"]
+need(0<len(attempted)<=2048 and len(attempted)+len(never_opened)==len(slots))
+need(all(slot.guard is guard and slot.open_state in ("OPEN","NO_EFFECT") and slot.close_state=="CLOSED" and slot.number is None for slot in attempted))
+need(all(slot.guard is guard and slot.number is None and slot.close_state in ("NOT_ATTEMPTED","CLOSED") for slot in never_opened))
+need(guard._restoration=="RESTORED" and ledger._fatal and ledger._command is None and ledger._profile is None
+     and ledger._commands==ledger._profile_calls==0 and ledger._command_dispatched is False and ledger._profile_dispatched is False
+     and ledger._profile_contained is True and ledger._command_contained is True)
+need(invocation.claimed and not invocation.active and not invocation.reserved and not invocation.frames
+     and invocation.child is None and invocation.project_owner is None and invocation.store_namespace is None
+     and invocation.reservation_state=="RELEASED" and invocation.lock_result is None and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)
+need(project is not None and project.claimed and original.claimed and original.quiescence=="original" and not original.failed)
+need(inputs._FD.__init__ is original_init and inputs._retire_terminal is original_retire)
+need(len(retirement_calls)==int(case=="project-recovery-cleanup-only"))
+primary=ledger._primary
+if case=="project-recovery-cleanup-only":
+    need(type(primary) is OSError and primary.errno==errno.EIO and primary.args==(errno.EIO,"fixed synthetic metadata retirement interruption"))
+else:
+    need(type(primary) is inputs.BuildInputError and primary.args==("build inputs: intervening target must be preserved",))
+restored={row["role"]:row["restored"] for row in original.records}
+expected={"android-services":case!="project-recovery-partial","ios-services":case=="project-recovery-cleanup-only"}
+need(restored==expected and all(type(x) is bool for x in restored.values()))
+report={"schemaVersion":1,"scope":"real-core-project-recovery-fixture-v1","case":case,
+    "materializationOutcome":"expected-cleanup-failure","coreFatal":True,"commands":0,"profileCalls":0,
+    "attemptedDescriptors":len(attempted),"neverOpenedDescriptors":len(never_opened),
+    "attemptedDescriptorsClosed":True,"handlersRestored":True,"invocationReleased":True,
+    "originalQuiescenceRecorded":True,"retirementInterceptions":len(retirement_calls),"observersRestored":True,
+    "restored":restored,"followupCoreOrFilesystemOperation":False}
+raw=json.dumps(report,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode("ascii")+b"\n"
+need(len(raw)<=2048)
+sys.stdout.buffer.write(raw)
+sys.stdout.buffer.flush()
+'''
+SHELL_PUBLIC_FILE_LIMIT = 190  # Exact25-case root roster:188, exported:190; non-shell remains128.
+SHELL_FIXTURE_NAMESPACE_LIMIT = 2048
+SHELL_FAILURE_LABEL_LIMIT = 512
+SHELL_PATH_FAILURE_FRAME_BOUND = 256
+SHELL_PATH_FAILURE_V2_FRAME_BOUND = 384  # Same512B sink; no change to historical v1.
+SHELL_PATH_FAILURE_V3_FRAME_BOUND = 384  # v2 plus five closed chooser bytes; no larger sink.
+SHELL_SESSION_FAILURE_FRAME_BOUND = 466  # v3 only; historical v1/v2 admission stays unchanged.
+SHELL_SESSION_FAILURE_V4_FRAME_BOUND = 492  # Same 512B sink; ;af= plus at most 22B.
+SHELL_SESSION_FAILURE_V5_FRAME_BOUND = 509  # v4 plus ;u= and at most 14B; no larger sink.
+SHELL_SESSION_FAILURE_V6_FRAME_BOUND = 507  # v5 - 7B (eval) + 5B (;g= and two closed bytes).
+SHELL_SESSION_FAILURE_V7_FRAME_BOUND = 512  # v6 + exactly 5B (;h= and two closed bytes); same sink.
+SHELL_EVIDENCE_CHECKS = (
+    b"status-pending", b"bridge", b"case", b"observe-pending", b"observe-returned", b"observe-requests",
+    b"revision", b"schema", b"availability", b"previous-revision", b"equal-revision", b"operation-order",
+    b"operation", b"operation-kind", b"operation-selection", b"operation-stage", b"phase", b"problem", b"result", b"selection",
+    b"selection-witness", b"selection-format", b"selection-name", b"selection-changed", b"choose-requests",
+    b"cancel-status", b"picker-activated", b"cancelled", b"observation-present", b"observation-changed")
+SHELL_EVIDENCE_PHASES = (b"na", b"idle", b"choosing", b"selected", b"observing", b"observed", b"stopping", b"cancelled", b"refused", b"unknown")
+SHELL_EVIDENCE_PROBLEMS = (b"na", b"none", b"unavailable", b"busy", b"cancelled", b"stale-selection", b"unsafe-selection",
+                           b"observation-failed", b"limit", b"deadline", b"cleanup-unknown")
+SHELL_EVIDENCE_ERRORS = (b"none", b"unavailable", b"busy", b"cancelled", b"stale-selection", b"unsafe-selection",
+                         b"observation-failed", b"limit", b"deadline", b"cleanup-unknown", b"invalid", b"runtime-unavailable",
+                         b"protocol", b"shutdown", b"query-timeout", b"other")
+SHELL_SNAPSHOT_CHECKS = (b"bridge", b"project", b"root", b"scope", b"config-path", b"config-state", b"config-issues",
+                         b"config-data", b"issues", b"discovery-state", b"discovery-partial", b"assurance",
+                         b"request-count", b"already-observed", b"stage", b"other-callback")
+# Literal observer labels only; never a prefix parser or raw-output escape.
+SHELL_FAILURE_STEPS = (
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Environment\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEnvironment\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Dashboard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseCancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Cancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Cancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadCancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SettledFailure\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseSelect\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SetProject\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectProject\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Selected\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSnapshot\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Settings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Suggest\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSuggestion\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Adopt\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GuidanceEnvironment\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LoadRequirements\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadRequirements\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHub\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubGuidanceReady\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubGuidanceReload\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadGitHubEmpty\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterRepository\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterSha\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadGitHubInputs\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ProposeGitHub\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadProposal\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=OpenWorkflows\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadWorkflows\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GuidanceSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadRetainedDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareSave\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSaveReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=OpenConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=KeepReviewing\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadKeptReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReopenConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadReopenedConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Acknowledge\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadAcknowledged\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Apply\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSaved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SavedDashboard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Refresh\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadReadback\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadVersion\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadVersionCard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Metadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LoadMetadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadMetadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterTitle\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterShortDescription\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterFullDescription\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadMetadataInputs\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ValidateMetadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadMetadataValidation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SavedSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSavedDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Artifacts\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceEmpty\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseEvidenceCancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=CancelEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceCancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceCancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseEvidenceSelect\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SetEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceSelected\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceSelected\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=InspectEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceObserved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceObserved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LifecycleReleases\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadLifecycleReleases\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LifecycleRecovery\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadLifecycleRecovery\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LifecycleControls\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChangeEvidenceStage\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceStage\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseEvidenceReplacement\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceReplacementReady\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=RequestEvidenceStop\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceStopped\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceStale\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=StaleArtifacts\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadStaleArtifacts\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=StaleRecovery\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadStaleRecovery\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=CandidateSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadCandidateDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareNoop\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadNoopReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Close\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Quit\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Exit\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathPreview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathBrowse\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathSet\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathActivate\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathSettlement\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathField\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathNavigation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowGitHub\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowPin\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadPin\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowStart\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowOpenText\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowConfirm\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowKeep\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadKept\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReconfirm\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadReconfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowAcknowledge\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadAcknowledged\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowApply\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowClose\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadResult\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionNavigate\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionOpen\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionContext\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionConfigure\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionChoose\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionSetFile\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionActivateFile\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionCapture\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionFields\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionPrepare\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionKeep\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionAssign\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionRecord\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionRemove\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionStaleAction\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionDiscard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReload\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionLoss\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionDeadline\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionQuitCancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionQuitPreserved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionFinality\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataNavigate\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataLoad\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadLoaded\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataShort\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataFull\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadInputs\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataValidate\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadValidation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataOpenText\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataCloseReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadClosed\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataConfirm\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataCheck\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadChecked\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataType\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadTyped\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataApply\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadSaved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataRefresh\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadReadback\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ToolsOffline\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ProjectRecovery\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionOpen\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadOpen\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionName\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionBuild\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadInputs\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionConfirm\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionCheck\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadChecked\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionType\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadTyped\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionApply\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadSaved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadback\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadReadback\n",
+)
+SHELL_FAILURE_BOUNDARIES = (
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=request\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=result\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=exit\n",
+)
+SHELL_BOOTSTRAP_PROGRESS = (
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=not-sampled\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=attachment\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=page-load\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=original-registry-sample\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=app-info-catalog\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=held-app-info\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=app-info-returned-before-hold\n",
+)
+# Only public observer categories; these do not establish native state/finality.
+SHELL_PATH_REJECTIONS = (
+    b"not-recorded", b"gtk-thread", b"gtk-dialog-book", b"gtk-dialog-original", b"gtk-owner-binding",
+    b"gtk-owner-interrupted", b"gtk-owner-facts", b"gtk-dialog-properties", b"gtk-initial-folder", b"gtk-target",
+    b"gtk-selection-setter", b"gtk-response-widget", b"gtk-action-widget", b"gtk-observer-endpoint", b"gtk-dialog-record",
+    b"gtk-selection-state", b"gtk-activation-state", b"gtk-filename-state", b"gtk-filename-absent", b"gtk-filename-different",
+    b"gtk-fixture-transition", b"gtk-response-state", b"gtk-response-contract", b"gtk-return-state", b"gtk-dispatch",
+    b"gtk-destroy-state", b"gtk-release-state",
+)
+SHELL_SESSION_REJECTIONS = (
+    b"not-recorded", b"unknown-native-snapshot", b"native-readiness-invariant", b"evaluation-budget",
+    b"unavailable-projection-script", b"evaluation-dispatch", b"step-pending-invariant",
+    b"gtk-thread", b"gtk-dialog-book", b"gtk-dialog-original", b"gtk-owner-binding", b"gtk-owner-interrupted", b"gtk-owner-facts",
+    b"gtk-dialog-properties", b"gtk-selection-setter", b"gtk-response-widget", b"gtk-action-widget", b"gtk-dialog-record",
+    b"gtk-observer-endpoint", b"gtk-selection-state", b"gtk-activation-state", b"gtk-filename-state", b"gtk-filename-absent",
+    b"gtk-filename-different", b"gtk-response-state", b"gtk-response-contract", b"gtk-return-role", b"gtk-return-state",
+    b"gtk-destroy-state", b"gtk-release-state",
+    b"lost-native-snapshot",
+    b"unbound-native-snapshot",
+    b"request-counter-underflow",
+    b"request-counter-surplus",
+    b"stale-reply-contract",
+    b"capability-cleanup-unknown",
+    b"capability-shutdown",
+    b"capability-document-lost",
+    b"capability-unsupported-platform",
+    b"capability-unqualified",
+    b"capability-closed",
+    b"capability-unavailable",
+    b"reply-asset-invalid-request",
+    b"reply-asset-closed",
+    b"reply-asset-unqualified",
+    b"reply-asset-unsupported-platform",
+    b"reply-asset-unsupported-fs",
+    b"reply-asset-unsupported-format",
+    b"reply-asset-busy",
+    b"reply-asset-source-refused",
+    b"reply-asset-source-changed",
+    b"reply-asset-material-limit",
+    b"reply-asset-parser-limit",
+    b"reply-asset-project-overlap",
+    b"reply-asset-excl-unconfirmed",
+    b"reply-asset-capacity",
+    b"reply-assessment-context-stale",
+    b"reply-asset-user-cancelled",
+    b"reply-asset-review-expired",
+    b"reply-asset-deadline",
+    b"reply-asset-document-lost",
+    b"reply-asset-shutdown",
+    b"reply-asset-cleanup-unknown",
+    b"reply-assessment-invalid-request",
+    b"reply-assessment-limit",
+    b"reply-assessment-version",
+    b"reply-assessment-policy-stale",
+    b"reply-assessment-context-invalid",
+    b"reply-assessment-unavailable",
+    b"reply-busy",
+    b"reply-shutting-down",
+    b"reply-query-timeout",
+    b"reply-cleanup-unknown",
+    b"reply-code-unavailable",
+)
+SHELL_SESSION_WAITS = (
+    b"not-sampled", b"request-not-yet-seen", b"native-reply-pending", b"original-owner-unsettled",
+    b"native-phase-not-ready", b"rendered-display-mismatch", b"rendered-control-mismatch",
+    b"gtk-dialog-absent", b"gtk-action-insensitive", b"gtk-selection-pending",
+)
+# v1-v5 retain their exact historical spellings and parsed shapes.
+SHELL_SESSION_V6_WAITS = (
+    b"not-sampled", b"request-not-yet-seen", b"native-reply-pending", b"original-owner-unsettled",
+    b"native-phase-not-ready", b"rendered-display-mismatch", b"rendered-control-mismatch",
+    b"gtk-dialog-absent", b"gtk-action-insensitive", b"gtk-selection-absent", b"gtk-selection-different",
+)
+SHELL_SESSION_GTK_CALLBACKS = (b"na", b"0i", b"0p", b"0w", b"1i", b"1p", b"1w", b"mi", b"mp", b"mw")
+# First byte: mapped flag/current-folder relation. Second: selected GFile relation.
+# na alone means not sampled; false/absent are real observations, not unknown.
+SHELL_SESSION_PICKER_FOLDERS = {
+    b"0": (False, "absent"), b"1": (False, "target-parent"), b"2": (False, "other"),
+    b"3": (True, "absent"), b"4": (True, "target-parent"), b"5": (True, "other"),
+}
+SHELL_SESSION_PICKER_SELECTIONS = {
+    b"a": "absent", b"t": "target", b"p": "target-parent", b"f": "firebase-peer", b"o": "other",
+}
+# v2 first document transition, plus a single later cached original R1 sample.
+# Neither association nor none-recorded establishes causation or settlement.
+SHELL_SESSION_ORIGINS = (
+    b"not-recorded", b"op-cleanup", b"registry", b"coord-lock", b"coord-join", b"supervisor-disabled",
+    b"staged-collision", b"install-retire", b"retain-retire", b"drain-retire", b"staged-refusal", b"gate-poisoned", b"exhausted",
+)
+SHELL_SESSION_DETAILS = (
+    b"none", b"deadline", b"review-expired", b"context-stale", b"cleanup-unknown", b"user-cancelled", b"shutdown",
+    b"document-lost", b"other", b"new", b"pending", b"returned", b"failed", b"unavailable",
+)
+SHELL_SESSION_ASSOCIATIONS = (b"bound", b"unassociated")
+SHELL_SESSION_QUERY_ERRORS = (b"none", b"timeout", b"cleanup", b"shutdown", b"protocol", b"engine", b"io", b"busy", b"unavailable", b"other")
+SHELL_SESSION_QUERY_CAUSES = (
+    b"none", b"sel-profile", b"sel-compile", b"sel-method", b"inspection", b"acq-entry", b"acq-custody", b"acq-lock",
+    b"capability", b"prepare", b"final-gate", b"final-claim", b"spawn-pfd", b"spawn-sfd", b"spawn-mem", b"spawn-res",
+    b"spawn-deny", b"spawn-miss", b"spawn-exec", b"spawn-other", b"response",
+)
+# v5's immutable first Unknown edge, not a worker or document failure cause.
+SHELL_SESSION_UNKNOWN_BOUNDARIES = (
+    b"na", b"unavailable", b"not-recorded", b"unspecified", b"transfer", b"inspection", b"acquisition",
+    b"native-observe", b"settlement", b"management", b"observer-loss", b"reply-loss", b"clock",
+    b"retire-clock", b"child-missing", b"child-wait", b"io", b"restore-limit", b"dev-observe",
+)
+# v3 original Prepare error provenance, independent of firstOrigin/Q/K.
+SHELL_SESSION_ASSESSMENT_ORIGINS = (b"none", b"request", b"bridge", b"result")
+SHELL_SESSION_ASSESSMENT_BRIDGE_CLASSES = (
+    b"runtime-unavailable", b"protocol", b"engine", b"io", b"output-limit", b"assessment-unavailable",
+    b"known-assessment", b"busy", b"shutdown", b"timeout", b"cleanup", b"retryable", b"other",
+)
+SHELL_SESSION_ASSESSMENT_RESULT_CLASSES = (b"value", b"bound", b"shape", b"dto", b"semantics")
+# v4 preserves the same original AdmissionFailure, never infers native state.
+SHELL_SESSION_ASSESSMENT_ADMISSIONS = (
+    b"na", b"unsupported-platform", b"missing-compile-anchor", b"stopped", b"deadline",
+    b"native-unavailable", b"native-denied", b"namespace", b"mount", b"ownership",
+    b"extended-attributes", b"identity-changed", b"manifest", b"inventory", b"bounds",
+    b"already-used", b"interrupted", b"close-uncertain", b"ledger-invariant",
+    b"transfer-unavailable", b"destination-occupied",
+)
+SHELL_SESSION_MANAGEMENT_JOINS = b"prmcxfi"
+# Exact refused public-spelling IDs only; not a prefix/grammar or object/cause claim.
+# Canonical roster body SHA-256: bf18de45262438226bbc80a1cc8a3c078821b4a1dc88ec16a00961c05c990710
+SHELL_SESSION_PUBLIC_MAP_WORKERS = (
+    b"map-x-aa", b"map-x-ab", b"map-x-ac", b"map-x-ad", b"map-x-ae", b"map-x-af", b"map-x-ag", b"map-x-ah", b"map-x-ai",
+    b"map-x-aj", b"map-x-ak", b"map-x-al", b"map-x-am", b"map-x-an", b"map-x-ao", b"map-x-ap", b"map-x-aq", b"map-x-ar",
+    b"map-x-as", b"map-x-at", b"map-x-au", b"map-x-av", b"map-x-aw", b"map-x-ax", b"map-x-ay", b"map-x-az", b"map-x-ba",
+    b"map-x-bb", b"map-x-bc", b"map-x-bd", b"map-x-be", b"map-x-bf", b"map-x-bg", b"map-x-bh", b"map-x-bi", b"map-x-bj",
+    b"map-x-bk", b"map-x-bl", b"map-x-bm", b"map-x-bn", b"map-x-bo", b"map-x-bp", b"map-x-bq", b"map-x-br", b"map-x-bs",
+    b"map-x-bt", b"map-x-bu", b"map-x-bv", b"map-x-bw", b"map-x-bx", b"map-x-by", b"map-x-bz", b"map-x-ca", b"map-x-cb",
+    b"map-x-cc", b"map-x-cd", b"map-x-ce", b"map-x-cf", b"map-x-cg", b"map-x-ch", b"map-x-ci", b"map-x-cj", b"map-x-ck",
+    b"map-x-cl", b"map-x-cm", b"map-x-cn", b"map-x-co", b"map-x-cp", b"map-x-cq", b"map-x-cr", b"map-x-cs", b"map-x-ct",
+    b"map-x-cu", b"map-x-cv", b"map-x-cw", b"map-x-cx", b"map-x-cy", b"map-x-cz", b"map-x-da", b"map-x-db", b"map-x-dc",
+    b"map-x-dd", b"map-x-de", b"map-x-df", b"map-x-dg", b"map-x-dh", b"map-x-di", b"map-x-dj", b"map-x-dk", b"map-x-dl",
+    b"map-x-dm", b"map-x-dn", b"map-x-do", b"map-x-dp", b"map-x-dq", b"map-x-dr", b"map-x-ds", b"map-x-dt", b"map-x-du",
+    b"map-x-dv", b"map-x-dw", b"map-x-dx", b"map-x-dy", b"map-x-dz", b"map-x-ea", b"map-x-eb", b"map-x-ec", b"map-x-ed",
+    b"map-x-ee", b"map-x-ef", b"map-x-eg", b"map-x-eh", b"map-x-ei", b"map-x-ej", b"map-x-ek", b"map-x-el", b"map-x-em",
+    b"map-x-en", b"map-x-eo", b"map-x-ep", b"map-x-eq", b"map-x-er", b"map-x-es", b"map-x-et", b"map-x-eu", b"map-x-ev",
+    b"map-x-ew", b"map-x-ex", b"map-x-ey", b"map-x-ez", b"map-x-fa", b"map-x-fb", b"map-x-fc", b"map-x-fd", b"map-x-fe",
+    b"map-x-ff", b"map-x-fg", b"map-x-fh", b"map-x-fi", b"map-x-fj", b"map-x-fk", b"map-x-fl", b"map-x-fm", b"map-x-fn",
+    b"map-x-fo", b"map-x-fp", b"map-x-fq", b"map-x-fr", b"map-x-fs", b"map-x-ft", b"map-x-fu", b"map-x-fv", b"map-x-fw",
+    b"map-x-fx", b"map-x-fy", b"map-x-fz", b"map-x-ga", b"map-x-gb", b"map-x-gc", b"map-x-gd", b"map-x-ge", b"map-x-gf",
+    b"map-x-gg", b"map-x-gh", b"map-x-gi", b"map-x-gj", b"map-x-gk", b"map-x-gl", b"map-x-gm", b"map-x-gn", b"map-x-go",
+    b"map-x-gp", b"map-x-gq", b"map-x-gr", b"map-x-gs", b"map-x-gt", b"map-x-gu", b"map-x-gv", b"map-x-gw", b"map-x-gx",
+    b"map-x-gy", b"map-x-gz", b"map-x-ha", b"map-x-hb", b"map-x-hc", b"map-x-hd", b"map-x-he", b"map-x-hf", b"map-x-hg",
+    b"map-x-hh", b"map-x-hi", b"map-x-hj", b"map-x-hk", b"map-x-hl", b"map-x-hm", b"map-x-hn", b"map-x-ho", b"map-x-hp",
+    b"map-x-hq", b"map-x-hr", b"map-x-hs", b"map-x-ht", b"map-x-hu", b"map-x-hv", b"map-x-hw", b"map-x-hx", b"map-x-hy",
+    b"map-x-hz", b"map-x-ia", b"map-x-ib", b"map-x-ic", b"map-x-id", b"map-x-ie", b"map-x-if", b"map-x-ig", b"map-x-ih",
+    b"map-x-ii", b"map-x-ij", b"map-x-ik", b"map-x-il", b"map-x-im", b"map-x-in", b"map-x-io", b"map-x-ip", b"map-x-iq",
+    b"map-x-ir", b"map-x-is", b"map-x-it", b"map-x-iu", b"map-x-iv", b"map-x-iw", b"map-x-ix", b"map-x-iy", b"map-x-iz",
+    b"map-x-ja", b"map-x-jb", b"map-x-jc", b"map-x-jd", b"map-x-je", b"map-x-jf", b"map-x-jg", b"map-x-jh", b"map-x-ji",
+    b"map-x-jj", b"map-x-jk", b"map-x-jl", b"map-x-jm", b"map-x-jn", b"map-x-jo", b"map-x-jp", b"map-x-jq", b"map-x-jr",
+    b"map-x-js", b"map-x-jt", b"map-x-ju", b"map-x-jv", b"map-x-jw", b"map-x-jx", b"map-x-jy", b"map-x-jz", b"map-x-ka",
+    b"map-x-kb", b"map-x-kc", b"map-x-kd", b"map-x-ke", b"map-x-kf", b"map-x-kg", b"map-x-kh", b"map-x-ki", b"map-x-kj",
+    b"map-x-kk", b"map-x-kl", b"map-x-km", b"map-x-kn", b"map-x-ko", b"map-x-kp", b"map-x-kq", b"map-x-kr", b"map-x-ks",
+    b"map-x-kt", b"map-x-ku", b"map-x-kv", b"map-x-kw", b"map-x-kx", b"map-x-ky", b"map-x-kz", b"map-x-la", b"map-x-lb",
+    b"map-x-lc", b"map-x-ld", b"map-x-le", b"map-x-lf", b"map-x-lg", b"map-x-lh", b"map-x-li", b"map-x-lj", b"map-x-lk",
+    b"map-x-ll", b"map-x-lm", b"map-x-ln", b"map-x-lo", b"map-x-lp", b"map-x-lq", b"map-x-lr", b"map-x-ls", b"map-x-lt",
+    b"map-x-lu", b"map-x-lv", b"map-x-lw", b"map-x-lx", b"map-x-ly", b"map-x-lz", b"map-x-ma", b"map-x-mb", b"map-x-mc",
+    b"map-x-md", b"map-x-me", b"map-x-mf", b"map-x-mg", b"map-x-mh", b"map-x-mi", b"map-x-mj", b"map-x-mk", b"map-x-ml",
+    b"map-x-mm", b"map-x-mn", b"map-x-mo", b"map-x-mp", b"map-x-mq", b"map-x-mr", b"map-x-ms", b"map-x-mt", b"map-x-mu",
+    b"map-x-mv", b"map-x-mw", b"map-x-mx", b"map-x-my", b"map-x-mz", b"map-x-na", b"map-x-nb", b"map-x-nc", b"map-x-nd",
+    b"map-x-ne", b"map-x-nf", b"map-x-ng", b"map-x-nh", b"map-x-ni", b"map-x-nj", b"map-x-nk", b"map-x-nl", b"map-x-nm",
+    b"map-x-nn", b"map-x-no", b"map-x-np", b"map-x-nq", b"map-x-nr", b"map-x-ns", b"map-x-nt", b"map-x-nu", b"map-x-nv",
+    b"map-x-nw", b"map-x-nx", b"map-x-ny", b"map-x-nz", b"map-x-oa", b"map-x-ob", b"map-x-oc", b"map-x-od", b"map-x-oe",
+    b"map-x-of", b"map-x-og", b"map-x-oh", b"map-x-oi", b"map-x-oj", b"map-x-ok", b"map-x-ol", b"map-x-om", b"map-x-on",
+    b"map-x-oo", b"map-x-op", b"map-x-oq", b"map-x-or", b"map-x-os", b"map-x-ot", b"map-x-ou", b"map-x-ov", b"map-x-ow",
+    b"map-x-ox", b"map-x-oy", b"map-x-oz", b"map-x-pa", b"map-x-pb", b"map-x-pc", b"map-x-pd", b"map-x-pe", b"map-x-pf",
+    b"map-x-pg", b"map-x-ph", b"map-x-pi", b"map-x-pj", b"map-x-pk", b"map-x-pl", b"map-x-pm", b"map-x-pn", b"map-x-po",
+    b"map-x-pp", b"map-x-pq", b"map-x-pr", b"map-x-ps", b"map-x-pt", b"map-x-pu", b"map-x-pv", b"map-x-pw", b"map-x-px",
+    b"map-x-py", b"map-x-pz", b"map-x-qa", b"map-x-qb", b"map-x-qc", b"map-x-qd", b"map-x-qe", b"map-x-qf", b"map-x-qg",
+    b"map-x-qh", b"map-x-qi", b"map-x-qj", b"map-x-qk", b"map-x-ql", b"map-x-qm", b"map-x-qn", b"map-x-qo", b"map-x-qp",
+    b"map-x-qq", b"map-x-qr", b"map-x-qs", b"map-x-qt", b"map-x-qu", b"map-x-qv", b"map-x-qw", b"map-x-qx", b"map-x-qy",
+    b"map-x-qz", b"map-x-ra", b"map-x-rb", b"map-x-rc", b"map-x-rd", b"map-x-re", b"map-x-rf", b"map-x-rg", b"map-x-rh",
+    b"map-x-ri", b"map-x-rj", b"map-x-rk", b"map-x-rl", b"map-x-rm", b"map-x-rn", b"map-x-ro", b"map-x-rp", b"map-x-rq",
+    b"map-x-rr", b"map-x-rs", b"map-x-rt", b"map-x-ru", b"map-x-rv", b"map-x-rw", b"map-x-rx", b"map-x-ry", b"map-x-rz",
+    b"map-x-sa", b"map-x-sb", b"map-x-sc", b"map-x-sd", b"map-x-se", b"map-x-sf", b"map-x-sg", b"map-x-sh", b"map-x-si",
+    b"map-x-sj", b"map-x-sk", b"map-x-sl", b"map-x-sm", b"map-x-sn", b"map-x-so", b"map-x-sp", b"map-x-sq", b"map-x-sr",
+    b"map-x-ss", b"map-x-st", b"map-x-su", b"map-x-sv", b"map-x-sw", b"map-x-sx", b"map-x-sy", b"map-x-sz", b"map-x-ta",
+    b"map-x-tb", b"map-x-tc", b"map-x-td", b"map-x-te", b"map-x-tf", b"map-x-tg", b"map-x-th", b"map-x-ti", b"map-x-tj",
+    b"map-x-tk", b"map-x-tl", b"map-x-tm", b"map-x-tn", b"map-x-to", b"map-x-tp", b"map-x-tq", b"map-x-tr", b"map-x-ts",
+    b"map-x-tt", b"map-x-tu", b"map-x-tv", b"map-x-tw", b"map-x-tx", b"map-x-ty", b"map-x-tz", b"map-x-ua", b"map-x-ub",
+    b"map-x-uc", b"map-x-ud", b"map-x-ue", b"map-x-uf", b"map-x-ug", b"map-x-uh", b"map-x-ui", b"map-x-uj", b"map-x-uk",
+    b"map-x-ul", b"map-x-um", b"map-x-un", b"map-x-uo", b"map-x-up", b"map-x-uq", b"map-x-ur", b"map-x-us", b"map-x-ut",
+    b"map-x-uu", b"map-x-uv", b"map-x-uw", b"map-x-ux", b"map-x-uy", b"map-x-uz", b"map-x-va", b"map-x-vb", b"map-x-vc",
+    b"map-x-vd", b"map-x-ve", b"map-x-vf", b"map-x-vg", b"map-x-vh", b"map-x-vi", b"map-x-vj", b"map-x-vk", b"map-x-vl",
+    b"map-x-vm", b"map-x-vn", b"map-x-vo", b"map-x-vp", b"map-x-vq", b"map-x-vr", b"map-x-vs", b"map-x-vt", b"map-x-vu",
+    b"map-x-vv", b"map-x-vw", b"map-x-vx", b"map-x-vy", b"map-x-vz", b"map-x-wa", b"map-x-wb", b"map-x-wc", b"map-x-wd",
+    b"map-x-we", b"map-x-wf", b"map-x-wg", b"map-x-wh", b"map-x-wi", b"map-x-wj", b"map-x-wk", b"map-x-wl", b"map-x-wm",
+    b"map-x-wn", b"map-x-wo", b"map-x-wp", b"map-x-wq", b"map-x-wr", b"map-x-ws", b"map-x-wt", b"map-x-wu", b"map-x-wv",
+    b"map-x-ww", b"map-x-wx", b"map-x-wy", b"map-x-wz", b"map-x-xa", b"map-x-xb", b"map-x-xc", b"map-x-xd", b"map-x-xe",
+    b"map-x-xf", b"map-x-xg", b"map-x-xh", b"map-x-xi", b"map-x-xj", b"map-x-xk", b"map-x-xl", b"map-x-xm", b"map-x-xn",
+    b"map-x-xo", b"map-x-xp", b"map-x-xq", b"map-x-xr", b"map-x-xs", b"map-x-xt", b"map-x-xu", b"map-x-xv", b"map-x-xw",
+    b"map-x-xx", b"map-x-xy", b"map-x-xz", b"map-x-ya", b"map-x-yb", b"map-x-yc", b"map-x-yd", b"map-x-ye", b"map-x-yf",
+    b"map-x-yg", b"map-x-yh", b"map-x-yi", b"map-x-yj", b"map-x-yk", b"map-x-yl", b"map-x-ym", b"map-x-yn", b"map-x-yo",
+    b"map-x-yp", b"map-x-yq", b"map-x-yr", b"map-x-ys", b"map-x-yt", b"map-x-yu", b"map-x-yv", b"map-x-yw", b"map-x-yx",
+)
+# K's accepted fail-only spelling/history partition. These static labels do not
+# admit a mapping, identify a path or change the14/412/512-byte failure bounds.
+SHELL_SESSION_GENERIC_MAP_WORKERS = (
+    b"map-x-v-na", b"map-x-v-np", b"map-x-v-da", b"map-x-v-dp",
+    b"map-x-l-na", b"map-x-l-np", b"map-x-l-da", b"map-x-l-dp",
+    b"map-x-c-na", b"map-x-c-np", b"map-x-c-da", b"map-x-c-dp",
+    b"map-x-h-na", b"map-x-h-np", b"map-x-h-da", b"map-x-h-dp",
+    b"map-x-m-na", b"map-x-m-np", b"map-x-m-da", b"map-x-m-dp",
+    b"map-x-o-na", b"map-x-o-np", b"map-x-o-da", b"map-x-o-dp",
+)
+# Same refused Hosted row only: twelve lexical spellings, eight numeric
+# relations. Neither field is identity/admission; the original bounds stay fixed.
+SHELL_SESSION_HOSTED_MAP_WORKERS = (
+    b"map-xh-sz", b"map-xh-sa", b"map-xh-sp", b"map-xh-ss", b"map-xh-sc", b"map-xh-sm", b"map-xh-sd", b"map-xh-sx",
+    b"map-xh-nz", b"map-xh-na", b"map-xh-np", b"map-xh-ns", b"map-xh-nc", b"map-xh-nm", b"map-xh-nd", b"map-xh-nx",
+    b"map-xh-tz", b"map-xh-ta", b"map-xh-tp", b"map-xh-ts", b"map-xh-tc", b"map-xh-tm", b"map-xh-td", b"map-xh-tx",
+    b"map-xh-iz", b"map-xh-ia", b"map-xh-ip", b"map-xh-is", b"map-xh-ic", b"map-xh-im", b"map-xh-id", b"map-xh-ix",
+    b"map-xh-pz", b"map-xh-pa", b"map-xh-pp", b"map-xh-ps", b"map-xh-pc", b"map-xh-pm", b"map-xh-pd", b"map-xh-px",
+    b"map-xh-lz", b"map-xh-la", b"map-xh-lp", b"map-xh-ls", b"map-xh-lc", b"map-xh-lm", b"map-xh-ld", b"map-xh-lx",
+    b"map-xh-cz", b"map-xh-ca", b"map-xh-cp", b"map-xh-cs", b"map-xh-cc", b"map-xh-cm", b"map-xh-cd", b"map-xh-cx",
+    b"map-xh-qz", b"map-xh-qa", b"map-xh-qp", b"map-xh-qs", b"map-xh-qc", b"map-xh-qm", b"map-xh-qd", b"map-xh-qx",
+    b"map-xh-rz", b"map-xh-ra", b"map-xh-rp", b"map-xh-rs", b"map-xh-rc", b"map-xh-rm", b"map-xh-rd", b"map-xh-rx",
+    b"map-xh-gz", b"map-xh-ga", b"map-xh-gp", b"map-xh-gs", b"map-xh-gc", b"map-xh-gm", b"map-xh-gd", b"map-xh-gx",
+    b"map-xh-uz", b"map-xh-ua", b"map-xh-up", b"map-xh-us", b"map-xh-uc", b"map-xh-um", b"map-xh-ud", b"map-xh-ux",
+    b"map-xh-fz", b"map-xh-fa", b"map-xh-fp", b"map-xh-fs", b"map-xh-fc", b"map-xh-fm", b"map-xh-fd", b"map-xh-fx",
+)
+SHELL_SESSION_WORKERS = (
+    b"na", b"unavailable", b"none-recorded", b"child-id", b"observe-entry", b"maps-read", b"maps-check", b"env-read", b"env-check",
+    b"hold-refused", b"settle-unknown", b"exec-read", b"exec-check",
+    # Same-read refusal categories, not raw values or an inferred root cause.
+    # Historical maps-check above remains generic and distinguishable.
+    b"map-p-utf", b"map-p-nl", b"map-p-row", b"map-p-cols", b"map-p-addr", b"map-p-order", b"map-p-perm", b"map-p-offset", b"map-p-dev", b"map-p-inode",
+    b"map-x-anon", b"map-x-pseudo", b"map-x-file",
+    # Same refused row matches a historical admission tuple, NOT live content.
+    b"map-x-hist-py", b"map-x-hist-ss", b"map-x-hist-cr",
+    b"map-m-stat-py", b"map-m-type-py", b"map-m-owner-py", b"map-m-links-py", b"map-m-mode-py", b"map-m-inode-py", b"map-m-dev-py", b"map-dup-py",
+    b"map-m-stat-ss", b"map-m-type-ss", b"map-m-owner-ss", b"map-m-links-ss", b"map-m-mode-ss", b"map-m-inode-ss", b"map-m-dev-ss", b"map-dup-ss",
+    b"map-m-stat-cr", b"map-m-type-cr", b"map-m-owner-cr", b"map-m-links-cr", b"map-m-mode-cr", b"map-m-inode-cr", b"map-m-dev-cr", b"map-dup-cr",
+    b"map-m-stat-ld", b"map-m-type-ld", b"map-m-owner-ld", b"map-m-links-ld", b"map-m-mode-ld", b"map-m-inode-ld", b"map-m-dev-ld", b"map-dup-ld",
+    b"map-m-stat-lc", b"map-m-type-lc", b"map-m-owner-lc", b"map-m-links-lc", b"map-m-mode-lc", b"map-m-inode-lc", b"map-m-dev-lc", b"map-dup-lc",
+    b"map-m-stat-lm", b"map-m-type-lm", b"map-m-owner-lm", b"map-m-links-lm", b"map-m-mode-lm", b"map-m-inode-lm", b"map-m-dev-lm", b"map-dup-lm",
+    *SHELL_SESSION_GENERIC_MAP_WORKERS, *SHELL_SESSION_PUBLIC_MAP_WORKERS, *SHELL_SESSION_HOSTED_MAP_WORKERS,
+)
+SHELL_SESSION_WORKER_STAGES = (b"inspect", b"acquire", b"observe", b"write", b"stdout", b"stderr", b"settle")
+SHELL_SESSION_WORKER_JOINS = b"cxf"
 SHELL_PATH_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_PATHS="
 SHELL_PATH_RECEIPT = {'assetAuthorityCreated': False,
  'cancel': [{'field': 'version.source', 'operation': 3}, {'field': 'metadata.root', 'operation': 7}],
@@ -98,7 +714,1023 @@ SHELL_PATH_MOVES = {
 }
 SHELL_PATH_ABSENT = ("path-project/.gitignore", "path-project/release", "path-project/.mobile-release",
     "path-project/.mobile-release-init-prepare", "path-project/.mobile-release-init", "path-project/.mobile-release-init-cleanup",
-    "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup")
+    "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup",
+    "path-project/.mobile-release-version-prepare", "path-project/.mobile-release-version", "path-project/.mobile-release-version-cleanup",
+    "path-project/.mobile-release-metadata-images-prepare", "path-project/.mobile-release-metadata-images", "path-project/.mobile-release-metadata-images-cleanup")
+
+SHELL_WORKFLOW_MARKER = b"MRK_INSTALLED_SHELL_WORKFLOW_APPLY="
+SHELL_WORKFLOW_RECEIPT = {
+    "schemaVersion": 1, "fixture": "android-workflow-apply-v1", "gate": "installed-workflow-profile",
+    "project": {"cancelSettled": True, "registered": True, "snapshot": True, "adopted": True},
+    "requests": {"open": 4, "prepare": 4, "apply": 2, "close": 1, "configuration": [0, 0, 0, 0]},
+    "draft": {"wholeMatched": True, "revision": 1, "baselineGeneration": 1, "unsavedReads": 4, "neverSaved": True},
+    "pins": {"explicit": True, "changed": True, "restored": True, "browserEdit": "insertText"},
+    "reviews": {"fullText": True, "canonicalUpdates": 4, "updateClosedWithoutApply": True, "configBlocked": 4},
+    "confirmation": {"opened": [2, 0, 1, 0], "keepReviewing": True, "acknowledged": 2},
+    "outcomes": [["committed", "clean", "settled", "none"], ["not_started", "not_created", "settled", "cancelled"],
+                 ["unchanged", "not_created", "settled", "none"], ["not_started", "not_created", "settled", "cancelled"]],
+    "nativeReasons": ["none", "discarded", "none", "shutdown"],
+    "originals": {"sessions": 4, "writerFrames": [3, 2, 3, 2], "stdoutFrames": [3, 3, 3, 3],
+                  "startupJoined": 4, "childWaited": 4, "ioSettled": 4, "ownersJoined": 4,
+                  "runtimeLedgerSettled": 4, "runtimeSettlementJoined": 4},
+    "quit": {"operation": 3, "pendingReview": True, "gtkSettled": True, "originalsSettled": True, "relayJoined": True, "exit": True},
+}
+# Private, entirely fictional DATA for the existing installed observer. These
+# headers establish format recognition only, never usable signing keys. Scalar
+# input stays in the original write-only controls, not in fixture files.
+SHELL_SESSION_JKS = b"\xfe\xed\xfe\xed\0\0\0\2\0\0\0\0"
+SHELL_SESSION_REPLACEMENT_JKS = b"\xfe\xed\xfe\xed\0\0\0\1\0\0\0\0"
+SHELL_SESSION_FIREBASE = b'{"client":[{"client_info":{"android_client_info":{"package_name":"org.assessment.fixture"}}}]}\n'
+SHELL_SESSION_FIREBASE_MISMATCH = b'{"client":[{"client_info":{"android_client_info":{"package_name":"org.assessment.other"}}}]}\n'
+SHELL_SESSION_CONFIG = b'''{
+  "android": {"applicationId": "org.assessment.fixture", "enabled": true, "identityStatus": "unverified"},
+  "ios": {"enabled": false},
+  "metadata": {"androidLocales": ["en-US"], "iosLocales": [], "root": "release/store"},
+  "projectChecks": {"androidArtifact": [], "iosArtifact": [], "preflight": []},
+  "schemaVersion": 1,
+  "services": {"androidFirebase": "required", "iosFirebase": "disabled"},
+  "source": {"candidateBranch": "main", "productionBranch": "main", "projectReadTokenRequired": true},
+  "version": {"buildKey": "BUILD_NUMBER", "nameKey": "VERSION_NAME", "source": "version.properties"}
+}
+'''
+SHELL_SESSION_IOS_FIREBASE_CONFIG = b'''{
+  "android": {"applicationId": "org.assessment.fixture", "enabled": true, "identityStatus": "unverified"},
+  "ios": {"bundleId": "org.assessment.fixture", "enabled": true, "identityStatus": "unverified"},
+  "metadata": {"androidLocales": ["en-US"], "iosLocales": ["en-US"], "root": "release/store"},
+  "projectChecks": {"androidArtifact": [], "iosArtifact": [], "preflight": []},
+  "schemaVersion": 1,
+  "services": {"androidFirebase": "required", "iosFirebase": "required"},
+  "source": {"candidateBranch": "main", "productionBranch": "main", "projectReadTokenRequired": true},
+  "version": {"buildKey": "BUILD_NUMBER", "nameKey": "VERSION_NAME", "source": "version.properties"}
+}
+'''
+SHELL_SESSION_IOS_FIREBASE = b'<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>BUNDLE_ID</key><string>org.assessment.fixture</string></dict></plist>\n'
+SHELL_SESSION_IOS_FIREBASE_MISMATCH = b'<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>BUNDLE_ID</key><string>org.assessment.other</string></dict></plist>\n'
+SHELL_SESSION_ABSENT = ("project/.gitignore", "project/.mobile-release", "project/.mobile-release-init-prepare",
+    "project/.mobile-release-init", "project/.mobile-release-init-cleanup", "project/release/store")
+SHELL_SESSION_MARKER = b"MRK_INSTALLED_SHELL_SESSION_INPUTS="
+SHELL_SESSION_INVENTORY_LIMIT = 8192
+SHELL_SESSION_RECEIPT_LIMIT = 4096
+SHELL_SESSION_R1_LIMIT = 16
+SHELL_SESSION_RECEIPTS = {case: {
+    "schemaVersion": 1, "case": case,
+    "profile": "installed-linux-session-ios-firebase" if case == "session-ios-firebase" else "installed-linux-session-inputs",
+    "methods": "thirteen-passive-including-supplied-input-assessment",
+    "project": {"cancelSettled": True, "selectedSettled": True, "snapshotMatched": True},
+    "safety": {"persistentStorage": False, "storeContacted": False, "signingVerified": False, "releaseReady": False},
+    "originals": {"assetJoined": True, "sourceClosed": True, "r1Joined": True, "guiSettled": True, "relayJoined": True, "exit": True},
+    "behavior": behavior,
+} for case, behavior in (
+    ("session-inputs", {
+        "kinds": ["android-keystore", "android-firebase", "google-wif", "project-read-token"],
+        "assessments": 7, "fileChoosers": 3, "capturedFiles": 3, "kept": 5, "assigned": 6,
+        "reassessedWithoutRecapture": True, "contextRevoked": True, "replacementSameIdNextRevision": True,
+        "removed": 1, "quitCancelPreserved": True,
+    }),
+    ("session-refusals", {
+        "assessments": 6, "fileChoosers": 9, "capturesClosed": 8,
+        "sourceRefusals": ["project-overlap", "source-refused", "source-refused", "source-changed"],
+        "missingCompanionRefused": True, "firebaseMismatchRefused": True, "staleKeepRefused": True,
+        "staleAssignRefused": True, "cancelledReplacementPreservedBytes": True,
+        "cancelledReplacementRevokedAssignment": True, "discardReopenEmpty": True,
+    }),
+    ("session-loss", {
+        "assessments": 1, "fileChoosers": 1, "navigationDenied": True, "lostStatusRedacted": True,
+        "oldCallbacksRefused": True, "noRebind": True, "noLateSuccess": True, "lossHoldReleasedByOriginalStop": True,
+    }),
+    ("session-deadline", {
+        "assessments": 1, "fileChoosers": 1, "originalDeadline": True, "firstCleanupPreserved": True,
+        "noPreview": True, "queryResult": "query_timeout", "assetReason": "deadline",
+    }),
+    ("session-ios-firebase", {
+        "kinds": ["ios-firebase"], "assessments": 2, "fileChoosers": 3,
+        "capturedFiles": 2, "capturesClosed": 2, "kept": 1, "assigned": 1,
+        "xmlFormatAndBundleIdentityMatched": True, "firebaseMismatchRefused": True,
+        "cancelledReplacementPreservedBytes": True, "cancelledReplacementRevokedAssignment": True,
+        "discardReopenEmpty": True,
+    }),
+)}
+# Closed synthetic project DATA from the PF01/PF02/PF06 fixture recipes.
+# The configured interpreter is already an original lifecycle TOOLS input.
+# check.py is trusted project code, not a bootstrap, Gradle shim or isolation.
+# Fixed Android engineering successor. These are proposed interoperability
+# versions, NOT authenticated supplier material or native compatibility evidence.
+SHELL_ANDROID_MARKER = b"MRK_INSTALLED_SHELL_ANDROID_BUILD="
+SHELL_ANDROID_RECEIPT_LIMIT = 64 << 10
+SHELL_ANDROID_INVENTORY_LIMIT = 16 << 10
+# Deliberately absent until separate material/OS-closure review supplies ALL four
+# exact selectors. Never fill this from host environment, a cache or a download.
+# The complete AGP/plugin-marker/transitive file repository must already be
+# included under gradle/repository in the existing tool manifest and its caps.
+# Rust's separately reviewed OS_CONTRACT_BYTES is also required; this DATA is
+# neither custody nor qualification and cannot make that absent profile usable.
+SHELL_ANDROID_MATERIALS = None
+# Exact reviewed DATA, not acquisition instructions or an execution permit.
+# The three documents are supplied under the fixed task-local admitted-android
+# root. Never place the material rows themselves in the 1MiB service handoff.
+# This remains absent until the actual tool/OS/source documents and totals are
+# accepted together. No host/environment fallback may populate it.
+SHELL_ANDROID_PUBLICATION_DATA = None
+SHELL_ANDROID_DOCUMENT_NAMES = {"manifest": "android-toolchain.json", "osContract": "os-contract.json",
+                                "sources": "source-rows.json"}
+SHELL_ANDROID_DOCUMENT_LIMITS = {"manifest": 4 << 20, "osContract": 1 << 20, "sources": 4 << 20}
+SHELL_ANDROID_TOTAL_KEYS = {"toolFiles", "toolDirectories", "toolBytes", "osFiles", "osAliases", "osBytes"}
+SHELL_ANDROID_CONFIG = "{\"schemaVersion\":1,\"version\":{\"source\":\"release/version.properties\",\"nameKey\":\"VERSION_NAME\",\"buildKey\":\"BUILD_NUMBER\"},\"source\":{\"candidateBranch\":\"main\",\"productionBranch\":\"main\"},\"android\":{\"enabled\":true,\"module\":\":app\",\"variant\":\"release\",\"applicationId\":\"org.example.saved\",\"identityStatus\":\"unverified\"},\"ios\":{\"enabled\":false},\"metadata\":{\"root\":\"release/store\",\"androidLocales\":[\"en-US\"],\"iosLocales\":[]},\"services\":{\"androidFirebase\":\"disabled\",\"iosFirebase\":\"disabled\"},\"projectChecks\":{\"preflight\":[],\"androidArtifact\":[],\"iosArtifact\":[]}}\n".encode("ascii")
+SHELL_ANDROID_VERSION = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
+SHELL_ANDROID_VERSION_PATH = "project/release/version.properties"
+SHELL_ANDROID_TRACE = "project/native-stage.trace"
+SHELL_ANDROID_DIRECTORIES = (".", "project", "project/.git", "project/app", "project/app/build",
+    "project/app/src", "project/app/src/main", "project/app/src/main/java", "project/app/src/main/java/org",
+    "project/app/src/main/java/org/example", "project/app/src/main/java/org/example/saved", "project/build",
+    "project/gradle", "project/gradle/wrapper", "project/release")
+SHELL_ANDROID_GENERATED = ("project/.mobile-release", "project/app/build", "project/build")
+SHELL_ANDROID_SETTINGS = "pluginManagement {\n    // Set before any plugin resolution; this is fixture policy, not a sandbox.\n    gradle.startParameter.offline = true\n    repositories { maven { url = uri('{repository}') } }\n}\ndependencyResolutionManagement {\n    repositoriesMode.set(org.gradle.api.initialization.resolve.RepositoriesMode.FAIL_ON_PROJECT_REPOS)\n    repositories { maven { url = uri('{repository}') } }\n}\nrootProject.name = 'InstalledAndroidFixture'\ninclude(':app')\n"
+SHELL_ANDROID_APP_PREFIX = "plugins { id 'com.android.application' version '8.9.2' }\nandroid {\n    namespace 'org.example.saved'\n    compileSdk 35\n    buildToolsVersion '35.0.0'\n    defaultConfig {\n        applicationId 'org.example.saved'\n        minSdk 23\n        targetSdk 35\n        versionCode Integer.parseInt(System.getenv('MOBILE_RELEASE_BUILD_NUMBER'))\n        versionName System.getenv('MOBILE_RELEASE_VERSION_NAME')\n    }\n    buildTypes { release { minifyEnabled false } }\n}\ntasks.register('mrkNativeBoundary') {\n    doLast {\n        new FileOutputStream(rootProject.file('native-stage.trace'), true).withCloseable { out ->\n            out.write('active\\n'.getBytes('US-ASCII'))\n            out.getFD().sync()\n        }\n"
+SHELL_ANDROID_APP_SUFFIX = "    }\n}\ntasks.matching { it.name == 'preReleaseBuild' }.configureEach { dependsOn tasks.named('mrkNativeBoundary') }\n"
+SHELL_ANDROID_STATIC_FILES = {
+    "project/.gitignore": "/.mobile-release/\n/.gradle/\n/build/\n/app/build/\n".encode("ascii"),
+    "project/gradlew": "#!/bin/sh\n# Desktop must use its protected Gradle, never this fallback.\nexit 70\n".encode("ascii"),
+    "project/app/src/main/AndroidManifest.xml": "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"><application android:label=\"Native Android\"><activity android:name=\".MainActivity\" android:exported=\"false\"/></application></manifest>\n".encode("ascii"),
+    "project/app/src/main/java/org/example/saved/MainActivity.java": "package org.example.saved;\npublic final class MainActivity extends android.app.Activity {}\n".encode("ascii"),
+    "project/release/mobile-release.json": SHELL_ANDROID_CONFIG,
+}
+SHELL_ANDROID_SELECTION = {"module": ":app", "variant": "release", "applicationId": "org.example.saved", "task": ":app:bundleRelease"}
+SHELL_ANDROID_CHECKS = ("aab-structure", "aab-manifest", "application-id", "build-number", "version-name",
+    "release-flags", "signer", "core-lifecycle", "other-core-finding")
+SHELL_ANDROID_LIMITATIONS = ["saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated",
+    "post-run-bytes-may-be-incremental-reused-or-stale", "source-binding-not-established", "artifact-signer-not-inspected",
+    "toolkit-signing-not-requested", "store-operation-not-requested", "release-readiness-not-assessed",
+    "local-output-observation-not-current-file-authority", "core-terminal-requires-original-native-finality"]
+SHELL_ANDROID_LIMITS = {key: False for key in ("normalActivation", "work3000Expiry", "privateJvmProfile",
+    "noAutoInstall", "allHelperNativeGates", "networkIsolated")}
+
+
+def shell_android_materials(materials=None):
+    """Closed source selector DATA, not a host search, installer or permit."""
+    value = SHELL_ANDROID_MATERIALS if materials is None else materials
+    need(type(value) is dict and set(value) == {"instance", "manifestSha256", "osContractSha256", "distributionSha256"},
+         "Android native material/OS-closure binding is pending; no Android fixture or tool may run")
+    need(type(value["instance"]) is str and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", value["instance"]) is not None
+         and all(type(value[key]) is str and re.fullmatch(r"[0-9a-f]{64}", value[key]) is not None
+                 for key in ("manifestSha256", "osContractSha256", "distributionSha256")),
+         "Fixed reviewed Android material selectors differ")
+    return dict(value)
+
+
+def shell_android_compile_environment(materials=None):
+    """The ONE normal+observer Cargo invocation receives identical selectors."""
+    value = shell_android_materials(materials)
+    return {"MRK_ANDROID_TOOL_INSTANCE": value["instance"], "MRK_ANDROID_TOOL_MANIFEST_SHA256": value["manifestSha256"],
+            "MRK_ANDROID_OS_CONTRACT_SHA256": value["osContractSha256"]}
+
+
+def shell_android_publication_data(materials=None, data=None):
+    """Closed source DATA; compilation and copying do not qualify this profile."""
+    materials = shell_android_materials(materials)
+    value = SHELL_ANDROID_PUBLICATION_DATA if data is None else data
+    need(type(value) is dict and set(value) == {"documents", "totals"},
+         "Android publication DATA is pending")
+    documents, totals = value["documents"], value["totals"]
+    need(type(documents) is dict and set(documents) == set(SHELL_ANDROID_DOCUMENT_NAMES),
+         "Android publication document roster differs")
+    for key, row in documents.items():
+        need(type(row) is dict and set(row) == {"size", "sha256"}
+             and type(row["size"]) is int and 0 < row["size"] <= SHELL_ANDROID_DOCUMENT_LIMITS[key]
+             and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None,
+             "Android publication document bound differs")
+    need(documents["manifest"]["sha256"] == materials["manifestSha256"]
+         and documents["osContract"]["sha256"] == materials["osContractSha256"],
+         "Android publication and compile anchors differ")
+    need(type(totals) is dict and set(totals) == SHELL_ANDROID_TOTAL_KEYS
+         and all(type(number) is int and number >= 0 for number in totals.values())
+         and 0 < totals["toolFiles"] <= 16384 and totals["toolDirectories"] > 0
+         and totals["toolFiles"] + totals["toolDirectories"] + 1 <= 32768
+         and 0 < totals["osFiles"] <= 256 and totals["osAliases"] <= 128
+         and 0 < totals["toolBytes"] + totals["osBytes"] <= 1 << 30,
+         "Android publication totals differ from unchanged profile bounds")
+    return deepcopy(value)
+
+
+def shell_android_publication_request(task_root, materials=None, data=None):
+    """Only fixed task-local references cross the original service transport."""
+    data = shell_android_publication_data(materials, data)
+    root = absolute(str(task_root)) / "work/admitted-android"
+    return {"sourceRoot": str(root / "tools"), "totals": data["totals"],
+            "documents": {key: {"path": str(root / SHELL_ANDROID_DOCUMENT_NAMES[key]), **row}
+                          for key, row in data["documents"].items()}}
+
+
+def bind_shell_android_profile(materials, publication):
+    """Bind already-validated original preparation DATA, never ambient inputs.
+
+    The compiler calls this only after preparation validation. The root calls it
+    only after the protected source-pinned validator independently rechecks the
+    same original material/context/host. This is not permission to execute and
+    never changes an ordinary qualification flag.
+    """
+    global SHELL_ANDROID_MATERIALS, SHELL_ANDROID_PUBLICATION_DATA
+    material = shell_android_materials(materials)
+    data = shell_android_publication_data(material, publication)
+    need((SHELL_ANDROID_MATERIALS is None and SHELL_ANDROID_PUBLICATION_DATA is None)
+         or (SHELL_ANDROID_MATERIALS == material and SHELL_ANDROID_PUBLICATION_DATA == data),
+         "Android profile cannot replace a previously bound original")
+    SHELL_ANDROID_MATERIALS, SHELL_ANDROID_PUBLICATION_DATA = material, data
+
+
+def _android_handoff_profile(value):
+    """Pure compact DATA checks; this does not bind a profile or read a host."""
+    shell = value["shell"]
+    if "localTransport" not in shell:
+        return shell_android_materials(), shell_android_publication_data()
+    compiler = shell["compiler"]
+    need(type(compiler) is dict and type(compiler.get("androidBuildMaterials")) is dict
+         and type(compiler.get("androidBuildPublication")) is dict, "Android original compact profile is missing")
+    materials = shell_android_materials(compiler["androidBuildMaterials"])
+    return materials, shell_android_publication_data(materials, compiler["androidBuildPublication"])
+
+
+def shell_transport_provenance(shell):
+    """Distinct closed provenance variants; never fabricate an artifact ID."""
+    return ({"shellLocalTransport": deepcopy(shell["localTransport"])} if "localTransport" in shell
+            else {"shellArtifactId": shell["artifactId"]})
+
+
+def _android_local_transport(value):
+    """Pure same-job envelope validation, also usable by cleanup-only StopPost.
+
+    Reading/validating live preparation and binding the profile happens ONLY in
+    _android_original_preparation after the protected source copy. This parser
+    cannot renew the compiler endpoint or turn StopPost into preparation work.
+    """
+    shell, compiler = value["shell"], value["shell"]["compiler"]
+    envelope = shell["localTransport"]
+    need(type(envelope) is dict and set(envelope) == {"path", "size", "sha256", "record"},
+         "Android local transport envelope differs")
+    task = absolute(value["taskRoot"])
+    stem = "mrk-desktop-ubuntu-publisher-" + value["runId"] + "-" + value["attempt"]
+    need(task.name == stem + "-observe", "Android local native task identity differs")
+    root = task.parent / (stem + "-compile")
+    material = task.parent / ("mrk-android-material-" + value["runId"] + "-" + value["attempt"])
+    transport = envelope["record"]
+    need(type(transport) is dict and set(transport) == {"schemaVersion", "kind", "context", "compilerRoot",
+         "compilerEvidence", "materialRoot", "compilerRoster", "materialRecord"}
+         and type(transport["schemaVersion"]) is int and transport["schemaVersion"] == 1
+         and transport["kind"] == "android-same-job-local-v1", "Android original transport schema differs")
+    def pin(row, path, limit):
+        need(type(row) is dict and set(row) == {"path", "size", "sha256"} and row["path"] == str(path)
+             and type(row["size"]) is int and 0 < row["size"] <= limit
+             and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None,
+             "Android original fixed transport reference differs")
+    pin({key: envelope[key] for key in ("path", "size", "sha256")}, root / "android-local-transport.json", 64 << 10)
+    raw = canonical(transport)
+    need(len(raw) == envelope["size"] and hashlib.sha256(raw).hexdigest() == envelope["sha256"],
+         "Android transport body/envelope correspondence differs")
+    context = transport["context"]
+    need(type(context) is dict and set(context) == {"sourceCommit", "sourceTree", "runId", "runAttempt", "job", "preparation"}
+         and context["sourceCommit"] == value["sourceSha"] and context["sourceTree"] == compiler.get("sourceTree")
+         and type(context["sourceTree"]) is str and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
+         and (context["runId"], context["runAttempt"], context["job"])
+             == (value["runId"], value["attempt"], "compile")
+         and shell["producerAttempt"] == value["attempt"], "Android source/tree/run/attempt/job differs")
+    pin(context["preparation"], root / "preparation.json", 16384)
+    for key, path in (("compilerRoot", root), ("compilerEvidence", root / "private-compiler"), ("materialRoot", material)):
+        row = transport[key]
+        need(type(row) is dict and set(row) == {"path", "identity"} and row["path"] == str(path)
+             and type(row["identity"]) is list and len(row["identity"]) == 5
+             and all(type(item) is int for item in row["identity"])
+             and row["identity"][2:] == [stat.S_IFDIR | 0o700, value["runnerUid"], value["runnerGid"]],
+             "Android original private transport directory differs")
+    pin(transport["compilerRoster"], root / "private-compiler/shell-roster.json", 512 << 10)
+    pin(transport["materialRecord"], material / "private/prepared.json", 64 << 10)
+    materials, data = _android_handoff_profile(value)
+    need(transport["compilerRoster"]["sha256"] == shell["rosterSha256"]
+         and compiler.get("androidPreparation") == transport["materialRecord"]
+         and compiler.get("androidOsContractInput") == {"path": str(material / "os-contract.json"), **data["documents"]["osContract"]},
+         "Android original compiler inputs/roster differ from its local transport")
+    return transport
+
+
+def _android_relative(value):
+    need(type(value) is str and 0 < len(value) <= 512 and not value.startswith("/"),
+         "Android material relative path differs")
+    parts = value.split("/")
+    need(1 < len(parts) <= 16 and parts[0] in {"jdk", "gradle", "sdk", "bundletool"}
+         and all(0 < len(part) <= 255 and part not in {".", ".."} and not part.endswith(".")
+                 and re.fullmatch(r"[A-Za-z0-9_+@.,=\-]+", part) is not None for part in parts),
+         "Android material path escaped its fixed tool families")
+    return value
+
+
+def _android_directories(paths):
+    directories = {str(parent) for name in paths for parent in Path(name).parents if str(parent) != "."}
+    names = set(paths) | directories | {"android-toolchain.json"}
+    need(not set(paths).intersection(directories) and len(names) <= 32768
+         and len({name.casefold() for name in names}) == len(names), "Android material entry collision/bound")
+    return sorted(directories, key=lambda name: (name.count("/"), name))
+
+
+def _android_absolute(value):
+    path = absolute(value)
+    need(len(value) <= 512 and len(path.parts) - 1 <= 16
+         and all(len(part) <= 255 and not part.endswith(".") for part in path.parts[1:]),
+         "Android OS path component/bound differs")
+    return path
+
+
+def _android_native_path(value):
+    _android_absolute(value)
+    def direct(directory, suffix):
+        tail = value.removeprefix(directory)
+        return value.startswith(directory) and "/" not in tail and len(tail) > len(suffix) and tail.endswith(suffix)
+    return (value.startswith(("/usr/bin/", "/usr/lib/", "/usr/lib64/", "/etc/ld.so.conf.d/"))
+            or value in {"/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/fonts/fonts.conf", "/etc/nsswitch.conf",
+                         "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf",
+                         "/run/systemd/resolve/stub-resolv.conf"}
+            or direct("/etc/fonts/conf.avail/", ".conf") or direct("/usr/share/fontconfig/conf.avail/", ".conf")
+            or any(direct("/usr/share/fonts/truetype/" + family + "/", ".ttf") for family in ("dejavu", "lato", "liberation", "noto"))
+            or value == "/var/cache/fontconfig/CACHEDIR.TAG"
+            or re.fullmatch(r"/var/cache/fontconfig/[0-9a-f]{32}-le64\.cache-9", value) is not None)
+
+
+def _android_publication_plan(raw):
+    """Parse pinned DATA only. Native core/Rust schema checks remain mandatory."""
+    data, materials = shell_android_publication_data(), shell_android_materials()
+    need(type(raw) is dict and set(raw) == set(data["documents"]), "Android material documents missing")
+    documents = {}
+    for key, pin in data["documents"].items():
+        body = raw[key]
+        need(type(body) is bytes and len(body) == pin["size"] and hashlib.sha256(body).hexdigest() == pin["sha256"],
+             "Android material document bytes differ")
+        documents[key] = decode(body, SHELL_ANDROID_DOCUMENT_LIMITS[key])
+    manifest, contract, sources = (documents[key] for key in ("manifest", "osContract", "sources"))
+    need(type(manifest) is dict and set(manifest) == {"schemaVersion", "profile", "target", "instance", "launchContract",
+         "versions", "gradleDistribution", "bundletool", "roles", "files", "osProfile"}
+         and type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1
+         and manifest["profile"] == "android-local-linux-gnu-x86_64-v1" and manifest["target"] == "linux-gnu-x86_64"
+         and manifest["instance"] == materials["instance"] and manifest["launchContract"] == "gradle-posix-private-jvm-v1",
+         "Android material manifest profile differs")
+    need(type(contract) is dict and set(contract) == {"schemaVersion", "id", "closure", "files", "aliases"}
+         and type(contract["schemaVersion"]) is int and contract["schemaVersion"] == 1
+         and contract["closure"] == "python-jdk-sdk-gradle-shell-loader-v1"
+         and type(contract["id"]) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+\-]{0,127}", contract["id"]) is not None,
+         "Android exact OS contract differs")
+    files = manifest["files"]
+    need(type(files) is list and 0 < len(files) <= 16384, "Android material file bound differs")
+    for row in files:
+        need(type(row) is dict and set(row) == {"path", "size", "sha256", "mode"}, "Android material file fields differ")
+        _android_relative(row["path"])
+        need(type(row["size"]) is int and 0 <= row["size"] <= 512 << 20 and type(row["mode"]) is int
+             and row["mode"] in {0o444, 0o555} and type(row["sha256"]) is str
+             and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None, "Android material file facts differ")
+    names = [row["path"] for row in files]
+    need(names == sorted(set(names)), "Android material ordering/duplicates differ")
+    directories = _android_directories(names)
+    need(manifest["roles"] == {"java": "jdk/bin/java", "javac": "jdk/bin/javac", "gradle": "gradle/bin/gradle",
+                               "bundletool": "bundletool/bundletool.jar", "sdk": "sdk"}
+         and all(name in names for name in ("jdk/bin/java", "jdk/bin/javac", "gradle/bin/gradle", "bundletool/bundletool.jar"))
+         and any(name.startswith("sdk/") for name in names), "Android material fixed roles differ")
+    by_name = {row["path"]: row for row in files}
+    need(all(by_name[name]["size"] > 0 and by_name[name]["mode"] == 0o555
+             for name in ("jdk/bin/java", "jdk/bin/javac", "gradle/bin/gradle")), "Android executable role mode/size differs")
+    versions = manifest["versions"]
+    need(type(versions) is dict and set(versions) == {"jdkVendor", "jdkVersion", "gradleVersion", "agpVersion",
+         "sdkPlatform", "sdkPlatformRevision", "sdkBuildToolsVersion"}
+         and all(type(item) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+\-]{0,63}", item) is not None
+                 for item in versions.values()) and versions["gradleVersion"] == "8.14.5"
+         and versions["agpVersion"] == "8.9.2" and versions["sdkPlatform"] == "android-35"
+         and versions["sdkBuildToolsVersion"] == "35.0.0", "Android selected version tuple differs")
+    need(type(manifest["gradleDistribution"]) is dict
+         and set(manifest["gradleDistribution"]) == {"url", "sha256"}
+         and manifest["gradleDistribution"]["sha256"] == materials["distributionSha256"]
+         and manifest["gradleDistribution"]["url"] in {"https://" + host + "/distributions/gradle-8.14.5-bin.zip"
+                                                       for host in ("services.gradle.org", "downloads.gradle.org")},
+         "Android material Gradle distribution differs")
+    bundletool = "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
+    need(manifest["bundletool"] == {"version": "1.18.3", "sha256": bundletool}
+         and by_name["bundletool/bundletool.jar"]["sha256"] == bundletool
+         and 0 < by_name["bundletool/bundletool.jar"]["size"] <= 32520401, "Android bundletool binding differs")
+    os_profile = manifest["osProfile"]
+    need(type(os_profile) is dict and set(os_profile) == {"id", "inventorySha256", "shell", "executableDirectory", "helpers", "files"}
+         and os_profile["id"] == contract["id"] and os_profile["inventorySha256"] == materials["osContractSha256"]
+         and os_profile["files"] == contract["files"] and os_profile["shell"] == "/usr/bin/dash"
+         and os_profile["executableDirectory"] == "/usr/bin", "Android manifest/OS correspondence differs")
+    os_files, aliases = contract["files"], contract["aliases"]
+    need(type(os_files) is list and 0 < len(os_files) <= 256 and type(aliases) is list and len(aliases) <= 128,
+         "Android OS file/alias bounds differ")
+    for row in os_files:
+        need(type(row) is dict and set(row) == {"path", "size", "sha256", "mode"}
+             and type(row["size"]) is int and 0 <= row["size"] <= 512 << 20
+             and type(row["mode"]) is int and 0 <= row["mode"] <= 0o777 and not row["mode"] & 0o022
+             and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None,
+             "Android OS file fields differ")
+        need(_android_native_path(row["path"]), "Android OS file escaped its explicit supported families")
+    need([row["path"] for row in os_files] == sorted({row["path"] for row in os_files}), "Android OS duplicate/order differs")
+    helpers = os_profile["helpers"]
+    need(type(helpers) is list and 0 < len(helpers) <= 128
+         and all(type(name) is str and re.fullmatch(r"[A-Za-z0-9_+@.,=\-]{1,255}", name) is not None
+                 and name not in {".", ".."} and not name.endswith(".") for name in helpers)
+         and helpers == sorted(set(helpers)) and {"sed", "uname", "xargs"} <= set(helpers), "Android helper roster differs")
+    need(all(any(row["path"] == command and row["size"] > 0 and row["mode"] & 0o111 for row in os_files)
+             for command in ["/usr/bin/dash", *("/usr/bin/" + name for name in helpers)]), "Android helper OS body missing")
+    os_names = {row["path"] for row in os_files}
+    os_names |= {str(parent) for name in os_names.copy() for parent in Path(name).parents}
+    seen_aliases = set()
+    for alias in aliases:
+        need(type(alias) is dict and set(alias) == {"path", "target", "canonical"}
+             and type(alias["target"]) is str and 0 < len(alias["target"]) <= 512, "Android OS alias fields differ")
+        _android_absolute(alias["path"]); _android_absolute(alias["canonical"])
+        destination = [] if alias["target"].startswith("/") else alias["path"].split("/")[1:-1]
+        for part in alias["target"].removeprefix("/").split("/"):
+            if part == "..":
+                need(bool(destination), "Android OS alias traverses above root")
+                destination.pop()
+            elif part != ".":
+                need(0 < len(part) <= 255 and not part.endswith(".")
+                     and re.fullmatch(r"[A-Za-z0-9_+@.,=\-]+", part) is not None,
+                     "Android OS alias target component differs")
+                destination.append(part)
+            need(len(destination) <= 16, "Android OS alias target depth differs")
+        loader_alias = alias["canonical"].startswith("/usr/") and (alias["path"] in {"/bin", "/lib", "/lib64"}
+                                                                               or alias["path"].startswith("/usr/"))
+        font_alias = (alias["path"].startswith("/etc/fonts/conf.d/") and "/" not in alias["path"].removeprefix("/etc/fonts/conf.d/")
+                      and alias["path"].endswith(".conf") and alias["canonical"] in {row["path"] for row in os_files}
+                      and alias["canonical"].startswith(("/etc/fonts/conf.avail/", "/usr/share/fontconfig/conf.avail/"))
+                      and alias["canonical"].endswith(".conf"))
+        # Match the material/Rust contract's one resolver file, not /run/**.
+        # The real OS observation still checks original ancestry/device/owner.
+        resolver_alias = (alias["path"] == "/etc/resolv.conf"
+                          and alias["canonical"] == "/run/systemd/resolve/stub-resolv.conf"
+                          and alias["target"] in {"/run/systemd/resolve/stub-resolv.conf", "../run/systemd/resolve/stub-resolv.conf"}
+                          and alias["canonical"] in {row["path"] for row in os_files})
+        need((loader_alias or font_alias or resolver_alias) and alias["path"] not in os_names and alias["path"].casefold() not in seen_aliases
+             and alias["canonical"] in os_names and "/" + "/".join(destination) == alias["canonical"],
+             "Android OS alias escapes its exact canonical contract")
+        seen_aliases.add(alias["path"].casefold())
+    need(type(sources) is dict and set(sources) == {"schemaVersion", "files"}
+         and type(sources["schemaVersion"]) is int and sources["schemaVersion"] == 1
+         and type(sources["files"]) is list and len(sources["files"]) == len(files), "Android source rows differ")
+    for row in sources["files"]:
+        need(type(row) is dict and set(row) == {"path", "source"}, "Android source row fields differ")
+        _android_relative(row["path"]); _android_relative(row["source"])
+    need([row["path"] for row in sources["files"]] == names
+         and len({row["source"].casefold() for row in sources["files"]}) == len(files), "Android source mapping is incomplete or aliases")
+    _android_directories([row["source"] for row in sources["files"]])
+    totals = {"toolFiles": len(files), "toolDirectories": len(directories), "toolBytes": sum(row["size"] for row in files),
+              "osFiles": len(os_files), "osAliases": len(aliases), "osBytes": sum(row["size"] for row in os_files)}
+    need(totals == data["totals"], "Android measured totals differ from reviewed combined fit")
+    return {"files": files, "directories": directories, "sources": sources["files"], "osFiles": os_files,
+            "aliases": aliases, "totals": totals, "materials": materials, "documents": data["documents"]}
+
+
+def _shell_android_content(raw):
+    return {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _shell_android_version(after=False):
+    return {"source": "release/version.properties", **_shell_android_content(SHELL_ANDROID_VERSION + (b"\n" if after else b"")),
+            "name": "1.2.3", "build": 7}
+
+
+def _shell_android_files(case, after=False, materials=None):
+    need(type(case) is str and case in SHELL_ANDROID_CASES and type(after) is bool, "Different fixed Android fixture/phase")
+    material = shell_android_materials(materials)
+    repository = "/opt/mobile-release-kit/android/" + material["instance"] + "/gradle/repository"
+    action = ("        throw new GradleException('Fixed trusted native fixture failure')\n" if case == "android-build-failure" else
+              "        Thread.sleep(20000)\n" if case == "android-build-cancel" else "")
+    return {**SHELL_ANDROID_STATIC_FILES,
+        "project/settings.gradle": SHELL_ANDROID_SETTINGS.replace("{repository}", repository).encode("ascii"),
+        "project/app/build.gradle": (SHELL_ANDROID_APP_PREFIX + action + SHELL_ANDROID_APP_SUFFIX).encode("ascii"),
+        "project/gradle/wrapper/gradle-wrapper.properties": (
+            "distributionUrl=https://services.gradle.org/distributions/gradle-8.14.5-bin.zip\n"
+            "distributionSha256Sum=" + material["distributionSha256"] + "\n").encode("ascii"),
+        SHELL_ANDROID_VERSION_PATH: SHELL_ANDROID_VERSION + (b"\n" if after and case == "android-build-refusals" else b""),
+        SHELL_ANDROID_TRACE: b"active\n" if after and case != "android-build-refusals" else b""}
+
+
+SHELL_TOOLS_OFFLINE_MARKER = b"MRK_INSTALLED_SHELL_TOOLS_OFFLINE="
+SHELL_TOOLS_OFFLINE_RECEIPT_LIMIT = 64 << 10
+SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT = 16 << 10
+SHELL_TOOLS_OFFLINE_SCRIPT = br'''import os
+import sys
+import time
+
+# Fixed configured project DATA, not an alternate bootstrap or process owner.
+mode = sys.argv[1]
+if mode not in ('pass', 'nonzero', 'active', 'later'):
+    raise SystemExit(91)
+path = 'later.trace' if mode == 'later' else 'script.trace'
+fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+try:
+    marker = {'pass': b'pass\n', 'nonzero': b'exit-7\n', 'active': b'active\n', 'later': b'forbidden-later\n'}[mode]
+    if os.write(fd, marker) != len(marker):
+        raise SystemExit(92)
+finally:
+    os.close(fd)
+print('OFFLINE_FIXTURE_PRIVATE_OUTPUT ' + os.getcwd(), flush=True)
+print('OFFLINE_FIXTURE_PRIVATE_ERROR ' + os.getcwd(), file=sys.stderr, flush=True)
+if mode == 'active':
+    while True:
+        time.sleep(0.05)
+raise SystemExit(7 if mode == 'nonzero' else 0)
+'''
+SHELL_TOOLS_OFFLINE_CONFIG_PASS = b'''{
+  "android": {
+    "applicationId": "com.example.reader",
+    "enabled": true,
+    "externalTrack": {
+      "kind": "closed",
+      "name": "closed-testing"
+    },
+    "identityStatus": "approved",
+    "module": ":app",
+    "uploadCertificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "variant": "release"
+  },
+  "ios": {
+    "enabled": false
+  },
+  "metadata": {
+    "androidLocales": [
+      "en-US"
+    ],
+    "iosLocales": [],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": [
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "pass"
+      ]
+    ]
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "release/version.properties"
+  }
+}
+'''
+SHELL_TOOLS_OFFLINE_CONFIG_NEGATIVE = b'''{
+  "android": {
+    "applicationId": "com.example.reader",
+    "enabled": true,
+    "externalTrack": {
+      "kind": "closed",
+      "name": "closed-testing"
+    },
+    "identityStatus": "approved",
+    "module": ":app",
+    "uploadCertificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "variant": "release"
+  },
+  "ios": {
+    "enabled": false
+  },
+  "metadata": {
+    "androidLocales": [
+      "en-US"
+    ],
+    "iosLocales": [],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": [
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "nonzero"
+      ],
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "later"
+      ]
+    ]
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "release/version.properties"
+  }
+}
+'''
+SHELL_TOOLS_OFFLINE_CONFIG_CANCEL = b'''{
+  "android": {
+    "applicationId": "com.example.reader",
+    "enabled": true,
+    "externalTrack": {
+      "kind": "closed",
+      "name": "closed-testing"
+    },
+    "identityStatus": "approved",
+    "module": ":app",
+    "uploadCertificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "variant": "release"
+  },
+  "ios": {
+    "enabled": false
+  },
+  "metadata": {
+    "androidLocales": [
+      "en-US"
+    ],
+    "iosLocales": [],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": [
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "active"
+      ],
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "later"
+      ]
+    ]
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "release/version.properties"
+  }
+}
+'''
+SHELL_TOOLS_OFFLINE_CONFIGS = {case: (
+    SHELL_TOOLS_OFFLINE_CONFIG_NEGATIVE if case == "offline-negative" else
+    SHELL_TOOLS_OFFLINE_CONFIG_CANCEL if case == "offline-cancel" else SHELL_TOOLS_OFFLINE_CONFIG_PASS)
+    for case in SHELL_TOOLS_OFFLINE_CASES}
+SHELL_TOOLS_OFFLINE_TRACES = {case: (
+    b"pass\n" if case in ("offline-pass", "offline-settlement") else b"exit-7\n" if case == "offline-negative"
+    else b"active\n" if case == "offline-cancel" else b"") for case in SHELL_TOOLS_OFFLINE_CASES}
+SHELL_TOOLS_OFFLINE_FILES = {
+    "project/.gitignore": b"/.mobile-release/\n",
+    "project/release/version.properties": b"VERSION_NAME=1.2.3\nBUILD_NUMBER=42\n",
+    "project/app/build.gradle.kts": (b'plugins { id("com.android.application") }\n'
+        b'android { namespace = "com.example.reader"; defaultConfig { applicationId = "com.example.reader" }; '
+        b'buildTypes { debug { applicationIdSuffix = ".debug" } } }\n'),
+    "project/gradlew": b"#!/bin/sh\nexit 93\n",  # Presence sentinel only; MUST NOT execute.
+    "project/release/store/android/en-US/title.txt": b"Reader\n",
+    "project/release/store/android/en-US/short_description.txt": b"Read safely on every device.\n",
+    "project/release/store/android/en-US/full_description.txt": b"A real application description.\n",
+    "project/release/store/android/en-US/changelogs/default.txt": b"Reliability improvements.\n",
+    "project/check.py": SHELL_TOOLS_OFFLINE_SCRIPT,
+}
+SHELL_TOOLS_OFFLINE_ABSENT = ("project/.mobile-release", "project/.mobile-release-init-prepare",
+    "project/.mobile-release-init", "project/.mobile-release-init-cleanup", "project/.mobile-release-metadata-text-prepare",
+    "project/.mobile-release-metadata-text", "project/.mobile-release-metadata-text-cleanup")
+SHELL_TOOLS_OFFLINE_STATUSES = ("PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE")
+SHELL_TOOLS_OFFLINE_CHECKS = ("version-source", "platform-selection", "android-module", "android-gradle-wrapper",
+    "android-debug-identity", "workspace-private-output", "android-artifact", "preflight-early-exit", "configuration-policy",
+    "metadata-policy", "configured-project-check", "core-lifecycle", "other-core-finding")
+SHELL_TOOLS_OFFLINE_LIMITATIONS = ["saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated",
+    "core-builds-disabled", "artifact-validation-not-requested", "toolkit-signing-credentials-store-not-requested",
+    "release-readiness-not-assessed"]
+
+SHELL_METADATA_MARKER = b"MRK_INSTALLED_SHELL_METADATA_SAVE="
+SHELL_METADATA_RECEIPT = {
+    "schemaVersion": 1, "fixture": "android-metadata-save-v1", "gate": "installed-metadata-profile",
+    "project": {"cancelSettled": True, "registered": True, "snapshot": True},
+    "requests": {"observe": 2, "validate": 1, "open": 2, "prepare": 2, "apply": 1, "close": 1,
+                 "configuration": [0, 0, 0, 0], "workflow": [0, 0, 0, 0]},
+    "draft": {"revision": 2, "baselineGeneration": 0, "wholeMatched": True,
+              "retainedAfterClose": True, "browserEdit": "insertText"},
+    "reviews": {"fullText": 2, "actions": [1, 1, 1], "distinctOriginals": True, "configBlocked": 2},
+    "confirmation": {"opened": 1, "initiallyDisabled": True, "checkboxOnlyDisabled": True,
+                     "typedSave": True, "acknowledged": True},
+    "outcomes": [["not_started", "not_created", "settled", "cancelled"], ["committed", "clean", "settled", "none"]],
+    "nativeReasons": ["discarded", "none"],
+    "originals": {"sessions": 2, "writerFrames": [2, 3], "stdoutFrames": [3, 3],
+                  "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
+                  "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
+    "readback": {"planMatched": True, "savedBaseline": True, "originalObservation": True},
+    "quit": {"operation": 3, "gtkSettled": True, "originalsSettled": True, "relayJoined": True, "exit": True},
+}
+SHELL_VERSION_MARKER = b"MRK_INSTALLED_SHELL_VERSION_SAVE="
+SHELL_VERSION_RECEIPT = {'confirmation': {'acknowledged': 3,
+                  'checkboxOnlyDisabled': 3,
+                  'initiallyDisabled': 3,
+                  'opened': 3,
+                  'typedSave': 3},
+ 'domain': 'release_version',
+ 'draft': {'bindings': [[2, 0], [4, 1], [4, 2]], 'browserEdit': 'insertText', 'wholeMatched': True},
+ 'filesystem': {'afterModes': [384, 384, 384],
+                'parents': 2,
+                'preserveFull9': True,
+                'preservedFiles': 3,
+                'replaceIdentityChanged': True},
+ 'fixture': 'release-version-save-v1',
+ 'gate': 'installed-version-profile',
+ 'lateSettled': [False, False, False],
+ 'nativeFinality': ['settled', 'settled', 'settled'],
+ 'nativeReasons': ['none', 'none', 'none'],
+ 'originals': {'childWaited': 3,
+               'ioSettled': 3,
+               'ownersJoined': 3,
+               'runtimeLedgerSettled': 3,
+               'runtimeSettlementJoined': 3,
+               'sessions': 3,
+               'startupJoined': 3,
+               'stdoutFrames': [3, 3, 3],
+               'writerFrames': [3, 3, 3]},
+ 'outcomes': [['committed', 'clean', 'settled', 'none'],
+              ['committed', 'clean', 'settled', 'none'],
+              ['unchanged', 'not_created', 'settled', 'none']],
+ 'project': {'cancelSettled': True, 'registered': True, 'snapshot': True},
+ 'quit': {'exit': True, 'gtkSettled': True, 'operation': 3, 'originalsSettled': True, 'relayJoined': True},
+ 'readback': {'originalObservations': 3,
+              'planMatched': 3,
+              'savedBaseline': 3,
+              'values': [['1.2.3', 7], ['2.3.4', 8], ['2.3.4', 8]]},
+ 'requests': {'apply': 3,
+              'close': 0,
+              'configuration': [0, 0, 0, 0],
+              'metadata': [0, 0, 0, 0],
+              'observe': 3,
+              'open': 3,
+              'prepare': 3,
+              'workflow': [0, 0, 0, 0]},
+ 'reviews': {'actions': ['create', 'replace', 'preserve'],
+             'configBlocked': 3,
+             'distinctOriginals': True,
+             'distinctPlans': True,
+             'fullText': 3},
+ 'schemaVersion': 1}
+# Reviewed literal caller DATA, never a second runtime generator. The existing
+# focused fixture contract compares every byte with the shared core proposal and
+# shipped template resource before this source may be qualified.
+SHELL_WORKFLOW_CALLERS = {
+    '.github/workflows/mobile-preflight.yml': b'''name: Mobile release preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to validate
+        required: true
+        default: both
+        type: choice
+        options:
+          - android
+          - ios
+          - both
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    uses: example/toolkit/.github/workflows/reusable-preflight.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+''',
+    '.github/workflows/mobile-candidate.yml': b'''name: Mobile internal candidate
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build once and upload to internal testing
+        required: true
+        type: choice
+        options:
+        - android
+        - ios
+        - both
+      confirmation:
+        description: candidate:<platform>:<version>:<build>
+        required: true
+        type: string
+      recovery_run_id:
+        description: Run holding the original intent or selected complete final; never replaces authorization.
+        required: false
+        default: ''
+        type: string
+      recovery_confirmation:
+        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.
+        required: false
+        default: ''
+        type: string
+permissions: {}
+jobs:
+  candidate:
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    uses: example/toolkit/.github/workflows/reusable-candidate.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+      confirmation: ${{ inputs.confirmation }}
+      recovery_run_id: ${{ inputs.recovery_run_id }}
+      recovery_confirmation: ${{ inputs.recovery_confirmation }}
+''',
+    '.github/workflows/mobile-external-testing.yml': b'''name: Mobile external testing
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform whose exact internal build should be promoted
+        required: true
+        type: choice
+        options:
+        - android
+        - ios
+        - both
+      candidate_run_id:
+        description: Common candidate evidence run; leave blank for per-platform or preserved recovery inputs.
+        required: false
+        default: ''
+        type: string
+      confirmation:
+        description: external-testing:<platform>:<version>:<build>
+        required: true
+        type: string
+      recovery_run_id:
+        description: Run holding the original intent or selected complete final; never replaces authorization.
+        required: false
+        default: ''
+        type: string
+      recovery_confirmation:
+        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.
+        required: false
+        default: ''
+        type: string
+      candidate_android_run_id:
+        description: android candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      candidate_ios_run_id:
+        description: ios candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+permissions: {}
+jobs:
+  external-testing:
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    uses: example/toolkit/.github/workflows/reusable-external-testing.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+      candidate_run_id: ${{ inputs.candidate_run_id }}
+      confirmation: ${{ inputs.confirmation }}
+      recovery_run_id: ${{ inputs.recovery_run_id }}
+      recovery_confirmation: ${{ inputs.recovery_confirmation }}
+      candidate_android_run_id: ${{ inputs.candidate_android_run_id }}
+      candidate_ios_run_id: ${{ inputs.candidate_ios_run_id }}
+''',
+    '.github/workflows/mobile-production-submit.yml': b'''name: Mobile production submission
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Exactly one platform to prepare for production review
+        required: true
+        type: choice
+        options:
+        - android
+        - ios
+      candidate_run_id:
+        description: Common candidate evidence run; leave blank for per-platform or preserved recovery inputs.
+        required: false
+        default: ''
+        type: string
+      external_run_id:
+        description: Common external evidence run; leave blank for per-platform or preserved recovery inputs.
+        required: false
+        default: ''
+        type: string
+      confirmation:
+        description: production-submit:<platform>:<version>:<build>
+        required: true
+        type: string
+      recovery_run_id:
+        description: Run holding the original intent or selected complete final; never replaces authorization.
+        required: false
+        default: ''
+        type: string
+      recovery_confirmation:
+        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.
+        required: false
+        default: ''
+        type: string
+      candidate_android_run_id:
+        description: android candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      candidate_ios_run_id:
+        description: ios candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      external_android_run_id:
+        description: android external evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      external_ios_run_id:
+        description: ios external evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+permissions: {}
+jobs:
+  production-submit:
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    uses: example/toolkit/.github/workflows/reusable-production-submit.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+      candidate_run_id: ${{ inputs.candidate_run_id }}
+      external_run_id: ${{ inputs.external_run_id }}
+      confirmation: ${{ inputs.confirmation }}
+      recovery_run_id: ${{ inputs.recovery_run_id }}
+      recovery_confirmation: ${{ inputs.recovery_confirmation }}
+      candidate_android_run_id: ${{ inputs.candidate_android_run_id }}
+      candidate_ios_run_id: ${{ inputs.candidate_ios_run_id }}
+      external_android_run_id: ${{ inputs.external_android_run_id }}
+      external_ios_run_id: ${{ inputs.external_ios_run_id }}
+''',
+}
+
+SHELL_WORKFLOW_IGNORE = b"# workflow fixture sentinel; not a configuration save\n"
+SHELL_WORKFLOW_SIBLING = b"# unrelated caller sentinel; never part of this bundle\n"
+SHELL_WORKFLOW_ABSENT = ("release", ".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init",
+    ".mobile-release-init-cleanup", ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text",
+    ".mobile-release-metadata-text-cleanup", ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup",
+    ".mobile-release-metadata-images-prepare", ".mobile-release-metadata-images", ".mobile-release-metadata-images-cleanup")
 
 SHELL_FEATURES = ["custom-protocol", "desktop-shell"]
 SHELL_PROJECT_SOURCE = (b'plugins { id("com.android.application") }\n'
@@ -147,11 +1779,26 @@ SHELL_PROJECT_CONFIG = b'''{
 '''
 SHELL_PROJECT_IGNORE = (b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n"
                         b".mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n"
-                        b".mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n")
+                        b".mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n"
+                        b".mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n"
+                        b".mobile-release-metadata-images-prepare/\n.mobile-release-metadata-images/\n.mobile-release-metadata-images-cleanup/\n")
+SHELL_VERSION_KEEP = b"keep unrelated version fixture data\n"
+SHELL_VERSION_EDITED = b"VERSION_NAME=2.3.4\nBUILD_NUMBER=8\n"
+SHELL_METADATA_LOCALE = "release/store/android/en-US"
+# Public fixed DATA, not a serializer or an alternate metadata writer.
+SHELL_METADATA_TITLE = b"Public title"
+SHELL_METADATA_SHORT_BEFORE = b"Old summary"
+SHELL_METADATA_SHORT_AFTER = b"Public summary"
+SHELL_METADATA_FULL = b"Public description"
+SHELL_METADATA_KEEP = b"untouched\n"
+SHELL_METADATA_ABSENT = (".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init",
+    ".mobile-release-init-cleanup", ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text",
+    ".mobile-release-metadata-text-cleanup", ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup",
+    ".mobile-release-metadata-images-prepare", ".mobile-release-metadata-images", ".mobile-release-metadata-images-cleanup")
 SHELL_PROJECT_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_DRAFT="
 SHELL_PROJECT_RECEIPT = {
-    "schemaVersion": 3, "fixture": "android-saved-readonly-v1", "projectGateContract": True,
-    "methods": "twelve-passive", "passiveActions": False,
+    "schemaVersion": 4, "fixture": "android-saved-readonly-v1", "projectGateContract": True,
+    "methods": "14-input-assess", "passiveActions": False,
     "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
     "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
     "snapshot": {"initial": "missing", "androidHint": True, "sourceFiles": 2},
@@ -168,7 +1815,7 @@ SHELL_PROJECT_RECEIPT = {
     "originals": {"sessions": 2, "writerFrames": [3, 2], "stdoutFrames": [3, 3],
                   "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
                   "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
-    "quit": {"operation": 6, "originalsSettled": True, "relayJoined": True, "exit": True},
+    "quit": {"operation": 7, "originalsSettled": True, "relayJoined": True, "exit": True},
     "guidance": {
         "draftUnchanged": True,
         "requirements": {"requestResultDomMatched": True, "context": "android/build", "roles": 3},
@@ -551,20 +2198,28 @@ SHELL_CANDIDATE_DOCUMENTS = {
 SHELL_CANDIDATE_ARTIFACT_TARGETS = (
     "reader-1.2.3-42.aab", "store-metadata-1.2.3-42.zip", "validation-report-1.2.3-42.json",
 )
-SHELL_CANDIDATE_MARKER = b"MRK_INSTALLED_SHELL_CANDIDATE_DOCUMENTS="
-SHELL_CANDIDATE_RECEIPT = {
+SHELL_LIFECYCLE_MARKER = b"MRK_INSTALLED_SHELL_LIFECYCLE_DOCUMENTS="
+SHELL_LIFECYCLE_RECEIPT = {
     "schemaVersion": 1, "fixture": "android-candidate-documents-v1",
-    "gate": "installed-project-profile+candidate-passive", "privacy": "independent-predicate+gtk-readback",
-    "cancel": {"operation": 3, "requestMatched": True, "gtkSettled": True, "tokenJoined": True,
-               "probeUnstarted": True, "coordinatorJoined": True, "noRegistration": True},
-    "select": {"operation": 4, "requestMatched": True, "gtkSettled": True, "filenameMatched": True,
-               "tokenJoined": True, "probeJoined": True, "coordinatorJoined": True, "selectionMatched": True},
-    "observe": {"operation": 5, "requests": 1, "requestResultDomMatched": True, "bindingMatched": True,
-                "coordinatorJoined": True, "supervisorIdle": True, "knownIdle": True},
+    "gate": "installed-project-profile+lifecycle-passive", "privacy": "independent-predicate+gtk-readback",
+    "requests": {"choose": 3, "observe": 1, "cancel": 1},
+    "cancel": {"operation": 3, "stage": "candidate", "gtkSettled": True, "nativeFinal": True, "probeUnstarted": True},
+    "select": {"operation": 4, "stage": "candidate", "gtkSettled": True, "filenameMatched": True,
+               "nativeFinal": True, "selectionMatched": True},
+    "observe": {"operation": 5, "method": "release.evidence.observe", "stage": "candidate", "bindingMatched": True,
+                "requestResultDomMatched": True, "nativeFinal": True},
+    "shared": {"current": ["Artifacts", "Releases", "Recovery"], "stale": ["Releases", "Artifacts", "Recovery"],
+               "sameObservation": True, "noExtraObservation": True, "recoveryCurrent": False},
+    "stageChange": {"requested": "external-testing", "retained": "candidate", "inspectDisabled": True, "currentBeforeChoice": True},
+    "opposite": {"boundary": "native-owner-endpoints", "checks": 1, "status": "busy", "cancel": "stale-selection",
+                 "sameOriginal": True, "noStop": True},
+    "stop": {"operation": 6, "stage": "external-testing", "rendererRequest": True, "createdBeforeStop": True,
+             "deleteEvent": True, "gtkCancel": False, "gtkSettled": True, "nativeFinal": True, "probeUnstarted": True, "noResult": True},
     "preserved": {"sourceProject": True, "registry": True, "credentialStateEmpty": True, "savedReads": True, "wholeDraft": True},
     "scope": {"documents": 3, "formatsDigestsBindingsMatched": True, "artifactPayloadsObserved": False,
-              "sourceCompared": False, "signingVerified": False, "storeObserved": False, "releaseReady": False, "recoveryAuthority": False},
-    "quit": {"operation": 6, "gtkSettled": True, "coordinatorJoined": True, "relayJoined": True, "exit": True},
+              "sourceCompared": False, "signingVerified": False, "workflowAuthenticated": False,
+              "storeObserved": False, "releaseReady": False, "recoveryAuthority": False},
+    "quit": {"operation": 7, "gtkSettled": True, "coordinatorJoined": True, "relayJoined": True, "exit": True},
 }
 OS_SONAMES = {"libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
               "libpthread.so.0", "librt.so.1", "libutil.so.1", "libgcc_s.so.1"}
@@ -580,6 +2235,7 @@ LIMIT, JSON_LIMIT, FILE_LIMIT, TOTAL_LIMIT = 2 << 20, 1 << 20, 512 << 20, 32 << 
 # GUI shared-memory working files are not captured output. This finite per-file
 # headroom is independent of the unchanged combined capture/evidence bounds.
 SHELL_WORK_FILE_LIMIT = 64 << 20
+SHELL_DESCRIPTOR_LIMIT = 65_536  # The retained Android tool/runtime books require this inherited floor.
 CLIENT_RESERVATION = 40  # start10 + stop10 + StopPost10 + original-client10
 PROPERTIES = {
     "User": "root", "Group": "root", "WorkingDirectory": "/", "UMask": "0077",
@@ -614,15 +2270,33 @@ PUBLISHED = b"Immutable runtime payload published. Product execution remains unq
 REFUSAL = "Runtime publication refused: {}. Partial or published objects were not removed; do not repair or retry automatically.\n"
 CORE_PINS = {
     "__init__.py": (144, "557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2"),
-    "owned_process.py": (7631, "430a596c5069b7acf248334d1f60fdd12ad8212cf9c2e9dfef717c9ba2179c02"),
-    "_command_process.py": (169926, "075fa6e9838017feb6a1716ab3a75074e3a65dffe8b217613aff7e87c0201f68"),
+    "owned_process.py": (9037, "0c7c87c7eaf27629be2eb33c195a956b6c40b7b5883214a08e15f255ac4939b8"),
+    "_command_process.py": (172299, "30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69"),
     "_native_process.py": (62175, "70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4"),
-    "cancellation.py": (29094, "1840232213e877e26c4cebd1434b3b851f9fa4c6961baa26eeaae9fa1442db78"),
-    "_lifetime_evidence.py": (18536, "d64948f26984ed692030834221f0cfd93b85117da89b4860f8b69a6f7919e1b3"),
+    "cancellation.py": (31723, "e71c7063e2652e3ce539c95c0b667ab13275f7ce01559b460585e99e1550f916"),
+    "_lifetime_evidence.py": (19514, "fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d"),
     "_store_lane_contract.py": (9500, "8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e"),
     "errors.py": (749, "26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853"),
 }
 DATA_PIN = (19198, "b22b83554231bef19178fbb8723acfed71e4476df14048bd9b4c763b937743d5")
+# Filled only from the coherent source-reviewed preparation helper, original
+# ELF parser/dependency and six exact DATA documents. Missing pins refuse the dynamic Android path; legacy
+# non-Android source/owner imports remain unchanged.
+ANDROID_PREPARATION_PINS = None
+
+
+def _android_source_pins():
+    names = {"desktop/tools/android_material_preparation.py", "desktop/tools/ci_ubuntu_publication.py",
+             "desktop/tools/stock_trust_correspondence.py", "desktop/tools/ubuntu_stock_ca_policy.json",
+             "desktop/tools/ci_foundation.py", *("desktop/tools/android_material_data/" + name
+             for name in ("policy.json", "suppliers.json", "layout.json.gz", "archives.json.gz", "fonts.json", "providers.json"))}
+    need(type(ANDROID_PREPARATION_PINS) is dict and set(ANDROID_PREPARATION_PINS) == names,
+         "Android protected preparation source pins are pending")
+    for pin in ANDROID_PREPARATION_PINS.values():
+        need(type(pin) is tuple and len(pin) == 2 and type(pin[0]) is int and 0 < pin[0] <= 8 << 20
+             and type(pin[1]) is str and re.fullmatch(r"[0-9a-f]{64}", pin[1]) is not None,
+             "Android protected preparation source pin differs")
+    return dict(ANDROID_PREPARATION_PINS)
 
 # The workflow carries these exact bytes in MRK_UBUNTU_LIFECYCLE_BOOTSTRAP.
 # Only the entry digest is fixed separately, so there is no self-hash cycle.
@@ -675,7 +2349,10 @@ _END = 0.0
 _COMMANDS, _FILES = [], []
 _TOTAL = 0
 _FAILED = False
+_RECOVERY_NEGATIVE = None
 _PHASE = "entry"
+_ANDROID_PUBLICATION = None
+_ANDROID_PUBLISHED = None
 
 
 class Refused(ValueError):
@@ -752,6 +2429,22 @@ def read(path, limit=JSON_LIMIT):
     return record(path, limit, content=True)[1]
 
 
+def check_source_pins(source, *, android=False):
+    """Refuse stale source before compilation; never initialize a lifecycle."""
+    expected = {"src/mobile_release/" + name: pin for name, pin in CORE_PINS.items()}
+    expected["desktop/tools/conventional_runtime_data.py"] = DATA_PIN
+    if android:
+        expected.update(_android_source_pins())
+    for relative, (size, digest) in expected.items():
+        path = source / relative
+        try:
+            actual = record(path, size)
+            need(actual == {"path": str(path), "size": size, "sha256": digest}, "Source pin differs")
+        except (OSError, Refused):
+            # Fixed source names identify the defect without exposing raw errors.
+            raise Refused("Lifecycle source pin differs: " + relative) from None
+
+
 def copy_pinned(source, target, expected, mode=0o444):
     need(record(source, expected["size"]) == {**expected, "path": str(source)}, "Pinned copy source differs")
     directory(target.parent, protected=True)
@@ -778,6 +2471,294 @@ def copy_pinned(source, target, expected, mode=0o444):
     need(record(target, expected["size"]) == {**expected, "path": str(target)}
          and target.stat().st_uid == target.stat().st_gid == 0 and stat.S_IMODE(target.stat().st_mode) == mode
          and (target.stat().st_dev, target.stat().st_ino) != (before.st_dev, before.st_ino), "Protected copy readback differs")
+
+
+def _android_point():
+    need(not _FAILED and time.monotonic() < _END, "Android publication endpoint expired or failed")
+
+
+def _android_node(path, *, owner, device, is_directory, mode=None):
+    _android_point()
+    item = path.lstat()
+    need((stat.S_ISDIR(item.st_mode) if is_directory else stat.S_ISREG(item.st_mode))
+         and (item.st_uid, item.st_gid) == owner and item.st_dev == device and not item.st_mode & 0o7022
+         and (is_directory or item.st_nlink == 1) and (mode is None or stat.S_IMODE(item.st_mode) == mode),
+         "Android material owner/device/type/mode/link differs")
+    _xattrs(path, is_directory)
+    need(identity(path.lstat()) == identity(item), "Android material node changed during admission")
+    return identity(item)
+
+
+def _android_ancestors(path, device):
+    """Every protected canonical ancestor shares the consumer's root device."""
+    originals = {}
+    for parent in reversed((path, *path.parents)):
+        item = _android_node(parent, owner=(0, 0), device=device, is_directory=True)
+        need(item[2] & 0o555 == 0o555, "Android protected ancestor is not readable/searchable by the consumer")
+        originals[str(parent)] = item[:5]
+    return originals
+
+
+def _android_merge_originals(originals, observed):
+    for name, item in observed.items():
+        need(name not in originals or originals[name] == item, "Android original ancestor binding changed")
+        originals.setdefault(name, item)
+
+
+def _android_directory_mode(path, original, mode):
+    """Change only an original directory, never a substituted named object."""
+    before = _android_node(path, owner=(0, 0), device=original[0], is_directory=True)
+    need(before[:len(original)] == original, "Android original directory changed before mode establishment")
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        need(identity(os.fstat(fd)) == before, "Android directory changed before original open")
+        os.fchmod(fd, mode)
+        after = identity(os.fstat(fd))
+        need(after[:2] == before[:2] and after[2] == stat.S_IFDIR | mode and after[3:8] == before[3:8]
+             and identity(path.lstat()) == after, "Android original directory changed during mode establishment")
+    finally:
+        os.close(fd)
+    need(identity(path.lstat()) == after, "Android directory changed after original close")
+    return after
+
+
+def _android_mkdir(path, device):
+    # main's umask077 is intentional. Establish0755 explicitly only after
+    # exclusive creation and original-owner/device/mode admission.
+    path.mkdir(mode=0o700)
+    original = _android_node(path, owner=(0, 0), device=device, is_directory=True, mode=0o700)
+    return _android_directory_mode(path, original, 0o755)
+
+
+def _android_tree(root, files, directories, *, owner, device, source=False, manifest=False, hashes=True, root_mode=0o555):
+    """Android-only complete finite readback; ordinary runtime _tree is unchanged."""
+    expected = {row["path"]: row for row in files}
+    directories = set(directories)
+    wanted = set(expected) | directories | {""}
+    need(len(wanted) <= 32769, "Android tree exceeds its existing entry bound")
+    pending, rows, pairs = [(root, "")], {}, set()
+    while pending:
+        path, name = pending.pop()
+        need(name in wanted and name not in rows, "Extra or repeated Android material entry")
+        is_directory = name == "" or name in directories
+        spec = None if is_directory else expected[name]
+        mode = 0o700 if source and is_directory else (root_mode if name == "" else 0o555) if is_directory else spec["mode"]
+        if source and not is_directory:
+            mode = 0o500 if mode & 0o111 else 0o400
+        item = _android_node(path, owner=owner, device=device, is_directory=is_directory, mode=mode)
+        need(item[:2] not in pairs, "Android material inode aliases another entry")
+        pairs.add(item[:2])
+        if is_directory:
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    _android_point()
+                    need(len(children) + len(pending) + len(rows) < len(wanted), "Android enumeration count exceeded")
+                    children.append((path / entry.name, name + "/" + entry.name if name else entry.name))
+            pending.extend(sorted(children, reverse=True))
+        else:
+            need(item[6] == spec["size"], "Android material size differs")
+            if hashes:
+                need(record(path, spec["size"]) == {"path": str(path), "size": spec["size"], "sha256": spec["sha256"]},
+                     "Android material body differs")
+        need(identity(path.lstat()) == item, "Android material identity changed during traversal")
+        rows[name] = item
+    need(set(rows) == wanted, "Android material membership incomplete")
+    for name, item in rows.items():
+        need(identity((root / name).lstat()) == item, "Android original changed after complete readback")
+    need(source or manifest or "android-toolchain.json" not in rows, "Android manifest published before payload acceptance")
+    return rows
+
+
+def _android_os_check(plan, device):
+    originals = {}
+    canonical = {row["path"] for row in plan["osFiles"]}
+    canonical |= {str(parent) for name in canonical.copy() for parent in Path(name).parents}
+    for row in plan["osFiles"]:
+        path = absolute(row["path"])
+        _android_merge_originals(originals, _android_ancestors(path.parent, device))
+        before = _android_node(path, owner=(0, 0), device=device, is_directory=False, mode=row["mode"])
+        need(record(path, row["size"]) == {key: row[key] for key in ("path", "size", "sha256")},
+             "Android current OS file differs from exact contract")
+        need(identity(path.lstat()) == before, "Android current OS file changed during readback")
+        originals[str(path)] = before
+    seen = set()
+    for row in plan["aliases"]:
+        path, destination = absolute(row["path"]), absolute(row["canonical"])
+        need(str(path) not in canonical and str(path).casefold() not in seen and str(destination) in canonical
+             and os.path.normpath(str(path.parent / row["target"])) == str(destination), "Android OS alias destination differs")
+        seen.add(str(path).casefold())
+        _android_merge_originals(originals, _android_ancestors(path.parent, device))
+        before = path.lstat()
+        need(stat.S_ISLNK(before.st_mode) and before.st_uid == before.st_gid == 0 and before.st_dev == device
+             and before.st_nlink == 1 and os.readlink(path) == row["target"], "Android OS alias owner/body differs")
+        _xattrs(path, False)
+        need(identity(path.lstat()) == identity(before), "Android OS alias changed during readback")
+        originals[str(path)] = identity(before)
+    for name, before in originals.items():
+        actual = identity(Path(name).lstat())
+        need(actual[:len(before)] == before, "Android OS original/name changed after readback")
+    return originals
+
+
+def _android_source_documents(value):
+    request = value["shell"]["androidPublication"]
+    need(request == shell_android_publication_request(value["taskRoot"]), "Android source request differs")
+    raw, originals = {}, {}
+    for key, row in request["documents"].items():
+        path = absolute(row["path"])
+        directory(path.parent)
+        before = path.lstat()
+        need((before.st_uid, before.st_gid) == (value["runnerUid"], value["runnerGid"])
+             and stat.S_IMODE(before.st_mode) == 0o400, "Android source document owner/mode differs")
+        _xattrs(path, False)
+        observed, body = record(path, row["size"], content=True)
+        need(observed == row and identity(path.lstat()) == identity(before), "Android source document drift")
+        raw[key], originals[str(path)] = body, identity(before)
+    return _android_publication_plan(raw), originals
+
+
+def _android_publication_summary():
+    return deepcopy(_ANDROID_PUBLICATION)
+
+
+def _publish_android(value):
+    """One root-service branch; no acquisition, generic publisher, or cleanup."""
+    global _ANDROID_PUBLICATION, _ANDROID_PUBLISHED, _PHASE
+    need(_ANDROID_PUBLICATION is None and _ANDROID_PUBLISHED is None, "Android publication cannot be retried")
+    _PHASE = "android-publication-inputs"
+    _android_point()
+    plan, documents = _android_source_documents(value)
+    materials = plan["materials"]
+    target = Path("/opt/mobile-release-kit/android") / materials["instance"]
+    source = absolute(value["shell"]["androidPublication"]["sourceRoot"])
+    directory(source)
+    device = Path("/").lstat().st_dev
+    source_device = source.lstat().st_dev
+    specs = {row["path"]: row for row in plan["files"]}
+    source_files = [{**specs[row["path"]], "path": row["source"]} for row in plan["sources"]]
+    source_directories = _android_directories([row["path"] for row in source_files])
+    source_before = _android_tree(source, source_files, source_directories,
+        owner=(value["runnerUid"], value["runnerGid"]), device=source_device, source=True, hashes=False)
+    # Record current source ancestry identities, not historical material receipts.
+    ancestry = {str(path): identity(path.lstat())[:5] for path in (source, *source.parents)}
+    _ANDROID_PUBLICATION = {"state": "preparing", "instance": materials["instance"], "materials": materials,
+        "documents": plan["documents"], "totals": plan["totals"], "createdDirectories": 0,
+        "verifiedFiles": 0, "verifiedBytes": 0, "manifestPublished": False, "uncertainEntry": None,
+        "qualified": False, "cleanupClaimed": False}
+    _absent(target)  # Refuse an existing instance before touching any prefix.
+    ancestors = {}
+    for path in (Path("/opt"), target.parent.parent, target.parent):
+        _android_point()
+        if not path.exists() and not path.is_symlink():
+            need(path != Path("/opt"), "Android OS /opt prerequisite missing")
+            _ANDROID_PUBLICATION["uncertainEntry"] = str(path)
+            _android_mkdir(path, device)
+            _ANDROID_PUBLICATION["createdDirectories"] += 1
+            _ANDROID_PUBLICATION["uncertainEntry"] = None
+        _android_merge_originals(ancestors, _android_ancestors(path, device))
+    _ANDROID_PUBLICATION["uncertainEntry"] = str(target)
+    original = _android_mkdir(target, device)
+    _ANDROID_PUBLICATION["createdDirectories"] += 1
+    created = {"": original[:2]}
+    created_pairs = set(created.values())
+    _ANDROID_PUBLICATION["uncertainEntry"] = None
+    _PHASE = "android-publication-copy"
+    for name in plan["directories"]:
+        _android_point()
+        _ANDROID_PUBLICATION["uncertainEntry"] = name
+        path = target / name
+        created[name] = _android_mkdir(path, device)[:2]
+        need(created[name] not in created_pairs, "Android directory inode aliases another original")
+        created_pairs.add(created[name])
+        _ANDROID_PUBLICATION["createdDirectories"] += 1
+        _ANDROID_PUBLICATION["uncertainEntry"] = None
+    for mapping in plan["sources"]:
+        _android_point()
+        row, original = specs[mapping["path"]], source / mapping["source"]
+        need(identity(original.lstat()) == source_before[mapping["source"]], "Android copy source changed before use")
+        _ANDROID_PUBLICATION["uncertainEntry"] = row["path"]
+        copy_pinned(original, target / row["path"], {"path": str(original), **{key: row[key] for key in ("size", "sha256")}}, row["mode"])
+        item = _android_node(target / row["path"], owner=(0, 0), device=device, is_directory=False, mode=row["mode"])
+        need(item[:2] not in created_pairs and item[:2] != source_before[mapping["source"]][:2], "Android copy did not create a distinct original")
+        created[row["path"]] = item[:2]
+        created_pairs.add(item[:2])
+        _ANDROID_PUBLICATION["verifiedFiles"] += 1
+        _ANDROID_PUBLICATION["verifiedBytes"] += row["size"]
+        _ANDROID_PUBLICATION["uncertainEntry"] = None
+    for name in reversed(plan["directories"]):
+        _android_directory_mode(target / name, created[name], 0o555)
+    _PHASE = "android-publication-readback"
+    before = _android_tree(target, plan["files"], plan["directories"], owner=(0, 0), device=device, root_mode=0o755)
+    need(all(before[name][:2] == item for name, item in created.items()), "Android original output was replaced")
+    need(_android_ancestors(target.parent, device) == ancestors, "Android publication prefix original changed")
+    os_before = _android_os_check(plan, device)
+    need(_android_tree(source, source_files, source_directories, owner=(value["runnerUid"], value["runnerGid"]),
+         device=source_device, source=True, hashes=False) == source_before, "Android original source tree changed during copy")
+    for name, item in {**ancestry, **documents}.items():
+        need(identity(Path(name).lstat())[:len(item)] == item, "Android original source/document binding changed")
+    _PHASE = "android-publication-manifest"
+    row = value["shell"]["androidPublication"]["documents"]["manifest"]
+    _ANDROID_PUBLICATION["uncertainEntry"] = "android-toolchain.json"
+    copy_pinned(absolute(row["path"]), target / "android-toolchain.json", row)
+    _android_directory_mode(target, before[""][:5], 0o555)
+    manifest_row = {"path": "android-toolchain.json", "size": row["size"], "sha256": row["sha256"], "mode": 0o444}
+    files = [*plan["files"], manifest_row]
+    # Only metadata needs another pass: payload bytes were just checked while
+    # the root-owned tree was closed to the nonroot consumer; manifest copied last.
+    final = _android_tree(target, files, plan["directories"], owner=(0, 0), device=device, manifest=True, hashes=False)
+    need(final[""][:2] == before[""][:2] and final[""][3:5] == before[""][3:5],
+         "Android original root changed while publishing manifest")
+    need(all(final[name] == item for name, item in before.items() if name), "Android payload changed while publishing manifest")
+    # Sync every new namespace edge as well as the final closed tool tree.
+    # Prefixes may pre-exist, but syncing does not adopt or change their contents.
+    syncs = [(target / name, final[name]) for name in (*reversed(plan["directories"]), "")]
+    parents = _android_ancestors(target.parent, device)
+    need(parents == ancestors, "Android publication prefix changed before sync")
+    syncs.extend((Path(name), item) for name, item in reversed(tuple(parents.items())))
+    for path, expected in syncs:
+        _android_point()
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            need(identity(os.fstat(fd))[:len(expected)] == expected, "Android directory changed before sync")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    _android_point()
+    _ANDROID_PUBLICATION.update(state="published", manifestPublished=True, uncertainEntry=None)
+    _ANDROID_PUBLISHED = (target, plan, files, final, os_before, device, ancestors)
+    return _android_publication_summary()
+
+
+def _finish_android_publication(value):
+    need(_ANDROID_PUBLISHED is not None and _ANDROID_PUBLICATION is not None
+         and _ANDROID_PUBLICATION["state"] == "published", "Android publication was not completed")
+    target, plan, files, before, os_before, device, ancestors = _ANDROID_PUBLISHED
+    need(_android_tree(target, files, plan["directories"], owner=(0, 0), device=device, manifest=True) == before
+         and _android_os_check(plan, device) == os_before, "Android protected profile changed during native consumers")
+    need(_android_ancestors(target.parent, device) == ancestors, "Android original publication prefix changed during consumers")
+    need(value["shell"]["androidPublication"] == shell_android_publication_request(value["taskRoot"]),
+         "Android publication/source correspondence changed")
+    _ANDROID_PUBLICATION["state"] = "verified-after-consumers"
+    return _android_publication_summary()
+
+
+def _android_closed_publication(value, receipt):
+    """Correspondence after original service/client finality, not a new permit."""
+    data, materials = shell_android_publication_data(), shell_android_materials()
+    totals = data["totals"]
+    need(value["shell"].get("androidPublication") == shell_android_publication_request(value["taskRoot"])
+         and type(receipt) is dict and set(receipt) == {"state", "instance", "materials", "documents", "totals",
+         "createdDirectories", "verifiedFiles", "verifiedBytes", "manifestPublished", "uncertainEntry", "qualified", "cleanupClaimed"},
+         "Closed Android publication record missing or different")
+    need(receipt["state"] == "verified-after-consumers" and receipt["instance"] == materials["instance"]
+         and receipt["materials"] == materials and receipt["documents"] == data["documents"] and receipt["totals"] == totals
+         and type(receipt["createdDirectories"]) is int and totals["toolDirectories"] + 1 <= receipt["createdDirectories"] <= totals["toolDirectories"] + 3
+         and type(receipt["verifiedFiles"]) is int and receipt["verifiedFiles"] == totals["toolFiles"]
+         and type(receipt["verifiedBytes"]) is int and receipt["verifiedBytes"] == totals["toolBytes"]
+         and receipt["manifestPublished"] is True and receipt["uncertainEntry"] is None
+         and receipt["qualified"] is receipt["cleanupClaimed"] is False, "Closed Android publication result differs")
+    return deepcopy(receipt)
 
 
 def handoff(path, digest):
@@ -841,16 +2822,3067 @@ def handoff(path, digest):
     return value
 
 
+
+# Closed installed GitHub consumer. This selects observation cases, never a
+# product endpoint, trust store, credential, import path, or enable override.
+SHELL_GITHUB_PROFILE = "github-readonly-installed-tls-v1"
+SHELL_GITHUB_REF = "refs/heads/verify/desktop-installed-github-readonly"
+SHELL_GITHUB_BOUNDARY_PROFILE = "github-readonly-installed-normal-boundaries-v1"
+SHELL_GITHUB_BOUNDARY_REF = "refs/heads/verify/desktop-installed-github-normal-boundaries"
+SHELL_GITHUB_BOUNDARY_CASES = ("github-dns-deadline", "github-connect-deadline")
+SHELL_GITHUB_PREFLIGHT_PROFILE = "github-preflight-installed-tls-v1"
+SHELL_GITHUB_PREFLIGHT_REF = "refs/heads/verify/desktop-installed-github-preflight"
+SHELL_GITHUB_PREFLIGHT_CASES = (
+    "github-preflight-success", "github-preflight-response-loss", "github-preflight-pre-go-revocation",
+    "github-preflight-journal-collision", "github-preflight-finality-refusal",
+)
+SHELL_GITHUB_PREFLIGHT_TOOLING_SHA = "304abf6b802cde7dac236a2217488f67b33a3ce4"
+SHELL_GITHUB_PREFLIGHT_CALLER = (1498, "71bd9034967f4a2212a7f4475074ded0f1211d1f52d532a26a9e2f890df98b0d")
+SHELL_GITHUB_PREFLIGHT_TEMPLATE = (1469, "ba77f4383cd3f901f1743ad24e8c5a68aa59fd6901a44a05121d6a61fc543579")
+# Corrected native5 SOURCE; actual integration/command/native evidence remain separate.
+SHELL_GITHUB_PREFLIGHT_PEER_PIN = (30744, "2557debc5420820cf9568ca12e667b0c886d01d1a61dd588def1794183aecf82")
+SHELL_GITHUB_PREFLIGHT_NOT_PROVEN = (
+    "real-github-api-dispatch", "real-github-job-names", "macos-github-preflight", "windows-github-preflight",
+    "kernel-close-error-injection",
+)
+SHELL_GITHUB_PREFLIGHT_MARKER = b"MRK_INSTALLED_SHELL_GITHUB_PREFLIGHT="
+SHELL_GITHUB_PREFLIGHT_JOURNAL_LIMIT = 8192
+_SHELL_GITHUB_PREFLIGHT_HOMES = {}
+_SHELL_GITHUB_PREFLIGHT_COMPLETED = {}
+# R is independently selected and pinned. The source candidate is not delivered tooling.
+SHELL_GITHUB_RELEASE_PROFILE = "github-release-native3-v1"
+SHELL_GITHUB_RELEASE_REF = "refs/heads/verify/desktop-installed-github-release"
+SHELL_GITHUB_RELEASE_CASES = ("github-release-normal-pending", "github-release-response-loss", "github-release-pre-go-revocation")
+SHELL_GITHUB_RELEASE_TOOLING_SHA = '4c89f77c7a1e3f0b538a99ab12069b245484205d'
+SHELL_GITHUB_RELEASE_CALLERS = {'candidate': (2322, '693119d27471d9894c250cc4326547258afba446fc40620a1923b334563a8837'), 'external-testing': (3098, '82dc6d39910a4363b9432fbbda96f51f1a6c4ac543670a40bee8fb6a0c813397'), 'production-submit': (3835, 'b16776c8de7862eaba316d330a05cacb2c36f338f22880897dcdca8f53157188')}
+SHELL_GITHUB_RELEASE_TEMPLATES = {'candidate': (2293, '9e6beb4f5a7337897277403e2f016984b5bd31488bdbc0bf7cd953ad724c2f56'), 'external-testing': (3069, '7080d900ec13d5162eb6ad9e728ba4b44c7c1f559c62692515229708b982027a'), 'production-submit': (3806, 'da3d427108fa85d8d8eba923410389fe92e5fb2cfb504d7d84a1afc1da1e7cf8')}
+SHELL_GITHUB_RELEASE_PEER_PIN = (39119, '229974a5bf0378b3e6eca1e1f75d1105036b8a8deae822ec8e76c5aaf7b8e415')
+SHELL_GITHUB_RELEASE_NOT_PROVEN = ("real-github-release-dispatch", "real-github-release-job-names", "delivered-production-tooling",
+                                  "macos-github-release", "windows-github-release", "kernel-close-error-injection")
+SHELL_GITHUB_RELEASE_MARKER = b"MRK_INSTALLED_SHELL_GITHUB_RELEASE="
+SHELL_GITHUB_RELEASE_JOURNAL_LIMIT = 8192
+_SHELL_GITHUB_RELEASE_HOMES = {}
+_SHELL_GITHUB_RELEASE_COMPLETED = {}
+SHELL_GITHUB_CASES = (
+    "github-connect-refresh", "github-real-ca-refusal", "github-wrong-name", "github-expired",
+    "github-ragged", "github-length", "github-chunk", "github-header-limit", "github-body-limit",
+    "github-chunk-limit", "github-unauthorized", "github-rate", "github-identity", "github-redirect",
+    "github-ambient-fixed", "github-ambient-no-rescue", "github-handshake-deadline",
+    "github-header-deadline", "github-body-deadline", "github-cancel", "github-quit", "github-unknown",
+)
+SHELL_GITHUB_ALL_CASES = SHELL_GITHUB_CASES + SHELL_GITHUB_BOUNDARY_CASES
+SHELL_GITHUB_REAL_CA_CASES = ("github-real-ca-refusal", "github-ambient-no-rescue")
+SHELL_GITHUB_AMBIENT_CASES = ("github-ambient-fixed", "github-ambient-no-rescue")
+# Deliberately absent from the automatic roster/handoff/CI route. A separately
+# reviewed original action is required for the one N /user noncredential GET.
+SHELL_GITHUB_NORMAL_NEGATIVE = "github-normal-negative"
+SHELL_GITHUB_PAYLOADS = {'N': {'caSha256': '9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f',
+       'coreSha256': '701d234dc84c0729438917b487c522f04001e07cb18f65a875485928493d2c55',
+       'inventorySha256': '3aacdc2d8e72c3d828d03aed850f6ea50c8639f7942e2d660c1190bf444258c5',
+       'manifestBytes': 85945,
+       'manifestSha256': M},
+ 'D-R': {'caSha256': '9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f',
+         'coreSha256': 'db5a3dd069af123f41575bde631ac540acf3f35ae1fbf741888e5104ff0adfaf',
+         'inventorySha256': 'c5e287c7246f46529c3e2a735f0d0a09b098cb60601a27f80c30eafa6e0046d4',
+         'manifestBytes': 106721,
+         'manifestSha256': '87237111b05fe6e5849d68ad74e02871223ae7d3aaaf05e8f0d6f6c48bffbe35'},
+ 'D-S': {'caSha256': '3d785e2a47139241c55b340b4d07a5de79aed18b9c28157f9dbe9f694b461025',
+         'coreSha256': 'db5a3dd069af123f41575bde631ac540acf3f35ae1fbf741888e5104ff0adfaf',
+         'inventorySha256': '67f17e1cfc88b4d4b9c5b173cd0667e3741ecb272d470a308654e8dea9d0db47',
+         'manifestBytes': 106718,
+         'manifestSha256': '90a4ff34a02f3bc72d1909261dbe9d77c9d0fbbf8c89d33fb296c976eaedaadb'}}
+SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256 = "ccaf7231bde4cead31ff9e82b4141e09bf308ae7275949aa8a9d0fe4d4192c88"
+SHELL_GITHUB_PEER_PINS = {'github_tls/api-expired.pem': (790, 'd0613acb9ef97d2b421d13a279e9f6b5674688210a5cb80441bcd89a183b4c0f'), 'github_tls/api-valid.pem': (786, '33f6acd10b8d466078525b80464a1c5938266b1084ea5aabf43b348bd7dca6f2'), 'github_tls/other-root-ca.pem': (778, '69b4eda8770c518de6e83caa5037bcf5d38f9f9ec16ef3c1e7c11023627a018c'), 'github_tls/root-ca.pem': (761, '3d785e2a47139241c55b340b4d07a5de79aed18b9c28157f9dbe9f694b461025'), 'github_tls/server-key.pem': (241, '33332bb26fd6e394d067f7e2df563d496f934e0a098de1e3039169fb8d4ee109'), 'github_tls/wrong-san.pem': (786, '8d9b1bcc7c3ca1a9118af18993d2cd01a45439e76c0b1407103f1e6689ee9108'), 'github_tls_peer.py': (61665, '5e917b35b320b05cb3c7fcf1bc7ad02ab9fcd44e29f743b53a8471da96ac475c')}
+SHELL_GITHUB_MATERIAL_LIMIT = 2 << 20
+SHELL_GITHUB_FIXTURE_LIMIT = 8192
+SHELL_GITHUB_PUBLIC_FILE_LIMIT = 135
+SHELL_GITHUB_DIAL_BEFORE = b'                http.client.HTTPConnection.connect(self)\n'
+SHELL_GITHUB_DIAL_AFTER = (
+    b'                # TEST ONLY: exact fixed numeric dial; all TLS/HTTP policy is unchanged.\n'
+    b'                import socket\n'
+    b'                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n'
+    b'                self.sock.settimeout(budget.remaining())\n'
+    b'                self.sock.connect(("127.0.0.1", 18443))\n'
+)
+
+
+def shell_github_selection(profile=SHELL_GITHUB_PROFILE):
+    need(profile in (SHELL_GITHUB_PROFILE, SHELL_GITHUB_BOUNDARY_PROFILE), "Unknown fixed GitHub selection")
+    boundary = profile == SHELL_GITHUB_BOUNDARY_PROFILE
+    selection = {"profile": profile, "cases": list(SHELL_GITHUB_BOUNDARY_CASES if boundary else SHELL_GITHUB_CASES),
+                 "payloads": deepcopy(SHELL_GITHUB_PAYLOADS),
+                 "peerSources": [{"path": "desktop/src-tauri/tests/fixtures/" + path, "size": pin[0], "sha256": pin[1]}
+                                 for path, pin in sorted(SHELL_GITHUB_PEER_PINS.items())],
+                 "derivativeRecipeSha256": SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256,
+                 "normalDestinationAction": boundary}
+    if boundary:
+        selection.update(normalNetworkScope="normal-dns-and-scoped-https-acquisition-syns-only",
+                         normalHttpRequests=False, separatelyApprovedNormalNegative=False)
+    return selection
+
+
+def shell_github_preflight_peer_pins():
+    pin = SHELL_GITHUB_PREFLIGHT_PEER_PIN
+    need(type(pin) is tuple and len(pin) == 2 and type(pin[0]) is int and 0 < pin[0] <= JSON_LIMIT
+         and type(pin[1]) is str and re.fullmatch(r"[0-9a-f]{64}", pin[1]) is not None,
+         "GitHub preflight peer SOURCE has not been independently frozen")
+    return {"github_preflight_peer.py": pin, "mobile-preflight.yml": SHELL_GITHUB_PREFLIGHT_CALLER,
+            **{name: SHELL_GITHUB_PEER_PINS[name] for name in
+               ("github_tls_peer.py", "github_tls/api-valid.pem", "github_tls/server-key.pem")}}
+
+
+def shell_github_preflight_selection():
+    pins = shell_github_preflight_peer_pins()
+    return {"profile": SHELL_GITHUB_PREFLIGHT_PROFILE, "cases": list(SHELL_GITHUB_PREFLIGHT_CASES),
+            "payloads": deepcopy(SHELL_GITHUB_PAYLOADS),
+            "peerSources": [{"path": "desktop/src-tauri/tests/fixtures/" + path, "size": pin[0], "sha256": pin[1]}
+                            for path, pin in sorted(pins.items()) if path != "mobile-preflight.yml"],
+            "derivativeRecipeSha256": SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256,
+            "toolingSha": SHELL_GITHUB_PREFLIGHT_TOOLING_SHA,
+            "caller": {"path": "mobile-preflight.yml", "size": SHELL_GITHUB_PREFLIGHT_CALLER[0],
+                       "sha256": SHELL_GITHUB_PREFLIGHT_CALLER[1],
+                       "template": {"path": "templates/workflows/mobile-preflight.yml",
+                                    "size": SHELL_GITHUB_PREFLIGHT_TEMPLATE[0], "sha256": SHELL_GITHUB_PREFLIGHT_TEMPLATE[1]}},
+            "normalDestinationAction": False}
+
+
+def shell_github_release_peer_pins():
+    pin = SHELL_GITHUB_RELEASE_PEER_PIN
+    need(type(pin) is tuple and len(pin) == 2 and type(pin[0]) is int and 0 < pin[0] <= 65536
+         and type(pin[1]) is str and re.fullmatch(r"[0-9a-f]{64}", pin[1]) is not None,
+         "GitHub release peer SOURCE is not frozen")
+    return {"github_release_peer.py": pin,
+            **{"mobile-" + stage + ".yml": row for stage, row in SHELL_GITHUB_RELEASE_CALLERS.items()},
+            **{name: SHELL_GITHUB_PEER_PINS[name] for name in
+               ("github_tls_peer.py", "github_tls/api-valid.pem", "github_tls/server-key.pem")}}
+
+
+def shell_github_release_selection():
+    pins = shell_github_release_peer_pins()
+    return {"profile": SHELL_GITHUB_RELEASE_PROFILE, "cases": list(SHELL_GITHUB_RELEASE_CASES),
+            "payloads": deepcopy(SHELL_GITHUB_PAYLOADS),
+            "peerSources": [{"path": "desktop/src-tauri/tests/fixtures/" + path, "size": pin[0], "sha256": pin[1]}
+                            for path, pin in sorted(pins.items()) if not path.endswith(".yml")],
+            "derivativeRecipeSha256": SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256,
+            "toolingSha": SHELL_GITHUB_RELEASE_TOOLING_SHA,
+            "callers": {stage: {"path": "mobile-" + stage + ".yml", "size": pin[0], "sha256": pin[1],
+                                "template": {"path": "templates/workflows/mobile-" + stage + ".yml",
+                                             "size": SHELL_GITHUB_RELEASE_TEMPLATES[stage][0],
+                                             "sha256": SHELL_GITHUB_RELEASE_TEMPLATES[stage][1]}}
+                        for stage, pin in SHELL_GITHUB_RELEASE_CALLERS.items()},
+            "normalDestinationAction": False, "productionToolingDelivered": False}
+
+
+def shell_github_release(value):
+    return type(value.get("shell")) is dict and "githubRelease" in value["shell"]
+
+
+def shell_github_preflight(value):
+    return type(value.get("shell")) is dict and "githubPreflight" in value["shell"]
+
+
+def shell_github_readonly(value):
+    return type(value.get("shell")) is dict and "githubReadOnly" in value["shell"]
+
+
+def shell_recovery_compile_selection():
+    # Q3 and the separate retained-Unknown experiment share these exact bytes.
+    return {"profile": SHELL_RECOVERY_COMPILE_PROFILE, "cases": list(SHELL_RECOVERY_ALL_CASES),
+            "ordinaryActivation": False, "androidPreparation": False, "androidExecution": False}
+
+
+def shell_recovery_selection(profile):
+    need(profile in (SHELL_RECOVERY_PROFILE, SHELL_RECOVERY_NEGATIVE_PROFILE), "Unknown project-recovery scope")
+    negative = profile == SHELL_RECOVERY_NEGATIVE_PROFILE
+    return {"profile": profile, "cases": [SHELL_RECOVERY_PARTIAL] if negative else list(SHELL_RECOVERY_CASES),
+            "compileProfile": SHELL_RECOVERY_COMPILE_PROFILE, "expectedRetainedUnknown": negative,
+            "ordinaryActivation": False, "androidPreparation": False, "androidExecution": False}
+
+
+def shell_recovery(value):
+    shell = value.get("shell")
+    if type(shell) is not dict or "projectRecovery" not in shell:
+        return False
+    selection = shell["projectRecovery"]
+    need(not {"ordinary21", "githubReadOnly", "githubPreflight", "githubRelease", "androidPublication", "localTransport"} & set(shell)
+         and type(selection) is dict and canonical(selection) == canonical(shell_recovery_selection(selection.get("profile"))),
+         "Project-recovery selection differs or mixes another installed scope")
+    return True
+
+
+def shell_recovery_negative(value):
+    return shell_recovery(value) and value["shell"]["projectRecovery"]["profile"] == SHELL_RECOVERY_NEGATIVE_PROFILE
+
+
+def _recovery_fields(value, keys):
+    need(type(value) is dict and set(value) == set(keys), "Project-recovery closed fields differ")
+
+
+def _recovery_token(value, *, project=False):
+    need(type(value) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}" if project else r"[0-9a-f]{32}", value) is not None,
+         "Project-recovery original identity differs")
+
+
+def shell_recovery_receipt(raw, case, *, source=None):
+    """Closed DATA only. Partial cannot become normal application finality."""
+    need(case in SHELL_RECOVERY_ALL_CASES and type(raw) is bytes and 0 < len(raw) <= SHELL_RECOVERY_REPORT_LIMIT
+         and raw.endswith(b"\n") and b"\r" not in raw and b"\n" not in raw[:-1], "Project-recovery receipt framing differs")
+    value = decode(raw, SHELL_RECOVERY_REPORT_LIMIT)
+    _recovery_fields(value, ("schemaVersion", "scope", "case", "sourceCommit", "testOnlyQualification", "applicationFinal",
+        "bootstrapReturned", "projectSelectionObserved", "originals", "requests", "replies", "freshUncheckedReview",
+        "explicitAcknowledgement", "heldSettlementObserved", "peerAdmissionRefused", "originalStatusReturned",
+        "originalCancelReturned", "partialWarningVisible", "finalVisible", "commandDispatches", "profileCalls", "ordinaryActivation"))
+    negative, cancelled = case == SHELL_RECOVERY_PARTIAL, case == "project-recovery-cancel"
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["scope"] == "project-build-input-recovery-native-observation-v1" and value["case"] == case
+         and type(value["sourceCommit"]) is str and re.fullmatch(r"[0-9a-f]{40}", value["sourceCommit"]) is not None
+         and (source is None or value["sourceCommit"] == source), "Project-recovery receipt source/schema differs")
+    wanted = {"testOnlyQualification": True, "applicationFinal": not negative, "bootstrapReturned": True,
+        "projectSelectionObserved": True, "freshUncheckedReview": True, "explicitAcknowledgement": True,
+        "heldSettlementObserved": cancelled, "peerAdmissionRefused": negative or cancelled,
+        "originalStatusReturned": negative, "originalCancelReturned": negative or cancelled,
+        "partialWarningVisible": negative, "finalVisible": not negative, "ordinaryActivation": False}
+    need(all(type(value[key]) is bool and value[key] is item for key, item in wanted.items())
+         and all(type(value[key]) is int and value[key] == 0 for key in ("commandDispatches", "profileCalls")),
+         "Project-recovery original observation or safety facts differ")
+    counts = [1, 1, 1, 1, int(negative or cancelled), int(negative)]
+    need(all(type(value[key]) is list and all(type(n) is int for n in value[key]) and value[key] == counts
+             for key in ("requests", "replies")) and type(value["originals"]) is list and len(value["originals"]) == 2,
+         "Project-recovery two-original request/reply roster differs")
+    common = {"inspectionJoined", "acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed", "stdoutEofClosed",
+              "stderrEofClosed", "ioJoined"}
+    final = {"coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined", "driverJoined", "managerJoined",
+             "observerJoined", "watchdogJoined", "retiredBeforeCutoff"}
+    booleans = common | final | {"noChild", "activeRetained", "resourceUnknown"}
+    projections = []
+    for index, original in enumerate(value["originals"]):
+        _recovery_fields(original, ("facts", "projection", "accepted", "coreTerminal", "coreFatal", "reviewMinted"))
+        failed = negative and index == 1
+        need(original["accepted"] is True and original["coreTerminal"] is True
+             and original["coreFatal"] is failed and original["reviewMinted"] is (index == 0),
+             "Project-recovery actual original core/review facts differ")
+        facts = original["facts"]
+        _recovery_fields(facts, {"domain", "id", "generation", *booleans})
+        need(facts["domain"] == "project-recovery" and all(type(facts[key]) is bool for key in booleans)
+             and all(facts[key] is True for key in common) and facts["noChild"] is False
+             and facts["activeRetained"] is failed and facts["resourceUnknown"] is failed
+             and facts["retiredBeforeCutoff"] is (not failed), "Project-recovery native original resource facts differ")
+        if failed:
+            need(all(facts[key] is False for key in ("coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined")),
+                 "Retained Unknown borrowed native settlement")
+        else:
+            need(all(facts[key] is True for key in final), "Project-recovery final native joins are incomplete")
+        _recovery_token(facts["id"]); _recovery_token(facts["generation"])
+        projection = original["projection"]
+        _recovery_fields(projection, ("operationId", "ownerGeneration", "context", "phase", "intentUsable", "outcome", "reason", "result", "effect"))
+        need(projection["operationId"] == facts["id"] and projection["ownerGeneration"] == facts["generation"]
+             and projection["intentUsable"] is False, "Project-recovery original public projection differs")
+        context = projection["context"]
+        _recovery_fields(context, ("projectId", "draftRevision", "baselineGeneration", "action", "review"))
+        _recovery_token(context["projectId"], project=True)
+        need(context["action"] == ("inspect" if index == 0 else "recover")
+             and all(type(context[key]) is int and 0 <= context[key] < 2**32 - 1 for key in ("draftRevision", "baselineGeneration")),
+             "Project-recovery original context differs")
+        outcome = "unknown" if failed else "cancelled" if index == 1 and cancelled else "complete"
+        need(projection["phase"] == ("unknown" if failed else "terminal") and projection["outcome"] == outcome
+             and projection["reason"] == ("cleanup-unknown" if failed else "cancelled" if outcome == "cancelled" else "none"),
+             "Project-recovery public outcome/finality differs")
+        result = projection["result"]
+        if outcome != "complete":
+            need(result is None and projection["effect"] is None, "Noncomplete recovery exposed provisional success/effect DATA")
+        else:
+            _recovery_fields(result, ("schemaVersion", "scope", "action", "observation", "recoveredSession", "limitations"))
+            need(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1 and result["scope"] == "project-build-inputs-only"
+                 and result["action"] == context["action"] and projection["effect"] == ("inspection" if index == 0 else "recovery-attempted")
+                 and result["limitations"] == ["build-inputs-only-not-store-or-account-recovery", "recorded-quiescence-not-new-worker-proof",
+                     "foreign-changes-preserved", "cancellation-does-not-undo-completed-cleanup", "project-and-release-readiness-not-assessed"],
+                 "Project-recovery public DATA limits differ")
+            if index == 0:
+                observation = result["observation"]
+                _recovery_fields(observation, ("status", "session", "roles", "quiescence"))
+                _recovery_token(observation["session"])
+                cleanup = case == "project-recovery-cleanup-only"
+                need(observation["status"] == ("cleanup-only" if cleanup else "pending") and observation["quiescence"] == "original"
+                     and observation["roles"] == ([] if cleanup else ["android-services", "ios-services"])
+                     and result["recoveredSession"] is None and context["review"] is None,
+                     "Project-recovery real inspection/quiescence differs")
+            else:
+                _recovery_fields(context["review"], ("status", "session", "roles", "quiescence"))
+                need(result["observation"] is None and result["recoveredSession"] == context["review"]["session"],
+                     "Project-recovery restored session differs from original reviewed Inspect")
+        projections.append(projection)
+    inspect, recover = projections
+    need(inspect["operationId"] != recover["operationId"] and inspect["ownerGeneration"] != recover["ownerGeneration"]
+         and all(inspect["context"][key] == recover["context"][key] for key in ("projectId", "draftRevision", "baselineGeneration"))
+         and canonical(recover["context"]["review"]) == canonical(inspect["result"]["observation"]),
+         "Project-recovery retained originals or native review correspondence differ")
+    return value
+
+
+def shell_recovery_result(stdout, stderr, case, code):
+    need(case in SHELL_RECOVERY_CASES and type(code) is int and code == 0 and type(stdout) is bytes and type(stderr) is bytes
+         and len(stdout) + len(stderr) <= LIMIT, "Project-recovery positive capture incomplete")
+    lines = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+    need(len(lines) == 5 and lines[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n",
+         b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"]
+         and lines[3].startswith(SHELL_RECOVERY_MARKER)
+         and lines[4] == b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n"
+         and not any(line.startswith(b"MRK_") for line in stderr.splitlines()), "Project-recovery original success framing differs")
+    receipt = shell_recovery_receipt(lines[3][len(SHELL_RECOVERY_MARKER):], case)
+    return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [], "projectRecovery": receipt}
+
+
+def shell_github(value):
+    # Shared physical staging/namespace/owner, not shared action authority.
+    return shell_github_readonly(value) or shell_github_preflight(value) or shell_github_release(value)
+
+
+def _shell_github_selection(value):
+    need(sum((shell_github_readonly(value), shell_github_preflight(value), shell_github_release(value))) == 1,
+         "Installed GitHub selections are absent or mixed")
+    shell_cases(value)
+    return value["shell"]["githubRelease" if shell_github_release(value) else "githubPreflight" if shell_github_preflight(value) else "githubReadOnly"]
+
+
+def _shell_github_peer_pins(value):
+    return (shell_github_release_peer_pins() if shell_github_release(value) else
+            shell_github_preflight_peer_pins() if shell_github_preflight(value) else SHELL_GITHUB_PEER_PINS)
+
+
+def _shell_github_ambient_cases(value):
+    return () if shell_github_preflight(value) or shell_github_release(value) else SHELL_GITHUB_AMBIENT_CASES
+
+
+def shell_ordinary_selection():
+    # Selection DATA, not a result or permission to skip an arbitrary case.
+    return {"profile": SHELL_ORDINARY_PROFILE, "cases": list(SHELL_ORDINARY_CASES),
+            "remainingRequiredCases": list(SHELL_ANDROID_CASES),
+            "namespacePlaceholders": sorted(SHELL_ANDROID_CASES),
+            "androidPreparation": False, "androidExecution": False}
+
+
+def shell_ordinary(value):
+    shell = value.get("shell")
+    if type(shell) is not dict or "ordinary21" not in shell:
+        return False  # Historical absence is full25, never a reduced pass.
+    need(not {"githubReadOnly", "githubPreflight", "githubRelease", "projectRecovery", "androidPublication", "localTransport"} & set(shell)
+         and type(shell["ordinary21"]) is dict
+         and canonical(shell["ordinary21"]) == canonical(shell_ordinary_selection()),
+         "Ordinary21 selection differs or mixes another installed scope")
+    return True
+
+
+def shell_android(value):
+    ordinary = shell_ordinary(value)
+    return "shell" in value and not ordinary and not shell_github(value) and not shell_recovery(value)
+
+
+def shell_android_cases(value):
+    return SHELL_ANDROID_CASES if shell_android(value) else ()
+
+
+def shell_normal_boundaries(value):
+    return shell_github_readonly(value) and not shell_github_preflight(value) and not shell_github_release(value) and type(value["shell"]["githubReadOnly"]) is dict \
+        and value["shell"]["githubReadOnly"].get("profile") == SHELL_GITHUB_BOUNDARY_PROFILE
+
+
+def shell_cases(value):
+    if shell_recovery(value):
+        return tuple(value["shell"]["projectRecovery"]["cases"])
+    if shell_ordinary(value):
+        return SHELL_ORDINARY_CASES
+    if shell_github_release(value):
+        shell = value["shell"]
+        need(not {"ordinary21", "projectRecovery", "githubReadOnly", "githubPreflight", "androidPublication", "localTransport"} & set(shell)
+             and type(shell["githubRelease"]) is dict
+             and canonical(shell["githubRelease"]) == canonical(shell_github_release_selection()),
+             "GitHub release selection differs or mixes another installed scope")
+        return SHELL_GITHUB_RELEASE_CASES
+    if shell_github_preflight(value):
+        shell = value["shell"]
+        need(not {"ordinary21", "projectRecovery", "githubReadOnly", "githubRelease", "androidPublication", "localTransport"} & set(shell)
+             and type(shell["githubPreflight"]) is dict
+             and canonical(shell["githubPreflight"]) == canonical(shell_github_preflight_selection()),
+             "GitHub preflight selection differs or mixes another installed scope")
+        return SHELL_GITHUB_PREFLIGHT_CASES
+    if shell_github_readonly(value):
+        selection = value["shell"]["githubReadOnly"]
+        need(type(selection) is dict, "Closed GitHub selection is not an object")
+        profile = selection.get("profile")
+        need(canonical(selection) == canonical(shell_github_selection(profile)),
+             "Closed GitHub observation selection differs; no normal HTTP action is granted")
+        return SHELL_GITHUB_BOUNDARY_CASES if profile == SHELL_GITHUB_BOUNDARY_PROFILE else SHELL_GITHUB_CASES
+    return SHELL_CASES
+
+
+def shell_observers(value):
+    return tuple(case for case in shell_cases(value) if case != "normal")
+
+
+def shell_fixture_children(value):
+    if shell_recovery(value):
+        return tuple(sorted(shell_cases(value)))
+    return ("github-project",) if shell_github(value) else SHELL_FIXTURE_CHILDREN
+
+
+def shell_public_limit(value):
+    if shell_recovery(value):
+        return 96
+    return SHELL_GITHUB_PUBLIC_FILE_LIMIT if shell_github(value) else SHELL_PUBLIC_FILE_LIMIT
+
+
+def shell_github_role(case):
+    need(case in SHELL_GITHUB_ALL_CASES, "Unknown GitHub case or separately gated normal HTTP action")
+    return "N" if case in SHELL_GITHUB_BOUNDARY_CASES else "D-R" if case in SHELL_GITHUB_REAL_CA_CASES else "D-S"
+
+
+
+SHELL_GITHUB_MARKER = b"MRK_INSTALLED_SHELL_GITHUB_READONLY="
+SHELL_GITHUB_DEADLINE_CASES = ("github-handshake-deadline", "github-header-deadline", "github-body-deadline")
+SHELL_GITHUB_ACTIVE_CASES = ("github-cancel", "github-quit", "github-unknown")
+# Exact installed native Case::{script,connections,reason}; not a caller route.
+SHELL_GITHUB_CASE_DATA = {
+    "github-connect-refresh": ("G-connect-refresh", 8, "none"),
+    "github-real-ca-refusal": ("T2-root", 1, "tls-failed"),
+    "github-wrong-name": ("T2-name", 1, "tls-failed"),
+    "github-expired": ("T2-expired", 1, "tls-failed"),
+    "github-ragged": ("T3-ragged", 1, "tls-failed"),
+    "github-length": ("T3-length", 1, "response-invalid"),
+    "github-chunk": ("T3-chunk", 1, "response-invalid"),
+    "github-header-limit": ("T6-header", 1, "response-limit"),
+    "github-body-limit": ("T6-body", 1, "response-limit"),
+    "github-chunk-limit": ("T6-chunk-metadata", 1, "response-limit"),
+    "github-unauthorized": ("T6-unauthorized", 1, "unauthorized"),
+    "github-rate": ("T6-rate-expiry", 1, "response-invalid"),
+    "github-identity": ("T6-target", 4, "target-changed"),
+    "github-redirect": ("T6-redirect", 1, "response-invalid"),
+    "github-ambient-fixed": ("T4-ambient-fixed", 4, "none"),
+    "github-ambient-no-rescue": ("T4-ambient-no-rescue", 1, "tls-failed"),
+    "github-handshake-deadline": ("T5-handshake", 1, "query_timeout"),
+    "github-header-deadline": ("G-header-withhold", 1, "query_timeout"),
+    "github-body-deadline": ("T5-read", 1, "query_timeout"),
+    "github-cancel": ("T5-read", 1, "cancelled"),
+    "github-quit": ("T5-read", 1, "cancelled"),
+    "github-unknown": ("T5-read", 1, "cleanup_unknown"),
+}
+
+
+SHELL_GITHUB_BOUNDARY_CASE_DATA = {
+    "github-dns-deadline": ("G-dns-withhold", 0, "query_timeout"),
+    "github-connect-deadline": (None, 0, "query_timeout"),
+}
+
+
+def shell_github_case_data(case):
+    shell_github_role(case)
+    return (SHELL_GITHUB_BOUNDARY_CASE_DATA if case in SHELL_GITHUB_BOUNDARY_CASES else SHELL_GITHUB_CASE_DATA)[case]
+
+
+def _shell_github_fields(value, keys, label):
+    need(type(value) is dict and set(value) == set(keys), "GitHub closed " + label + " fields differ")
+
+
+def _shell_github_uint(value, maximum, label, minimum=0):
+    need(type(value) is int and minimum <= value <= maximum, "GitHub closed " + label + " integer differs")
+
+
+def _shell_github_pin(raw):
+    need(type(raw) is bytes, "GitHub retained DATA is not bytes")
+    return {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def shell_github_peer_receipt(peer, case):
+    """Validate the actual shared retained-owner projection, not another owner."""
+    shell_github_role(case)
+    script, connections, _ = shell_github_case_data(case)
+    true_fields = ("acquisitionJoined", "spawned", "waited", "exitSuccess", "stdoutJoined", "stderrJoined",
+                   "stdoutEof", "stderrEof", "ready", "settled", "withinEndpoint", "protocolChecked")
+    false_fields = ("stopAttempted", "stdoutOverflow", "stderrOverflow")
+    _shell_github_fields(peer, (*true_fields, *false_fields, "exitCode", "stdoutBytes", "stderrBytes", "terminal", "control"), "peer")
+    need(all(peer[key] is True for key in true_fields) and all(peer[key] is False for key in false_fields),
+         "GitHub peer lacks actual original wait/EOF/join/endpoint/protocol finality")
+    _shell_github_uint(peer["exitCode"], 0, "peer exit")
+    _shell_github_uint(peer["stdoutBytes"], 8192, "peer stdout", 1)
+    _shell_github_uint(peer["stderrBytes"], 0, "peer stderr")
+    control = peer["control"]
+    controls = ("acquired", "started", "joined", "writeComplete", "shutdownComplete", "productSettled", "withinEndpoint", "released")
+    _shell_github_fields(control, (*controls, "failed"), "peer control")
+    need(all(control[key] is True for key in controls) and control["failed"] is False,
+         "GitHub peer did not retain original S+EOF after actual product settlement")
+    terminal = peer["terminal"]
+    dns = case == "github-dns-deadline"
+    deadline = case in SHELL_GITHUB_DEADLINE_CASES or case in SHELL_GITHUB_ACTIVE_CASES or dns
+    framed = deadline or case in SHELL_GITHUB_AMBIENT_CASES
+    extra = ("sni", "phase", "withheldWireBytes", "bodyBytes", "incompleteBody", "clientStop", "progressCount",
+             "dnsQuestions", "dnsA", "dnsAAAA", "dnsReplies") if framed else ("replyStops",)
+    if dns:
+        extra += ("dnsSource",)
+    _shell_github_fields(terminal, ("schemaVersion", "scope", "case", "installedCase", "ownerTag",
+        "manifestSha256", "peerSha256", "primaryPort", "state", "status", "code", "connections",
+        "handshakes", "requests", "decryptedBytes", "authBytes", "closeNotify", "tlsRefused",
+        "wireReadBytes", "wireWriteBytes", "replyBytes", "allSocketsClosed", "completion", *extra), "peer terminal")
+    fixed = {"schemaVersion": 1, "scope": "github-installed-tls-peer-v1", "case": script, "installedCase": case,
+             "manifestSha256": SHELL_GITHUB_PAYLOADS[shell_github_role(case)]["manifestSha256"],
+             "peerSha256": SHELL_GITHUB_PEER_PINS["github_tls_peer.py"][1], "primaryPort": 18553 if dns else 18443,
+             "state": "finished", "status": "passed", "code": None, "connections": connections, "allSocketsClosed": True}
+    need(canonical({key: terminal[key] for key in fixed}) == canonical(fixed)
+         and type(terminal["ownerTag"]) is str and re.fullmatch(r"[0-9a-f]{16}", terminal["ownerTag"]) is not None,
+         "GitHub peer case/manifest/SOURCE/finality binding differs")
+    if dns:
+        # No TCP listener, application reply, authorization, or forged TLS stop
+        # is a DNS observation. The retained peer's FIRST question is correlated
+        # separately with the original unreaped product Child.
+        for key in ("connections", "handshakes", "requests", "decryptedBytes", "authBytes", "closeNotify",
+                    "sni", "withheldWireBytes", "bodyBytes", "dnsReplies"):
+            _shell_github_uint(terminal[key], 0, "DNS peer " + key)
+        need(terminal["tlsRefused"] is False and terminal["incompleteBody"] is False
+             and terminal["clientStop"] is None and terminal["phase"] == "dns"
+             and all(terminal[key] == [] for key in ("wireReadBytes", "wireWriteBytes", "replyBytes")),
+             "Normal DNS peer acquired an unrelated transport or emitted a reply")
+        for key in ("dnsQuestions", "progressCount", "dnsA", "dnsAAAA"):
+            _shell_github_uint(terminal[key], 8, "DNS peer " + key, 1 if key in ("dnsQuestions", "progressCount") else 0)
+        need(terminal["dnsQuestions"] == terminal["progressCount"] == terminal["dnsA"] + terminal["dnsAAAA"],
+             "Normal DNS peer question/progress roster differs")
+        shell_github_dns_source(terminal["dnsSource"])
+        need(canonical(terminal["completion"]) == canonical({
+            "bytes": 1, "eof": True, "closed": True, "primaryEmpty": None, "primaryUnexpected": 0,
+            "primaryClosed": None, "proxy": None, "dnsEmpty": True, "dnsClosed": True}),
+            "Normal DNS original UDP/control finality differs")
+        need(peer["stdoutBytes"] > len(canonical(terminal)), "Normal DNS peer omitted original ready/question frames")
+        return peer
+    # ownerTag is correlation-only; authority remains the source-bound original
+    # Child, exclusive listeners, actual wait and original reader/control joins.
+    refused = case in ("github-real-ca-refusal", "github-wrong-name", "github-expired", "github-ambient-no-rescue")
+    handshake = case == "github-handshake-deadline"
+    requests = 0 if refused or handshake else connections
+    for field in ("handshakes", "requests"):
+        _shell_github_uint(terminal[field], requests, "peer " + field, requests)
+    auth = requests * len(b"Bearer INERT_NOT_A_CREDENTIAL")
+    _shell_github_uint(terminal["authBytes"], auth, "synthetic authorization count", auth)
+    _shell_github_uint(terminal["decryptedBytes"], requests * 8192, "peer decrypted count", requests * 27)
+    _shell_github_uint(terminal["closeNotify"], connections, "peer close notify")
+    need(terminal["tlsRefused"] is refused and (not refused or terminal["closeNotify"] == 0),
+         "GitHub TLS refusal sent application authorization or a close-notify claim")
+    wire_max = 512 * 1024 if case == "github-body-limit" else 128 * 1024
+    for field in ("wireReadBytes", "wireWriteBytes", "replyBytes"):
+        rows = terminal[field]
+        need(type(rows) is list and len(rows) == connections, "GitHub peer wire roster differs")
+        for count in rows:
+            _shell_github_uint(count, wire_max, "peer " + field)
+    completion = terminal["completion"]
+    common = {"bytes": 1, "eof": True, "closed": True, "primaryEmpty": True, "primaryUnexpected": 0, "primaryClosed": True}
+    if framed:
+        wanted = {**common, "proxy": {"empty": True, "unexpected": 0, "closed": True} if case in SHELL_GITHUB_AMBIENT_CASES else None,
+                  "dnsEmpty": None, "dnsClosed": None}
+        for field in ("dnsQuestions", "dnsA", "dnsAAAA", "dnsReplies"):
+            _shell_github_uint(terminal[field], 0, "unused DNS " + field)
+        _shell_github_uint(terminal["sni"], connections, "peer SNI count")
+        _shell_github_uint(terminal["withheldWireBytes"], wire_max, "withheld wire")
+        _shell_github_uint(terminal["bodyBytes"], 65536, "peer body count")
+        _shell_github_uint(terminal["progressCount"], 24, "peer progress count")
+        need(type(terminal["incompleteBody"]) is bool and type(terminal["phase"]) is str
+             and re.fullmatch(r"[a-z-]{1,32}", terminal["phase"]) is not None
+             and (terminal["clientStop"] is None or type(terminal["clientStop"]) is str
+                  and re.fullmatch(r"[a-z-]{1,40}", terminal["clientStop"]) is not None),
+             "GitHub peer progress field types differ")
+    else:
+        wanted = {**common, "redirect": {"empty": True, "unexpected": 0, "closed": True} if case == "github-redirect" else None}
+        stops = terminal["replyStops"]
+        allowed = {"none", *(stage + ":" + reason for stage in ("notify", "reply")
+                    for reason in ("broken-pipe", "connection-reset", "tls-eof", "tls-close-notify"))}
+        need(type(stops) is list and len(stops) == connections and all(type(stop) is str and stop in allowed for stop in stops),
+             "GitHub peer original reply-stop roster differs")
+        streaming = {
+            "github-header-limit": ((40630,), (32768,)), "github-body-limit": ((262215,), (262215,)),
+            "github-chunk-limit": ((35803,), (33143,)), "github-unauthorized": ((99,), (80,)),
+            "github-rate": ((175,), (156,)), "github-identity": ((95, 222, 102, 222), (95, 222, 102, 222)),
+            "github-redirect": ((136,), (117,)),
+        }.get(case)
+        if streaming is not None:
+            scripted, minima = streaming
+            for index, stop in enumerate(stops):
+                minimum = scripted[index] if stop == "none" or stop.startswith("notify:") else minima[index]
+                need((case != "github-identity" or stop == "none")
+                     and minimum <= terminal["replyBytes"][index] <= scripted[index]
+                     and terminal["wireWriteBytes"][index] >= minimum, "GitHub peer did not reach its fixed response boundary")
+            need(terminal["closeNotify"] == stops.count("none"), "GitHub streaming close-notify count differs")
+        else:
+            notify = 8 if case == "github-connect-refresh" else 1 if case in ("github-length", "github-chunk") else 0
+            need(terminal["closeNotify"] == notify and (refused or all(0 < count <= 65536 for count in terminal["replyBytes"])),
+                 "GitHub framing response/notify count differs")
+    need(canonical(completion) == canonical(wanted), "GitHub peer original listener/control closure differs")
+    if deadline:
+        need(terminal["sni"] == 1 and terminal["clientStop"] in ("tcp-eof", "connection-reset", "tls-close-notify", "broken-pipe"),
+             "GitHub withholding lacks the original observed client stop")
+        if handshake:
+            need(terminal["phase"] == "handshake" and terminal["withheldWireBytes"] > 0
+                 and terminal["wireWriteBytes"] == [0] and terminal["replyBytes"] == [0],
+                 "GitHub handshake-withholding receipt differs")
+        elif case == "github-header-deadline":
+            need(terminal["phase"] == "headers" and terminal["bodyBytes"] == 0 and terminal["replyBytes"] == [0],
+                 "GitHub header-withholding receipt differs")
+        else:
+            need(terminal["phase"] == "read" and terminal["incompleteBody"] is True
+                 and (7 if case == "github-body-deadline" else 1) <= terminal["bodyBytes"] < 14,
+                 "GitHub body-withholding receipt differs")
+        need(terminal["progressCount"] >= 2, "GitHub withholding lost its original progress/stop frames")
+    need(peer["stdoutBytes"] > len(canonical(terminal)), "GitHub peer omitted its original readiness frame")
+    return peer
+
+
+
+def shell_github_maps(expected):
+    _shell_github_fields(expected, SHELL_GITHUB_PAYLOADS, "N/D expected map roles")
+    roles = {"python", "libssl.so.3", "libcrypto.so.3", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"}
+    private_inodes = set()
+    for profile, pin in SHELL_GITHUB_PAYLOADS.items():
+        _shell_github_fields(expected[profile], roles, "expected six-object map")
+        for role, row in expected[profile].items():
+            _shell_github_fields(row, ("paths", "deviceMajor", "deviceMinor", "inode"), "expected map object")
+            for key in ("deviceMajor", "deviceMinor", "inode"):
+                _shell_github_uint(row[key], (1 << 64) - 1, "expected map " + key, 1 if key == "inode" else 0)
+            if role == "python" or role in PRIVATE_SONAMES:
+                relative = "python/bin/python3" if role == "python" else "python/lib/" + role
+                need(row["paths"] == [str(PREFIX / pin["manifestSha256"] / relative)], "GitHub expected private map root differs")
+                pair = tuple(row[key] for key in ("deviceMajor", "deviceMinor", "inode"))
+                need(pair not in private_inodes, "GitHub N/D native originals alias")
+                private_inodes.add(pair)
+            else:
+                paths = sorted([directory + "/" + role for directory in DEFAULT_LIBRARY_DIRS[:2]]
+                               + (["/lib64/" + role] if role == "ld-linux-x86-64.so.2" else []))
+                need(row["paths"] == paths and canonical(row) == canonical(expected["N"][role]),
+                     "GitHub D route changed an original OS loader map")
+    return expected
+
+
+
+def _github_boundary_ip(value):
+    need(type(value) is str and 0 < len(value) <= 45 and "%" not in value, "Normal boundary IP is not bounded unscoped text")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError as error:
+        raise Refused("Normal boundary IP is not a literal address") from error
+    need(str(address) == value, "Normal boundary IP is not canonical")
+    return address
+
+
+def shell_github_dns_source(value):
+    _shell_github_fields(value, ("address", "port", "questionId", "questionType"), "original DNS question source")
+    need(type(value["address"]) is str, "DNS source address is not text")
+    address = _github_boundary_ip(value["address"])
+    need(address.version == 4 and address.is_loopback and str(address) == value["address"],
+         "DNS source is not its canonical original loopback address")
+    _shell_github_uint(value["port"], 65535, "original DNS source port", 1)
+    _shell_github_uint(value["questionId"], 65535, "original DNS question id")
+    need(type(value["questionType"]) is int and value["questionType"] in (1, 28), "Unexpected DNS question type")
+    return value
+
+
+def shell_github_boundary_receipt(value, case, peer):
+    need(case in SHELL_GITHUB_BOUNDARY_CASES, "No normal-boundary receipt is granted to another case")
+    _shell_github_fields(value, ("kind", "childPid", "fd", "inode", "uid", "family", "protocol",
+        "localAddress", "localPort", "remoteAddress", "remotePort", "state", "originalFdStable",
+        "observedBeforeDeadline", "peerSource"), "original normal boundary")
+    dns = case == "github-dns-deadline"
+    need(value["kind"] == ("normal-dns" if dns else "normal-connect")
+         and value["originalFdStable"] is True and value["observedBeforeDeadline"] is True,
+         "Normal boundary is not the original stable FD observed before its unchanged endpoint")
+    for key in ("childPid", "uid", "fd"):
+        _shell_github_uint(value[key], (1 << 32) - 1, "original boundary " + key, 0 if key == "fd" else 1)
+    need(type(value["inode"]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value["inode"]) is not None
+         and int(value["inode"]) < 1 << 64, "Normal boundary inode is not canonical positive u64 DATA")
+    for key in ("localAddress", "remoteAddress"):
+        need(type(value[key]) is str and len(value[key]) <= 45, "Normal boundary address bound differs")
+    local, remote = (_github_boundary_ip(value[key]) for key in ("localAddress", "remoteAddress"))
+    need(str(local) == value["localAddress"] and str(remote) == value["remoteAddress"]
+         and local.version == remote.version and value["family"] == ("ipv4" if local.version == 4 else "ipv6")
+         and not local.is_unspecified and not local.is_multicast, "Normal boundary original address/family differs")
+    _shell_github_uint(value["localPort"], 65535, "normal boundary local port", 1)
+    _shell_github_uint(value["remotePort"], 65535, "normal boundary remote port")
+    if dns:
+        source = shell_github_dns_source(value["peerSource"])
+        need(type(peer) is dict and type(peer.get("terminal")) is dict
+             and canonical(source) == canonical(peer["terminal"].get("dnsSource"))
+             and value["family"] == "ipv4" and value["protocol"] == "udp"
+             and (value["localAddress"], value["localPort"]) == (source["address"], source["port"])
+             and ((value["remoteAddress"], value["remotePort"], value["state"]) == ("127.0.0.53", 53, "01")
+                  or (value["remoteAddress"], value["remotePort"], value["state"]) == ("0.0.0.0", 0, "07")),
+             "Normal DNS question is not joined to that original Child UDP FD/inode/full endpoint")
+    else:
+        need(peer is None and value["peerSource"] is None and value["protocol"] == "tcp"
+             and value["state"] == "02" and value["remotePort"] == 443 and remote.is_global
+             and not remote.is_multicast and not remote.is_reserved
+             and (remote.version != 6 or remote.ipv4_mapped is None),
+             "Normal connect is not the original public-destination TCP SYN_SENT socket")
+    return value
+
+
+def shell_github_receipt(raw, case, expected):
+    """Closed DATA from the actual native producer; never a success template."""
+    role = shell_github_role(case)
+    need(type(raw) is bytes and 0 < len(raw) <= 32769
+         and type(expected) is dict and set(expected) == set(SHELL_GITHUB_PAYLOADS),
+         "GitHub receipt or independently bound N/D map roles differ")
+    shell_github_maps(expected)
+    receipt = decode(raw, 32769)
+    need(canonical(receipt) == raw, "GitHub native receipt is not canonical closed JSON")
+    _shell_github_fields(receipt, ("schemaVersion", "fixture", "case", "sourceCommit", "normalManifestSha256",
+        "productManifestSha256", "protocolSha256", "peerSha256", "project", "nativeSession", "originals",
+        "peer", "quit", "notProven"), "native receipt")
+    fixed = {"schemaVersion": 1, "fixture": "github-readonly-installed-v1", "case": case,
+             "normalManifestSha256": M, "productManifestSha256": SHELL_GITHUB_PAYLOADS[role]["manifestSha256"],
+             "protocolSha256": Q, "peerSha256": None if case == "github-connect-deadline" else SHELL_GITHUB_PEER_PINS["github_tls_peer.py"][1],
+             "project": {"cancelSettled": True, "registered": True, "snapshot": True},
+             "quit": {"originalsFinal": True, "relayJoined": True, "gtkSettled": True, "exit": True},
+             "notProven": (["real-stalled-tcp-connect"] if case == "github-dns-deadline" else
+                            ["normal-resolver-withholding"] if case == "github-connect-deadline" else
+                            ["normal-resolver-withholding", "real-stalled-tcp-connect"])}
+    need(canonical({key: receipt[key] for key in fixed}) == canonical(fixed)
+         and type(receipt["sourceCommit"]) is str and re.fullmatch(r"[0-9a-f]{40}", receipt["sourceCommit"]) is not None,
+         "GitHub actual native SOURCE/profile/project/quit binding differs")
+    active = case in SHELL_GITHUB_ACTIVE_CASES
+    deadline = case in SHELL_GITHUB_DEADLINE_CASES or case in SHELL_GITHUB_BOUNDARY_CASES
+    reads = 2 if case == "github-connect-refresh" else 1
+    reason = shell_github_case_data(case)[2]
+    session = receipt["nativeSession"]
+    _shell_github_fields(session, ("connect", "refresh", "disconnect", "retainedStatus", "runningObserved",
+        "outcomes", "cleared", "unknownRetained", "tokenFieldCleared"), "native session")
+    wanted = {"connect": 1, "refresh": reads - 1, "disconnect": 0 if case in ("github-quit", "github-unknown") else 1,
+              "retainedStatus": not active, "runningObserved": active,
+              "cleared": case not in ("github-quit", "github-unknown"),
+              "unknownRetained": case == "github-unknown", "tokenFieldCleared": True}
+    need(canonical({key: session[key] for key in wanted}) == canonical(wanted)
+         and type(session["outcomes"]) is list and len(session["outcomes"]) == (0 if active else reads),
+         "GitHub original Connect/Refresh/Status/Disconnect/unknown UI interval differs")
+    ui_reason = "network-unavailable" if deadline else "cleanup-unknown" if case == "github-unknown" else reason
+    previous_revision, context = 0, None
+    for index, outcome in enumerate(session["outcomes"]):
+        _shell_github_fields(outcome, ("revision", "sessionId", "projectId", "target", "sessionState", "kind", "phase",
+            "reason", "facts", "accountId", "repositoryId", "workflowRows"), "visible retained outcome")
+        _shell_github_uint(outcome["revision"], (1 << 32) - 2, "visible revision", previous_revision + 1)
+        previous_revision = outcome["revision"]
+        need(type(outcome["sessionId"]) is str and re.fullmatch(r"github-session-[0-9]{1,10}", outcome["sessionId"]) is not None
+             and type(outcome["projectId"]) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", outcome["projectId"]) is not None,
+             "GitHub registered session/project identity is not bounded")
+        current = (outcome["sessionId"], outcome["projectId"])
+        need(context is None or current == context, "GitHub Refresh adopted a replacement native session or project")
+        context = current
+        positive = reason == "none"
+        # TargetChanged retires before accept_facts: the current UI must not
+        # promote the partial account retained inside that native typed outcome.
+        shown = {"target": "owner/app", "sessionState": "connected" if positive else "failed",
+                 "kind": "connect" if index == 0 else "refresh", "phase": "settled", "reason": ui_reason,
+                 "facts": ["observed" if positive else "unavailable"] * 3,
+                 "accountId": "11" if positive else None, "repositoryId": "22" if positive else None,
+                 "workflowRows": 4 if positive else 0}
+        need(canonical({key: outcome[key] for key in shown}) == canonical(shown),
+             "GitHub fixed visible status/fact projection differs")
+    originals = receipt["originals"]
+    need(type(originals) is list and len(originals) == reads, "GitHub original native read roster differs")
+    operation_ids = set()
+    for original in originals:
+        _shell_github_fields(original, ("operationId", "manifestSha256", "receiptKind", "reason", "terminal",
+            "unknownLatched", "firstError", "originalObserverJoined", "nativeSettled", "environmentClear", "maps",
+            "cleanupWithinOriginalEndpoint", "elapsedMs", *(("boundary",) if case in SHELL_GITHUB_BOUNDARY_CASES else ())), "original read")
+        operation = original["operationId"]
+        need(type(operation) is str and re.fullmatch(r"github-read-(0|[1-9][0-9]{0,19})", operation) is not None
+             and int(operation.rsplit("-", 1)[1]) < 1 << 64 and operation not in operation_ids,
+             "GitHub original operation was missing, duplicated or replaced")
+        operation_ids.add(operation)
+        native_error = active or deadline
+        original_fixed = {"manifestSha256": SHELL_GITHUB_PAYLOADS[role]["manifestSha256"],
+                          "receiptKind": "native-error" if native_error else "typed-outcome", "reason": reason,
+                          "terminal": True, "unknownLatched": case == "github-unknown",
+                          "firstError": reason if native_error else None, "originalObserverJoined": True,
+                          "nativeSettled": True, "environmentClear": True, "cleanupWithinOriginalEndpoint": True}
+        need(canonical({key: original[key] for key in original_fixed}) == canonical(original_fixed),
+             "GitHub original first error/wait/settlement/environment/observer receipt differs")
+        _shell_github_uint(original["elapsedMs"], 11999 if deadline else 9999, "original read interval", 10000 if deadline else 0)
+        rows = _shell_original_child_map(canonical(original["maps"]), expected[role])
+        for name, relative in (("python", "python/bin/python3"), ("libssl.so.3", "python/lib/libssl.so.3"),
+                               ("libcrypto.so.3", "python/lib/libcrypto.so.3")):
+            row = next(row for row in rows if row["role"] == name)
+            same_normal = (row["deviceMajor"], row["deviceMinor"], row["inode"]) == tuple(
+                expected["N"][name][key] for key in ("deviceMajor", "deviceMinor", "inode"))
+            need(row["path"] == str(PREFIX / SHELL_GITHUB_PAYLOADS[role]["manifestSha256"] / relative)
+                 and same_normal is (role == "N"), "GitHub original N/D map role was relabelled")
+        if case in SHELL_GITHUB_BOUNDARY_CASES:
+            shell_github_boundary_receipt(original["boundary"], case, receipt["peer"])
+    if case == "github-connect-deadline":
+        need(receipt["peer"] is None, "Normal TCP-connect boundary acquired an unrelated synthetic peer")
+    else:
+        shell_github_peer_receipt(receipt["peer"], case)
+    return receipt
+
+
+def shell_github_result(stdout, stderr, case, code, expected):
+    shell_github_role(case)
+    need(type(code) is int and code == 0 and type(stdout) is bytes and type(stderr) is bytes
+         and len(stdout) + len(stderr) <= LIMIT, "GitHub original capture failed, oversized or incomplete")
+    output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+    diagnostics = [line for line in stderr.splitlines(keepends=True) if line.startswith(b"MRK_")]
+    # The one required guidance reload emits a second info/catalog pair before
+    # final contracts. It is not an optional or repeatable bootstrap allowance.
+    need(len(output) == 7, "GitHub original marker count differs")
+    need(output[:4] == [
+        b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n",
+        b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n"],
+        "GitHub original bootstrap/reload order differs")
+    need(output[4] == b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n",
+         "GitHub original contract marker differs")
+    need(output[5].startswith(SHELL_GITHUB_MARKER) and output[5].endswith(b"\n"),
+         "GitHub original receipt marker differs")
+    need(output[6] == b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n",
+         "GitHub original completion marker differs")
+    need(diagnostics == [], "GitHub original stderr contains a marker")
+    receipt = shell_github_receipt(output[5][len(SHELL_GITHUB_MARKER):], case, expected)
+    return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+            "maps": [], "githubReadOnly": receipt}
+
+
+def _shell_github_preflight_case(case):
+    need(case in SHELL_GITHUB_PREFLIGHT_CASES, "Different closed preflight case")
+    return {
+        "github-preflight-success": (20, 1, ("connect", "prepare", "dispatch", "track")),
+        "github-preflight-response-loss": (21, 1, ("connect", "prepare", "dispatch", "pending", "reconcile")),
+        "github-preflight-pre-go-revocation": (10, 0, ("connect", "prepare", "dispatch")),
+        "github-preflight-journal-collision": (21, 1, ("connect", "prepare", "dispatch", "prepare", "dispatch")),
+        "github-preflight-finality-refusal": (15, 1, ("connect", "prepare", "dispatch")),
+    }[case]
+
+
+def _shell_github_preflight_journal_kinds(case):
+    _shell_github_preflight_case(case)
+    return (("intent", 8192),) if case == "github-preflight-pre-go-revocation" else (("intent", 8192), ("run", 512))
+
+
+def _shell_github_preflight_scheduling(value, case, originals):
+    fields = ("mechanism", "kernelCloseFaultInjected", "readyNs", "revocationReplyNs", "writerReleasedNs",
+              "claimReturnedNs", "settlementReservedNs", "settlementEnteredNs", "cancelReplyNs",
+              "cleanupEndpointNs", "unknownReceiptNs", "unknownDomNs", "settlementReleasedNs", "markerReused")
+    _shell_github_fields(value, fields, "preflight original scheduling")
+    revocation = case == "github-preflight-pre-go-revocation"
+    collision = case == "github-preflight-journal-collision"
+    late = case == "github-preflight-finality-refusal"
+    mechanism = ("original-writer-scheduling" if revocation else "same-original-marker" if collision
+                 else "original-settlement-scheduling" if late else "none")
+    need(value["mechanism"] == mechanism and value["kernelCloseFaultInjected"] is False
+         and value["markerReused"] is collision, "Preflight scheduling mechanism or marker custody differs")
+    present = {"readyNs", "claimReturnedNs"}
+    if revocation:
+        present |= {"revocationReplyNs", "writerReleasedNs"}
+    if late:
+        present |= {"settlementReservedNs", "settlementEnteredNs", "cancelReplyNs", "cleanupEndpointNs",
+                    "unknownReceiptNs", "unknownDomNs", "settlementReleasedNs"}
+    for key in fields:
+        if key.endswith("Ns"):
+            if key in present:
+                _shell_github_uint(value[key], (1 << 64) - 1, "preflight " + key)
+            else:
+                need(value[key] is None, "Unrelated preflight scheduling interval present")
+    def ordered(points):
+        need(all(a <= b for a, b in zip(points, points[1:])), "Preflight original scheduling order differs")
+    ordered([value["readyNs"], value["claimReturnedNs"], originals[2]["settledNs"]])
+    if revocation:
+        ordered([value["readyNs"], value["revocationReplyNs"], value["writerReleasedNs"],
+                 value["claimReturnedNs"], originals[-1]["settledNs"]])
+    if late:
+        # The original owner's fixed two-second cleanup interval, not a new clock.
+        endpoint = value["cleanupEndpointNs"]
+        need(endpoint >= 2_000_000_000 and value["cancelReplyNs"] < endpoint,
+             "Preflight original cleanup endpoint differs")
+        ordered([value["claimReturnedNs"], value["settlementReservedNs"], value["settlementEnteredNs"],
+                 endpoint - 2_000_000_000, value["cancelReplyNs"], endpoint, value["unknownReceiptNs"],
+                 value["unknownDomNs"], value["settlementReleasedNs"], originals[-1]["settledNs"]])
+    return value
+
+
+def shell_github_preflight_journal_receipt(journal, marker, case):
+    kinds = _shell_github_preflight_journal_kinds(case)
+    _shell_github_fields(journal, ("marker", "intentBytes", "intentSha256", "runBytes", "runSha256",
+                                  "runId", "attempt", "leafCount", "runReadBeforeCollision"), "preflight journal")
+    need(type(marker) is str and re.fullmatch(r"[0-9a-f]{32}", marker) is not None and journal["marker"] == marker,
+         "Preflight original journal marker differs")
+    _shell_github_uint(journal["intentBytes"], 8192, "preflight intentBytes", 1)
+    need(type(journal["intentSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", journal["intentSha256"]) is not None
+         and type(journal["leafCount"]) is int and journal["leafCount"] == len(kinds)
+         and journal["runReadBeforeCollision"] is (case == "github-preflight-journal-collision"),
+         "Preflight intent digest, leaf count or collision readback differs")
+    if len(kinds) == 1:
+        need(all(journal[key] is None for key in ("runBytes", "runSha256", "runId", "attempt")),
+             "Revocation journal unexpectedly contains a run")
+    else:
+        _shell_github_uint(journal["runBytes"], 512, "preflight runBytes", 1)
+        need(type(journal["runSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", journal["runSha256"]) is not None
+             and journal["runId"] == "9001" and type(journal["attempt"]) is int and journal["attempt"] == 1,
+             "Preflight journal digest or exact run/attempt differs")
+        run = canonical({"schemaVersion": 1, "intentSha256": journal["intentSha256"], "runId": "9001", "attempt": 1})
+        need(journal["runBytes"] == len(run) and journal["runSha256"] == hashlib.sha256(run).hexdigest(),
+             "Preflight canonical run record does not bind the original intent")
+    return journal
+
+
+def shell_github_preflight_peer_receipt(peer, case, marker):
+    need(case in SHELL_GITHUB_PREFLIGHT_CASES, "Different preflight peer case")
+    true_fields = ("acquisitionJoined", "spawned", "waited", "exitSuccess", "stdoutJoined", "stderrJoined",
+                   "stdoutEof", "stderrEof", "ready", "settled", "withinEndpoint", "protocolChecked")
+    false_fields = ("stopAttempted", "stdoutOverflow", "stderrOverflow")
+    _shell_github_fields(peer, (*true_fields, *false_fields, "exitCode", "stdoutBytes", "stderrBytes", "terminal", "control"),
+                         "preflight peer")
+    need(all(peer[key] is True for key in true_fields) and all(peer[key] is False for key in false_fields),
+         "Preflight peer lacks original wait/EOF/join/endpoint/protocol finality")
+    _shell_github_uint(peer["exitCode"], 0, "preflight peer exit")
+    _shell_github_uint(peer["stdoutBytes"], 8192, "preflight peer stdout", 1)
+    _shell_github_uint(peer["stderrBytes"], 0, "preflight peer stderr")
+    controls = ("acquired", "started", "joined", "writeComplete", "shutdownComplete", "productSettled", "withinEndpoint", "released")
+    control = peer["control"]
+    _shell_github_fields(control, (*controls, "failed"), "preflight peer control")
+    need(all(control[key] is True for key in controls) and control["failed"] is False,
+         "Preflight original S+EOF writer did not follow actual product settlement")
+    terminal = peer["terminal"]
+    _shell_github_fields(terminal, ("schemaVersion", "scope", "case", "state", "ownerTag", "manifestSha256", "peerSha256",
+        "toolingSha", "callerSha256", "primaryPort", "status", "requests", "posts", "decryptedBytes", "intentBeforeResponse",
+        "allSocketsClosed", "inputsCheckedClosed", "code", "completion", "journal"), "preflight peer terminal")
+    requests, posts, _ = _shell_github_preflight_case(case)
+    wanted = {"schemaVersion": 1, "scope": "github-preflight-installed-peer-v1", "case": case.removeprefix("github-"),
+              "state": "finished", "manifestSha256": SHELL_GITHUB_PAYLOADS["D-S"]["manifestSha256"],
+              "peerSha256": shell_github_preflight_peer_pins()["github_preflight_peer.py"][1],
+              "toolingSha": SHELL_GITHUB_PREFLIGHT_TOOLING_SHA, "callerSha256": SHELL_GITHUB_PREFLIGHT_CALLER[1],
+              "primaryPort": 18443, "status": "passed", "requests": requests, "posts": posts, "intentBeforeResponse": posts == 1,
+              "allSocketsClosed": True, "inputsCheckedClosed": True, "code": None,
+              "completion": {"bytes": 1, "eof": True, "closed": True, "primaryEmpty": True,
+                             "primaryUnexpected": 0, "primaryClosed": True, "redirect": None}}
+    need(canonical({key: terminal[key] for key in wanted}) == canonical(wanted)
+         and type(terminal["ownerTag"]) is str and re.fullmatch(r"[0-9a-f]{16}", terminal["ownerTag"]) is not None,
+         "Preflight peer SOURCE/one-POST/request/finality binding differs")
+    _shell_github_uint(terminal["decryptedBytes"], requests * 8192, "preflight peer decrypted bytes", 1)
+    shell_github_preflight_journal_receipt(terminal["journal"], marker, case)
+    return peer
+
+
+def _shell_github_preflight_pending_map(raw, expected):
+    """Actual before-IO subset for Pending/pre-GO refusal; never a general loader allowlist."""
+    need(type(expected) is dict and len(expected) == 6, "Preflight admitted full loader map differs")
+    rows = decode(raw, 8192)
+    need(type(rows) is list and 4 <= len(rows) <= 6 and all(type(row) is dict for row in rows),
+         "Pending original child map count differs")
+    roles = [row.get("role") for row in rows]
+    mandatory = {"python", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"}
+    need(all(type(role) is str for role in roles) and roles == sorted(set(roles))
+         and mandatory <= set(roles) <= set(expected), "Pending original mandatory/optional roles differ")
+    for row in rows:
+        need(set(row) == {"role", "path", "deviceMajor", "deviceMinor", "inode"}
+             and row["path"] in expected[row["role"]]["paths"]
+             and all(type(row[key]) is int and row[key] == expected[row["role"]][key]
+                     for key in ("deviceMajor", "deviceMinor", "inode")), "Pending original child mapping differs")
+    return rows
+
+
+def shell_github_preflight_receipt(raw, case, expected):
+    """Typed native five-case evidence; never readonly or ordinary authority."""
+    _, _, kinds = _shell_github_preflight_case(case)
+    need(type(raw) is bytes and 0 < len(raw) <= 32769, "Preflight native receipt bound differs")
+    shell_github_maps(expected)
+    receipt = decode(raw, 32769)
+    need(canonical(receipt) == raw, "Preflight native receipt is not canonical closed JSON")
+    _shell_github_fields(receipt, ("schemaVersion", "fixture", "case", "sourceCommit", "normalManifestSha256",
+        "productManifestSha256", "protocolSha256", "toolingSha", "callerSha256", "peerSha256", "project",
+        "nativeSession", "scheduling", "originals", "peer", "quit", "notProven"), "preflight native receipt")
+    loss = case == "github-preflight-response-loss"
+    revocation = case == "github-preflight-pre-go-revocation"
+    collision = case == "github-preflight-journal-collision"
+    late = case == "github-preflight-finality-refusal"
+    negative_case = revocation or collision or late
+    wanted = {"schemaVersion": 1, "fixture": "github-preflight-installed-negative-v1" if negative_case else "github-preflight-installed-v2",
+              "case": case, "normalManifestSha256": M, "productManifestSha256": SHELL_GITHUB_PAYLOADS["D-S"]["manifestSha256"],
+              "protocolSha256": Q, "toolingSha": SHELL_GITHUB_PREFLIGHT_TOOLING_SHA,
+              "callerSha256": SHELL_GITHUB_PREFLIGHT_CALLER[1],
+              "peerSha256": shell_github_preflight_peer_pins()["github_preflight_peer.py"][1],
+              "project": {"cancelSettled": True, "registered": True, "snapshot": True},
+              "quit": {"originalsFinal": True, "relayJoined": True, "gtkSettled": True, "exit": True},
+              "notProven": list(SHELL_GITHUB_PREFLIGHT_NOT_PROVEN)}
+    need(canonical({key: receipt[key] for key in wanted}) == canonical(wanted)
+         and type(receipt["sourceCommit"]) is str and re.fullmatch(r"[0-9a-f]{40}", receipt["sourceCommit"]) is not None
+         and receipt["sourceCommit"] != "0" * 40, "Preflight native SOURCE/profile/project/quit binding differs")
+    originals = receipt["originals"]
+    need(type(originals) is list and len(originals) == len(kinds), "Preflight original operation roster differs")
+    previous, previous_settled, marker = -1, 0, None
+    for index, (original, kind) in enumerate(zip(originals, kinds)):
+        _shell_github_fields(original, ("operationId", "kind", "manifestSha256", "reason", "effect", "marker", "terminal",
+            "originalObserverJoined", "nativeSettled", "environmentClear", "readyObserved", "claimReturned", "goWritten",
+            "goClaimed", "negative", "wasUnknown", "errorCode", "firstError", "exitCode", "exitSignal",
+            "ownedStopAttempted", "settledNs", "maps"), "preflight original")
+        prefix = "github-read-" if kind == "connect" else "github-preflight-"
+        operation = original["operationId"]
+        need(type(operation) is str and re.fullmatch(prefix + r"(0|[1-9][0-9]{0,19})", operation) is not None,
+             "Preflight original operation ID differs")
+        sequence = int(operation[len(prefix):])
+        _shell_github_uint(original["settledNs"], (1 << 64) - 1, "preflight original settled interval")
+        need(previous < sequence < 1 << 64 and previous_settled <= original["settledNs"],
+             "Preflight original operation was duplicated, reordered or replaced")
+        previous, previous_settled = sequence, original["settledNs"]
+        if index == 1:
+            marker = original["marker"]
+            need(type(marker) is str and re.fullmatch(r"[0-9a-f]{32}", marker) is not None,
+                 "Preflight actual native marker differs")
+        negative = negative_case and index == len(kinds) - 1
+        before_go = negative and (revocation or collision)
+        reason, effect, error, first = "none", "none", None, None
+        if kind == "dispatch":
+            reason = "tls-failed" if loss else "none"
+            effect = "potentially-applied" if loss else "accepted"
+        if negative:
+            effect = "potentially-applied" if late else "not-sent"
+            if collision:
+                first = original["firstError"]
+                reasons = {"protocol_error": "response-invalid", "engine_failed": "network-unavailable", "io_error": "network-unavailable"}
+                need(type(first) is str and first in reasons, "Preflight collision first failure differs")
+                error, reason = first, reasons[first]
+            else:
+                first = "cancelled"
+                error, reason = ("cleanup_unknown", "cleanup-unknown") if late else ("cancelled", "cancelled")
+        fixed = {"kind": kind, "manifestSha256": SHELL_GITHUB_PAYLOADS["D-S"]["manifestSha256"],
+                 "reason": reason, "effect": effect, "marker": None if index == 0 else marker,
+                 "terminal": True, "originalObserverJoined": True, "nativeSettled": True, "environmentClear": True,
+                 "readyObserved": index > 0 and not (negative and collision),
+                 "claimReturned": index > 0 and not (negative and collision),
+                 "goWritten": index > 0 and not before_go, "goClaimed": index > 0 and not before_go,
+                 "negative": negative, "wasUnknown": negative and late, "errorCode": error, "firstError": first}
+        need(canonical({key: original[key] for key in fixed}) == canonical(fixed)
+             and type(original["ownedStopAttempted"]) is bool,
+             "Preflight original outcome/marker/READY/GO/first-failure/finality differs")
+        code, signal = original["exitCode"], original["exitSignal"]
+        if before_go:
+            need(type(code) is int and code == 70 and signal is None
+                 or code is None and type(signal) is int and signal == 9 and original["ownedStopAttempted"] is True,
+                 "Preflight pre-GO original unsuccessful exit differs")
+        else:
+            need(type(code) is int and code == 0 and signal is None, "Preflight original successful child exit differs")
+        if kind == "pending" or before_go:
+            _shell_github_preflight_pending_map(canonical(original["maps"]), expected["D-S"])
+        else:
+            _shell_original_child_map(canonical(original["maps"]), expected["D-S"])
+    dispatch = [row for row in originals if row["kind"] == "dispatch"][-1]
+    retirement = ({"mode": "late-unknown", "unknownPreserved": True, "newWorkDenied": True,
+                   "initialDisplayedPending": 0, "lateNativeRecoveryRetained": True, "lateDisplayedPending": 0}
+                  if late else {"mode": "disconnected", "authorityRemoved": True,
+                                "terminalPreserved": True, "recoveryPreserved": True})
+    session = {"connect": 1, "prepare": 2 if collision else 1, "dispatch": 2 if collision else 1,
+               "observe": 0 if negative_case else 1, "disconnect": 0 if late else 1,
+               "pending": 1 if loss else 0, "pendingReloaded": loss, "retainedStatus": True, "tokenFieldCleared": True,
+               "reviewVisible": True, "consentObserved": True, "dispatchEffect": dispatch["effect"],
+               "dispatchReason": dispatch["reason"], "runObserved": not negative_case, "retirement": retirement}
+    need(canonical(receipt["nativeSession"]) == canonical(session),
+         "Preflight actual review/consent/Pending/retirement/status interval differs")
+    _shell_github_preflight_scheduling(receipt["scheduling"], case, originals)
+    shell_github_preflight_peer_receipt(receipt["peer"], case, marker)
+    return receipt
+
+
+def shell_github_preflight_result(stdout, stderr, case, code, expected):
+    need(case in SHELL_GITHUB_PREFLIGHT_CASES and type(code) is int and code == 0
+         and type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= LIMIT,
+         "Preflight original capture failed, oversized or incomplete")
+    output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+    diagnostics = [line for line in stderr.splitlines(keepends=True) if line.startswith(b"MRK_")]
+    need(len(output) == 7 and output[:4] == [
+        b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n",
+        b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n"]
+        and output[4] == b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+        and output[5].startswith(SHELL_GITHUB_PREFLIGHT_MARKER) and output[5].endswith(b"\n")
+        and output[6] == b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n"
+        and diagnostics == [], "Preflight original bootstrap/reload/receipt/completion marker order differs")
+    receipt = shell_github_preflight_receipt(output[5][len(SHELL_GITHUB_PREFLIGHT_MARKER):], case, expected)
+    return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+            "maps": [], "githubPreflight": receipt}
+
+
+def _shell_github_release_case(case):
+    need(case in SHELL_GITHUB_RELEASE_CASES, "Different closed release case")
+    return {"github-release-normal-pending": (4, 0, ("connect", "pending")),
+            "github-release-response-loss": (25, 1, ("connect", "prepare", "dispatch", "pending", "reconcile")),
+            "github-release-pre-go-revocation": (14, 0, ("connect", "prepare", "dispatch"))}[case]
+
+
+def _shell_github_release_manifest(case):
+    _shell_github_release_case(case)
+    return M if case == "github-release-normal-pending" else SHELL_GITHUB_PAYLOADS["D-S"]["manifestSha256"]
+
+
+def _shell_github_release_journal_kinds(case):
+    _shell_github_release_case(case)
+    return (() if case == "github-release-normal-pending" else (("intent", 8192),)
+            if case == "github-release-pre-go-revocation" else (("intent", 8192), ("run", 512)))
+
+
+def _shell_github_release_scheduling(value, case, originals):
+    fields = ("mechanism", "readyNs", "revocationReplyNs", "writerReleasedNs", "claimReturnedNs", "cleanupEndpointNs", "kernelCloseFaultInjected")
+    _shell_github_fields(value, fields, "release original scheduling")
+    revocation = case == "github-release-pre-go-revocation"
+    need(value["mechanism"] == ("original-writer-scheduling" if revocation else "none")
+         and value["kernelCloseFaultInjected"] is False, "Release original scheduling mechanism differs")
+    for key in fields[1:-1]:
+        if revocation:
+            _shell_github_uint(value[key], (1 << 64) - 1, "release " + key)
+        else:
+            need(value[key] is None, "Unrelated release scheduling interval present")
+    if revocation:
+        endpoint = value["cleanupEndpointNs"]
+        need(endpoint >= 2_000_000_000 and originals[-1]["settledNs"] < endpoint,
+             "Release final claim/retirement exceeded its original two-second cleanup endpoint")
+        points = [value["readyNs"], endpoint - 2_000_000_000, value["revocationReplyNs"],
+                  value["writerReleasedNs"], value["claimReturnedNs"], originals[-1]["settledNs"]]
+        need(all(a <= b for a, b in zip(points, points[1:])), "Release original revocation/claim ordering differs")
+    return value
+
+
+def shell_github_release_journal_receipt(journal, marker, case):
+    kinds = _shell_github_release_journal_kinds(case)
+    _shell_github_fields(journal, ("marker", "intentBytes", "intentSha256", "runBytes", "runSha256", "runId", "attempt", "leafCount"), "release journal")
+    need(type(journal["leafCount"]) is int and journal["leafCount"] == len(kinds) and journal["marker"] == marker,
+         "Release original journal marker/roster differs")
+    if not kinds:
+        need(marker is None and all(journal[key] is None for key in
+             ("intentBytes", "intentSha256", "runBytes", "runSha256", "runId", "attempt")),
+             "Normal Pending acquired an intent, run or marker")
+        return journal
+    need(type(marker) is str and re.fullmatch(r"[0-9a-f]{32}", marker) is not None, "Release original marker differs")
+    _shell_github_uint(journal["intentBytes"], 8192, "release intent bytes", 1)
+    need(type(journal["intentSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", journal["intentSha256"]) is not None,
+         "Release original intent digest differs")
+    if len(kinds) == 1:
+        need(all(journal[key] is None for key in ("runBytes", "runSha256", "runId", "attempt")), "Revoked release acquired a run")
+    else:
+        _shell_github_uint(journal["runBytes"], 512, "release run bytes", 1)
+        need(journal["runId"] == "9001" and type(journal["attempt"]) is int and journal["attempt"] == 1,
+             "Release exact original run/attempt differs")
+        raw = canonical({"schemaVersion": 1, "intentSha256": journal["intentSha256"], "runId": "9001", "attempt": 1})
+        need(journal["runBytes"] == len(raw) and journal["runSha256"] == hashlib.sha256(raw).hexdigest(),
+             "Release run record does not bind the actual original intent")
+    return journal
+
+
+def shell_github_release_peer_receipt(peer, case, marker):
+    requests, posts, _ = _shell_github_release_case(case)
+    true_fields = ("acquisitionJoined", "spawned", "waited", "exitSuccess", "stdoutJoined", "stderrJoined",
+                   "stdoutEof", "stderrEof", "ready", "settled", "withinEndpoint", "protocolChecked")
+    false_fields = ("stopAttempted", "stdoutOverflow", "stderrOverflow")
+    _shell_github_fields(peer, (*true_fields, *false_fields, "exitCode", "stdoutBytes", "stderrBytes", "terminal", "control"), "release peer")
+    need(all(peer[key] is True for key in true_fields) and all(peer[key] is False for key in false_fields),
+         "Release peer lacks original wait/EOF/join/endpoint/protocol finality")
+    _shell_github_uint(peer["exitCode"], 0, "release peer exit")
+    _shell_github_uint(peer["stdoutBytes"], 8192, "release peer stdout", 1)
+    _shell_github_uint(peer["stderrBytes"], 0, "release peer stderr")
+    controls = ("acquired", "started", "joined", "writeComplete", "shutdownComplete", "productSettled", "withinEndpoint", "released")
+    _shell_github_fields(peer["control"], (*controls, "failed"), "release peer control")
+    need(all(peer["control"][key] is True for key in controls) and peer["control"]["failed"] is False,
+         "Release original completion writer did not follow product settlement")
+    terminal = peer["terminal"]
+    _shell_github_fields(terminal, ("schemaVersion", "scope", "case", "state", "ownerTag", "manifestSha256", "peerSha256",
+        "toolingSha", "callerSha256", "primaryPort", "status", "requests", "posts", "decryptedBytes", "intentBeforeResponse",
+        "allSocketsClosed", "inputsCheckedClosed", "code", "completion", "journal", "otherJournalAbsent"), "release peer terminal")
+    wanted = {"schemaVersion": 1, "scope": "github-release-installed-peer-v1", "case": case.removeprefix("github-"),
+              "state": "finished", "manifestSha256": _shell_github_release_manifest(case),
+              "peerSha256": shell_github_release_peer_pins()["github_release_peer.py"][1],
+              "toolingSha": SHELL_GITHUB_RELEASE_TOOLING_SHA,
+              "callerSha256": {stage: pin[1] for stage, pin in SHELL_GITHUB_RELEASE_CALLERS.items()},
+              "primaryPort": 18443, "status": "passed", "requests": requests, "posts": posts, "intentBeforeResponse": posts == 1,
+              "allSocketsClosed": True, "inputsCheckedClosed": True, "otherJournalAbsent": True, "code": None,
+              "completion": {"bytes": 1, "eof": True, "closed": True, "primaryEmpty": True, "primaryUnexpected": 0, "primaryClosed": True, "redirect": None}}
+    need(canonical({key: terminal[key] for key in wanted}) == canonical(wanted)
+         and type(terminal["ownerTag"]) is str and re.fullmatch(r"[0-9a-f]{16}", terminal["ownerTag"]) is not None,
+         "Release peer SOURCE/one-POST/request/finality binding differs")
+    _shell_github_uint(terminal["decryptedBytes"], requests * 8192, "release decrypted bytes", 1)
+    shell_github_release_journal_receipt(terminal["journal"], marker, case)
+    need(peer["stdoutBytes"] > len(canonical(terminal)), "Release peer omitted its actual readiness frame")
+    return peer
+
+
+def shell_github_release_receipt(raw, case, expected):
+    """Exactly R native3 DATA, not ordinary/G authority or release evidence."""
+    _, _, kinds = _shell_github_release_case(case)
+    need(type(raw) is bytes and 0 < len(raw) <= 32769, "Release native receipt bound differs")
+    shell_github_maps(expected)
+    receipt = decode(raw, 32769)
+    need(canonical(receipt) == raw, "Release native receipt is not canonical")
+    _shell_github_fields(receipt, ("schemaVersion", "fixture", "case", "sourceCommit", "normalManifestSha256", "productManifestSha256",
+        "connectionManifestSha256", "protocolSha256", "toolingSha", "callerSha256", "peerSha256", "project", "nativeSession",
+        "scheduling", "originals", "peer", "quit", "notProven"), "release native receipt")
+    normal, loss, revocation = (case == name for name in SHELL_GITHUB_RELEASE_CASES)
+    wanted = {"schemaVersion": 1, "fixture": "github-release-installed-v1", "case": case, "normalManifestSha256": M,
+              "productManifestSha256": _shell_github_release_manifest(case), "connectionManifestSha256": SHELL_GITHUB_PAYLOADS["D-S"]["manifestSha256"],
+              "protocolSha256": Q, "toolingSha": SHELL_GITHUB_RELEASE_TOOLING_SHA,
+              "callerSha256": {stage: pin[1] for stage, pin in SHELL_GITHUB_RELEASE_CALLERS.items()},
+              "peerSha256": shell_github_release_peer_pins()["github_release_peer.py"][1],
+              "project": {"cancelSettled": True, "registered": True, "snapshot": True},
+              "quit": {"originalsFinal": True, "relayJoined": True, "gtkSettled": True, "exit": True},
+              "notProven": list(SHELL_GITHUB_RELEASE_NOT_PROVEN)}
+    need(canonical({key: receipt[key] for key in wanted}) == canonical(wanted)
+         and type(receipt["sourceCommit"]) is str and re.fullmatch(r"[0-9a-f]{40}", receipt["sourceCommit"]) is not None
+         and receipt["sourceCommit"] != "0" * 40, "Release SOURCE/independent profile/project/quit binding differs")
+    originals = receipt["originals"]
+    need(type(originals) is list and len(originals) == len(kinds), "Release original operation roster differs")
+    previous, previous_settled, marker = -1, 0, None
+    for index, (original, kind) in enumerate(zip(originals, kinds)):
+        _shell_github_fields(original, ("operationId", "kind", "manifestSha256", "reason", "effect", "marker", "terminal",
+            "originalObserverJoined", "nativeSettled", "environmentClear", "readyObserved", "claimReturned", "goWritten", "goClaimed",
+            "tokenAbsent", "negative", "wasUnknown", "errorCode", "firstError", "exitCode", "exitSignal", "ownedStopAttempted", "settledNs", "maps"),
+            "release original")
+        prefix = "github-read-" if index == 0 else "github-release-"
+        operation = original["operationId"]
+        need(type(operation) is str and re.fullmatch(prefix + r"(0|[1-9][0-9]{0,19})", operation) is not None, "Release original ID differs")
+        sequence = int(operation[len(prefix):])
+        _shell_github_uint(original["settledNs"], (1 << 64) - 1, "release original settled interval")
+        need(previous < sequence < 1 << 64 and previous_settled <= original["settledNs"], "Release original was reused/reordered")
+        previous, previous_settled = sequence, original["settledNs"]
+        if index == 1 and not normal:
+            marker = original["marker"]
+            need(type(marker) is str and re.fullmatch(r"[0-9a-f]{32}", marker) is not None, "Release actual marker differs")
+        negative = revocation and index == 2
+        role = "N" if normal and index == 1 else "D-S"
+        effect = "not-sent" if negative else "potentially-applied" if kind == "dispatch" else "none"
+        reason = "cancelled" if negative else "tls-failed" if kind == "dispatch" else "none"
+        fixed = {"kind": kind, "manifestSha256": SHELL_GITHUB_PAYLOADS[role]["manifestSha256"], "reason": reason, "effect": effect,
+                 "marker": marker if index > 0 else None, "terminal": True, "originalObserverJoined": True, "nativeSettled": True,
+                 "environmentClear": True, "readyObserved": index > 0, "claimReturned": index > 0,
+                 "goWritten": index > 0 and not negative, "goClaimed": index > 0 and not negative,
+                 "tokenAbsent": None if index == 0 or negative else kind == "pending", "negative": negative, "wasUnknown": False,
+                 "errorCode": "cancelled" if negative else None, "firstError": "cancelled" if negative else None}
+        need(canonical({key: original[key] for key in fixed}) == canonical(fixed) and type(original["ownedStopAttempted"]) is bool,
+             "Release original manifest/READY/GO/token/first-failure/finality differs")
+        code, signal = original["exitCode"], original["exitSignal"]
+        if negative:
+            need(type(code) is int and code == 70 and signal is None or code is None and type(signal) is int
+                 and signal == 9 and original["ownedStopAttempted"] is True, "Revoked release original exit differs")
+        else:
+            need(type(code) is int and code == 0 and signal is None and original["ownedStopAttempted"] is False,
+                 "Release original successful child exit differs")
+        if kind == "pending" or negative:
+            _shell_github_preflight_pending_map(canonical(original["maps"]), expected[role])
+        else:
+            _shell_original_child_map(canonical(original["maps"]), expected[role])
+    session = {"connect": 1, "prepare": int(not normal), "dispatch": int(not normal), "pending": int(not revocation),
+               "reconcile": int(loss), "disconnect": 1, "retainedStatus": True, "pendingReloaded": not revocation,
+               "tokenFieldCleared": True, "reviewVisible": not normal, "typedConfirmation": not normal, "consentObserved": not normal,
+               "originalDeclarationsDistinct": loss, "dispatchEffect": None if normal else "potentially-applied" if loss else "not-sent",
+               "dispatchReason": None if normal else "tls-failed" if loss else "cancelled", "runObserved": loss,
+               "retirement": {"mode": "disconnected", "authorityRemoved": True, "terminalPreserved": True, "recoveryPreserved": True}}
+    need(canonical(receipt["nativeSession"]) == canonical(session), "Release actual UI review/typed consent/Pending/retirement differs")
+    _shell_github_release_scheduling(receipt["scheduling"], case, originals)
+    shell_github_release_peer_receipt(receipt["peer"], case, marker)
+    return receipt
+
+
+def shell_github_release_result(stdout, stderr, case, code, expected):
+    need(case in SHELL_GITHUB_RELEASE_CASES and type(code) is int and code == 0
+         and type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= LIMIT,
+         "Release original capture failed/oversized/incomplete")
+    output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+    need(len(output) == 7 and output[:4] == [b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n",
+        b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n"]
+        and output[4] == b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+        and output[5].startswith(SHELL_GITHUB_RELEASE_MARKER) and output[5].endswith(b"\n")
+        and output[6] == b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n"
+        and not any(line.startswith(b"MRK_") for line in stderr.splitlines()), "Release original framing/order differs")
+    receipt = shell_github_release_receipt(output[5][len(SHELL_GITHUB_RELEASE_MARKER):], case, expected)
+    return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [], "githubRelease": receipt}
+
+
+SHELL_GITHUB_PREFLIGHT_JOURNAL_DIRECTORIES = (
+    ".local", ".local/share", ".local/share/mobile-release-kit", ".local/share/mobile-release-kit/github-preflight",
+)
+
+
+def shell_github_preflight_journal_data(value, case, raw, receipt):
+    """Private original identities/hashes only; no raw intent or credential export."""
+    need(shell_github_preflight(value) and case in shell_cases(value), "Different preflight journal route")
+    journal = receipt["peer"]["terminal"]["journal"]
+    shell_github_preflight_journal_receipt(journal, receipt["originals"][1]["marker"], case)
+    data = decode(raw, SHELL_GITHUB_PREFLIGHT_JOURNAL_LIMIT)
+    _shell_github_fields(data, ("schema", "sourceSha", "runId", "attempt", "case", "home", "created", "directories", "files", "journal"),
+                         "preflight original journal DATA")
+    need(canonical(data) == raw and data["schema"] == "installed-github-preflight-journal-v1"
+         and all(data[key] == value[key] for key in ("sourceSha", "runId", "attempt")) and data["case"] == case
+         and data["home"] == str(root_path(value) / ("gui-" + case) / "home")
+         and canonical(data["journal"]) == canonical(journal), "Preflight journal source/HOME/native correspondence differs")
+    created, directories, files = data["created"], data["directories"], data["files"]
+    _shell_github_fields(created, ("root", "gui", "home"), "preflight original HOME identities")
+    _shell_github_fields(directories, ("gui", "home", *SHELL_GITHUB_PREFLIGHT_JOURNAL_DIRECTORIES), "preflight journal directories")
+    marker = journal["marker"]
+    _shell_github_fields(files, tuple(marker + "." + kind + ".json" for kind, _ in _shell_github_preflight_journal_kinds(case)),
+                         "preflight journal leaves")
+    owners = [value["runnerUid"], value["runnerGid"]]
+    for name, row in created.items():
+        need(type(row) is list and len(row) == 5 and all(type(n) is int and 0 <= n < 1 << 64 for n in row)
+             and row[0] > 0 and row[1] > 0
+             and row[2:] == ([stat.S_IFDIR | 0o711, 0, 0] if name == "root" else [stat.S_IFDIR | 0o700, *owners]),
+             "Preflight original created HOME protection differs")
+    pairs = {tuple(created["root"][:2])}
+    for name, row in directories.items():
+        need(type(row) is list and len(row) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in row)
+             and row[0] == created["root"][0] and row[1] > 0 and row[2:5] == [stat.S_IFDIR | 0o700, *owners]
+             and row[5] > 0 and row[6] <= JSON_LIMIT
+             and (name not in created or row[:5] == created[name]), "Preflight journal directory original changed")
+        pair = tuple(row[:2])
+        need(pair not in pairs, "Preflight journal directory aliases another original")
+        pairs.add(pair)
+    for kind, bound in _shell_github_preflight_journal_kinds(case):
+        row = files[marker + "." + kind + ".json"]
+        _shell_github_fields(row, ("identity", "size", "sha256"), "preflight journal leaf")
+        original = row["identity"]
+        need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+             and original[0] == created["root"][0] and original[1] > 0
+             and original[2:6] == [stat.S_IFREG | 0o400, *owners, 1]
+             and type(row["size"]) is int and 0 < row["size"] <= bound
+             and original[6] == row["size"] == journal[kind + "Bytes"] and row["sha256"] == journal[kind + "Sha256"],
+             "Preflight immutable journal owner/mode/size/hash differs")
+        pair = tuple(original[:2])
+        need(pair not in pairs, "Preflight journal leaf aliases another original")
+        pairs.add(pair)
+    return data
+
+
+def _shell_github_preflight_names(fd, expected):
+    # Enumerate only the fixed finite roster, before any private leaf read.
+    names = []
+    with os.scandir(fd) as iterator:
+        for entry in iterator:
+            need(len(names) < len(expected), "Preflight journal contains an unexpected entry")
+            names.append(entry.name)
+    need(sorted(names) == sorted(expected), "Preflight journal directory roster differs")
+
+
+def _shell_github_preflight_home(value, case):
+    need(shell_github_preflight(value) and case in shell_cases(value) and _ROOT == root_path(value)
+         and case not in _SHELL_GITHUB_PREFLIGHT_HOMES, "Preflight original HOME was reused")
+    home = _ROOT / ("gui-" + case) / "home"
+    _absent(home / ".local")
+    created = {name: list(identity(path.lstat())[:5]) for name, path in
+               (("root", _ROOT), ("gui", home.parent), ("home", home))}
+    need(created["root"][2:] == [stat.S_IFDIR | 0o711, 0, 0]
+         and all(created[name][2:] == [stat.S_IFDIR | 0o700, value["runnerUid"], value["runnerGid"]]
+                 and created[name][0] == created["root"][0] for name in ("gui", "home"))
+         and len({tuple(row[:2]) for row in created.values()}) == 3, "Fresh preflight HOME identity differs")
+    _SHELL_GITHUB_PREFLIGHT_HOMES[case] = created
+
+
+def _shell_github_preflight_journal_snapshot(value, case, receipt):
+    """Only called after original command and complete native receipt success.
+
+    Keep every no-follow directory and every1/2 file original until complete POST;
+    attempt every checked close on all outcomes. No cleanup or repaired record.
+    """
+    need(_ROOT == root_path(value) and case in _SHELL_GITHUB_PREFLIGHT_HOMES, "Preflight original HOME admission missing")
+    created = _SHELL_GITHUB_PREFLIGHT_HOMES[case]
+    journal = receipt["peer"]["terminal"]["journal"]
+    shell_github_preflight_journal_receipt(journal, receipt["originals"][1]["marker"], case)
+    marker, originals, pairs = journal["marker"], [], set()
+    directories, files = {}, {}
+    owners, device = (value["runnerUid"], value["runnerGid"]), created["root"][0]
+
+    def open_original(name, parent_fd, label, is_directory, mode, owner, maximum):
+        before = identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False))
+        need(before[0] == device and before[1] > 0 and before[2:5] == (mode, *owner)
+             and before[5] > 0 and before[6] <= maximum and (is_directory or before[5] == 1)
+             and before[:2] not in pairs, "Preflight journal original owner/type/device/alias differs")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK | (os.O_DIRECTORY if is_directory else 0)
+        fd = os.open(name, flags, dir_fd=parent_fd)
+        originals.append((name, parent_fd, fd, before, label))  # Custody before every fallible check.
+        need(identity(os.fstat(fd)) == before and os.listxattr(fd) == [], "Preflight journal opened original/xattrs differ")
+        pairs.add(before[:2])
+        return fd, before
+
+    try:
+        directory(_ROOT, protected=True)
+        root_fd, root_before = open_original(str(_ROOT), None, "root", True, stat.S_IFDIR | 0o711, (0, 0), JSON_LIMIT)
+        need(list(root_before[:5]) == created["root"], "Preflight original root changed")
+        gui_fd, gui = open_original("gui-" + case, root_fd, "gui", True, stat.S_IFDIR | 0o700, owners, JSON_LIMIT)
+        home_fd, home = open_original("home", gui_fd, "home", True, stat.S_IFDIR | 0o700, owners, JSON_LIMIT)
+        need(list(gui[:5]) == created["gui"] and list(home[:5]) == created["home"], "Preflight original per-case HOME changed")
+        directories.update(gui=list(gui), home=list(home))
+        _shell_github_preflight_names(home_fd, (".local",))
+        parent, rosters = home_fd, [(home_fd, (".local",))]
+        for index, relative in enumerate(SHELL_GITHUB_PREFLIGHT_JOURNAL_DIRECTORIES):
+            fd, before = open_original(Path(relative).name, parent, relative, True, stat.S_IFDIR | 0o700, owners, JSON_LIMIT)
+            directories[relative] = list(before)
+            expected = ((Path(SHELL_GITHUB_PREFLIGHT_JOURNAL_DIRECTORIES[index + 1]).name,) if index < 3
+                        else tuple(marker + "." + kind + ".json" for kind, _ in _shell_github_preflight_journal_kinds(case)))
+            _shell_github_preflight_names(fd, expected)
+            rosters.append((fd, expected))
+            parent = fd
+        leaf_fds = []
+        for kind, maximum in _shell_github_preflight_journal_kinds(case):
+            name = marker + "." + kind + ".json"
+            fd, before = open_original(name, parent, name, False, stat.S_IFREG | 0o400, owners, maximum)
+            need(before[6] == journal[kind + "Bytes"], "Preflight original journal length differs before read")
+            leaf_fds.append((kind, name, fd, before))
+        for kind, name, fd, before in leaf_fds:
+            blocks, count = [], 0
+            while block := os.read(fd, before[6] + 1):
+                count += len(block)
+                need(count <= before[6], "Preflight journal grew during original read")
+                blocks.append(block)
+            raw = b"".join(blocks)
+            need(count == before[6] and hashlib.sha256(raw).hexdigest() == journal[kind + "Sha256"],
+                 "Preflight journal actual bytes differ from native original")
+            if kind == "run":
+                need(raw == canonical({"schemaVersion": 1, "intentSha256": journal["intentSha256"], "runId": "9001", "attempt": 1}),
+                     "Preflight immutable run does not link the actual original intent")
+            files[name] = {"identity": list(before), "size": count, "sha256": hashlib.sha256(raw).hexdigest()}
+        for fd, expected in rosters:
+            _shell_github_preflight_names(fd, expected)
+        for name, parent_fd, fd, before, _ in originals:
+            need(os.listxattr(fd) == [] and identity(os.fstat(fd)) == before
+                 == identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)), "Preflight journal original full POST differs")
+        data = {"schema": "installed-github-preflight-journal-v1", "sourceSha": value["sourceSha"],
+                "runId": value["runId"], "attempt": value["attempt"], "case": case,
+                "home": str(_ROOT / ("gui-" + case) / "home"), "created": deepcopy(created),
+                "directories": directories, "files": files, "journal": deepcopy(journal)}
+        shell_github_preflight_journal_data(value, case, canonical(data), receipt)
+    finally:
+        close_errors = []
+        for _, _, fd, _, _ in reversed(originals):
+            try:
+                _shell_github_close(fd)
+            except BaseException as error:
+                close_errors.append(error)
+        need(not close_errors, "Preflight original journal descriptor close was not confirmed")
+    return data
+
+
+def _shell_github_preflight_after(value, case, observed):
+    global _FAILED
+    # No private filesystem observation is authorized by failed/Unknown owners
+    # or by terminal-looking bytes alone. This is after shell_result admission.
+    need(not _FAILED and time.monotonic() < _END and _OWNER is not None and case not in _SHELL_GITHUB_PREFLIGHT_COMPLETED
+         and _COMMANDS and _COMMANDS[-1]["phase"] == "shell-" + case
+         and _COMMANDS[-1]["argv"] == shell_argv(value, case) and _COMMANDS[-1]["exitCode"] == 0
+         and observed.get("exitCode") == 0 and type(observed.get("githubPreflight")) is dict,
+         "Preflight journal read lacks original successful command/native admission")
+    _FAILED = True
+    receipt = observed["githubPreflight"]
+    need(receipt["sourceCommit"] == value["sourceSha"], "Preflight journal native SOURCE differs")
+    data = _shell_github_preflight_journal_snapshot(value, case, receipt)
+    need(time.monotonic() < _END, "Preflight original journal read closed late")
+    _SHELL_GITHUB_PREFLIGHT_COMPLETED[case] = (deepcopy(receipt), data)
+    _FAILED = False
+
+
+def _shell_github_preflight_journals_final(value):
+    global _FAILED
+    need(not _FAILED and tuple(_SHELL_GITHUB_PREFLIGHT_COMPLETED) == SHELL_GITHUB_PREFLIGHT_CASES
+         and tuple(_SHELL_GITHUB_PREFLIGHT_HOMES) == SHELL_GITHUB_PREFLIGHT_CASES and time.monotonic() < _END,
+         "All five original preflight cases must settle before final journal observations")
+    _FAILED = True
+    retained = {}
+    all_pairs = set()
+    for case, (receipt, original) in _SHELL_GITHUB_PREFLIGHT_COMPLETED.items():
+        current = _shell_github_preflight_journal_snapshot(value, case, receipt)
+        need(canonical(current) == canonical(original), "Later preflight case changed an earlier original journal")
+        pairs = {tuple(row[:2]) for row in current["directories"].values()}
+        pairs.update(tuple(row["identity"][:2]) for row in current["files"].values())
+        need(pairs.isdisjoint(all_pairs), "Preflight cases reused original HOME/journal objects")
+        all_pairs.update(pairs)
+        retained[case] = canonical(current)
+    need(time.monotonic() < _END, "Final original preflight journal readback closed late")
+    for case, raw in retained.items():
+        _retain("shell-" + case + "-journal.json", raw)
+    _FAILED = False
+
+
+
+SHELL_GITHUB_RELEASE_JOURNAL_DIRECTORIES = (
+    ".local", ".local/share", ".local/share/mobile-release-kit", ".local/share/mobile-release-kit/github-release",
+)
+
+
+def shell_github_release_journal_data(value, case, raw, receipt):
+    """Private original identities/hashes only; no raw intent or credential export."""
+    need(shell_github_release(value) and case in shell_cases(value), "Different release journal route")
+    journal = receipt["peer"]["terminal"]["journal"]
+    shell_github_release_journal_receipt(journal, receipt["originals"][1]["marker"], case)
+    data = decode(raw, SHELL_GITHUB_RELEASE_JOURNAL_LIMIT)
+    _shell_github_fields(data, ("schema", "sourceSha", "runId", "attempt", "case", "home", "created", "directories", "files", "journal"),
+                         "release original journal DATA")
+    need(canonical(data) == raw and data["schema"] == "installed-github-release-journal-v1"
+         and all(data[key] == value[key] for key in ("sourceSha", "runId", "attempt")) and data["case"] == case
+         and data["home"] == str(root_path(value) / ("gui-" + case) / "home")
+         and canonical(data["journal"]) == canonical(journal), "Release journal source/HOME/native correspondence differs")
+    created, directories, files = data["created"], data["directories"], data["files"]
+    _shell_github_fields(created, ("root", "gui", "home"), "release original HOME identities")
+    _shell_github_fields(directories, ("gui", "home", *SHELL_GITHUB_RELEASE_JOURNAL_DIRECTORIES), "release journal directories")
+    marker = journal["marker"]
+    _shell_github_fields(files, tuple(marker + "." + kind + ".json" for kind, _ in _shell_github_release_journal_kinds(case)),
+                         "release journal leaves")
+    owners = [value["runnerUid"], value["runnerGid"]]
+    for name, row in created.items():
+        need(type(row) is list and len(row) == 5 and all(type(n) is int and 0 <= n < 1 << 64 for n in row)
+             and row[0] > 0 and row[1] > 0
+             and row[2:] == ([stat.S_IFDIR | 0o711, 0, 0] if name == "root" else [stat.S_IFDIR | 0o700, *owners]),
+             "Release original created HOME protection differs")
+    pairs = {tuple(created["root"][:2])}
+    for name, row in directories.items():
+        need(type(row) is list and len(row) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in row)
+             and row[0] == created["root"][0] and row[1] > 0 and row[2:5] == [stat.S_IFDIR | 0o700, *owners]
+             and row[5] > 0 and row[6] <= JSON_LIMIT
+             and (name not in created or row[:5] == created[name]), "Release journal directory original changed")
+        pair = tuple(row[:2])
+        need(pair not in pairs, "Release journal directory aliases another original")
+        pairs.add(pair)
+    for kind, bound in _shell_github_release_journal_kinds(case):
+        row = files[marker + "." + kind + ".json"]
+        _shell_github_fields(row, ("identity", "size", "sha256"), "release journal leaf")
+        original = row["identity"]
+        need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+             and original[0] == created["root"][0] and original[1] > 0
+             and original[2:6] == [stat.S_IFREG | 0o400, *owners, 1]
+             and type(row["size"]) is int and 0 < row["size"] <= bound
+             and original[6] == row["size"] == journal[kind + "Bytes"] and row["sha256"] == journal[kind + "Sha256"],
+             "Release immutable journal owner/mode/size/hash differs")
+        pair = tuple(original[:2])
+        need(pair not in pairs, "Release journal leaf aliases another original")
+        pairs.add(pair)
+    return data
+
+
+def _shell_github_release_names(fd, expected):
+    # Enumerate only the fixed finite roster, before any private leaf read.
+    names = []
+    with os.scandir(fd) as iterator:
+        for entry in iterator:
+            need(len(names) < len(expected), "Release journal contains an unexpected entry")
+            names.append(entry.name)
+    need(sorted(names) == sorted(expected), "Release journal directory roster differs")
+
+
+def _shell_github_release_home(value, case):
+    need(shell_github_release(value) and case in shell_cases(value) and _ROOT == root_path(value)
+         and case not in _SHELL_GITHUB_RELEASE_HOMES, "Release original HOME was reused")
+    home = _ROOT / ("gui-" + case) / "home"
+    _absent(home / ".local")
+    created = {name: list(identity(path.lstat())[:5]) for name, path in
+               (("root", _ROOT), ("gui", home.parent), ("home", home))}
+    need(created["root"][2:] == [stat.S_IFDIR | 0o711, 0, 0]
+         and all(created[name][2:] == [stat.S_IFDIR | 0o700, value["runnerUid"], value["runnerGid"]]
+                 and created[name][0] == created["root"][0] for name in ("gui", "home"))
+         and len({tuple(row[:2]) for row in created.values()}) == 3, "Fresh release HOME identity differs")
+    _SHELL_GITHUB_RELEASE_HOMES[case] = created
+
+
+def _shell_github_release_journal_snapshot(value, case, receipt):
+    """Only called after original command and complete native receipt success.
+
+    Keep every no-follow directory and every0/1/2 file original until complete POST;
+    attempt every checked close on all outcomes. No cleanup or repaired record.
+    """
+    need(_ROOT == root_path(value) and case in _SHELL_GITHUB_RELEASE_HOMES, "Release original HOME admission missing")
+    created = _SHELL_GITHUB_RELEASE_HOMES[case]
+    journal = receipt["peer"]["terminal"]["journal"]
+    shell_github_release_journal_receipt(journal, receipt["originals"][1]["marker"], case)
+    marker, originals, pairs = journal["marker"], [], set()
+    directories, files = {}, {}
+    owners, device = (value["runnerUid"], value["runnerGid"]), created["root"][0]
+
+    def open_original(name, parent_fd, label, is_directory, mode, owner, maximum):
+        before = identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False))
+        need(before[0] == device and before[1] > 0 and before[2:5] == (mode, *owner)
+             and before[5] > 0 and before[6] <= maximum and (is_directory or before[5] == 1)
+             and before[:2] not in pairs, "Release journal original owner/type/device/alias differs")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK | (os.O_DIRECTORY if is_directory else 0)
+        fd = os.open(name, flags, dir_fd=parent_fd)
+        try:
+            originals.append((name, parent_fd, fd, before, label))
+        except BaseException:
+            _shell_github_close(fd)
+            raise
+        need(identity(os.fstat(fd)) == before and os.listxattr(fd) == [], "Release journal opened original/xattrs differ")
+        pairs.add(before[:2])
+        return fd, before
+
+    try:
+        directory(_ROOT, protected=True)
+        root_fd, root_before = open_original(str(_ROOT), None, "root", True, stat.S_IFDIR | 0o711, (0, 0), JSON_LIMIT)
+        need(list(root_before[:5]) == created["root"], "Release original root changed")
+        gui_fd, gui = open_original("gui-" + case, root_fd, "gui", True, stat.S_IFDIR | 0o700, owners, JSON_LIMIT)
+        home_fd, home = open_original("home", gui_fd, "home", True, stat.S_IFDIR | 0o700, owners, JSON_LIMIT)
+        need(list(gui[:5]) == created["gui"] and list(home[:5]) == created["home"], "Release original per-case HOME changed")
+        directories.update(gui=list(gui), home=list(home))
+        _shell_github_release_names(home_fd, (".local",))
+        parent, rosters = home_fd, [(home_fd, (".local",))]
+        for index, relative in enumerate(SHELL_GITHUB_RELEASE_JOURNAL_DIRECTORIES):
+            fd, before = open_original(Path(relative).name, parent, relative, True, stat.S_IFDIR | 0o700, owners, JSON_LIMIT)
+            directories[relative] = list(before)
+            expected = ((Path(SHELL_GITHUB_RELEASE_JOURNAL_DIRECTORIES[index + 1]).name,) if index < 3
+                        else tuple(marker + "." + kind + ".json" for kind, _ in _shell_github_release_journal_kinds(case)))
+            _shell_github_release_names(fd, expected)
+            rosters.append((fd, expected))
+            parent = fd
+        leaf_fds = []
+        for kind, maximum in _shell_github_release_journal_kinds(case):
+            name = marker + "." + kind + ".json"
+            fd, before = open_original(name, parent, name, False, stat.S_IFREG | 0o400, owners, maximum)
+            need(before[6] == journal[kind + "Bytes"], "Release original journal length differs before read")
+            leaf_fds.append((kind, name, fd, before))
+        for kind, name, fd, before in leaf_fds:
+            blocks, count = [], 0
+            while block := os.read(fd, before[6] + 1):
+                count += len(block)
+                need(count <= before[6], "Release journal grew during original read")
+                blocks.append(block)
+            raw = b"".join(blocks)
+            need(count == before[6] and hashlib.sha256(raw).hexdigest() == journal[kind + "Sha256"],
+                 "Release journal actual bytes differ from native original")
+            if kind == "run":
+                need(raw == canonical({"schemaVersion": 1, "intentSha256": journal["intentSha256"], "runId": "9001", "attempt": 1}),
+                     "Release immutable run does not link the actual original intent")
+            files[name] = {"identity": list(before), "size": count, "sha256": hashlib.sha256(raw).hexdigest()}
+        for fd, expected in rosters:
+            _shell_github_release_names(fd, expected)
+        for name, parent_fd, fd, before, _ in originals:
+            need(os.listxattr(fd) == [] and identity(os.fstat(fd)) == before
+                 == identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)), "Release journal original full POST differs")
+        data = {"schema": "installed-github-release-journal-v1", "sourceSha": value["sourceSha"],
+                "runId": value["runId"], "attempt": value["attempt"], "case": case,
+                "home": str(_ROOT / ("gui-" + case) / "home"), "created": deepcopy(created),
+                "directories": directories, "files": files, "journal": deepcopy(journal)}
+        shell_github_release_journal_data(value, case, canonical(data), receipt)
+    finally:
+        close_errors = []
+        for _, _, fd, _, _ in reversed(originals):
+            try:
+                _shell_github_close(fd)
+            except BaseException as error:
+                close_errors.append(error)
+        need(not close_errors, "Release original journal descriptor close was not confirmed")
+    return data
+
+
+def _shell_github_release_after(value, case, observed):
+    global _FAILED
+    # No private filesystem observation is authorized by failed/Unknown owners
+    # or by terminal-looking bytes alone. This is after shell_result admission.
+    need(not _FAILED and time.monotonic() < _END and _OWNER is not None and case not in _SHELL_GITHUB_RELEASE_COMPLETED
+         and _COMMANDS and _COMMANDS[-1]["phase"] == "shell-" + case
+         and _COMMANDS[-1]["argv"] == shell_argv(value, case) and _COMMANDS[-1]["exitCode"] == 0
+         and observed.get("exitCode") == 0 and type(observed.get("githubRelease")) is dict,
+         "Release journal read lacks original successful command/native admission")
+    _FAILED = True
+    receipt = observed["githubRelease"]
+    need(receipt["sourceCommit"] == value["sourceSha"], "Release journal native SOURCE differs")
+    data = _shell_github_release_journal_snapshot(value, case, receipt)
+    need(time.monotonic() < _END, "Release original journal read closed late")
+    _SHELL_GITHUB_RELEASE_COMPLETED[case] = (deepcopy(receipt), data)
+    _FAILED = False
+
+
+def _shell_github_release_journals_final(value):
+    global _FAILED
+    need(not _FAILED and tuple(_SHELL_GITHUB_RELEASE_COMPLETED) == SHELL_GITHUB_RELEASE_CASES
+         and tuple(_SHELL_GITHUB_RELEASE_HOMES) == SHELL_GITHUB_RELEASE_CASES and time.monotonic() < _END,
+         "All three original release cases must settle before final journal observations")
+    _FAILED = True
+    retained = {}
+    all_pairs = set()
+    for case, (receipt, original) in _SHELL_GITHUB_RELEASE_COMPLETED.items():
+        current = _shell_github_release_journal_snapshot(value, case, receipt)
+        need(canonical(current) == canonical(original), "Later release case changed an earlier original journal")
+        pairs = {tuple(row[:2]) for row in current["directories"].values()}
+        pairs.update(tuple(row["identity"][:2]) for row in current["files"].values())
+        need(pairs.isdisjoint(all_pairs), "Release cases reused original HOME/journal objects")
+        all_pairs.update(pairs)
+        retained[case] = canonical(current)
+    need(time.monotonic() < _END, "Final original release journal readback closed late")
+    for case, raw in retained.items():
+        _retain("shell-" + case + "-journal.json", raw)
+    _FAILED = False
+
+
+
+def _shell_github_closed_loader(material, final):
+    """Bind D file identities to the same final loader proof; keep N/OS policy."""
+    bindings = final["bindings"]
+    for role in ("D-R", "D-S"):
+        root = PREFIX / SHELL_GITHUB_PAYLOADS[role]["manifestSha256"]
+        tree = material["payloads"][role]
+        present = ("python/bin/python3", "python/lib/libssl.so.3", "python/lib/libcrypto.so.3")
+        absent = ("python/lib/glibc-hwcaps",
+                  *("python/lib/" + name for name in final["entryObjects"] if name not in PRIVATE_SONAMES),
+                  *(prefix + name for prefix in ("", "python/", "python/bin/")
+                    for name in ("pyvenv.cfg", "python3._pth", "pybuilddir.txt")))
+        wanted = {str(root / relative) for relative in (*present, *absent)}
+        need({path for path in bindings if path.startswith(str(root) + "/")} == wanted,
+             "GitHub final loader D binding roster differs")
+        for relative in (*present, *absent):
+            path = str(root / relative)
+            row = bindings[path]
+            fields = ("path", "selectedPath", "links", "ancestry", "identity", "size", "sha256") if relative in present else (
+                "path", "selectedPath", "links", "ancestry", "absent", "absentAt")
+            _shell_github_fields(row, fields, "final D loader binding")
+            need(row["path"] == row["selectedPath"] == path and row["links"] == [] and type(row["ancestry"]) is dict,
+                 "GitHub final D native path or link differs")
+            for parent in Path(relative).parents:
+                name = "" if str(parent) == "." else parent.as_posix()
+                need(canonical(row["ancestry"].get(str(root / name))) == canonical(tree[name]["identity"][:5]),
+                     "GitHub final D native ancestry differs from the actual material originals")
+            if relative in present:
+                original = tree[relative]
+                # Loader DATA intentionally omits uid/gid; full9 material retains
+                # and checks both. Never compare the two different row layouts.
+                projected = [original["identity"][index] for index in (0, 1, 2, 5, 6, 7, 8)]
+                need(canonical(row["identity"]) == canonical(projected)
+                     and type(row["size"]) is int and row["size"] == original["size"] and row["sha256"] == original["sha256"],
+                     "GitHub final D native object was not the actually installed original")
+            else:
+                need(row["absent"] is True and row["absentAt"] == path, "GitHub D native/startup override was not absent")
+
+
+# The actual disposable nft/package/kernel/NSS tuple has NOT been admitted.
+# This is deliberately NOT populated from runtime hashes or workflow inputs.
+# A separately reviewed SOURCE update must pin an observed compatible tuple.
+# The read-only material observation below supplies engineering DATA, not a
+# capability token. The established22 profile never consults this gate.
+SHELL_GITHUB_BOUNDARY_HOST_PROFILE = None
+SHELL_GITHUB_BOUNDARY_NFT = "/usr/sbin/nft"
+SHELL_GITHUB_BOUNDARY_LIMIT = 128 << 10
+SHELL_GITHUB_BOUNDARY_PACKAGES = ("nftables", "libnftables1", "libnftnl11", "libmnl0")
+SHELL_GITHUB_BOUNDARY_INPUTS = ("/usr/sbin/nft", "/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf",
+    "/var/lib/dpkg/info/nftables.list", "/var/lib/dpkg/info/nftables.md5sums",
+    "/var/lib/dpkg/info/libnftables1:amd64.list", "/var/lib/dpkg/info/libnftables1:amd64.md5sums",
+    "/var/lib/dpkg/info/libnftnl11:amd64.list", "/var/lib/dpkg/info/libnftnl11:amd64.md5sums",
+    "/var/lib/dpkg/info/libmnl0:amd64.list", "/var/lib/dpkg/info/libmnl0:amd64.md5sums")
+_GITHUB_BOUNDARY_SLOTS = {}
+_GITHUB_BOUNDARY_COMMAND_FINAL = True
+_GITHUB_BOUNDARY_STOP = None
+_GITHUB_BOUNDARY_BODY_ERRORS = []
+
+
+def _github_boundary_material_phase(diagnostic, phase):
+    if diagnostic is not None:
+        diagnostic["phase"] = phase
+
+
+def _github_boundary_material_reason(error):
+    """Export only fixed diagnostic classes, not exception text or host values."""
+    if isinstance(error, FileNotFoundError):
+        return "absent"
+    if isinstance(error, PermissionError):
+        return "permission-denied"
+    if isinstance(error, OSError):
+        return "read-or-close-error"
+    fixed = {
+        "Unprotected normal-boundary material": "file-owner",
+        "Normal-boundary material link count differs": "file-links",
+        "Mutable/special normal-boundary material": "file-permissions",
+        "Changed normal-boundary material link": "link-changed",
+        "Unreviewed normal resolver material link": "resolver-link-target",
+        "Normal-boundary material link bound exceeded": "link-bound",
+        "Nonordinary or oversized lifecycle file": "file-type-or-bound",
+        "Lifecycle file changed before read": "file-open-changed",
+        "Lifecycle file grew": "file-grew",
+        "Lifecycle file changed during read": "file-read-changed",
+        "Lifecycle file changed after original close": "file-close-changed",
+        "Root input has mutable/special permissions": "file-owner-or-permissions",
+        "Protected input changed after readback": "file-binding-changed",
+        "Normal resolver material changed during observation": "resolver-body-changed",
+        "Original normal-boundary material changed": "file-original-changed",
+        "Normal resolver prerequisite unavailable": "prerequisite-unavailable",
+        "Normal resolver material bound differs": "resolver-data-bound",
+        "Normal NSS hosts database is malformed": "nss-hosts-format",
+        "Normal NSS is delegated, cached, conditional or unreviewed": "nss-hosts-sources",
+        "Normal hosts input shortcuts the original GitHub DNS question": "hosts-shortcut",
+        "Normal resolver nameserver shape differs": "resolver-nameserver-shape",
+        "Normal resolver search bound differs": "resolver-search-bound",
+        "Normal resolver option is unreviewed or duplicated": "resolver-option",
+        "Normal resolver flag has an unexpected value": "resolver-flag-value",
+        "Normal resolver retry option is not bounded": "resolver-retry-bound",
+        "Normal resolver directive is unreviewed": "resolver-directive",
+        "Normal resolver is not the one bounded direct IPv4 loopback recipe": "resolver-recipe",
+        "Actual normal unanswered resolver interval does not exceed the original operation endpoint": "resolver-interval",
+        "Kernel DATA bound exceeded": "kernel-data-bound",
+    }
+    value = error.args[0] if len(error.args) == 1 and type(error.args[0]) is str else None
+    if isinstance(error, ValueError) and value is not None:
+        if value in fixed:
+            return fixed[value]
+        for prefix, code in (("Nonordinary lifecycle ancestor path=", "ancestry-type"),
+                             ("Unprotected lifecycle ancestor path=", "ancestry-protection")):
+            if value.startswith(prefix):
+                return code
+    return "invalid-or-changed"
+
+
+def _github_boundary_material_file(name, *, diagnostic=None):
+    """Bounded protected link/file DATA, never execution or resolver editing."""
+    path, links = Path(name), []
+    for _ in range(4):
+        _github_boundary_material_phase(diagnostic, "resolver-ancestry")
+        directory(path.parent, protected=True)
+        _github_boundary_material_phase(diagnostic, "resolver-file")
+        before = path.lstat()
+        need(before.st_uid == before.st_gid == 0, "Unprotected normal-boundary material")
+        need(before.st_nlink == 1, "Normal-boundary material link count differs")
+        if not stat.S_ISLNK(before.st_mode):
+            need(not before.st_mode & 0o7022, "Mutable/special normal-boundary material")
+            cap = FILE_LIMIT if name == SHELL_GITHUB_BOUNDARY_NFT else 512 << 10 if name.startswith("/boot/config-") else 128 << 10
+            row = protected_record(path, cap)
+            return {"path": name, "selectedPath": str(path), "links": links, "file": row}
+        _github_boundary_material_phase(diagnostic, "resolver-link")
+        target = os.readlink(path)
+        need(type(target) is str and 0 < len(target) <= 256 and "\0" not in target
+             and identity(path.lstat()) == identity(before), "Changed normal-boundary material link")
+        selected = Path(os.path.normpath(str(path.parent / target))) if not target.startswith("/") else Path(target)
+        # Only the normal systemd stub link is admitted for these fixed inputs.
+        need(name == "/etc/resolv.conf" and selected == Path("/run/systemd/resolve/stub-resolv.conf")
+             and not links, "Unreviewed normal resolver material link")
+        links.append({"path": str(path), "target": target, "identity": list(identity(before))})
+        path = selected
+    raise Refused("Normal-boundary material link bound exceeded")
+
+
+def _github_boundary_package_stanzas(raw):
+    need(type(raw) is bytes and len(raw) <= 32 << 20 and b"\0" not in raw, "Dpkg material DATA bound differs")
+    result = {}
+    for stanza in raw.decode("utf-8").split("\n\n"):
+        lines = stanza.splitlines()
+        names = [line[9:] for line in lines if line.startswith("Package: ")]
+        if len(names) != 1 or names[0] not in SHELL_GITHUB_BOUNDARY_PACKAGES:
+            continue
+        name = names[0]
+        need(name not in result, "Duplicate normal-boundary package stanza")
+        fields = {}
+        for line in lines:
+            if line.startswith(("Status: ", "Version: ", "Architecture: ", "Source: ")):
+                key, value = line.split(": ", 1)
+                need(key not in fields and 0 < len(value) <= 256, "Normal-boundary package field differs")
+                fields[key] = value
+        need(fields.get("Status") == "install ok installed" and fields.get("Architecture") == "amd64"
+             and type(fields.get("Version")) is str, "Normal-boundary package is not installed amd64")
+        result[name] = fields
+    need(set(result) == set(SHELL_GITHUB_BOUNDARY_PACKAGES), "Normal-boundary package material is missing")
+    return result
+
+
+def _github_boundary_package_data():
+    # Bind this read to the actual protected package database. Only the four
+    # selected stanzas are interval material; unrelated dpkg status changes
+    # are neither adopted as pins nor allowed to make this path mutable.
+    path = Path("/var/lib/dpkg/status")
+    before = protected_record(path, 32 << 20)
+    raw = read(path, 32 << 20)
+    need(hashlib.sha256(raw).hexdigest() == before["sha256"]
+         and protected_record(path, 32 << 20) == before, "Protected selected package DATA changed")
+    return _github_boundary_package_stanzas(raw)
+
+
+def _github_boundary_resolver_shape(nss, hosts, resolver):
+    need(all(type(raw) is bytes and len(raw) <= 128 << 10 and b"\0" not in raw for raw in (nss, hosts, resolver)),
+         "Normal resolver material bound differs")
+    database = []
+    for line in nss.decode("ascii").splitlines():
+        line = line.split("#", 1)[0].strip()
+        name, separator, sources = line.partition(":")
+        if name.strip() == "hosts":
+            need(separator == ":", "Normal NSS hosts database is malformed")
+            database.append(sources.split())
+    need(database == [["files", "dns"]], "Normal NSS is delegated, cached, conditional or unreviewed")
+    for line in hosts.decode("ascii").splitlines():
+        fields = line.split("#", 1)[0].split()
+        need(not fields or all(name.rstrip(".").lower() != "api.github.com" for name in fields[1:]),
+             "Normal hosts input shortcuts the original GitHub DNS question")
+    servers, options, searches = [], {}, []
+    for line in resolver.decode("ascii").splitlines():
+        fields = line.split("#", 1)[0].split(";", 1)[0].split()
+        if not fields:
+            continue
+        if fields[0] == "nameserver":
+            need(len(fields) == 2, "Normal resolver nameserver shape differs")
+            servers.append(fields[1])
+        elif fields[0] in ("search", "domain"):
+            need(not searches and 1 <= len(fields[1:]) <= 6
+                 and all(re.fullmatch(r"[A-Za-z0-9_.-]{1,253}", name) is not None for name in fields[1:]),
+                 "Normal resolver search bound differs")
+            searches = fields[1:]
+        elif fields[0] == "options":
+            for option in fields[1:]:
+                key, separator, value = option.partition(":")
+                need(key not in options and key in ("timeout", "attempts", "ndots", "edns0", "trust-ad"),
+                     "Normal resolver option is unreviewed or duplicated")
+                if key in ("edns0", "trust-ad"):
+                    need(not separator, "Normal resolver flag has an unexpected value")
+                    options[key] = True
+                else:
+                    need(separator == ":" and value.isdecimal() and len(value) <= 2,
+                         "Normal resolver retry option is not bounded")
+                    options[key] = int(value)
+        else:
+            raise Refused("Normal resolver directive is unreviewed")
+    timeout, attempts, ndots = options.get("timeout", 5), options.get("attempts", 2), options.get("ndots", 1)
+    need(servers == ["127.0.0.53"] and 1 <= timeout <= 10 and 1 <= attempts <= 4 and 0 <= ndots <= 1,
+         "Normal resolver is not the one bounded direct IPv4 loopback recipe")
+    # Two possible A/AAAA questions per attempt; no reply reaches a search
+    # suffix before the first exact api.github.com attempt interval finishes.
+    need(timeout * attempts > 12 and 2 * attempts <= 8,
+         "Actual normal unanswered resolver interval does not exceed the original operation endpoint")
+    return {"nameserver": "127.0.0.53", "port": 53, "timeoutSeconds": timeout, "attempts": attempts,
+            "ndots": ndots, "edns0": options.get("edns0", False), "trustAd": options.get("trust-ad", False),
+            "maximumQuestions": 2 * attempts, "searchCount": len(searches),
+            "searchSha256": hashlib.sha256(canonical(searches)).hexdigest()}
+
+
+def shell_github_boundary_host_materials():
+    """Read-only hosted material observation; no nft/query/socket/subprocess."""
+    failures, files, bodies = [], {}, {}
+    def unavailable(label, error, diagnostic=None):
+        need(len(failures) < 24, "Normal-boundary material failure bound")
+        row = {"material": label, "errorType": type(error).__name__}
+        if diagnostic is not None:
+            row.update(phase=diagnostic["phase"], refusal=_github_boundary_material_reason(error))
+        failures.append(row)
+    for name in SHELL_GITHUB_BOUNDARY_INPUTS:
+        diagnostic = {"phase": "resolver-file"} if name == "/etc/resolv.conf" else None
+        try:
+            row = (_github_boundary_material_file(name, diagnostic=diagnostic) if diagnostic is not None
+                   else _github_boundary_material_file(name))
+            files[name] = row
+            if name in ("/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf"):
+                _github_boundary_material_phase(diagnostic, "resolver-body")
+                bodies[name] = read(Path(row["selectedPath"]), 128 << 10)
+                _github_boundary_material_phase(diagnostic, "resolver-recheck")
+                need(_github_boundary_material_file(name) == row, "Normal resolver material changed during observation")
+        except (OSError, ValueError, UnicodeError) as error:
+            unavailable(name, error, diagnostic)
+    packages, resolver, kernel, legacy, shortcuts = None, None, None, None, None
+    try:
+        packages = _github_boundary_package_data()
+    except (OSError, ValueError, UnicodeError) as error:
+        unavailable("selected-package-stanzas", error)
+    diagnostic = {"phase": "resolver-prerequisite"}
+    try:
+        need(all(name in bodies for name in ("/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf")),
+             "Normal resolver prerequisite unavailable")
+        diagnostic["phase"] = "resolver-parse"
+        resolver = _github_boundary_resolver_shape(*(bodies[name] for name in
+            ("/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf")))
+    except (OSError, ValueError, UnicodeError, KeyError) as error:
+        unavailable("normal-resolver-shape", error, diagnostic)
+    diagnostic = {"phase": "kernel-release"}
+    try:
+        release = _kernel("/proc/sys/kernel/osrelease", 256).strip()
+        need(re.fullmatch(r"[A-Za-z0-9.+_-]{1,128}", release) is not None and release == os.uname().release,
+             "Normal-boundary kernel release differs")
+        diagnostic["phase"] = "kernel-configuration"
+        config = _github_boundary_material_file("/boot/config-" + release)
+        raw = read(Path(config["selectedPath"]), 512 << 10)
+        relevant = ("CONFIG_CGROUPS", "CONFIG_CGROUP_BPF", "CONFIG_SOCK_CGROUP_DATA", "CONFIG_NF_TABLES",
+                    "CONFIG_NF_TABLES_INET", "CONFIG_NFT_SOCKET", "CONFIG_NFT_COUNTER", "CONFIG_NFT_NAT",
+                    "CONFIG_NFT_CHAIN_ROUTE", "CONFIG_IP_NF_IPTABLES", "CONFIG_IP6_NF_IPTABLES")
+        values = {}
+        for line in raw.decode("ascii").splitlines():
+            if "=" in line and line.split("=", 1)[0] in relevant:
+                key, value = line.split("=", 1)
+                need(key not in values and value in ("y", "m", "n"), "Duplicate/unreviewed kernel material option")
+                values[key] = value
+        need(_github_boundary_material_file("/boot/config-" + release) == config, "Kernel material changed")
+        diagnostic["phase"] = "kernel-version"
+        kernel = {"release": release, "version": _kernel("/proc/version", 1024).strip(),
+                  "configuration": config, "features": values}
+        observed_legacy = {}
+        for name, label in (("/proc/net/ip_tables_names", "legacy-v4"),
+                            ("/proc/net/ip6_tables_names", "legacy-v6")):
+            observed_legacy[name] = _kernel(name, 4096, diagnostic=diagnostic, label=label).splitlines()
+        legacy = observed_legacy
+        shortcuts = {}
+        diagnostic["phase"] = "delegated-sockets"
+        for name in ("/run/nscd/socket", "/var/run/nscd/socket"):
+            # /var/run is the conventional /run link; only named absence DATA,
+            # not an open/delegation to a daemon, is retained.
+            try:
+                item = Path(name).lstat()
+                shortcuts[name] = {"present": True, "identity": list(identity(item))}
+            except FileNotFoundError:
+                shortcuts[name] = {"present": False}
+    except (OSError, ValueError, UnicodeError) as error:
+        unavailable("kernel-and-host-packet-path", error, diagnostic)
+    for name, before in list(files.items()):
+        diagnostic = {"phase": "resolver-recheck"} if name == "/etc/resolv.conf" else None
+        try:
+            need(_github_boundary_material_file(name) == before, "Original normal-boundary material changed")
+        except (OSError, ValueError, UnicodeError) as error:
+            unavailable(name + "-post", error, diagnostic)
+    return {"schema": "installed-github-normal-boundary-host-materials-v1", "qualified": False,
+            "runtimeSelfAdmission": False, "nftExecuted": False, "dnsQueryIssued": False,
+            "files": files, "packages": packages, "kernel": kernel, "resolver": resolver,
+            "legacyTables": legacy, "delegatedSockets": shortcuts, "failures": failures}
+
+
+def _github_boundary_host_projection(observed):
+    _shell_github_fields(observed, ("schema", "qualified", "runtimeSelfAdmission", "nftExecuted", "dnsQueryIssued",
+        "files", "packages", "kernel", "resolver", "legacyTables", "delegatedSockets", "failures"), "host material")
+    need(observed["schema"] == "installed-github-normal-boundary-host-materials-v1"
+         and all(observed[key] is False for key in ("qualified", "runtimeSelfAdmission", "nftExecuted", "dnsQueryIssued"))
+         and observed["failures"] == [] and set(observed["files"]) == set(SHELL_GITHUB_BOUNDARY_INPUTS)
+         and observed["resolver"] is not None and observed["kernel"] is not None
+         and all(rows == [] for rows in observed["legacyTables"].values())
+         and all(row == {"present": False} for row in observed["delegatedSockets"].values()),
+         "Normal-boundary host material is incomplete, delegated or has an unknown legacy packet path")
+    projected = deepcopy(observed)
+    # Static SOURCE pins bind actual bytes and protected link targets; per-host
+    # inode identities are separately held unchanged throughout this original.
+    for row in [*projected["files"].values(), projected["kernel"]["configuration"]]:
+        row["file"].pop("identity")
+        for link in row["links"]:
+            link.pop("identity")
+    return projected
+
+
+def _github_boundary_host_admit(observed):
+    profile = SHELL_GITHUB_BOUNDARY_HOST_PROFILE
+    need(type(profile) is dict and set(profile) == {"materials", "nftMetainfo"},
+         "Normal-boundary host tuple is not yet independently SOURCE-admitted; retain read-only materials")
+    projected = _github_boundary_host_projection(observed)
+    need(canonical(projected) == canonical(profile["materials"]),
+         "Actual protected nft/package/kernel/NSS tuple differs from the reviewed SOURCE pins")
+    need(type(profile["nftMetainfo"]) is dict and profile["nftMetainfo"].get("json_schema_version") == 1,
+         "Reviewed nft JSON dialect is missing")
+    return observed
+
+
+def _github_boundary_tag(value, case):
+    need(case in SHELL_GITHUB_BOUNDARY_CASES and shell_cases(value) == SHELL_GITHUB_BOUNDARY_CASES,
+         "Only the separate fixed normal-boundary pair owns a fault policy")
+    for key in ("runId", "attempt"):
+        need(type(value.get(key)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value[key]) is not None,
+             "Normal-boundary policy lacks the actual original run/attempt")
+    suffix = "dns" if case == "github-dns-deadline" else "connect"
+    return "mrk_gnb_" + value["runId"] + "_" + value["attempt"] + "_" + suffix
+
+
+def shell_github_boundary_policy(value, case):
+    table = _github_boundary_tag(value, case)
+    uid = value.get("runnerUid")
+    need(type(uid) is int and 0 < uid < 1 << 31, "Normal-boundary policy requires the original nonroot skuid")
+    unit = root_path(value).name + ".service"
+    group = "system.slice/" + unit
+    prefix = "meta skuid " + str(uid) + ' socket cgroupv2 level 2 "' + group + '" '
+    lines = ["create table inet " + table]
+    if case == "github-dns-deadline":
+        lines.append("add counter inet " + table + " dns_queries")
+    lines += ["add counter inet " + table + " https_syns",
+              "add chain inet " + table + " output { type route hook output priority -300; policy accept; }"]
+    if case == "github-dns-deadline":
+        lines.append("add rule inet " + table + " output " + prefix
+            + "meta nfproto ipv4 ip daddr 127.0.0.53 udp dport 53 counter name dns_queries udp dport set 18553")
+    # An inet chain with l4proto tcp covers BOTH IPv4 and IPv6. Mask only
+    # FIN/SYN/RST/ACK so ECN-capable acquisition SYNs cannot escape.
+    lines.append("add rule inet " + table + " output " + prefix
+        + "meta l4proto tcp tcp dport 443 tcp flags & (fin | syn | rst | ack) == syn counter name https_syns drop")
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def _github_boundary_expected_objects(value, case):
+    table = _github_boundary_tag(value, case)
+    def match(left, right):
+        return {"match": {"op": "==", "left": left, "right": right}}
+    def payload(protocol, field):
+        return {"payload": {"protocol": protocol, "field": field}}
+    scope = [match({"meta": {"key": "skuid"}}, value["runnerUid"]),
+             match({"socket": {"key": "cgroupv2", "level": 2}}, "system.slice/" + root_path(value).name + ".service")]
+    objects = [{"table": {"family": "inet", "name": table}}]
+    for name in (("dns_queries", "https_syns") if case == "github-dns-deadline" else ("https_syns",)):
+        objects.append({"counter": {"family": "inet", "table": table, "name": name}})
+    objects.append({"chain": {"family": "inet", "table": table, "name": "output",
+                              "type": "route", "hook": "output", "prio": -300, "policy": "accept"}})
+    def rule(expressions):
+        return {"rule": {"family": "inet", "table": table, "chain": "output", "expr": expressions}}
+    if case == "github-dns-deadline":
+        objects.append(rule(deepcopy(scope) + [
+            match({"meta": {"key": "nfproto"}}, "ipv4"), match(payload("ip", "daddr"), "127.0.0.53"),
+            match(payload("udp", "dport"), 53), {"counter": "dns_queries"},
+            {"mangle": {"key": payload("udp", "dport"), "value": 18553}}]))
+    objects.append(rule(deepcopy(scope) + [
+        match({"meta": {"key": "l4proto"}}, "tcp"), match(payload("tcp", "dport"), 443),
+        match({"&": [payload("tcp", "flags"), ["fin", "syn", "rst", "ack"]]}, "syn"),
+        {"counter": "https_syns"}, {"drop": None}]))
+    return objects
+
+
+def _github_boundary_nft_rows(raw, *, echo=False):
+    value = decode(raw, SHELL_GITHUB_BOUNDARY_LIMIT)
+    _shell_github_fields(value, ("nftables",), "nft readback")
+    rows = value["nftables"]
+    need(type(rows) is list and 1 <= len(rows) <= 8 and type(rows[0]) is dict and set(rows[0]) == {"metainfo"},
+         "Normal-boundary nft readback is oversized or lacks its actual dialect")
+    need(type(SHELL_GITHUB_BOUNDARY_HOST_PROFILE) is dict
+         and canonical(rows[0]["metainfo"]) == canonical(SHELL_GITHUB_BOUNDARY_HOST_PROFILE["nftMetainfo"]),
+         "Actual nft readback dialect differs from the independently reviewed material")
+    result = []
+    for original in rows[1:]:
+        _shell_github_fields(original, tuple(original) if type(original) is dict else (), "nft object")
+        need(len(original) == 1, "Ambiguous nft object")
+        key = next(iter(original))
+        if echo and key in ("add", "create"):
+            original = original[key]
+        need(type(original) is dict and len(original) == 1
+             and next(iter(original)) in ("table", "counter", "chain", "rule"), "Unknown/foreign nft object")
+        result.append(deepcopy(original))
+    return result
+
+
+def shell_github_boundary_policy_readback(value, case, raw, *, echo=False):
+    return _github_boundary_policy_objects(value, case, _github_boundary_nft_rows(raw, echo=echo))
+
+
+def _github_boundary_policy_objects(value, case, objects):
+    need(type(objects) is list and all(type(row) is dict and len(row) == 1
+         and next(iter(row)) in ("table", "counter", "chain", "rule") for row in objects),
+         "Normal-boundary policy object shape differs")
+    expected = _github_boundary_expected_objects(value, case)
+    need(len(objects) == len(expected), "Normal-boundary policy has an extra/missing object")
+    stripped, immutable, counters, handles = [], [], {}, []
+    for original in objects:
+        key = next(iter(original))
+        row = original[key]
+        need(type(row) is dict and "handle" in row, "Actual nft object handle is missing")
+        _shell_github_uint(row["handle"], (1 << 64) - 1, "original nft handle", 1)
+        handles.append((key, row["handle"]))
+        stable = deepcopy(original)
+        if key == "counter":
+            name = row.get("name")
+            need(name in ("dns_queries", "https_syns") and name not in counters, "Unknown/duplicate owned counter")
+            _shell_github_uint(row.get("packets"), 64, "owned counter packets")
+            _shell_github_uint(row.get("bytes"), 1 << 20, "owned counter bytes")
+            counters[name] = {"packets": row["packets"], "bytes": row["bytes"]}
+            stable[key].pop("packets")
+            stable[key].pop("bytes")
+        immutable.append(stable)
+        plain = deepcopy(stable)
+        plain[key].pop("handle")
+        stripped.append(plain)
+    # Order of distinct named objects is not policy authority; expression and
+    # same-chain rule order IS, and is checked without dropping any fields.
+    named = lambda rows: sorted((canonical(row) for row in rows if "rule" not in row))
+    need(named(stripped) == named(expected)
+         and [row for row in stripped if "rule" in row] == [row for row in expected if "rule" in row]
+         and len(handles) == len(set(handles)), "Installed nft policy/handles differ from the fixed scoped effect")
+    table = next(row["table"] for row in immutable if "table" in row)
+    immutable = sorted((row for row in immutable if "rule" not in row), key=canonical) + [row for row in immutable if "rule" in row]
+    return {"table": deepcopy(table), "immutable": immutable, "counters": counters}
+
+
+def _github_boundary_policy_evidence(value, case, evidence):
+    """Validate an exported summary with the SAME exact immutable policy parser."""
+    _shell_github_fields(evidence, ("table", "immutable", "counters"), "summarized original nft policy")
+    need(type(evidence["immutable"]) is list and type(evidence["counters"]) is dict,
+         "Summarized policy objects/counters differ")
+    objects = deepcopy(evidence["immutable"])
+    for row in objects:
+        need(type(row) is dict and len(row) == 1, "Summarized policy object is ambiguous")
+        if "counter" in row:
+            counter = row["counter"]
+            need(type(counter) is dict and counter.get("name") in evidence["counters"], "Summarized counter has no original")
+            counts = evidence["counters"][counter["name"]]
+            _shell_github_fields(counts, ("packets", "bytes"), "summarized original counter")
+            counter.update(counts)
+    observed = _github_boundary_policy_objects(value, case, objects)
+    need(canonical(observed) == canonical(evidence), "Summarized policy is not the exact immutable fixed scoped effect")
+    return observed
+
+
+def _github_boundary_counter_interval(before, after, case):
+    need(canonical(before["table"]) == canonical(after["table"])
+         and canonical(before["immutable"]) == canonical(after["immutable"]),
+         "Original installed policy or actual handles changed")
+    wanted = {"dns_queries", "https_syns"} if case == "github-dns-deadline" else {"https_syns"}
+    need(set(before["counters"]) == set(after["counters"]) == wanted
+         and all(row == {"packets": 0, "bytes": 0} for row in before["counters"].values()),
+         "Original exclusive policy did not start with fresh zero counters")
+    for name, row in after["counters"].items():
+        _shell_github_uint(row["packets"], 8 if name == "dns_queries" else 64, "final owned packets")
+        _shell_github_uint(row["bytes"], 1 << 20, "final owned bytes")
+        need((row["packets"] == 0) is (row["bytes"] == 0), "Owned packet/byte counters disagree")
+    if case == "github-dns-deadline":
+        need(after["counters"]["dns_queries"]["packets"] > 0
+             and after["counters"]["https_syns"] == {"packets": 0, "bytes": 0},
+             "Normal DNS withholding did not intercept a question or advanced to HTTPS acquisition")
+    else:
+        need(after["counters"]["https_syns"]["packets"] > 0, "Normal connect has no actual acquisition SYN drop")
+    return after["counters"]
+
+
+def _github_boundary_prefix(case, *, stop=False):
+    need(case in SHELL_GITHUB_BOUNDARY_CASES, "Unknown fixed policy disposition case")
+    return ("stop-" if stop else "") + "github-boundary-" + ("dns" if case == "github-dns-deadline" else "connect")
+
+
+def _github_boundary_slots(case):
+    ordinary = ("before", "create", "installed", "post", "delete", "absence")
+    disposition = ("post", "delete", "absence")
+    names = {_github_boundary_prefix(case, stop=stop) + "-" + action + "." + stream: SHELL_GITHUB_BOUNDARY_LIMIT
+             for stop, actions in ((False, ordinary), (True, disposition))
+             for action in actions for stream in ("stdout", "stderr")}
+    names[_github_boundary_prefix(case) + "-policy.json"] = SHELL_GITHUB_BOUNDARY_LIMIT
+    return names
+
+
+def _github_boundary_reserve(case, *, stop=False):
+    slots = _github_boundary_slots(case)
+    selected = {name: cap for name, cap in slots.items() if not stop or name.startswith("stop-")}
+    need(not set(selected) & set(_GITHUB_BOUNDARY_SLOTS)
+         and not set(selected) & {row["path"] for row in _FILES},
+         "Normal-boundary output slot reused")
+    remaining = sum(row["cap"] for row in _GITHUB_BOUNDARY_SLOTS.values() if not row["retained"])
+    need(_TOTAL + remaining + sum(selected.values()) <= TOTAL_LIMIT, "No finite policy output reservation remains")
+    for name, cap in selected.items():
+        _GITHUB_BOUNDARY_SLOTS[name] = {"cap": cap, "entered": False, "retained": False}
+    return slots
+
+
+def _github_boundary_private_name(case, suffix, *, root=None):
+    need(suffix in ("policy.nft", "intent.json", "owned.json", "retired.json"), "Unknown private policy leaf")
+    return (_ROOT if root is None else root) / "private" / (_github_boundary_prefix(case) + "-" + suffix)
+
+
+def _github_boundary_private_write(case, suffix, raw):
+    need(type(raw) is bytes and len(raw) <= SHELL_GITHUB_BOUNDARY_LIMIT, "Private policy record bound")
+    path = _github_boundary_private_name(case, suffix)
+    _D.write(path, raw, 0o400)  # Exclusive write; a collision never grants ownership.
+    row = protected_record(path, SHELL_GITHUB_BOUNDARY_LIMIT)
+    need(stat.S_IMODE(row["identity"][2]) == 0o400 and row["size"] == len(raw)
+         and row["sha256"] == hashlib.sha256(raw).hexdigest(), "Original protected policy record changed")
+    return row
+
+
+def _github_boundary_private_read(case, suffix):
+    path = _github_boundary_private_name(case, suffix)
+    row = protected_record(path, SHELL_GITHUB_BOUNDARY_LIMIT)
+    need(stat.S_IMODE(row["identity"][2]) == 0o400, "Policy ownership record is not protected immutable DATA")
+    raw = read(path, SHELL_GITHUB_BOUNDARY_LIMIT)
+    need(protected_record(path, SHELL_GITHUB_BOUNDARY_LIMIT) == row
+         and hashlib.sha256(raw).hexdigest() == row["sha256"], "Policy ownership record changed")
+    return row, raw
+
+
+def _github_boundary_public_record(name):
+    path = _ROOT / "public" / name
+    row = protected_record(path, SHELL_GITHUB_BOUNDARY_LIMIT)
+    need(stat.S_IMODE(row["identity"][2]) == 0o444, "Policy command capture is not root-protected")
+    raw = read(path, SHELL_GITHUB_BOUNDARY_LIMIT)
+    need(protected_record(path, SHELL_GITHUB_BOUNDARY_LIMIT) == row, "Policy command capture changed")
+    return row, raw
+
+
+def _github_boundary_self():
+    pid = os.getpid()
+    raw = _kernel("/proc/self/stat", 4096)
+    end = raw.rfind(")")
+    need(end > 0 and raw[:raw.find(" ")] == str(pid), "Original disposition self identity differs")
+    fields = raw[end + 2:].split()
+    need(len(fields) >= 20 and fields[19].isdecimal(), "Original disposition start time is missing")
+    return {"pid": pid, "startTicks": int(fields[19])}
+
+
+def _github_boundary_namespaces():
+    # The legacy namespace observation is unchanged. This fault recipe ALSO
+    # owns and compares the real initial net nsfs objects, not a sysctl label.
+    result = _namespaces(True)
+    originals, error, close_error = [], None, None
+    try:
+        for name in ("/proc/self/ns/net", "/proc/1/ns/net"):
+            fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            originals.append((fd, None))
+            item = os.fstat(fd)
+            before = identity(item)
+            originals[-1] = (fd, before)
+            need(stat.S_ISREG(item.st_mode) and item.st_uid == item.st_gid == 0 and item.st_nlink == 1
+                 and fcntl.ioctl(fd, 0xb703) == 0x40000000, "Real initial network namespace type/owner differs")
+        need(originals[0][1][:2] == originals[1][1][:2], "Normal-boundary policy is not in the real initial network namespace")
+        for fd, before in originals:
+            need(identity(os.fstat(fd)) == before, "Original network namespace changed during observation")
+        result["net"] = list(originals[0][1][:2])
+    except BaseException as caught:
+        error = caught
+    finally:
+        for fd, _ in reversed(originals):
+            try:
+                _shell_github_close(fd)
+            except BaseException as caught:
+                if close_error is None:
+                    close_error = caught
+    if error is not None:
+        raise error from close_error
+    if close_error is not None:
+        raise close_error
+    return result
+
+
+def _github_boundary_domain(value, namespaces):
+    complete_namespaces = _github_boundary_namespaces()
+    need(set(namespaces) == {"user", "pid", "mnt"}
+         and {name: complete_namespaces[name] for name in namespaces} == namespaces,
+         "Original policy process changed the established service namespaces")
+    invocation = os.environ.get("INVOCATION_ID", "")
+    unit = root_path(value).name + ".service"
+    group = "/system.slice/" + unit
+    need(re.fullmatch(r"[0-9a-f]{32}", invocation) is not None
+         and _kernel("/proc/self/cgroup") == "0::" + group + "\n", "Original policy service invocation/cgroup differs")
+    path = Path("/sys/fs/cgroup" + group)
+    directory(path, protected=True)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        need(identity(path.lstat()) == identity(before) and before.st_uid == before.st_gid == 0,
+             "Original policy cgroup open differs")
+        domain = {"sourceSha": value["sourceSha"], "runId": value["runId"], "attempt": value["attempt"],
+                  "runnerUid": value["runnerUid"], "invocationId": invocation, "unit": unit,
+                  "cgroupPath": str(path), "cgroupIdentity": list(identity(before)[:6]), "namespaces": complete_namespaces,
+                  "bootId": _kernel("/proc/sys/kernel/random/boot_id", 128).strip()}
+        need(re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", domain["bootId"]) is not None,
+             "Original policy kernel boot identity is missing")
+        state = {"value": value, "domain": domain, "cgroupFd": fd, "self": _github_boundary_self(), "owner": _OWNER,
+                 "endpoint": _END}
+        _github_boundary_domain_check(state, no_workers=True)
+        return state
+    except BaseException as error:
+        try:
+            _shell_github_close(fd)
+        except BaseException as close_error:
+            raise error from close_error
+        raise
+
+
+def _github_boundary_domain_check(state, *, no_workers):
+    _root_ids()
+    need(state["owner"] is _OWNER and state["endpoint"] == _END and time.monotonic() < _END,
+         "Policy disposition changed the original owner or finite endpoint")
+    domain, value = state["domain"], state["value"]
+    unit = root_path(value).name + ".service"
+    group = "/system.slice/" + unit
+    path = Path(domain["cgroupPath"])
+    need(domain["unit"] == unit and domain["runnerUid"] == value["runnerUid"]
+         and domain["invocationId"] == os.environ.get("INVOCATION_ID")
+         and _kernel("/proc/self/cgroup") == "0::" + group + "\n"
+         and str(path) == "/sys/fs/cgroup" + group
+         and list(identity(os.fstat(state["cgroupFd"]))[:6]) == domain["cgroupIdentity"]
+         and list(identity(path.lstat())[:6]) == domain["cgroupIdentity"]
+         and _kernel("/proc/sys/kernel/random/boot_id", 128).strip() == domain["bootId"]
+         and _github_boundary_namespaces() == domain["namespaces"] and _github_boundary_self() == state["self"],
+         "Original service/cgroup/kernel/self/namespace custody changed")
+    need(_kernel(path / "cgroup.type") == "domain\n", "Policy cgroup ceased to be an aggregate domain")
+    children = os.listdir(state["cgroupFd"])
+    need(len(children) <= 256 and all(not stat.S_ISDIR(os.stat(name, dir_fd=state["cgroupFd"],
+             follow_symlinks=False).st_mode) for name in children), "Policy scope gained a child/delegated cgroup")
+    if no_workers:
+        # BEFORE launch and AFTER its original join only THIS retained lifecycle
+        # process may remain. No arbitrary root/UID/process-name exemptions.
+        for leaf in ("cgroup.procs", "cgroup.threads"):
+            rows = _kernel(path / leaf, 4096).splitlines()
+            need(rows == [str(state["self"]["pid"])], "Original cgroup still contains a prior task worker")
+    return domain
+
+
+def _github_boundary_close_after(state):
+    global _FAILED
+    pending = sys.exc_info()[0] is not None
+    try:
+        _github_boundary_close_domain(state)
+    except BaseException as error:
+        _FAILED = True
+        if len(_GITHUB_BOUNDARY_BODY_ERRORS) < 4:
+            _GITHUB_BOUNDARY_BODY_ERRORS.append({"stage": "original-cgroup-close", "errorType": type(error).__name__})
+        if not pending:
+            raise  # Existing first failure remains first when one is pending.
+
+
+def _github_boundary_close_domain(state):
+    fd = state.pop("cgroupFd")
+    _shell_github_close(fd)  # One consuming checked close; never retry an uncertain close.
+
+
+def _github_boundary_host_check(host):
+    _github_boundary_host_admit(host)
+    for name, original in host["files"].items():
+        need(_github_boundary_material_file(name) == original, "Original protected policy material changed")
+    kernel = host["kernel"]
+    need(_kernel("/proc/sys/kernel/osrelease", 256).strip() == kernel["release"]
+         and _kernel("/proc/version", 1024).strip() == kernel["version"]
+         and _github_boundary_material_file("/boot/config-" + kernel["release"]) == kernel["configuration"],
+         "Original admitted policy kernel material changed")
+    need(_github_boundary_package_data() == host["packages"],
+         "Original admitted nft package version changed")
+    for name in host["legacyTables"]:
+        need(_kernel(name, 4096).splitlines() == [], "An unowned legacy packet path appeared")
+    for name in host["delegatedSockets"]:
+        _absent(Path(name))
+
+
+def _github_boundary_argv(state, action):
+    case = state["case"]
+    need(action in ("before", "create", "installed", "post", "delete", "absence"), "Unknown fixed policy command")
+    if action == "create":
+        return [SHELL_GITHUB_BOUNDARY_NFT, "--json", "--numeric", "--handle", "--echo",
+                "--file", str(_github_boundary_private_name(case, "policy.nft", root=root_path(state["value"]))) ]
+    if action == "delete":
+        handle = state["owned"]["installed"]["table"]["handle"]
+        _shell_github_uint(handle, (1 << 64) - 1, "original delete table handle", 1)
+        return [SHELL_GITHUB_BOUNDARY_NFT, "delete", "table", "inet", "handle", str(handle)]
+    return [SHELL_GITHUB_BOUNDARY_NFT, "--json", "--numeric", "--handle", "list", "ruleset"]
+
+
+def _github_boundary_body_command(state, action):
+    _github_boundary_domain_check(state, no_workers=True)
+    _github_boundary_host_check(state["host"])
+    result = command(_github_boundary_prefix(state["case"]) + "-" + action, _github_boundary_argv(state, action), maximum=3)
+    _github_boundary_domain_check(state, no_workers=True)
+    need(result.stderr == b"", "Original policy command emitted diagnostics")
+    return result
+
+
+def _github_boundary_prepare(value, case, start, host):
+    need(shell_normal_boundaries(value) and not _FAILED and _GITHUB_BOUNDARY_COMMAND_FINAL,
+         "Normal-boundary policy cannot follow a failed/unknown original")
+    _github_boundary_host_check(host)
+    state = _github_boundary_domain(value, start["namespaces"])
+    state.update(case=case, host=host)
+    try:
+        slots = _github_boundary_reserve(case)
+        policy_raw = shell_github_boundary_policy(value, case)
+        policy = _github_boundary_private_write(case, "policy.nft", policy_raw)
+        intent = {"schema": "installed-github-normal-boundary-intent-v1", "case": case,
+                  "profile": SHELL_GITHUB_BOUNDARY_PROFILE, "domain": state["domain"], "host": host,
+                  "table": _github_boundary_tag(value, case), "policy": policy, "slots": slots,
+                  "creationIsExclusive": True, "intentIsNotDeleteAuthority": True}
+        # These protected intent/finite slots exist BEFORE the exclusive create.
+        state["intent"] = _github_boundary_private_write(case, "intent.json", canonical(intent))
+        before = _github_boundary_body_command(state, "before")
+        need(_github_boundary_nft_rows(before.stdout) == [], "Preexisting/unknown host nft policy; never edit or adopt it")
+        created = _github_boundary_body_command(state, "create")
+        create_command = deepcopy(_COMMANDS[-1])
+        create = shell_github_boundary_policy_readback(value, case, created.stdout, echo=True)
+        actual = _github_boundary_body_command(state, "installed")
+        installed_command = deepcopy(_COMMANDS[-1])
+        installed = shell_github_boundary_policy_readback(value, case, actual.stdout)
+        need(canonical(create) == canonical(installed)
+             and all(row == {"packets": 0, "bytes": 0} for row in installed["counters"].values()),
+             "Exclusive creation/actual installed handles or initial counters differ")
+        prefix = _github_boundary_prefix(case)
+        captures = {action: {stream: _github_boundary_public_record(prefix + "-" + action + "." + stream)[0]
+                            for stream in ("stdout", "stderr")} for action in ("before", "create", "installed")}
+        owned = {"schema": "installed-github-normal-boundary-owned-v1", "case": case, "intent": state["intent"],
+                 "createCommand": create_command, "installedCommand": installed_command, "captures": captures,
+                 "installed": installed, "creatorReturned": True, "actualHandlesBound": True}
+        state["owned"] = owned
+        state["ownedRecord"] = _github_boundary_private_write(case, "owned.json", canonical(owned))
+        return state
+    except BaseException:
+        # Do NOT delete on uncertain creation/readback. The original manager
+        # tears down this service; StopPost needs the separate ownership record.
+        _github_boundary_close_after(state)
+        raise
+
+
+def _github_boundary_owned_admit(state):
+    case, value = state["case"], state["value"]
+    intent_record, intent_raw = _github_boundary_private_read(case, "intent.json")
+    intent = decode(intent_raw, SHELL_GITHUB_BOUNDARY_LIMIT)
+    _shell_github_fields(intent, ("schema", "case", "profile", "domain", "host", "table", "policy", "slots",
+                                  "creationIsExclusive", "intentIsNotDeleteAuthority"), "policy intent")
+    need(intent["schema"] == "installed-github-normal-boundary-intent-v1" and intent["case"] == case
+         and intent["profile"] == SHELL_GITHUB_BOUNDARY_PROFILE and intent["domain"] == state["domain"]
+         and intent["table"] == _github_boundary_tag(value, case) and intent["slots"] == _github_boundary_slots(case)
+         and intent["creationIsExclusive"] is True and intent["intentIsNotDeleteAuthority"] is True,
+         "Original protected intent/cgroup/service scope differs")
+    policy_record, policy_raw = _github_boundary_private_read(case, "policy.nft")
+    need(policy_record == intent["policy"] and policy_raw == shell_github_boundary_policy(value, case),
+         "Original exclusive fixed policy source differs")
+    _github_boundary_host_check(intent["host"])
+    owned_record, owned_raw = _github_boundary_private_read(case, "owned.json")
+    owned = decode(owned_raw, SHELL_GITHUB_BOUNDARY_LIMIT)
+    _shell_github_fields(owned, ("schema", "case", "intent", "createCommand", "installedCommand", "captures",
+                                 "installed", "creatorReturned", "actualHandlesBound"), "policy ownership")
+    need(owned["schema"] == "installed-github-normal-boundary-owned-v1" and owned["case"] == case
+         and owned["intent"] == intent_record and owned["creatorReturned"] is True and owned["actualHandlesBound"] is True,
+         "Protected intent alone, uncertain creation or missing handles cannot authorize deletion")
+    state.update(intent=intent_record, ownedRecord=owned_record, owned=owned, host=intent["host"])
+    prefix = _github_boundary_prefix(case)
+    captures = {}
+    need(set(owned["captures"]) == {"before", "create", "installed"}, "Original policy capture roster differs")
+    for action in ("before", "create", "installed"):
+        need(set(owned["captures"][action]) == {"stdout", "stderr"}, "Original policy streams differ")
+        captures[action] = {}
+        for stream in ("stdout", "stderr"):
+            current, raw = _github_boundary_public_record(prefix + "-" + action + "." + stream)
+            need(current == owned["captures"][action][stream], "Original policy capture identity/hash differs")
+            captures[action][stream] = raw
+        need(captures[action]["stderr"] == b"", "Original policy command was not diagnostic-free")
+    need(_github_boundary_nft_rows(captures["before"]["stdout"]) == [], "Original pre-create host was not empty/admitted")
+    create = shell_github_boundary_policy_readback(value, case, captures["create"]["stdout"], echo=True)
+    installed = shell_github_boundary_policy_readback(value, case, captures["installed"]["stdout"])
+    need(canonical(create) == canonical(installed) == canonical(owned["installed"])
+         and all(row == {"packets": 0, "bytes": 0} for row in installed["counters"].values()),
+         "Protected creation receipt does not bind the actual initial immutable policy/handles")
+    for action, key in (("create", "createCommand"), ("installed", "installedCommand")):
+        original = owned[key]
+        _shell_github_fields(original, ("phase", "argv", "exitCode", "timeoutSeconds"), "original policy command")
+        need(original["phase"] == prefix + "-" + action and original["argv"] == _github_boundary_argv(state, action)
+             and type(original["exitCode"]) is int and original["exitCode"] == 0
+             and type(original["timeoutSeconds"]) is int and 0 < original["timeoutSeconds"] <= 3,
+             "Original policy command creation/finality record differs")
+    return owned
+
+
+def _github_boundary_finish(state, observed):
+    value, case = state["value"], state["case"]
+    need(not _FAILED and _GITHUB_BOUNDARY_COMMAND_FINAL and _COMMANDS[-1]["phase"] == "shell-" + case
+         and _COMMANDS[-1]["exitCode"] == 0, "Original product command is not positively final")
+    receipt = observed["githubReadOnly"]
+    need(receipt["case"] == case and all(row["nativeSettled"] is True and row["originalObserverJoined"] is True
+         and row["cleanupWithinOriginalEndpoint"] is True and row["boundary"]["uid"] == value["runnerUid"]
+         for row in receipt["originals"]), "Original native product/boundary settlement is missing")
+    product = deepcopy(_COMMANDS[-1])
+    _github_boundary_owned_admit(state)
+    post_result = _github_boundary_body_command(state, "post")
+    post = shell_github_boundary_policy_readback(value, case, post_result.stdout)
+    counters = _github_boundary_counter_interval(state["owned"]["installed"], post, case)
+    if case == "github-dns-deadline":
+        need(counters["dns_queries"]["packets"] == receipt["peer"]["terminal"]["dnsQuestions"],
+             "Original DNS question receipt and owned stateless packet count differ")
+    removed = _github_boundary_body_command(state, "delete")
+    need(removed.stdout == b"", "Unexpected policy delete output")
+    absent = _github_boundary_body_command(state, "absence")
+    need(_github_boundary_nft_rows(absent.stdout) == [], "Original table absence was not actually observed")
+    proof = {"schema": "installed-github-normal-boundary-policy-v1", "case": case, "profile": SHELL_GITHUB_BOUNDARY_PROFILE,
+             "sourceSha": value["sourceSha"], "domain": state["domain"], "intent": state["intent"],
+             "owned": state["ownedRecord"], "installed": state["owned"]["installed"], "post": post,
+             "productCommand": product, "nativeBoundary": receipt["originals"][0]["boundary"],
+             "state": "removed-and-observed", "productOriginalsFinal": True, "noPriorWorkers": True,
+             "absence": _shell_github_pin(absent.stdout), "policySha256": hashlib.sha256(shell_github_boundary_policy(value, case)).hexdigest(),
+             "faultHeldThroughOriginalFinality": True, "normalHttpRequests": False}
+    name = _github_boundary_prefix(case) + "-policy.json"
+    _retain(name, canonical(proof))
+    public = _github_boundary_public_record(name)[0]
+    _github_boundary_private_write(case, "retired.json", canonical({"schema": "installed-github-normal-boundary-retired-v1",
+        "case": case, "owned": state["ownedRecord"], "proof": public, "originalTableAbsent": True}))
+    return proof
+
+
+def _github_boundary_error(controller, stage, error):
+    global _FAILED
+    _FAILED = True
+    need(len(controller["errors"]) < 16, "Bounded policy disposition errors exhausted")
+    controller["errors"].append({"stage": stage, "errorType": type(error).__name__,
+                                 "reason": str(error).replace("\n", " ")[:192] or type(error).__name__})
+
+
+def _github_boundary_dispose_command(controller, state, action):
+    """PRIVATE finite StopPost route; ONLY the lifecycle _FAILED guard is bypassed."""
+    global _FAILED, _PHASE, _GITHUB_BOUNDARY_COMMAND_FINAL
+    need(controller["owner"] is _OWNER and controller["endpoint"] == _END
+         and not controller["launchesClosed"] and _GITHUB_BOUNDARY_COMMAND_FINAL,
+         "Original policy disposition owner/finality/endpoint is closed")
+    if action == "unit-show":
+        need(state is controller["context"] and controller["next"] == "unit-show",
+             "Wrong fixed original StopPost admission command")
+        label = "stop-unit-show"
+        argv = ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(
+            (*SHOW, "ActiveState", "SubState", "ControlPID", "MainPID")), state["domain"]["unit"]]
+        controller["next"] = None
+    else:
+        need(action in ("post", "delete", "absence") and state.get("next") == action
+             and state.get("ownedRecord") is not None and state["owner"] is _OWNER,
+             "Disposition is not the original owned finite read/delete/absence route")
+        _github_boundary_owned_admit(state)
+        label, argv = _github_boundary_prefix(state["case"], stop=True) + "-" + action, _github_boundary_argv(state, action)
+        state["next"] = None  # Entered once; a failing command never gets a retry.
+    _PHASE = label
+    _github_boundary_domain_check(state, no_workers=True)
+    seconds = min(2, math.floor(_END - time.monotonic()))
+    need(seconds > 0, "Original9s StopPost endpoint exhausted")
+    _GITHUB_BOUNDARY_COMMAND_FINAL = False
+    result = None
+    try:
+        result = _OWNER.run_owned(argv, environ=_environment(), cwd=Path("/"), timeout=seconds, capture=True,
+            text=False, output_limit=SHELL_GITHUB_BOUNDARY_LIMIT, execution_scope=None, journal_binding=None, cleanup=False)
+        need(type(result) is subprocess.CompletedProcess and result.args == argv and type(result.returncode) is int
+             and type(result.stdout) is bytes and type(result.stderr) is bytes
+             and len(result.stdout) + len(result.stderr) <= SHELL_GITHUB_BOUNDARY_LIMIT,
+             "Original disposition command result is incomplete")
+        _GITHUB_BOUNDARY_COMMAND_FINAL = True  # Saved positive original return, not an exception classification.
+    except BaseException as error:
+        controller["launchesClosed"] = True  # Never obtain a fresh underlying owner after unknown custody.
+        _github_boundary_error(controller, label + "-owner", error)
+        return None
+    try:
+        _command_capture(label, argv, result, seconds)
+    except BaseException as error:
+        # A capture/readback error AFTER the saved original CompletedProcess
+        # cannot erase its finality, clear the first failure or skip safe cleanup.
+        _github_boundary_error(controller, label + "-capture", error)
+    try:
+        _github_boundary_domain_check(state, no_workers=True)
+        need(time.monotonic() < _END, "Original policy disposition completed late")
+    except BaseException as error:
+        controller["launchesClosed"] = True
+        _github_boundary_error(controller, label + "-finality", error)
+        return None
+    if result.returncode != 0 or result.stderr != b"":
+        _github_boundary_error(controller, label + "-result", Refused("Original fixed disposition command failed"))
+    return result
+
+
+def _github_boundary_stop(value):
+    """Enter authenticated disposition BEFORE completion/result/denial success gates."""
+    global _GITHUB_BOUNDARY_STOP
+    controller = {"owner": _OWNER, "endpoint": _END, "launchesClosed": False, "next": "unit-show",
+                  "errors": [], "cases": {}, "domain": None, "context": None}
+    report = {"schema": "installed-github-normal-boundary-disposition-v1", "cases": controller["cases"],
+              "errors": controller["errors"], "allOwnedPoliciesAbsent": False, "laterLaunchesClosed": False}
+    _GITHUB_BOUNDARY_STOP = report
+    context = None
+    try:
+        # Actual original manager StopPost identity, not arbitrary root/UID peers.
+        need(os.getppid() == 1, "Policy disposition is not the original manager's direct child")
+        context = _github_boundary_domain(value, _namespaces(True))
+        controller["context"] = context
+        result = _github_boundary_dispose_command(controller, context, "unit-show")
+        need(result is not None and result.returncode == 0 and result.stderr == b"",
+             "Original StopPost service domain could not be admitted")
+        controller["domain"] = _domain_admission(value, result.stdout, stop_boundary=True)
+        for case in SHELL_GITHUB_BOUNDARY_CASES:
+            state = {**context, "case": case}
+            # Missing result/denial counters have NOT been inspected here.
+            try:
+                _github_boundary_private_name(case, "intent.json").lstat()
+            except FileNotFoundError:
+                controller["cases"][case] = {"state": "no-intent-no-delete-authority", "ownedPolicyAbsent": None}
+                continue
+            controller["cases"][case] = {"state": "retained-uncertain", "ownedPolicyAbsent": False}
+            try:
+                _github_boundary_owned_admit(state)
+                try:
+                    retired_record, retired_raw = _github_boundary_private_read(case, "retired.json")
+                except FileNotFoundError:
+                    retired_record = None
+                if retired_record is not None:
+                    retired = decode(retired_raw, SHELL_GITHUB_BOUNDARY_LIMIT)
+                    _shell_github_fields(retired, ("schema", "case", "owned", "proof", "originalTableAbsent"), "retired policy")
+                    proof_record, proof_raw = _github_boundary_public_record(_github_boundary_prefix(case) + "-policy.json")
+                    proof = decode(proof_raw, SHELL_GITHUB_BOUNDARY_LIMIT)
+                    need(retired == {"schema": "installed-github-normal-boundary-retired-v1", "case": case,
+                         "owned": state["ownedRecord"], "proof": proof_record, "originalTableAbsent": True}
+                         and proof["state"] == "removed-and-observed" and proof["owned"] == state["ownedRecord"]
+                         and proof["domain"] == state["domain"] and proof["faultHeldThroughOriginalFinality"] is True,
+                         "Original policy retirement record changed")
+                    controller["cases"][case] = {"state": "already-retired", "ownedPolicyAbsent": True,
+                                                  "proof": _shell_github_pin(proof_raw)}
+                    continue
+                _github_boundary_reserve(case, stop=True)
+                state["next"] = "post"
+                observed = _github_boundary_dispose_command(controller, state, "post")
+                need(observed is not None and observed.returncode == 0 and observed.stderr == b"",
+                     "Original owned policy post-observation failed")
+                if _github_boundary_nft_rows(observed.stdout) == []:
+                    controller["cases"][case] = {"state": "observed-original-absent", "ownedPolicyAbsent": True}
+                    continue  # Absence needs no delete and grants no future creation.
+                post = shell_github_boundary_policy_readback(value, case, observed.stdout)
+                need(post["table"] == state["owned"]["installed"]["table"]
+                     and post["immutable"] == state["owned"]["installed"]["immutable"],
+                     "Original owned policy/handles changed; no deletion authority")
+                state["next"] = "delete"
+                deleted = _github_boundary_dispose_command(controller, state, "delete")
+                need(deleted is not None, "Original delete finality unknown; no next command")
+                if deleted.stdout != b"":
+                    _github_boundary_error(controller, "delete-output", Refused("Unexpected original delete output"))
+                # Even a known nonzero deletion keeps first failure, but may
+                # independently observe absence. Unknown finality never does.
+                state["next"] = "absence"
+                absent = _github_boundary_dispose_command(controller, state, "absence")
+                need(absent is not None and absent.returncode == 0 and absent.stderr == b""
+                     and _github_boundary_nft_rows(absent.stdout) == [], "Original table absence is not proved")
+                controller["cases"][case] = {"state": "removed-and-observed-after-manager-teardown",
+                                              "ownedPolicyAbsent": True}
+            except BaseException as error:
+                _github_boundary_error(controller, _github_boundary_prefix(case), error)
+                # A failed authenticated ownership/finality admission cannot be
+                # repaired or retried and cannot advance to another task case.
+                controller["launchesClosed"] = True
+                break
+    except BaseException as error:
+        _github_boundary_error(controller, "stop-domain-admission", error)
+        controller["launchesClosed"] = True
+    finally:
+        if context is not None:
+            try:
+                _github_boundary_close_domain(context)
+            except BaseException as error:
+                _github_boundary_error(controller, "stop-original-cgroup-close", error)
+                controller["launchesClosed"] = True
+        report["allOwnedPoliciesAbsent"] = (set(controller["cases"]) == set(SHELL_GITHUB_BOUNDARY_CASES)
+            and all(row["ownedPolicyAbsent"] is True for row in controller["cases"].values()))
+        report["laterLaunchesClosed"] = controller["launchesClosed"]
+    return controller["domain"], report
+
+
+def _github_boundary_domain_data(value, domain):
+    _shell_github_fields(domain, ("sourceSha", "runId", "attempt", "runnerUid", "invocationId", "unit",
+                                  "cgroupPath", "cgroupIdentity", "namespaces", "bootId"), "closed policy domain")
+    unit = root_path(value).name + ".service"
+    need(all(domain[key] == value[key] for key in ("sourceSha", "runId", "attempt", "runnerUid"))
+         and domain["unit"] == unit and domain["cgroupPath"] == "/sys/fs/cgroup/system.slice/" + unit
+         and type(domain["invocationId"]) is str and re.fullmatch(r"[0-9a-f]{32}", domain["invocationId"]) is not None
+         and type(domain["bootId"]) is str
+         and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", domain["bootId"]) is not None,
+         "Closed original policy UID/service/kernel identity differs")
+    identity_row = domain["cgroupIdentity"]
+    need(type(identity_row) is list and len(identity_row) == 6 and all(type(n) is int and 0 <= n < 1 << 64 for n in identity_row)
+         and identity_row[0] > 0 and identity_row[1] > 0 and stat.S_ISDIR(identity_row[2])
+         and not identity_row[2] & 0o7022 and identity_row[3:5] == [0, 0] and identity_row[5] > 0,
+         "Closed original kernel cgroup identity is missing")
+    need(type(domain["namespaces"]) is dict and set(domain["namespaces"]) == {"user", "pid", "net", "mnt"}
+         and all(type(row) is list and len(row) == 2 and all(type(n) is int and n > 0 for n in row)
+                 for row in domain["namespaces"].values()), "Closed original policy namespace identities differ")
+    return domain
+
+
+def shell_github_boundary_policy_data(value, case, proof, receipt):
+    _shell_github_fields(proof, ("schema", "case", "profile", "sourceSha", "domain", "intent", "owned", "installed", "post",
+        "productCommand", "nativeBoundary", "state", "productOriginalsFinal", "noPriorWorkers", "absence", "policySha256",
+        "faultHeldThroughOriginalFinality", "normalHttpRequests"), "closed normal-boundary policy")
+    need(proof["schema"] == "installed-github-normal-boundary-policy-v1" and proof["case"] == case
+         and proof["profile"] == SHELL_GITHUB_BOUNDARY_PROFILE and proof["sourceSha"] == value["sourceSha"]
+         and proof["state"] == "removed-and-observed"
+         and all(proof[key] is True for key in ("productOriginalsFinal", "noPriorWorkers", "faultHeldThroughOriginalFinality"))
+         and proof["normalHttpRequests"] is False
+         and proof["policySha256"] == hashlib.sha256(shell_github_boundary_policy(value, case)).hexdigest(),
+         "Closed normal-boundary policy is not the actual original removed/final interval")
+    _github_boundary_domain_data(value, proof["domain"])
+    need(type(receipt) is dict and receipt["case"] == case and len(receipt["originals"]) == 1
+         and canonical(proof["nativeBoundary"]) == canonical(receipt["originals"][0]["boundary"])
+         and proof["nativeBoundary"]["uid"] == value["runnerUid"],
+         "Root policy is not correlated to the actual original native Child boundary")
+    for phase in ("installed", "post"):
+        _github_boundary_policy_evidence(value, case, proof[phase])
+    absence = proof["absence"]
+    _shell_github_fields(absence, ("size", "sha256"), "original policy absence capture")
+    need(type(absence["size"]) is int and 0 < absence["size"] <= SHELL_GITHUB_BOUNDARY_LIMIT
+         and type(absence["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", absence["sha256"]) is not None,
+         "Original policy absence capture pin differs")
+    counters = _github_boundary_counter_interval(proof["installed"], proof["post"], case)
+    if case == "github-dns-deadline":
+        need(counters["dns_queries"]["packets"] == receipt["peer"]["terminal"]["dnsQuestions"],
+             "Root stateless DNS counter is not the actual retained peer question count")
+    product = proof["productCommand"]
+    _shell_github_fields(product, ("phase", "argv", "exitCode", "timeoutSeconds"), "closed original boundary command")
+    need(product["phase"] == "shell-" + case and product["argv"] == shell_argv(value, case)
+         and type(product["exitCode"]) is int and product["exitCode"] == 0
+         and type(product["timeoutSeconds"]) is int and 0 < product["timeoutSeconds"] <= 60,
+         "Root boundary policy adopted a different or failed product command")
+    for key, suffix in (("intent", "intent.json"), ("owned", "owned.json")):
+        row = proof[key]
+        _shellmetapath = root_path(value) / "private" / (_github_boundary_prefix(case) + "-" + suffix)
+        _shell_github_fields(row, ("path", "size", "sha256", "identity"), "protected policy " + key)
+        identity_row = row["identity"]
+        need(row["path"] == str(_shellmetapath) and type(row["size"]) is int and 0 < row["size"] <= SHELL_GITHUB_BOUNDARY_LIMIT
+             and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None
+             and type(identity_row) is list,
+             "Protected policy evidence record differs")
+        # Do not conflate file/full9 with the separate six-field cgroup identity.
+        need(type(identity_row) is list and len(identity_row) == 9
+             and all(type(n) is int and 0 <= n < 1 << 64 for n in identity_row)
+             and identity_row[0] > 0 and identity_row[1] > 0
+             and identity_row[2:7] == [stat.S_IFREG | 0o400, 0, 0, 1, row["size"]],
+             "Protected policy evidence ownership/full9 differs")
+    return proof
+
+
+def shell_github_boundary_closed(value, cases, outcome, raw_files):
+    """Actual root captures plus original native boundary; not inner flags alone."""
+    need(shell_cases(value) == SHELL_GITHUB_BOUNDARY_CASES, "Closed normal-boundary selection differs")
+    before, after = (raw_files["github-boundary-host-" + phase + ".json"] for phase in ("before", "after"))
+    need(before == after, "Original nft/package/kernel/NSS interval changed")
+    _github_boundary_host_admit(decode(before, SHELL_GITHUB_BOUNDARY_LIMIT))
+    commands = {row["phase"]: row for row in outcome["commands"]}
+    start, stop = (decode(raw_files["unit-" + name + ".json"], LIMIT) for name in ("start", "stop"))
+    disposition = stop.get("normalBoundaryDisposition")
+    _shell_github_fields(disposition, ("schema", "cases", "errors", "allOwnedPoliciesAbsent", "laterLaunchesClosed"), "root disposition")
+    need(disposition["schema"] == "installed-github-normal-boundary-disposition-v1" and disposition["errors"] == []
+         and disposition["allOwnedPoliciesAbsent"] is True and disposition["laterLaunchesClosed"] is False
+         and set(disposition["cases"]) == set(SHELL_GITHUB_BOUNDARY_CASES), "Original root policy disposition did not qualify")
+    policies, original_domain = {}, None
+    for case in SHELL_GITHUB_BOUNDARY_CASES:
+        prefix = _github_boundary_prefix(case)
+        raw = raw_files[prefix + "-policy.json"]
+        proof = shell_github_boundary_policy_data(value, case, decode(raw, SHELL_GITHUB_BOUNDARY_LIMIT),
+                                                  cases[case]["githubReadOnly"])
+        need(proof["domain"]["invocationId"] == start["invocationId"]
+             and {name: proof["domain"]["namespaces"][name] for name in ("user", "pid", "mnt")} == start["namespaces"]
+             and proof["domain"]["runnerUid"] == start["runnerUid"]
+             and proof["productCommand"] == commands["shell-" + case],
+             "Original source-bound service/product/policy custody differs")
+        need(original_domain is None or original_domain == proof["domain"], "Two boundary cases adopted a replacement service/cgroup")
+        original_domain = proof["domain"]
+        state = {"case": case, "value": value, "owned": {"installed": proof["installed"]}}
+        captures = {}
+        for action in ("before", "create", "installed", "post", "delete", "absence"):
+            label = prefix + "-" + action
+            command_row = commands[label]
+            _shell_github_fields(command_row, ("phase", "argv", "exitCode", "timeoutSeconds"), "closed policy command")
+            need(command_row["argv"] == _github_boundary_argv(state, action)
+                 and type(command_row["exitCode"]) is int and command_row["exitCode"] == 0
+                 and type(command_row["timeoutSeconds"]) is int and 0 < command_row["timeoutSeconds"] <= 3
+                 and raw_files[label + ".stderr"] == b"", "Actual original policy command/capture differs")
+            captures[action] = raw_files[label + ".stdout"]
+        need(_github_boundary_nft_rows(captures["before"]) == _github_boundary_nft_rows(captures["absence"]) == []
+             and captures["delete"] == b"" and proof["absence"] == _shell_github_pin(captures["absence"]),
+             "Original no-foreign-policy/removed-table absence capture differs")
+        created = shell_github_boundary_policy_readback(value, case, captures["create"], echo=True)
+        installed = shell_github_boundary_policy_readback(value, case, captures["installed"])
+        post = shell_github_boundary_policy_readback(value, case, captures["post"])
+        need(canonical(created) == canonical(installed) == canonical(proof["installed"])
+             and canonical(post) == canonical(proof["post"]), "Policy proof differs from actual creation/installed/post handles")
+        pin = _shell_github_pin(raw)
+        need(disposition["cases"][case] == {"state": "already-retired", "ownedPolicyAbsent": True, "proof": pin},
+             "StopPost did not bind this exact original retirement proof")
+        policies[case] = {"capture": pin, "evidence": proof}
+    return {"host": {"before": _shell_github_pin(before), "after": _shell_github_pin(after)}, "policies": policies,
+            "normalResolverWithholdingObserved": True, "realStalledTcpConnectObserved": True,
+            "rootUidAndCgroupScoped": True, "normalHttpRequests": False}
+
+
+def shell_github_closed_result(value, outcome, raw_files, expected):
+    """Only after the unchanged original service/client/StopPost finality gate."""
+    need(shell_github_readonly(value) and not shell_github_preflight(value) and not shell_github_release(value)
+         and shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES), "GitHub closed route differs")
+    before = raw_files["shell-github-materials-before.json"]
+    after = raw_files["shell-github-materials-after.json"]
+    need(type(before) is bytes and before == after, "GitHub actual N/D/peer/keylog originals changed")
+    maps = shell_github_material_data(value, before, expected)
+    shell_github_maps(maps)
+    material = decode(before, SHELL_GITHUB_MATERIAL_LIMIT)
+    _shell_github_closed_loader(material, decode(raw_files["loader-final.json"], LIMIT))
+    fixture_before = raw_files["shell-github-project-before.json"]
+    fixture_after = raw_files["shell-github-project-after.json"]
+    fixture = shell_github_fixture(value, fixture_before, fixture_after)
+    project = decode(fixture_before, SHELL_GITHUB_FIXTURE_LIMIT)
+    material_pairs = {tuple(row["identity"][:2]) for tree in material["payloads"].values() for row in tree.values()}
+    material_pairs.update(tuple(row["identity"][:2]) for name in ("peer", "ambientKeylogs") for row in material[name].values())
+    project_pairs = {tuple(row["identity"][:2]) for row in project["nodes"].values()} | {tuple(project["namespace"]["identity"][:2])}
+    need(material_pairs.isdisjoint(project_pairs), "GitHub registered fixture aliases an installed material original")
+    p0 = decode(raw_files["observe-p0.stdout"], LIMIT)
+    need(type(p0.get("published")) is dict and set(p0["published"]) == {"P0"}
+         and canonical(p0["published"]["P0"]) == canonical(material["payloads"]["N"])
+         and canonical(decode(raw_files["published-before-upgrade.txt"], LIMIT)) == canonical(p0["published"]),
+         "GitHub N material is not the original unchanged P0 publication")
+    cases_raw = raw_files["shell-cases.json"]
+    cases = decode(cases_raw, LIMIT)
+    need(type(cases) is dict and set(cases) == set(shell_cases(value)) and canonical(cases) == cases_raw,
+         "GitHub closed original case roster or canonical capture differs")
+    need(type(outcome["commands"]) is list
+         and tuple(row["phase"] for row in outcome["commands"]) == root_phases(value),
+         "GitHub original command sequence includes a missing, duplicate or unrelated case")
+    commands = {row["phase"]: row for row in outcome["commands"]}
+    for case in shell_cases(value):
+        phase = "shell-" + case
+        command = commands[phase]
+        need(command["argv"] == shell_argv(value, case), "GitHub original observer argv differs")
+        streams = [raw_files[phase + suffix] for suffix in (".stdout", ".stderr", "-xvfb.stderr")]
+        need(all(type(raw) is bytes for raw in streams) and sum(map(len, streams)) <= LIMIT,
+             "GitHub combined original stdout/stderr/Xvfb capture differs")
+        result = shell_github_result(streams[0], streams[1], case, command["exitCode"], maps)
+        need(result["githubReadOnly"]["sourceCommit"] == value["sourceSha"]
+             and canonical(result) == canonical(cases[case]), "GitHub native receipt is not the original closed SOURCE/capture")
+    github = {"selection": shell_github_selection(value["shell"]["githubReadOnly"]["profile"]), "expectedMaps": maps,
+              "materials": {"before": _shell_github_pin(before), "after": _shell_github_pin(after)},
+              "fixture": {**fixture, "before": _shell_github_pin(fixture_before), "after": _shell_github_pin(fixture_after)},
+              "casesCapture": _shell_github_pin(cases_raw),
+              "normalDestinationAction": False, "normalTransportPositive": False,
+              "remainingCoverage": ["normal-resolver-withholding", "real-stalled-tcp-connect",
+                                    "separately-approved-normal-destination-negative"]}
+    if shell_normal_boundaries(value):
+        github.update(normalDestinationAction=True,
+                      normalNetworkScope="normal-dns-and-scoped-https-acquisition-syns-only",
+                      normalHttpRequests=False,
+                      boundaries=shell_github_boundary_closed(value, cases, outcome, raw_files),
+                      remainingCoverage=["current-twenty-two-synthetic-regressions",
+                                         "separately-approved-normal-destination-negative"])
+    shell = value["shell"]
+    return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
+            "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+            "cases": cases, "githubReadOnly": github, "packageLifecycleQualified": False, "shellPackageBuilt": False}
+
+
+def shell_github_preflight_closed_result(value, outcome, raw_files, expected):
+    """Reconcile G only after the SAME original service/client/StopPost finality."""
+    selection = _shell_github_selection(value)
+    need(shell_github_preflight(value) and canonical(outcome.get("githubPreflight")) == canonical(selection)
+         and not {"githubReadOnly", "githubRelease", "ordinary21", "projectRecovery", "androidPublication", "androidBuild"} & set(outcome)
+         and outcome.get("serviceQualified") is False and outcome.get("normalDestinationAction") is False
+         and set(raw_files) == public_files(value), "Closed preflight selection or exact output scope differs")
+    before, after = (raw_files["shell-github-materials-" + phase + ".json"] for phase in ("before", "after"))
+    need(type(before) is bytes and before == after, "Preflight actual N/D/peer originals changed")
+    maps = shell_github_material_data(value, before, expected)
+    shell_github_maps(maps)
+    material = decode(before, SHELL_GITHUB_MATERIAL_LIMIT)
+    _shell_github_closed_loader(material, decode(raw_files["loader-final.json"], LIMIT))
+    fixture_before, fixture_after = (raw_files["shell-github-project-" + phase + ".json"] for phase in ("before", "after"))
+    fixture = shell_github_fixture(value, fixture_before, fixture_after)
+    project = decode(fixture_before, SHELL_GITHUB_FIXTURE_LIMIT)
+    pairs = {tuple(row["identity"][:2]) for tree in material["payloads"].values() for row in tree.values()}
+    pairs.update(tuple(row["identity"][:2]) for row in material["peer"].values())
+    project_pairs = {tuple(row["identity"][:2]) for row in project["nodes"].values()} | {tuple(project["namespace"]["identity"][:2])}
+    need(pairs.isdisjoint(project_pairs), "Preflight registered project aliases installed material")
+    pairs.update(project_pairs)
+    p0 = decode(raw_files["observe-p0.stdout"], LIMIT)
+    need(type(p0.get("published")) is dict and set(p0["published"]) == {"P0"}
+         and canonical(p0["published"]["P0"]) == canonical(material["payloads"]["N"])
+         and canonical(decode(raw_files["published-before-upgrade.txt"], LIMIT)) == canonical(p0["published"]),
+         "Preflight N is not the original unchanged P0 publication")
+    cases_raw = raw_files["shell-cases.json"]
+    cases = decode(cases_raw, LIMIT)
+    need(type(cases) is dict and set(cases) == set(SHELL_GITHUB_PREFLIGHT_CASES) and canonical(cases) == cases_raw
+         and type(outcome["commands"]) is list and tuple(row["phase"] for row in outcome["commands"]) == root_phases(value),
+         "Preflight closed original case/command roster differs")
+    commands = {row["phase"]: row for row in outcome["commands"]}
+    journals, original_root = {}, None
+    for case in SHELL_GITHUB_PREFLIGHT_CASES:
+        phase, command = "shell-" + case, commands["shell-" + case]
+        need(command["argv"] == shell_argv(value, case), "Preflight original observer argv differs")
+        streams = [raw_files[phase + suffix] for suffix in (".stdout", ".stderr", "-xvfb.stderr")]
+        need(all(type(raw) is bytes for raw in streams) and sum(map(len, streams)) <= LIMIT,
+             "Preflight combined original capture differs")
+        observed = shell_github_preflight_result(streams[0], streams[1], case, command["exitCode"], maps)
+        receipt = observed["githubPreflight"]
+        need(receipt["sourceCommit"] == value["sourceSha"] and canonical(observed) == canonical(cases[case]),
+             "Preflight native receipt differs from original SOURCE/capture")
+        raw = raw_files[phase + "-journal.json"]
+        journal = shell_github_preflight_journal_data(value, case, raw, receipt)
+        root = journal["created"]["root"]
+        need(root == original_root or original_root is None, "Preflight original common root changed")
+        original_root = root
+        current_pairs = {tuple(row[:2]) for row in journal["directories"].values()}
+        current_pairs.update(tuple(row["identity"][:2]) for row in journal["files"].values())
+        need(current_pairs.isdisjoint(pairs) and tuple(root[:2]) not in pairs
+             and len({pair[0] for pair in current_pairs | pairs | {tuple(root[:2])}}) == 1,
+             "Preflight HOME/journal aliases another original or crosses devices")
+        pairs.update(current_pairs)
+        journals[case] = {"capture": _shell_github_pin(raw), "originals": journal}
+    shell = value["shell"]
+    return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
+            "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+            "cases": cases, "githubPreflight": {"selection": selection, "expectedMaps": maps,
+                "materials": {"before": _shell_github_pin(before), "after": _shell_github_pin(after)},
+                "fixture": {**fixture, "before": _shell_github_pin(fixture_before), "after": _shell_github_pin(fixture_after)},
+                "casesCapture": _shell_github_pin(cases_raw), "journals": journals,
+                "normalDestinationAction": False, "normalTransportPositive": False,
+                "remainingCoverage": list(SHELL_GITHUB_PREFLIGHT_NOT_PROVEN)},
+            "packageLifecycleQualified": False, "shellPackageBuilt": False, "serviceQualified": False}
+
+
+def shell_github_release_closed_result(value, outcome, raw_files, expected):
+    """Reconcile R only after the SAME original service/client/StopPost finality."""
+    selection = _shell_github_selection(value)
+    need(shell_github_release(value) and canonical(outcome.get("githubRelease")) == canonical(selection)
+         and not {"githubReadOnly", "githubPreflight", "ordinary21", "projectRecovery", "androidPublication", "androidBuild"} & set(outcome)
+         and outcome.get("serviceQualified") is False and outcome.get("normalDestinationAction") is False
+         and set(raw_files) == public_files(value), "Closed release selection or exact output scope differs")
+    before, after = (raw_files["shell-github-materials-" + phase + ".json"] for phase in ("before", "after"))
+    need(type(before) is bytes and before == after, "Release actual N/D/peer originals changed")
+    maps = shell_github_material_data(value, before, expected)
+    shell_github_maps(maps)
+    material = decode(before, SHELL_GITHUB_MATERIAL_LIMIT)
+    _shell_github_closed_loader(material, decode(raw_files["loader-final.json"], LIMIT))
+    fixture_before, fixture_after = (raw_files["shell-github-project-" + phase + ".json"] for phase in ("before", "after"))
+    fixture = shell_github_fixture(value, fixture_before, fixture_after)
+    project = decode(fixture_before, SHELL_GITHUB_FIXTURE_LIMIT)
+    pairs = {tuple(row["identity"][:2]) for tree in material["payloads"].values() for row in tree.values()}
+    pairs.update(tuple(row["identity"][:2]) for row in material["peer"].values())
+    project_pairs = {tuple(row["identity"][:2]) for row in project["nodes"].values()} | {tuple(project["namespace"]["identity"][:2])}
+    need(pairs.isdisjoint(project_pairs), "Release registered project aliases installed material")
+    pairs.update(project_pairs)
+    p0 = decode(raw_files["observe-p0.stdout"], LIMIT)
+    need(type(p0.get("published")) is dict and set(p0["published"]) == {"P0"}
+         and canonical(p0["published"]["P0"]) == canonical(material["payloads"]["N"])
+         and canonical(decode(raw_files["published-before-upgrade.txt"], LIMIT)) == canonical(p0["published"]),
+         "Release N is not the original unchanged P0 publication")
+    cases_raw = raw_files["shell-cases.json"]
+    cases = decode(cases_raw, LIMIT)
+    need(type(cases) is dict and set(cases) == set(SHELL_GITHUB_RELEASE_CASES) and canonical(cases) == cases_raw
+         and type(outcome["commands"]) is list and tuple(row["phase"] for row in outcome["commands"]) == root_phases(value),
+         "Release closed original case/command roster differs")
+    commands = {row["phase"]: row for row in outcome["commands"]}
+    journals, original_root = {}, None
+    for case in SHELL_GITHUB_RELEASE_CASES:
+        phase, command = "shell-" + case, commands["shell-" + case]
+        need(command["argv"] == shell_argv(value, case), "Release original observer argv differs")
+        streams = [raw_files[phase + suffix] for suffix in (".stdout", ".stderr", "-xvfb.stderr")]
+        need(all(type(raw) is bytes for raw in streams) and sum(map(len, streams)) <= LIMIT,
+             "Release combined original capture differs")
+        observed = shell_github_release_result(streams[0], streams[1], case, command["exitCode"], maps)
+        receipt = observed["githubRelease"]
+        need(receipt["sourceCommit"] == value["sourceSha"] and canonical(observed) == canonical(cases[case]),
+             "Release native receipt differs from original SOURCE/capture")
+        raw = raw_files[phase + "-journal.json"]
+        journal = shell_github_release_journal_data(value, case, raw, receipt)
+        root = journal["created"]["root"]
+        need(root == project["namespace"]["control"]["identity"] and (root == original_root or original_root is None),
+             "Release original common root changed")
+        original_root = root
+        current_pairs = {tuple(row[:2]) for row in journal["directories"].values()}
+        current_pairs.update(tuple(row["identity"][:2]) for row in journal["files"].values())
+        need(current_pairs.isdisjoint(pairs) and tuple(root[:2]) not in pairs
+             and len({pair[0] for pair in current_pairs | pairs | {tuple(root[:2])}}) == 1,
+             "Release HOME/journal aliases another original or crosses devices")
+        pairs.update(current_pairs)
+        journals[case] = {"capture": _shell_github_pin(raw), "originals": journal}
+    shell = value["shell"]
+    return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
+            "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+            "cases": cases, "githubRelease": {"selection": selection, "expectedMaps": maps,
+                "materials": {"before": _shell_github_pin(before), "after": _shell_github_pin(after)},
+                "fixture": {**fixture, "before": _shell_github_pin(fixture_before), "after": _shell_github_pin(fixture_after)},
+                "casesCapture": _shell_github_pin(cases_raw), "journals": journals,
+                "normalDestinationAction": False, "normalTransportPositive": False,
+                "remainingCoverage": list(SHELL_GITHUB_RELEASE_NOT_PROVEN)},
+            "packageLifecycleQualified": False, "shellPackageBuilt": False, "serviceQualified": False}
+
+
 def shell_handoff(value, original_paths):
     """The fixed connection is neither J's libtest nor a new package source."""
     shell = value["shell"]
+    ordinary, recovery = shell_ordinary(value), shell_recovery(value)
     need(type(shell) is dict and set(shell) == {"binaries", "compiler", "rosterSha256", "producerAttempt",
-         "artifactId", "acceptedU", "loaderPolicy"}, "Fixed shell handoff fields differ")
+         "acceptedU", "loaderPolicy"} | ({"localTransport"} if "localTransport" in shell else {"artifactId"})
+         | ({"projectRecovery"} if recovery else {"ordinary21"} if ordinary else {"githubRelease"} if shell_github_release(value)
+            else {"githubPreflight"} if shell_github_preflight(value)
+            else {"githubReadOnly"} if shell_github_readonly(value) else {"androidPublication"}),
+         "Fixed shell handoff fields differ")
+    if ordinary or recovery or shell_github(value):
+        need("localTransport" not in shell, "Non-Android scope cannot adopt Android local transport")
+    else:
+        materials, publication = _android_handoff_profile(value)
+        need(shell["androidPublication"] == shell_android_publication_request(value["taskRoot"], materials, publication),
+             "Fixed Android publication handoff differs")
     need(all(type(shell[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", shell[key]) is not None
-             for key in ("producerAttempt", "artifactId")) and int(shell["producerAttempt"]) <= int(value["attempt"])
+             for key in (("producerAttempt",) if "localTransport" in shell else ("producerAttempt", "artifactId")))
+         and int(shell["producerAttempt"]) <= int(value["attempt"])
          and type(shell["rosterSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", shell["rosterSha256"]) is not None,
          "Original shell producer/roster binding differs")
+    if shell_github(value):
+        _shell_github_selection(value)
     binaries, compiler, accepted = shell["binaries"], shell["compiler"], shell["acceptedU"]
+    need(type(compiler) is dict and ("ordinary21" in compiler) == ordinary
+         and (not ordinary or canonical(compiler["ordinary21"]) == canonical(shell["ordinary21"])),
+         "Original compiler and root ordinary21 scopes differ")
+    need(("projectRecovery" in compiler) == recovery
+         and (not recovery or canonical(compiler["projectRecovery"]) == canonical(shell_recovery_compile_selection())),
+         "Original compiler and root project-recovery scopes differ")
+    release = shell_github_release(value)
+    need(("githubRelease" in compiler) == release
+         and (not release or canonical(compiler["githubRelease"]) == canonical(shell["githubRelease"])),
+         "Original compiler and root GitHub release scopes differ")
+    preflight = shell_github_preflight(value)
+    need(("githubPreflight" in compiler) == preflight
+         and (not preflight or canonical(compiler["githubPreflight"]) == canonical(shell["githubPreflight"])),
+         "Original compiler and root GitHub preflight scopes differ")
     need(type(binaries) is dict and set(binaries) == {"normal", "observer"}, "Normal/observer shell pair missing")
     paths = list(original_paths)
     for role, row in binaries.items():
@@ -869,6 +5901,33 @@ def shell_handoff(value, original_paths):
          and all(compiler["exportedArtifacts"][role][key] == row[key]
                  for role, row in binaries.items() for key in ("size", "sha256")),
          "Original normal/observer source, features or output bytes differ")
+    if ordinary or recovery or shell_github(value):
+        need(compiler.get("androidBuildMaterials") is None
+              and compiler.get("androidBuildBindings") == {}
+              and compiler.get("androidBuildPublication") is None,
+              "Non-Android shell cannot adopt an Android compile profile")
+        if release:
+            need({"androidBuildMaterials", "androidBuildBindings", "androidBuildPublication"} <= set(compiler)
+                 and not {"androidPreparation", "androidOsContractInput", "androidPublication", "androidBuild", "ordinary21",
+                          "githubReadOnly", "githubReadOnlyProfile", "githubPreflight", "projectRecovery", "localTransport", "shellLocalTransport"} & set(compiler),
+                 "GitHub release compiler has an unrelated action/profile")
+        if preflight:
+            need({"androidBuildMaterials", "androidBuildBindings", "androidBuildPublication"} <= set(compiler)
+                 and not {"androidPreparation", "androidOsContractInput", "androidPublication", "androidBuild",
+                          "githubReadOnly", "githubReadOnlyProfile", "githubRelease", "projectRecovery", "localTransport", "shellLocalTransport"} & set(compiler),
+                 "GitHub preflight compiler has an unrelated action/profile")
+        if ordinary or recovery:
+            need({"androidBuildMaterials", "androidBuildBindings", "androidBuildPublication"} <= set(compiler)
+                 and not {"androidPreparation", "androidOsContractInput", "androidPublication", "androidBuild",
+                          "githubReadOnly", "githubReadOnlyProfile", "githubPreflight", "githubRelease", "localTransport", "shellLocalTransport"} & set(compiler),
+                 "Named non-Android compiler needs the exact null/empty/null Android contract")
+    else:
+        need(compiler.get("androidBuildMaterials") == materials
+             and compiler.get("androidBuildBindings") == shell_android_compile_environment(materials)
+             and compiler.get("androidBuildPublication") == publication,
+             "Original Android compiled profile/publication correspondence differs")
+    if "localTransport" in shell:
+        _android_local_transport(value)
     need(type(accepted) is dict and set(accepted) == {"sourceSha", "runId", "attempt", "artifactId"}
          and accepted["sourceSha"] == value["compilerRecords"]["sourceSha"]
          and re.fullmatch(r"[0-9a-f]{40}", accepted["sourceSha"]) is not None
@@ -878,6 +5937,12 @@ def shell_handoff(value, original_paths):
 
 def root_path(value):
     return Path("/var/lib/mrk-ubuntu-native-" + value["runId"] + "-" + value["attempt"])
+
+
+def shell_fixture_root(value):
+    need(all(type(value.get(key)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value[key]) is not None
+             for key in ("runId", "attempt")), "Original shell fixture run identity differs")
+    return Path("/var/lib/mrk-ubuntu-shell-fixtures-" + value["runId"] + "-" + value["attempt"])
 
 
 def service_task_limit(value):
@@ -907,6 +5972,8 @@ def service_argv(handoff_path, handoff_sha256, entry_sha256):
     need(type(entry_sha256) is str and re.fullmatch(r"[0-9a-f]{64}", entry_sha256) is not None
          and record(entry, JSON_LIMIT)["sha256"] == entry_sha256, "Workflow entry pin differs")
     properties = {**service_properties(value["deadline"]), "TasksMax": service_task_limit(value)}
+    if "shell" in value and not shell_github(value):
+        properties["LimitNOFILE"] = str(SHELL_DESCRIPTOR_LIMIT)
     return _service_argv(value, handoff_path, handoff_sha256, entry_sha256, properties)
 
 
@@ -931,14 +5998,23 @@ def _root_ids():
          and status["NoNewPrivs"].strip() == "1", "Root filesystem IDs/no-new-privs differ")
 
 
-def _kernel(path, limit=64 << 10):
+def _kernel(path, limit=64 << 10, *, diagnostic=None, label=None):
+    if diagnostic is not None:
+        _github_boundary_material_phase(diagnostic, label + "-open")
     fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
+        if diagnostic is not None:
+            _github_boundary_material_phase(diagnostic, label + "-read")
         raw = os.read(fd, limit + 1)
         need(len(raw) <= limit and not os.read(fd, 1), "Kernel DATA bound exceeded")
         return raw.decode("ascii")
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except BaseException:
+            if diagnostic is not None:
+                _github_boundary_material_phase(diagnostic, label + "-close")
+            raise
 
 
 def _status():
@@ -1011,6 +6087,105 @@ def _modules(root, *, owner):
         _OWNER = owned_process
 
 
+def _android_material_engine(root):
+    """Import only the existing source-pinned, root-protected DATA validator."""
+    base = root / "source"
+    for relative, (size, digest) in _android_source_pins().items():
+        path = base / relative
+        directory(path.parent, protected=True)
+        item = path.lstat()
+        need(record(path, size) == {"path": str(path), "size": size, "sha256": digest}
+             and item.st_uid == item.st_gid == 0 and stat.S_IMODE(item.st_mode) == 0o444
+             and not os.listxattr(path, follow_symlinks=False), "Android protected validator source differs")
+    spec = importlib.util.spec_from_file_location("_root_android_material_preparation",
+        base / "desktop/tools/android_material_preparation.py")
+    engine = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(engine)
+    # Reuse this already authenticated root loader DATA implementation. The
+    # material validator never imports a second lifecycle/owner or self-hash.
+    engine._PROVIDER_LOADER_DATA = {name: globals()[name] for name in (
+        "loader_diagnostics", "loader_cache", "shell_loader_candidates", "loader_selected", "DEFAULT_LIBRARY_DIRS", "HWCAPS")}
+    return engine
+
+
+def _android_original_preparation(value):
+    """Root revalidation before profile binding, publication or loader/app GO.
+
+    No acquisition or command API is reachable here. The existing native end is
+    used; the original compiler end may legitimately have elapsed after compile.
+    StopPost never calls this function or adopts an expired compiler owner.
+    """
+    need(_ROOT == root_path(value) and not _FAILED and time.monotonic() < _END,
+         "Android root preparation role/endpoint differs")
+    transport = _android_local_transport(value)
+    envelope, compiler = value["shell"]["localTransport"], value["shell"]["compiler"]
+    originals = {}
+    def original_document(pin, limit, mode):
+        path = absolute(pin["path"])
+        directory(path.parent)
+        item = path.lstat()
+        need(time.monotonic() < _END and stat.S_ISREG(item.st_mode) and item.st_nlink == 1
+             and (item.st_uid, item.st_gid) == (value["runnerUid"], value["runnerGid"])
+             and stat.S_IMODE(item.st_mode) == mode and not os.listxattr(path, follow_symlinks=False),
+             "Android original private document custody differs")
+        observed, body = record(path, pin["size"], content=True)
+        need(observed == pin and identity(path.lstat()) == identity(item), "Android original private document changed")
+        originals[path] = (identity(item), pin)
+        return decode(body, limit)
+    envelope_pin = {key: envelope[key] for key in ("path", "size", "sha256")}
+    need(original_document(envelope_pin, 64 << 10, 0o400) == transport,
+         "Android original local transport changed before root admission")
+    for key in ("compilerRoot", "compilerEvidence", "materialRoot"):
+        original = transport[key]
+        directory(absolute(original["path"]))
+        need(list(identity(absolute(original["path"]).lstat())[:5]) == original["identity"],
+             "Android same-job original directory changed before root admission")
+    preparation_pin = transport["context"]["preparation"]
+    original = original_document(preparation_pin, 16384, 0o600)
+    need(original.get("source") == value["source"]
+         and (original.get("runnerUid"), original.get("runnerGid")) == (value["runnerUid"], value["runnerGid"]),
+         "Android original compiler source/owner differs from native preparation")
+    engine = _android_material_engine(_ROOT)
+    prepared_pin = transport["materialRecord"]
+    prepared_path = absolute(prepared_pin["path"])
+    prepared = original_document(prepared_pin, 64 << 10, 0o400)
+    host_pin = prepared["provenance"]["documents"]["host"]
+    need(type(host_pin) is dict and set(host_pin) == {"path", "size", "sha256"} and host_pin["path"] == "host.json"
+         and type(host_pin["size"]) is int and 0 < host_pin["size"] <= 32 << 20,
+         "Android fixed private host reference differs")
+    host_path = absolute(transport["materialRoot"]["path"]) / "private/host.json"
+    host = original_document({**host_pin, "path": str(host_path)}, 32 << 20, 0o400)
+    checked = engine.read_record(prepared_path, {key: prepared_pin[key] for key in ("size", "sha256")},
+        context=transport["context"], host=host, deadline=_END)
+    materials, publication = _android_handoff_profile(value)
+    need(checked == prepared and checked["materials"] == materials and checked["publication"] == publication,
+         "Android root-validated original profile differs from compiler")
+    roster_pin = transport["compilerRoster"]
+    roster = original_document(roster_pin, 512 << 10, 0o600)
+    original_pin = compiler.get("originalRecord")
+    need(type(original_pin) is dict and set(original_pin) == {"path", "size", "sha256"}
+         and original_pin["path"] == "compiler.json" and type(original_pin["size"]) is int
+         and 0 < original_pin["size"] <= 8 << 20, "Android original compiler record pin differs")
+    original_compiler = absolute(transport["compilerEvidence"]["path"]) / "compiler.json"
+    need(type(roster) is dict and set(roster) == {"sourceSha", "sourceTree", "runId", "attempt", "files"}
+         and all(roster.get(key) == compiler.get(key) for key in ("sourceSha", "sourceTree", "runId", "attempt"))
+         and type(roster["files"]) is list and len(roster["files"]) <= 1536
+         and [row for row in roster["files"] if type(row) is dict and row.get("path") == "compiler.json"] == [original_pin],
+         "Android root compiler record differs from the complete original roster")
+    full = original_document({**original_pin, "path": str(original_compiler)}, 8 << 20, 0o600)
+    need(all(full.get(key) == item for key, item in compiler.items() if key != "originalRecord")
+         and time.monotonic() < _END, "Android root compiler projection differs or closed late")
+    for key in ("compilerRoot", "compilerEvidence", "materialRoot"):
+        row = transport[key]
+        need(list(identity(absolute(row["path"]).lstat())[:5]) == row["identity"],
+             "Android original transport directory changed during root admission")
+    for path, (before, pin) in originals.items():
+        need(time.monotonic() < _END and identity(path.lstat()) == before
+             and record(path, pin["size"]) == pin and identity(path.lstat()) == before,
+             "Android original private document changed during root admission")
+    bind_shell_android_profile(materials, publication)
+
+
 def _context(*, copying=False):
     global _ROOT, _END
     root = Path(__file__).absolute().parent
@@ -1036,6 +6211,14 @@ def _context(*, copying=False):
         relative = "desktop/tools/conventional_runtime_data.py"
         copy_pinned(source / relative, root / "source" / relative,
                     {"path": str(source / relative), "size": DATA_PIN[0], "sha256": DATA_PIN[1]})
+        android = "localTransport" in value.get("shell", {})
+        if android:
+            data_directory = root / "source/desktop/tools/android_material_data"
+            data_directory.mkdir(mode=0o700)
+            for relative, (size, digest) in _android_source_pins().items():
+                copy_pinned(source / relative, root / "source" / relative,
+                            {"path": str(source / relative), "size": size, "sha256": digest})
+            os.chmod(data_directory, 0o555)
         candidates = [("candidate", value["installed"]["candidate"], root / "installed-tests", 0o555)] if "installed" in value else []
         if "shell" in value:
             candidates = [(role, row, root / ("shell-" + role), 0o555) for role, row in value["shell"]["binaries"].items()]
@@ -1049,6 +6232,8 @@ def _context(*, copying=False):
         os.chmod(root / "public", 0o755)
         os.chmod(root, 0o711)
     _modules(root, owner=True)
+    if copying and shell_github(value):
+        _shell_github_stage_peer(value)
     return value, pins[1]
 
 
@@ -1065,25 +6250,95 @@ def _capacity(value):
                 + (value["installed"]["candidate"]["size"] if "installed" in value else 0)
                 + (sum(row["size"] for row in value["shell"]["binaries"].values()) if "shell" in value else 0)
                 + 2 * capacity["runtimeBytes"] + 1 + 2 * max(capacity["installedBytes"].values()) + TOTAL_LIMIT + JSON_LIMIT)
-    # The four original Xvfb logs share the GUI per-file ceiling. Account for
+    # The original Xvfb logs share the GUI per-file ceiling. Account for
     # those private files in addition to retained output. This free-space check
     # is not a reservation, aggregate quota or a bound on every GUI cache/memfd.
-    if "shell" in value:
-        required += len(SHELL_CASES) * SHELL_WORK_FILE_LIMIT
-    inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + 128
+    if "shell" in value and not shell_github(value) and not shell_recovery(value):
+        # One write-only failure leaf per observer. The512-byte emitter/read
+        # bound is not a filesystem quota; retain the unchanged64MiB ceiling.
+        required += (len(shell_cases(value)) + len(shell_observers(value))) * SHELL_WORK_FILE_LIMIT
+        android_publication_nodes = 0
+        if shell_android(value):
+            _, android_data = _android_handoff_profile(value)
+            android_totals = android_data["totals"]
+            required += android_totals["toolBytes"] + android_data["documents"]["manifest"]["size"]
+            android_publication_nodes = android_totals["toolFiles"] + android_totals["toolDirectories"] + 4
+        required += sum(map(len, SHELL_WORKFLOW_CALLERS.values())) + len(SHELL_WORKFLOW_IGNORE) + len(SHELL_WORKFLOW_SIBLING) \
+            + len(SHELL_PROJECT_SOURCE) + len(SHELL_PROJECT_VERSION)
+        required += sum(len(data) for _, mode, _, data in _shell_metadata_roster(value, True) if stat.S_ISREG(mode)) \
+            + len(SHELL_METADATA_SHORT_BEFORE)
+        version_nodes = _shell_version_roster(value, True)
+        required += sum(len(data) for _, mode, _, data in version_nodes if stat.S_ISREG(mode))
+        session_nodes = [row for case in SHELL_SESSION_CASES for row in _shell_session_roster(value, case)]
+        required += sum(len(row[3]) for row in session_nodes if not stat.S_ISDIR(row[1]))
+        tools_offline_nodes = [row for case in SHELL_TOOLS_OFFLINE_CASES for row in _shell_tools_offline_roster(value, case, True)]
+        required += sum(len(row[3]) for row in tools_offline_nodes if stat.S_ISREG(row[1]))
+        android_nodes = [row for case in shell_android_cases(value) for row in _shell_android_roster(value, case, True)]
+        required += sum(len(row[3]) for row in android_nodes if stat.S_ISREG(row[1]))
+        # The unchanged native exact24 namespace includes four empty original
+        # root-owned placeholders in ordinary21, not Android fixture trees.
+        placeholder_nodes = len(SHELL_ANDROID_CASES) if shell_ordinary(value) else 0
+        # Each added existing GUI route creates eight directories, auth and
+        # bus-config files, its log, and a bus socket. The shell-only190 output
+        # slots cover the188 root originals; TOTAL_LIMIT is unchanged.
+        # Settled-failure and version-save are outside the three fixture groups:
+        # each needs twelve GUI environment nodes in block/inode accounting.
+        session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES) + len(shell_android_cases(value)) + 2)
+    inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + (shell_public_limit(value) if "shell" in value else 128)
+    if "shell" in value and not shell_github(value) and not shell_recovery(value):
+        inodes += len(shell_observers(value)) + 1 + 12 + 14 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + len(android_nodes) + placeholder_nodes + session_environment_nodes
+        inodes += android_publication_nodes  # Full25 manifest and at most three new directories; zero for ordinary21.
+    if shell_github(value):
+        count = len(shell_cases(value))
+        # Two distinct complete D copies, the fixed peer/project, and the
+        # unchanged per-original GUI/log limits. No Tools/JDK fixtures.
+        required += 2 * capacity["runtimeBytes"] + 2 * JSON_LIMIT + 2 * count * SHELL_WORK_FILE_LIMIT
+        required += sum(pin[0] for pin in _shell_github_peer_pins(value).values()) + len(SHELL_PROJECT_SOURCE) + len(SHELL_PROJECT_VERSION)
+        github_nodes = 2 * 8192 + 16 + 13 * count
+        if shell_github_preflight(value) or shell_github_release(value):
+            kinds_for = _shell_github_release_journal_kinds if shell_github_release(value) else _shell_github_preflight_journal_kinds
+            journal_kinds = [kinds_for(case) for case in shell_cases(value)]
+            required += sum(bound for kinds in journal_kinds for _, bound in kinds)  # Exact per-case bounds; no raw journal bodies exported.
+            github_nodes += count * 4 + sum(map(len, journal_kinds))  # Four directories PER HOME and its exact0/1/2 leaves.
+        inodes += github_nodes
+    if shell_recovery(value):
+        count = len(shell_cases(value))
+        # Exact bounded controls/fixture summaries plus existing GUI/log file
+        # ceilings; the negative observation has its own retained write leaf.
+        recovery_nodes = count * (160 + 13) + int(shell_recovery_negative(value))
+        required += count * (136 * (256 << 10) + 2 * SHELL_WORK_FILE_LIMIT)
+        required += int(shell_recovery_negative(value)) * SHELL_WORK_FILE_LIMIT
+        inodes += recovery_nodes
     need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
+    if "shell" in value and not shell_github(value) and not shell_recovery(value):
+        required += (27 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + len(android_nodes) + placeholder_nodes + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
+        required += android_publication_nodes * space.f_frsize
+    if shell_recovery(value):
+        required += recovery_nodes * space.f_frsize
+    if shell_github(value):
+        required += github_nodes * space.f_frsize
     need(space.f_bavail * space.f_frsize >= required and space.f_favail >= inodes, "Insufficient original host capacity; do not clear caches")
 
 
 def _retain(name, raw):
     global _TOTAL
+    slot = _GITHUB_BOUNDARY_SLOTS.get(name)
+    remaining = sum(row["cap"] for row in _GITHUB_BOUNDARY_SLOTS.values() if not row["retained"])
+    need(slot is None or not slot["entered"] and type(raw) is bytes and len(raw) <= slot["cap"],
+         "Original reserved policy output slot reused or exceeded")
     need(_ROOT is not None and re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,100}", name) is not None
-         and type(raw) is bytes and len(raw) <= LIMIT and _TOTAL + len(raw) <= TOTAL_LIMIT, "Fixed capture bound differs")
+         and type(raw) is bytes and len(raw) <= LIMIT
+         and _TOTAL + len(raw) + remaining - (slot["cap"] if slot is not None else 0) <= TOTAL_LIMIT,
+         "Fixed capture/reserved policy output bound differs")
+    if slot is not None:
+        slot["entered"] = True  # Before the write; uncertain output cannot reuse its slot.
     row = _D.write(_ROOT / "public" / name, raw, 0o444)
     _TOTAL += len(raw)
     _FILES.append({**row, "path": name})
+    if slot is not None:
+        slot["retained"] = True
 
 
 def _environment():
@@ -1100,53 +6355,149 @@ def _command_capture(label, argv, result, seconds):
 
 
 def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, shell_log=None):
-    global _FAILED, _PHASE
+    global _FAILED, _PHASE, _GITHUB_BOUNDARY_COMMAND_FINAL, _RECOVERY_NEGATIVE
     _PHASE = label
     need(not _FAILED and _OWNER is not None, "Prior root command failed or owner missing")
     _root_ids()
     if shell_log is not None:
         need(type(shell_log) is tuple and len(shell_log) == 3
-             and shell_log[1] in SHELL_CASES[1:] and label == "shell-" + shell_log[1]
+             and shell_log[1] in shell_observers(shell_log[0]) and label == "shell-" + shell_log[1]
              and argv == shell_argv(shell_log[0], shell_log[1]), "Different fixed shell log route")
+    recovery_negative = shell_log is not None and shell_recovery_negative(shell_log[0])
+    need(not recovery_negative or label == "shell-" + SHELL_RECOVERY_PARTIAL
+         and maximum == SHELL_RECOVERY_NEGATIVE_SECONDS and codes == (0,) and endpoint is None
+         and env == shell_environment(shell_log[0], SHELL_RECOVERY_PARTIAL),
+         "Recovery negative requires its exact original finite command route")
+    settled_failure = label == "shell-settled-failure"
+    need(not settled_failure or shell_log is not None and codes == (0,),
+         "Settled-failure requires its original shell route, not an exit-code override")
     # The fixed overlap configure may only SHORTEN this original endpoint.
     need(endpoint is None or type(endpoint) in {int, float} and math.isfinite(endpoint), "Fixed finite command cap required")
     bound = _END if endpoint is None else min(_END, endpoint)
-    started = time.monotonic()
-    seconds = min(maximum, math.floor(bound - started))
-    need(seconds > 0, "Original root command endpoint exhausted")
     _FAILED = True
-    result = _OWNER.run_owned(argv, environ=_environment() if env is None else env, cwd=Path("/"), timeout=seconds,
-        capture=True, text=False, output_limit=LIMIT, execution_scope=None, journal_binding=None, cleanup=False)
-    _command_capture(label, argv, result, seconds)
-    if endpoint is not None:
-        _COMMANDS[-1].update(originalEndpoint=bound, startMonotonic=started)
-    accepted = result.returncode in codes and time.monotonic() < bound
-    display_log, log_error = None, None
-    if shell_log is not None:
+    failure_sink, recovery_sink, result = None, None, None
+    try:
+        if shell_log is not None:
+            failure_sink = _shell_labels_prepare(shell_log[0], shell_log[1])
+        if recovery_negative:
+            need(_RECOVERY_NEGATIVE is None, "Recovery negative original may not be reset/reused")
+            _RECOVERY_NEGATIVE = {"schemaVersion": 1, "scope": "original-recovery-negative-owner-v1",
+                "case": SHELL_RECOVERY_PARTIAL, "sourceSha": shell_log[0]["sourceSha"], "phase": label,
+                "classificationEligible": False, "applicationFinal": False, "originalOwnerFinal": False,
+                "error": None, "ownerCall": None, "labelsBytes": None, "observation": None,
+                "failureSinkClosed": False, "observationSinkClosed": False}
+            recovery_sink = _shell_recovery_negative_prepare(shell_log[0])
+        started = time.monotonic()
+        seconds = min(maximum, math.floor(bound - started))
+        need(seconds > 0, "Original root command endpoint exhausted")
+        need(not recovery_negative or seconds == SHELL_RECOVERY_NEGATIVE_SECONDS,
+             "Recovery negative cannot start with a shortened original cap")
+        call = _shell_call_started(seconds) if shell_log is not None else None
         try:
-            display_log = _shell_log_capture(*shell_log, result)
+            _GITHUB_BOUNDARY_COMMAND_FINAL = False
+            result = _OWNER.run_owned(argv, environ=_environment() if env is None else env, cwd=Path("/"), timeout=seconds,
+                capture=True, text=False, output_limit=LIMIT, execution_scope=None, journal_binding=None, cleanup=False)
+            # Record typed positive finality for the private boundary route.
+            # Legacy commands retain their existing result/capture contract.
+            _GITHUB_BOUNDARY_COMMAND_FINAL = (type(result) is subprocess.CompletedProcess and result.args == argv
+                and type(result.returncode) is int and type(result.stdout) is bytes and type(result.stderr) is bytes)
         except BaseException as error:
-            log_error = error
-        if not accepted or log_error is not None:
-            _shell_command_failure(argv, result, shell_log[1], display_log, log_error)
-        if not accepted:
-            # The settled original command's failure remains primary. Preserve
-            # a later read/retention/interruption error as its explicit cause;
-            # neither branch can resume or claim cleanup/success.
-            raise Refused("Original root command failed or completed late") from log_error
-        if log_error is not None:
-            raise log_error
-        need(time.monotonic() < bound, "Original shell log captured after endpoint")
-    if not accepted and label in {"native-root", "native-user", "observe-unpacked", "observe-p0",
-                                 "observe-upgrade", "observe-duplicate", "observe-remove", "observe-purge"}:
-        # Only these fixed credential-free fixtures may expose bounded DATA
-        # from the SAME returned capture. This is not another read or receipt.
-        diagnostic = {"phase": label, "exitCode": result.returncode, "timeoutSeconds": seconds,
-            "stdoutBytes": len(result.stdout), "stderrBytes": len(result.stderr),
-            "stdoutPrefix": result.stdout[:1024].decode("utf-8", errors="backslashreplace"),
-            "stderrPrefix": result.stderr[:1024].decode("utf-8", errors="backslashreplace")}
-        sys.stderr.write("Fixture command failure DATA: " + canonical(diagnostic).decode("ascii"))
-    need(accepted, "Original root command failed or completed late")
+            if shell_log is not None:
+                try:
+                    if recovery_negative:
+                        _shell_recovery_owner_failure(shell_log[0], error, failure_sink, recovery_sink, call)
+                    else:
+                        _shell_owner_failure(shell_log[1], error, failure_sink, call)
+                except BaseException:
+                    pass
+            raise  # Same original object; diagnosis supplies no continuation authority.
+        if shell_log is not None:
+            try:
+                _shell_call_finished(call, True)
+            except BaseException:
+                pass  # Return DATA is recorded before its optional diagnostic clock.
+        need(not recovery_negative, "Retained-Unknown experiment returned normally instead of its original endpoint")
+        _command_capture(label, argv, result, seconds)
+        if endpoint is not None:
+            _COMMANDS[-1].update(originalEndpoint=bound, startMonotonic=started)
+        accepted = not settled_failure and result.returncode in codes and time.monotonic() < bound
+        display_log, log_error = None, None
+        if shell_log is not None:
+            try:
+                display_log = _shell_log_capture(*shell_log, result)
+            except BaseException as error:
+                log_error = error
+            label_data = None
+            if settled_failure and result.returncode == 1 and log_error is None and time.monotonic() < bound:
+                # Mark this original read as attempted BEFORE entering it. Even
+                # a read/parse/export error must not let diagnostics read again.
+                label_data = (None, None)
+                try:
+                    label_data = _shell_labels_read(failure_sink, with_raw=True)
+                    _shell_settled_failure_result(result.stdout, result.stderr, shell_log[1], result.returncode, label_data[0])
+                    _retain("shell-settled-failure-failure.labels", label_data[0])
+                    accepted = True  # Still _FAILED until checked close and the final endpoint check below.
+                except BaseException as error:
+                    log_error = error
+            if not accepted or log_error is not None:
+                try:
+                    _shell_command_failure(argv, result, shell_log[1], display_log, log_error, failure_sink, call,
+                                           label_data=label_data)
+                except BaseException:
+                    pass  # Diagnosis cannot replace the pending refusal/original log error.
+            if not accepted:
+                # The settled original command's failure remains primary. Preserve
+                # a later read/retention/interruption error as its explicit cause;
+                # neither branch can resume or claim cleanup/success.
+                raise Refused("Original root command failed or completed late") from log_error
+            if log_error is not None:
+                raise log_error
+            need(time.monotonic() < bound, "Original root command failed or completed late" if settled_failure
+                 else "Original shell log captured after endpoint")
+        if not accepted and label in {"native-root", "native-user", "observe-unpacked", "observe-p0",
+                                     "observe-upgrade", "observe-duplicate", "observe-remove", "observe-purge"}:
+            # Only these fixed credential-free fixtures may expose bounded DATA
+            # from the SAME returned capture. This is not another read or receipt.
+            diagnostic = {"phase": label, "exitCode": result.returncode, "timeoutSeconds": seconds,
+                "stdoutBytes": len(result.stdout), "stderrBytes": len(result.stderr),
+                "stdoutPrefix": result.stdout[:1024].decode("utf-8", errors="backslashreplace"),
+                "stderrPrefix": result.stderr[:1024].decode("utf-8", errors="backslashreplace")}
+            sys.stderr.write("Fixture command failure DATA: " + canonical(diagnostic).decode("ascii"))
+        need(accepted, "Original root command failed or completed late")
+    except BaseException as error:
+        if settled_failure and type(result) is subprocess.CompletedProcess and not isinstance(error, Refused):
+            # The returned expected-negative is not yet accepted. Retention,
+            # clock and classification errors cannot replace that failed outcome.
+            raise Refused("Original root command failed or completed late") from error
+        raise
+    finally:
+        if failure_sink is not None:
+            active_failure = sys.exc_info()[0] is not None
+            try:
+                os.close(failure_sink[0])  # This exact retained original, once; no reopen/unlink.
+                if recovery_negative and _RECOVERY_NEGATIVE is not None:
+                    _RECOVERY_NEGATIVE["failureSinkClosed"] = True
+            except BaseException as error:
+                if not active_failure:
+                    if settled_failure:
+                        raise Refused("Original root command failed or completed late") from error
+                    raise  # _FAILED remains True; a lost close cannot qualify.
+        if recovery_sink is not None:
+            active_failure = sys.exc_info()[0] is not None
+            try:
+                os.close(recovery_sink[0])  # Original protected read FD; never seek/reopen/retry.
+                if _RECOVERY_NEGATIVE is not None:
+                    _RECOVERY_NEGATIVE["observationSinkClosed"] = True
+            except BaseException:
+                if not active_failure:
+                    raise
+    if settled_failure:
+        try:
+            need(time.monotonic() < bound, "Original root command failed or completed late")
+        except BaseException as error:
+            if isinstance(error, Refused):
+                raise
+            raise Refused("Original root command failed or completed late") from error
     _FAILED = False
     return result
 
@@ -1162,10 +6513,28 @@ def seconds_value(value):
 
 def _domain(value, label):
     unit = root_path(value).name + ".service"
-    result = command(label + "-unit-show", ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(SHOW), unit], maximum=3)
-    rows = result.stdout.decode("ascii").splitlines()
+    show = SHOW + (("LimitNOFILE", "LimitNOFILESoft") if "shell" in value and not shell_github(value) else ())
+    result = command(label + "-unit-show", ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(show), unit], maximum=3)
+    observation = _domain_events(_domain_admission(value, result.stdout))
+    _no_denials(observation)
+    return observation
+
+
+def _domain_admission(value, raw, *, stop_boundary=False):
+    """Ownership/domain admission is not the later zero-denial success verdict."""
+    unit = root_path(value).name + ".service"
+    show = SHOW + (("LimitNOFILE", "LimitNOFILESoft") if "shell" in value and not shell_github(value) else ())
+    rows = raw.decode("ascii").splitlines()
     props = dict(line.split("=", 1) for line in rows)
-    need(len(props) == len(rows) and set(props) == set(SHOW) and props["Id"] == unit and props["Type"] == "exec", "Original service properties incomplete")
+    extra = ("ActiveState", "SubState", "ControlPID", "MainPID") if stop_boundary else ()
+    need(len(props) == len(rows) and set(props) == set(show) | set(extra)
+         and props["Id"] == unit and props["Type"] == "exec", "Original service properties incomplete")
+    if stop_boundary:
+        need(props["ActiveState"] == "deactivating" and props["SubState"] == "stop-post"
+             and props["ControlPID"] == str(os.getpid()) and props["MainPID"] == "0",
+             "Not the actual original manager's StopPost after main-worker teardown")
+        for key in extra:
+            props.pop(key)
     for key in ("User", "Group", "WorkingDirectory", "UMask", "ExitType", "Restart", "KillMode", "SendSIGKILL", "OOMPolicy", "Delegate", "NoNewPrivileges"):
         need(props[key] == PROPERTIES[key], "Effective service ownership policy differs")
     need(all(props[key] == "no" for key in ("PrivateMounts", "PrivateTmp", "PrivateUsers", "PrivateNetwork", "ProtectControlGroups")),
@@ -1185,14 +6554,21 @@ def _domain(value, label):
     need(props["MemoryMax"] == effective["memory.max"] == str(6 << 30) and props["MemorySwapMax"] == effective["memory.swap.max"] == "0"
          and props["TasksMax"] == effective["pids.max"] == service_task_limit(value)
          and effective["memory.oom.group"] == "1", "Effective aggregate limits differ")
+    if "shell" in value and not shell_github(value):
+        nofile = resource.getrlimit(resource.RLIMIT_NOFILE)
+        need(props["LimitNOFILE"] == props["LimitNOFILESoft"] == str(SHELL_DESCRIPTOR_LIMIT)
+             and nofile == (SHELL_DESCRIPTOR_LIMIT, SHELL_DESCRIPTOR_LIMIT), "Inherited shell descriptor limits differ")
+        effective["nofile"] = list(nofile)
     quota, period = effective["cpu.max"].split()
     need(quota.isdecimal() and period.isdecimal() and int(period) > 0 and int(quota) == 2 * int(period), "Effective CPU ceiling differs")
+    return {"sourceSha": value["sourceSha"], "unit": props, "invocationId": invocation, "effective": effective}
+
+
+def _domain_events(observation):
+    cgroup = Path("/sys/fs/cgroup" + observation["unit"]["ControlGroup"])
     events = {name: {key: int(number) for key, number in (line.split() for line in _kernel(cgroup / name).splitlines())}
               for name in ("memory.events", "pids.events")}
-    need({"max", "oom", "oom_kill"} <= set(events["memory.events"]) and "max" in events["pids.events"], "Aggregate denial counters missing")
-    need(all(number == 0 for key, number in events["memory.events"].items() if key != "low")
-         and all(number == 0 for number in events["pids.events"].values()), "Original aggregate resource denial")
-    return {"sourceSha": value["sourceSha"], "unit": props, "invocationId": invocation, "effective": effective, "events": events}
+    return {**observation, "events": events}
 
 
 def config_options(raw):
@@ -1471,14 +6847,19 @@ def _xattrs(path, is_directory):
             raise Refused(refusal(name, "present"))
 
 
-def _tree(root, manifest, *, published):
+def _tree(root, manifest, *, published, github=False):
     directory(root, protected=True)
     raw = read(root / "manifest.json")
-    need(hashlib.sha256(raw).hexdigest() == manifest and len(raw) == (85440 if manifest == M else 85441), "Published manifest bytes differ")
+    sizes = {M: 85945, F1: 85946}
+    if github:
+        derivatives = {row["manifestSha256"]: row["manifestBytes"] for role, row in SHELL_GITHUB_PAYLOADS.items() if role != "N"}
+        need(manifest in derivatives and root == PREFIX / manifest, "GitHub derivative tree root/role differs")
+        sizes = derivatives
+    need(manifest in sizes and hashlib.sha256(raw).hexdigest() == manifest and len(raw) == sizes[manifest], "Published manifest bytes differ")
     data = _D.decode(raw, JSON_LIMIT)
     need(data["target"] == TARGET and data["protocolSha256"] == Q and data["protocol"] == data["schemaVersion"] == 1, "Runtime DATA profile differs")
     files = _D.records(data["files"])
-    need(len(files) == 606, "Runtime payload roster count differs")
+    need(len(files) == 610, "Runtime payload roster count differs")
     files["manifest.json"] = {"path": "manifest.json", "size": len(raw), "sha256": manifest}
     directories = {""} | {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
     pending, seen, rows, aliases = [root], set(), {}, set()
@@ -1488,7 +6869,8 @@ def _tree(root, manifest, *, published):
         item = path.lstat()
         need(item.st_uid == item.st_gid == 0, "Runtime owner differs")
         is_directory = stat.S_ISDIR(item.st_mode)
-        mode = (0o555 if published else 0o755) if is_directory else (0o555 if relative == "python/bin/python3" else 0o444)
+        mode = ((0o700 if github and not published and path == root else 0o555 if published or github else 0o755)
+                if is_directory else (0o555 if relative == "python/bin/python3" else 0o444))
         need(stat.S_IMODE(item.st_mode) == mode and (is_directory or stat.S_ISREG(item.st_mode)), "Runtime object type/mode differs")
         _xattrs(path, is_directory)
         if is_directory:
@@ -1678,8 +7060,22 @@ ROOT_PHASES = ("start-unit-show", "native-root", "native-user", "state-initial",
 
 def root_phases(value):
     if "shell" in value:
+        if shell_recovery(value):
+            initial = (ROOT_PHASES[0], "loader-diagnostics", "loader-cache", *ROOT_PHASES[1:11],
+                       *("recovery-fixture-" + case for case in shell_cases(value)))
+            return (*initial, *("shell-" + case for case in shell_cases(value)),
+                    *(() if shell_recovery_negative(value) else ("state-shell-finished",)))
+        if shell_normal_boundaries(value):
+            phases = []
+            for case in shell_cases(value):
+                prefix = _github_boundary_prefix(case)
+                phases.extend(prefix + "-" + action for action in ("before", "create", "installed"))
+                phases.append("shell-" + case)
+                phases.extend(prefix + "-" + action for action in ("post", "delete", "absence"))
+            return (ROOT_PHASES[0], "loader-diagnostics", "loader-cache", *ROOT_PHASES[1:11],
+                    *phases, "state-shell-finished")
         return (ROOT_PHASES[0], "loader-diagnostics", "loader-cache", *ROOT_PHASES[1:11],
-                *("shell-" + case for case in SHELL_CASES), "state-shell-finished")
+                *("shell-" + case for case in shell_cases(value)), "state-shell-finished")
     if "installed" not in value:
         return ROOT_PHASES
     case = value["installed"]["case"]
@@ -1691,6 +7087,16 @@ def root_phases(value):
 
 
 def result_state(value):
+    if shell_recovery(value):
+        return "project-recovery-retained-unknown-experiment-observed" if shell_recovery_negative(value) else "project-recovery-native3-observed"
+    if shell_ordinary(value):
+        return "ordinary21-shell-installed-runtime-connection-observed"
+    if shell_github_release(value):
+        return "installed-github-release-native3-observed"
+    if shell_github_preflight(value):
+        return "installed-github-preflight-synthetic-observed"
+    if shell_github_readonly(value):
+        return "installed-github-normal-boundaries-observed" if shell_normal_boundaries(value) else "installed-github-readonly-synthetic-observed"
     if "shell" in value:
         return "normal-shell-installed-runtime-connection-observed"
     if "installed" not in value:
@@ -1701,13 +7107,45 @@ def result_state(value):
 def public_files(value):
     fixed = {phase + "." + suffix for phase in (*root_phases(value), "stop-unit-show") for suffix in ("stdout", "stderr")}
     fixed |= {"unit-start.json", "unit-result.json", "unit-stop.json", "inputs.json", "dpkg-policy.json", "scripts-unpacked.json", "binaries-unpacked.json"}
+    if shell_recovery(value):
+        fixed |= {"loader-entry.json", "loader-runtime.json", "published-before-upgrade.txt"}
+        fixed |= {"shell-root-data-" + str(i) + ".json" for i in range(len(SHELL_DATA_ROOTS))}
+        fixed |= {"shell-" + case + "-" + phase + ".json" for case in shell_cases(value)
+                  for phase in ("initial", "generated", "before", "after")}
+        if shell_recovery_negative(value):
+            # No success result/final-loader/application stdout exists on this failed stream.
+            fixed -= {"unit-result.json", "unit-stop.json", "shell-" + SHELL_RECOVERY_PARTIAL + ".stdout",
+                      "shell-" + SHELL_RECOVERY_PARTIAL + ".stderr", "shell-" + SHELL_RECOVERY_PARTIAL + "-after.json"}
+            return fixed | {"unit-start-error.json", "project-recovery-negative-stop.json", "project-recovery-negative.observation",
+                            SHELL_RECOVERY_LOADER_BEFORE, SHELL_RECOVERY_INTERVAL}
+        return fixed | {"loader-final.json", "shell-cases.json", "mutation-denials.txt"} \
+            | {"shell-" + case + "-xvfb.stderr" for case in shell_cases(value)}
+    if shell_github(value):
+        if shell_github_preflight(value) or shell_github_release(value):
+            fixed |= {"shell-" + case + "-journal.json" for case in shell_cases(value)}
+        if shell_normal_boundaries(value):
+            fixed |= {"github-boundary-host-before.json", "github-boundary-host-after.json"} \
+                | {_github_boundary_prefix(case) + "-policy.json" for case in SHELL_GITHUB_BOUNDARY_CASES}
+        return fixed | {"loader-entry.json", "loader-final.json", "loader-runtime.json", "shell-cases.json",
+                        "published-before-upgrade.txt", "mutation-denials.txt",
+                        "shell-github-project-before.json", "shell-github-project-after.json",
+                        "shell-github-materials-before.json", "shell-github-materials-after.json"} \
+            | {"shell-" + case + "-xvfb.stderr" for case in shell_cases(value)} \
+            | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
     if "shell" in value:
         return fixed | {"loader-entry.json", "loader-final.json", "loader-runtime.json", "shell-cases.json",
                         "shell-normal-control.json", "shell-positive-project-before.json", "shell-positive-project-after.json",
                         "shell-positive-candidate-before.json", "shell-positive-candidate-after.json",
                         "shell-project-paths-before.json", "shell-project-paths-after.json",
-                        "published-before-upgrade.txt", "mutation-denials.txt"} \
-            | {"shell-" + case + "-xvfb.stderr" for case in SHELL_CASES} \
+                        "shell-workflow-apply-before.json", "shell-workflow-apply-after.json",
+                        "shell-metadata-save-before.json", "shell-metadata-save-after.json",
+                        "shell-version-save-before.json", "shell-version-save-after.json",
+                        "published-before-upgrade.txt", "mutation-denials.txt", "shell-settled-failure-failure.labels"} \
+            | {"shell-" + case + "-xvfb.stderr" for case in shell_cases(value)} \
+            | {"shell-" + case + "-" + phase + ".json" for case in SHELL_SESSION_CASES for phase in ("before", "after")} \
+            | {"shell-" + case + "-" + phase + ".json" for case in SHELL_TOOLS_OFFLINE_CASES for phase in ("before", "after")} \
+            | {"shell-" + case + "-" + phase + ".json" for case in shell_android_cases(value) for phase in ("before", "after")} \
+            | ({"shell-ordinary21-placeholders-" + phase + ".json" for phase in ("before", "after")} if shell_ordinary(value) else set()) \
             | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
     installed = value.get("installed")
     if installed is not None:
@@ -1724,7 +7162,9 @@ def public_files(value):
 def lifecycle_states(value):
     rows = [("initial", "absent", None), ("unpacked", "install ok unpacked", "P0")]
     if "shell" in value:
-        rows += [("p0", "install ok installed", "P0"), ("shell-finished", "install ok installed", "P0")]
+        rows += [("p0", "install ok installed", "P0")]
+        if not shell_recovery_negative(value):
+            rows += [("shell-finished", "install ok installed", "P0")]
     elif "installed" in value and value["installed"]["case"] != "positive":
         rows.append(("refusal", "install ok unpacked", "P0"))
     else:
@@ -2813,9 +8253,9 @@ def _installed_overlap(value, policy, proof, expected):
 
 
 def shell_environment(value, case):
-    need(case in SHELL_CASES, "Unknown fixed shell case")
+    need(case in shell_cases(value), "Unknown fixed shell case")
     home = root_path(value) / ("gui-" + case)
-    return {"PATH": HOST_PATH, "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+    environment = {"PATH": HOST_PATH, "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
             "HOME": str(home / "home"), "TMPDIR": str(home / "tmp"), "XDG_RUNTIME_DIR": str(home / "runtime"),
             "XDG_CONFIG_HOME": str(home / "config"), "XDG_CACHE_HOME": str(home / "cache"), "XDG_DATA_HOME": str(home / "data"),
             "XDG_CONFIG_DIRS": str(home / "empty-config"), "XDG_DATA_DIRS": "/usr/share",
@@ -2824,6 +8264,14 @@ def shell_environment(value, case):
             "DBUS_SYSTEM_BUS_ADDRESS": "unix:path=" + str(home / "runtime/absent-system-bus"),
             "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "GITHUB_SHA": value["sourceSha"],
             **({"MRK_DESKTOP_HOSTED_CHECKS": "installed-shell-connection-v1"} if case != "normal" else {})}
+    if case in SHELL_GITHUB_AMBIENT_CASES:
+        need(shell_github(value), "Ambient decoys require the fixed GitHub route")
+        environment.update({key: "http://127.0.0.1:18888" for key in
+                            ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")})
+        environment.update({key: str(root_path(value) / "github-peer/github_tls/root-ca.pem") for key in
+                            ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")})
+        environment["SSLKEYLOGFILE"] = str(root_path(value) / ("shell-" + case + "-keylog.log"))
+    return environment
 
 
 def shell_argv(value, case):
@@ -2839,9 +8287,534 @@ def shell_argv(value, case):
         "--server-args=-screen 0 1280x1024x24 -noreset", *command])
 
 
+def _shell_labels_prepare(value, case):
+    """One root-owned leaf and its original read FD; never an app-writable namespace."""
+    need(case in shell_observers(value) and _ROOT == root_path(value), "Different fixed shell label route")
+    directory(_ROOT, protected=True)
+    root = identity(_ROOT.lstat())
+    need(root[2:5] == (stat.S_IFDIR | 0o711, 0, 0), "Different protected shell label parent")
+    _xattrs(_ROOT, True)
+    path = _ROOT / ("shell-" + case + "-failure.labels")
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+    try:
+        os.fchown(fd, 0, value["runnerGid"])
+        os.fchmod(fd, 0o620)
+        original = identity(os.fstat(fd))
+        need(original[0] == root[0] and original[2:7] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1, 0)
+             and identity(path.lstat()) == original and identity(_ROOT.lstat())[:6] == root[:6],
+             "Fresh shell label binding differs")
+        need(os.listxattr(fd) == [], "Shell label attributes are not empty")
+        need(identity(os.fstat(fd)) == original, "Fresh shell label changed before launch")
+        return fd, original[:6]
+    except BaseException:
+        try:
+            os.close(fd)
+        except BaseException:
+            pass  # No retry of an ambiguous close; the original refusal stays primary.
+        raise
+
+
+def _shell_session_first_origin(origin, detail, association, query, worker):
+    """Closed DATA only; no lookup or inference from the public step/current owner."""
+    if origin not in SHELL_SESSION_ORIGINS or detail not in SHELL_SESSION_DETAILS or association not in SHELL_SESSION_ASSOCIATIONS:
+        return None
+    details = {
+        b"op-cleanup": (b"deadline", b"review-expired", b"context-stale", b"cleanup-unknown", b"user-cancelled", b"shutdown", b"document-lost", b"other"),
+        b"coord-join": (b"failed",),
+        b"staged-refusal": (b"new", b"pending", b"returned", b"failed", b"unavailable"),
+    }.get(origin, (b"none",))
+    if detail not in details:
+        return None
+    if query not in (b"na", b"unregistered", b"unavailable"):
+        parts = query.split(b".")
+        if (len(parts) != 3 or parts[0] not in SHELL_SESSION_QUERY_ERRORS or parts[1] not in SHELL_SESSION_QUERY_CAUSES
+                or len(parts[2]) != 2 or any(join not in SHELL_SESSION_MANAGEMENT_JOINS for join in parts[2])
+                or parts[0] == b"none" and parts[1] != b"none"):
+            return None
+    if worker not in SHELL_SESSION_WORKERS:
+        parts = worker.rsplit(b"-", 1)
+        if (len(parts) != 2 or parts[0] not in SHELL_SESSION_WORKER_STAGES
+                or len(parts[1]) != 1 or parts[1][0] not in SHELL_SESSION_WORKER_JOINS):
+            return None
+    if (association == b"unassociated" and (query, worker) != (b"na", b"na")
+            or association == b"bound" and query == b"na"
+            or query == b"unregistered" and worker != b"na"
+            or origin == b"not-recorded" and (detail, association, query, worker) != (b"none", b"unassociated", b"na", b"na")):
+        return None
+    return {"origin": origin.decode("ascii"), "detail": detail.decode("ascii"), "association": association.decode("ascii"),
+            "query": query.decode("ascii"), "worker": worker.decode("ascii")}
+
+
+def _shell_session_unknown_boundary(association, query, worker, boundary):
+    """v5-only consistency after legacy first-origin validation; no native lookup."""
+    if boundary not in SHELL_SESSION_UNKNOWN_BOUNDARIES:
+        return None
+    if association == b"unassociated":
+        valid = (query, worker, boundary) == (b"na", b"na", b"na")
+    elif association != b"bound":
+        return None
+    elif query == b"unregistered":
+        valid = (worker, boundary) == (b"na", b"na")
+    elif query == b"unavailable":
+        valid = (worker, boundary) == (b"unavailable", b"unavailable")
+    else:
+        # A successful state snapshot may still have no Resources guard. A
+        # retained known edge with unavailable worker is legitimate, not a cause.
+        valid = query != b"na" and worker != b"na" and boundary not in (b"na", b"unavailable")
+    return boundary.decode("ascii") if valid else None
+
+
+def _shell_session_assessment_failure(rejection, origin, classification, cause):
+    """Closed original-return labels only, never current-owner or finality claims."""
+    if origin not in SHELL_SESSION_ASSESSMENT_ORIGINS:
+        return None
+    if origin == b"none":
+        valid = (classification, cause) == (b"na", b"none")
+    elif origin == b"request":
+        valid = (classification, cause) == (b"serialize", b"none")
+    elif origin == b"result":
+        valid = classification in SHELL_SESSION_ASSESSMENT_RESULT_CLASSES and cause == b"none"
+    else:
+        valid = classification in SHELL_SESSION_ASSESSMENT_BRIDGE_CLASSES and cause in SHELL_SESSION_QUERY_CAUSES
+    if not valid:
+        return None
+    # These are the unchanged public mappings of the captured original error,
+    # not inferences from a current owner, wait, firstOrigin or worker sample.
+    if origin != b"none":
+        compatible = {
+            b"known-assessment": (b"reply-assessment-invalid-request", b"reply-assessment-limit", b"reply-assessment-version",
+                                  b"reply-assessment-policy-stale", b"reply-assessment-context-invalid"),
+            b"busy": (b"reply-busy",), b"shutdown": (b"reply-shutting-down",),
+            b"timeout": (b"reply-query-timeout",), b"cleanup": (b"reply-cleanup-unknown",),
+        }.get(classification, (b"reply-assessment-unavailable",))
+        if rejection not in compatible:
+            return None
+    return {"origin": origin.decode("ascii"), "class": classification.decode("ascii"), "cause": cause.decode("ascii")}
+
+
+
+def _shell_github_entry_labels(lines):
+    """Closed first-failure DATA; sample counters are not an atomic native/DOM view."""
+    if (len(lines) != 4 or lines[1] != b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubEntry\n"
+            or lines[2] not in SHELL_FAILURE_BOUNDARIES or lines[3] not in SHELL_BOOTSTRAP_PROGRESS):
+        return None
+    match = re.fullmatch(
+        rb"MRK_INSTALLED_SHELL_GITHUB_ENTRY_FAILURE=v1;o=(not-recorded|evaluation-budget|deadline|callback-shape|script-error|ready-refused)"
+        rb";eval=(na|0|[1-9][0-9]{0,2});ne=(na|0|[1-9][0-9]{0,2});ns=(not-observed|absent|present)"
+        rb";cap=(na|0|1);reason=([a-z-]{2,25});sess=(na|0|1);de=(na|0|[1-9][0-9]{0,2})"
+        rb";dom=(not-observed|wait|ready|error);sel=(na|0|1);form=(na|0|1);submit=(na|0|1)"
+        rb";enabled=(na|0|1);help=(na|0|1);repo=(na|0|1);guide=(na|0|1)\n", lines[0])
+    if match is None:
+        return None
+    origin, evaluations, native_eval, presence, capability, reason, session, dom_eval, dom, *bits = match.groups()
+    reasons = {b"none", b"unqualified", b"runtime-unavailable", b"publisher-unconfigured", b"not-connected",
+               b"invalid-input", b"busy", b"unauthorized", b"forbidden", b"not-found-or-inaccessible",
+               b"target-changed", b"rate-limited", b"network-unavailable", b"tls-failed", b"response-invalid",
+               b"response-limit", b"expired", b"stale", b"cancelled", b"cleanup-unknown"}
+    if reason not in reasons | {b"na"}:
+        return None
+    evaluations, native_eval, dom_eval = (None if value == b"na" else int(value)
+                                         for value in (evaluations, native_eval, dom_eval))
+    boolean = {b"na": None, b"0": False, b"1": True}
+    capability, session = boolean[capability], boolean[session]
+    selected, form, submit, enabled, help_present, repository, guide = (boolean[value] for value in bits)
+    observed = (selected, form, submit, enabled, help_present, repository, guide)
+    if origin == b"not-recorded":
+        if (any(value is not None for value in (evaluations, native_eval, dom_eval, capability, session, *observed))
+                or presence != b"not-observed" or dom != b"not-observed" or reason != b"na"):
+            return None
+    elif (evaluations is None or evaluations > 128
+          or native_eval is not None and native_eval > evaluations
+          or dom_eval is not None and not 1 <= dom_eval <= evaluations
+          or origin == b"evaluation-budget" and evaluations != 128):
+        return None
+    if ((native_eval is None) != (presence == b"not-observed")
+            or (dom_eval is None) != (dom == b"not-observed")):
+        return None
+    if presence == b"present":
+        if capability is None or session is None or reason == b"na" or capability != (reason == b"none"):
+            return None
+    elif capability is not None or session is not None or reason != b"na":
+        return None
+    if dom in {b"not-observed", b"error"}:
+        if any(value is not None for value in observed):
+            return None
+    else:
+        ready = selected is True and form is True and submit is True and enabled is True
+        if (any(value is None for value in (selected, form, submit))
+                or submit is True and form is not True
+                or (enabled is not None) != (submit is True)
+                or form is True and guide is None
+                or help_present is True and guide is not True
+                or dom == b"wait" and (ready or help_present is not None)
+                or dom == b"ready" and (not ready or help_present is None)):
+            return None
+    boundary = lines[2][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii")
+    if (origin == b"evaluation-budget" and boundary != "settlement"
+            or origin == b"deadline" and boundary != "deadline"
+            or origin in {b"callback-shape", b"script-error", b"ready-refused"}
+            and (boundary != "dom" or dom_eval != evaluations)
+            or origin in {b"callback-shape", b"script-error"} and dom != b"error"
+            or origin == b"ready-refused" and (dom != b"ready" or help_present is not False)):
+        return None
+    return {"step": "GitHubEntry", "boundary": boundary,
+            "bootstrapProgress": lines[3][len(b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS="):-1].decode("ascii"),
+            "githubEntry": {"origin": origin.decode("ascii"), "evaluations": evaluations,
+                            "native": {"sampleEvaluations": native_eval, "status": presence.decode("ascii"),
+                                       "capabilityAvailable": capability, "capabilityReason": None if reason == b"na" else reason.decode("ascii"),
+                                       "sessionPresent": session},
+                            "dom": {"sampleEvaluations": dom_eval, "state": dom.decode("ascii"),
+                                    "pageSelected": selected, "formPresent": form, "submitPresent": submit,
+                                    "submitEnabled": enabled, "helpPresent": help_present,
+                                    "repositoryExpected": repository, "helpContainerPresent": guide}}}
+
+
+SHELL_COMMAND_FAILURE_STEPS = (b"Navigate", b"ReadVersion", b"Ready", b"Prepare", b"Review", b"Acknowledge",
+    b"Confirmed", b"Start", b"Work", b"Reciprocal", b"ReadReciprocal", b"Cancel", b"WaitFinal", b"Return", b"Terminal")
+
+
+def _shell_label_pair(raw):
+    if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
+        return None
+    lines = raw.splitlines(keepends=True)
+    if lines[0].startswith(b"MRK_INSTALLED_SHELL_GITHUB_ENTRY_FAILURE="):
+        # Only an entire prefix-first four-line GitHubEntry frame is admitted.
+        return _shell_github_entry_labels(lines)
+    path_detail = evidence_detail = snapshot_detail = None
+    metadata_open_detail = commands_detail = None
+    if lines[0].startswith(b"MRK_INSTALLED_SHELL_COMMANDS_FAILURE="):
+        if len(lines) != 4:
+            return None
+        commands_detail, lines = lines[0], lines[1:]
+    elif lines[0].startswith(b"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE="):
+        if len(lines) != 4:
+            return None
+        snapshot_detail, lines = lines[0], lines[1:]
+    elif lines[0].startswith(b"MRK_INSTALLED_SHELL_METADATA_OPEN_FAILURE="):
+        if len(lines) != 4 or len(raw) > 384:
+            return None
+        metadata_open_detail, lines = lines[0], lines[1:]
+    elif lines[0].startswith(b"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE="):
+        if len(lines) != 4:
+            return None
+        evidence_detail, lines = lines[0], lines[1:]
+    elif lines[0].startswith(b"MRK_INSTALLED_SHELL_PATH_FAILURE="):
+        # Prefix first, so no proper prefix of this new frame can masquerade
+        # as an old three-line Path result with the detail silently lost.
+        path_bound = (SHELL_PATH_FAILURE_V3_FRAME_BOUND if lines[0].startswith(b"MRK_INSTALLED_SHELL_PATH_FAILURE=v3;")
+                      else SHELL_PATH_FAILURE_V2_FRAME_BOUND if lines[0].startswith(b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;")
+                      else SHELL_PATH_FAILURE_FRAME_BOUND)
+        if len(lines) != 4 or len(raw) > path_bound:
+            return None
+        path_detail, lines = lines[0], lines[1:]
+    # Session traces require their complete fourth record. Historical v1/v2
+    # keep their prior shape, with no invented assessmentFailure metadata.
+    # Never admit a proper prefix of v3/v4/v5/v6/v7 as a complete historical frame.
+    if (len(lines) not in (3, 4) or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES
+            or lines[2] not in SHELL_BOOTSTRAP_PROGRESS):
+        return None
+    result = {"step": lines[0][len(b"MRK_INSTALLED_SHELL_FAILURE_STEP="):-1].decode("ascii"),
+              "boundary": lines[1][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii"),
+              "bootstrapProgress": lines[2][len(b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS="):-1].decode("ascii")}
+    if commands_detail is not None:
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_COMMANDS_FAILURE=v1;site=(na|[1-9][0-9]{0,4});step=([A-Za-z]{1,20})\n", commands_detail)
+        if match is None or len(lines) != 3 or result["step"] != "ToolsOffline":
+            return None
+        site, step = match.groups()
+        if step not in SHELL_COMMAND_FAILURE_STEPS or site != b"na" and int(site) > 65535:
+            return None
+        result["commandsFailure"] = {"sourceLine": None if site == b"na" else int(site), "step": step.decode("ascii")}
+        return result  # Original cached DATA, never success/finality/cleanup authority.
+    if snapshot_detail is not None:
+        # This complete frame precedes legacy Session/Path requirements: an
+        # actual wrong-stage rejection must not fabricate their old details.
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE=v1;site=([1-9][0-9]{0,4});check=([a-z-]{1,20})"
+                             rb";error=([a-z-]{1,20})\n", snapshot_detail)
+        if len(lines) != 3 or match is None:
+            return None
+        site, check, error = match.groups()
+        if int(site) > 65535 or check not in SHELL_SNAPSHOT_CHECKS or error not in SHELL_EVIDENCE_ERRORS:
+            return None
+        selected = result["step"] in {"Selected", "ReadSnapshot"}
+        if check == b"other-callback":
+            if not selected or error != b"none":
+                return None
+        elif (result["boundary"] != "result" or (check == b"bridge") != (error != b"none")
+              or check == b"stage" and selected):
+            return None
+        result["snapshotFailure"] = {"sourceLine": int(site), "check": check.decode("ascii"), "error": error.decode("ascii")}
+        return result  # Diagnostic DATA only; never a success/finality/cleanup receipt.
+    if metadata_open_detail is not None:
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_METADATA_OPEN_FAILURE=v1;site=(na|[1-9][0-9]{0,4})"
+                             rb";origin=(evaluation-budget|deadline|not-recorded);eval=(na|0|[1-9][0-9]{0,2})"
+                             rb";index=([01]);sample=(na|[1-9][0-9]{0,2});wait=(na|review-missing|heading-not-review)"
+                             rb";heading=(na|empty|protocol-unverified|opening|preparing|other)\n", metadata_open_detail)
+        if match is None or len(lines) != 3 or result["step"] != "MetadataOpenText":
+            return None
+        site, origin, evaluations, index, sample, wait, heading = match.groups()
+        source_line = None if site == b"na" else int(site)
+        count = None if evaluations == b"na" else int(evaluations)
+        sampled = None if sample == b"na" else int(sample)
+        if source_line is not None and source_line > 65535 or count is not None and count > 128:
+            return None
+        if origin == b"not-recorded":
+            if (evaluations, sample, wait, heading) != (b"na",) * 4:
+                return None
+        elif (count is None or origin == b"evaluation-budget" and
+              (result["boundary"] != "settlement" or count != 128 or source_line is None)
+              or origin == b"deadline" and (result["boundary"] != "deadline" or source_line is not None)):
+            return None
+        if sampled is None:
+            if wait != b"na" or heading != b"na":
+                return None
+        elif (count is None or sampled > count or wait == b"na"
+              or (wait == b"review-missing") != (heading == b"na")):
+            return None
+        result["metadataOpenFailure"] = {
+            "sourceLine": source_line, "origin": origin.decode("ascii"), "evaluations": count,
+            "reviewIndex": int(index), "lastSampleEvaluation": sampled,
+            "wait": None if wait == b"na" else wait.decode("ascii"),
+            "heading": None if heading == b"na" else heading.decode("ascii"),
+        }
+        return result  # First failure/last-sample DATA, not success or cleanup authority.
+    session = result["step"].startswith("Session")  # Membership was checked above, not prefix admission.
+    if len(lines) != (4 if session else 3):
+        return None
+    if evidence_detail is not None:
+        # A finite original first-failure observation, never a result or native
+        # receipt. Missing detail in historical three-line records stays absent.
+        if session or result["step"].startswith("Path") or result["boundary"] != "result":
+            return None
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE=v1;callback=(status|observe-start|cancel-start);check=([a-z-]{1,20})"
+                             rb";phase=([a-z-]{1,20});problem=([a-z-]{1,20});error=([a-z-]{1,20})\n", evidence_detail)
+        if match is None:
+            return None
+        callback, check, phase, problem, error = match.groups()
+        if (check not in SHELL_EVIDENCE_CHECKS or phase not in SHELL_EVIDENCE_PHASES
+                or problem not in SHELL_EVIDENCE_PROBLEMS or error not in SHELL_EVIDENCE_ERRORS
+                or callback == b"observe-start" and result["step"] not in {"InspectEvidence", "EvidenceObserved"}
+                or callback == b"cancel-start" and result["step"] not in {"RequestEvidenceStop", "EvidenceStopped"}
+                or check in {b"case", b"observe-pending", b"observe-returned"} and callback != b"observe-start"):
+            return None
+        if check == b"bridge":
+            if phase != b"na" or problem != b"na" or error == b"none":
+                return None
+        elif check == b"status-pending":
+            if callback != b"status" or phase != b"na" or problem != b"na" or error != b"none":
+                return None
+        elif phase == b"na" or problem == b"na" or error != b"none":
+            return None
+        result["evidence"] = {key: value.decode("ascii") for key, value in
+                              zip(("callback", "check", "phase", "problem", "error"), match.groups())}
+    if path_detail is not None:
+        sample = path_picker = None
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=(none|0|[1-9]|10);reject=([a-z-]{1,22})\n", path_detail)
+        if match is None:
+            match = re.fullmatch(rb"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=(none|0|[1-9]|10);reject=([a-z-]{1,22})"
+                                 rb";start=(over|0|[1-9][0-9]{0,5});now=(over|0|[1-9][0-9]{0,5})"
+                                 rb";rsv=([01m]);in=([01m]);out=([01m]);cb=(na|idle|reserved|entered|returned)"
+                                 rb";wait=(not-sampled|dialog-absent|initial-folder-absent|selection-absent|selection-different|response-insensitive)\n", path_detail)
+            if match is None:
+                match = re.fullmatch(rb"MRK_INSTALLED_SHELL_PATH_FAILURE=v3;index=(none|0|[1-9]|10);reject=([a-z-]{1,22})"
+                                     rb";start=(over|0|[1-9][0-9]{0,5});now=(over|0|[1-9][0-9]{0,5})"
+                                     rb";rsv=([01m]);in=([01m]);out=([01m]);cb=(na|idle|reserved|entered|returned)"
+                                     rb";wait=(not-sampled|dialog-absent|initial-folder-absent|unmapped|target-parent-absent|target-parent-different|selection-absent|selection-different|response-insensitive)"
+                                     rb";h=(na|[0-5][atpo])\n", path_detail)
+                if match is None:
+                    return None
+                index_raw, rejection, *sample, path_picker = match.groups()
+            else:
+                index_raw, rejection, *sample = match.groups()
+        else:
+            index_raw, rejection = match.groups()
+        index = None if index_raw == b"none" else int(index_raw)
+        indexed = {"PathBrowse", "PathSet", "PathActivate", "PathSettlement", "PathField"}
+        unindexed = {"PathDraft", "PathPreview", "PathNavigation"}
+        if (rejection not in SHELL_PATH_REJECTIONS or result["step"] not in indexed | unindexed
+                or result["step"] in indexed and index is None or result["step"] in unindexed and index is not None):
+            return None
+        result["path"] = {"recipeIndex": index, "rejection": rejection.decode("ascii")}
+        if sample is not None:
+            start, now, reserved, entered, returned, phase, wait = sample
+            active = result["step"] in {"PathSet", "PathActivate"}
+            counts = {b"0": 0, b"1": 1, b"m": 2}
+            rsv, ent, ret = (counts[item] for item in (reserved, entered, returned))
+            if (start == b"over" and now != b"over" or now != b"over" and int(start) > int(now)
+                    or not ret <= ent <= rsv):
+                return None
+            if not active:
+                if phase != b"na" or (rsv, ent, ret) != (0, 0, 0) or wait != b"not-sampled":
+                    return None
+            elif (phase == b"na" or phase == b"idle" and ((rsv, ent, ret) != (0, 0, 0) or wait != b"not-sampled")
+                    or phase == b"reserved" and (rsv == 0 or ent != ret or (rsv == 1) != (ent == 0))
+                    or phase == b"entered" and (rsv == 0 or rsv != ent or (rsv == 1) != (ret == 0))
+                    or phase == b"returned" and (rsv == 0 or rsv != ent or ent != ret)
+                    or wait != b"not-sampled" and ent == 0
+                    or wait in {b"selection-absent", b"selection-different", b"response-insensitive"} and result["step"] != "PathActivate"):
+                return None
+            result["path"].update({"stepEntryElapsedMs": "over" if start == b"over" else int(start),
+                                   "sampleElapsedMs": "over" if now == b"over" else int(now),
+                                   "callbackReservations": reserved.decode("ascii"), "callbackEntries": entered.decode("ascii"),
+                                   "callbackReturns": returned.decode("ascii"), "callbackPhase": phase.decode("ascii"),
+                                   "lastWait": wait.decode("ascii")})
+            if path_picker is not None:
+                result["path"]["gtkPicker"] = None
+                if path_picker == b"na":
+                    if (wait not in {b"not-sampled", b"dialog-absent", b"initial-folder-absent"}
+                            and not (wait == b"response-insensitive" and index in {0, 4})):
+                        return None
+                else:
+                    mapped, folder = SHELL_SESSION_PICKER_FOLDERS[path_picker[:1]]
+                    selected = path_picker[1:]
+                    if ent == 0:
+                        return None
+                    if result["step"] == "PathSet":
+                        # The four selecting Open recipes in the fixed PATH_CASES;
+                        # directory and Cancel callbacks never navigate a file parent.
+                        if index not in {1, 6, 7, 8} or not (
+                                wait == b"unmapped" and not mapped
+                                or wait == b"target-parent-absent" and mapped and folder == "absent"
+                                or wait == b"target-parent-different" and mapped and folder == "other"
+                                or wait == b"not-sampled" and mapped and folder == "target-parent"):
+                            return None
+                    elif result["step"] == "PathActivate" and index not in {0, 4}:
+                        allowed = ({b"selection-absent"} if selected == b"a"
+                                   else {b"not-sampled", b"response-insensitive"} if selected == b"t"
+                                   else {b"selection-different"})
+                        if wait not in allowed:
+                            return None
+                    else:
+                        return None
+                    result["path"]["gtkPicker"] = {
+                        "mapped": mapped, "folder": folder, "selected": SHELL_SESSION_PICKER_SELECTIONS[selected]}
+    if session:
+        if lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;"):
+            version = b"v1"
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;"):
+            version = b"v2"
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v3;"):
+            version = b"v3"
+            if len(raw) > SHELL_SESSION_FAILURE_FRAME_BOUND:
+                return None
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;"):
+            version = b"v4"
+            if len(raw) > SHELL_SESSION_FAILURE_V4_FRAME_BOUND:
+                return None
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;"):
+            version = b"v5"
+            if len(raw) > SHELL_SESSION_FAILURE_V5_FRAME_BOUND:
+                return None
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;"):
+            version = b"v6"
+            if len(raw) > SHELL_SESSION_FAILURE_V6_FRAME_BOUND:
+                return None
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v7;"):
+            version = b"v7"
+            if len(raw) > SHELL_SESSION_FAILURE_V7_FRAME_BOUND:
+                return None
+        else:
+            return None
+        suffix = b"" if version == b"v1" else rb";o=([a-z-]{1,19});d=([a-z-]{1,15});a=([a-z-]{1,12});q=([a-z.-]{1,26});w=([a-z-]{1,14})"
+        if version in (b"v3", b"v4", b"v5", b"v6", b"v7"):
+            suffix += rb";ao=([a-z-]{1,7});ac=([a-z-]{1,24});ax=([a-z-]{1,11})"
+        if version in (b"v4", b"v5", b"v6", b"v7"):
+            suffix += rb";af=([a-z-]{1,22})"
+        if version in (b"v5", b"v6", b"v7"):
+            suffix += rb";u=([a-z-]{1,14})"
+        if version in (b"v6", b"v7"):
+            suffix += rb";g=([a-z0-9]{2})"
+        if version == b"v7":
+            suffix += rb";h=(na|[0-5][atpfo])"
+        suffix += rb"\n"
+        evaluations_key = rb"eval" if version in (b"v6", b"v7") else rb"evaluations"
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_SESSION_FAILURE=" + version + rb";index=(none|0|[1-9][0-9]?);"
+                             + evaluations_key + rb"=(0|[1-9][0-9]{0,2});reject=([a-z-]{1,32});wait=([a-z-]{1,32})" + suffix, lines[3])
+        if match is None:
+            return None
+        index_raw, evaluations_raw, rejection, wait = match.groups()[:4]
+        index = None if index_raw == b"none" else int(index_raw)
+        evaluations = int(evaluations_raw)
+        unindexed = {"SessionNavigate", "SessionReload", "SessionLoss", "SessionDeadline", "SessionQuitPreserved"}
+        mixed = {"SessionQuitCancel", "SessionFinality"}
+        waits = SHELL_SESSION_V6_WAITS if version in (b"v6", b"v7") else SHELL_SESSION_WAITS
+        if (index is not None and index >= 64 or evaluations > 128 or rejection not in SHELL_SESSION_REJECTIONS
+                or wait not in waits or rejection == b"evaluation-budget" and evaluations != 128
+                or result["step"] in unindexed and index is not None
+                or result["step"] not in unindexed | mixed and index is None):
+            return None
+        result["session"] = {"recipeIndex": index, "evaluations": evaluations,
+                             "rejection": rejection.decode("ascii"), "lastWait": wait.decode("ascii")}
+        if version != b"v1":
+            first_origin = _shell_session_first_origin(*match.groups()[4:9])
+            if first_origin is None:
+                return None
+            if version in (b"v5", b"v6", b"v7"):
+                unknown_boundary = _shell_session_unknown_boundary(
+                    match.groups()[6], match.groups()[7], match.groups()[8], match.groups()[13])
+                if unknown_boundary is None:
+                    return None
+                first_origin["unknownBoundary"] = unknown_boundary
+            result["session"]["firstOrigin"] = first_origin
+        if version in (b"v3", b"v4", b"v5", b"v6", b"v7"):
+            origin, classification, cause = match.groups()[9:12]
+            assessment_failure = _shell_session_assessment_failure(rejection, origin, classification, cause)
+            if assessment_failure is None:
+                return None
+            if version in (b"v4", b"v5", b"v6", b"v7"):
+                admission = match.groups()[12]
+                if (admission not in SHELL_SESSION_ASSESSMENT_ADMISSIONS
+                        or admission != b"na" and not (origin == b"bridge" and cause in (b"inspection", b"capability", b"prepare", b"final-claim"))
+                        or origin == b"bridge" and cause in (b"capability", b"prepare", b"final-claim") and admission == b"na"):
+                    return None
+                assessment_failure["admission"] = admission.decode("ascii")
+            result["session"]["assessmentFailure"] = assessment_failure
+        if version in (b"v6", b"v7"):
+            callbacks = match.groups()[14]
+            gtk_role = result["step"] in ("SessionSetFile", "SessionActivateFile")
+            if (callbacks not in SHELL_SESSION_GTK_CALLBACKS or (callbacks == b"na") == gtk_role
+                    or wait in (b"gtk-selection-absent", b"gtk-selection-different") and result["step"] != "SessionActivateFile"):
+                return None
+            # p is dispatch reservation, not successful dispatch/callback entry.
+            # Returns are helper notifications, never native-owner settlement.
+            result["session"]["gtkCallbacks"] = None if callbacks == b"na" else {
+                "returns": {b"0": "none", b"1": "one", b"m": "multiple"}[callbacks[:1]],
+                "phase": {b"i": "idle", b"p": "pending", b"w": "wait-observed"}[callbacks[1:]]}
+        if version == b"v7":
+            picker = match.groups()[15]
+            result["session"]["gtkPicker"] = None
+            if picker != b"na":
+                selected = picker[1:]
+                allowed_waits = ((b"not-sampled", b"gtk-action-insensitive") if selected == b"t"
+                                 else (b"gtk-selection-absent",) if selected == b"a"
+                                 else (b"gtk-selection-different",))
+                if result["step"] != "SessionActivateFile" or wait not in allowed_waits:
+                    return None
+                mapped, folder = SHELL_SESSION_PICKER_FOLDERS[picker[:1]]
+                result["session"]["gtkPicker"] = {
+                    "mapped": mapped, "folder": folder, "selected": SHELL_SESSION_PICKER_SELECTIONS[selected]}
+
+    return result
+
+
+def _shell_labels_read(original, *, with_raw=False):
+    """Only the exact original read FD, after this call's strict typed settlement gate."""
+    fd, binding = original
+    before = identity(os.fstat(fd))
+    need(before[:6] == binding and 0 <= before[6] <= SHELL_FAILURE_LABEL_LIMIT,
+         "Original shell label identity or bound differs")
+    need(os.listxattr(fd) == [], "Original shell label attributes differ")
+    raw = os.read(fd, SHELL_FAILURE_LABEL_LIMIT + 1)  # One attempt; no seek, reopen or suffix retry.
+    need(type(raw) is bytes and len(raw) == before[6] and identity(os.fstat(fd)) == before,
+         "Original shell label read was incomplete or changed")
+    parsed = _shell_label_pair(raw)
+    # The one fixed negative case needs this SAME original read for its public
+    # raw frame and diagnosis. Neither consumer may reopen/reread the source.
+    return (raw, parsed) if with_raw else parsed
+
+
 def _shell_log_prepare(value, case):
     """One original write-only-for-test-group log, never a writable namespace."""
-    need(case in SHELL_CASES and _ROOT == root_path(value), "Different original shell log root/case")
+    need(case in shell_cases(value) and _ROOT == root_path(value), "Different original shell log root/case")
     bounds = resource.getrlimit(resource.RLIMIT_FSIZE)
     need(type(bounds) is tuple and len(bounds) == 2
          and all(type(bound) is int and (bound == resource.RLIM_INFINITY or bound >= SHELL_WORK_FILE_LIMIT) for bound in bounds),
@@ -2865,7 +8838,7 @@ def _shell_log_prepare(value, case):
 
 def _shell_log_capture(value, case, original, result):
     """Caller owns a genuine settled return; normal additionally joins its worker."""
-    need(case in SHELL_CASES and _ROOT == root_path(value)
+    need(case in shell_cases(value) and _ROOT == root_path(value)
          and type(original) is tuple and len(original) == 6
          and all(type(number) is int for number in original)
          and original[2:] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1),
@@ -2885,7 +8858,1670 @@ def _shell_log_capture(value, case, original, result):
     return raw
 
 
-def _shell_project_inventory(value, *, saved=False):
+SHELL_FIXTURE_CHILDREN = ("android-build", "android-build-cancel", "android-build-failure", "android-build-refusals", "candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative",
+    "offline-pass", "offline-settlement", "path-outside", "path-project", "positive-project", "session-deadline", "session-inputs",
+    "session-ios-firebase", "session-loss", "session-refusals", "tools-cancel", "tools-observed", "tools-settlement", "version-project", "workflow-project")
+
+
+def _shell_session_roster(value, case, changed=False):
+    """Finite fictional DATA, not a supplied file plan or source selector."""
+    need(case in SHELL_SESSION_CASES and type(changed) is bool
+         and (not changed or case == "session-refusals"), "Different fixed session fixture or phase")
+    owners = value["runnerUid"], value["runnerGid"]
+    if case == "session-ios-firebase":
+        files = {
+            "project/release/mobile-release.json": (0o600, SHELL_SESSION_IOS_FIREBASE_CONFIG),
+            "project/version.properties": (0o600, SHELL_PROJECT_VERSION),
+            "sources/firebase-ios.plist": (0o600, SHELL_SESSION_IOS_FIREBASE),
+            "sources/firebase-ios-mismatch.plist": (0o600, SHELL_SESSION_IOS_FIREBASE_MISMATCH),
+        }
+    else:
+        files = {
+            "project/release/mobile-release.json": (0o600, SHELL_SESSION_CONFIG),
+            "project/version.properties": (0o600, SHELL_PROJECT_VERSION),
+            "sources/input.jks": (0o600, SHELL_SESSION_JKS),
+            "sources/replacement.jks": (0o600, SHELL_SESSION_REPLACEMENT_JKS),
+            "sources/firebase.json": (0o600, SHELL_SESSION_FIREBASE),
+        }
+    if case == "session-refusals":
+        files.update({
+            "project/overlap.jks": (0o600, SHELL_SESSION_JKS),
+            "sources/changed.jks": (0o600, SHELL_SESSION_REPLACEMENT_JKS if changed else SHELL_SESSION_JKS),
+            "sources/public.jks": (0o644, SHELL_SESSION_JKS),
+            "sources/firebase-mismatch.json": (0o600, SHELL_SESSION_FIREBASE_MISMATCH),
+        })
+        if not changed:
+            files["sources/changed-next.jks"] = (0o600, SHELL_SESSION_REPLACEMENT_JKS)
+    leaves = sorted([*files, *(["sources/link.jks"] if case == "session-refusals" else [])])
+    directories = (".", "project", "project/release", "sources")
+    nodes = [*directories[1:], *leaves]
+    rows = [(name, stat.S_IFDIR | 0o700, owners,
+             sorted(Path(child).name for child in nodes if str(Path(child).parent) == name)) for name in directories]
+    rows += [(name, stat.S_IFREG | files[name][0], owners, files[name][1]) for name in sorted(files)]
+    if case == "session-refusals":
+        rows.append(("sources/link.jks", stat.S_IFLNK | 0o777, owners, "input.jks"))
+    return tuple(rows)
+
+
+def _shell_session_absent(case, changed):
+    # These finite names are checked only before launch or after actual Exit.
+    return [*SHELL_SESSION_ABSENT, *(["sources/changed-next.jks"] if changed else [])]
+
+
+def _shell_session_fixtures_prepare(value, root):
+    """Create once beneath the fresh unpublished namespace; never adopt/repair."""
+    need(_ROOT == root_path(value) and root == shell_fixture_root(value), "Different fresh session fixture route")
+    for case in SHELL_SESSION_CASES:
+        base = root / case
+        for relative, mode, owners, expected in _shell_session_roster(value, case):
+            path = base if relative == "." else base / relative
+            if stat.S_ISDIR(mode):
+                path.mkdir(mode=0o700)
+            elif stat.S_ISLNK(mode):
+                os.symlink(expected, path)
+            else:
+                _D.write(path, expected, stat.S_IMODE(mode))
+            os.chown(path, *owners, follow_symlinks=False)
+            if not stat.S_ISLNK(mode):
+                _xattrs(path, stat.S_ISDIR(mode))
+
+
+def _shell_session_inventory(value, namespace, case, *, changed=False):
+    """Exact private fixtures, only pre-launch or after original Exit/finality.
+
+    First admit every directory's complete child roster. No unknown subtree,
+    symlink target, private user input or failed/possibly-live case is read.
+    """
+    need(_ROOT == root_path(value), "Different original session service root")
+    roster = _shell_session_roster(value, case, changed)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / case
+    rows, originals = [], []
+    for relative, mode, owners, expected in roster:
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners,
+             "Session fixture ownership or mode differs")
+        if not stat.S_ISLNK(mode):
+            _xattrs(path, stat.S_ISDIR(mode))
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected session fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected, "Session fixture child roster differs")
+            row = {"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected}
+        elif stat.S_ISLNK(mode):
+            need(before.st_nlink == 1 and before.st_size == len(expected) and os.readlink(path) == expected,
+                 "Session refusal symlink differs")
+            row = {"path": relative, "kind": "symlink", "identity": list(identity(before)), "target": expected}
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest(),
+                 "Session fixture bytes differ")
+            row = {**observed, "path": relative, "kind": "file", "identity": list(identity(before))}
+        need(identity(path.lstat()) == identity(before), "Session fixture changed during inventory")
+        rows.append(row)
+        originals.append((path, identity(before)))
+    absent = _shell_session_absent(case, changed)
+    for relative in absent:
+        _absent(root / relative)
+    need(len({tuple(row["identity"][:2]) for row in rows}) == len(roster)
+         and all(row["identity"][0] == namespace["identity"][0] for row in rows)
+         and all(identity(path.lstat()) == original for path, original in originals),
+         "Session fixture aliases, device or original identity differs")
+    _shell_namespace_check(value, binding)
+    fixture_name = "ios-firebase-session-v1" if case == "session-ios-firebase" else "four-kind-session-v1"
+    document = {"schemaVersion": 1, "fixture": fixture_name, "case": case, "root": str(root),
+                "changed": changed, "entries": rows, "absent": absent, "namespace": namespace}
+    need(len(canonical(document)) <= SHELL_SESSION_INVENTORY_LIMIT, "Session inventory exceeds its fixed bound")
+    return document
+
+
+def shell_session_fixture(value, case, before_raw, after_raw):
+    """Closed original DATA correspondence; never authority to scan live work."""
+    inventories, namespaces = [], []
+    fixture_name = "ios-firebase-session-v1" if case == "session-ios-firebase" else "four-kind-session-v1"
+    for raw, changed in ((before_raw, False), (after_raw, case == "session-refusals")):
+        document = decode(raw, SHELL_SESSION_INVENTORY_LIMIT)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "case", "root", "changed", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == fixture_name and document["case"] == case and document["changed"] is changed
+             and document["root"] == str(shell_fixture_root(value) / case)
+             and document["absent"] == _shell_session_absent(case, changed), "Session fixture inventory shape or phase differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        roster, rows = _shell_session_roster(value, case, changed), document["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Session fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            kind = "directory" if stat.S_ISDIR(mode) else "symlink" if stat.S_ISLNK(mode) else "file"
+            fields = {"children"} if kind == "directory" else {"target"} if kind == "symlink" else {"size", "sha256"}
+            need(type(row) is dict and set(row) == {"path", "kind", "identity"} | fields
+                 and row["path"] == relative and row["kind"] == kind, "Session fixture node kind or path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Session fixture original identity differs")
+            if kind == "directory":
+                need(row["children"] == expected, "Session fixture has unexpected or pending state")
+            elif kind == "symlink":
+                need(original[5] == 1 and original[6] == len(expected) and row["target"] == expected,
+                     "Session refusal symlink target differs")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Session fixture is not the exact fictional source DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Session fixture nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1], "Session fixture original namespace changed")
+    changed = case == "session-refusals"
+    if changed:
+        need(set(first) - set(last) == {"sources/changed-next.jks"} and not set(last) - set(first),
+             "Session mutation did not consume exactly its fixed source name")
+        for name, row in last.items():
+            if name == "sources":
+                need(first[name]["identity"][:6] == row["identity"][:6], "Session source directory was replaced or chmodded")
+            elif name == "sources/changed.jks":
+                old = first["sources/changed-next.jks"]
+                # Rename can change ctime, not the original byte/mode/mtime or
+                # dev/inode. Native evidence owns the displaced open original.
+                need(old["identity"][:8] == row["identity"][:8] and old["size"] == row["size"]
+                     and old["sha256"] == row["sha256"], "Session changed leaf is not its original prepared replacement")
+            else:
+                need(first[name] == row, "Session mutation changed an unrelated original")
+    else:
+        need(first == last and before_raw == after_raw, "Read-only session changed its original fixture")
+    return {"fixture": fixture_name, "case": case, "rootRetained": True, "originalsAccounted": True,
+            "projectUnchanged": True, "sourcesOutsideProject": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "beforeCount": len(first), "afterCount": len(last), "mutations": ["changed-leaf-rename"] if changed else [],
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+def _shell_tools_offline_roster(value, case, after=False):
+    """Twenty-one fixed, ordinary nodes per case; no supplied path or command."""
+    need(type(case) is str and case in SHELL_TOOLS_OFFLINE_CASES and type(after) is bool,
+         "Different fixed Tools/Offline fixture or phase")
+    owners = value["runnerUid"], value["runnerGid"]
+    files = {**SHELL_TOOLS_OFFLINE_FILES,
+        "project/release/mobile-release.json": SHELL_TOOLS_OFFLINE_CONFIGS[case] + (b"\n" if after and case == "offline-drift" else b""),
+        "project/script.trace": SHELL_TOOLS_OFFLINE_TRACES[case] if after else b"",
+        "project/later.trace": b""}
+    directories = (".", "project", "project/.git", "project/app", "project/release", "project/release/store",
+        "project/release/store/android", "project/release/store/android/en-US", "project/release/store/android/en-US/changelogs")
+    nodes = [*directories[1:], *files]
+    rows = [(name, stat.S_IFDIR | 0o700, owners,
+             sorted(Path(child).name for child in nodes if str(Path(child).parent) == name)) for name in directories]
+    return tuple(rows + [(name, stat.S_IFREG | 0o600, owners, files[name]) for name in sorted(files)])
+
+
+def _shell_tools_offline_fixtures_prepare(value, root):
+    """Create only fresh synthetic fixtures, before namespace publication."""
+    need(_ROOT == root_path(value) and root == shell_fixture_root(value), "Different fresh Tools/Offline fixture route")
+    for case in SHELL_TOOLS_OFFLINE_CASES:
+        base = root / case
+        for relative, mode, owners, expected in _shell_tools_offline_roster(value, case):
+            path = base if relative == "." else base / relative
+            if stat.S_ISDIR(mode):
+                path.mkdir(mode=0o700)
+            else:
+                _D.write(path, expected, 0o600)
+            os.chown(path, *owners, follow_symlinks=False)
+            _xattrs(path, stat.S_ISDIR(mode))
+
+
+def _shell_tools_offline_inventory(value, namespace, case, *, after=False):
+    """Pre-launch or actual ordinary Exit only; never inspect failed/live work."""
+    need(_ROOT == root_path(value), "Different original Tools/Offline service root")
+    roster = _shell_tools_offline_roster(value, case, after)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / case
+    rows, originals = [], []
+    # Parent rosters are admitted completely before any descendant is read.
+    for relative, mode, owners, expected in roster:
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners,
+             "Tools/Offline fixture ownership or mode differs")
+        _xattrs(path, stat.S_ISDIR(mode))
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected Tools/Offline fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected, "Tools/Offline fixture child roster differs")
+            row = {"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected}
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest(),
+                 "Tools/Offline fixture bytes differ")
+            row = {**observed, "path": relative, "kind": "file", "identity": list(identity(before))}
+        need(identity(path.lstat()) == identity(before), "Tools/Offline fixture changed during inventory")
+        rows.append(row)
+        originals.append((path, identity(before)))
+    for relative in SHELL_TOOLS_OFFLINE_ABSENT:
+        _absent(root / relative)
+    need(len({tuple(row["identity"][:2]) for row in rows}) == len(roster)
+         and all(row["identity"][0] == namespace["identity"][0] for row in rows)
+         and all(identity(path.lstat()) == original for path, original in originals),
+         "Tools/Offline fixture aliases, device or original identity differs")
+    _shell_namespace_check(value, binding)
+    document = {"schemaVersion": 1, "fixture": "installed-tools-offline-fixture-v1", "case": case, "root": str(root),
+                "changed": after and case.startswith("offline-"), "entries": rows,
+                "absent": list(SHELL_TOOLS_OFFLINE_ABSENT), "namespace": namespace}
+    need(len(canonical(document)) <= SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT, "Tools/Offline inventory exceeds its fixed bound")
+    return document
+
+
+def shell_tools_offline_fixture(value, case, before_raw, after_raw):
+    """Bind exact synthetic DATA and in-place changes to the same originals."""
+    inventories, namespaces = [], []
+    for raw, after in ((before_raw, False), (after_raw, True)):
+        roster = _shell_tools_offline_roster(value, case, after)
+        document = decode(raw, SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "case", "root", "changed", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "installed-tools-offline-fixture-v1" and document["case"] == case
+             and document["changed"] is (after and case.startswith("offline-"))
+             and document["root"] == str(shell_fixture_root(value) / case)
+             and document["absent"] == list(SHELL_TOOLS_OFFLINE_ABSENT), "Tools/Offline inventory shape or phase differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        rows = document["entries"]
+        need(type(rows) is list and len(rows) == len(roster) == 21, "Tools/Offline fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            kind = "directory" if stat.S_ISDIR(mode) else "file"
+            fields = {"children"} if kind == "directory" else {"size", "sha256"}
+            need(type(row) is dict and set(row) == {"path", "kind", "identity"} | fields
+                 and row["path"] == relative and row["kind"] == kind, "Tools/Offline fixture node kind or path differs")
+            original = row["identity"]
+            need(row["path"] not in observed and type(original) is list and len(original) == 9
+                 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Tools/Offline fixture original identity differs")
+            if kind == "directory":
+                need(row["children"] == expected, "Tools/Offline fixture has unexpected or pending state")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Tools/Offline fixture is not the exact synthetic source DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Tools/Offline nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1] and set(first) == set(last), "Tools/Offline original namespace or roster changed")
+    mutations = (["project/release/mobile-release.json"] if case == "offline-drift" else
+                 ["project/script.trace"] if SHELL_TOOLS_OFFLINE_TRACES[case] else [])
+    for name, row in last.items():
+        if name in mutations:
+            need(first[name]["identity"][:6] == row["identity"][:6], "Tools/Offline changed leaf was replaced or chmodded")
+        else:
+            need(first[name] == row, "Tools/Offline changed an unrelated original")
+    if not mutations:
+        need(before_raw == after_raw, "Read-only Tools case changed its original fixture")
+    config = SHELL_TOOLS_OFFLINE_CONFIGS[case]
+    return {"fixture": "installed-tools-offline-fixture-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+            "noUnexpectedEntries": True, "noPendingState": True, "beforeCount": 21, "afterCount": 21, "mutations": mutations,
+            "scriptTrace": SHELL_TOOLS_OFFLINE_TRACES[case].decode("ascii"), "laterTrace": "", "savedConfigChanged": case == "offline-drift",
+            "savedConfigBefore": {"bytes": len(config), "sha256": hashlib.sha256(config).hexdigest()},
+            "savedConfigAfter": {"bytes": len(config) + (case == "offline-drift"),
+                                 "sha256": hashlib.sha256(config + (b"\n" if case == "offline-drift" else b"")).hexdigest()},
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+
+def _shell_github_close(fd):
+    os.close(fd)
+    try:
+        os.fstat(fd)
+    except OSError as error:
+        need(error.errno == errno.EBADF, "GitHub original descriptor close was not established")
+        return
+    raise Refused("GitHub original descriptor remains open")
+
+
+def _shell_github_sync(path):
+    before = identity(path.lstat())
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        need(identity(os.fstat(fd)) == before, "GitHub original directory changed before sync")
+        os.fsync(fd)
+        need(identity(os.fstat(fd)) == before == identity(path.lstat()), "GitHub original directory changed during sync")
+    finally:
+        _shell_github_close(fd)
+
+
+def _shell_github_stage_peer(value):
+    """Fixed SOURCE copies only; the native retained owner alone starts a peer."""
+    _shell_github_selection(value)
+    root = root_path(value) / "github-peer"
+    root.mkdir(mode=0o700)
+    original = identity(root.lstat())
+    (root / "github_tls").mkdir(mode=0o700)
+    source = absolute(value["source"]) / "desktop/src-tauri/tests/fixtures"
+    for relative, (size, digest) in sorted(_shell_github_peer_pins(value).items()):
+        if shell_github_release(value) and relative.endswith(".yml"):
+            stage = relative.removeprefix("mobile-").removesuffix(".yml")
+            need(stage in SHELL_GITHUB_RELEASE_TEMPLATES, "Unknown R caller")
+            template = absolute(value["source"]) / "templates/workflows" / relative
+            before = identity(template.lstat())
+            need(before[3:5] == (value["runnerUid"], value["runnerGid"]), "Release caller SOURCE owner differs")
+            raw = read(template, SHELL_GITHUB_RELEASE_TEMPLATES[stage][0])
+            need((len(raw), hashlib.sha256(raw).hexdigest()) == SHELL_GITHUB_RELEASE_TEMPLATES[stage], "Release caller SOURCE differs")
+            rendered = raw.replace(b"__MOBILE_RELEASE_KIT_REPOSITORY__", b"Apdelrahman1911/mobile-release-kit") \
+                .replace(b"__MOBILE_RELEASE_KIT_SHA__", SHELL_GITHUB_RELEASE_TOOLING_SHA.encode("ascii"))
+            need((len(rendered), hashlib.sha256(rendered).hexdigest()) == (size, digest)
+                 and identity(template.lstat()) == before, "Canonical release caller or original SOURCE differs")
+            _D.write(root / relative, rendered, 0o444)
+            need(record(root / relative, size) == {"path": str(root / relative), "size": size, "sha256": digest},
+                 "Canonical release caller protected readback differs")
+            continue
+        if relative == "mobile-preflight.yml":
+            template = absolute(value["source"]) / "templates/workflows/mobile-preflight.yml"
+            before = identity(template.lstat())
+            need(before[3:5] == (value["runnerUid"], value["runnerGid"]), "Preflight caller template SOURCE owner differs")
+            raw = read(template, SHELL_GITHUB_PREFLIGHT_TEMPLATE[0])
+            need((len(raw), hashlib.sha256(raw).hexdigest()) == SHELL_GITHUB_PREFLIGHT_TEMPLATE,
+                 "Preflight caller template SOURCE differs")
+            rendered = raw.replace(b"__MOBILE_RELEASE_KIT_REPOSITORY__", b"Apdelrahman1911/mobile-release-kit") \
+                .replace(b"__MOBILE_RELEASE_KIT_SHA__", SHELL_GITHUB_PREFLIGHT_TOOLING_SHA.encode("ascii"))
+            need((len(rendered), hashlib.sha256(rendered).hexdigest()) == (size, digest)
+                 and identity(template.lstat()) == before, "Canonical preflight caller rendering or original SOURCE differs")
+            _D.write(root / relative, rendered, 0o444)
+            need(record(root / relative, size) == {"path": str(root / relative), "size": size, "sha256": digest},
+                 "Canonical preflight caller protected readback differs")
+            continue
+        path = source / relative
+        before = identity(path.lstat())
+        need(before[3:5] == (value["runnerUid"], value["runnerGid"]), "GitHub peer SOURCE owner differs")
+        copy_pinned(path, root / relative, {"path": str(path), "size": size, "sha256": digest}, 0o444)
+        need(identity(path.lstat()) == before, "GitHub peer SOURCE changed during protected copy")
+    need(identity(root.lstat())[:5] == original[:5], "GitHub peer staging root changed")
+    os.chmod(root / "github_tls", 0o555)
+    _shell_github_sync(root / "github_tls")
+    os.chmod(root, 0o555)
+    _shell_github_sync(root)
+    _shell_github_peer_snapshot(value)
+    for case in _shell_github_ambient_cases(value):
+        path = root_path(value) / ("shell-" + case + "-keylog.log")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            os.fchown(fd, 0, value["runnerGid"])
+            os.fchmod(fd, 0o620)
+            os.fsync(fd)
+            original = identity(os.fstat(fd))
+            need(original == identity(path.lstat()) and original[2:7] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1, 0),
+                 "GitHub fresh ambient keylog control differs")
+        finally:
+            _shell_github_close(fd)
+    _shell_github_keylog_snapshot(value)
+
+
+def _shell_github_keylog_snapshot(value):
+    result = {}
+    for case in _shell_github_ambient_cases(value):
+        path = root_path(value) / ("shell-" + case + "-keylog.log")
+        before = identity(path.lstat())
+        need(before[2:7] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1, 0),
+             "GitHub ambient keylog was created/replaced/written")
+        row = record(path, 0)
+        _xattrs(path, False)
+        need(identity(path.lstat()) == before and row["size"] == 0
+             and row["sha256"] == hashlib.sha256(b"").hexdigest(), "GitHub ambient keylog changed")
+        row.pop("path")
+        result[case] = {**row, "identity": list(before)}
+    return result
+
+
+def _shell_github_peer_snapshot(value):
+    root = root_path(value) / "github-peer"
+    pins = _shell_github_peer_pins(value)
+    need(sorted(path.name for path in root.iterdir()) == sorted({Path(path).parts[0] for path in pins})
+         and sorted(path.name for path in (root / "github_tls").iterdir())
+             == sorted(Path(path).name for path in pins if path.startswith("github_tls/")),
+         "GitHub peer SOURCE roster differs")
+    result = {}
+    for relative in (".", "github_tls"):
+        path = root if relative == "." else root / relative
+        before = identity(path.lstat())
+        need(before[2:5] == (stat.S_IFDIR | 0o555, 0, 0), "GitHub peer directory protection differs")
+        _xattrs(path, True)
+        need(identity(path.lstat()) == before, "GitHub peer directory changed")
+        result[relative] = {"identity": list(before)}
+    for relative, (size, digest) in sorted(pins.items()):
+        path = root / relative
+        item = protected_record(path, size)
+        need(item["size"] == size and item["sha256"] == digest
+             and item["identity"][2:6] == [stat.S_IFREG | 0o444, 0, 0, 1],
+             "GitHub peer SOURCE bytes or installed permissions differ")
+        _xattrs(path, False)
+        item.pop("path")
+        result[relative] = item
+    for relative in (".", "github_tls"):
+        path = root if relative == "." else root / relative
+        need(list(identity(path.lstat())) == result[relative]["identity"], "GitHub peer directory POST differs")
+    return result
+
+
+def shell_github_dial_core(raw):
+    """One exact, inventoried ZIP DATA transform; never import its members."""
+    import io
+    import zipfile
+    need(type(raw) is bytes and len(raw) == 801091
+         and hashlib.sha256(raw).hexdigest() == SHELL_GITHUB_PAYLOADS["N"]["coreSha256"],
+         "GitHub normal core ZIP differs")
+    output = io.BytesIO()
+    originals = {}
+    with zipfile.ZipFile(io.BytesIO(raw), "r") as source:
+        infos = source.infolist()
+        need(len(infos) == 127 and len({info.filename for info in infos}) == 127
+             and sum(info.file_size for info in infos) <= 16 << 20,
+             "GitHub normal inner core roster differs")
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as target:
+            for info in infos:
+                need(not info.is_dir() and not info.flag_bits & 1
+                     and info.compress_type == zipfile.ZIP_DEFLATED and 0 < info.file_size <= 2 << 20
+                     and not info.filename.startswith("/") and all(part not in ("", ".", "..") for part in info.filename.split("/")),
+                     "GitHub core ZIP member is not fixed SOURCE")
+                body = source.read(info)
+                need(len(body) == info.file_size, "GitHub core ZIP member size differs")
+                original_body = body
+                if info.filename == "mobile_release/_github_connection_transport.py":
+                    need(len(body) == 44396 and hashlib.sha256(body).hexdigest()
+                         == "83f920465937d6d2443606413469229e47022370ad4813f0266afe3ca393e5a1"
+                         and body.count(SHELL_GITHUB_DIAL_BEFORE) == 1, "GitHub exact TCP dial source differs")
+                    body = body.replace(SHELL_GITHUB_DIAL_BEFORE, SHELL_GITHUB_DIAL_AFTER, 1)
+                    need(len(body) == 44649 and hashlib.sha256(body).hexdigest()
+                         == "b6e4816be44cd7e5e6c5c177edd02dc88f30f2e4ae8049c8235ede0038b5b6cd",
+                         "GitHub exact TCP dial delta differs")
+                originals[info.filename] = (body, original_body, info.date_time, info.external_attr, info.create_system, info.compress_type)
+                target.writestr(deepcopy(info), body, compress_type=info.compress_type, compresslevel=9)
+    result = output.getvalue()
+    output.close()
+    need(len(result) == 795803 and hashlib.sha256(result).hexdigest() == SHELL_GITHUB_PAYLOADS["D-R"]["coreSha256"],
+         "GitHub derivative ZIP reproduction differs; no alternative compressor is permitted")
+    with zipfile.ZipFile(io.BytesIO(result), "r") as check:
+        infos = check.infolist()
+        need([info.filename for info in infos] == list(originals), "GitHub derivative ZIP order differs")
+        for info in infos:
+            body, _, date_time, external_attr, create_system, compress_type = originals[info.filename]
+            need(check.read(info) == body and (info.date_time, info.external_attr, info.create_system, info.compress_type)
+                 == (date_time, external_attr, create_system, compress_type), "GitHub derivative ZIP SOURCE or metadata differs")
+    need(sum(body != before for body, before, *_ in originals.values()) == 1,
+         "GitHub derivative changed another inner SOURCE")
+    return result
+
+
+def shell_github_manifest(normal_raw, role):
+    need(role in SHELL_GITHUB_PAYLOADS and type(normal_raw) is bytes and len(normal_raw) == 85945
+         and hashlib.sha256(normal_raw).hexdigest() == M, "GitHub N manifest binding differs")
+    normal = decode(normal_raw)
+    need(canonical(normal) == normal_raw and set(normal) == {"coreSha256", "coreVersion", "files", "inventorySha256",
+         "protocol", "protocolSha256", "schemaVersion", "target"} and normal["coreVersion"] == "0.3.0"
+         and normal["coreSha256"] == SHELL_GITHUB_PAYLOADS["N"]["coreSha256"]
+         and normal["inventorySha256"] == SHELL_GITHUB_PAYLOADS["N"]["inventorySha256"]
+         and normal["target"] == TARGET and normal["protocolSha256"] == Q
+         and type(normal["protocol"]) is int and normal["protocol"] == 1
+         and type(normal["schemaVersion"]) is int and normal["schemaVersion"] == 1
+         and type(normal["files"]) is list and len(normal["files"]) == 610,
+         "GitHub N manifest schema/profile differs")
+    rows = _D.records(normal["files"])
+    need(len(rows) == 610 and normal["files"] == sorted(normal["files"], key=lambda row: row["path"])
+         and rows["core.zip"] == {"path": "core.zip", "size": 801091, "sha256": SHELL_GITHUB_PAYLOADS["N"]["coreSha256"]}
+         and rows["github-ca.pem"] == {"path": "github-ca.pem", "size": 240216, "sha256": SHELL_GITHUB_PAYLOADS["N"]["caSha256"]}
+         and hashlib.sha256(canonical(normal["files"])[:-1]).hexdigest() == normal["inventorySha256"],
+         "GitHub N complete inventory differs")
+    if role == "N":
+        return normal_raw
+    changed = deepcopy(normal)
+    replacements = {"core.zip": {"path": "core.zip", "size": 795803, "sha256": SHELL_GITHUB_PAYLOADS[role]["coreSha256"]}}
+    if role == "D-S":
+        replacements["github-ca.pem"] = {"path": "github-ca.pem", "size": 761, "sha256": SHELL_GITHUB_PAYLOADS[role]["caSha256"]}
+    changed["files"] = [replacements.get(row["path"], row) for row in changed["files"]]
+    changed["coreSha256"] = SHELL_GITHUB_PAYLOADS[role]["coreSha256"]
+    changed["inventorySha256"] = hashlib.sha256(canonical(changed["files"])[:-1]).hexdigest()
+    raw = (json.dumps(changed, sort_keys=True, indent=2, ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
+    pin = SHELL_GITHUB_PAYLOADS[role]
+    need(len(raw) == pin["manifestBytes"] and hashlib.sha256(raw).hexdigest() == pin["manifestSha256"]
+         and changed["inventorySha256"] == pin["inventorySha256"],
+         "GitHub derivative manifest reproduction differs")
+    return raw
+
+
+def _shell_github_publish_payload(value, role, normal, core, normal_raw):
+    """Exclusive, nonsearchable construction; publish only this fresh root."""
+    need(shell_github(value) and role in ("D-R", "D-S") and _ROOT == root_path(value),
+         "Different GitHub derivative construction route")
+    pin = SHELL_GITHUB_PAYLOADS[role]
+    manifest_raw = shell_github_manifest(normal_raw, role)
+    data = decode(manifest_raw)
+    files = _D.records(data["files"])
+    directories = {""} | {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
+    directory(PREFIX, protected=True)
+    parent = os.open(PREFIX, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    fd = None
+    try:
+        parent_id = identity(os.fstat(parent))
+        need(parent_id == identity(PREFIX.lstat()), "GitHub derivative parent differs")
+        # mkdir is exclusive, not check-then-replace. An occupied leaf refuses.
+        os.mkdir(pin["manifestSha256"], mode=0o700, dir_fd=parent)
+        root = PREFIX / pin["manifestSha256"]
+        fd = os.open(pin["manifestSha256"], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        original = identity(os.fstat(fd))
+        need(original == identity(root.lstat()) and original[2:5] == (stat.S_IFDIR | 0o700, 0, 0)
+             and original[0] == parent_id[0], "GitHub fresh derivative root protection differs")
+        for relative in sorted(directories - {""}, key=lambda name: (len(Path(name).parts), name)):
+            (root / relative).mkdir(mode=0o700)
+        for relative, row in sorted(files.items()):
+            target = root / relative
+            if relative == "core.zip":
+                need(len(core) == row["size"] and hashlib.sha256(core).hexdigest() == row["sha256"],
+                     "GitHub derivative core differs before copy")
+                _D.write(target, core, 0o444)
+            elif relative == "github-ca.pem" and role == "D-S":
+                # G's exact peer roster does not include a spare CA. Copy the
+                # identical pinned derivative SOURCE directly; old routes keep
+                # their original staged source. Never broaden peer authority.
+                source = (absolute(value["source"]) / "desktop/src-tauri/tests/fixtures/github_tls/root-ca.pem"
+                          if shell_github_preflight(value) or shell_github_release(value) else root_path(value) / "github-peer/github_tls/root-ca.pem")
+                before = identity(source.lstat())
+                if shell_github_preflight(value) or shell_github_release(value):
+                    need(before[3:5] == (value["runnerUid"], value["runnerGid"])
+                         and (row["size"], row["sha256"]) == SHELL_GITHUB_PEER_PINS["github_tls/root-ca.pem"],
+                         "Preflight derivative CA SOURCE owner/identity differs")
+                copy_pinned(source, target, {**row, "path": str(source)}, 0o444)
+                need(identity(source.lstat()) == before, "Original derivative CA SOURCE changed during copy")
+            else:
+                source = PREFIX / M / relative
+                need(all(normal[relative][key] == row[key] for key in ("size", "sha256")),
+                     "GitHub derivative changed an unallowlisted payload row")
+                copy_pinned(source, target, {**row, "path": str(source)}, 0o555 if relative == "python/bin/python3" else 0o444)
+            need(identity(root.lstat())[:5] == original[:5] == identity(os.fstat(fd))[:5],
+                 "GitHub fresh derivative root changed during construction")
+        _D.write(root / "manifest.json", manifest_raw, 0o444)
+        for relative in sorted(directories - {""}, key=lambda name: (len(Path(name).parts), name), reverse=True):
+            os.chmod(root / relative, 0o555)
+            _shell_github_sync(root / relative)
+        staged = _tree(root, pin["manifestSha256"], published=False, github=True)
+        need(staged == _tree(root, pin["manifestSha256"], published=False, github=True),
+             "GitHub staged derivative readbacks differ")
+        os.fchmod(fd, 0o555)
+        os.fsync(fd)
+        os.fsync(parent)
+        published = _tree(root, pin["manifestSha256"], published=True, github=True)
+        need(published == _tree(root, pin["manifestSha256"], published=True, github=True)
+             and {name: row for name, row in published.items() if name}
+                 == {name: row for name, row in staged.items() if name}
+             and published[""]["identity"] == list(identity(os.fstat(fd))) == list(identity(root.lstat()))
+             and identity(os.fstat(parent))[:5] == parent_id[:5] == identity(PREFIX.lstat())[:5],
+             "GitHub original derivative publication/readback differs")
+        need({tuple(row["identity"][:2]) for row in published.values()}.isdisjoint(
+             {tuple(row["identity"][:2]) for row in normal.values()}), "GitHub derivative aliases N originals")
+        return published
+    finally:
+        try:
+            if fd is not None:
+                _shell_github_close(fd)
+        finally:
+            _shell_github_close(parent)
+
+
+def _shell_github_materials_snapshot(value):
+    normal_raw = read(PREFIX / M / "manifest.json", 85945)
+    shell_github_manifest(normal_raw, "N")
+    return {"schema": "installed-github-release-materials-v1" if shell_github_release(value) else "installed-github-preflight-materials-v1" if shell_github_preflight(value) else "installed-github-readonly-materials-v1",
+            "sourceSha": value["sourceSha"], "runId": value["runId"], "attempt": value["attempt"],
+            "profile": _shell_github_selection(value)["profile"],
+            "derivativeRecipeSha256": SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256,
+            "normalManifest": decode(normal_raw),
+            "payloads": {role: _tree(PREFIX / pin["manifestSha256"], pin["manifestSha256"], published=True, github=role != "N")
+                         for role, pin in SHELL_GITHUB_PAYLOADS.items()},
+            "peer": _shell_github_peer_snapshot(value), "ambientKeylogs": _shell_github_keylog_snapshot(value)}
+
+
+def _shell_github_materials_prepare(value, proof, normal, normal_maps):
+    _shell_github_selection(value)
+    need(shell_github(value)
+         and _tree(PREFIX / M, M, published=True) == normal, "GitHub N original changed before derivative construction")
+    normal_raw = read(PREFIX / M / "manifest.json", 85945)
+    core = shell_github_dial_core(read(PREFIX / M / "core.zip", 801091))
+    for role in ("D-R", "D-S"):
+        _shell_github_publish_payload(value, role, normal, core, normal_raw)
+        need(_tree(PREFIX / M, M, published=True) == normal, "GitHub derivative construction changed N")
+    observed = _shell_github_materials_snapshot(value)
+    raw = canonical(observed)
+    maps = shell_github_material_data(value, raw, normal_maps)
+    for role in ("D-R", "D-S"):
+        root = PREFIX / SHELL_GITHUB_PAYLOADS[role]["manifestSha256"]
+        for relative in ("python/bin/python3", "python/lib/libssl.so.3", "python/lib/libcrypto.so.3"):
+            path = root / relative
+            binding = _loader_binding(path, proof["scope"])
+            original = observed["payloads"][role][relative]["identity"]
+            need(binding["identity"] == [original[index] for index in (0, 1, 2, 5, 6, 7, 8)],
+                 "GitHub derivative native original differs from the admitted payload")
+            proof["bindings"][str(path)] = binding
+        for relative in ("python/lib/glibc-hwcaps", *("python/lib/" + name for name in proof["entryObjects"] if name not in PRIVATE_SONAMES),
+                         *(prefix + name for prefix in ("", "python/", "python/bin/") for name in ("pyvenv.cfg", "python3._pth", "pybuilddir.txt"))):
+            path = root / relative
+            binding = _loader_binding(path, proof["scope"], absent=True)
+            need(binding.get("absent") is True, "GitHub derivative startup/native override exists")
+            proof["bindings"][str(path)] = binding
+    _installed_loader_check(proof)
+    _retain("shell-github-materials-before.json", raw)
+    return maps
+
+
+def shell_github_material_data(value, raw, normal_maps):
+    """Reconcile actual full9 N/D/peer DATA; no constant success projection."""
+    need(shell_github(value) and type(raw) is bytes, "GitHub material DATA requires its fixed handoff and bytes")
+    data = decode(raw, SHELL_GITHUB_MATERIAL_LIMIT)
+    need(canonical(data) == raw, "GitHub material DATA is not canonical")
+    need(type(data) is dict and set(data) == {"schema", "sourceSha", "runId", "attempt", "profile",
+         "derivativeRecipeSha256", "normalManifest", "payloads", "peer", "ambientKeylogs"}
+         and data["schema"] == ("installed-github-release-materials-v1" if shell_github_release(value) else "installed-github-preflight-materials-v1" if shell_github_preflight(value) else "installed-github-readonly-materials-v1")
+         and all(data[key] == value[key] for key in ("sourceSha", "runId", "attempt"))
+         and data["profile"] == _shell_github_selection(value)["profile"]
+         and data["derivativeRecipeSha256"] == SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256
+         and type(data["payloads"]) is dict and set(data["payloads"]) == set(SHELL_GITHUB_PAYLOADS),
+         "GitHub original material DATA identity or role roster differs")
+    normal_raw = canonical(data["normalManifest"])
+    all_inodes = set()
+    maps = {}
+    for role, pin in SHELL_GITHUB_PAYLOADS.items():
+        manifest_raw = shell_github_manifest(normal_raw, role)
+        files = _D.records(decode(manifest_raw)["files"])
+        files["manifest.json"] = {"path": "manifest.json", "size": len(manifest_raw), "sha256": pin["manifestSha256"]}
+        directories = {""} | {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
+        tree = data["payloads"][role]
+        need(type(tree) is dict and set(tree) == set(files) | directories, "GitHub complete installed payload membership differs")
+        for relative, row in tree.items():
+            is_directory = relative in directories
+            need(type(row) is dict and set(row) == ({"identity"} if is_directory else {"identity", "size", "sha256"}),
+                 "GitHub payload full9 row fields differ")
+            original = row["identity"]
+            mode = stat.S_IFDIR | 0o555 if is_directory else stat.S_IFREG | (0o555 if relative == "python/bin/python3" else 0o444)
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2:5] == [mode, 0, 0]
+                 and original[5] > 0 and original[6] <= FILE_LIMIT, "GitHub installed payload identity/mode differs")
+            if not is_directory:
+                expected = files[relative]
+                need(original[5] == 1 and type(row["size"]) is int and original[6] == row["size"] == expected["size"]
+                     and row["sha256"] == expected["sha256"], "GitHub installed payload byte/size binding differs")
+            pair = tuple(original[:2])
+            need(pair not in all_inodes, "GitHub N/D tree aliases another original")
+            all_inodes.add(pair)
+        need(type(normal_maps) is dict and set(normal_maps) == {"python", "libssl.so.3", "libcrypto.so.3", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"},
+             "GitHub original six-object N loader map binding differs")
+        selected = deepcopy(normal_maps)
+        for relative, name in (("python/bin/python3", "python"), ("python/lib/libssl.so.3", "libssl.so.3"), ("python/lib/libcrypto.so.3", "libcrypto.so.3")):
+            original = tree[relative]["identity"]
+            selected[name] = {"paths": [str(PREFIX / pin["manifestSha256"] / relative)], "deviceMajor": os.major(original[0]),
+                              "deviceMinor": os.minor(original[0]), "inode": original[1]}
+        if role == "N":
+            need(canonical(selected) == canonical(normal_maps), "GitHub N material differs from the original loader proof")
+        maps[role] = selected
+    peer, pins = data["peer"], _shell_github_peer_pins(value)
+    need(type(peer) is dict and set(peer) == {".", "github_tls", *pins}, "GitHub peer material roster differs")
+    for relative, row in peer.items():
+        is_directory = relative in (".", "github_tls")
+        need(type(row) is dict and set(row) == ({"identity"} if is_directory else {"identity", "size", "sha256"}),
+             "GitHub peer material fields differ")
+        original = row["identity"]
+        need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+             and original[0] > 0 and original[1] > 0
+             and original[2:5] == [stat.S_IFDIR | 0o555 if is_directory else stat.S_IFREG | 0o444, 0, 0]
+             and original[5] > 0 and original[6] <= JSON_LIMIT, "GitHub peer material identity/mode differs")
+        if not is_directory:
+            size, digest = pins[relative]
+            need(original[5] == 1 and type(row["size"]) is int and original[6] == row["size"] == size and row["sha256"] == digest,
+                 "GitHub peer SOURCE byte/hash binding differs")
+        pair = tuple(original[:2])
+        need(pair not in all_inodes, "GitHub peer aliases another admitted material original")
+        all_inodes.add(pair)
+    keylogs = data["ambientKeylogs"]
+    need(type(keylogs) is dict and set(keylogs) == set(_shell_github_ambient_cases(value)), "GitHub ambient keylog roster differs")
+    for case, row in keylogs.items():
+        need(type(row) is dict and set(row) == {"identity", "size", "sha256"}, "GitHub ambient keylog fields differ")
+        original = row["identity"]
+        need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+             and original[0] > 0 and original[1] > 0
+             and original[2:7] == [stat.S_IFREG | 0o620, 0, value["runnerGid"], 1, 0]
+             and type(row["size"]) is int and row["size"] == 0 and row["sha256"] == hashlib.sha256(b"").hexdigest(),
+             "GitHub ambient keylog identity/mode/content differs")
+        pair = tuple(original[:2])
+        need(pair not in all_inodes, "GitHub ambient keylog aliases another original")
+        all_inodes.add(pair)
+    need(len({pair[0] for pair in all_inodes}) == 1, "GitHub admitted materials cross the original root filesystem")
+    return maps
+
+
+
+def _shell_github_roster(value):
+    owners = (value["runnerUid"], value["runnerGid"])
+    return ((".", stat.S_IFDIR | 0o700, owners, None),
+            ("app", stat.S_IFDIR | 0o555, (0, 0), None),
+            ("app/build.gradle.kts", stat.S_IFREG | 0o444, (0, 0), SHELL_PROJECT_SOURCE),
+            ("version.properties", stat.S_IFREG | 0o600, owners, SHELL_PROJECT_VERSION))
+
+
+def _shell_github_fixtures_prepare(value):
+    """One registered project, not the unrelated twenty legacy fixture trees."""
+    _shell_github_selection(value)
+    ancestry = _shell_fixture_ancestry(value)
+    root = shell_fixture_root(value)
+    root.mkdir(mode=0o700)
+    original = identity(root.lstat())
+    need(original[2:5] == (stat.S_IFDIR | 0o700, 0, 0)
+         and original[0] == ancestry["control"]["identity"][0]
+         and all(original[:2] != tuple(row["identity"][:2]) for row in [ancestry["control"], *ancestry["ancestors"]]),
+         "GitHub fresh fixture namespace differs")
+    _xattrs(root, True)
+    project = root / "github-project"
+    nodes = [(project if relative == "." else project / relative, mode, owners, body)
+             for relative, mode, owners, body in _shell_github_roster(value)]
+    for path, mode, owners, body in nodes:
+        if stat.S_ISDIR(mode):
+            path.mkdir(mode=0o700)
+        else:
+            _D.write(path, body, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+    for path, mode, owners, _ in reversed(nodes):
+        if stat.S_ISDIR(mode):
+            os.chmod(path, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+        _xattrs(path, stat.S_ISDIR(mode))
+    _shell_namespace_roster(root, shell_fixture_children(value))
+    need(identity(root.lstat())[:5] == original[:5] and _shell_fixture_ancestry(value) == ancestry,
+         "GitHub original namespace changed before publication")
+    os.chmod(root, 0o755)
+    _shell_github_sync(root)
+    published = identity(root.lstat())
+    need(published[:2] == original[:2] and published[2:5] == (stat.S_IFDIR | 0o755, 0, 0),
+         "GitHub original fixture namespace publication differs")
+    binding = canonical({"root": str(root), "identity": list(published),
+                         "children": list(shell_fixture_children(value)), **ancestry})
+    _shell_namespace_check(value, binding)
+    return binding
+
+
+def _shell_github_inventory(value, namespace):
+    admitted = _shell_namespace_check(value, namespace)
+    project = shell_fixture_root(value) / "github-project"
+    roster = _shell_github_roster(value)
+    nodes, identities = {}, set()
+    # Admit both finite directory rosters before any leaf SOURCE read.
+    for relative, mode, owners, _ in roster:
+        path = project if relative == "." else project / relative
+        before = identity(path.lstat())
+        need(before[2:5] == (mode, *owners) and before[0] == admitted["identity"][0]
+             and before[:2] not in identities and (stat.S_ISDIR(mode) or before[5] == 1),
+             "GitHub registered project original type/owner/link differs")
+        identities.add(before[:2])
+        _xattrs(path, stat.S_ISDIR(mode))
+        need(identity(path.lstat()) == before, "GitHub fixture identity changed")
+        if stat.S_ISDIR(mode):
+            wanted = ["app", "version.properties"] if relative == "." else ["build.gradle.kts"]
+            need(sorted(child.name for child in path.iterdir()) == wanted,
+                 "GitHub read-only fixture gained release/config/other entries")
+        nodes[relative] = {"identity": list(before)}
+    for relative, mode, _, body in roster:
+        if stat.S_ISDIR(mode):
+            continue
+        path = project / relative
+        row = record(path, len(body))
+        need(row["size"] == len(body) and row["sha256"] == hashlib.sha256(body).hexdigest()
+             and list(identity(path.lstat())) == nodes[relative]["identity"], "GitHub read-only fixture SOURCE differs")
+        row.pop("path")
+        nodes[relative].update(row)
+    for relative, _, _, _ in roster:
+        path = project if relative == "." else project / relative
+        need(list(identity(path.lstat())) == nodes[relative]["identity"], "GitHub fixture original POST changed")
+    _shell_namespace_check(value, namespace)
+    return {"schema": "installed-github-project-v1", "sourceSha": value["sourceSha"],
+            "runId": value["runId"], "attempt": value["attempt"], "project": str(project),
+            "namespace": admitted, "nodes": nodes}
+
+
+def shell_github_fixture(value, before_raw, after_raw):
+    need(shell_github(value) and type(before_raw) is bytes and type(after_raw) is bytes
+         and before_raw == after_raw, "GitHub read-only observation changed its original registered project")
+    before = decode(before_raw, SHELL_GITHUB_FIXTURE_LIMIT)
+    need(canonical(before) == before_raw and type(before) is dict
+         and set(before) == {"schema", "sourceSha", "runId", "attempt", "project", "namespace", "nodes"}
+         and before["schema"] == "installed-github-project-v1"
+         and all(before[key] == value[key] for key in ("sourceSha", "runId", "attempt"))
+         and before["project"] == str(shell_fixture_root(value) / "github-project"),
+         "GitHub read-only fixture identity differs")
+    namespace = _shell_namespace_data(value, before["namespace"])
+    nodes = before["nodes"]
+    roster = _shell_github_roster(value)
+    need(type(nodes) is dict and set(nodes) == {row[0] for row in roster}, "GitHub exact fixture node roster differs")
+    identities = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+    for relative, mode, owners, body in roster:
+        row = nodes[relative]
+        is_directory = stat.S_ISDIR(mode)
+        need(type(row) is dict and set(row) == ({"identity"} if is_directory else {"identity", "size", "sha256"}),
+             "GitHub fixture row fields differ")
+        original = row["identity"]
+        need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+             and original[0] == namespace["identity"][0] and original[1] > 0
+             and original[2:5] == [mode, *owners] and original[5] > 0 and original[6] <= SHELL_GITHUB_FIXTURE_LIMIT,
+             "GitHub fixture original identity/mode differs")
+        pair = tuple(original[:2])
+        need(pair not in identities, "GitHub fixture aliases another original")
+        identities.add(pair)
+        if not is_directory:
+            need(original[5] == 1 and type(row["size"]) is int and original[6] == row["size"] == len(body)
+                 and row["sha256"] == hashlib.sha256(body).hexdigest(), "GitHub fixture SOURCE changed or relabelled")
+    return {"project": before["project"], "namespace": namespace, "unchanged": True,
+            "sourceSha256": hashlib.sha256(SHELL_PROJECT_SOURCE).hexdigest(),
+            "versionSha256": hashlib.sha256(SHELL_PROJECT_VERSION).hexdigest(),
+            "releaseConfigCreated": False, "sourceSha": value["sourceSha"]}
+
+
+def _shell_android_object(value, fields, message):
+    need(type(value) is dict and set(value) == set(fields), message)
+    return value
+
+
+def _shell_android_roster(value, case, after=False):
+    """Exactly25 original controls; generated output bodies are not controls."""
+    materials = _android_handoff_profile(value)[0] if "localTransport" in value.get("shell", {}) else None
+    files = _shell_android_files(case, after, materials)
+    nodes = [*SHELL_ANDROID_DIRECTORIES[1:], *files]
+    owners = value["runnerUid"], value["runnerGid"]
+    rows = []
+    for name in SHELL_ANDROID_DIRECTORIES:
+        children = sorted(Path(child).name for child in nodes if str(Path(child).parent) == name)
+        if after and name in SHELL_ANDROID_GENERATED[1:]:
+            children = None  # No generated output traversal, even after Exit.
+        elif after and name == "project" and case != "android-build-refusals":
+            children = sorted([*children, ".mobile-release"])
+        rows.append((name, stat.S_IFDIR | 0o700, owners, children))
+    rows.extend((name, stat.S_IFREG | 0o600, owners, files[name]) for name in sorted(files))
+    need(len(rows) == 25 and all(len(data) <= 2048 for _, mode, _, data in rows if stat.S_ISREG(mode)),
+         "Fixed Android original control roster exceeds its bound")
+    return tuple(rows)
+
+
+def _shell_android_fixtures_prepare(value, root):
+    """Only fresh fixed source controls; no SDK/repository download or adoption."""
+    need(_ROOT == root_path(value) and root == shell_fixture_root(value), "Different fresh Android fixture route")
+    shell_android_materials()  # Refuse absent material BEFORE creating a case.
+    for case in SHELL_ANDROID_CASES:
+        base = root / case
+        for relative, mode, owners, expected in _shell_android_roster(value, case):
+            path = base if relative == "." else base / relative
+            if stat.S_ISDIR(mode):
+                path.mkdir(mode=0o700)
+            else:
+                _D.write(path, expected, 0o600)
+            os.chown(path, *owners, follow_symlinks=False)
+            _xattrs(path, stat.S_ISDIR(mode))
+
+
+def _shell_android_identity(value, original, mode, device):
+    need(type(original) is list and len(original) == 9
+         and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+         and original[0] == device and original[0] > 0 and original[1] > 0 and original[2] == mode
+         and original[3:5] == [value["runnerUid"], value["runnerGid"]]
+         and (0 < original[5] <= 16 and original[6] <= 1 << 20 if stat.S_ISDIR(mode) else
+              original[5] == 1 and original[6] <= 2048), "Android source control identity differs")
+
+
+def _shell_android_inventory(value, namespace, case, *, after=False):
+    """Pre-launch or ordinary observed Exit only. Never scan live/failed work."""
+    need(_ROOT == root_path(value), "Different original Android service root")
+    roster = _shell_android_roster(value, case, after)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / case
+    rows, originals = [], []
+    # Parent names are admitted before descendants. The three generated scopes
+    # are never exported; after Exit only their fixed root metadata is observed.
+    for relative, mode, owners, expected in roster:
+        path = root if relative == "." else root / relative
+        before = identity(path.lstat())
+        _shell_android_identity(value, list(before), mode, namespace["identity"][0])
+        _xattrs(path, stat.S_ISDIR(mode))
+        if stat.S_ISDIR(mode):
+            directory(path)
+            if expected is not None:
+                found = []
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        need(len(found) < len(expected) and entry.name in expected, "Unexpected Android source control entry")
+                        found.append(entry.name)
+                need(sorted(found) == expected, "Android source control roster differs")
+            row = {"path": relative, "kind": "directory", "identity": list(before),
+                   "children": expected, "contentsInspected": expected is not None}
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest(),
+                 "Android source control bytes differ")
+            row = {**observed, "path": relative, "kind": "file", "identity": list(before)}
+        need(identity(path.lstat()) == before, "Android source control changed during inventory")
+        rows.append(row)
+        originals.append((path, before))
+    generated = None
+    if after and case != "android-build-refusals":
+        path = root / SHELL_ANDROID_GENERATED[0]
+        before = identity(path.lstat())
+        _shell_android_identity(value, list(before), stat.S_IFDIR | 0o700, namespace["identity"][0])
+        _xattrs(path, True)
+        need(identity(path.lstat()) == before, "Android generated namespace metadata changed")
+        generated = {"path": SHELL_ANDROID_GENERATED[0], "kind": "directory", "identity": list(before), "contentsInspected": False}
+        originals.append((path, before))  # Metadata only, never children/logs/AAB.
+    identities = [row["identity"] for row in rows] + ([generated["identity"]] if generated is not None else [])
+    reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+    need(len({tuple(row[:2]) for row in identities}) == len(identities)
+         and all(tuple(row[:2]) not in reserved for row in identities)
+         and all(identity(path.lstat()) == original for path, original in originals),
+         "Android source controls alias or changed during inventory")
+    _shell_namespace_check(value, binding)
+    document = {"schemaVersion": 1, "fixture": "installed-android-build-fixture-v1", "case": case,
+        "root": str(root), "after": after, "entries": rows, "generatedNamespace": generated,
+        "generatedScopesNotExported": list(SHELL_ANDROID_GENERATED), "namespace": namespace, "materials": shell_android_materials()}
+    need(len(canonical(document)) <= SHELL_ANDROID_INVENTORY_LIMIT, "Android inventory exceeds its fixed bound")
+    return document
+
+
+def _shell_android_native_fixture(case):
+    need(type(case) is str and case in SHELL_ANDROID_CASES, "Different Android fixture case")
+    return {"sourceControlsAccounted": True, "savedVersionChanged": case == "android-build-refusals",
+            "gradleBoundary": "" if case == "android-build-refusals" else "active\n",
+            "generatedScopesNotExported": list(SHELL_ANDROID_GENERATED)}
+
+
+def _shell_android_fixture_facts(case):
+    drift = case == "android-build-refusals"
+    return {"fixture": "installed-android-build-fixture-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+        **_shell_android_native_fixture(case), "beforeCount": 25, "afterCount": 25,
+        "mutations": [SHELL_ANDROID_VERSION_PATH if drift else SHELL_ANDROID_TRACE],
+        "generatedNamespacePresent": not drift, "materials": shell_android_materials(),
+        "savedConfig": _shell_android_content(SHELL_ANDROID_CONFIG),
+        "savedVersionBefore": _shell_android_version(), "savedVersionAfter": _shell_android_version(drift)}
+
+
+def shell_android_fixture(value, case, before_raw, after_raw):
+    """Closed DATA correspondence, not permission to inspect a failed/live tree."""
+    inventories, namespaces = [], []
+    for raw, after in ((before_raw, False), (after_raw, True)):
+        roster = _shell_android_roster(value, case, after)
+        document = decode(raw, SHELL_ANDROID_INVENTORY_LIMIT)
+        _shell_android_object(document, {"schemaVersion", "fixture", "case", "root", "after", "entries",
+            "generatedNamespace", "generatedScopesNotExported", "namespace", "materials"}, "Android inventory shape differs")
+        need(canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "installed-android-build-fixture-v1" and document["case"] == case
+             and document["root"] == str(shell_fixture_root(value) / case) and document["after"] is after
+             and document["generatedScopesNotExported"] == list(SHELL_ANDROID_GENERATED)
+             and canonical(document["materials"]) == canonical(shell_android_materials()), "Android inventory route/phase/material differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        rows = document["entries"]
+        need(type(rows) is list and len(rows) == len(roster) == 25, "Android original control count differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            is_directory = stat.S_ISDIR(mode)
+            _shell_android_object(row, {"path", "kind", "identity"} | ({"children", "contentsInspected"} if is_directory else
+                {"size", "sha256"}), "Android source control fields differ")
+            need(row["path"] == relative and row["kind"] == ("directory" if is_directory else "file")
+                 and relative not in observed, "Android source control name/kind differs")
+            _shell_android_identity(value, row["identity"], mode, namespace["identity"][0])
+            if is_directory:
+                need(row["children"] == expected and row["contentsInspected"] is (expected is not None),
+                     "Android source control children or output exclusion differs")
+            else:
+                need(row["identity"][6] == len(expected) and type(row["size"]) is int and row["size"] == len(expected)
+                     and row["sha256"] == hashlib.sha256(expected).hexdigest(), "Android original source bytes differ")
+            observed[relative] = row
+        generated = document["generatedNamespace"]
+        if after and case != "android-build-refusals":
+            _shell_android_object(generated, {"path", "kind", "identity", "contentsInspected"}, "Android namespace metadata is missing")
+            need(generated["path"] == SHELL_ANDROID_GENERATED[0] and generated["kind"] == "directory"
+                 and generated["contentsInspected"] is False, "Android output body was scanned/exported")
+            _shell_android_identity(value, generated["identity"], stat.S_IFDIR | 0o700, namespace["identity"][0])
+        else:
+            need(generated is None, "Android prebuild/refusal created a generated namespace")
+        all_rows = [*rows, *([generated] if generated is not None else [])]
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(len({tuple(row["identity"][:2]) for row in all_rows}) == len(all_rows)
+             and all(tuple(row["identity"][:2]) not in reserved for row in all_rows), "Android control/namespace aliases")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1] and set(first) == set(last), "Android original namespace or control roster changed")
+    mutation = SHELL_ANDROID_VERSION_PATH if case == "android-build-refusals" else SHELL_ANDROID_TRACE
+    for name, row in last.items():
+        old = first[name]
+        if name == mutation:
+            need(old["identity"][:6] == row["identity"][:6] and row["identity"][7] >= old["identity"][7]
+                 and row["identity"][8] >= old["identity"][8], "Android changed source was replaced or moved backwards")
+        elif name in ("project", *SHELL_ANDROID_GENERATED[1:]):
+            need(old["identity"][:5] == row["identity"][:5] and row["identity"][7] >= old["identity"][7]
+                 and row["identity"][8] >= old["identity"][8], "Android original output parent was replaced")
+        else:
+            need(old == row, "Android changed an unrelated original source control")
+    need(before_raw != after_raw, "Android fixture lost its fixed in-place mutation")
+    return {**_shell_android_fixture_facts(case),
+        "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+        "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+
+def shell_recovery_producer_result(stdout, stderr, case, code):
+    need(case in SHELL_RECOVERY_ALL_CASES and type(code) is int and code == 0 and stderr == b""
+         and type(stdout) is bytes and stdout.endswith(b"\n") and b"\n" not in stdout[:-1],
+         "Original recovery fixture producer failed or its capture is incomplete")
+    result = decode(stdout, 2048)
+    _recovery_fields(result, ("schemaVersion", "scope", "case", "materializationOutcome", "coreFatal", "commands",
+        "profileCalls", "attemptedDescriptors", "neverOpenedDescriptors", "attemptedDescriptorsClosed", "handlersRestored",
+        "invocationReleased", "originalQuiescenceRecorded", "retirementInterceptions", "observersRestored", "restored", "followupCoreOrFilesystemOperation"))
+    need(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1 and result["case"] == case
+         and result["scope"] == "real-core-project-recovery-fixture-v1"
+         and result["materializationOutcome"] == "expected-cleanup-failure",
+         "Original failed materialization generation contract differs")
+    need(all(result[key] is True for key in ("coreFatal", "attemptedDescriptorsClosed", "handlersRestored", "invocationReleased",
+        "originalQuiescenceRecorded", "observersRestored"))
+         and all(type(result[key]) is int and result[key] == 0 for key in ("commands", "profileCalls"))
+         and result["followupCoreOrFilesystemOperation"] is False
+         and type(result["retirementInterceptions"]) is int
+         and result["retirementInterceptions"] == int(case == "project-recovery-cleanup-only")
+         and all(type(result[key]) is int and 0 <= result[key] <= 2048 for key in ("attemptedDescriptors", "neverOpenedDescriptors"))
+         and 0 < result["attemptedDescriptors"] <= result["attemptedDescriptors"] + result["neverOpenedDescriptors"] <= 2048,
+         "Original fixture descriptor/handler/failure attestation differs")
+    _recovery_fields(result["restored"], ("android-services", "ios-services"))
+    need(result["restored"]["android-services"] is (case != SHELL_RECOVERY_PARTIAL)
+         and result["restored"]["ios-services"] is (case == "project-recovery-cleanup-only"),
+         "Real original materialization cleanup effects differ")
+    return result
+
+
+def shell_recovery_producer_argv(value, case):
+    need(shell_recovery(value) and case in shell_cases(value), "Wrong fixed Recovery producer route")
+    return _drop(value, [str(PREFIX / M / "python/bin/python3"), "-I", "-S", "-B", "-c", SHELL_RECOVERY_PRODUCER,
+                        str(PREFIX / M / "core.zip"), str(shell_fixture_root(value) / case / "project"), case])
+
+
+def _shell_recovery_namespace_live(value, binding):
+    """Metadata correspondence; also usable by the joined nonroot negative collector.
+
+    There is no permission change, private-root access, owner lookup or teardown
+    inference here. Callers must first establish original command/client finality.
+    """
+    namespace = _shell_namespace_data(value, decode(binding, SHELL_FIXTURE_NAMESPACE_LIMIT))
+    need(canonical(namespace) == binding, "Original Recovery namespace DATA is not canonical")
+    for row in (*namespace["ancestors"], namespace["control"]):
+        path = Path(row["path"])
+        need(list(identity(path.lstat())[:5]) == row["identity"], "Original Recovery namespace ancestry changed")
+        _xattrs(path, True)
+    root = shell_fixture_root(value)
+    need(list(identity(root.lstat())) == namespace["identity"], "Original Recovery namespace changed")
+    _xattrs(root, True)
+    _shell_namespace_roster(root, shell_fixture_children(value))
+    need(list(identity(root.lstat())) == namespace["identity"], "Original Recovery namespace changed during roster read")
+    return namespace
+
+
+def _recovery_entry_kind(relative):
+    # Finite real-core synthetic fixture names only; never an arbitrary walk.
+    if relative in (".", "project", "project/.mobile-release", "project/.mobile-release/build-inputs",
+                    "project/.mobile-release/build-inputs/scratch"):
+        return "directory"
+    if relative in ("project/.gitignore", "project/unrelated.txt", "project/google-services.json", "project/GoogleService-Info.plist",
+                    "project/saved-foreign-android", "project/saved-foreign-ios", "project/.mobile-release/build-inputs-complete.json"):
+        return "file"
+    if re.fullmatch(r"project/\.mobile-release/build-inputs/(?:header\.json|intent\.json|checkpoint-(?:0[0-9]{2}|1[01][0-9]|12[0-7])\.json|(?:backup|stage|retired)-[01])", relative):
+        return "file"
+    raise Refused("Unexpected Recovery fixture member; preserve the original subtree")
+
+
+def _shell_recovery_inventory(value, binding, case, stage):
+    need(shell_recovery(value) and case in shell_cases(value) and stage in ("initial", "generated", "before", "after"),
+         "Wrong fixed Recovery fixture inventory")
+    namespace = _shell_recovery_namespace_live(value, binding)
+    root, rows, total = shell_fixture_root(value) / case, [], 0
+    device = namespace["identity"][0]
+    seen = set()
+    def visit(path, relative):
+        nonlocal total
+        need(len(rows) < 160, "Recovery fixture member bound exceeded")
+        kind = _recovery_entry_kind(relative)  # Admit the fixed name before descending/reading.
+        before = identity(path.lstat())
+        need(before[0] == device and before[:2] not in seen
+             and before[3:5] == (value["runnerUid"], value["runnerGid"])
+             and before[2] == ((stat.S_IFDIR | 0o700) if kind == "directory" else (stat.S_IFREG | 0o600))
+             and (2 <= before[5] <= 6 if kind == "directory" else before[5] == 1),
+             "Recovery fixture aliases, ownership, kind or mode differ")
+        seen.add(before[:2]); _xattrs(path, kind == "directory")
+        row = {"path": relative, "identity": list(before), "sha256": None}
+        rows.append(row)
+        if kind == "directory":
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < 136, "Recovery fixture directory bound exceeded")
+                    child = entry.name if relative == "." else relative + "/" + entry.name
+                    _recovery_entry_kind(child)
+                    children.append((entry.name, child))
+            for name, child in sorted(children):
+                visit(path / name, child)
+        else:
+            need(0 < before[6] <= 256 << 10, "Recovery synthetic/control file bound differs")
+            raw = read(path, 256 << 10)
+            total += len(raw)
+            need(total <= 136 * (256 << 10), "Recovery fixed fixture aggregate bound exceeded")
+            row["sha256"] = hashlib.sha256(raw).hexdigest()  # Private bytes never leave this bounded read.
+        need(identity(path.lstat()) == before, "Recovery original fixture changed during inventory")
+    visit(root, ".")
+    need(_shell_recovery_namespace_live(value, binding) == namespace, "Recovery namespace changed after inventory")
+    result = {"schemaVersion": 1, "fixture": "real-core-project-recovery-v1", "sourceSha": value["sourceSha"],
+              "case": case, "stage": stage, "namespace": namespace, "entries": rows}
+    need(len(canonical(result)) <= SHELL_RECOVERY_INVENTORY_LIMIT, "Recovery inventory DATA bound exceeded")
+    return result
+
+
+def _shell_recovery_inventory_data(value, raw, case, stage):
+    result = decode(raw, SHELL_RECOVERY_INVENTORY_LIMIT)
+    _recovery_fields(result, ("schemaVersion", "fixture", "sourceSha", "case", "stage", "namespace", "entries"))
+    need(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1
+         and result["fixture"] == "real-core-project-recovery-v1" and result["sourceSha"] == value["sourceSha"]
+         and result["case"] == case and result["stage"] == stage
+         and type(result["entries"]) is list and 6 <= len(result["entries"]) <= 160,
+         "Original Recovery fixture inventory DATA differs")
+    namespace = _shell_namespace_data(value, result["namespace"])
+    rows, seen = {}, set()
+    for row in result["entries"]:
+        _recovery_fields(row, ("path", "identity", "sha256"))
+        need(type(row["path"]) is str and row["path"] not in rows, "Repeated Recovery inventory member")
+        kind = _recovery_entry_kind(row["path"])
+        item = row["identity"]
+        need(type(item) is list and len(item) == 9 and all(type(n) is int and 0 <= n < 2**64 for n in item)
+             and item[0] == namespace["identity"][0] and item[1] > 0 and tuple(item[:2]) not in seen
+             and item[3:5] == [value["runnerUid"], value["runnerGid"]]
+             and item[2] == ((stat.S_IFDIR | 0o700) if kind == "directory" else (stat.S_IFREG | 0o600))
+             and (2 <= item[5] <= 6 if kind == "directory" else item[5] == 1), "Recovery inventory identity differs")
+        need((row["sha256"] is None and item[6] <= 1 << 20) if kind == "directory" else
+             (type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None and 0 < item[6] <= 256 << 10),
+             "Recovery inventory digest/size differs")
+        rows[row["path"]] = row; seen.add(tuple(item[:2]))
+    for name in rows:
+        if name != ".":
+            parent = str(Path(name).parent)
+            need(parent in rows and rows[parent]["sha256"] is None, "Recovery inventory omitted original ancestry")
+    need("project" in rows and "." in rows, "Recovery original project is missing")
+    checkpoints = sorted(name for name in rows if "/checkpoint-" in name)
+    need(checkpoints == ["project/.mobile-release/build-inputs/checkpoint-%03d.json" % i for i in range(len(checkpoints))],
+         "Recovery checkpoint sequence is not complete")
+    return result, rows
+
+
+def _recovery_content(row, name):
+    raw = SHELL_RECOVERY_BYTES[name]
+    need(row["identity"][6] == len(raw) and row["sha256"] == hashlib.sha256(raw).hexdigest(),
+         "Recovery synthetic file content changed")
+
+
+def _recovery_moved(original, later):
+    # Exclusive core rename may change ctime, but not file bytes, inode, mode,
+    # uid/gid, link count, length or mtime. Never treat same bytes as same file.
+    need(original["identity"][:8] == later["identity"][:8] and original["sha256"] == later["sha256"],
+         "Recovery original file identity/content correspondence differs")
+
+
+
+def _shell_recovery_generated(value, case, initial_raw, generated_raw):
+    initial_doc, initial = _shell_recovery_inventory_data(value, initial_raw, case, "initial")
+    generated_doc, generated = _shell_recovery_inventory_data(value, generated_raw, case, "generated")
+    need(initial_doc["namespace"] == generated_doc["namespace"], "Recovery producer changed original namespace")
+    private, pending = "project/.mobile-release", "project/.mobile-release/build-inputs"
+    android, ios = "project/google-services.json", "project/GoogleService-Info.plist"
+    static = {".", "project", "project/.gitignore", "project/unrelated.txt", android, ios}
+    need(set(initial) == static, "Recovery initial fixture contains an unexpected member")
+    cleanup, partial = case == "project-recovery-cleanup-only", case == SHELL_RECOVERY_PARTIAL
+    controls = {name for name in generated if "/checkpoint-" in name}
+    expected = static | {private, pending, pending + "/header.json", pending + "/intent.json"} | controls
+    expected |= {private + "/build-inputs-complete.json"} if cleanup else {pending + "/backup-1"}
+    if partial:
+        expected.add(pending + "/backup-0")
+    need(controls and set(generated) == expected, "Real core fixture materialization left an unexpected inventory")
+    for row, label in ((initial[android], "android-original"), (initial[ios], "ios-original"),
+                       (initial["project/.gitignore"], "ignore"), (initial["project/unrelated.txt"], "unrelated")):
+        _recovery_content(row, label)
+    need(all(generated[name] == initial[name] for name in ("project/.gitignore", "project/unrelated.txt"))
+         and all(generated[name]["identity"][:5] == initial[name]["identity"][:5] for name in (".", "project")),
+         "Recovery producer changed unrelated original files/ancestry")
+    _recovery_moved(initial[android], generated[pending + "/backup-0" if partial else android])
+    _recovery_moved(initial[ios], generated[ios if cleanup else pending + "/backup-1"])
+    if not cleanup:
+        _recovery_content(generated[ios], "ios-foreign")
+    if partial:
+        _recovery_content(generated[android], "android-foreign")
+    return generated
+
+def shell_recovery_fixture(value, case, initial_raw, generated_raw, before_raw, after_raw):
+    _shell_recovery_generated(value, case, initial_raw, generated_raw)
+    snapshots = [_shell_recovery_inventory_data(value, raw, case, stage) for raw, stage in
+                 zip((initial_raw, generated_raw, before_raw, after_raw), ("initial", "generated", "before", "after"))]
+    need(all(item[0]["namespace"] == snapshots[0][0]["namespace"] for item in snapshots), "Recovery inventories changed namespace")
+    initial, generated, before, after = [item[1] for item in snapshots]
+    android, ios, private, pending = "project/google-services.json", "project/GoogleService-Info.plist", "project/.mobile-release", "project/.mobile-release/build-inputs"
+    static = {".", "project", "project/.gitignore", "project/unrelated.txt", android, ios}
+    need(set(initial) == static, "Recovery initial synthetic fixture roster differs")
+    for row, name in ((initial[android], "android-original"), (initial[ios], "ios-original"),
+                      (initial["project/.gitignore"], "ignore"), (initial["project/unrelated.txt"], "unrelated")):
+        _recovery_content(row, name)
+    for current in (generated, before, after):
+        need(all(current[name] == initial[name] for name in ("project/.gitignore", "project/unrelated.txt")),
+             "Recovery changed an unrelated original or ignore file")
+        need(all(current[name]["identity"][:5] == initial[name]["identity"][:5] for name in (".", "project")),
+             "Recovery replaced original task/project directories")
+    need(private in generated and pending in generated and private in after
+         and all(current[private]["identity"][:5] == generated[private]["identity"][:5] for current in (before, after)),
+         "Recovery real private metadata directory binding differs")
+    terminal = private + "/build-inputs-complete.json"
+    cleanup, partial = case == "project-recovery-cleanup-only", case == SHELL_RECOVERY_PARTIAL
+    need((terminal in generated) is cleanup and (terminal in before) is cleanup and terminal not in after,
+         "Recovery terminal control lifecycle differs")
+    need(pending + "/header.json" in generated and pending + "/intent.json" in generated,
+         "Recovery generation lacks actual original controls")
+    backup_android, backup_ios = pending + "/backup-0", pending + "/backup-1"
+    if cleanup:
+        need(backup_android not in generated and backup_ios not in generated and set(generated) == set(before),
+             "Cleanup-only generation retained application restoration work")
+        _recovery_moved(initial[android], generated[android]); _recovery_moved(initial[ios], generated[ios])
+        _recovery_content(before[android], "later-edit")
+        need(before[android]["identity"][:6] == generated[android]["identity"][:6], "Later synthetic edit replaced its original")
+        need(all(before[name] == row for name, row in generated.items() if name != android), "Later edit changed private controls/unrelated files")
+        need(set(after) == static | {private} and after[android] == before[android] and after[ios] == before[ios],
+             "Cleanup-only metadata retirement touched a later application target")
+    else:
+        saved = "project/saved-foreign-android" if partial else "project/saved-foreign-ios"
+        removed = android if partial else ios
+        _recovery_content(generated[ios], "ios-foreign")
+        _recovery_moved(initial[ios], generated[backup_ios])
+        if partial:
+            _recovery_content(generated[android], "android-foreign"); _recovery_moved(initial[android], generated[backup_android])
+        else:
+            _recovery_moved(initial[android], generated[android]); need(backup_android not in generated, "Pending fixture did not restore Android independently")
+        need(set(before) == (set(generated) - {removed}) | {saved} and removed not in before,
+             "Parent fixture transition moved something other than its fixed synthetic sentinel")
+        _recovery_moved(generated[removed], before[saved])
+        need(all(before[name] == row for name, row in generated.items() if name not in (removed, "project")),
+             "Parent sentinel preservation changed private controls/unrelated files")
+        need(after[saved] == before[saved], "Desktop recovery changed the preserved foreign sentinel")
+        _recovery_moved(initial[android], after[android])
+        if partial:
+            need(pending in after and backup_android not in after and backup_ios in after
+                 and after[ios] == before[ios] and after[backup_ios] == before[backup_ios],
+                 "Partial recovery did not preserve the unresolved foreign target/backup")
+            appended = {name for name in after if name not in before and "/checkpoint-" in name}
+            need(appended and set(after) == (set(before) - {backup_android}) | {android} | appended
+                 and after[pending]["identity"][:5] == before[pending]["identity"][:5],
+                 "Partial recovery retained unexpected work or replaced the original pending directory")
+            for name, row in before.items():
+                if name.startswith(pending + "/") and row["sha256"] is not None and "/backup-" not in name:
+                    need(after.get(name) == row, "Partial recovery changed an original journal control")
+        else:
+            need(set(after) == static | {private, saved}, "Completed pending recovery retained unexpected metadata")
+            _recovery_moved(initial[ios], after[ios])
+    return {"fixture": "real-core-project-recovery-v1", "case": case, "realCoreGenerated": True,
+            "syntheticRetirementInjection": cleanup, "originalTargetsRestored": not partial,
+            "metadataRetired": not partial, "foreignPreserved": not cleanup, "laterEditPreserved": cleanup,
+            "partialEffectsObserved": partial, "privateContentsExported": False}
+
+
+def _shell_recovery_fixtures_prepare(value):
+    need(shell_recovery(value) and not _FAILED and _ROOT == root_path(value), "Recovery fixtures require the original healthy command stream")
+    ancestry = _shell_fixture_ancestry(value)
+    root = shell_fixture_root(value)
+    root.mkdir(mode=0o700)  # Exclusive; occupied names are never adopted or repaired.
+    original = identity(root.lstat())
+    need(original[2:5] == (stat.S_IFDIR | 0o700, 0, 0) and original[0] == ancestry["control"]["identity"][0],
+         "Fresh Recovery namespace protection differs")
+    _xattrs(root, True)
+    for case in shell_cases(value):
+        base, project = root / case, root / case / "project"
+        base.mkdir(mode=0o700); project.mkdir(mode=0o700)
+        for leaf, content in ((".gitignore", "ignore"), ("unrelated.txt", "unrelated"),
+                              ("google-services.json", "android-original"), ("GoogleService-Info.plist", "ios-original")):
+            _D.write(project / leaf, SHELL_RECOVERY_BYTES[content], 0o600)
+            os.chown(project / leaf, value["runnerUid"], value["runnerGid"])
+        os.chown(project, value["runnerUid"], value["runnerGid"])
+        os.chown(base, value["runnerUid"], value["runnerGid"])
+    _shell_namespace_roster(root, shell_fixture_children(value))
+    need(identity(root.lstat())[:5] == original[:5] and _shell_fixture_ancestry(value) == ancestry,
+         "Fresh Recovery namespace ancestry changed")
+    os.chmod(root, 0o755)
+    namespace = canonical({"root": str(root), "identity": list(identity(root.lstat())),
+                           "children": list(shell_fixture_children(value)), **ancestry})
+    _shell_namespace_check(value, namespace)
+    for case in shell_cases(value):
+        _retain("shell-" + case + "-initial.json", canonical(_shell_recovery_inventory(value, namespace, case, "initial")))
+        environment = {"PATH": HOST_PATH, "LANG": "C", "LC_ALL": "C", "TZ": "UTC", "HOME": "/nonexistent"}
+        produced = command("recovery-fixture-" + case, shell_recovery_producer_argv(value, case), maximum=30, env=environment)
+        shell_recovery_producer_result(produced.stdout, produced.stderr, case, produced.returncode)
+        # Only the real original child/I/O/owner return and exact typed expected
+        # failure attestation permit the parent to touch these fixed sentinels.
+        generated = _shell_recovery_inventory(value, namespace, case, "generated")
+        _retain("shell-" + case + "-generated.json", canonical(generated))
+        _shell_recovery_generated(value, case,
+            read(_ROOT / "public" / ("shell-" + case + "-initial.json"), SHELL_RECOVERY_INVENTORY_LIMIT), canonical(generated))
+        project = root / case / "project"
+        if case == "project-recovery-cleanup-only":
+            fd = os.open(project / "google-services.json", os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                raw = SHELL_RECOVERY_BYTES["later-edit"]
+                need(os.write(fd, raw) == len(raw), "Fixed later synthetic edit was incomplete")
+                os.fsync(fd)
+            finally:
+                os.close(fd)  # One attempt; a close error aborts the original root stream.
+        else:
+            source, target = (("google-services.json", "saved-foreign-android") if case == SHELL_RECOVERY_PARTIAL
+                              else ("GoogleService-Info.plist", "saved-foreign-ios"))
+            _absent(project / target)
+            os.rename(project / source, project / target)
+        # No recovery/core operation is performed by the parent. The next core
+        # invocation is the actual UI-owned Inspect, with its own native owner.
+    return namespace
+
+def _shell_fixture_ancestry(value):
+    """Metadata only; the search-only control root and private contents stay put."""
+    need("shell" in value and "installed" not in value and _ROOT == root_path(value), "Different original shell fixture route")
+    rows = []
+    for path in (Path("/"), Path("/var"), Path("/var/lib"), _ROOT):
+        before = identity(path.lstat())[:5]
+        need(stat.S_ISDIR(before[2]) and before[3:5] == (0, 0) and before[2] & 0o022 == 0
+             and (before[2] == stat.S_IFDIR | 0o711 if path == _ROOT else before[2] & 0o005 == 0o005),
+             "Shell fixture ancestor is not protected/readable as required")
+        _xattrs(path, True)
+        need(identity(path.lstat())[:5] == before, "Shell fixture ancestor changed")
+        rows.append({"path": str(path), "identity": list(before)})
+    need(len({row["identity"][0] for row in rows}) == 1
+         and len({tuple(row["identity"][:2]) for row in rows}) == 4, "Shell fixture ancestors cross devices or alias")
+    private = _ROOT / "private"
+    before = identity(private.lstat())[:5]
+    need(before[0] == rows[0]["identity"][0] and before[2:] == (stat.S_IFDIR | 0o700, 0, 0), "Shell private control protection changed")
+    _xattrs(private, True)
+    need(identity(private.lstat())[:5] == before, "Shell private control identity changed")
+    return {"control": rows[-1], "ancestors": rows[:-1]}
+
+
+def _shell_namespace_data(value, namespace):
+    """Closed inert DATA; it is not permission to inspect a live/failed tree."""
+    need(type(namespace) is dict and set(namespace) == {"root", "identity", "children", "control", "ancestors"}
+         and namespace["root"] == str(shell_fixture_root(value)) and namespace["children"] == list(shell_fixture_children(value)),
+         "Shell fixture namespace shape/root differs")
+    need(type(namespace["control"]) is dict and set(namespace["control"]) == {"path", "identity"}
+         and namespace["control"]["path"] == str(root_path(value)) and type(namespace["ancestors"]) is list
+         and len(namespace["ancestors"]) == 3, "Shell fixture control/ancestor binding differs")
+    identities = []
+    for row, path in zip(namespace["ancestors"], ("/", "/var", "/var/lib")):
+        need(type(row) is dict and set(row) == {"path", "identity"} and row["path"] == path,
+             "Shell fixture ancestor path differs")
+    rows = [(namespace["identity"], 9, stat.S_IFDIR | 0o755),
+            (namespace["control"]["identity"], 5, stat.S_IFDIR | 0o711)]
+    rows.extend((row["identity"], 5, None) for row in namespace["ancestors"])
+    for original, length, mode in rows:
+        need(type(original) is list and len(original) == length
+             and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+             and original[0] > 0 and original[1] > 0 and original[3:5] == [0, 0]
+             and original[2] <= 0o177777 and stat.S_ISDIR(original[2]) and original[2] & 0o022 == 0
+             and (original[2] == mode if mode is not None else original[2] & 0o005 == 0o005),
+             "Shell fixture namespace identity/mode differs")
+        if length == 9:
+            need(0 < original[5] <= len(shell_fixture_children(value)) + 2 and original[6] <= 1 << 20,
+                 "Shell fixture namespace directory bound differs")
+        identities.append(tuple(original[:2]))
+    need(len(set(identities)) == 5 and len({pair[0] for pair in identities}) == 1
+         and len(canonical(namespace)) < SHELL_FIXTURE_NAMESPACE_LIMIT,
+         "Shell fixture namespace aliases, device or DATA bound differs")
+    return namespace
+
+
+def _shell_namespace_roster(root, children=SHELL_FIXTURE_CHILDREN):
+    found = []
+    with os.scandir(root) as entries:
+        for entry in entries:
+            need(len(found) < len(children) and entry.name in children, "Unexpected shell fixture namespace entry")
+            found.append(entry.name)
+    need(sorted(found) == list(children), "Shell fixture namespace roster differs")
+
+
+def _shell_namespace_check(value, binding):
+    # Immutable original bytes, never a new snapshot substituted as authority.
+    namespace = _shell_namespace_data(value, decode(binding, SHELL_FIXTURE_NAMESPACE_LIMIT))
+    need(canonical(namespace) == binding, "Original shell namespace binding is not canonical")
+    ancestry = {key: namespace[key] for key in ("control", "ancestors")}
+    need(_shell_fixture_ancestry(value) == ancestry, "Original shell fixture ancestry changed")
+    root = shell_fixture_root(value)
+    need(list(identity(root.lstat())) == namespace["identity"], "Original shell fixture namespace changed")
+    _xattrs(root, True)
+    # Admit the selected names before any fixture descendant read.
+    if shell_github(value) or shell_recovery(value):
+        _shell_namespace_roster(root, shell_fixture_children(value))
+    else:
+        _shell_namespace_roster(root)
+    need(list(identity(root.lstat())) == namespace["identity"] and _shell_fixture_ancestry(value) == ancestry,
+         "Original shell fixture namespace changed during observation")
+    return namespace
+
+
+def _shell_ordinary_placeholders_prepare(value, root):
+    """Four exclusive empty directories, never Android material preparation."""
+    need(shell_ordinary(value) and _ROOT == root_path(value) and root == shell_fixture_root(value),
+         "Ordinary21 placeholder preparation route differs")
+    originals = []
+    for name in sorted(SHELL_ANDROID_CASES):
+        path = root / name
+        path.mkdir(mode=0o700)  # Never inspect/adopt/repair an occupied name.
+        original = identity(path.lstat())
+        need(original[2:5] == (stat.S_IFDIR | 0o700, 0, 0),
+             "Fresh ordinary21 placeholder protection differs")
+        _xattrs(path, True)
+        _shell_namespace_roster(path, ())
+        need(identity(path.lstat()) == original, "Fresh ordinary21 placeholder changed")
+        originals.append(list(original))
+    return originals
+
+
+def _shell_ordinary_placeholders_inventory(value, binding):
+    """Metadata/empty-child observation before GO or after all original returns."""
+    need(shell_ordinary(value) and _ROOT == root_path(value), "Ordinary21 placeholder inventory route differs")
+    namespace = _shell_namespace_check(value, binding)
+    rows, originals = [], []
+    for name in sorted(SHELL_ANDROID_CASES):
+        path = shell_fixture_root(value) / name
+        original = identity(path.lstat())
+        need(original[2:5] == (stat.S_IFDIR | 0o700, 0, 0)
+             and 0 < original[5] <= 2 and original[6] <= 1 << 20,
+             "Ordinary21 placeholder ownership, mode or directory bound differs")
+        _xattrs(path, True)
+        _shell_namespace_roster(path, ())  # Any entry refuses; no descendant is read.
+        need(identity(path.lstat()) == original, "Ordinary21 placeholder changed during observation")
+        rows.append({"path": name, "kind": "directory", "identity": list(original), "children": []})
+        originals.append((path, original))
+    reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+    need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+         and len({tuple(row["identity"][:2]) for row in rows}) == len(SHELL_ANDROID_CASES)
+         and all(identity(path.lstat()) == original for path, original in originals),
+         "Ordinary21 placeholder originals alias, cross devices or changed")
+    _shell_namespace_check(value, binding)
+    result = {"schemaVersion": 1, "fixture": "ordinary21-inert-placeholders-v1",
+              "ordinary21": shell_ordinary_selection(), "namespace": namespace, "entries": rows}
+    need(len(canonical(result)) <= 8192, "Ordinary21 placeholder inventory exceeds the existing fixture bound")
+    return result
+
+
+def shell_ordinary_placeholders(value, before_raw, after_raw):
+    """Closed DATA only; emptiness is not an Android execution/coverage claim."""
+    need(shell_ordinary(value), "Ordinary21 placeholder decoding requires the explicit scope")
+    for raw in (before_raw, after_raw):
+        document = decode(raw, 8192)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "ordinary21", "namespace", "entries"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "ordinary21-inert-placeholders-v1"
+             and canonical(document["ordinary21"]) == canonical(shell_ordinary_selection()),
+             "Ordinary21 placeholder inventory shape or scope differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        rows = document["entries"]
+        need(type(rows) is list and len(rows) == len(SHELL_ANDROID_CASES), "Ordinary21 placeholder roster differs")
+        for row, name in zip(rows, sorted(SHELL_ANDROID_CASES)):
+            need(type(row) is dict and set(row) == {"path", "kind", "identity", "children"}
+                 and row["path"] == name and row["kind"] == "directory" and row["children"] == [],
+                 "Ordinary21 placeholder is not the exact empty directory")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2:5] == [stat.S_IFDIR | 0o700, 0, 0]
+                 and 0 < original[5] <= 2 and original[6] <= 1 << 20,
+                 "Ordinary21 placeholder original ownership, mode or identity differs")
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(SHELL_ANDROID_CASES),
+             "Ordinary21 placeholder originals alias or cross devices")
+    need(before_raw == after_raw, "Ordinary21 placeholder original identity, namespace or emptiness changed")
+    return {"fixture": "ordinary21-inert-placeholders-v1", "names": sorted(SHELL_ANDROID_CASES),
+            "namespaceOnly": True, "empty": True, "originalsAccounted": True, "rootRetained": True,
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+def _shell_fixtures_prepare(value):
+    """Create the exact24 namespace once, retained on every failure.
+
+    The sibling follows the existing disposable-runner retention policy; there
+    is no deletion, cleanup scan, retry or permission repair of an old object.
+    Ordinary21 keeps four Android-named entries empty and root-only so the
+    unchanged native namespace capture applies; they are not Android fixtures.
+    """
+    if shell_recovery(value):
+        return _shell_recovery_fixtures_prepare(value)
+    if shell_github(value):
+        return _shell_github_fixtures_prepare(value)
+    if shell_android(value):
+        shell_android_materials()  # Missing full25 binding refuses before any fresh namespace.
+    ancestry = _shell_fixture_ancestry(value)
+    root = shell_fixture_root(value)
+    root.mkdir(mode=0o700)  # Exclusive. Do not inspect/adopt an occupied name.
+    original = identity(root.lstat())
+    need(original[2:5] == (stat.S_IFDIR | 0o700, 0, 0)
+         and original[0] == ancestry["control"]["identity"][0]
+         and all(original[:2] != tuple(row["identity"][:2]) for row in [ancestry["control"], *ancestry["ancestors"]]),
+         "Fresh shell fixture namespace protection/device differs")
+    _xattrs(root, True)
+    need(identity(root.lstat()) == original, "Fresh shell fixture namespace changed")
+    project = root / "positive-project"
+    project.mkdir(mode=0o700)
+    (project / "app").mkdir(mode=0o700)
+    _D.write(project / "app/build.gradle.kts", SHELL_PROJECT_SOURCE, 0o444)
+    _D.write(project / "version.properties", SHELL_PROJECT_VERSION, 0o600)
+    # release/.gitignore are created only by real Save; app stays read-only.
+    os.chmod(project / "app", 0o555)
+    os.chown(project / "version.properties", value["runnerUid"], value["runnerGid"])
+    os.chown(project, value["runnerUid"], value["runnerGid"])
+    evidence = root / "candidate-evidence"
+    evidence.mkdir(mode=0o700)
+    (evidence / "operation").mkdir(mode=0o700)
+    for relative, raw in SHELL_CANDIDATE_DOCUMENTS.items():
+        _D.write(evidence / relative, raw, 0o600)
+        os.chown(evidence / relative, value["runnerUid"], value["runnerGid"])
+    for path in (evidence / "operation", evidence):
+        os.chown(path, value["runnerUid"], value["runnerGid"])
+    for name, kind in SHELL_PATH_NODES:
+        path = root / name
+        if kind == "directory":
+            path.mkdir(mode=0o700)
+        else:
+            _D.write(path, SHELL_PATH_BYTES, 0o600)
+        os.chown(path, value["runnerUid"], value["runnerGid"])
+    workflow_root = root / "workflow-project"
+    workflow_nodes = [(workflow_root if name == "." else workflow_root / name, mode, owners, expected)
+                      for name, mode, owners, expected in _shell_workflow_roster(value, False)]
+    for path, mode, owners, expected in workflow_nodes:
+        if stat.S_ISDIR(mode):
+            path.mkdir(mode=0o700)
+        else:
+            _D.write(path, expected, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+    for path, mode, owners, _ in reversed(workflow_nodes):
+        if stat.S_ISDIR(mode):
+            os.chmod(path, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+        _xattrs(path, stat.S_ISDIR(mode))
+    metadata_root = root / "metadata-project"
+    metadata_nodes = [(metadata_root if name == "." else metadata_root / name, mode, owners, expected)
+                      for name, mode, owners, expected in _shell_metadata_roster(value, False)]
+    for path, mode, owners, expected in metadata_nodes:
+        if stat.S_ISDIR(mode):
+            path.mkdir(mode=0o700)
+        else:
+            _D.write(path, expected, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+    for path, mode, owners, _ in reversed(metadata_nodes):
+        if stat.S_ISDIR(mode):
+            os.chmod(path, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+        _xattrs(path, stat.S_ISDIR(mode))
+    version_root = root / "version-project"
+    version_nodes = [(version_root if name == "." else version_root / name, mode, owners, expected)
+                      for name, mode, owners, expected in _shell_version_roster(value, False)]
+    for path, mode, owners, expected in version_nodes:
+        if stat.S_ISDIR(mode):
+            path.mkdir(mode=0o700)
+        else:
+            _D.write(path, expected, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+    for path, mode, owners, _ in reversed(version_nodes):
+        if stat.S_ISDIR(mode):
+            os.chmod(path, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+        _xattrs(path, stat.S_ISDIR(mode))
+    _shell_session_fixtures_prepare(value, root)
+    _shell_tools_offline_fixtures_prepare(value, root)
+    placeholder_originals = None
+    if shell_android(value):
+        _shell_android_fixtures_prepare(value, root)
+    else:
+        placeholder_originals = _shell_ordinary_placeholders_prepare(value, root)
+    _shell_namespace_roster(root)
+    for name, kind in (("positive-project", True), ("positive-project/app", True),
+                       ("positive-project/app/build.gradle.kts", False), ("positive-project/version.properties", False),
+                       ("candidate-evidence", True), ("candidate-evidence/operation", True),
+                       *(("candidate-evidence/" + name, False) for name in SHELL_CANDIDATE_DOCUMENTS),
+                       *((name, kind == "directory") for name, kind in SHELL_PATH_NODES)):
+        _xattrs(root / name, kind)
+    need(identity(root.lstat())[:5] == original[:5] and _shell_fixture_ancestry(value) == ancestry,
+         "Fresh shell namespace or ancestry changed before publication")
+    _xattrs(root, True)
+    os.chmod(root, 0o755)  # Only this verified fresh original becomes readable.
+    published = identity(root.lstat())
+    need(published[:2] == original[:2] and published[2:5] == (stat.S_IFDIR | 0o755, 0, 0),
+         "Original shell fixture namespace publication differs")
+    binding = canonical({"root": str(root), "identity": list(published), "children": list(SHELL_FIXTURE_CHILDREN), **ancestry})
+    _shell_namespace_check(value, binding)
+    if placeholder_originals is not None:
+        before = _shell_ordinary_placeholders_inventory(value, binding)
+        need([row["identity"] for row in before["entries"]] == placeholder_originals,
+             "Fresh ordinary21 placeholder originals changed before capture")
+        _retain("shell-ordinary21-placeholders-before.json", canonical(before))
+    return binding
+
+
+def _shell_project_inventory(value, namespace, *, saved=False):
     """Fixed fixture only, before launch or AFTER original exit and finality.
 
     This never repairs/removes a pending transaction or scans an unexpected
@@ -2893,8 +10529,9 @@ def _shell_project_inventory(value, *, saved=False):
     cannot reach the saved observation through the original shell-result gate.
     """
     need(_ROOT == root_path(value) and type(saved) is bool, "Positive fixture differs from the original service root or phase")
-    root = _ROOT / "positive-project"
-    directory(root.parent, protected=True)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / "positive-project"
     owner = (value["runnerUid"], value["runnerGid"])
     directories = [(".", [".gitignore", "app", "release", "version.properties"] if saved else ["app", "version.properties"], 0o700, owner),
                    ("app", ["build.gradle.kts"], 0o555, (0, 0))]
@@ -2934,8 +10571,9 @@ def _shell_project_inventory(value, *, saved=False):
         _absent(root / relative)
     need(all(identity(path.lstat()) == original for path, original in original_directories),
          "Positive fixture parent changed during its bounded inventory")
-    return {"schemaVersion": 2, "fixture": "android-saved-readonly-v1", "root": str(root), "saved": saved,
-            "entries": rows, "absent": absent}
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 3, "fixture": "android-saved-readonly-v1", "root": str(root), "saved": saved,
+            "entries": rows, "absent": absent, "namespace": namespace}
 
 
 def shell_project_fixture(value, before_raw, after_raw):
@@ -2944,12 +10582,13 @@ def shell_project_fixture(value, before_raw, after_raw):
     owner = (value["runnerUid"], value["runnerGid"])
     inventories = []
     for document, raw, saved in ((before, before_raw, False), (after, after_raw, True)):
-        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "saved", "entries", "absent"}
-             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 2
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "saved", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 3
              and document["fixture"] == "android-saved-readonly-v1" and document["saved"] is saved
-             and document["root"] == str(root_path(value) / "positive-project")
+             and document["root"] == str(shell_fixture_root(value) / "positive-project")
              and document["absent"] == (["release/store"] if saved else [".gitignore", "release"]),
              "Positive fixture inventory is incomplete or out of phase")
+        namespace = _shell_namespace_data(value, document["namespace"])
         roster = [(".", stat.S_IFDIR | 0o700, owner, [".gitignore", "app", "release", "version.properties"] if saved else ["app", "version.properties"]),
                   ("app", stat.S_IFDIR | 0o555, (0, 0), ["build.gradle.kts"])]
         if saved:
@@ -2978,13 +10617,14 @@ def shell_project_fixture(value, before_raw, after_raw):
                      and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
                      "Positive fixture source or saved output does not match exact expected DATA")
             observed[relative] = row
-        need(all(row["identity"][0] == observed["."]["identity"][0] for row in rows)
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
              and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Positive fixture node aliases or cross-device entries differ")
         inventories.append(observed)
     first, last = inventories
     # Save creates release and may change root timestamps/size/link count,
     # never its dev/inode/type/mode/ownership. Both original hints stay exact.
-    need(first["."]["identity"][:5] == last["."]["identity"][:5]
+    need(before["namespace"] == after["namespace"] and first["."]["identity"][:5] == last["."]["identity"][:5]
          and all(first[name] == last[name] for name in ("app", "app/build.gradle.kts", "version.properties")),
          "Positive fixture root was replaced or an original hint changed")
     return {"fixture": "android-saved-readonly-v1", "rootRetained": True, "hintUnchanged": True,
@@ -2997,15 +10637,371 @@ def shell_project_fixture(value, before_raw, after_raw):
             "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
 
-def _shell_candidate_inventory(value):
+def _shell_workflow_roster(value, installed):
+    """Closed fixture DATA; never a caller renderer or a generic write plan."""
+    need(type(installed) is bool, "Workflow fixture phase is not a boolean")
+    owner = (value["runnerUid"], value["runnerGid"])
+    callers = list(SHELL_WORKFLOW_CALLERS.items())
+    leaves = callers if installed else callers[:1]
+    return [
+        (".", stat.S_IFDIR | 0o700, owner, [".github", ".gitignore", "app", "version.properties"]),
+        ("app", stat.S_IFDIR | 0o555, (0, 0), ["build.gradle.kts"]),
+        (".github", stat.S_IFDIR | 0o700, owner, ["workflows"]),
+        (".github/workflows", stat.S_IFDIR | 0o700, owner, sorted([Path(name).name for name, _ in leaves] + ["unrelated.yml"])),
+        ("app/build.gradle.kts", stat.S_IFREG | 0o444, (0, 0), SHELL_PROJECT_SOURCE),
+        ("version.properties", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_VERSION),
+        (".gitignore", stat.S_IFREG | 0o640, owner, SHELL_WORKFLOW_IGNORE),
+        (".github/workflows/unrelated.yml", stat.S_IFREG | 0o600, owner, SHELL_WORKFLOW_SIBLING),
+        *((name, stat.S_IFREG | (0o640 if index == 0 else 0o600), owner, raw) for index, (name, raw) in enumerate(leaves)),
+    ]
+
+
+def _shell_workflow_absent(installed):
+    return list(SHELL_WORKFLOW_ABSENT) + ([] if installed else list(SHELL_WORKFLOW_CALLERS)[1:])
+
+
+def _shell_workflow_inventory(value, namespace, *, installed=False):
+    """Only before launch or AFTER original successful exit/finality.
+
+    Unexpected names refuse before descendant reads. Nothing repairs, removes,
+    reopens a live operation, follows a link or inspects an unknown journal.
+    """
+    need(_ROOT == root_path(value) and type(installed) is bool, "Different workflow fixture route or phase")
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / "workflow-project"
+    roster = _shell_workflow_roster(value, installed)
+    rows, originals = [], []
+    for relative, mode, owners, expected in roster:
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners, "Workflow fixture mode or ownership differs")
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected workflow fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected and identity(path.lstat()) == identity(before), "Workflow fixture parent changed")
+            rows.append({"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected})
+            originals.append((path, identity(before)))
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest()
+                 and identity(path.lstat()) == identity(before), "Workflow fixture caller or sentinel differs")
+            rows.append({**observed, "path": relative, "kind": "file", "identity": list(identity(before))})
+    absent = _shell_workflow_absent(installed)
+    for relative in absent:
+        _absent(root / relative)
+    need(all(identity(path.lstat()) == original for path, original in originals), "Workflow fixture changed during its inventory")
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 1, "fixture": "android-workflow-apply-v1", "root": str(root), "installed": installed,
+            "entries": rows, "absent": absent, "namespace": namespace}
+
+
+def shell_workflow_fixture(value, before_raw, after_raw):
+    """Type-sensitive, exact fixture correspondence; no possible-live I/O."""
+    inventories, namespaces = [], []
+    for raw, installed in ((before_raw, False), (after_raw, True)):
+        document = decode(raw, 8192)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "installed", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "android-workflow-apply-v1" and document["installed"] is installed
+             and document["root"] == str(shell_fixture_root(value) / "workflow-project")
+             and document["absent"] == _shell_workflow_absent(installed), "Workflow fixture inventory is incomplete or out of phase")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        roster, rows = _shell_workflow_roster(value, installed), document["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Workflow fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            is_directory = stat.S_ISDIR(mode)
+            wanted = {"path", "kind", "identity", "children"} if is_directory else {"path", "kind", "identity", "size", "sha256"}
+            need(type(row) is dict and set(row) == wanted and row["path"] == relative
+                 and row["kind"] == ("directory" if is_directory else "file"), "Workflow fixture node kind/path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Workflow fixture original identity differs")
+            if is_directory:
+                need(row["children"] == expected, "Workflow fixture has an unexpected child or pending state")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Workflow fixture bytes differ from the fixed reviewed caller/sentinel DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Workflow fixture nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1] and len(first) == 9 and len(last) == 12
+         and set(last) - set(first) == set(list(SHELL_WORKFLOW_CALLERS)[1:]), "Workflow fixture does not contain exactly three new callers")
+    for name, old in first.items():
+        new = last[name]
+        if name in (".", ".github/workflows"):
+            # Only these original parents gained/removed entries. Identity,
+            # mode, owners and link counts remain original; timestamps may move.
+            need(old["identity"][:6] == new["identity"][:6], "Workflow fixture original parent was replaced or chmodded")
+        else:
+            need(old == new, "Workflow installation changed an exact-preserved original")
+    return {"fixture": "android-workflow-apply-v1", "rootRetained": True, "originalsRetained": True, "createdCount": 3,
+            "beforeCount": len(first), "afterCount": len(last), "configurationAbsent": True, "noUnexpectedEntries": True,
+            "noPendingState": True, "callers": [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                "mode": stat.S_IMODE(last[name]["identity"][2])} for name, raw in SHELL_WORKFLOW_CALLERS.items()],
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+def _shell_metadata_roster(value, saved):
+    """Fixed public locale: one preserve, one replace, one create, plus a sentinel."""
+    need(type(saved) is bool, "Metadata fixture phase is not a boolean")
+    owner = (value["runnerUid"], value["runnerGid"])
+    names = ["keep.txt", "short_description.txt", "title.txt"]
+    if saved:
+        names.insert(0, "full_description.txt")
+    return [
+        (".", stat.S_IFDIR | 0o700, owner, [".gitignore", "app", "release", "version.properties"]),
+        ("app", stat.S_IFDIR | 0o555, (0, 0), ["build.gradle.kts"]),
+        ("release", stat.S_IFDIR | 0o700, owner, ["mobile-release.json", "store"]),
+        ("release/store", stat.S_IFDIR | 0o700, owner, ["android"]),
+        ("release/store/android", stat.S_IFDIR | 0o700, owner, ["en-US"]),
+        (SHELL_METADATA_LOCALE, stat.S_IFDIR | 0o700, owner, names),
+        ("app/build.gradle.kts", stat.S_IFREG | 0o444, (0, 0), SHELL_PROJECT_SOURCE),
+        ("version.properties", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_VERSION),
+        (".gitignore", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_IGNORE),
+        ("release/mobile-release.json", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_CONFIG),
+        (SHELL_METADATA_LOCALE + "/title.txt", stat.S_IFREG | 0o600, owner, SHELL_METADATA_TITLE),
+        (SHELL_METADATA_LOCALE + "/short_description.txt", stat.S_IFREG | 0o600, owner,
+         SHELL_METADATA_SHORT_AFTER if saved else SHELL_METADATA_SHORT_BEFORE),
+        (SHELL_METADATA_LOCALE + "/keep.txt", stat.S_IFREG | 0o600, owner, SHELL_METADATA_KEEP),
+        *([(SHELL_METADATA_LOCALE + "/full_description.txt", stat.S_IFREG | 0o600, owner, SHELL_METADATA_FULL)] if saved else []),
+    ]
+
+
+def _shell_metadata_absent(saved):
+    return list(SHELL_METADATA_ABSENT) + ([] if saved else [SHELL_METADATA_LOCALE + "/full_description.txt"])
+
+
+def _shell_metadata_inventory(value, namespace, *, saved=False):
+    """Only before launch or after original successful exit/finality; no repair."""
+    need(_ROOT == root_path(value) and type(saved) is bool, "Different metadata fixture route or phase")
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / "metadata-project"
+    rows, parents = [], []
+    for relative, mode, owners, expected in _shell_metadata_roster(value, saved):
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners, "Metadata fixture mode or ownership differs")
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected metadata fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected and identity(path.lstat()) == identity(before), "Metadata fixture parent changed")
+            rows.append({"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected})
+            parents.append((path, identity(before)))
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest()
+                 and identity(path.lstat()) == identity(before), "Metadata fixture input, text or sentinel differs")
+            rows.append({**observed, "path": relative, "kind": "file", "identity": list(identity(before))})
+    absent = _shell_metadata_absent(saved)
+    for relative in absent:
+        _absent(root / relative)
+    need(all(identity(path.lstat()) == original for path, original in parents), "Metadata fixture changed during its inventory")
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 1, "fixture": "android-metadata-save-v1", "root": str(root), "saved": saved,
+            "entries": rows, "absent": absent, "namespace": namespace}
+
+
+def shell_metadata_fixture(value, before_raw, after_raw):
+    """Exact original-to-final DATA correspondence, never possible-live I/O."""
+    inventories, namespaces = [], []
+    for raw, saved in ((before_raw, False), (after_raw, True)):
+        document = decode(raw, 8192)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "saved", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "android-metadata-save-v1" and document["saved"] is saved
+             and document["root"] == str(shell_fixture_root(value) / "metadata-project")
+             and document["absent"] == _shell_metadata_absent(saved), "Metadata fixture inventory is incomplete or out of phase")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        roster, rows = _shell_metadata_roster(value, saved), document["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Metadata fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            is_directory = stat.S_ISDIR(mode)
+            wanted = {"path", "kind", "identity", "children"} if is_directory else {"path", "kind", "identity", "size", "sha256"}
+            need(type(row) is dict and set(row) == wanted and row["path"] == relative
+                 and row["kind"] == ("directory" if is_directory else "file"), "Metadata fixture node kind/path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Metadata fixture original identity differs")
+            if is_directory:
+                need(row["children"] == expected, "Metadata fixture has an unexpected child or pending state")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Metadata fixture bytes differ from the exact reviewed input/text/sentinel DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Metadata fixture nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    short = SHELL_METADATA_LOCALE + "/short_description.txt"
+    full = SHELL_METADATA_LOCALE + "/full_description.txt"
+    need(namespaces[0] == namespaces[1] and len(first) == 13 and len(last) == 14
+         and set(last) - set(first) == {full}, "Metadata fixture does not contain exactly one new text file")
+    for name, old in first.items():
+        new = last[name]
+        if name in (".", SHELL_METADATA_LOCALE):
+            # Journal staging and locale replacement may change timestamps,
+            # never the original directory, mode, owners or final link count.
+            need(old["identity"][:6] == new["identity"][:6], "Metadata fixture original parent was replaced or chmodded")
+        elif name != short:
+            need(old == new, "Metadata Save changed an exact-preserved original")
+    original_nodes = {tuple(row["identity"][:2]) for row in first.values()}
+    need(all(tuple(last[name]["identity"][:2]) not in original_nodes for name in (short, full)),
+         "Metadata replacement/create reused an original inode")
+    return {"fixture": "android-metadata-save-v1", "rootRetained": True, "preservedOriginals": True,
+            "createdCount": 1, "replacedCount": 1, "beforeCount": len(first), "afterCount": len(last),
+            "configurationUnchanged": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "files": [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                       "mode": stat.S_IMODE(last[name]["identity"][2])}
+                      for name, mode, _, raw in _shell_metadata_roster(value, True)
+                      if stat.S_ISREG(mode) and name.startswith(SHELL_METADATA_LOCALE + "/")],
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+def _shell_version_roster(value, saved):
+    """Fixed private version fixture: one absent source, config and sentinel."""
+    need(type(saved) is bool, "Version fixture phase is not a boolean")
+    owner = (value["runnerUid"], value["runnerGid"])
+    return [
+        (".", stat.S_IFDIR | 0o700, owner,
+         [".gitignore", "release", "unrelated.txt", "version.properties"] if saved
+         else [".gitignore", "release", "unrelated.txt"]),
+        ("release", stat.S_IFDIR | 0o700, owner, ["mobile-release.json"]),
+        (".gitignore", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_IGNORE),
+        ("release/mobile-release.json", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_CONFIG),
+        ("unrelated.txt", stat.S_IFREG | 0o600, owner, SHELL_VERSION_KEEP),
+        *([("version.properties", stat.S_IFREG | 0o600, owner, SHELL_VERSION_EDITED)] if saved else []),
+    ]
+
+
+def _shell_version_absent(saved):
+    return list(SHELL_METADATA_ABSENT) + ([] if saved else ["version.properties"])
+
+
+def _shell_version_inventory(value, namespace, *, saved=False):
+    """Inventory only before launch or after the original successful finality."""
+    need(_ROOT == root_path(value) and type(saved) is bool, "Different version fixture route or phase")
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / "version-project"
+    rows, parents = [], []
+    for relative, mode, owners, expected in _shell_version_roster(value, saved):
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners, "Version fixture mode or ownership differs")
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected version fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected and identity(path.lstat()) == identity(before), "Version fixture parent changed")
+            rows.append({"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected})
+            parents.append((path, identity(before)))
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest()
+                 and identity(path.lstat()) == identity(before), "Version fixture input or sentinel differs")
+            rows.append({**observed, "path": relative, "kind": "file", "identity": list(identity(before))})
+    absent = _shell_version_absent(saved)
+    for relative in absent:
+        _absent(root / relative)
+    need(all(identity(path.lstat()) == original for path, original in parents), "Version fixture changed during inventory")
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 1, "fixture": "release-version-save-v1", "root": str(root), "saved": saved,
+            "entries": rows, "absent": absent, "namespace": namespace}
+
+
+def shell_version_fixture(value, before_raw, after_raw):
+    """Outer fixture correspondence; per-phase originals are checked by the observer."""
+    inventories, namespaces = [], []
+    for raw, saved in ((before_raw, False), (after_raw, True)):
+        document = decode(raw, 8192)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "saved", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "release-version-save-v1" and document["saved"] is saved
+             and document["root"] == str(shell_fixture_root(value) / "version-project")
+             and document["absent"] == _shell_version_absent(saved), "Version fixture inventory is incomplete or out of phase")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        roster, rows = _shell_version_roster(value, saved), document["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Version fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            is_directory = stat.S_ISDIR(mode)
+            wanted = {"path", "kind", "identity", "children"} if is_directory else {"path", "kind", "identity", "size", "sha256"}
+            need(type(row) is dict and set(row) == wanted and row["path"] == relative
+                 and row["kind"] == ("directory" if is_directory else "file"), "Version fixture node kind/path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Version fixture original identity differs")
+            if is_directory:
+                need(row["children"] == expected, "Version fixture has an unexpected child or pending state")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Version fixture bytes differ from the reviewed input/version/sentinel DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Version fixture nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1] and len(first) == 5 and len(last) == 6
+         and set(last) - set(first) == {"version.properties"}, "Version fixture does not contain exactly one new source")
+    for name, old in first.items():
+        new = last[name]
+        if name == ".":
+            need(old["identity"][:6] == new["identity"][:6], "Version fixture original root was replaced or chmodded")
+        else:
+            need(old == new, "Version Save changed an exact-preserved original")
+    need(tuple(last["version.properties"]["identity"][:2]) not in {tuple(row["identity"][:2]) for row in first.values()},
+         "Version source aliases an original fixture node")
+    return {"fixture": "release-version-save-v1", "rootRetained": True, "preservedOriginals": True,
+            "createdFileCount": 1, "beforeCount": len(first), "afterCount": len(last),
+            "configurationUnchanged": True, "ignoreUnchanged": True, "sentinelUnchanged": True,
+            "noUnexpectedEntries": True, "noPendingState": True,
+            "version": {"path": "version.properties", "size": len(SHELL_VERSION_EDITED),
+                        "sha256": hashlib.sha256(SHELL_VERSION_EDITED).hexdigest(), "mode": 0o600},
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+def _shell_candidate_inventory(value, namespace):
     """Only the five fixed nodes, before launch or after successful finality.
 
     Unexpected children refuse before any leaf read or subtree inspection.
     Artifact names are checked for absence, never opened, measured or hashed.
     """
     need(_ROOT == root_path(value), "Candidate fixture differs from the original service root")
-    root = _ROOT / "candidate-evidence"
-    directory(root.parent, protected=True)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / "candidate-evidence"
     owner = (value["runnerUid"], value["runnerGid"])
     rows, originals = [], []
     for relative, expected in ((".", ["candidate-manifest.json", "candidate-receipt.json", "operation"]),
@@ -3040,8 +11036,9 @@ def _shell_candidate_inventory(value):
          and len({tuple(row["identity"][:2]) for row in rows}) == 5
          and all(identity(path.lstat()) == original for path, original in originals),
          "Candidate fixture node aliases, cross-device entry or inventory drift")
-    return {"schemaVersion": 1, "fixture": "android-candidate-documents-v1", "root": str(root),
-            "entries": rows, "absent": list(SHELL_CANDIDATE_ARTIFACT_TARGETS)}
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 2, "fixture": "android-candidate-documents-v1", "root": str(root),
+            "entries": rows, "absent": list(SHELL_CANDIDATE_ARTIFACT_TARGETS), "namespace": namespace}
 
 
 def shell_candidate_fixture(value, before_raw, after_raw):
@@ -3052,11 +11049,12 @@ def shell_candidate_fixture(value, before_raw, after_raw):
               ("operation", stat.S_IFDIR | 0o700, ["candidate-operation-intent.json"]),
               *((relative, stat.S_IFREG | 0o600, raw) for relative, raw in SHELL_CANDIDATE_DOCUMENTS.items())]
     for document, raw in ((before, before_raw), (after, after_raw)):
-        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "entries", "absent"}
-             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 2
              and document["fixture"] == "android-candidate-documents-v1"
-             and document["root"] == str(root_path(value) / "candidate-evidence")
+             and document["root"] == str(shell_fixture_root(value) / "candidate-evidence")
              and document["absent"] == list(SHELL_CANDIDATE_ARTIFACT_TARGETS), "Candidate inventory shape or root differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
         rows = document["entries"]
         need(type(rows) is list and len(rows) == 5, "Candidate fixture must contain exactly five nodes")
         for row, (relative, mode, expected) in zip(rows, roster):
@@ -3074,7 +11072,8 @@ def shell_candidate_fixture(value, before_raw, after_raw):
                 need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
                      and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
                      "Candidate document differs from the fixed literal DATA")
-        need(all(row["identity"][0] == rows[0]["identity"][0] for row in rows)
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
              and len({tuple(row["identity"][:2]) for row in rows}) == 5, "Candidate nodes alias or cross devices")
     need(before_raw == after_raw, "Candidate original nodes, bytes or absent artifact targets changed")
     return {"fixture": "android-candidate-documents-v1", "rootRetained": True, "documentsUnchanged": True,
@@ -3094,9 +11093,9 @@ def shell_project_receipt(raw):
     return receipt
 
 
-def shell_candidate_receipt(raw):
+def shell_lifecycle_receipt(raw):
     receipt = decode(raw, 2048)
-    need(canonical(receipt) == canonical(SHELL_CANDIDATE_RECEIPT), "Candidate documents receipt is missing, malformed or premature")
+    need(canonical(receipt) == canonical(SHELL_LIFECYCLE_RECEIPT), "Lifecycle documents receipt is missing, malformed or premature")
     return receipt
 
 
@@ -3104,6 +11103,335 @@ def shell_candidate_receipt(raw):
 def shell_path_receipt(raw):
     receipt = decode(raw, 2048)
     need(raw == canonical(receipt) == canonical(SHELL_PATH_RECEIPT), "Project-path receipt is missing, malformed or premature")
+    return receipt
+
+
+def shell_workflow_receipt(raw):
+    receipt = decode(raw, 2048)
+    need(raw == canonical(receipt) == canonical(SHELL_WORKFLOW_RECEIPT),
+         "Workflow Apply receipt is missing, malformed or premature")
+    return receipt
+
+
+def shell_metadata_receipt(raw):
+    receipt = decode(raw, 2048)
+    need(raw == canonical(receipt) == canonical(SHELL_METADATA_RECEIPT),
+         "Metadata Save receipt is missing, malformed or premature")
+    return receipt
+
+
+def shell_version_receipt(raw):
+    receipt = decode(raw, 2048)
+    need(raw == canonical(receipt) == canonical(SHELL_VERSION_RECEIPT),
+         "Version Save receipt is missing, malformed or premature")
+    return receipt
+
+
+def shell_session_receipt(raw, case):
+    need(type(case) is str and case in SHELL_SESSION_CASES, "Different fixed session receipt case")
+    receipt = decode(raw, SHELL_SESSION_RECEIPT_LIMIT)
+    need(raw == canonical(receipt) == canonical(SHELL_SESSION_RECEIPTS[case]),
+         "Session receipt is missing, malformed, premature or for another method profile")
+    return receipt
+
+
+def _shell_tools_offline_object(value, fields, message):
+    need(type(value) is dict and set(value) == set(fields), message)
+    return value
+
+
+def _shell_tools_offline_context(context, case):
+    offline = case.startswith("offline-")
+    _shell_tools_offline_object(context, {"projectId", "draftRevision", "baselineGeneration", "platform", "operation"}
+        | ({"savedConfig"} if offline else set()), "Tools/Offline original context shape differs")
+    need(type(context["projectId"]) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", context["projectId"]) is not None
+         and all(type(context[key]) is int and 0 <= context[key] < (1 << 32) - 1 for key in ("draftRevision", "baselineGeneration"))
+         and context["platform"] == "android" and context["operation"] == ("offline-preflight" if offline else "build"),
+         "Tools/Offline original context differs")
+    if offline:
+        config = SHELL_TOOLS_OFFLINE_CONFIGS[case]
+        need(canonical(context["savedConfig"]) == canonical({"bytes": len(config), "sha256": hashlib.sha256(config).hexdigest()}),
+             "Offline intent is not bound to the exact predeclared saved bytes")
+
+
+def _shell_tools_terminal(projection, case):
+    need(projection["phase"] == "settled" and projection["finality"] == "settled", "Tools public finality is still pending/unknown")
+    if case == "tools-cancel":
+        need(projection["outcome"] == "cancelled" and projection["reason"] == "cancelled" and projection["result"] is None,
+             "Preclaim Tools cancellation advertised a core result")
+        return
+    core = _shell_tools_offline_object(projection["result"], {"schemaVersion", "policyVersion", "context", "hostPlatform",
+        "outcome", "checks", "commandsAttempted", "lifetime", "assurance"}, "Tools actual core terminal is missing")
+    need(type(core["schemaVersion"]) is int and core["schemaVersion"] == 1 and core["policyVersion"] == "environment-diagnostics-v1"
+         and core["hostPlatform"] == "linux" and canonical(core["context"]) == canonical(projection["context"])
+         and core["outcome"] in ("complete", "unavailable") and projection["outcome"] == core["outcome"]
+         and projection["reason"] == "none", "Tools core/owner terminal differs or is partial")
+    checks = core["checks"]
+    need(type(checks) is list and len(checks) == 3, "Tools fixed Linux Android check roster differs")
+    attempts = 0
+    for row, role in zip(checks, ("git", "java", "javac")):
+        _shell_tools_offline_object(row, {"id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment", "help"},
+                                   "Tools check is not closed Linux DATA")
+        need(row["id"] == role and row["state"] in ("not-run", "completed") and row["build"] is None
+             and type(row["help"]) is str and 0 < len(row["help"].encode("utf-8")) <= 1024 and row["help"].strip()
+             and all(ord(char) > 31 and ord(char) != 127 for char in row["help"]), "Tools fixed check or bounded help differs")
+        baseline = _shell_tools_offline_object(row["baseline"], {"kind", "version", "build"}, "Tools core baseline shape differs")
+        need(baseline["build"] is None and (baseline == {"kind": "no-local-policy", "version": None, "build": None} if role == "git" else
+             baseline["kind"] == "workflow-reference" and type(baseline["version"]) is str
+             and re.fullmatch(r"[0-9][A-Za-z0-9._+\-]{0,63}", baseline["version"]) is not None),
+             "Tools core-supplied baseline differs")
+        if row["state"] == "not-run":
+            need(row["reason"] in ("missing-in-supported-lookup", "unsupported-installation", "unselected-installation")
+                 and row["returnCode"] is None and row["version"] is None and row["assessment"] == "not-assessed",
+                 "Tools not-run row is not an honest fixed-lookup refusal")
+            continue
+        attempts += 1
+        need(type(row["returnCode"]) is int and -(1 << 31) <= row["returnCode"] < 1 << 31
+             and row["reason"] in ("observed", "nonzero-exit", "version-unrecognized")
+             and (row["reason"] == "nonzero-exit") == (row["returnCode"] != 0), "Tools completed original return differs")
+        if row["reason"] == "observed":
+            pattern = (r"[0-9]{1,3}\.[0-9]{1,3}(?:\.[0-9]{1,3})?(?:[.\-][A-Za-z0-9][A-Za-z0-9.+\-]{0,40})?" if role == "git" else
+                       r"[0-9]{1,3}(?:[._][0-9]{1,6}){0,3}(?:[+\-][A-Za-z0-9][A-Za-z0-9.+_\-]{0,32})?")
+            need(type(row["version"]) is str and len(row["version"]) <= 64 and re.fullmatch(pattern, row["version"]) is not None
+                 and row["assessment"] == "no-local-policy", "Tools observed version or non-readiness assessment differs")
+        else:
+            need(row["version"] is None and row["assessment"] == "not-assessed", "Unobserved tool advertised a version")
+    need(type(core["commandsAttempted"]) is int and core["commandsAttempted"] == attempts
+         and (core["outcome"] == "unavailable") == (attempts == 0), "Tools command/observation count differs")
+    need(canonical(core["lifetime"]) == canonical({"complete": True, "fatal": False, "contained": True,
+         "commandDispatched": attempts > 0, "commands": attempts, "inputClosed": True, "handlersRestored": True,
+         "toolDescriptorsClosed": True, "stopObserved": "none"}), "Tools actual core lifetime did not settle")
+    need(canonical(core["assurance"]) == canonical({"basis": "local-tool-observation", "toolsAttempted": attempts > 0,
+         "projectCodeExecuted": False, "projectFilesRead": False, "repositoryObserved": False, "sdkInspected": False,
+         "credentialsRead": False, "storeContacted": False, "dependencyCompleteness": "unknown", "releaseReadiness": "unknown",
+         "toolCacheEffects": "possible"}), "Tools observation was relabelled as readiness or project execution")
+
+
+def _shell_offline_terminal(projection, case):
+    outcome, reason = (("refused", "saved-config-changed") if case == "offline-drift" else
+                       ("cancelled", "cancelled") if case == "offline-cancel" else ("complete", "none"))
+    need(projection["phase"] == "terminal" and projection["intentUsable"] is False
+         and projection["outcome"] == outcome and projection["reason"] == reason, "Offline actual outcome or consumed intent differs")
+    if outcome != "complete":
+        need(projection["result"] is None, "Refused/cancelled Offline case advertised a report")
+        return
+    report = _shell_tools_offline_object(projection["result"], {"schemaVersion", "scope", "usedConfig", "findings", "summary", "limitations"},
+                                       "Offline actual complete report is missing")
+    need(type(report["schemaVersion"]) is int and report["schemaVersion"] == 1 and report["scope"] == "saved-offline-android-no-core-build"
+         and canonical(report["usedConfig"]) == canonical(projection["context"]["savedConfig"])
+         and report["limitations"] == SHELL_TOOLS_OFFLINE_LIMITATIONS, "Offline report scope, saved bytes or limitations differ")
+    summary = _shell_tools_offline_object(report["summary"], {"total", "shown", "omitted", "counts"}, "Offline summary fields differ")
+    counts = _shell_tools_offline_object(summary["counts"], SHELL_TOOLS_OFFLINE_STATUSES, "Offline summary status roster differs")
+    need(all(type(summary[key]) is int and 0 <= summary[key] <= 4096 for key in ("total", "shown", "omitted"))
+         and summary["shown"] == min(summary["total"], 128) and summary["omitted"] == summary["total"] - summary["shown"]
+         and all(type(count) is int and 0 <= count <= 4096 for count in counts.values()) and sum(counts.values()) == summary["total"],
+         "Offline summary counts differ")
+    rows = report["findings"]
+    need(type(rows) is list and len(rows) == summary["shown"], "Offline bounded findings count differs")
+    seen, configured = {status: 0 for status in SHELL_TOOLS_OFFLINE_STATUSES}, []
+    for index, row in enumerate(rows):
+        _shell_tools_offline_object(row, {"ordinal", "check", "status", "message", "projectCheckIndex"}, "Offline finding fields differ")
+        need(type(row["ordinal"]) is int and row["ordinal"] == index and row["check"] in SHELL_TOOLS_OFFLINE_CHECKS
+             and row["message"] == row["check"] and row["status"] in SHELL_TOOLS_OFFLINE_STATUSES
+             and (row["projectCheckIndex"] is None or row["check"] == "configured-project-check"
+                  and type(row["projectCheckIndex"]) is int and 0 <= row["projectCheckIndex"] <= 31), "Offline finding is not redacted fixed DATA")
+        seen[row["status"]] += 1
+        if row["check"] == "configured-project-check":
+            configured.append(row)
+    need(all(seen[status] <= counts[status] for status in seen) and len(configured) == 1
+         and type(configured[0]["projectCheckIndex"]) is int and configured[0]["projectCheckIndex"] == 0
+         and configured[0]["status"] == ("FAIL" if case == "offline-negative" else "PASS")
+         and all(counts[status] == 0 for status in ("MISSING", "BLOCKED", "INVALID"))
+         and (counts["FAIL"] > 0 if case == "offline-negative" else counts["FAIL"] == 0),
+         "Offline fixed project check is missing or complete-negative was relabelled PASS")
+
+
+def shell_tools_offline_receipt(raw, case):
+    """Closed observer engineering DATA, never a shipping qualification token."""
+    need(type(case) is str and case in SHELL_TOOLS_OFFLINE_CASES, "Different fixed Tools/Offline receipt case")
+    receipt = decode(raw, SHELL_TOOLS_OFFLINE_RECEIPT_LIMIT)
+    fields = {"schema", "case", "qualificationOnly", "builder", "projectPicker", "savedObservation", "requests", "initial", "ui",
+              "reciprocalBusy", "hold", "original", "terminal", "fixture"}
+    _shell_tools_offline_object(receipt, fields, "Tools/Offline receipt fields differ")
+    need(raw == canonical(receipt), "Tools/Offline receipt is not original canonical LF DATA")
+    offline, cancelled = case.startswith("offline-"), case in ("tools-cancel", "offline-cancel")
+    boundary = "inspection" if case == "tools-cancel" else "settlement" if case in ("tools-settlement", "offline-settlement") else "none"
+    fixed = {"schema": "installed-tools-offline-v1", "case": case, "qualificationOnly": True, "builder": "normal",
+        "projectPicker": True, "savedObservation": True,
+        "requests": {"toolsStart": 0 if offline else 1, "toolsCancel": 1 if case == "tools-cancel" else 0,
+                     "offlinePrepare": 1 if offline else 0, "offlineStart": 1 if offline else 0, "offlineCancel": 1 if case == "offline-cancel" else 0},
+        "initial": {"toolsAvailable": True, "offlineAvailable": True},
+        "ui": {"start": True, "consent": offline, "terminal": True, "cancel": cancelled},
+        "reciprocalBusy": case in ("tools-settlement", "offline-cancel", "offline-settlement"),
+        "hold": {"boundary": boundary, "entered": boundary != "none", "released": boundary != "none"},
+        "fixture": {"scriptTrace": SHELL_TOOLS_OFFLINE_TRACES[case].decode("ascii"), "laterTrace": "", "savedConfigChanged": case == "offline-drift"}}
+    need(canonical({key: receipt[key] for key in fixed}) == canonical(fixed),
+         "Tools/Offline route, consent, reciprocal gate, hold release or fixed trace differs")
+    original = receipt["original"]
+    flags = {key: True for key in ("inspectionJoined", "acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed",
+        "stdoutEofClosed", "stderrEofClosed", "ioJoined", "coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined",
+        "driverJoined", "managerJoined", "observerJoined", "watchdogJoined", "retiredBeforeCutoff")}
+    flags.update(noChild=False, activeRetained=False, resourceUnknown=False)
+    if case == "tools-cancel":
+        flags.update({key: False for key in ("acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed", "stdoutEofClosed",
+                                            "stderrEofClosed", "coreLifetimeSettled")})
+        flags["noChild"] = True
+    _shell_tools_offline_object(original, {"domain", "id", "generation", *flags}, "Tools/Offline original resource fields differ")
+    need(original["domain"] == ("offline" if offline else "tools")
+         and all(type(original[key]) is str and re.fullmatch(r"[0-9a-f]{32}", original[key]) is not None for key in ("id", "generation"))
+         and canonical({key: original[key] for key in flags}) == canonical(flags),
+         "Tools/Offline same-original inspection, claim, IO, ledger or actual joins are missing")
+    projection = _shell_tools_offline_object(receipt["terminal"], {"ownerGeneration", "context", "phase", "outcome", "reason", "result"}
+        | ({"operationId", "intentUsable"} if offline else {"runId", "finality"}), "Tools/Offline actual typed projection differs")
+    need(projection["operationId" if offline else "runId"] == original["id"] and projection["ownerGeneration"] == original["generation"],
+         "Tools/Offline terminal belongs to a different original")
+    _shell_tools_offline_context(projection["context"], case)
+    (_shell_offline_terminal if offline else _shell_tools_terminal)(projection, case)
+    return receipt
+
+
+def _shell_android_context(context):
+    _shell_android_object(context, {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
+        "platform", "operation"}, "Android original context fields differ")
+    need(type(context["projectId"]) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", context["projectId"]) is not None
+         and all(type(context[key]) is int and 0 <= context[key] < (1 << 32) - 1 for key in ("draftRevision", "baselineGeneration"))
+         and context["platform"] == "android" and context["operation"] == "android-build-inspect"
+         and canonical(context["savedConfig"]) == canonical(_shell_android_content(SHELL_ANDROID_CONFIG))
+         and canonical(context["savedVersion"]) == canonical(_shell_android_version()),
+         "Android intent is not bound to the original saved configuration AND version bytes")
+
+
+def _shell_android_activity(activity):
+    _shell_android_object(activity, {"stage", "selection", "command", "findings", "summary"}, "Android actual activity fields differ")
+    need(activity["stage"] in ("accepted", "inputs-bound", "building", "capturing", "inspecting", "disposing-work"),
+         "Android actual stage differs")
+    need(activity["selection"] is None or canonical(activity["selection"]) == canonical(SHELL_ANDROID_SELECTION),
+         "Android fixed application selection differs")
+    command = _shell_android_object(activity["command"], {"outcome", "exitCode"}, "Android actual command fields differ")
+    need(command["outcome"] in ("not-dispatched", "exited", "unknown")
+         and (type(command["exitCode"]) is int and -(1 << 31) <= command["exitCode"] < 1 << 31 if command["outcome"] == "exited"
+              else command["exitCode"] is None), "Android original command exit is not typed or known as claimed")
+    zero = command["outcome"] == "exited" and command["exitCode"] == 0
+    if activity["stage"] in ("inputs-bound", "building", "capturing", "inspecting"):
+        need(activity["selection"] is not None, "Android stage lost its application selection")
+    if activity["stage"] in ("capturing", "inspecting"):
+        need(zero, "Android inspection preceded a known zero build return")
+    if command["outcome"] != "not-dispatched":
+        need(activity["selection"] is not None and activity["stage"] in ("building", "capturing", "inspecting", "disposing-work"),
+             "Android command was attributed to a prebuild stage")
+    summary = _shell_android_object(activity["summary"], {"total", "shown", "omitted", "counts"}, "Android summary fields differ")
+    counts = _shell_android_object(summary["counts"], SHELL_TOOLS_OFFLINE_STATUSES, "Android exact core status roster differs")
+    rows = activity["findings"]
+    need(type(rows) is list and len(rows) <= 128
+         and all(type(summary[key]) is int for key in ("total", "shown", "omitted"))
+         and summary["total"] == summary["shown"] == len(rows) and summary["omitted"] == 0
+         and all(type(n) is int and 0 <= n <= 128 for n in counts.values()), "Android bounded summary counts differ")
+    seen = {status: 0 for status in SHELL_TOOLS_OFFLINE_STATUSES}
+    for ordinal, row in enumerate(rows):
+        _shell_android_object(row, {"ordinal", "check", "status"}, "Android finding is not redacted closed DATA")
+        need(type(row["ordinal"]) is int and row["ordinal"] == ordinal and row["check"] in SHELL_ANDROID_CHECKS
+             and row["status"] in SHELL_TOOLS_OFFLINE_STATUSES and (row["check"] != "signer" or row["status"] == "SKIP"),
+             "Android finding status/order or signer claim differs")
+        seen[row["status"]] += 1
+        if row["check"] not in ("core-lifecycle", "other-core-finding"):
+            need(zero and activity["stage"] in ("inspecting", "disposing-work"), "Android artifact finding lacks a completed build")
+    need(counts == seen, "Android counts do not equal its actual bounded findings")
+
+
+def _shell_android_terminal(projection, case, original):
+    _shell_android_object(projection, {"operationId", "ownerGeneration", "context", "phase", "intentUsable",
+        "outcome", "reason", "stage", "activity", "disposition", "result"}, "Android actual typed projection fields differ")
+    expected_outcome, expected_reason = {
+        "android-build": ("complete", "none"), "android-build-failure": ("failed", "command-failed"),
+        "android-build-cancel": ("cancelled", "cancelled"), "android-build-refusals": ("refused", "saved-version-changed")}[case]
+    need(projection["operationId"] == original["id"] and projection["ownerGeneration"] == original["generation"]
+         and projection["phase"] == "terminal" and projection["intentUsable"] is False
+         and projection["outcome"] == expected_outcome and projection["reason"] == expected_reason,
+         "Android actual terminal belongs to another original or has not settled")
+    _shell_android_context(projection["context"])
+    activity = projection["activity"]
+    _shell_android_activity(activity)
+    need(projection["stage"] == activity["stage"], "Android native/core terminal stages differ")
+    refused, cancelled = case == "android-build-refusals", case == "android-build-cancel"
+    expected_disposition = {"work": "not-created" if refused else "removed",
+        "artifacts": "not-created" if refused else "retained-local-result" if case == "android-build" else "retained-incomplete"}
+    need(canonical(projection["disposition"]) == canonical(expected_disposition), "Android original disposition is not known as claimed")
+    command = activity["command"]
+    if refused:
+        need(activity["selection"] is None and command == {"outcome": "not-dispatched", "exitCode": None}
+             and activity["findings"] == [], "Saved-version drift dispatched a tool or advertised artifact inspection")
+    else:
+        need(canonical(activity["selection"]) == canonical(SHELL_ANDROID_SELECTION)
+             and command["outcome"] in ("exited", "unknown"), "Android native fixture did not dispatch its selected build")
+    if case != "android-build":
+        need(projection["result"] is None, "Failed/refused/cancelled Android case advertised a local result")
+        if not refused and not cancelled:
+            need(command["outcome"] == "exited" and command["exitCode"] != 0, "Android failure lacks its known nonzero build return")
+        return
+    need(activity["stage"] == "disposing-work" and canonical(command) == canonical({"outcome": "exited", "exitCode": 0}),
+         "Android complete result preceded actual build/finality")
+    result = _shell_android_object(projection["result"], {"schemaVersion", "scope", "usedConfig", "usedVersion", "selection",
+        "toolchainProfile", "command", "findings", "summary", "artifacts", "assurances", "limitations"}, "Android complete result fields differ")
+    need(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1
+         and result["scope"] == "local-post-build-artifact-observation" and result["toolchainProfile"] == "android-local-linux-gnu-x86_64-v1"
+         and canonical(result["usedConfig"]) == canonical(projection["context"]["savedConfig"])
+         and canonical(result["usedVersion"]) == canonical(projection["context"]["savedVersion"])
+         and all(canonical(result[key]) == canonical(activity[key]) for key in ("selection", "command", "findings", "summary"))
+         and result["limitations"] == SHELL_ANDROID_LIMITATIONS, "Android local result lost its original inputs/activity or limitations")
+    findings = result["findings"]
+    need([row["status"] for row in findings if row["check"] == "aab-structure"] == ["PASS"]
+         and [(row["check"], row["status"]) for row in findings if row["check"] in
+              ("aab-manifest", "application-id", "build-number", "version-name", "release-flags")] == [("aab-manifest", "PASS")]
+         and not any(row["check"] in ("core-lifecycle", "other-core-finding") for row in findings),
+         "Fixed real Android fixture did not pass structure AND native manifest/version inspection")
+    expected_assurances = {"structure": "passed", "nativeManifest": "passed", "applicationVersion": "native-checked",
+        "signer": "not-inspected", "toolkitSigning": "not-requested", "storeOperation": "not-requested",
+        "sourceBinding": "not-established", "releaseReadiness": "not-assessed"}
+    need(canonical(result["assurances"]) == canonical(expected_assurances), "Android local observation was relabelled as release authority")
+    artifacts = result["artifacts"]
+    need(type(artifacts) is list and len(artifacts) == 1, "Android required local AAB observation is missing/ambiguous")
+    artifact = _shell_android_object(artifacts[0], {"logicalName", "platform", "kind", "fileName", "size", "sha256",
+        "architectures", "unknownAbi", "freshness"}, "Android artifact contains extra/raw output fields")
+    fixed_artifact = {"logicalName": "android-aab", "platform": "android", "kind": "aab", "fileName": "app-release.aab",
+        "architectures": [], "unknownAbi": False, "freshness": "not-established"}
+    need(canonical({key: artifact[key] for key in fixed_artifact}) == canonical(fixed_artifact)
+         and type(artifact["size"]) is int and 0 < artifact["size"] <= 1 << 30
+         and type(artifact["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"]) is not None,
+         "Android Java-only fixture artifact or bounded byte observation differs")
+
+
+def shell_android_receipt(raw, case):
+    """Engineering cases; ordinary-selection history is not product/native gate credit."""
+    need(type(case) is str and case in SHELL_ANDROID_CASES, "Different fixed Android receipt case")
+    receipt = decode(raw, SHELL_ANDROID_RECEIPT_LIMIT)
+    _shell_android_object(receipt, {"schema", "case", "qualificationOnly", "builder", "normalSelection", "projectPicker", "savedObservation",
+        "savedVersionObservation", "requests", "ui", "busyObserved", "original", "toolsLedgerSettled", "nativeIntegrity",
+        "coreLifetime", "terminal", "fixture", "limits"}, "Android receipt fields differ")
+    need(raw == canonical(receipt), "Android receipt is not original canonical LF DATA")
+    cancelled, refused = case == "android-build-cancel", case == "android-build-refusals"
+    fixed = {"schema": "installed-android-build-v2", "case": case, "qualificationOnly": True, "builder": "normal",
+        "normalSelection": {"selectedBeforeObservation": True, "observerGranted": False},
+        "projectPicker": True, "savedObservation": True, "savedVersionObservation": True,
+        "requests": {"androidPrepare": 1, "androidStart": 1, "androidCancel": 1 if cancelled else 0},
+        "ui": {"start": True, "consent": True, "terminal": True, "cancel": cancelled}, "busyObserved": cancelled,
+        "toolsLedgerSettled": True, "nativeIntegrity": True, "fixture": _shell_android_native_fixture(case), "limits": SHELL_ANDROID_LIMITS}
+    need(canonical({key: receipt[key] for key in fixed}) == canonical(fixed),
+         "Android original UI/consent/busy/fixture/native settlement or qualification limits differ")
+    flags = {key: True for key in ("inspectionJoined", "acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed",
+        "stdoutEofClosed", "stderrEofClosed", "ioJoined", "coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined",
+        "driverJoined", "managerJoined", "observerJoined", "watchdogJoined", "retiredBeforeCutoff")}
+    flags.update(noChild=False, activeRetained=False, resourceUnknown=False)
+    original = _shell_android_object(receipt["original"], {"domain", "id", "generation", *flags}, "Android original fields differ")
+    need(original["domain"] == "android"
+         and all(type(original[key]) is str and re.fullmatch(r"[0-9a-f]{32}", original[key]) is not None for key in ("id", "generation"))
+         and canonical({key: original[key] for key in flags}) == canonical(flags),
+         "Android receipt lacks its OWN original inspection/child/waits/ledgers/joins")
+    commands = 0 if refused else 2 if case == "android-build" else 1
+    lifetime = {"complete": True, "fatal": False, "contained": True, "commandDispatched": not refused, "commands": commands,
+        "profileCalls": 0, "inputClosed": True, "handlersRestored": True, "invocationClosed": True, "artifactsClosed": True,
+        "toolsClosed": True, "namespaceClosed": True, "stopObserved": "cancelled" if cancelled else "none"}
+    need(canonical(receipt["coreLifetime"]) == canonical(lifetime), "Android ACTUAL parsed core lifetime is incomplete/different")
+    _shell_android_terminal(receipt["terminal"], case, original)
     return receipt
 
 
@@ -3117,21 +11445,23 @@ def _shell_path_absent(changed):
         ["path-project/inputs/link-original", "path-project/inputs/kind-original", "path-project/ios/Kind.original"])
 
 
-def _shell_paths_inventory(value, *, changed=False):
+def _shell_paths_inventory(value, namespace, *, changed=False):
     """Fixed before/after fixture; after is reachable only after actual success.
 
     No failed-work scan, repair, restoration or target-file follow is admitted.
     A directory's exact children are admitted before any descendant is opened.
     """
     need(_ROOT == root_path(value) and type(changed) is bool, "Different original path fixture or phase")
-    directory(_ROOT, protected=True)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value)
     roster = _shell_path_roster(changed)
     rows, originals = {}, []
     # Parent roster admission is first, including both fixed sibling roots.
     for name, kind in roster:
         if kind != "directory":
             continue
-        path = _ROOT / name
+        path = root / name
         before = path.lstat()
         mode = 0o500 if changed and name == "path-project" else 0o700
         need(stat.S_ISDIR(before.st_mode) and stat.S_IMODE(before.st_mode) == mode
@@ -3149,7 +11479,7 @@ def _shell_paths_inventory(value, *, changed=False):
     for name, kind in roster:
         if kind == "directory":
             continue
-        path = _ROOT / name
+        path = root / name
         before = path.lstat()
         need((before.st_uid, before.st_gid) == (value["runnerUid"], value["runnerGid"])
              and before.st_nlink == 1, "Path fixture leaf ownership differs")
@@ -3167,24 +11497,27 @@ def _shell_paths_inventory(value, *, changed=False):
         rows[name] = row
         originals.append((path, identity(before)))
     for name in _shell_path_absent(changed):
-        _absent(_ROOT / name)
+        _absent(root / name)
     need(len({(row["identity"][0], row["identity"][1]) for row in rows.values()}) == len(roster)
-         and all(row["identity"][0] == _ROOT.lstat().st_dev for row in rows.values())
+         and all(row["identity"][0] == namespace["identity"][0] for row in rows.values())
          and all(identity(path.lstat()) == original for path, original in originals), "Path fixture aliases or original identity drift")
-    return {"schemaVersion": 1, "fixture": "project-paths-v1", "root": str(_ROOT), "changed": changed,
-            "entries": [rows[name] for name, _ in roster], "absent": _shell_path_absent(changed)}
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 2, "fixture": "project-paths-v1", "root": str(root), "changed": changed,
+            "entries": [rows[name] for name, _ in roster], "absent": _shell_path_absent(changed), "namespace": namespace}
 
 
 def shell_paths_fixture(value, before_raw, after_raw):
     """Typed correspondence only; not authority to observe a live/failed case."""
-    documents = []
+    documents, namespaces = [], []
     for raw, changed in ((before_raw, False), (after_raw, True)):
         doc = decode(raw, 8192)
         roster = _shell_path_roster(changed)
-        need(type(doc) is dict and set(doc) == {"schemaVersion", "fixture", "root", "changed", "entries", "absent"}
-             and canonical(doc) == raw and type(doc["schemaVersion"]) is int and doc["schemaVersion"] == 1
-             and doc["fixture"] == "project-paths-v1" and doc["root"] == str(root_path(value)) and doc["changed"] is changed
+        need(type(doc) is dict and set(doc) == {"schemaVersion", "fixture", "root", "changed", "entries", "absent", "namespace"}
+             and canonical(doc) == raw and type(doc["schemaVersion"]) is int and doc["schemaVersion"] == 2
+             and doc["fixture"] == "project-paths-v1" and doc["root"] == str(shell_fixture_root(value)) and doc["changed"] is changed
              and doc["absent"] == _shell_path_absent(changed), "Project-path inventory shape, root or phase differs")
+        namespace = _shell_namespace_data(value, doc["namespace"])
+        namespaces.append(namespace)
         rows = doc["entries"]
         need(type(rows) is list and len(rows) == len(roster), "Project-path fixture must have exactly fourteen/fifteen nodes")
         for row, (name, kind) in zip(rows, roster):
@@ -3204,8 +11537,10 @@ def shell_paths_fixture(value, before_raw, after_raw):
             else:
                 need(original[5] == 1 and original[6] == len(SHELL_PATH_BYTES) and type(row["size"]) is int
                      and row["size"] == len(SHELL_PATH_BYTES) and row["sha256"] == hashlib.sha256(SHELL_PATH_BYTES).hexdigest(), "Project-path fixed inert bytes differ")
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
         need(len({tuple(row["identity"][:2]) for row in rows}) == len(roster)
-             and all(row["identity"][0] == rows[0]["identity"][0] for row in rows), "Project-path nodes alias or cross devices")
+             and all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows),
+             "Project-path nodes alias or cross devices")
         documents.append({row["path"]: row for row in rows})
     before, after = documents
     for name, kind in SHELL_PATH_NODES:
@@ -3221,7 +11556,7 @@ def shell_paths_fixture(value, before_raw, after_raw):
             need(old == new, "Unchanged project-path node identity changed")
         if kind == "file":
             need(before[name]["sha256"] == after[new_name]["sha256"], "Moved original file bytes changed")
-    need(before_raw != after_raw, "Project-path mutations were not observed")
+    need(namespaces[0] == namespaces[1] and before_raw != after_raw, "Project-path mutations or original namespace differ")
     return {"fixture": "project-paths-v1", "rootRetained": True, "originalsRetained": True, "noUnexpectedEntries": True,
             "noPendingState": True, "inertBytesUnchanged": True, "beforeCount": 14, "afterCount": 15, "fileCount": 5,
             "fileBytes": len(SHELL_PATH_BYTES) * 5, "mutations": ["symlink", "directory-for-file", "file-for-directory", "root-mode"],
@@ -3229,7 +11564,8 @@ def shell_paths_fixture(value, before_raw, after_raw):
             "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
 
-def _shell_prepare(value, case):
+def _shell_prepare(value, case, namespace):
+    _shell_namespace_check(value, namespace)
     base, environment = _ROOT / ("gui-" + case), shell_environment(value, case)
     log_binding = _shell_log_prepare(value, case)
     for path in (base, *(base / name for name in ("home", "tmp", "runtime", "config", "cache", "data", "empty-config"))):
@@ -3250,40 +11586,142 @@ def _shell_prepare(value, case):
     for path in (Path("/tmp/.X99-lock"), Path("/tmp/.X11-unix/X99"), bus, base / "runtime/absent-system-bus"):
         _absent(path)  # Conflict is failure, never permission to repair/remove.
     if case == "positive":
-        project = _ROOT / "positive-project"
-        project.mkdir(mode=0o700)
-        (project / "app").mkdir(mode=0o700)
-        _D.write(project / "app/build.gradle.kts", SHELL_PROJECT_SOURCE, 0o444)
-        _D.write(project / "version.properties", SHELL_PROJECT_VERSION, 0o600)
-        # Keep release absent: the actual reviewed Save must create it. The
-        # named version input has project-owner ancestry; app stays read-only.
-        os.chmod(project / "app", 0o555)
-        os.chown(project / "version.properties", value["runnerUid"], value["runnerGid"])
-        os.chown(project, value["runnerUid"], value["runnerGid"])
-        _retain("shell-positive-project-before.json", canonical(_shell_project_inventory(value)))
-        evidence = _ROOT / "candidate-evidence"
-        evidence.mkdir(mode=0o700)
-        (evidence / "operation").mkdir(mode=0o700)
-        for relative, raw in SHELL_CANDIDATE_DOCUMENTS.items():
-            _D.write(evidence / relative, raw, 0o600)
-            os.chown(evidence / relative, value["runnerUid"], value["runnerGid"])
-        for path in (evidence / "operation", evidence):
-            os.chown(path, value["runnerUid"], value["runnerGid"])
-        _retain("shell-positive-candidate-before.json", canonical(_shell_candidate_inventory(value)))
+        _retain("shell-positive-project-before.json", canonical(_shell_project_inventory(value, namespace)))
+        _retain("shell-positive-candidate-before.json", canonical(_shell_candidate_inventory(value, namespace)))
     if case == "project-paths":
-        for name, kind in SHELL_PATH_NODES:
-            path = _ROOT / name
-            if kind == "directory":
-                path.mkdir(mode=0o700)
-            else:
-                _D.write(path, SHELL_PATH_BYTES, 0o600)
-            os.chown(path, value["runnerUid"], value["runnerGid"])
-        _retain("shell-project-paths-before.json", canonical(_shell_paths_inventory(value)))
+        _retain("shell-project-paths-before.json", canonical(_shell_paths_inventory(value, namespace)))
+    if case == "workflow-apply":
+        _retain("shell-workflow-apply-before.json", canonical(_shell_workflow_inventory(value, namespace)))
+    if case in SHELL_SESSION_CASES:
+        _retain("shell-" + case + "-before.json", canonical(_shell_session_inventory(value, namespace, case)))
+    if case == "metadata-save":
+        _retain("shell-metadata-save-before.json", canonical(_shell_metadata_inventory(value, namespace)))
+    if case == "version-save":
+        _retain("shell-version-save-before.json", canonical(_shell_version_inventory(value, namespace)))
+    if case in SHELL_TOOLS_OFFLINE_CASES:
+        _retain("shell-" + case + "-before.json", canonical(_shell_tools_offline_inventory(value, namespace, case)))
+    if case in SHELL_ANDROID_CASES:
+        _retain("shell-" + case + "-before.json", canonical(_shell_android_inventory(value, namespace, case)))
+    if case in SHELL_RECOVERY_ALL_CASES:
+        _retain("shell-" + case + "-before.json", canonical(_shell_recovery_inventory(value, namespace, case, "before")))
+    if shell_github_release(value):
+        _shell_github_release_home(value, case)
+    if shell_github_preflight(value):
+        _shell_github_preflight_home(value, case)
     return environment, log_binding
 
 
-def shell_result(stdout, stderr, case, code, expected):
+def _shell_fixtures_final(value, namespace):
+    """Compare retained fixtures only after every original case has returned."""
+    # Every original case, including the eight Tools/Offline cases, returned through the
+    # same shell_result gate. Check every earlier original family and the
+    # saved metadata/version together, never by following a failed/possibly-live case.
+    if shell_recovery(value):
+        need(not shell_recovery_negative(value), "Failed recovery experiment cannot enter success finality")
+        for case in shell_cases(value):
+            need(canonical(_shell_recovery_inventory(value, namespace, case, "after"))
+                 == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_RECOVERY_INVENTORY_LIMIT),
+                 "A later Recovery case changed an earlier original fixture")
+        return
+    if shell_github(value):
+        if shell_github_release(value):
+            _shell_github_release_journals_final(value)
+        if shell_github_preflight(value):
+            _shell_github_preflight_journals_final(value)
+        after = canonical(_shell_github_inventory(value, namespace))
+        shell_github_fixture(value, read(_ROOT / "public/shell-github-project-before.json", SHELL_GITHUB_FIXTURE_LIMIT), after)
+        _retain("shell-github-project-after.json", after)
+        material = canonical(_shell_github_materials_snapshot(value))
+        need(material == read(_ROOT / "public/shell-github-materials-before.json", SHELL_GITHUB_MATERIAL_LIMIT),
+             "GitHub N/D/peer originals changed during observations")
+        _retain("shell-github-materials-after.json", material)
+        return
+    need(canonical(_shell_project_inventory(value, namespace, saved=True))
+         == read(_ROOT / "public/shell-positive-project-after.json", 8192)
+         and canonical(_shell_candidate_inventory(value, namespace))
+         == read(_ROOT / "public/shell-positive-candidate-after.json", 8192)
+         and canonical(_shell_paths_inventory(value, namespace, changed=True))
+         == read(_ROOT / "public/shell-project-paths-after.json", 8192)
+         and canonical(_shell_workflow_inventory(value, namespace, installed=True))
+         == read(_ROOT / "public/shell-workflow-apply-after.json", 8192)
+         and canonical(_shell_metadata_inventory(value, namespace, saved=True))
+         == read(_ROOT / "public/shell-metadata-save-after.json", 8192)
+         and canonical(_shell_version_inventory(value, namespace, saved=True))
+         == read(_ROOT / "public/shell-version-save-after.json", 8192),
+         "Shell observations changed another original fixture family")
+    for case in SHELL_SESSION_CASES:
+        need(canonical(_shell_session_inventory(value, namespace, case, changed=case == "session-refusals"))
+             == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_SESSION_INVENTORY_LIMIT),
+             "Later shell observations changed an earlier original session fixture")
+    for case in SHELL_TOOLS_OFFLINE_CASES:
+        need(canonical(_shell_tools_offline_inventory(value, namespace, case, after=True))
+             == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT),
+             "Later shell observations changed an earlier original Tools/Offline fixture")
+    for case in shell_android_cases(value):
+        need(canonical(_shell_android_inventory(value, namespace, case, after=True))
+             == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_ANDROID_INVENTORY_LIMIT),
+             "Later shell observations changed earlier Android source controls or fixed output-root metadata")
+    if shell_ordinary(value):
+        after = canonical(_shell_ordinary_placeholders_inventory(value, namespace))
+        shell_ordinary_placeholders(value, read(_ROOT / "public/shell-ordinary21-placeholders-before.json", 8192), after)
+        _retain("shell-ordinary21-placeholders-after.json", after)
+
+
+def _shell_original_child_map(raw, expected):
+    """One actual original-child map, matched to the admitted loader identities."""
+    need(type(expected) is dict and len(expected) == 6, "Original shell admitted mapping set differs")
+    rows = decode(raw, 8192)
+    need(type(rows) is list and len(rows) == 6 and all(type(row) is dict for row in rows)
+         and [row.get("role") for row in rows] == sorted(expected), "Original shell child roles differ")
+    for row in rows:
+        need(set(row) == {"role", "path", "deviceMajor", "deviceMinor", "inode"}
+             and row["path"] in expected[row["role"]]["paths"]
+             and all(type(row[key]) is int and row[key] == expected[row["role"]][key]
+                     for key in ("deviceMajor", "deviceMinor", "inode")), "Original shell child mapping differs")
+    return rows
+
+
+SHELL_SETTLED_FAILURE_LABELS = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SettledFailure\n"
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+
+
+def _shell_settled_failure_result(stdout, stderr, case, code, labels):
+    """One closed expected-negative observation, never general code1 acceptance."""
+    need(case == "settled-failure" and type(code) is int and code == 1
+         and type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= LIMIT
+         and type(labels) is bytes and labels == SHELL_SETTLED_FAILURE_LABELS
+         and _shell_label_pair(labels) == {"step": "SettledFailure", "boundary": "dom", "bootstrapProgress": "advanced"},
+         "Original settled-failure capture or first label differs")
+    def records(raw):
+        lines = raw.split(b"\n")  # Retain prefixed records and unterminated tails; CR is not LF.
+        return [line + b"\n" if index < len(lines) - 1 else line
+                for index, line in enumerate(lines) if b"MRK_" in line]
+    need(records(stdout) == [b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n",
+         *SHELL_SETTLED_FAILURE_LABELS.splitlines(keepends=True),
+         b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n",
+         b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n"] and records(stderr) == [],
+         "Original settled-failure bootstrap/label/handoff/failure order differs")
+    return {"case": case, "exitCode": 1, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [],
+            "qualified": False, "expectedFailureObserved": True, "failureHandoff": "original-quit-relay-loop-returned"}
+
+
+def shell_result(stdout, stderr, case, code, expected, *, failure_labels=None):
     """Original bounded captures, not wrapper zero or an observation delay."""
+    if case in SHELL_RECOVERY_ALL_CASES:
+        need(failure_labels is None, "Recovery requires its own original observation, not failure labels")
+        return shell_recovery_result(stdout, stderr, case, code)
+    if case in SHELL_GITHUB_RELEASE_CASES:
+        need(failure_labels is None, "Release success requires its actual receipt, not failure labels")
+        return shell_github_release_result(stdout, stderr, case, code, expected)
+    if case in SHELL_GITHUB_PREFLIGHT_CASES:
+        need(failure_labels is None, "Preflight success requires its actual receipt, not failure labels")
+        return shell_github_preflight_result(stdout, stderr, case, code, expected)
+    if case in SHELL_GITHUB_ALL_CASES:
+        need(failure_labels is None, "GitHub success requires its actual receipt, not legacy failure labels")
+        return shell_github_result(stdout, stderr, case, code, expected)
+    if case == "settled-failure":
+        return _shell_settled_failure_result(stdout, stderr, case, code, failure_labels)
+    need(failure_labels is None, "A success-requiring case supplied a failure-label export")
     need(case in SHELL_CASES and type(code) is int and code == 0
          and type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= LIMIT,
          "Original shell capture failed/incomplete")
@@ -3298,24 +11736,70 @@ def shell_result(stdout, stderr, case, code, expected):
         need(len(output) == 6 and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n",
              b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
              and output[3].startswith(SHELL_PROJECT_MARKER) and output[3].endswith(b"\n")
-             and output[4].startswith(SHELL_CANDIDATE_MARKER) and output[4].endswith(b"\n")
+             and output[4].startswith(SHELL_LIFECYCLE_MARKER) and output[4].endswith(b"\n")
              and output[5] == marker + b"\n" and diagnostics == [],
              "Positive original bootstrap/contract/receipt/completion order differs")
         # Each independent JSON+LF retains its original 2048-byte bound.
         receipt = shell_project_receipt(output[3][len(SHELL_PROJECT_MARKER):])
-        candidate = shell_candidate_receipt(output[4][len(SHELL_CANDIDATE_MARKER):])
+        lifecycle = shell_lifecycle_receipt(output[4][len(SHELL_LIFECYCLE_MARKER):])
         return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
-                "maps": [], "projectDraft": receipt, "candidateDocuments": candidate}
-    if case == "project-paths":
+                "maps": [], "projectDraft": receipt, "lifecycleDocuments": lifecycle}
+    if case in ("project-paths", "workflow-apply", "metadata-save", "version-save"):
+        receipt_marker, receipt_reader, field = {
+            "project-paths": (SHELL_PATH_MARKER, shell_path_receipt, "projectPaths"),
+            "workflow-apply": (SHELL_WORKFLOW_MARKER, shell_workflow_receipt, "workflowApply"),
+            "metadata-save": (SHELL_METADATA_MARKER, shell_metadata_receipt, "metadataSave"),
+            "version-save": (SHELL_VERSION_MARKER, shell_version_receipt, "versionSave"),
+        }[case]
         output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
         diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
         need(len(output) == 5 and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n",
              b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
-             and output[3].startswith(SHELL_PATH_MARKER) and output[3].endswith(b"\n")
+             and output[3].startswith(receipt_marker) and output[3].endswith(b"\n")
              and output[4] == marker + b"\n" and diagnostics == [],
-             "Project-path original bootstrap/contract/receipt/completion order differs")
-        receipt = shell_path_receipt(output[3][len(SHELL_PATH_MARKER):])
-        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [], "projectPaths": receipt}
+             "Original path/workflow/metadata/version bootstrap/contract/receipt/completion order differs")
+        receipt = receipt_reader(output[3][len(receipt_marker):])
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [],
+                field: receipt}
+    if case in SHELL_ANDROID_CASES:
+        output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+        diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
+        need(len(output) == 5 and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n",
+             b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
+             and output[3].startswith(SHELL_ANDROID_MARKER) and output[3].endswith(b"\n")
+             and output[4] == marker + b"\n" and diagnostics == [],
+             "Android original bootstrap/contract/receipt/completion order differs")
+        receipt = shell_android_receipt(output[3][len(SHELL_ANDROID_MARKER):], case)
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                "maps": [], "androidBuild": receipt}
+    if case in SHELL_TOOLS_OFFLINE_CASES:
+        output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+        diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
+        need(len(output) == 5 and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n",
+             b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
+             and output[3].startswith(SHELL_TOOLS_OFFLINE_MARKER) and output[3].endswith(b"\n")
+             and output[4] == marker + b"\n" and diagnostics == [],
+             "Tools/Offline original bootstrap/contract/receipt/completion order differs")
+        receipt = shell_tools_offline_receipt(output[3][len(SHELL_TOOLS_OFFLINE_MARKER):], case)
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                "maps": [], "toolsOffline": receipt}
+    if case in SHELL_SESSION_CASES:
+        output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+        diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
+        need(6 <= len(output) <= SHELL_SESSION_R1_LIMIT + 5
+             and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
+             and output[-2].startswith(SHELL_SESSION_MARKER) and output[-2].endswith(b"\n")
+             and output[-1] == marker + b"\n" and diagnostics == [],
+             "Original session bootstrap/contract/maps/receipt/completion order differs")
+        receipt = shell_session_receipt(output[-2][len(SHELL_SESSION_MARKER):], case)
+        maps = output[3:-2]
+        need(len(maps) == receipt["behavior"]["assessments"]
+             and all(line.startswith(CHILD_MARKER.encode("ascii")) and line.endswith(b"\n") and b"\r" not in line
+                     and len(line) <= 8192 + len(CHILD_MARKER) for line in maps),
+             "Session assessments lack their bounded original child-map captures")
+        rows = [_shell_original_child_map(line[len(CHILD_MARKER):], expected) for line in maps]
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                "maps": rows, "sessionInputs": receipt}
     if case == "normal":
         wanted = [b"MRK_DESKTOP_CAPABILITIES=available", b"MRK_DESKTOP_CATALOGUE=returned"]
         need(sorted(lines) == sorted(wanted), "Actual normal capabilities/catalogue or observer completion missing")
@@ -3328,14 +11812,7 @@ def shell_result(stdout, stderr, case, code, expected):
     need(sorted(remaining) in (sorted([contracts, marker]), sorted([contracts, marker, b"MRK_DESKTOP_CAPABILITIES=unavailable"]))
          and len(maps) == 1 and len(maps[0]) <= 8192 + len(CHILD_MARKER)
          and type(expected) is dict and len(expected) == 6, "Outstanding original/GUI completion differs")
-    rows = decode(maps[0][len(CHILD_MARKER):], 8192)
-    need(type(rows) is list and len(rows) == 6 and all(type(row) is dict for row in rows)
-         and [row.get("role") for row in rows] == sorted(expected), "Outstanding original child roles differ")
-    for row in rows:
-        need(set(row) == {"role", "path", "deviceMajor", "deviceMinor", "inode"}
-             and row["path"] in expected[row["role"]]["paths"]
-             and all(type(row[key]) is int and row[key] == expected[row["role"]][key]
-                     for key in ("deviceMajor", "deviceMinor", "inode")), "Outstanding original child mapping differs")
+    rows = _shell_original_child_map(maps[0][len(CHILD_MARKER):], expected)
     return {"case": case, "exitCode": 0, "bootstrapReturned": False, "domAndGtkObserved": True, "maps": [rows]}
 
 
@@ -3438,6 +11915,59 @@ def _shell_normal_markers(stdout, stderr):
               "app-info-enter", "catalog-enter", "content-terminated",
               "content-reason-crashed", "content-reason-exceeded-memory-limit",
               "content-reason-terminated-by-api", "content-reason-unknown")
+    # Exact static Rust records from the SAME capability admission/original wait.
+    # Unknown original codes map to literal other; unknown emitted bytes do not.
+    failure_codes = ("runtime_unavailable", "cleanup_unknown", "invalid_request", "shutting_down", "busy", "unavailable",
+                     "offline_preflight_busy", "android_build_busy", "environment_diagnostics_busy", "query_timeout",
+                     "protocol_error", "engine_failed", "io_error", "output_limit", "other")
+    stages += tuple("capabilities-" + origin + "-" + code
+                    for origin in ("admission", "query-wait") for code in failure_codes)
+    # Linux-only first-error cause DATA, counted only as complete fixed records.
+    native_failures = (
+        'unsupported-platform',
+        'missing-compile-anchor',
+        'stopped',
+        'deadline',
+        'native-unavailable',
+        'native-denied',
+        'namespace',
+        'mount',
+        'ownership',
+        'extended-attributes',
+        'identity-changed',
+        'manifest',
+        'inventory',
+        'bounds',
+        'already-used',
+        'interrupted',
+        'close-uncertain',
+        'ledger-invariant',
+        'transfer-unavailable',
+        'destination-occupied',
+    )
+    local_causes = (
+        'selection-profile-closed',
+        'selection-compile-binding',
+        'selection-method-outside-profile',
+        'inspection-unavailable',
+        'acquisition-entry-not-released',
+        'acquisition-custody-missing',
+        'acquisition-lock',
+        'final-claim-owner-gate',
+        'returned-spawn-process-fd-limit',
+        'returned-spawn-system-fd-limit',
+        'returned-spawn-memory',
+        'returned-spawn-resource-unavailable',
+        'returned-spawn-permission-denied',
+        'returned-spawn-not-found',
+        'returned-spawn-exec-format',
+        'returned-spawn-other',
+        'engine-response',
+        'unavailable',
+    )
+    stages += tuple("capabilities-cause-" + origin + "-" + reason
+                    for origin in ("inspection", "capability", "preparation", "final-claim") for reason in native_failures)
+    stages += tuple("capabilities-cause-" + label for label in local_causes)
     prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
     stage_lines = {prefix + stage.encode("ascii") + b"\n": stage for stage in stages}
     result = {}
@@ -3559,17 +12089,391 @@ def _shell_failure_output(marker, data):
         sys.stderr.flush()
 
 
-def _shell_command_failure(argv, result, case, display_log, log_error):
-    """Original returned synthetic observer DATA, not another read or verdict."""
+def _shell_command_failure(argv, result, case, display_log, log_error, original, call, *, label_data=None):
+    """Same actual owner return and original sidecar only; never a verdict."""
     try:
+        capture = _shell_capture_summary(result, argv, display_log)
+        labels, reason = None, "owner-finality-unavailable"
+        handoff = None
+        if capture is not None:
+            reason = "unavailable"
+            try:
+                labels = _shell_labels_read(original) if label_data is None else label_data[1]
+            except BaseException:
+                pass
+            if labels is not None:
+                reason = None
+                if result.returncode == 1:
+                    # Closed DATA from the SAME joined capture, never Xvfb log
+                    # text, a second label read, or cleanup/continuation authority.
+                    wanted = b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n"
+                    failed = b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n"
+                    terminal = []
+                    for raw in (result.stdout, result.stderr):
+                        lines = raw.split(b"\n")  # Only LF delimits a record, never a bare CR.
+                        for index, line in enumerate(lines):
+                            if (b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF" in line or b"MRK_INSTALLED_SHELL_OBSERVATION" in line
+                                    or line.startswith(b"MRK_") and b"-verified" in line):
+                                # Include malformed/prefixed records and the unterminated
+                                # tail so neither can disappear beside a genuine pair.
+                                terminal.append(line + b"\n" if index < len(lines) - 1 else line)
+                    if len(terminal) == 2 and terminal.count(wanted) == 1 and terminal.count(failed) == 1:
+                        handoff = "original-quit-relay-loop-returned"
         name = None if log_error is None else type(log_error).__name__
         data = {"schemaVersion": 1, "scope": "original-shell-command-failure-diagnostic-only",
                 "case": case, "qualified": False, "cleanupEstablished": False,
                 "logErrorType": name if name is None or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other",
-                "capture": _shell_capture_summary(result, argv, display_log)}
+                "capture": capture, "labels": labels, "labelsReason": reason, "failureHandoff": handoff,
+                "ownerCall": _shell_call_summary(call)}
         _shell_failure_output(b"MRK_INSTALLED_SHELL_COMMAND_FAILURE=", data)
     except BaseException:
         pass  # Never replace an original failure, including a log read failure.
+
+
+def _shell_error_data(original, origin):
+    safe_messages = {
+        "Normal window controller endpoint expired",
+        "Normal original returned before controller command",
+        "Normal window controller command bound exhausted",
+        "No original controller command budget remains",
+        "Original normal shell returned before Quit",
+        "Original private shell window did not become visible in the finite observation",
+        "Original normal shell/controller did not settle",
+        "Original shell capture failed/incomplete",
+        "Actual normal capabilities/catalogue or observer completion missing",
+        "owned command failed, timed out, or produced incomplete output",
+        "owned command cleanup could not be confirmed",
+        "owned command executable could not be started",
+        "owned command produced incomplete output",
+        "owned command output exceeds its bound",
+        "owned command exceeded its original deadline",
+        "owned command protocol or original ownership is incomplete",
+        "Original shell error log was replaced or changed",
+        "Original shell error log changed during capture",
+        "Combined shell output exceeds its bound",
+    }
+
+    known_errors = tuple(value for name in ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown")
+                         if isinstance(value := getattr(_OWNER, name, None), type))
+
+    name = type(original).__name__
+    row = {"type": name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other",
+           "origin": origin, "originalProcessFacts": None}
+    # Never call exception formatting: it may contain argv, environment
+    # or other context, or itself raise. Only fixed public messages pass.
+    args = BaseException.args.__get__(original)
+    if type(args) is tuple and len(args) == 1 and type(args[0]) is str and args[0] in safe_messages:
+        row["message"] = args[0]
+    if type(original) in known_errors:
+        # Exact trusted family only; read stored fields, not properties.
+        fields = vars(original)
+        row["originalProcessFacts"] = {key: fields.get(key) if type(fields.get(key)) is bool else None
+                                       for key in ("dispatched", "contained", "cleanup_complete")}
+    return row
+
+
+
+def _shell_recovery_negative_prepare(value):
+    need(shell_recovery_negative(value) and _ROOT == root_path(value), "Wrong original recovery negative sink")
+    path = _ROOT / "shell-project-recovery-partial.observation"
+    parent = identity(_ROOT.lstat())
+    need(parent[2:5] == (stat.S_IFDIR | 0o711, 0, 0), "Recovery observation parent differs")
+    _xattrs(_ROOT, True)
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+    try:
+        os.fchown(fd, 0, value["runnerGid"]); os.fchmod(fd, 0o620)
+        original = identity(os.fstat(fd))
+        need(original[0] == parent[0] and original[2:7] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1, 0)
+             and identity(path.lstat()) == original and identity(_ROOT.lstat())[:6] == parent[:6]
+             and os.listxattr(fd) == [], "Fresh original recovery negative sink differs")
+        return fd, original[:6]
+    except BaseException:
+        try:
+            os.close(fd)
+        except BaseException:
+            pass  # Preserve the primary; never retry an ambiguous descriptor close.
+        raise
+
+
+def _shell_recovery_owner_failure(value, error, labels, observation, call):
+    """Record the exact original expected failure; this never resumes the stream."""
+    need(_FAILED and shell_recovery_negative(value) and _RECOVERY_NEGATIVE is not None,
+         "Recovery failed stream is not original")
+    _shell_call_finished(call, False)
+    _RECOVERY_NEGATIVE["ownerCall"] = _shell_call_summary(call)
+    _RECOVERY_NEGATIVE["error"] = _shell_error_data(error, "owner")
+    need(type(error) is getattr(_OWNER, "ProcessError", None)
+         and BaseException.args.__get__(error) == ("owned command exceeded its original deadline",)
+         and all(vars(error).get(key) is True for key in ("dispatched", "contained", "cleanup_complete")),
+         "Recovery negative original command cleanup/failure differs")
+    _RECOVERY_NEGATIVE["originalOwnerFinal"] = True
+    raw_labels, parsed = _shell_labels_read(labels, with_raw=True)
+    need(raw_labels == b"" and parsed is None, "Recovery negative contains another native failure")
+    _RECOVERY_NEGATIVE["labelsBytes"] = 0
+    fd, binding = observation
+    before = identity(os.fstat(fd))
+    need(before[:6] == binding and 0 < before[6] <= SHELL_RECOVERY_REPORT_LIMIT and os.listxattr(fd) == [],
+         "Original recovery negative sink identity/bound differs")
+    raw = os.read(fd, SHELL_RECOVERY_REPORT_LIMIT + 1)  # One original read, no seek or reopened path.
+    need(len(raw) == before[6] and identity(os.fstat(fd)) == before, "Original recovery observation changed or was incomplete")
+    shell_recovery_receipt(raw, SHELL_RECOVERY_PARTIAL, source=value["sourceSha"])
+    _retain("project-recovery-negative.observation", raw)
+    _RECOVERY_NEGATIVE["observation"] = {"path": "project-recovery-negative.observation", "size": len(raw),
+                                         "sha256": hashlib.sha256(raw).hexdigest()}
+    _RECOVERY_NEGATIVE["classificationEligible"] = True
+    # Close facts are still false. Only command()'s actual finally can set them,
+    # and only main's later immutable error record publishes the complete facts.
+
+
+def shell_recovery_negative_owner_data(value, failure):
+    _recovery_fields(failure, ("schemaVersion", "scope", "case", "sourceSha", "phase", "classificationEligible",
+        "applicationFinal", "originalOwnerFinal", "error", "ownerCall", "labelsBytes", "observation",
+        "failureSinkClosed", "observationSinkClosed"))
+    need(type(failure["schemaVersion"]) is int and failure["schemaVersion"] == 1
+         and failure["scope"] == "original-recovery-negative-owner-v1" and failure["case"] == SHELL_RECOVERY_PARTIAL
+         and failure["sourceSha"] == value["sourceSha"] and failure["phase"] == "shell-" + SHELL_RECOVERY_PARTIAL
+         and all(failure[key] is True for key in ("classificationEligible", "originalOwnerFinal", "failureSinkClosed", "observationSinkClosed"))
+         and failure["applicationFinal"] is False and type(failure["labelsBytes"]) is int and failure["labelsBytes"] == 0,
+         "Recovery negative is not the exact final original failed owner")
+    error = failure["error"]
+    _recovery_fields(error, ("type", "origin", "originalProcessFacts", "message"))
+    need(error == {"type": "ProcessError", "origin": "owner", "message": "owned command exceeded its original deadline",
+                  "originalProcessFacts": {"dispatched": True, "contained": True, "cleanup_complete": True}}
+         and all(type(n) is bool for n in error["originalProcessFacts"].values()), "Recovery negative trusted error facts differ")
+    call = failure["ownerCall"]
+    _recovery_fields(call, ("timeoutSeconds", "ownerReturned", "startMonotonic", "endMonotonic", "ownerElapsedSeconds"))
+    need(type(call["timeoutSeconds"]) is int and call["timeoutSeconds"] == SHELL_RECOVERY_NEGATIVE_SECONDS
+         and call["ownerReturned"] is False
+         and all(type(call[key]) in (float, int) and math.isfinite(call[key]) and call[key] > 0
+                 for key in ("startMonotonic", "endMonotonic", "ownerElapsedSeconds"))
+         and call["ownerElapsedSeconds"] == call["endMonotonic"] - call["startMonotonic"]
+         and SHELL_RECOVERY_NEGATIVE_SECONDS <= call["ownerElapsedSeconds"] < SHELL_RECOVERY_NEGATIVE_SECONDS + 10
+         and call["endMonotonic"] < value["deadline"] - CLIENT_RESERVATION - 1,
+         "Recovery negative did not reach and settle its exact original finite endpoint")
+    observation = failure["observation"]
+    _recovery_fields(observation, ("path", "size", "sha256"))
+    need(observation["path"] == "project-recovery-negative.observation" and type(observation["size"]) is int
+         and 0 < observation["size"] <= SHELL_RECOVERY_REPORT_LIMIT and type(observation["sha256"]) is str
+         and re.fullmatch(r"[0-9a-f]{64}", observation["sha256"]) is not None, "Recovery original observation pin differs")
+    return failure
+
+
+def _shell_recovery_negative_public(name):
+    """One bounded original read, only of these two protected negative inputs."""
+    need(_ROOT is not None and name in (SHELL_RECOVERY_LOADER_BEFORE, "published-before-upgrade.txt"),
+         "Recovery negative interval input is not fixed")
+    path = _ROOT / "public" / name
+    directory(path.parent, protected=True)
+    before = path.lstat()
+    need(before.st_uid == before.st_gid == 0 and stat.S_IMODE(before.st_mode) == 0o444,
+         "Recovery negative interval input is not protected")
+    pin, raw = record(path, LIMIT, content=True)
+    need(identity(path.lstat()) == identity(before), "Recovery negative interval input changed after its original read")
+    return raw, {**pin, "path": name}
+
+
+def _shell_recovery_negative_loader_binding(value, start, request_sha):
+    need(shell_recovery_negative(value) and type(start) is dict and start.get("sourceSha") == value["sourceSha"]
+         and start.get("handoffSha256") == request_sha and start.get("deadline") == value["deadline"]
+         and type(start.get("entrySha256")) is str and re.fullmatch(r"[0-9a-f]{64}", start["entrySha256"]) is not None
+         and type(request_sha) is str and re.fullmatch(r"[0-9a-f]{64}", request_sha) is not None
+         and type(start.get("invocationId")) is str and re.fullmatch(r"[0-9a-f]{32}", start["invocationId"]) is not None,
+         "Recovery negative interval source/original invocation differs")
+    return {"sourceSha": value["sourceSha"], "entrySha256": start["entrySha256"], "handoffSha256": request_sha,
+            "invocationId": start["invocationId"], "deadline": value["deadline"]}
+
+
+def shell_recovery_negative_loader_before_data(value, start, request_sha, before, published_raw):
+    """Closed original snapshot correspondence; never runtime admission."""
+    binding = _shell_recovery_negative_loader_binding(value, start, request_sha)
+    _recovery_fields(before, ("schemaVersion", "scope", *binding, "publication", "loader"))
+    need(type(before["schemaVersion"]) is int and before["schemaVersion"] == 1
+         and before["scope"] == "project-recovery-negative-loader-before-v1"
+         and canonical({key: before[key] for key in binding}) == canonical(binding)
+         and type(published_raw) is bytes and 0 < len(published_raw) <= LIMIT,
+         "Recovery negative original admitted snapshot binding differs")
+    publication = {"path": "published-before-upgrade.txt", "size": len(published_raw),
+                   "sha256": hashlib.sha256(published_raw).hexdigest()}
+    need(canonical(before["publication"]) == canonical(publication), "Recovery negative original P0 pin differs")
+    published = decode(published_raw, LIMIT)
+    need(type(published) is dict and set(published) == {"P0"} and type(published["P0"]) is dict
+         and 0 < len(published["P0"]) <= 8192, "Recovery negative original publication roster differs")
+    proof = before["loader"]
+    need(type(proof) is dict and proof.get("payloadAdmitted") is True and proof.get("runtimeDataRechecked") is False
+         and type(start.get("namespaces")) is dict and canonical(proof.get("namespaces")) == canonical(start["namespaces"]),
+         "Recovery negative snapshot is not the actual prelaunch payload-admitted proof")
+    return proof, published["P0"]
+
+
+def _shell_recovery_negative_loader_before(value, start, request_sha, loader, original):
+    # Called once directly after actual payload admission, before the negative
+    # fixture/native launch. Entry/map summaries cannot replace this original.
+    need(not _FAILED and time.monotonic() < _END, "Recovery negative original snapshot was late or followed failure")
+    published_raw, publication = _shell_recovery_negative_public("published-before-upgrade.txt")
+    before = {"schemaVersion": 1, "scope": "project-recovery-negative-loader-before-v1",
+              **_shell_recovery_negative_loader_binding(value, start, request_sha), "publication": publication, "loader": loader}
+    _, published = shell_recovery_negative_loader_before_data(value, start, request_sha, before, published_raw)
+    need(canonical(published) == canonical(original) and time.monotonic() < _END,
+         "Recovery negative original admitted publication changed or closed late")
+    _retain(SHELL_RECOVERY_LOADER_BEFORE, canonical(before))
+    need(time.monotonic() < _END, "Recovery negative original snapshot closed late")
+
+
+def _shell_recovery_negative_interval(value, start, request_sha, domain):
+    # Only the existing authenticated root StopPost calls this after failed
+    # owner/read closure, MainPID0 and no-denials. It creates no process owner.
+    need(shell_recovery_negative(value) and not _FAILED and time.monotonic() < _END,
+         "Recovery negative original final interval is unavailable")
+    before_raw, before_pin = _shell_recovery_negative_public(SHELL_RECOVERY_LOADER_BEFORE)
+    need(time.monotonic() < _END, "Recovery negative original snapshot read closed late")
+    published_raw, publication = _shell_recovery_negative_public("published-before-upgrade.txt")
+    before = decode(before_raw, LIMIT)
+    proof, original = shell_recovery_negative_loader_before_data(value, start, request_sha, before, published_raw)
+    original_proof = canonical({**proof, "runtimeDataRechecked": True})
+    need(time.monotonic() < _END, "Recovery negative original P0 read closed late")
+    need(_tree(PREFIX / M, M, published=True) == original and time.monotonic() < _END,
+         "Recovery negative published runtime changed or final rewalk closed late")
+    _shell_data_check(proof)
+    need(time.monotonic() < _END, "Recovery negative original DATA recheck closed late")
+    _installed_loader_check(proof)
+    need(canonical(proof) == original_proof and time.monotonic() < _END,
+         "Recovery negative original loader interval changed or closed late")
+    closed_domain = _domain_events(domain)
+    _no_denials(closed_domain)
+    need(time.monotonic() < _END, "Recovery negative original no-denials interval closed late")
+    interval = {"schemaVersion": 1, "scope": "project-recovery-negative-final-interval-v1",
+                **_shell_recovery_negative_loader_binding(value, start, request_sha),
+                "before": before_pin, "publication": publication, "loader": proof, "publicationUnchanged": True}
+    raw = canonical(interval)
+    _retain(SHELL_RECOVERY_INTERVAL, raw)
+    pin = {"path": SHELL_RECOVERY_INTERVAL, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    need(_FILES[-1] == pin and time.monotonic() < _END, "Recovery negative original interval retention closed late or differs")
+    return closed_domain, pin
+
+
+def shell_recovery_negative_interval_data(value, start, stop, raw_files):
+    """After the original client joined, require the distinct real final interval."""
+    names = (SHELL_RECOVERY_LOADER_BEFORE, SHELL_RECOVERY_INTERVAL, "published-before-upgrade.txt")
+    need(type(raw_files) is dict and all(name in raw_files and type(raw_files[name]) is bytes
+         and 0 < len(raw_files[name]) <= LIMIT for name in names), "Recovery negative original interval files are missing")
+    before_raw, interval_raw, published_raw = (raw_files[name] for name in names)
+    before, interval = decode(before_raw, LIMIT), decode(interval_raw, LIMIT)
+    proof, _ = shell_recovery_negative_loader_before_data(value, start, start["handoffSha256"], before, published_raw)
+    binding = _shell_recovery_negative_loader_binding(value, start, start["handoffSha256"])
+    _recovery_fields(interval, ("schemaVersion", "scope", *binding, "before", "publication", "loader", "publicationUnchanged"))
+    need(type(interval["schemaVersion"]) is int and interval["schemaVersion"] == 1
+         and interval["scope"] == "project-recovery-negative-final-interval-v1"
+         and canonical({key: interval[key] for key in binding}) == canonical(binding)
+         and interval["publicationUnchanged"] is True
+         and canonical(interval["publication"]) == canonical(before["publication"])
+         and canonical(interval["before"]) == canonical({"path": SHELL_RECOVERY_LOADER_BEFORE, "size": len(before_raw),
+             "sha256": hashlib.sha256(before_raw).hexdigest()})
+         and canonical(stop.get("interval")) == canonical({"path": SHELL_RECOVERY_INTERVAL, "size": len(interval_raw),
+             "sha256": hashlib.sha256(interval_raw).hexdigest()})
+         and canonical(interval["loader"]) == canonical({**proof, "runtimeDataRechecked": True}),
+         "Recovery negative protected original final interval differs")
+    # Reuse closed loader/map/policy correspondence, not the normal success
+    # verifier and never a manufactured loader-final.json file.
+    shell_closed_loader(value, raw_files, negative_interval=interval["loader"])
+
+
+def _shell_recovery_negative_stop(value, request_sha, stop_end):
+    # A fresh original ExecStopPost, not continuation/reset of the failed body.
+    need(shell_recovery_negative(value) and not _FAILED and not _COMMANDS
+         and _END == min(value["deadline"], stop_end), "Recovery negative StopPost route/unchanged endpoint differs")
+    completion = {name: os.environ.get(name) for name in ("SERVICE_RESULT", "EXIT_CODE", "EXIT_STATUS")}
+    need(completion == {"SERVICE_RESULT": "exit-code", "EXIT_CODE": "exited", "EXIT_STATUS": "1"},
+         "Recovery negative service failed for a different reason")
+    show = SHOW + ("LimitNOFILE", "LimitNOFILESoft", "ActiveState", "SubState", "ControlPID", "MainPID")
+    argv = ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(show), root_path(value).name + ".service"]
+    observed = command("stop-unit-show", argv, maximum=3)
+    need(observed.stderr == b"", "Recovery negative StopPost query produced a diagnostic")
+    domain = _domain_events(_domain_admission(value, observed.stdout, stop_boundary=True))
+    _no_denials(domain)
+    start = decode(read(_ROOT / "public/unit-start.json"))
+    error_raw = read(_ROOT / "public/unit-start-error.json")
+    error = decode(error_raw)
+    shell_recovery_negative_owner_data(value, error.get("projectRecoveryNegative"))
+    stop = {**domain, "entrySha256": record(_ROOT / "entry.py", JSON_LIMIT)["sha256"],
+            "handoffSha256": request_sha, "deadline": value["deadline"], "namespaces": _namespaces(True),
+            "completion": completion, "stopBoundary": {"activeState": "deactivating", "subState": "stop-post",
+                "controlPid": os.getpid(), "mainPid": 0},
+            "error": {"path": "unit-start-error.json", "size": len(error_raw), "sha256": hashlib.sha256(error_raw).hexdigest()},
+            "commands": list(_COMMANDS), "files": list(_FILES), "applicationFinal": False,
+            "experimentClientJoined": False}
+    shell_recovery_negative_finality(value, start, error, stop, 1, stop["entrySha256"], request_sha)
+    closed_domain, interval = _shell_recovery_negative_interval(value, start, request_sha, domain)
+    stop.update(closed_domain)
+    stop["interval"], stop["files"] = interval, list(_FILES)
+    _retain("project-recovery-negative-stop.json", canonical(stop))
+    need(time.monotonic() < _END, "Original recovery negative StopPost closed late")
+    print("Original retained-Unknown experiment StopPost observed; original client finality still required.", flush=True)
+
+
+def shell_recovery_negative_finality(value, start, error, stop, code, entry_sha, handoff_sha):
+    """Pure failed-unit correspondence. Never the ordinary success/finality gate."""
+    need(shell_recovery_negative(value) and type(code) is int and code == 1
+         and type(start) is dict and type(error) is dict and type(stop) is dict,
+         "Recovery negative requires its exact failed original client/unit")
+    for key in ("sourceSha", "entrySha256", "handoffSha256", "invocationId", "deadline", "namespaces", "effective"):
+        need(key in start and key in stop and type(start[key]) is type(stop[key]) and start[key] == stop[key],
+             "Recovery failed original unit correspondence differs: " + key)
+    need(start["sourceSha"] == value["sourceSha"] and start["entrySha256"] == entry_sha and start["handoffSha256"] == handoff_sha
+         and start["deadline"] == value["deadline"] and start["runnerUid"] == value["runnerUid"] and start["runnerGid"] == value["runnerGid"]
+         and type(start["invocationId"]) is str and re.fullmatch(r"[0-9a-f]{32}", start["invocationId"]) is not None,
+         "Recovery negative source/entry/handoff/invocation differs")
+    unit, stopped = start["unit"], stop["unit"]
+    need(type(unit) is dict and type(stopped) is dict and set(unit) == set(stopped)
+         and unit["Id"] == root_path(value).name + ".service" and unit["InvocationID"] == start["invocationId"]
+         and unit["ControlGroup"] == "/system.slice/" + unit["Id"] and unit["Result"] == "success"
+         and stopped["Result"] == "exit-code" and all(unit[key] == stopped[key] for key in unit if key != "Result")
+         and stop["completion"] == {"SERVICE_RESULT": "exit-code", "EXIT_CODE": "exited", "EXIT_STATUS": "1"}
+         and stop["applicationFinal"] is False and stop["experimentClientJoined"] is False,
+         "Recovery negative did not preserve the failed original service")
+    boundary = stop["stopBoundary"]
+    _recovery_fields(boundary, ("activeState", "subState", "controlPid", "mainPid"))
+    need(boundary["activeState"] == "deactivating" and boundary["subState"] == "stop-post"
+         and type(boundary["controlPid"]) is int and boundary["controlPid"] > 0
+         and type(boundary["mainPid"]) is int and boundary["mainPid"] == 0,
+         "Recovery negative lacks actual original StopPost main teardown")
+    need(error.get("phase") == "shell-" + SHELL_RECOVERY_PARTIAL and error.get("errorType") == "ProcessError"
+         and error.get("reason") == "owned command exceeded its original deadline"
+         and error.get("laterLaunchesClosed") is True and error.get("cleanupProven") is False
+         and error.get("completion") is None and error.get("normalBoundaryDisposition") is None
+         and error.get("normalBoundaryCleanupErrors") == [] and error.get("androidPublication") is None,
+         "Recovery negative failed at another boundary or resumed work")
+    shell_recovery_negative_owner_data(value, error.get("projectRecoveryNegative"))
+    need(type(error.get("commands")) is list and tuple(row["phase"] for row in error["commands"]) == root_phases(value)[:-1]
+         and type(stop.get("commands")) is list and len(stop["commands"]) == 1
+         and stop["commands"][0]["phase"] == "stop-unit-show" and stop["commands"][0]["exitCode"] == 0,
+         "Recovery negative original command prefix/StopPost differs")
+    _no_denials(start); _no_denials(stop)
+
+
+def _shell_owner_failure(case, error, original, call):
+    """Finite sidecar DATA only; neither exception text nor a new lifetime authority."""
+    try:
+        _shell_call_finished(call, False)
+        labels, reason = None, "owner-finality-unavailable"
+        if type(error) is getattr(_OWNER, "ProcessError", None):
+            fields = vars(error)  # Exact trusted type: stored built-in flags, not properties/causes.
+            if fields.get("contained") is True and fields.get("cleanup_complete") is True:
+                reason = "unavailable"
+                try:
+                    labels = _shell_labels_read(original)
+                except BaseException:
+                    pass
+                if labels is not None:
+                    reason = None
+        facts = _shell_error_data(error, "owner")
+        facts.pop("message", None)  # No exception text in this diagnostic lane.
+        data = {"schemaVersion": 1, "scope": "original-shell-owner-failure-diagnostic-only",
+                "case": case, "phase": "owner-call", "qualified": False, "cleanupEstablished": False,
+                "capture": None, "labels": labels, "labelsReason": reason, "error": facts,
+                "ownerCall": _shell_call_summary(call)}
+        _shell_failure_output(b"MRK_INSTALLED_SHELL_COMMAND_FAILURE=", data)
+    except BaseException:
+        pass  # Diagnosis/clock/format/output failures never replace the active original.
 
 
 def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, error,
@@ -3583,47 +12487,6 @@ def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, erro
     operation's original failure.
     """
     try:
-        safe_messages = {
-            "Normal window controller endpoint expired",
-            "Normal original returned before controller command",
-            "Normal window controller command bound exhausted",
-            "No original controller command budget remains",
-            "Original normal shell returned before Quit",
-            "Original private shell window did not become visible in the finite observation",
-            "Original normal shell/controller did not settle",
-            "Original shell capture failed/incomplete",
-            "Actual normal capabilities/catalogue or observer completion missing",
-            "owned command failed, timed out, or produced incomplete output",
-            "owned command cleanup could not be confirmed",
-            "owned command executable could not be started",
-            "owned command produced incomplete output",
-            "owned command output exceeds its bound",
-            "owned command exceeded its original deadline",
-            "owned command protocol or original ownership is incomplete",
-            "Original shell error log was replaced or changed",
-            "Original shell error log changed during capture",
-            "Combined shell output exceeds its bound",
-        }
-
-        known_errors = tuple(value for name in ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown")
-                             if isinstance(value := getattr(_OWNER, name, None), type))
-
-        def error_data(original, origin):
-            name = type(original).__name__
-            row = {"type": name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other",
-                   "origin": origin, "originalProcessFacts": None}
-            # Never call exception formatting: it may contain argv, environment
-            # or other context, or itself raise. Only fixed public messages pass.
-            args = BaseException.args.__get__(original)
-            if type(args) is tuple and len(args) == 1 and type(args[0]) is str and args[0] in safe_messages:
-                row["message"] = args[0]
-            if type(original) in known_errors:
-                # Exact trusted family only; read stored fields, not properties.
-                fields = vars(original)
-                row["originalProcessFacts"] = {key: fields.get(key) if type(fields.get(key)) is bool else None
-                                               for key in ("dispatched", "contained", "cleanup_complete")}
-            return row
-
         errors = [(item, origin) for item, origin in
                   ((error, error_origin), (join_error, "join"), (capture_error, "capture")) if item is not None]
         result = None
@@ -3680,7 +12543,7 @@ def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, erro
                             "guard-restore", "guard-check", "guard-state"} else "worker"
                     errors.append((item, label))
             result = holder.get("result")
-        data["errors"] = [error_data(item, origin) for item, origin in errors[:4]]
+        data["errors"] = [_shell_error_data(item, origin) for item, origin in errors[:4]]
         data["errorsTruncated"] = len(errors) > 4
         data["capture"] = _shell_capture_summary(result, argv, display_log if joined else None, normal=True)
         if data["capture"] is not None:
@@ -3890,14 +12753,22 @@ def _finish_body(value, request_sha, start, states, observations, traces, cases,
                  "lifecycleComplete": installed["case"] == "positive", "fixturePublished": installed["case"] == "positive"}
     elif "shell" in value:
         shell = value["shell"]
-        need(set(cases) == set(SHELL_CASES), "Original fixed shell case roster incomplete")
+        need(set(cases) == set(shell_cases(value)), "Original fixed shell case roster incomplete")
+        android_publication = _finish_android_publication(value) if shell_android(value) else None
         _shell_data_check(loader)
         _installed_loader_check(loader)
         _retain("loader-final.json", canonical(loader))
         _retain("shell-cases.json", canonical(cases))
         extra = {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
-                 "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
-                 "packageLifecycleQualified": False, "shellPackageBuilt": False}
+                 **shell_transport_provenance(shell), "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+                 "packageLifecycleQualified": False, "shellPackageBuilt": False,
+                 **({"androidPublication": android_publication} if shell_android(value) else {}),
+                 **({"githubRelease": shell["githubRelease"], "serviceQualified": False,
+                     "normalDestinationAction": False} if shell_github_release(value) else {}),
+                 **({"githubPreflight": shell["githubPreflight"], "serviceQualified": False,
+                     "normalDestinationAction": False} if shell_github_preflight(value) else {}),
+                 **({"ordinary21": shell_ordinary_selection()} if shell_ordinary(value) else {}),
+                 **({"projectRecovery": shell["projectRecovery"]} if shell_recovery(value) else {})}
     if "installed" not in value or value["installed"]["case"] == "positive":
         _retain("mutation-denials.txt", canonical({phase: row["denials"] for phase, row in observations.items()}))
     _retain("unit-result.json", canonical({"sourceSha": value["sourceSha"], "handoffSha256": request_sha,
@@ -3911,15 +12782,22 @@ def _finish_body(value, request_sha, start, states, observations, traces, cases,
 def unit_start():
     _root_ids()
     value, request_sha = _context(copying=True)
+    if "localTransport" in value.get("shell", {}):
+        _android_original_preparation(value)
     _D.write(_ROOT / "private/dpkg.log", b"", 0o600)
     namespaces = _namespaces(True)
     policy = dpkg_policy()
     start = {**_domain(value, "start"), "runnerUid": value["runnerUid"], "runnerGid": value["runnerGid"],
              "deadline": value["deadline"], "namespaces": namespaces, "handoffSha256": request_sha,
              "entrySha256": record(_ROOT / "entry.py", JSON_LIMIT)["sha256"]}
+    if shell_github(value):
+        start["githubPeerNamespaces"] = _github_boundary_namespaces()
+        _github_peer_namespace_witness(start)
     _retain("unit-start.json", canonical(start))
     _retain("inputs.json", canonical(value))
     _retain("dpkg-policy.json", canonical(policy))
+    if shell_android(value):
+        _publish_android(value)
     loader = (_installed_loader_start(value, namespaces) if "installed" in value
               else _shell_loader_start(value, namespaces) if "shell" in value else None)
     env = {**_environment(), "MRK_UBUNTU_PUBLICATION_NATIVE": "1", "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
@@ -3994,25 +12872,112 @@ def unit_start():
     if "shell" in value:
         original = observations["p0"]["published"]["P0"]
         expected = _installed_payload(value, loader, original)
-        for case in SHELL_CASES:
-            environment, log_binding = _shell_prepare(value, case)
-            if case == "normal":
-                cases[case] = _shell_normal(value, environment, expected, log_binding)
-            else:
-                result = command("shell-" + case, shell_argv(value, case), maximum=60, env=environment,
-                                 shell_log=(value, case, log_binding))
-                cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected)
-                if case == "positive":
-                    after = canonical(_shell_project_inventory(value, saved=True))
-                    _retain("shell-positive-project-after.json", after)
-                    shell_project_fixture(value, read(_ROOT / "public/shell-positive-project-before.json", 8192), after)
-                    candidate_after = canonical(_shell_candidate_inventory(value))
-                    _retain("shell-positive-candidate-after.json", candidate_after)
-                    shell_candidate_fixture(value, read(_ROOT / "public/shell-positive-candidate-before.json", 8192), candidate_after)
-                if case == "project-paths":
-                    paths_after = canonical(_shell_paths_inventory(value, changed=True))
-                    _retain("shell-project-paths-after.json", paths_after)
-                    shell_paths_fixture(value, read(_ROOT / "public/shell-project-paths-before.json", 8192), paths_after)
+        if shell_recovery_negative(value):
+            _shell_recovery_negative_loader_before(value, start, request_sha, loader, original)
+        github_expected = _shell_github_materials_prepare(value, loader, original, expected) if shell_github(value) else None
+        namespace = _shell_fixtures_prepare(value)
+        boundary_host = None
+        if shell_normal_boundaries(value):
+            boundary_host = shell_github_boundary_host_materials()
+            _retain("github-boundary-host-before.json", canonical(boundary_host))
+            _github_boundary_host_admit(boundary_host)
+        if shell_github(value):
+            _retain("shell-github-project-before.json", canonical(_shell_github_inventory(value, namespace)))
+        for case in shell_cases(value):
+            boundary = None
+            try:
+                if case in SHELL_GITHUB_BOUNDARY_CASES:
+                    boundary = _github_boundary_prepare(value, case, start, boundary_host)
+                environment, log_binding = _shell_prepare(value, case, namespace)
+                if case == "normal":
+                    cases[case] = _shell_normal(value, environment, expected, log_binding)
+                else:
+                    result = command("shell-" + case, shell_argv(value, case),
+                                     maximum=SHELL_RECOVERY_NEGATIVE_SECONDS if case == SHELL_RECOVERY_PARTIAL else 60, env=environment,
+                                     shell_log=(value, case, log_binding))
+                    # Only the immutable public copy is reread after command closed
+                    # the single original label FD; never reopen the private leaf.
+                    failure_labels = read(_ROOT / "public/shell-settled-failure-failure.labels", SHELL_FAILURE_LABEL_LIMIT) \
+                        if case == "settled-failure" else None
+                    cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode,
+                                              github_expected if shell_github(value) else expected, failure_labels=failure_labels)
+                    if case in SHELL_RECOVERY_CASES:
+                        after = canonical(_shell_recovery_inventory(value, namespace, case, "after"))
+                        _retain("shell-" + case + "-after.json", after)
+                        shell_recovery_fixture(value, case,
+                            *(read(_ROOT / "public" / ("shell-" + case + "-" + stage + ".json"), SHELL_RECOVERY_INVENTORY_LIMIT)
+                              for stage in ("initial", "generated", "before")), after)
+                        need(cases[case]["projectRecovery"]["sourceCommit"] == value["sourceSha"], "Recovery native source differs")
+                    if shell_github_release(value):
+                        _shell_github_release_after(value, case, cases[case])
+                    if shell_github_preflight(value):
+                        _shell_github_preflight_after(value, case, cases[case])
+                    if shell_github(value):
+                        need(canonical(_shell_github_inventory(value, namespace))
+                             == read(_ROOT / "public/shell-github-project-before.json", SHELL_GITHUB_FIXTURE_LIMIT),
+                             "A returned GitHub original changed the read-only registered fixture")
+                        if case in SHELL_GITHUB_AMBIENT_CASES:
+                            material = decode(read(_ROOT / "public/shell-github-materials-before.json", SHELL_GITHUB_MATERIAL_LIMIT), SHELL_GITHUB_MATERIAL_LIMIT)
+                            need(canonical(_shell_github_keylog_snapshot(value)) == canonical(material["ambientKeylogs"]),
+                                 "A returned ambient GitHub original changed an empty original keylog")
+                    if case == "positive":
+                        after = canonical(_shell_project_inventory(value, namespace, saved=True))
+                        _retain("shell-positive-project-after.json", after)
+                        shell_project_fixture(value, read(_ROOT / "public/shell-positive-project-before.json", 8192), after)
+                        candidate_after = canonical(_shell_candidate_inventory(value, namespace))
+                        _retain("shell-positive-candidate-after.json", candidate_after)
+                        shell_candidate_fixture(value, read(_ROOT / "public/shell-positive-candidate-before.json", 8192), candidate_after)
+                    if case == "project-paths":
+                        paths_after = canonical(_shell_paths_inventory(value, namespace, changed=True))
+                        _retain("shell-project-paths-after.json", paths_after)
+                        shell_paths_fixture(value, read(_ROOT / "public/shell-project-paths-before.json", 8192), paths_after)
+                    if case == "workflow-apply":
+                        workflow_after = canonical(_shell_workflow_inventory(value, namespace, installed=True))
+                        _retain("shell-workflow-apply-after.json", workflow_after)
+                        shell_workflow_fixture(value, read(_ROOT / "public/shell-workflow-apply-before.json", 8192), workflow_after)
+                        # Same fixed earlier fixture originals, after this actual
+                        # workflow exit; never inspect a failed/possibly-live case.
+                        need(canonical(_shell_project_inventory(value, namespace, saved=True))
+                             == read(_ROOT / "public/shell-positive-project-after.json", 8192)
+                             and canonical(_shell_candidate_inventory(value, namespace))
+                             == read(_ROOT / "public/shell-positive-candidate-after.json", 8192)
+                             and canonical(_shell_paths_inventory(value, namespace, changed=True))
+                             == read(_ROOT / "public/shell-project-paths-after.json", 8192),
+                             "Workflow case changed another original fixture family")
+                    if case in SHELL_SESSION_CASES:
+                        session_after = canonical(_shell_session_inventory(value, namespace, case, changed=case == "session-refusals"))
+                        _retain("shell-" + case + "-after.json", session_after)
+                        shell_session_fixture(value, case,
+                            read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_SESSION_INVENTORY_LIMIT), session_after)
+                    if case == "metadata-save":
+                        metadata_after = canonical(_shell_metadata_inventory(value, namespace, saved=True))
+                        _retain("shell-metadata-save-after.json", metadata_after)
+                        shell_metadata_fixture(value, read(_ROOT / "public/shell-metadata-save-before.json", 8192), metadata_after)
+                    if case == "version-save":
+                        version_after = canonical(_shell_version_inventory(value, namespace, saved=True))
+                        _retain("shell-version-save-after.json", version_after)
+                        shell_version_fixture(value, read(_ROOT / "public/shell-version-save-before.json", 8192), version_after)
+                    if case in SHELL_TOOLS_OFFLINE_CASES:
+                        tools_offline_after = canonical(_shell_tools_offline_inventory(value, namespace, case, after=True))
+                        _retain("shell-" + case + "-after.json", tools_offline_after)
+                        shell_tools_offline_fixture(value, case,
+                            read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT), tools_offline_after)
+                    if case in SHELL_ANDROID_CASES:
+                        android_after = canonical(_shell_android_inventory(value, namespace, case, after=True))
+                        _retain("shell-" + case + "-after.json", android_after)
+                        shell_android_fixture(value, case,
+                            read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_ANDROID_INVENTORY_LIMIT), android_after)
+                _shell_namespace_check(value, namespace)
+                if boundary is not None:
+                    _github_boundary_finish(boundary, cases[case])
+            finally:
+                if boundary is not None:
+                    _github_boundary_close_after(boundary)
+        _shell_fixtures_final(value, namespace)
+        if boundary_host is not None:
+            after_host = shell_github_boundary_host_materials()
+            need(canonical(after_host) == canonical(boundary_host), "Original normal-boundary host material changed")
+            _retain("github-boundary-host-after.json", canonical(after_host))
         need(_tree(PREFIX / M, M, published=True) == original, "Published A changed during shell observations")
         state("shell-finished", "install ok installed", "P0")
         _finish_body(value, request_sha, start, states, observations, traces, cases, loader)
@@ -4071,10 +13036,28 @@ def _no_denials(observation):
          and all(number == 0 for number in events["pids.events"].values()), "Original aggregate resource denial")
 
 
-def verify_finality(start, stop, client_exit_code):
+def _github_peer_namespace_witness(observation):
+    """Closed DATA shared by the root producer, StopPost and capless peer."""
+    legacy = observation.get("namespaces")
+    witness = observation.get("githubPeerNamespaces")
+    for values, roles in ((legacy, {"user", "pid", "mnt"}), (witness, {"user", "pid", "mnt", "net"})):
+        need(type(values) is dict and set(values) == roles
+             and all(type(pair) is list and len(pair) == 2
+                     and all(type(number) is int and 0 < number < 2**64 for number in pair)
+                     for pair in values.values()), "GitHub peer namespace witness shape differs")
+    need(all(legacy[role] == witness[role] for role in legacy), "GitHub peer namespace witness changed legacy domain")
+    return witness
+
+
+def verify_finality(start, stop, client_exit_code, *, github=False):
     """Pure original-result correspondence; not a replacement wait/query."""
     need(type(client_exit_code) is int and client_exit_code == 0, "Original service client did not exit zero")
     need(type(start) is dict and type(stop) is dict, "Original service observations missing")
+    need(type(github) is bool and all(("githubPeerNamespaces" in item) is github for item in (start, stop)),
+         "GitHub peer namespace witness presence differs from the original route")
+    if github:
+        need(_github_peer_namespace_witness(start) == _github_peer_namespace_witness(stop),
+             "Original GitHub peer namespaces changed before StopPost")
     for key in ("sourceSha", "entrySha256", "handoffSha256", "invocationId", "deadline", "namespaces", "unit", "effective"):
         need(key in start and key in stop and type(start[key]) is type(stop[key]) and start[key] == stop[key],
              "Original service correspondence differs: " + key)
@@ -4097,16 +13080,36 @@ def unit_stop():
     _root_ids()
     value, request_sha = _context()
     _END = stop_end
+    if shell_recovery_negative(value):
+        _END = min(value["deadline"], stop_end)
+        _shell_recovery_negative_stop(value, request_sha, stop_end)
+        return
+    admitted_domain, disposition = _github_boundary_stop(value) if shell_normal_boundaries(value) else (None, None)
+    # Completion, optional body/result files and resource-success verdicts are
+    # intentionally AFTER authenticated disposition. None grants delete rights.
     completion = {name: os.environ.get(name) for name in ("SERVICE_RESULT", "EXIT_CODE", "EXIT_STATUS")}
     need(all(type(item) is str and 0 < len(item) <= 128 for item in completion.values()), "Original systemd completion variables missing")
     start = decode(read(_ROOT / "public/unit-start.json"))
     outcome = record(_ROOT / "public/unit-result.json", JSON_LIMIT)
-    stop = {**_domain(value, "stop"), "entrySha256": record(_ROOT / "entry.py", JSON_LIMIT)["sha256"],
+    if disposition is not None:
+        need(admitted_domain is not None, "Original StopPost domain admission failed; policy disposition remains unproved")
+    domain = _domain_events(admitted_domain) if disposition is not None else _domain(value, "stop")
+    stop = {**domain, "entrySha256": record(_ROOT / "entry.py", JSON_LIMIT)["sha256"],
             "handoffSha256": request_sha, "deadline": value["deadline"], "namespaces": _namespaces(True),
             "completion": completion, "result": {**outcome, "path": "unit-result.json"},
             "commands": list(_COMMANDS), "files": list(_FILES)}
+    if shell_github(value):
+        stop["githubPeerNamespaces"] = _github_boundary_namespaces()
+        _github_peer_namespace_witness(stop)
+    if disposition is not None:
+        stop["normalBoundaryDisposition"] = disposition
     _retain("unit-stop.json", canonical(stop))
-    verify_finality(start, stop, 0)  # Actual original client zero is independently required by the nonroot collector.
+    if disposition is not None:
+        need(not _FAILED and disposition["errors"] == [] and disposition["allOwnedPoliciesAbsent"] is True
+             and disposition["laterLaunchesClosed"] is False
+             and all(row["state"] == "already-retired" for row in disposition["cases"].values()),
+             "Policy disposal after failure cannot qualify as a successful normal-boundary run")
+    verify_finality(start, stop, 0, github=shell_github(value))  # Original client zero is independently required by the collector.
     need(time.monotonic() < stop_end, "Original StopPost metadata close/readback was late")
     print("Root lifecycle StopPost completed.", flush=True)
 
@@ -4182,10 +13185,14 @@ def installed_closed_result(value, outcome, raw_files):
             "lifecycleComplete": positive, "fixturePublished": positive}
 
 
-def shell_closed_loader(value, raw_files):
+def shell_closed_loader(value, raw_files, *, negative_interval=None):
     """Reconcile retained originals; never query a possibly live GUI process."""
+    if negative_interval is not None:
+        need(shell_recovery_negative(value) and type(negative_interval) is dict,
+             "Only the original recovery negative may supply a distinct final interval")
     policy = expand_shell_loader_policy(value["shell"]["loaderPolicy"], value["shell"]["compiler"])
-    entry, final = (decode(raw_files["loader-" + phase + ".json"], LIMIT) for phase in ("entry", "final"))
+    entry = decode(raw_files["loader-entry.json"], LIMIT)
+    final = decode(raw_files["loader-final.json"], LIMIT) if negative_interval is None else negative_interval
     for key in ("scope", "namespaces", "diagnostics", "cacheRows", "entryObjects", "globalObjects", "hwcapsTiers",
                 "moduleRoots", "privateSearch", "runtimeData", "externalPrerequisites"):
         need(entry[key] == final[key], "Closed original shell loader/DATA interval differs: " + key)
@@ -4258,30 +13265,114 @@ def shell_closed_loader(value, raw_files):
     return expected
 
 
+
+def shell_recovery_closed_result(value, outcome, raw_files):
+    need(shell_recovery(value) and not shell_recovery_negative(value)
+         and canonical(outcome.get("projectRecovery")) == canonical(value["shell"]["projectRecovery"])
+         and not {"ordinary21", "androidPublication", "androidBuild", "githubReadOnly", "githubPreflight", "githubRelease"} & set(outcome)
+         and set(raw_files) == public_files(value), "Recovery positive outputs mix another scope or omit an original")
+    cases = decode(raw_files["shell-cases.json"])
+    need(type(cases) is dict and set(cases) == set(SHELL_RECOVERY_CASES), "Recovery positive case roster differs")
+    commands = {row["phase"]: row for row in outcome["commands"]}
+    fixtures = {}
+    for case in SHELL_RECOVERY_CASES:
+        producer, phase = "recovery-fixture-" + case, "shell-" + case
+        need(commands[producer]["argv"] == shell_recovery_producer_argv(value, case)
+             and commands[phase]["argv"] == shell_argv(value, case), "Recovery original producer/native command differs")
+        shell_recovery_producer_result(raw_files[producer + ".stdout"], raw_files[producer + ".stderr"], case, commands[producer]["exitCode"])
+        streams = [raw_files[phase + suffix] for suffix in (".stdout", ".stderr", "-xvfb.stderr")]
+        need(sum(map(len, streams)) <= LIMIT, "Recovery original combined capture exceeded its bound")
+        actual = shell_recovery_result(streams[0], streams[1], case, commands[phase]["exitCode"])
+        need(canonical(actual) == canonical(cases[case]) and actual["projectRecovery"]["sourceCommit"] == value["sourceSha"],
+             "Recovery actual original capture/source differs")
+        fixtures[case] = shell_recovery_fixture(value, case,
+            *(raw_files["shell-" + case + "-" + stage + ".json"] for stage in ("initial", "generated", "before", "after")))
+    p0 = decode(raw_files["observe-p0.stdout"], LIMIT)
+    need(set(p0["published"]) == {"P0"} and decode(raw_files["published-before-upgrade.txt"], LIMIT) == p0["published"],
+         "Recovery original unchanged publication observation differs")
+    shell = value["shell"]
+    return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
+            **shell_transport_provenance(shell), "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+            "cases": cases, "projectRecovery": shell["projectRecovery"], "recoveryFixtures": fixtures,
+            "ordinaryActivation": False, "packageLifecycleQualified": False, "shellPackageBuilt": False}
+
 def shell_closed_result(value, outcome, raw_files):
     """Correspondence only, after the same original-client/StopPost gate."""
     shell = value["shell"]
+    ordinary = shell_ordinary(value)
+    need(("ordinary21" in outcome) == ordinary
+         and (not ordinary or canonical(outcome["ordinary21"]) == canonical(shell["ordinary21"])),
+         "Closed original ordinary21 scope differs from the handoff")
+    if ordinary:
+        need(not {"androidPublication", "androidBuild", "githubReadOnly", "githubPreflight", "githubRelease", "projectRecovery"} & set(outcome)
+             and set(raw_files) == public_files(value),
+             "Ordinary21 closed outputs mix another scope or omit an original file")
     for key, field in (("shellRosterSha256", "rosterSha256"), ("shellProducerAttempt", "producerAttempt"),
-                       ("shellArtifactId", "artifactId"), ("acceptedU", "acceptedU")):
+                       ("acceptedU", "acceptedU")):
         need(outcome.get(key) == shell[field], "Closed shell original provenance differs")
+    provenance = shell_transport_provenance(shell)
+    need(all(outcome.get(key) == item for key, item in provenance.items())
+         and ("shellArtifactId" not in outcome if "localTransport" in shell else "shellLocalTransport" not in outcome),
+         "Closed shell transport provenance variant differs")
     need(outcome.get("consumerAttempt") == value["attempt"] and outcome.get("packageLifecycleQualified") is False
          and outcome.get("shellPackageBuilt") is False, "Connection was relabelled as a shell package qualification")
     expected = shell_closed_loader(value, raw_files)
+    if shell_recovery(value):
+        return shell_recovery_closed_result(value, outcome, raw_files)
+    if shell_github_release(value):
+        return shell_github_release_closed_result(value, outcome, raw_files, expected)
+    if shell_github_preflight(value):
+        return shell_github_preflight_closed_result(value, outcome, raw_files, expected)
+    if shell_github_readonly(value):
+        return shell_github_closed_result(value, outcome, raw_files, expected)
+    android_publication = _android_closed_publication(value, outcome.get("androidPublication")) if shell_android(value) else None
     cases = decode(raw_files["shell-cases.json"])
-    need(type(cases) is dict and set(cases) == set(SHELL_CASES), "Closed original shell case roster differs")
+    need(type(cases) is dict and set(cases) == set(shell_cases(value)), "Closed original shell case roster differs")
     commands = {row["phase"]: row for row in outcome["commands"]}
-    for case in SHELL_CASES:
+    for case in shell_cases(value):
         phase = "shell-" + case
         need(commands[phase]["argv"] == shell_argv(value, case), "Closed original shell argv differs")
         streams = [raw_files[phase + suffix] for suffix in (".stdout", ".stderr", "-xvfb.stderr")]
         need(all(type(raw) is bytes for raw in streams) and sum(map(len, streams)) <= LIMIT,
              "Closed original shell combined output differs")
-        result = shell_result(raw_files[phase + ".stdout"], raw_files[phase + ".stderr"], case, commands[phase]["exitCode"], expected)
-        need(canonical(result) == canonical(cases[case]) if case in ("positive", "project-paths") else result == cases[case],
+        result = shell_result(raw_files[phase + ".stdout"], raw_files[phase + ".stderr"], case, commands[phase]["exitCode"], expected,
+            failure_labels=raw_files["shell-settled-failure-failure.labels"] if case == "settled-failure" else None)
+        need(canonical(result) == canonical(cases[case]),
              "Closed original shell capture differs")
     fixture = shell_project_fixture(value, raw_files["shell-positive-project-before.json"], raw_files["shell-positive-project-after.json"])
     candidate = shell_candidate_fixture(value, raw_files["shell-positive-candidate-before.json"], raw_files["shell-positive-candidate-after.json"])
     paths = shell_paths_fixture(value, raw_files["shell-project-paths-before.json"], raw_files["shell-project-paths-after.json"])
+    workflow = shell_workflow_fixture(value, raw_files["shell-workflow-apply-before.json"], raw_files["shell-workflow-apply-after.json"])
+    metadata = shell_metadata_fixture(value, raw_files["shell-metadata-save-before.json"], raw_files["shell-metadata-save-after.json"])
+    version = shell_version_fixture(value, raw_files["shell-version-save-before.json"], raw_files["shell-version-save-after.json"])
+    sessions = {case: {"native": cases[case]["sessionInputs"],
+        "fixture": shell_session_fixture(value, case, raw_files["shell-" + case + "-before.json"], raw_files["shell-" + case + "-after.json"])}
+        for case in SHELL_SESSION_CASES}
+    tools_offline = {case: {"native": cases[case]["toolsOffline"],
+        "fixture": shell_tools_offline_fixture(value, case, raw_files["shell-" + case + "-before.json"], raw_files["shell-" + case + "-after.json"])}
+        for case in SHELL_TOOLS_OFFLINE_CASES}
+    need(all(canonical(pair["native"]["fixture"]) == canonical({key: pair["fixture"][key]
+             for key in ("scriptTrace", "laterTrace", "savedConfigChanged")}) for pair in tools_offline.values()),
+         "Tools/Offline original native fixture observations differ from the outer inventories")
+    android = {case: {"native": cases[case]["androidBuild"],
+        "fixture": shell_android_fixture(value, case, raw_files["shell-" + case + "-before.json"], raw_files["shell-" + case + "-after.json"])}
+        for case in shell_android_cases(value)}
+    need(all(canonical(pair["native"]["fixture"]) == canonical({key: pair["fixture"][key]
+             for key in _shell_android_native_fixture(case)}) for case, pair in android.items()),
+         "Android original native controls differ from the outer inventories")
+    namespaces = [decode(raw_files[name], 8192)["namespace"] for name in
+                  ("shell-positive-project-before.json", "shell-positive-candidate-before.json", "shell-project-paths-before.json", "shell-workflow-apply-before.json",
+                   *("shell-" + case + "-before.json" for case in SHELL_SESSION_CASES), "shell-metadata-save-before.json", "shell-version-save-before.json")]
+    namespaces.extend(decode(raw_files["shell-" + case + "-before.json"], SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)["namespace"]
+                      for case in SHELL_TOOLS_OFFLINE_CASES)
+    namespaces.extend(decode(raw_files["shell-" + case + "-before.json"], SHELL_ANDROID_INVENTORY_LIMIT)["namespace"]
+                      for case in shell_android_cases(value))
+    placeholders = None
+    if ordinary:
+        before = raw_files["shell-ordinary21-placeholders-before.json"]
+        placeholders = shell_ordinary_placeholders(value, before, raw_files["shell-ordinary21-placeholders-after.json"])
+        namespaces.append(decode(before, 8192)["namespace"])
+    need(all(namespace == namespaces[0] for namespace in namespaces), "Closed shell fixture families have different original namespaces")
     control = decode(raw_files["shell-normal-control.json"])
     need(control.get("joined") is True and control.get("inputs") == 2 and control.get("workerGuardState") == "RESTORED"
          and control.get("workerErrorCount") == 0 and control.get("errorType") is None
@@ -4296,10 +13387,18 @@ def shell_closed_result(value, outcome, raw_files):
          and decode(raw_files["published-before-upgrade.txt"], LIMIT) == p0["published"],
          "Original unchanged P0 publication observation differs")
     return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
-            "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+            **shell_transport_provenance(shell), "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
             "cases": cases, "projectDraft": {"native": cases["positive"]["projectDraft"], "fixture": fixture},
-            "candidateDocuments": {"native": cases["positive"]["candidateDocuments"], "fixture": candidate},
+            "lifecycleDocuments": {"native": cases["positive"]["lifecycleDocuments"], "fixture": candidate},
             "projectPaths": {"native": cases["project-paths"]["projectPaths"], "fixture": paths},
+            "workflowApply": {"native": cases["workflow-apply"]["workflowApply"], "fixture": workflow},
+            "sessionInputs": sessions,
+            "metadataSave": {"native": cases["metadata-save"]["metadataSave"], "fixture": metadata},
+            "versionSave": {"native": cases["version-save"]["versionSave"], "fixture": version},
+            "toolsOffline": tools_offline,
+            **({"ordinary21": shell_ordinary_selection(), "namespacePlaceholders": placeholders} if ordinary
+               else {"androidBuild": android, "androidPublication": android_publication}),
+            "settledFailure": cases["settled-failure"],
             "packageLifecycleQualified": False, "shellPackageBuilt": False}
 
 
@@ -4318,12 +13417,14 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
     need(len(runtime) == 1 and re.fullmatch(r"[1-9][0-9]{0,3}s", runtime[0]) is not None and int(runtime[0][:-1]) < 1200,
          "Original client finite lifetime argument missing")
     properties = {**PROPERTIES, "TasksMax": service_task_limit(value), "RuntimeMaxSec": runtime[0]}
+    if "shell" in value and not shell_github(value):
+        properties["LimitNOFILE"] = str(SHELL_DESCRIPTOR_LIMIT)
     need(client_result.args == _service_argv(value, handoff_path, handoff_sha256, entry_sha256, properties), "Original service client argv differs")
     root = root_path(value)
     directory(root / "public", protected=True)
     start = decode(read(root / "public/unit-start.json"))
     stop = decode(read(root / "public/unit-stop.json"))
-    verify_finality(start, stop, client_result.returncode)
+    verify_finality(start, stop, client_result.returncode, github=shell_github(value))
     need(start["sourceSha"] == value["sourceSha"] and start["entrySha256"] == entry_sha256
          and start["handoffSha256"] == handoff_sha256 and start["unit"]["Id"] == root.name + ".service"
          and start["deadline"] == value["deadline"] and start["runnerUid"] == value["runnerUid"] and start["runnerGid"] == value["runnerGid"],
@@ -4342,6 +13443,10 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
          and len(stop["commands"]) == 1 and stop["commands"][0]["phase"] == "stop-unit-show"
          and stop["commands"][0]["exitCode"] == 0, "Original lifecycle phase/result roster differs")
     for row in outcome["commands"]:
+        if row["phase"] == "shell-settled-failure":
+            need("shell" in value and type(row["exitCode"]) is int and row["exitCode"] == 1,
+                 "Original settled-failure phase must retain raw exit1")
+            continue  # Full raw capture/label classification follows only after unchanged finality and export checks.
         codes = (79,) if row["phase"] == "installed-emfile" else (0, 1) if row["phase"] in {"state-initial", "state-purge"} else ((1,) if row["phase"] in {"nonroot-helper", "duplicate"} else (0,))
         need(type(row["exitCode"]) is int and row["exitCode"] in codes, "Original lifecycle phase exit differs")
     verify_package_observations(outcome["commands"], root)
@@ -4350,7 +13455,7 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
         pin = record(root / "public" / name, JSON_LIMIT)
         rows.append({**pin, "path": name})
     fixed = public_files(value)
-    need(len(rows) <= 128 and len({row["path"] for row in rows}) == len(rows)
+    need(len(rows) <= (shell_public_limit(value) if "shell" in value else 128) and len({row["path"] for row in rows}) == len(rows)
          and {path.name for path in (root / "public").iterdir()} == {row["path"] for row in rows} == fixed,
          "Original fixed public evidence roster differs")
     total, raw_files = 0, {}
@@ -4395,6 +13500,112 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
                             else "published-versions-and-root-task-retained-until-disposable-vm-disposition"), **extra}
 
 
+
+def verify_project_recovery_negative_service_result(handoff_path, handoff_sha256, entry_sha256, client_result, public_destination):
+    """One failed-unit classifier, not a weakened ordinary success verifier.
+
+    The original --wait client must have returned in its original command owner;
+    no process polling, replacement wait or metadata-only cleanup assertion can
+    authorize the fixture read at the end of this function.
+    """
+    need(type(client_result) is subprocess.CompletedProcess and type(client_result.returncode) is int
+         and client_result.returncode == 1 and type(client_result.args) is list
+         and type(client_result.stdout) is bytes and type(client_result.stderr) is bytes
+         and len(client_result.stdout) + len(client_result.stderr) <= LIMIT, "Recovery negative original client did not return exactly exit1")
+    handoff_path = absolute(str(handoff_path))
+    value = handoff(handoff_path, handoff_sha256)
+    need(shell_recovery_negative(value) and os.getresuid() == (value["runnerUid"],) * 3
+         and os.getresgid() == (value["runnerGid"],) * 3 and time.monotonic() < value["deadline"],
+         "Recovery negative collector identity/route/endpoint differs")
+    runtime = [arg.removeprefix("--property=RuntimeMaxSec=") for arg in client_result.args if arg.startswith("--property=RuntimeMaxSec=")]
+    need(len(runtime) == 1 and re.fullmatch(r"[1-9][0-9]{0,3}s", runtime[0]) is not None and int(runtime[0][:-1]) < 1200,
+         "Recovery negative original client finite lifetime missing")
+    properties = {**PROPERTIES, "TasksMax": service_task_limit(value), "RuntimeMaxSec": runtime[0], "LimitNOFILE": str(SHELL_DESCRIPTOR_LIMIT)}
+    need(client_result.args == _service_argv(value, handoff_path, handoff_sha256, entry_sha256, properties),
+         "Recovery negative original client argv differs")
+    root = root_path(value)
+    directory(root / "public", protected=True)
+    start_raw = read(root / "public/unit-start.json")
+    error_raw = read(root / "public/unit-start-error.json")
+    stop_raw = read(root / "public/project-recovery-negative-stop.json")
+    start, error, stop = (decode(raw) for raw in (start_raw, error_raw, stop_raw))
+    shell_recovery_negative_finality(value, start, error, stop, client_result.returncode, entry_sha256, handoff_sha256)
+    finality = {"applicationFinal": False, "experimentFinal": True, "expectedRetainedUnknown": True}
+    need(stop["error"] == {"path": "unit-start-error.json", "size": len(error_raw), "sha256": hashlib.sha256(error_raw).hexdigest()}
+         and _D.same(decode(read(root / "public/inputs.json")), value), "Recovery negative closed original error/handoff differs")
+    _modules(root, owner=False)
+    for row in error["commands"]:
+        codes = (0, 1) if row["phase"] == "state-initial" else (1,) if row["phase"] == "nonroot-helper" else (0,)
+        need(type(row["exitCode"]) is int and row["exitCode"] in codes, "Recovery negative had an earlier original command failure")
+    verify_package_observations(error["commands"], root)
+    rows = error["files"] + stop["files"] + [stop["error"],
+        {"path": "project-recovery-negative-stop.json", "size": len(stop_raw), "sha256": hashlib.sha256(stop_raw).hexdigest()}]
+    need(len(rows) <= shell_public_limit(value) and all(type(row) is dict and set(row) == {"path", "size", "sha256"} for row in rows)
+         and len({row["path"] for row in rows}) == len(rows)
+         and {path.name for path in (root / "public").iterdir()} == {row["path"] for row in rows} == public_files(value),
+         "Recovery negative fixed original public roster differs")
+    total, raw_files = 0, {}
+    for row in rows:
+        need(type(row["path"]) is str and re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,100}", row["path"]) is not None
+             and type(row["size"]) is int and 0 <= row["size"] <= LIMIT, "Recovery negative evidence record bounds differ")
+        path = root / "public" / row["path"]
+        protected = protected_record(path, row["size"])
+        raw = read(path, row["size"])
+        need(protected["size"] == row["size"] and protected["sha256"] == row["sha256"]
+             and hashlib.sha256(raw).hexdigest() == row["sha256"] and stat.S_IMODE(protected["identity"][2]) == 0o444,
+             "Recovery negative original protected evidence changed")
+        total += len(raw)
+        need(total <= TOTAL_LIMIT and time.monotonic() < value["deadline"], "Recovery negative evidence aggregate/endpoint exceeded")
+        raw_files[row["path"]] = raw
+    show = SHOW + ("LimitNOFILE", "LimitNOFILESoft", "ActiveState", "SubState", "ControlPID", "MainPID")
+    stop_command = stop["commands"][0]
+    need(stop_command["argv"] == ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(show), root.name + ".service"]
+         and raw_files["stop-unit-show.stderr"] == b"", "Recovery negative original StopPost query changed")
+    show_rows = raw_files["stop-unit-show.stdout"].decode("ascii").splitlines()
+    props = dict(line.split("=", 1) for line in show_rows)
+    boundary = stop["stopBoundary"]
+    need(len(props) == len(show_rows) and props == {**stop["unit"], "ActiveState": boundary["activeState"],
+         "SubState": boundary["subState"], "ControlPID": str(boundary["controlPid"]), "MainPID": "0"},
+         "Recovery negative StopPost teardown facts do not match actual original command")
+    case = SHELL_RECOVERY_PARTIAL
+    producer = "recovery-fixture-" + case
+    command_row = error["commands"][-1]
+    need(command_row["phase"] == producer and command_row["argv"] == shell_recovery_producer_argv(value, case),
+         "Recovery negative producer differs")
+    shell_recovery_producer_result(raw_files[producer + ".stdout"], raw_files[producer + ".stderr"], case, command_row["exitCode"])
+    pin = error["projectRecoveryNegative"]["observation"]
+    raw = raw_files[pin["path"]]
+    need(len(raw) == pin["size"] and hashlib.sha256(raw).hexdigest() == pin["sha256"], "Recovery negative original observation binding differs")
+    receipt = shell_recovery_receipt(raw, case, source=value["sourceSha"])
+    need(decode(raw_files["observe-unpacked.stdout"], LIMIT)["published"] == {}
+         and set(decode(raw_files["observe-p0.stdout"], LIMIT)["published"]) == {"P0"}
+         and decode(raw_files["published-before-upgrade.txt"], LIMIT) == decode(raw_files["observe-p0.stdout"], LIMIT)["published"],
+         "Recovery negative installed publication preparation differs")
+    shell_recovery_negative_interval_data(value, start, stop, raw_files)
+    # First failed-fixture access: exact original command finality, authenticated
+    # original StopPost/main teardown, joined original client and no-denials have
+    # all been established above. This remains no application-finality claim.
+    before_raw = raw_files["shell-" + case + "-before.json"]
+    before, _ = _shell_recovery_inventory_data(value, before_raw, case, "before")
+    after = canonical(_shell_recovery_inventory(value, canonical(before["namespace"]), case, "after"))
+    fixture = shell_recovery_fixture(value, case, raw_files["shell-" + case + "-initial.json"],
+        raw_files["shell-" + case + "-generated.json"], before_raw, after)
+    raw_files["shell-" + case + "-after.json"] = after  # Nonroot post-client DATA, never a root/body receipt.
+    public_destination = absolute(str(public_destination))
+    directory(public_destination)
+    need(public_destination.is_relative_to(absolute(value["taskRoot"])) and public_destination.stat().st_uid == value["runnerUid"],
+         "Recovery negative public destination differs")
+    exported = [_D.write(public_destination / ("lifecycle-" + name), raw, 0o600) for name, raw in
+                {**raw_files, "client.stdout": client_result.stdout, "client.stderr": client_result.stderr}.items()]
+    need(time.monotonic() < value["deadline"], "Recovery negative post-client observation/export was late")
+    shell = value["shell"]
+    return {"state": result_state(value), "sourceSha": value["sourceSha"], "unit": start["unit"]["Id"], "invocationId": start["invocationId"],
+            "files": exported, "projectRecovery": shell["projectRecovery"], "observation": receipt, "recoveryFixture": fixture,
+            "shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
+            **shell_transport_provenance(shell), "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+            **finality, "ordinaryActivation": False, "productQualified": False, "loaderFinalIntervalQualified": True,
+            "disposition": "unknown-application-and-synthetic-private-state-retained-until-disposable-vm-disposition"}
+
 def main():
     global _FAILED
     role = sys.argv[1] if len(sys.argv) > 1 else "missing"
@@ -4417,6 +13628,9 @@ def main():
             try:
                 _retain(role + "-error.json", canonical({"phase": phase, "reason": reason, "errorType": type(error).__name__,
                     "commands": list(_COMMANDS), "files": list(_FILES), "laterLaunchesClosed": True, "cleanupProven": False,
+                    "normalBoundaryDisposition": _GITHUB_BOUNDARY_STOP, "normalBoundaryCleanupErrors": list(_GITHUB_BOUNDARY_BODY_ERRORS),
+                    "androidPublication": _android_publication_summary(),
+                    **({"projectRecoveryNegative": _RECOVERY_NEGATIVE} if _RECOVERY_NEGATIVE is not None else {}),
                     "completion": {name: os.environ.get(name, "")[:128] for name in ("SERVICE_RESULT", "EXIT_CODE", "EXIT_STATUS")}
                                   if role == "unit-stop" else None}))
             except BaseException:

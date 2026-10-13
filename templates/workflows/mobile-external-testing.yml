@@ -1,4 +1,5 @@
 name: Mobile external testing
+run-name: ${{ inputs.desktop_request != '' && format('MRK Desktop external-testing [{0}]', inputs.desktop_request) || 'Mobile external testing' }}
 on:
   workflow_dispatch:
     inputs:
@@ -39,6 +40,21 @@ on:
         required: false
         default: ''
         type: string
+      desktop_request:
+        description: Optional exact Desktop request marker; use with reviewed source and full ref.
+        required: false
+        default: ''
+        type: string
+      desktop_source_sha:
+        description: Optional Desktop-reviewed current dispatch commit; not a replacement for original recovery source.
+        required: false
+        default: ''
+        type: string
+      desktop_expected_ref:
+        description: Optional Desktop-reviewed full branch ref; all three Desktop inputs must be supplied together.
+        required: false
+        default: ''
+        type: string
 permissions: {}
 jobs:
   external-testing:
@@ -59,3 +75,6 @@ jobs:
       recovery_confirmation: ${{ inputs.recovery_confirmation }}
       candidate_android_run_id: ${{ inputs.candidate_android_run_id }}
       candidate_ios_run_id: ${{ inputs.candidate_ios_run_id }}
+      desktop_request: ${{ inputs.desktop_request }}
+      desktop_source_sha: ${{ inputs.desktop_source_sha }}
+      desktop_expected_ref: ${{ inputs.desktop_expected_ref }}

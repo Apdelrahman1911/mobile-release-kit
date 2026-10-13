@@ -8,12 +8,12 @@ use serde_json::json;
 
 fn owner() -> OfflinePreflightOwner { OfflinePreflightOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened-runtime"))) }
 fn project() -> RegisteredRoot { RegisteredRoot { path: PathBuf::from("/unopened-preflight-project"),
-    identity: crate::asset_source::DirectoryIdentity::synthetic_evidence_identity() } }
+    identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) } }
 fn projection() -> RunProjection { RunProjection { operation_id: "a".repeat(32), owner_generation: "b".repeat(32),
     context: Context::OfflinePreflight(wire::tests::context()), phase: Phase::AwaitingConsent, intent_usable: true,
     outcome: None, reason: Reason::None, result: None, stage: None } }
 fn prepared(owner: &OfflinePreflightOwner, expires: Instant) {
-    owner.original_for_test().inner.lock().prepared = Some(Prepared { projection: projection(), expires, registration: 1, project: project() });
+    owner.original_for_test().inner.lock().prepared = Some(Prepared { projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
 }
 fn start_input(id: &str) -> wire::Start { wire::start(&json!({"operationId":id,"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap() }
 fn active() -> (OfflinePreflightOwner, Arc<Session>) {
@@ -21,9 +21,16 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
     let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending); let (frames, receiver) = mpsc::channel(2);
     let clocks = Clocks::new(SavedCommandDomain::OfflinePreflight, Instant::now());
     let (native_audit_cutoff, _) = watch::channel(clocks.work);
+    let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
     let session = Arc::new(Session { domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
-        profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), request: AsyncMutex::new(None),
-        stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
+        profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
+        material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None,
+        artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+        android_control: None,
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+        android_close: None,
+        stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
         driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
         watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false),
         startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(receiver), ..Resources::default() }),
@@ -31,29 +38,56 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
         driver: AsyncMutex::new(None), watchdog: Mutex::new(None), manager: AsyncMutex::new(None), observer: AsyncMutex::new(None),
         driver_return: Mutex::new(None), manager_return: Mutex::new(None), observer_return: Mutex::new(None), watchdog_return: Mutex::new(None),
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         fixture: None,
     });
+    // Offline fixture data must not acquire another domain's input or tool loan.
+    assert!(session.artifact_selection.is_none() && session.artifact_tools.is_none()
+        && session.artifact_binding.lock().unwrap().is_none());
     let p = RunProjection { operation_id: p.operation_id, owner_generation: p.owner_generation, context: p.context,
         phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
     owner.original_for_test().inner.lock().active = Some(Active { owner: session.clone(), projection: p, first_stop: None, work_expired: false,
-        accepted: false, terminal: false, unknown: false, final_join_seen: false });
+        accepted: false, terminal: false, unknown: false, final_join_seen: false, context_invalidated: false });
     (owner, session)
 }
 
 fn offline_context(owner: &Session) -> &wire::Context {
-    match &owner.context { Context::OfflinePreflight(context) => context, Context::AndroidBuild(_) => panic!("offline test context") }
+    match &owner.context { Context::OfflinePreflight(context) => context, Context::AndroidBuild(_) | Context::ProjectRecovery(_) | Context::IOSArchive(_) | Context::ArtifactInspection(_) => panic!("offline test context") }
 }
 
 pub(crate) fn qualification_is_closed_without_a_runtime_or_another_owners_permit() {
-    let owner = owner(); assert!(!owner.original_for_test().inner.qualified());
+    let owner = owner();
+    let selected = cfg!(feature = "custom-protocol") && owner.original_for_test().inner.runtime.offline_preflight_installed_profile_available();
+    assert_eq!(owner.original_for_test().inner.qualified(None), selected);
+    assert_eq!(owner.original_for_test().inner.lock().revision, 0);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    assert!(owner.original_for_test().inner.observation.lock().unwrap().is_none());
     let status = owner.status(wire::Availability::Available).unwrap();
-    assert!(matches!(status.availability, wire::Availability::RuntimeUnqualified | wire::Availability::UnsupportedPlatform));
+    assert_eq!(status.availability, if wire::Profile::current().is_none() { wire::Availability::UnsupportedPlatform }
+        else if selected { wire::Availability::Available } else { wire::Availability::RuntimeUnqualified });
     assert!(status.operation.is_none()); assert!(owner.can_exit());
     let input = wire::prepare(&json!({"projectId":"inert-project","draftRevision":2,"baselineGeneration":3,
         "savedConfig":{"bytes":123,"sha256":"c".repeat(64)}})).unwrap();
-    assert!(owner.prepare(input, 1, project(), wire::Availability::Available).is_err());
+    let prepared = owner.prepare(input, 1, project(), wire::Availability::Available);
+    if selected {
+        assert_eq!(status.status_revision, 1);
+        // Ordinary Status/Prepare need no observation token. The synthetic
+        // project is only comparison DATA: no Start, runtime inspect or child.
+        let prepared = prepared.unwrap();
+        assert_eq!((prepared.status_revision, prepared.availability), (3, wire::Availability::Busy));
+        let operation = prepared.operation.unwrap();
+        assert_eq!(operation.phase, wire::Phase::AwaitingConsent); assert!(operation.intent_usable);
+        assert!(owner.original_for_test().inner.lock().prepared.is_some());
+        assert!(owner.original_for_test().inner.lock().active.is_none());
+        let cancelled = owner.cancel(&operation.operation_id, &operation.owner_generation, wire::Availability::Available).unwrap();
+        assert_eq!((cancelled.status_revision, cancelled.availability), (5, wire::Availability::Available));
+        let retired = cancelled.operation.unwrap();
+        assert_eq!((retired.phase, retired.outcome, retired.reason),
+            (wire::Phase::Terminal, Some(wire::Outcome::Cancelled), wire::Reason::Cancelled));
+        assert!(!retired.intent_usable);
+    } else { assert!(prepared.is_err()); }
     assert!(owner.original_for_test().inner.lock().prepared.is_none()); assert!(owner.original_for_test().inner.lock().active.is_none());
+    assert!(owner.can_exit());
 }
 
 pub(crate) fn no_owner_startup_and_unsupported_status_do_not_claim_document_loss() {
@@ -62,7 +96,9 @@ pub(crate) fn no_owner_startup_and_unsupported_status_do_not_claim_document_loss
     assert!(initial.operation.is_none());
     assert_eq!(initial.availability, if wire::Profile::current().is_some() { wire::Availability::Busy } else { wire::Availability::UnsupportedPlatform });
     let bound = owner.status(wire::Availability::Available).unwrap();
-    assert_eq!(bound.availability, if wire::Profile::current().is_some() { wire::Availability::RuntimeUnqualified } else { wire::Availability::UnsupportedPlatform });
+    let selected = cfg!(feature = "custom-protocol") && owner.original_for_test().inner.runtime.offline_preflight_installed_profile_available();
+    assert_eq!(bound.availability, if wire::Profile::current().is_none() { wire::Availability::UnsupportedPlatform }
+        else if selected { wire::Availability::Available } else { wire::Availability::RuntimeUnqualified });
     assert!(bound.operation.is_none());
     if initial.availability != bound.availability { assert!(bound.status_revision > initial.status_revision); }
     owner.document_lost();
@@ -95,12 +131,14 @@ pub(crate) fn intent_expires_with_a_new_revision_and_cancel_never_creates_an_own
 
 pub(crate) fn start_burns_before_unavailability_and_foreign_start_grants_nothing() {
     let owner = owner(); prepared(&owner, Instant::now() + INTENT);
-    assert!(owner.start(start_input(&"f".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
+    // A supplied closed gate keeps this synthetic identity out of installed
+    // startup even when the ordinary build profile is selected.
+    assert!(owner.start(start_input(&"f".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::RuntimeUnqualified).is_err());
     assert!(owner.original_for_test().inner.lock().prepared.is_some());
-    let status = owner.start(start_input(&"a".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::Available).unwrap().release();
+    let status = owner.start(start_input(&"a".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::RuntimeUnqualified).unwrap().release();
     assert!(owner.original_for_test().inner.lock().prepared.is_none()); assert!(owner.original_for_test().inner.lock().active.is_none());
     assert_eq!(status.operation.unwrap().outcome, Some(wire::Outcome::Refused));
-    assert!(owner.start(start_input(&"a".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
+    assert!(owner.start(start_input(&"a".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::RuntimeUnqualified).is_err());
 }
 
 pub(crate) fn whole_run_endpoints_and_first_stop_never_renew() {
@@ -112,10 +150,20 @@ pub(crate) fn whole_run_endpoints_and_first_stop_never_renew() {
     owner.original_for_test().inner.stop_locked(&mut r, &session, Reason::ProtocolError, first + Duration::from_secs(9));
     let a = r.active.as_ref().unwrap(); assert_eq!(a.first_stop, Some(first));
     assert_eq!(session.clocks.settlement(a.first_stop), first + SETTLEMENT);
+    assert_eq!(*session.native_cleanup_cutoff.borrow(), first + SETTLEMENT);
     owner.original_for_test().inner.advance_locked(&mut r, &session, first + SETTLEMENT);
     let a = r.active.as_ref().unwrap(); assert!(a.unknown && r.disabled); assert_eq!(a.first_stop, Some(first));
+    assert_eq!(a.projection.reason, Reason::Cancelled);
+    assert_eq!(*session.native_cleanup_cutoff.borrow(), first + SETTLEMENT);
     let p = a.projection.public(); assert_eq!((p.phase, p.outcome, p.reason), (Phase::Unknown, Some(Outcome::Unknown), Reason::CleanupUnknown));
     assert!(p.result.is_none());
+    for later in [1, 2] {
+        owner.original_for_test().inner.advance_locked(&mut r, &session, first + SETTLEMENT + Duration::from_secs(later));
+        let a = r.active.as_ref().unwrap();
+        assert!(a.unknown && r.disabled);
+        assert_eq!((a.first_stop, a.projection.reason), (Some(first), Reason::Cancelled));
+        assert_eq!(*session.native_cleanup_cutoff.borrow(), first + SETTLEMENT);
+    }
 }
 
 pub(crate) fn complete_negative_is_provisional_and_not_first_failure() {
@@ -141,6 +189,17 @@ pub(crate) fn late_terminal_never_reverses_timeout_or_unknown_in_either_delivery
         assert_eq!(a.projection.reason, Reason::TimedOut); assert_eq!(a.projection.outcome, Some(Outcome::TimedOut));
         assert_eq!(a.unknown, due == OFFLINE_HARD); assert!(a.projection.public().result.is_none()); assert!(r.last.is_none());
     } }
+    // A protocol failure has its own supplied event time, not the wall-clock
+    // instant at which this inert future-time model happens to execute.
+    let (owner, session) = active();
+    let at = session.clocks.admitted + Duration::from_secs(5);
+    owner.original_for_test().inner.accept_at(&session, Frame::OfflinePreflight(wire::Frame::Accepted), session.clocks.admitted);
+    owner.original_for_test().inner.accept_at(&session, Frame::OfflinePreflight(wire::Frame::Accepted), at);
+    let r = owner.original_for_test().inner.lock(); let a = r.active.as_ref().unwrap();
+    assert!(a.unknown && r.disabled && session.resource_unknown.load(Ordering::SeqCst));
+    assert_eq!((a.first_stop, a.projection.reason), (Some(at), Reason::ProtocolError));
+    assert_eq!(*session.native_cleanup_cutoff.borrow(), at + SETTLEMENT);
+    assert!(a.projection.public().result.is_none() && r.last.is_none());
 }
 
 pub(crate) fn repeated_unknown_polling_does_not_publish_new_results_or_extend_clocks() {
@@ -158,7 +217,7 @@ pub(crate) fn repeated_unknown_polling_does_not_publish_new_results_or_extend_cl
 // release/shell/unsupported builds. Shared helpers below carry DATA and IO, not
 // another owner's qualification or a substitute launcher.
 #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 pub(crate) mod hosted {
     use super::*;
     use wire::{Context, Terminal, Phase, Outcome, Reason, Profile};
@@ -437,7 +496,7 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             let android = crate::android_build_owner::AndroidBuildOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened-android-runtime")), None);
             let android_inner = &android.original_for_test().inner;
             *android_inner.fixture.lock().map_err(|_| "fixture_android_permit_slot")? = Some(Arc::downgrade(&permit));
-            require(!permit.permits(android_inner) && !android_inner.qualified()
+            require(!permit.permits(android_inner) && !android_inner.qualified(None)
                 && !permit.claimed.load(Ordering::SeqCst)
                 && permit.admitted.lock().map_err(|_| "fixture_admission_slot")?.is_none()
                 && android_inner.lock().prepared.is_none() && android_inner.lock().active.is_none(), "fixture_offline_permit_is_not_android")?;

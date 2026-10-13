@@ -9,6 +9,11 @@ if [ "${3:-}" != / ]; then
     exit 1
 fi
 printf '%s\n' 'MRK_MACOS_POSTINSTALL_PHASE=target-ok' >&2
+# The observed first argument is forwarded, never treated as authority.
+case "${1:-}" in
+    /*) ;;
+    *) exit 1 ;;
+esac
 case "$0" in
     ./postinstall)
         scripts=.
@@ -25,4 +30,4 @@ if ! cd -P "$scripts" 2>/dev/null; then
     exit 1
 fi
 printf '%s\n' 'MRK_MACOS_POSTINSTALL_PHASE=cwd-ok' 'MRK_MACOS_POSTINSTALL_PHASE=pre-exec' >&2
-exec ./mrk-macos-install "$PWD/input"
+exec ./mrk-macos-install "$PWD/input" "$1"

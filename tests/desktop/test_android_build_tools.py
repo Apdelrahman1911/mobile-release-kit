@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import inspect
 import json
 import os
 import shlex
@@ -36,8 +37,8 @@ def file_data(path, *, mode=0o644, size=7, digest="a" * 64):
     return {"path": path, "size": size, "sha256": digest, "mode": mode}
 
 
-def manifest_data():
-    return {
+def manifest_data(*, signature=False):
+    data = {
         "schemaVersion": 1, "profile": subject.PROFILE, "target": subject.TARGET,
         "instance": "inert-data", "launchContract": subject.LAUNCH_CONTRACT,
         "versions": {"jdkVendor": "inert-data", "jdkVersion": "0.0-inert", "gradleVersion": "0.0-inert",
@@ -48,7 +49,8 @@ def manifest_data():
         "bundletool": {"version": subject.BUNDLETOOL_VERSION, "sha256": subject.BUNDLETOOL_SHA256},
         "roles": dict(subject.TOOL_ROLES),
         "files": [file_data("bundletool/bundletool.jar", digest=subject.BUNDLETOOL_SHA256),
-                  file_data("gradle/bin/gradle", mode=0o755), file_data("jdk/bin/java", mode=0o755),
+                  file_data("gradle/bin/gradle", mode=0o755), file_data(subject.AAPT2_PATH, mode=0o555),
+                  file_data("jdk/bin/java", mode=0o755),
                   file_data("jdk/bin/javac", mode=0o755), file_data("sdk/licenses/inert-license-data")],
         "osProfile": {"id": "inert-os-data-only", "inventorySha256": "c" * 64,
                       "shell": subject.OS_SHELL, "executableDirectory": subject.OS_EXECUTABLE_DIRECTORY,
@@ -56,6 +58,11 @@ def manifest_data():
                       "files": [file_data("/usr/bin/" + name, mode=0o755)
                                 for name in ("dash", "sed", "uname", "xargs")]},
     }
+    if signature:
+        data["files"].extend(file_data(path, mode=0o555) for path in
+                             (subject.JARSIGNER_PATH, subject.KEYTOOL_PATH))
+        data["files"].sort(key=lambda item: item["path"])
+    return data
 
 
 def encoded(document=None):
@@ -102,6 +109,7 @@ class Guard:
     def __init__(self):
         self.pid, self.depth = os.getpid(), 0
         self.lifetime_ledger = Ledger()
+        self._project_recovery_source = None
 
     def _check_owner(self):
         return None
@@ -119,17 +127,19 @@ class Guard:
             self.depth -= 1
 
 
-def inert_operation():
+def inert_operation(*, signature=False, document=None):
     # Actual operation type, deliberately fabricated fields: constructor/owner
     # predicates only. There is no input descriptor, invocation or native owner.
     operation = object.__new__(AndroidBuildOperation)
+    operation.signing = None
     operation.pid, operation.thread = os.getpid(), threading.current_thread()
     operation.guard = Guard()
     operation.source = types.SimpleNamespace(operation=operation, guard=operation.guard, active=True,
         request_returned=True, close_claimed=False, failure_observed=Mock())
     operation.guard._android_build_source = operation.source
-    operation.request = types.SimpleNamespace(native={"toolchain": encoded()[1]})
-    operation.inputs = types.SimpleNamespace(release=ReleaseVersion("1.2.3", 7), task=":app:bundleRelease",
+    document = manifest_data(signature=signature) if document is None else document
+    operation.request = types.SimpleNamespace(native={"toolchain": encoded(document)[1]})
+    operation.inputs = types.SimpleNamespace(release=ReleaseVersion("1.2.3", 7), task=":app:bundleRelease", check_signer=signature,
         saved=types.SimpleNamespace(configuration=types.SimpleNamespace(module=":app")))
     operation.files = object.__new__(AndroidBuildFiles)
     operation.files.operation = operation
@@ -150,14 +160,19 @@ def inert_operation():
     return operation
 
 
-def inert_tools(*, selected=True):
-    operation = inert_operation()
+def inert_tools(*, selected=True, signature=False, document=None):
+    document = manifest_data(signature=signature) if document is None else document
+    operation = inert_operation(signature=signature, document=document)
     tools = subject.AndroidValidationTools(operation, operation.request.native["toolchain"])
     operation.tools = tools
-    tools.profile, tools._acquired = profile_data(), True
+    tools.profile, tools._acquired = profile_data(document), True
     if selected:
-        tools._project_claimed = True
-        tools._project_data = subject._selection_data(selection_data(), tools.profile, root_module=False)
+        # Admission remains fabricated DATA; only the pure selection and fixed
+        # inventory predicates run. There are no live metadata observations.
+        with patch.object(tools, "check"):
+            if signature:
+                tools.require_signature_tools()
+            tools.check_project_inputs(selection_data())
     return tools
 
 
@@ -270,6 +285,101 @@ class ManifestDataTests(unittest.TestCase):
         with self.assertRaises(subject.AndroidToolError):
             subject._parse_manifest(b" " * (subject.MAX_MANIFEST_BYTES + 1), subject._binding(encoded()[1]))
 
+    def test_fixed_aapt2_leaf_is_required_before_any_dispatch(self):
+        for change in ("missing", "empty", "not-executable"):
+            data = manifest_data()
+            leaf = next(row for row in data["files"] if row["path"] == subject.AAPT2_PATH)
+            if change == "missing":
+                data["files"].remove(leaf)
+            else:
+                leaf["size" if change == "empty" else "mode"] = 0 if change == "empty" else 0o444
+            with self.subTest(change=change), self.assertRaises(subject.AndroidToolError):
+                profile_data(data)
+
+    def test_native_configuration_paths_are_closed_direct_families(self):
+        allowed = ("/etc/fonts/fonts.conf", "/etc/fonts/conf.avail/50-user.conf",
+                   "/usr/share/fontconfig/conf.avail/10-hinting.conf",
+                   "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                   "/usr/share/fonts/truetype/lato/Lato-Regular.ttf",
+                   "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                   "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+                   "/var/cache/fontconfig/CACHEDIR.TAG",
+                   "/var/cache/fontconfig/" + "0a" * 16 + "-le64.cache-9",
+                   "/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf")
+        denied = ("/etc/passwd", "/etc/resolv.conf.bak", "/etc/fonts/conf.avail/.conf",
+                  "/etc/fonts/conf.avail/nested/file.conf", "/etc/fonts/conf.avail/FILE.CONF",
+                  "/etc/fonts/conf.avail/../outside.conf", "/etc/fonts/conf.d/50-user.conf",
+                  "/usr/share/fontconfig/conf.avail/nested/file.conf",
+                  "/usr/share/fonts/truetype/other/Font.ttf", "/usr/share/fonts/truetype/lato/Font.TTF",
+                  "/usr/share/fonts/truetype/lato/nested/Font.ttf", "/usr/local/share/fonts/Font.ttf",
+                  "/usr/share/fonts/truetype/noto/nested/Font.ttf", "/usr/share/fonts/truetype/noto/Font.otf",
+                  "/var/cache/fontconfig/" + "0A" * 16 + "-le64.cache-9",
+                  "/var/cache/fontconfig/" + "a" * 31 + "-le64.cache-9",
+                  "/var/cache/fontconfig/" + "a" * 32 + "-le64.cache-8",
+                  "/var/cache/fontconfig/nested/" + "a" * 32 + "-le64.cache-9",
+                  "/var/cache/fontconfig/cachedir.tag", "/var/cache/other/CACHEDIR.TAG",
+                  "/usr/share/arbitrary/data")
+        for path in allowed:
+            with self.subTest(allowed=path):
+                self.assertEqual(subject._file_specs([file_data(path)], native=True)[0].path, path)
+        for path in denied:
+            with self.subTest(denied=path), self.assertRaises(subject.AndroidToolError):
+                subject._file_specs([file_data(path)], native=True)
+
+    def test_os_file_capacity_does_not_expand_helper_or_json_budgets(self):
+        data = manifest_data()
+        files = data["osProfile"]["files"]
+        files.extend(file_data(f"/usr/lib/inert-{n:03}") for n in range(256 - len(files)))
+        self.assertEqual(len(profile_data(data).native_files), 256)
+        files.append(file_data("/usr/lib/overflow"))
+        with self.assertRaises(subject.AndroidToolError):
+            profile_data(data)
+        data = manifest_data()
+        helpers = [f"inert-{n:03}" for n in range(126)] + ["sed", "uname", "xargs"]
+        data["osProfile"]["helpers"] = helpers
+        data["osProfile"]["files"].extend(file_data(f"/usr/bin/{name}", mode=0o755) for name in helpers[:126])
+        data["osProfile"]["files"].sort(key=lambda item: item["path"])
+        with self.assertRaises(subject.AndroidToolError):
+            profile_data(data)
+        helpers.pop(0)
+        self.assertEqual(len(profile_data(data).helpers), 128)
+        self.assertEqual(67 + subject.MAX_OS_HELPERS + 9 * (subject.MAX_TOOL_FILES + subject.MAX_OS_FILES), 149_955)
+        self.assertLessEqual(149_955, subject.MAX_MANIFEST_NODES)
+
+    def test_complete_toolset_sized_data_and_new_manifest_edges(self):
+        data = manifest_data()
+        data["files"].extend(file_data(f"sdk/platforms/android-35/data/inert-{n:05}")
+                             for n in range(len(data["files"]), subject.MAX_TOOL_FILES))
+        data["files"].sort(key=lambda item: item["path"])
+        raw, binding = encoded(data)
+        self.assertGreater(len(raw), 2 * 1024**2)
+        self.assertLess(len(raw), subject.MAX_MANIFEST_BYTES)
+        self.assertEqual(len(subject._parse_manifest(raw, subject._binding(binding)).files), 16_384)
+        exact = raw + b" " * (subject.MAX_MANIFEST_BYTES - len(raw))
+        self.assertEqual(len(subject._parse_manifest(exact, subject._binding(binding_data(exact))).files), 16_384)
+        with self.assertRaises(subject.AndroidToolError):
+            subject._parse_manifest(exact + b" ", subject._binding(binding_data(exact + b" ")))
+        data["files"].append(file_data(f"sdk/platforms/android-35/data/inert-{subject.MAX_TOOL_FILES:05}"))
+        with self.assertRaises(subject.AndroidToolError):
+            profile_data(data)  # Unique/sorted one-over: refusal is the file bound, not duplicate names.
+        # Shape DATA only. Object keys still count and only this tool parser's
+        # node ceiling changes; this is not an executable/installed inventory.
+        value = [0] * (subject.MAX_MANIFEST_NODES - 1)
+        subject._shape(value)
+        value.append(0)
+        with self.assertRaises(subject.AndroidToolError):
+            subject._shape(value)
+
+    def test_complete_entry_limit_includes_directories_and_the_manifest(self):
+        spec = lambda path: subject._FileSpec(path, 1, "a" * 64, 0o644)
+        files = [spec(f"sdk/d{n:05}/a/b/file") for n in range(subject.MAX_ENTRIES // 4 - 1)]
+        files.extend((spec("sdk/z-extra-a"), spec("sdk/z-extra-b")))
+        directories = subject._directories(tuple(files))
+        self.assertEqual(len(files) + len(directories) + 1, subject.MAX_ENTRIES)
+        files.append(spec("sdk/z-extra-c"))
+        with self.assertRaises(subject.AndroidToolError):
+            subject._directories(tuple(files))
+
     def test_malformed_json_is_fixed_refusal(self):
         for raw in (b'{"schemaVersion":1,"schemaVersion":1}', b'{"n":1.2}', b'{"n":NaN}', b'{"n":true}',
                     b'{"n":null}', b'{"n":9007199254740992}', b'{"n":"\\ud800"}', b'\xef\xbb\xbf{}', b'\xff'):
@@ -339,6 +449,20 @@ class SelectionDataTests(unittest.TestCase):
         result = subject._selection_data(data, profile_data(), root_module=True)
         self.assertEqual(dict(result)["module_gradle_properties"], b"x=y")
 
+    def test_aapt2_native_jansi_and_platform_selection_cannot_override_fixed_launches(self):
+        conflicts = ("android.aapt2FromMavenOverride", "android.aapt2Version", "android.aapt2Platform",
+                     "jna.nosys", "jna.boot.library.path", "jna.boot.library.name", "jna.tmpdir",
+                     "jna.nounpack", "jnidispatch.path", "org.gradle.native", "org.gradle.native.dir",
+                     "org.gradle.internal.native.enabled", "library.jansi.path", "library.jansi.version",
+                     "jansi.tmpdir", "jansi.force", "jansi.passthrough", "jansi.strip",
+                     "os.arch", "os.name", "os.version", "sun.arch.data.model", "com.ibm.vm.bitmode")
+        for field in ("local_properties", "root_gradle_properties", "module_gradle_properties"):
+            for key in conflicts:
+                for selection in (key, key.upper(), "systemProp." + key, "SYSTEMPROP." + key.upper()):
+                    data = selection_data(); data[field] = (selection + "=conflicting").encode("ascii")
+                    with self.subTest(field=field, key=selection), self.assertRaises(subject.AndroidToolError):
+                        subject._selection_data(data, profile_data(), root_module=False)
+
     def test_once_only_selection_retains_immutable_bytes_and_cannot_retry_failure(self):
         tools, data = inert_tools(selected=False), selection_data()
         with patch.object(tools, "check") as checked:
@@ -358,6 +482,97 @@ class SelectionDataTests(unittest.TestCase):
                 tools.check_project_inputs(selection_data())
         self.assertTrue(tools._project_claimed)
         self.assertIsNone(tools._project_data)
+
+
+class SignatureToolAdmissionDataTests(unittest.TestCase):
+    def test_extra_signature_files_do_not_change_five_manifest_roles_or_basic_mode(self):
+        for present in (False, True):
+            data = manifest_data(signature=present)
+            self.assertEqual(set(data["roles"]), {"java", "javac", "gradle", "bundletool", "sdk"})
+            profile = profile_data(data)
+            self.assertEqual(subject.JARSIGNER_PATH in {item.path for item in profile.files}, present)
+            tools = inert_tools(selected=False, document=data)
+            with patch.object(tools, "check") as checked:
+                with self.assertRaises(subject.AndroidToolError):
+                    tools.require_signature_tools()
+                checked.assert_not_called()
+                tools.check_project_inputs(selection_data())
+            self.assertFalse(tools._signature_claimed or tools._signature_ready)
+        data = manifest_data(signature=True)
+        data["roles"]["jarsigner"] = subject.JARSIGNER_PATH
+        with self.assertRaises(subject.AndroidToolError):
+            profile_data(data)
+
+    def test_missing_empty_nonexecutable_or_other_jdk_leaves_refuse_before_selection(self):
+        for path in (subject.JARSIGNER_PATH, subject.KEYTOOL_PATH):
+            for change in ("missing", "empty", "not-executable", "other-jdk"):
+                data = manifest_data(signature=True)
+                leaf = next(item for item in data["files"] if item["path"] == path)
+                if change == "missing":
+                    data["files"].remove(leaf)
+                elif change == "other-jdk":
+                    leaf["path"] = "jdk/other/bin/" + path.rsplit("/", 1)[1]
+                    data["files"].sort(key=lambda item: item["path"])
+                else:
+                    leaf["size" if change == "empty" else "mode"] = 0 if change == "empty" else 0o444
+                tools = inert_tools(selected=False, signature=True, document=data)
+                with self.subTest(path=path, change=change), patch.object(tools, "check") as checked, \
+                     patch.object(subject.os, "open") as opened, patch("mobile_release.android.run_owned") as dispatched:
+                    with self.assertRaises(subject.AndroidToolError):
+                        tools.require_signature_tools()
+                    self.assertEqual(tools._first_error.reason, "toolchain-mismatch")
+                    self.assertTrue(tools._signature_claimed)
+                    self.assertFalse(tools._signature_ready)
+                    with self.assertRaises(subject.AndroidToolError):
+                        tools.require_signature_tools()
+                    with self.assertRaises(subject.AndroidToolError):
+                        tools.check_project_inputs(selection_data())
+                    with self.assertRaises(subject.AndroidToolError):
+                        tools.gradle_command(tools.task, WORK)
+                    checked.assert_called_once_with()
+                    opened.assert_not_called(); dispatched.assert_not_called()
+                    self.assertFalse(tools._project_claimed)
+                    self.assertIsNone(tools._project_data)
+
+    def test_upload_admission_is_once_and_precedes_project_selection(self):
+        tools = inert_tools(selected=False, signature=True)
+        with patch.object(tools, "check") as checked:
+            with self.assertRaises(subject.AndroidToolError):
+                tools.check_project_inputs(selection_data())
+            checked.assert_not_called()
+            self.assertFalse(tools._project_claimed)
+            tools.require_signature_tools()
+            self.assertTrue(tools._signature_claimed and tools._signature_ready)
+            with self.assertRaises(subject.AndroidToolError):
+                tools.require_signature_tools()
+            checked.assert_called_once_with()
+            tools.check_project_inputs(selection_data())
+            self.assertEqual(checked.call_count, 3)
+        self.assertIsNotNone(tools._project_data)
+        for mutate in (lambda t: setattr(t, "_acquired", False), lambda t: setattr(t, "_close_claimed", True),
+                       lambda t: setattr(t, "_project_claimed", True), lambda t: setattr(t, "_project_data", ()),
+                       lambda t: setattr(t.operation, "tools", object()), lambda t: setattr(t.source, "active", False)):
+            tools = inert_tools(selected=False, signature=True)
+            mutate(tools)
+            with patch.object(tools, "check") as checked, self.assertRaises(subject.AndroidToolError):
+                tools.require_signature_tools()
+            checked.assert_not_called()
+            self.assertFalse(tools._signature_claimed or tools._signature_ready)
+
+    def test_failed_preflight_preserves_failure_and_never_becomes_ready_or_retries(self):
+        for error in (subject.AndroidToolError(), ProcessCleanupError("inert lifetime"), KeyboardInterrupt()):
+            tools = inert_tools(selected=False, signature=True)
+            with self.subTest(error=type(error).__name__), patch.object(tools, "check", side_effect=error) as checked:
+                with self.assertRaises(type(error)):
+                    tools.require_signature_tools()
+                with self.assertRaises(subject.AndroidToolError):
+                    tools.require_signature_tools()
+                checked.assert_called_once_with()
+            self.assertIs(tools._first_error, error)
+            self.assertIn(error, tools.guard.lifetime_ledger.errors)
+            self.assertTrue(tools._signature_claimed)
+            self.assertFalse(tools._signature_ready)
+            self.assertEqual(tools._unknown_seen, isinstance(error, ProcessCleanupError))
 
 
 class OwnerAndCommandDataTests(unittest.TestCase):
@@ -383,11 +598,14 @@ class OwnerAndCommandDataTests(unittest.TestCase):
         tools = inert_tools()
         poison = {name: "ambient-not-forwarded" for name in ("JAVA_OPTS", "GRADLE_OPTS", "JAVA_TOOL_OPTIONS",
                   "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH", "PYTHONPATH", "ENV", "BASH_ENV",
-                  "LD_PRELOAD", "SSH_AUTH_SOCK", "AWS_SECRET_ACCESS_KEY", "MOBILE_RELEASE_BUILD_NUMBER")}
-        with patch.object(subject.os, "environ", poison), patch.object(tools, "check"), \
+                  "LD_PRELOAD", "SSH_AUTH_SOCK", "AWS_SECRET_ACCESS_KEY", "MOBILE_RELEASE_BUILD_NUMBER",
+                  "GRADLE_NATIVE_DIR", "JANSI_TMPDIR", "TERM", "COLORTERM")}
+        with patch.object(subject.os, "environ", poison), patch.object(tools, "check") as checked, \
              patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK):
             env = tools.command_environment(WORK, tools.release)
+            self.assertEqual(checked.call_count, 1)
             another = tools.command_environment(WORK, tools.release)
+            self.assertEqual(checked.call_count, 2)
             self.assertIsNot(env, another)
             self.assertEqual({key: value for key, value in env.items() if key.startswith("MOBILE_RELEASE_")},
                              {"MOBILE_RELEASE_VERSION_NAME": "1.2.3", "MOBILE_RELEASE_BUILD_NUMBER": "7",
@@ -396,6 +614,10 @@ class OwnerAndCommandDataTests(unittest.TestCase):
             self.assertEqual(env["PATH"], ROOT + "/jdk/bin:/usr/bin")
             self.assertEqual(env["ANDROID_SDK_ROOT"], ROOT + "/sdk")
             self.assertEqual(shlex.split(env["JAVA_OPTS"]), list(subject._jvm_arguments(WORK)))
+            for option in ("-Djna.nosys=true", "-Djna.boot.library.path=", "-Djna.boot.library.name=jnidispatch",
+                           f"-Djna.tmpdir={WORK}", f"-Dorg.gradle.native.dir={WORK}"):
+                self.assertIn(option, shlex.split(env["JAVA_OPTS"]))
+            self.assertNotIn("-Djna.nounpack=true", shlex.split(env["JAVA_OPTS"]))
             self.assertFalse(set(poison).difference({"JAVA_OPTS", "MOBILE_RELEASE_BUILD_NUMBER"}).intersection(env))
             self.assertFalse(set(poison.values()).intersection(env.values()))
             env["HOME"] = "changed"
@@ -407,10 +629,11 @@ class OwnerAndCommandDataTests(unittest.TestCase):
 
     def test_gradle_argv_is_fixed_shell_installed_script_and_private_jvm_data(self):
         tools = inert_tools()
-        with patch.object(tools, "check"), \
+        with patch.object(tools, "check") as checked, \
              patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK), \
              patch("mobile_release.android.run_owned") as dispatched, patch.object(subject.os, "open") as opened:
             argv = tools.gradle_command(tools.task, WORK)
+            checked.assert_called_once_with()
             self.assertEqual(argv[:2], (subject.OS_SHELL, ROOT + "/gradle/bin/gradle"))
             self.assertEqual(argv[-1], ":app:bundleRelease")
             for flag in ("--no-daemon", "--no-watch-fs", "--no-parallel", "--console=plain", "--stacktrace", "--max-workers=2"):
@@ -421,8 +644,15 @@ class OwnerAndCommandDataTests(unittest.TestCase):
             # POSIX round-trip DATA only; the actual installed script/daemon
             # parser and launch-control support still require native qualification.
             self.assertEqual(shlex.split(jvm), list(subject._jvm_arguments(WORK)))
+            env = tools.command_environment(WORK, tools.release)
+            native_dir = f"-Dorg.gradle.native.dir={WORK}"
+            self.assertEqual(shlex.split(jvm).count(native_dir), 1)
+            self.assertEqual(shlex.split(env["JAVA_OPTS"]).count(native_dir), 1)
+            for startup in (shlex.split(jvm), shlex.split(env["JAVA_OPTS"])):
+                self.assertFalse(any(value.startswith(("-Dos.arch=", "-Dos.name=")) for value in startup))
             for key, value in subject._fixed_properties(ROOT):
                 self.assertIn(f"-D{key}={value}", argv); self.assertIn(f"-P{key}={value}", argv)
+            self.assertIn(f"-Pandroid.aapt2FromMavenOverride={ROOT}/gradle/native/aapt2/aapt2", argv)
             self.assertNotIn("gradlew", argv); self.assertNotIn("/usr/bin/env", argv)
             with self.assertRaises(subject.AndroidToolError):
                 tools.gradle_command(":other:bundleRelease", WORK)
@@ -433,11 +663,12 @@ class OwnerAndCommandDataTests(unittest.TestCase):
         artifact = object.__new__(OriginalAndroidArtifact)
         artifact.files, artifact._native, artifact._reader, artifact.check = tools.files, True, None, Mock()
         tools.files.artifact = tools.files._original_artifact = tools.operation._artifact = artifact
-        with patch.object(tools, "check"), \
+        with patch.object(tools, "check") as checked, \
              patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK), \
              patch.object(OriginalAndroidArtifact, "path", new_callable=PropertyMock, return_value=snapshot), \
              patch("mobile_release.android.run_owned") as dispatched:
             argv = tools.bundletool_command(snapshot)
+            checked.assert_called_once_with()
             self.assertEqual(argv[0], ROOT + "/jdk/bin/java")
             self.assertEqual(argv[1:1 + len(subject._jvm_arguments(WORK, bundletool=True))],
                              subject._jvm_arguments(WORK, bundletool=True))
@@ -456,6 +687,84 @@ class OwnerAndCommandDataTests(unittest.TestCase):
                 tools.bundletool_command(snapshot)
         dispatched.assert_not_called()
 
+    def test_signature_argv_uses_same_jdk_original_path_and_every_inspector_jvm_control(self):
+        tools, snapshot = inert_tools(signature=True), WORK.parent / "artifacts/app-release.aab"
+        artifact = object.__new__(OriginalAndroidArtifact)
+        artifact.files, artifact._native, artifact._reader, artifact.check = tools.files, True, None, Mock()
+        tools.files.artifact = tools.files._original_artifact = tools.operation._artifact = artifact
+        options = ("-J-Xms64m", "-J-Xmx1024m", "-J-XX:MaxMetaspaceSize=512m", "-J-Dfile.encoding=UTF-8",
+                   f"-J-Duser.home={WORK}", f"-J-Djava.io.tmpdir={WORK}", "-J-Djna.nosys=true",
+                   "-J-Djna.boot.library.path=", "-J-Djna.boot.library.name=jnidispatch", f"-J-Djna.tmpdir={WORK}")
+        with patch.object(tools, "check") as checked, \
+             patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK), \
+             patch.object(OriginalAndroidArtifact, "path", new_callable=PropertyMock, return_value=snapshot), \
+             patch("mobile_release.android.run_owned") as dispatched, patch.object(subject.os, "open") as opened:
+            self.assertEqual(tools.jarsigner_command(snapshot),
+                             (ROOT + "/jdk/bin/jarsigner", *options, "-verify", "-strict", str(snapshot)))
+            self.assertEqual(tools.keytool_command(snapshot),
+                             (ROOT + "/jdk/bin/keytool", *options, "-printcert", "-jarfile", str(snapshot)))
+            self.assertEqual(checked.call_count, 2)
+            self.assertEqual(artifact.check.call_count, 2)
+        dispatched.assert_not_called(); opened.assert_not_called()
+
+    def test_signature_builders_require_upload_preflight_before_any_artifact_access(self):
+        for signature in (False, True):
+            tools = inert_tools(selected=False, signature=signature)
+            with patch.object(tools, "_inspection_input") as original_input:
+                for name in ("jarsigner_command", "keytool_command"):
+                    with self.subTest(signature=signature, builder=name), self.assertRaises(subject.AndroidToolError):
+                        getattr(tools, name)(Path("/inert/no-artifact.aab"))
+            original_input.assert_not_called()
+
+    def test_signature_builders_refuse_wrong_original_borrow_path_owner_or_failed_checks(self):
+        for name in ("jarsigner_command", "keytool_command"):
+            for change in ("foreign-path", "string-path", "no-native", "python-reader", "foreign-artifact",
+                           "foreign-files", "replaced-artifact", "replaced-original", "replaced-tools",
+                           "retired-source", "closed", "unselected", "tool-check", "artifact-check", "stop"):
+                tools, snapshot = inert_tools(signature=True), WORK.parent / "artifacts/app-release.aab"
+                artifact = object.__new__(OriginalAndroidArtifact)
+                artifact.files, artifact._native, artifact._reader, artifact.check = tools.files, True, None, Mock()
+                tools.files.artifact = tools.files._original_artifact = tools.operation._artifact = artifact
+                expected_error, path = subject.AndroidToolError, snapshot
+                if change == "foreign-path":
+                    path = Path("/inert/other.aab")
+                elif change == "string-path":
+                    path = str(snapshot)
+                elif change == "no-native":
+                    artifact._native = False
+                elif change == "python-reader":
+                    artifact._reader = object()
+                elif change == "foreign-artifact":
+                    tools.operation._artifact = object()
+                elif change == "foreign-files":
+                    artifact.files = object()
+                elif change == "replaced-artifact":
+                    tools.files.artifact = object()
+                elif change == "replaced-original":
+                    tools.files._original_artifact = object()
+                elif change == "replaced-tools":
+                    tools.operation.tools = object()
+                elif change == "retired-source":
+                    tools.source.active = False
+                elif change == "closed":
+                    tools._close_claimed = True
+                elif change == "unselected":
+                    tools._project_data = None
+                elif change == "artifact-check":
+                    artifact.check.side_effect = subject.AndroidToolError()
+                elif change == "stop":
+                    expected_error = KeyboardInterrupt
+                    tools.operation.checkpoint.side_effect = KeyboardInterrupt()
+                with self.subTest(builder=name, change=change), patch.object(tools, "check") as checked, \
+                     patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK), \
+                     patch.object(OriginalAndroidArtifact, "path", new_callable=PropertyMock, return_value=snapshot), \
+                     patch("mobile_release.android.run_owned") as dispatched, patch.object(subject.os, "open") as opened:
+                    if change == "tool-check":
+                        checked.side_effect = subject.AndroidToolError()
+                    with self.assertRaises(expected_error):
+                        getattr(tools, name)(path)
+                dispatched.assert_not_called(); opened.assert_not_called()
+
     def test_builders_refuse_before_selection_and_checks_do_not_rehash(self):
         tools = inert_tools(selected=False)
         with patch.object(tools, "_read") as read, patch.object(tools, "_check_metadata") as checked:
@@ -470,6 +779,105 @@ class OwnerAndCommandDataTests(unittest.TestCase):
 
 
 class OriginalLifetimeDataTests(unittest.TestCase):
+    def test_fourteen_metadata_rounds_fit_the_finite_checkpoint_budget(self):
+        # Actual accounting methods, but EVERY native boundary is doubled.
+        # No original descriptor, directory, file or process is acquired.
+        for rounds, directory, blocks, expected in (
+                (14, False, (b"x" * 7,), 110), (14, True, (), 112),
+                (23, False, (b"x" * 7,), 164), (23, True, (), 175),
+                (23, False, (b"x" * 3, b"x" * 4), 165)):
+            tools, slot = inert_tools(), Slot("counter-data", [])
+            slot.open = Mock(return_value=17)
+            tools._directories[ROOT] = 11
+            mode = (stat.S_IFDIR | 0o755) if directory else (stat.S_IFREG | 0o644)
+            data = observed(mode=mode)
+            with self.subTest(rounds=rounds, directory=directory, reads=len(blocks)), \
+                 patch.object(subject, "_FD", return_value=slot), \
+                 patch.object(subject.os, "fstat", return_value=data), patch.object(subject.os, "stat", return_value=data), \
+                 patch.object(subject.os, "getxattr", side_effect=OSError(errno.ENODATA, "inert")), \
+                 patch.object(subject.os, "lseek", return_value=0), patch.object(subject.os, "read", side_effect=blocks):
+                record = tools._open_record(11, "inert", directory=directory)
+                if not directory:
+                    tools._read(record, 7)
+                for _ in range(rounds):
+                    tools._check_record(record)
+            # Actual k read calls: regular 109+k/163+k; directory 112/175.
+            self.assertEqual(tools.operation.counters["tool-checkpoints"], expected)
+            tools.operation.counters["tool-checkpoints"] = subject.MAX_CHECKPOINTS - 1
+            tools._point()
+            with self.assertRaises(subject.AndroidToolError):
+                tools._point()
+            self.assertEqual(tools.operation.counters["tool-checkpoints"], subject.MAX_CHECKPOINTS)
+            tools._cleanup_mode = True
+            tools._point()
+            tools.operation.cleanup_checkpoint.assert_called_once_with()
+            self.assertEqual(tools.operation.counters["tool-checkpoints"], subject.MAX_CHECKPOINTS)
+        # Both DATA envelopes assume full requested read blocks, not native
+        # read behavior. Positive short reads add checkpoints (see above);
+        # arbitrary short-read schedules can still exhaust the unchanged cap.
+        bound = (112 * subject.MAX_DESCRIPTORS + 5 * subject.MAX_ENTRIES
+                 + (subject.MAX_TOTAL_BYTES + subject.MAX_MANIFEST_BYTES) // subject.READ_CHUNK
+                 + subject.MAX_TOOL_FILES + subject.MAX_OS_FILES + 1024)
+        self.assertEqual(bound, 3_867_968)
+        self.assertEqual(subject.MAX_CHECKPOINTS - bound, 132_032)
+        # Reuse the admitted complete tool tuple; no installed-tree census.
+        # Basic success14 + signature preflight1 + jarsigner4 + keytool4 =23.
+        tool_files, tool_directories = 12_371 + 4, 3_471
+        ancestors = len(Path(ROOT).parts)
+        self.assertEqual(ancestors, 5)
+        regular = tool_files + subject.MAX_OS_FILES + 1  # Includes manifest.
+        directories = tool_directories + subject.MAX_OS_FILES * subject.MAX_DEPTH + ancestors + 1
+        retained = regular + directories
+        self.assertEqual((regular, directories, retained), (12_632, 7_573, 20_205))
+        upload_bound = (163 * regular + 175 * directories + 5 * retained
+                        + (subject.MAX_TOTAL_BYTES + subject.MAX_MANIFEST_BYTES) // subject.READ_CHUNK
+                        + regular + 1024)
+        self.assertEqual(upload_bound, 3_515_420)
+        self.assertEqual(subject.MAX_CHECKPOINTS - upload_bound, 484_580)
+        # Bind ancestry and fixed-round overhead to the actual metadata body.
+        # Do not acquire ancestry: all slots/bindings/observations are DATA.
+        tools = inert_tools()
+        tools.ancestry = subject._Ancestry(tools)
+        tools.ancestry.slots = [Slot("inert-ancestor", []) for _ in range(ancestors)]
+        identity = dict(device=1, inode=50, uid=0, gid=0, mode=0o755)
+        tools.ancestry.bindings = [(None if index == 0 else 17, name, identity)
+                                  for index, name in enumerate(Path(ROOT).parts)]
+        tools.manifest = object()
+        tools._credentials = ((1234,) * 3, (1234,) * 3)
+        data = observed(inode=50, mode=stat.S_IFDIR | 0o755)
+        with patch.object(subject.os, "fstat", return_value=data), patch.object(subject.os, "stat", return_value=data), \
+             patch.object(subject.os, "getxattr", side_effect=OSError(errno.ENODATA, "inert")), \
+             patch.object(subject.os, "getresuid", return_value=tools._credentials[0], create=True), \
+             patch.object(subject.os, "getresgid", return_value=tools._credentials[1], create=True), \
+             patch.object(subject.os, "open", side_effect=AssertionError("no native ancestry acquisition")) as opened:
+            tools._check_metadata()
+        opened.assert_not_called()
+        self.assertEqual(tools.operation.counters["tool-checkpoints"], 7 * ancestors + 6)
+        self.assertEqual(tools.operation.counters["tool-checkpoints"], 41)
+        fixed = 10 + 23 * (tools.operation.counters["tool-checkpoints"] - 7 * ancestors)
+        self.assertEqual(fixed, 148)  # Acquisition + measured round overhead.
+        self.assertLessEqual(fixed, 1024)
+        # Bind the acquisition contribution to the ACTUAL success-path body.
+        # Ancestry/open/read/enumeration are inert doubles, not native custody.
+        tools = inert_tools()
+        raw, _ = encoded()
+        tools._directories[ROOT] = 17
+        ancestry = types.SimpleNamespace(slots=[Slot("inert-root", [])], fd=17,
+            bindings=[(11, "inert-data")], acquire=Mock())
+
+        def opened(_parent, _name, *, directory, stable_contents=True, spec=None):
+            return types.SimpleNamespace(slot=Slot("inert-record", []), spec=spec,
+                                         identity=(1, 50, 0o100644, 0, 0, 1, len(raw), 0, 0))
+
+        with patch.object(tools, "_platform"), patch.object(subject, "_Ancestry", return_value=ancestry), \
+                patch.object(tools, "_protected", return_value=tools.binding.identity), \
+                patch.object(tools, "_open_record", side_effect=opened), \
+                patch.object(tools, "_read", side_effect=lambda record, _size, **_: (
+                    record.spec.sha256 if record.spec else tools.binding.sha256, raw)), \
+                patch.object(tools, "_inventory_names"), patch.object(tools, "check") as checked:
+            tools.acquire()
+            checked.assert_called_once_with()
+
     def test_fixed_acl_and_capability_observations_require_explicit_absence(self):
         tools = inert_tools()
         with patch.object(subject.os, "getxattr", side_effect=OSError(errno.ENODATA, "inert")) as attrs:
@@ -507,6 +915,20 @@ class OriginalLifetimeDataTests(unittest.TestCase):
             scan.assert_called_once_with(11)
             self.assertEqual(entries.closes, 1)
             self.assertEqual(tools.iterators[0].close_state, "CLOSED")
+            if names == ("java", "javac"):
+                self.assertEqual(tools.operation.counters["tool-directory-advances"], 3)
+                self.assertEqual(tools.operation.counters["tool-checkpoints"], 7)  # 2 entries*2 +3 per iterator.
+        tools, entries = inert_tools(), Entries(("java", "javac"))
+        tools._directories[ROOT] = 11
+        tools.operation.counters["tool-directory-advances"] = subject.MAX_DIRECTORY_ADVANCES - 3
+        with patch.object(subject.os, "scandir", return_value=entries):
+            tools._inventory_names(ROOT, {"java", "javac"})
+        self.assertEqual(tools.operation.counters["tool-directory-advances"], 2 * subject.MAX_ENTRIES)
+        self.assertEqual(entries.closes, 1)  # Final StopIteration consumed the inclusive last advance.
+        empty = Entries(())
+        with patch.object(subject.os, "scandir", return_value=empty), self.assertRaises(subject.AndroidToolError):
+            tools._inventory_names(ROOT, set())
+        self.assertEqual(empty.closes, 1)
         tools = inert_tools()
         tools._directories[ROOT] = 11
         tools.slots = [Slot("DATA-only", [])] * subject.MAX_DESCRIPTORS
@@ -661,6 +1083,675 @@ class OriginalLifetimeDataTests(unittest.TestCase):
         iterator.value.close.assert_called_once_with()
         self.assertEqual(iterator.close_state, "UNKNOWN")
 
+
+
+# Mac cases reuse inert operation/slot DATA above; they never run an installed
+# tool, native directory iterator, real descriptor or system-provider probe.
+MAC_DATA_PAIRS = {
+    "android-registered-macos-arm64-v1": (
+        "macos-arm64", "gradle-macos-private-jvm-arm64-v1", "macos26-arm64-sealed-system-v1", "arm64"),
+    "android-registered-macos-x86_64-v1": (
+        "macos-x86_64", "gradle-macos-private-jvm-x86_64-v1", "macos26-x86_64-sealed-system-v1", "x86_64"),
+}
+
+
+def mac_documents(*, profile="android-registered-macos-arm64-v1"):
+    from mobile_release import android_build_tools_macos as mac
+    # Independent literals, not the production profile table as a test oracle.
+    target, launch, os_profile, _ = MAC_DATA_PAIRS[profile]
+    home = "jdk/Inert Vendor.jdk/Contents/Home"
+    data = manifest_data(signature=True)
+    del data["osProfile"]
+    data.update(profile=profile, target=target, instance="ab" * 16,
+                launchContract=launch, aliases=[])
+    # Independent enrolled Mac pins; the shared Linux fixture above stays original.
+    signed_digest = "b87fef6d0b3c7a6c43debb7b069639136af549d8b0f0bb7bac452328f0eb5a18"
+    data["bundletool"]["sha256"] = signed_digest
+    data["versions"]["jdkVersion"] = "17.0-inert"
+    data["roles"].update(java=f"{home}/bin/java", javac=f"{home}/bin/javac")
+    for leaf in data["files"]:
+        if leaf["path"].startswith("jdk/"):
+            leaf["path"] = home + leaf["path"][3:]
+        if leaf["path"] == "bundletool/bundletool.jar":
+            leaf.update(size=32494771, sha256=signed_digest)
+        leaf["mode"] = 0o555 if leaf["mode"] & 0o111 else 0o444
+    data["files"].sort(key=lambda row: row["path"])
+    provider = {"schemaVersion": 1, "profile": os_profile, "target": target,
+                "shell": "/bin/sh", "executablePath": ["/usr/bin", "/bin"], "roots": list(mac.OS_ROOTS),
+                "files": [file_data(path, mode=0o644 if path.endswith(".plist") else 0o755)
+                          for path in mac.OS_FILES]}
+    return data, provider
+
+
+def mac_encoded(data=None, provider=None, *, record_changes=None, profile="android-registered-macos-arm64-v1"):
+    from mobile_release import android_build_tools_macos as mac
+    default_data, default_provider = mac_documents(profile=profile)
+    data = default_data if data is None else data
+    provider = default_provider if provider is None else provider
+    encode = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    provider_raw = encode(provider)
+    provider_hash = hashlib.sha256(provider_raw).hexdigest()
+    data = {**data, "osProviderSha256": provider_hash}
+    raw = encode(data)
+    inventory_hash = hashlib.sha256(raw).hexdigest()
+    record = {"schemaVersion": 1, "profile": profile, "target": MAC_DATA_PAIRS[profile][0], "instance": "ab" * 16,
+              "ownerUid": 501, "inventorySha256": inventory_hash, "osProviderSha256": provider_hash,
+              "licenseAcknowledged": True, **(record_changes or {})}
+    record_raw = encode(record)
+    selected = {"instance": "ab" * 16, "ownerUid": 501, "catalogGeneration": 3,
+                "recordSha256": hashlib.sha256(record_raw).hexdigest(),
+                "inventorySha256": inventory_hash, "osProviderSha256": provider_hash}
+    native = {"schemaVersion": 2, "profile": profile, "root": f"{mac.PREFIX}/501/{'ab' * 16}",
+              "rootIdentity": {"device": "1", "inode": "50", "mode": stat.S_IFDIR | 0o555, "uid": 0, "gid": 0},
+              "inventorySha256": inventory_hash, "selection": selected}
+    return raw, provider_raw, record_raw, native
+
+
+def mac_inert_tools(*, profile="android-registered-macos-arm64-v1"):
+    from mobile_release import android_build_tools_macos as mac
+    raw, provider, record, native = mac_encoded(profile=profile)
+    operation = inert_operation(signature=True)
+    operation.request.native["toolchain"] = native
+    tools = subject.AndroidValidationTools(operation, native)
+    operation.tools = tools
+    tools.profile, tools._acquired = mac.parse_profile(raw, provider, record, tools.binding), True
+    with patch.object(tools, "check"):
+        tools.require_signature_tools()
+        tools.check_project_inputs(selection_data())
+    return tools
+
+
+class MacToolAdmissionDataTests(unittest.TestCase):
+    def test_selection_binds_three_raw_headers_and_preserves_linux_shape(self):
+        from mobile_release import android_build_tools_macos as mac
+        for name, (_, _, os_profile, _) in MAC_DATA_PAIRS.items():
+            with self.subTest(profile=name):
+                raw, provider, record, native = mac_encoded(profile=name)
+                selected = subject._binding(native)
+                profile = mac.parse_profile(raw, provider, record, selected)
+                self.assertEqual(selected.profile, name)
+                self.assertEqual(profile.binding, selected)
+                self.assertEqual(profile.os_identity, os_profile)
+                self.assertEqual(profile.java_home, "jdk/Inert Vendor.jdk/Contents/Home")
+                self.assertEqual(tuple(file.path for file in profile.native_files), mac.OS_FILES)
+                self.assertEqual(len(profile.native_files), 11)
+                self.assertTrue({"/bin/bash", "/bin/ls", "/usr/bin/expr"}.issubset(mac.OS_FILES))
+                self.assertEqual(dict(profile.roles)["java"], f"{profile.java_home}/bin/java")
+                self.assertEqual(dict(selected.selection)["catalogGeneration"], 3)
+                jar = next(file for file in profile.files if file.path == "bundletool/bundletool.jar")
+                self.assertEqual((jar.size, jar.sha256, jar.mode), (
+                    32494771, "b87fef6d0b3c7a6c43debb7b069639136af549d8b0f0bb7bac452328f0eb5a18", 0o444))
+                # Every changed manifest is freshly re-anchored: these refusals
+                # prove the signed-derivative contract, not a raw-hash mismatch.
+                for fault in ("metadata", "member", "upstream", "short", "long", "mode"):
+                    data, os_data = mac_documents(profile=name)
+                    leaf = next(row for row in data["files"] if row["path"] == "bundletool/bundletool.jar")
+                    if fault == "metadata":
+                        data["bundletool"]["sha256"] = subject.BUNDLETOOL_SHA256
+                    elif fault == "member":
+                        leaf["sha256"] = subject.BUNDLETOOL_SHA256
+                    elif fault == "upstream":
+                        data["bundletool"]["sha256"] = subject.BUNDLETOOL_SHA256
+                        leaf.update(sha256=subject.BUNDLETOOL_SHA256, size=32520401)
+                    elif fault in ("short", "long"):
+                        leaf["size"] += -1 if fault == "short" else 1
+                    else:
+                        leaf["mode"] = 0o555
+                    changed_raw, changed_os, changed_record, changed_binding = mac_encoded(
+                        data, os_data, profile=name)
+                    with self.subTest(derivative_fault=fault), self.assertRaises(subject.AndroidToolError):
+                        mac.parse_profile(changed_raw, changed_os, changed_record, subject._binding(changed_binding))
+                for changed in ((raw + b"\n", provider, record), (raw, provider + b"\n", record),
+                                (raw, provider, record + b"\n")):
+                    with self.subTest(header=changed), self.assertRaises(subject.AndroidToolError):
+                        mac.parse_profile(*changed, selected)
+                for mutation in ({"root": native["root"] + "/"}, {"schemaVersion": 1}, {"qualified": True},
+                                 {"rootIdentity": {**native["rootIdentity"], "uid": 501}},
+                                 {"rootIdentity": {**native["rootIdentity"], "mode": stat.S_IFDIR | 0o755}},
+                                 {"selection": {**native["selection"], "catalogGeneration": 0}},
+                                 {"selection": {**native["selection"], "ownerUid": True}}):
+                    with self.subTest(mutation=mutation), self.assertRaises(subject.AndroidToolError):
+                        subject._binding({**native, **mutation})
+        linux = subject._binding(encoded()[1])
+        self.assertEqual((linux.profile, linux.selection), (subject.PROFILE, ()))
+        self.assertEqual(profile_data().java_home, "jdk")
+        self.assertEqual(subject.BUNDLETOOL_SHA256,
+                         "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29")
+
+    def test_profile_pairing_rejects_rehashed_opposite_and_unknown_documents(self):
+        from mobile_release import android_build_tools_macos as mac
+        for name in MAC_DATA_PAIRS:
+            opposite = next(key for key in MAC_DATA_PAIRS if key != name)
+            opposite_target, opposite_launch, opposite_os, _ = MAC_DATA_PAIRS[opposite]
+            changes = (("record", "profile", opposite), ("record", "target", opposite_target),
+                       ("inventory", "profile", opposite), ("inventory", "target", opposite_target),
+                       ("inventory", "launchContract", opposite_launch),
+                       ("provider", "profile", opposite_os), ("provider", "target", opposite_target))
+            for document, field, other in changes:
+                for replacement in (other, "unknown-profile-data"):
+                    data, provider = mac_documents(profile=name)
+                    record_change = {}
+                    {"inventory": data, "provider": provider, "record": record_change}[document][field] = replacement
+                    raw, os_raw, record, native = mac_encoded(
+                        data, provider, profile=name, record_changes=record_change)
+                    with self.subTest(profile=name, document=document, field=field, value=replacement):
+                        selected = subject._binding(native)
+                        anchors = dict(selected.selection)
+                        # All three raw anchors match: this must refuse the pairing itself.
+                        self.assertEqual(hashlib.sha256(raw).hexdigest(), selected.sha256)
+                        self.assertEqual(hashlib.sha256(os_raw).hexdigest(), anchors["osProviderSha256"])
+                        self.assertEqual(hashlib.sha256(record).hexdigest(), anchors["recordSha256"])
+                        with self.assertRaises(subject.AndroidToolError):
+                            mac.parse_profile(raw, os_raw, record, selected)
+            raw, provider, record, native = mac_encoded(profile=opposite)
+            with self.subTest(profile=name, all_documents="opposite"), self.assertRaises(subject.AndroidToolError):
+                mac.parse_profile(raw, provider, record, subject._binding({**native, "profile": name}))
+
+    def test_unknown_profile_data_never_uses_hashability_or_string_fallback(self):
+        from mobile_release import android_build_tools_macos as mac
+
+        class StringSubclass(str):
+            pass
+
+        for name in MAC_DATA_PAIRS:
+            raw, provider, record, native = mac_encoded(profile=name)
+            original = subject._binding(native)
+            for value in ([], {}, None, True, 17, "", name + " ", StringSubclass(name)):
+                with self.subTest(profile=name, value=value):
+                    for binder in (subject._binding, mac.binding):
+                        with self.assertRaises(subject.AndroidToolError):
+                            binder({**native, "profile": value})
+                    changed = subject._Binding(original.root, original.instance, original.identity,
+                                               original.sha256, value, original.selection)
+                    with self.assertRaises(subject.AndroidToolError):
+                        mac.parse_profile(raw, provider, record, changed)
+
+    def test_mac_owner_keeps_original_request_and_never_relabels_architecture(self):
+        from mobile_release import android_build_tools_macos as mac
+        for name in MAC_DATA_PAIRS:
+            tools = mac_inert_tools(profile=name)
+            self.assertIs(type(tools._mac), mac.MacAdmission)
+            self.assertIs(tools._mac.tools, tools)
+            self.assertIs(tools.operation.tools, tools)
+            self.assertIs(tools.source.operation, tools.operation)
+            self.assertEqual(tools.binding.profile, name)
+            with patch.object(tools, "_owner", wraps=tools._owner) as owner:
+                tools._mac.owner()
+                owner.assert_called_once_with(active=True)
+                tools._cleanup_mode = True
+                tools._mac.owner()
+                self.assertEqual(owner.call_args.kwargs, {"active": False})
+            opposite = next(key for key in MAC_DATA_PAIRS if key != name)
+            native = mac_encoded(profile=name)[3]
+            mismatched = {**native, "profile": opposite}
+            operation = inert_operation(signature=True)
+            operation.request.native["toolchain"] = native
+            with self.subTest(profile=name, mismatch="constructor"), patch.object(mac.MacAdmission, "platform") as platform:
+                with self.assertRaises(subject.AndroidToolError):
+                    subject.AndroidValidationTools(operation, mismatched)
+                platform.assert_not_called()
+                self.assertIsNone(operation.tools)
+            for change in ("request", "binding", "original-admission", "malformed-profile"):
+                tools = mac_inert_tools(profile=name)
+                original_mac = tools._mac
+                if change == "request":
+                    tools.request.native["toolchain"] = mismatched
+                elif change == "binding":
+                    tools.binding = subject._binding(mismatched)
+                elif change == "original-admission":
+                    tools._mac = object()
+                else:
+                    b = tools.binding
+                    tools.binding = subject._Binding(b.root, b.instance, b.identity, b.sha256, [], b.selection)
+                with self.subTest(profile=name, mismatch=change), self.assertRaises(subject.AndroidToolError):
+                    original_mac.owner()
+
+    def test_mac_platform_pairs_machine_and_lp64_before_credentials(self):
+        from mobile_release import android_build_tools_macos as mac
+        # Standard-library observations below are fabricated DATA, never a native probe.
+        for name, (_, _, _, expected_machine) in MAC_DATA_PAIRS.items():
+            opposite = "x86_64" if expected_machine == "arm64" else "arm64"
+            cases = [("matching", "darwin", expected_machine, 2**63 - 1, True, True, True),
+                     ("opposite", "darwin", opposite, 2**63 - 1, True, True, False),
+                     ("spelling", "darwin", "aarch64", 2**63 - 1, True, True, False),
+                     ("non-Darwin", "linux", expected_machine, 2**63 - 1, True, True, False),
+                     ("missing-flags", "darwin", expected_machine, 2**63 - 1, False, True, False),
+                     ("Darwin-without-Linux-xattr-API", "darwin", expected_machine, 2**63 - 1, True, False, True)]
+            if expected_machine == "x86_64":
+                cases.append(("non-LP64", "darwin", expected_machine, 2**31 - 1, True, True, False))
+            for label, platform, machine, maxsize, flags, xattr, accepted in cases:
+                tools = mac_inert_tools(profile=name)
+                events = []
+                original_point = tools._point
+
+                def point():
+                    events.append("checkpoint")
+                    original_point()
+
+                def uname():
+                    events.append("uname")
+                    return types.SimpleNamespace(machine=machine)
+
+                model_os = types.SimpleNamespace(uname=Mock(side_effect=uname),
+                    stat_result=types.SimpleNamespace(**({"st_flags": 0} if flags else {})),
+                    getuid=Mock(return_value=501), geteuid=Mock(return_value=501),
+                    getgid=Mock(return_value=20), getegid=Mock(return_value=20),
+                    getgroups=Mock(return_value=[20]))
+                if xattr:
+                    model_os.listxattr = Mock()
+                with self.subTest(profile=name, condition=label), \
+                     patch.object(mac, "os", model_os), \
+                     patch.object(mac, "sys", types.SimpleNamespace(platform=platform, maxsize=maxsize)), \
+                     patch("resource.getrlimit", return_value=(256, 256)) as limits, \
+                     patch.object(tools, "_point", side_effect=point) as checkpoint:
+                    if accepted:
+                        tools._mac.platform()
+                        self.assertEqual(tools._mac.credentials, (501, 501, 20, 20, (20,)))
+                        limits.assert_called_once()
+                        for method in (model_os.getuid, model_os.geteuid, model_os.getgid,
+                                       model_os.getegid, model_os.getgroups):
+                            method.assert_called_once_with()
+                    else:
+                        with self.assertRaises(subject.AndroidToolError):
+                            tools._mac.platform()
+                        self.assertIsNone(tools._mac.credentials)
+                        limits.assert_not_called()
+                        for method in (model_os.getuid, model_os.geteuid, model_os.getgid,
+                                       model_os.getegid, model_os.getgroups):
+                            method.assert_not_called()
+                    checkpoint.assert_called_once_with()
+                    self.assertEqual(events, ["checkpoint", "uname"] if platform == "darwin" else ["checkpoint"])
+                    self.assertEqual(model_os.uname.call_count, int(platform == "darwin"))
+                    if xattr:
+                        model_os.listxattr.assert_not_called()
+
+    def test_intel_commands_share_the_original_mac_private_jvm_environment(self):
+        outputs = []
+        snapshot = WORK / "artifact.aab"
+        for name in MAC_DATA_PAIRS:
+            tools = mac_inert_tools(profile=name)
+            with patch.object(tools, "_work", return_value=WORK), \
+                 patch.object(tools, "_inspection_input", return_value=(WORK, snapshot)):
+                outputs.append((tools.gradle_command(tools.task, WORK), tools.command_environment(WORK, tools.release),
+                                tools.bundletool_command(snapshot), tools.jarsigner_command(snapshot),
+                                tools.keytool_command(snapshot)))
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertEqual(outputs[1][0][0], "/bin/sh")
+        self.assertTrue(outputs[1][1]["PATH"].endswith("/bin:/usr/bin:/bin"))
+
+    def test_layout_alias_membership_license_and_provider_are_not_optional(self):
+        from mobile_release import android_build_tools_macos as mac
+        for field, value in (("licenseAcknowledged", False), ("ownerUid", 502), ("profile", subject.PROFILE)):
+            raw, provider, record, native = mac_encoded(record_changes={field: value})
+            with self.subTest(record_field=field), self.assertRaises(subject.AndroidToolError):
+                mac.parse_profile(raw, provider, record, subject._binding(native))
+        cases = []
+        data, provider = mac_documents()
+        home = "jdk/Inert Vendor.jdk/Contents/Home"
+        data["aliases"] = [{"path": f"{home}/lib/java-link", "target": "../bin/java", "canonical": f"{home}/bin/java"}]
+        raw, os_raw, record, native = mac_encoded(data, provider)
+        self.assertEqual(len(mac.parse_profile(raw, os_raw, record, subject._binding(native)).aliases), 1)
+        for replacement in ("../../../../../../outside", f"/{home}/bin/java"):
+            changed, os_data = mac_documents()
+            changed["aliases"] = [{"path": f"{home}/lib/java-link", "target": replacement, "canonical": f"{home}/bin/java"}]
+            cases.append((changed, os_data))
+        changed, os_data = mac_documents(); changed["roles"]["java"] = "jdk/bin/java"; cases.append((changed, os_data))
+        changed, os_data = mac_documents(); changed["files"][0]["mode"] = 0o644; cases.append((changed, os_data))
+        changed, os_data = mac_documents()
+        changed["files"].append(file_data("jdk/Other.jdk/Contents/Home/data", mode=0o444))
+        changed["files"].sort(key=lambda row: row["path"]); cases.append((changed, os_data))
+        changed, os_data = mac_documents(); os_data["shell"] = "/usr/bin/dash"; cases.append((changed, os_data))
+        changed, os_data = mac_documents(); os_data["files"].pop(); cases.append((changed, os_data))
+        changed, os_data = mac_documents()
+        os_data["files"] = [row for row in os_data["files"] if row["path"] not in {"/bin/bash", "/bin/ls", "/usr/bin/expr"}]
+        cases.append((changed, os_data))
+        for changed, os_data in cases:
+            raw, os_raw, record, native = mac_encoded(changed, os_data)
+            with self.subTest(changed=changed["roles"]), self.assertRaises(subject.AndroidToolError):
+                mac.parse_profile(raw, os_raw, record, subject._binding(native))
+
+    def test_mac_commands_use_exact_contents_home_private_environment_and_inspection_only(self):
+        tools = mac_inert_tools()
+        home = f"{tools.binding.root}/{tools.profile.java_home}"
+        snapshot = WORK / "artifact.aab"
+        with patch.object(tools, "_work", return_value=WORK), \
+             patch.object(tools, "_inspection_input", return_value=(WORK, snapshot)), \
+             patch.dict(os.environ, {"JAVA_HOME": "/unselected/java", "ANDROID_HOME": "/unselected/sdk",
+                                     "JAVA_TOOL_OPTIONS": "unselected", "DYLD_LIBRARY_PATH": "/unselected"}):
+            command = tools.gradle_command(tools.task, WORK)
+            environment = tools.command_environment(WORK, tools.release)
+            self.assertEqual(command[:2], ("/bin/sh", f"{tools.binding.root}/gradle/bin/gradle"))
+            self.assertIn(f"-Dorg.gradle.java.home={home}", command)
+            self.assertIn(f"-Porg.gradle.java.installations.paths={home}", command)
+            self.assertEqual(environment["JAVA_HOME"], home)
+            self.assertEqual(environment["PATH"], f"{home}/bin:/usr/bin:/bin")
+            self.assertEqual((environment["LANG"], environment["LC_ALL"]), ("C", "C"))
+            self.assertEqual(environment["ANDROID_HOME"], environment["ANDROID_SDK_ROOT"])
+            self.assertEqual(environment["MOBILE_RELEASE_REQUIRE_SIGNING"], "false")
+            self.assertNotIn("JAVA_TOOL_OPTIONS", environment)
+            self.assertNotIn("DYLD_LIBRARY_PATH", environment)
+            self.assertIn(f"-Duser.home={WORK}", shlex.split(environment["JAVA_OPTS"]))
+            startup = shlex.split(environment["JAVA_OPTS"])
+            build_jvm = shlex.split(next(value.split("=", 1)[1] for value in command if value.startswith("-Dorg.gradle.jvmargs=")))
+            self.assertEqual(startup, build_jvm)
+            self.assertEqual(startup.count(f"-Dorg.gradle.native.dir={WORK}"), 1)
+            self.assertFalse(any(value.startswith(("-Dos.arch=", "-Dos.name=")) for value in startup))
+            self.assertEqual(tools.bundletool_command(snapshot), (
+                f"{home}/bin/java", "-Xms64m", "-Xmx1024m", "-XX:MaxMetaspaceSize=512m",
+                "-Dfile.encoding=UTF-8", f"-Duser.home={WORK}", f"-Djava.io.tmpdir={WORK}",
+                "-Djna.nosys=true", "-Djna.boot.library.path=", "-Djna.boot.library.name=jnidispatch",
+                f"-Djna.tmpdir={WORK}", "-jar", f"{tools.binding.root}/bundletool/bundletool.jar",
+                "dump", "manifest", f"--bundle={snapshot}", "--module=base",
+            ))
+            self.assertEqual(tuple((parameter.name, parameter.kind, parameter.default)
+                                   for parameter in inspect.signature(
+                                       subject.AndroidValidationTools.bundletool_command).parameters.values()), (
+                ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                ("snapshot_path", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+            ))
+            self.assertEqual(tools.jarsigner_command(snapshot)[0], f"{home}/bin/jarsigner")
+            self.assertEqual(tools.keytool_command(snapshot)[0], f"{home}/bin/keytool")
+        chosen = selection_data()
+        chosen["root_gradle_properties"] = f"org.gradle.java.home={home}\n".encode("ascii")
+        self.assertEqual(subject._selection_data(chosen, tools.profile, root_module=False)[2][1],
+                         chosen["root_gradle_properties"])
+        chosen["root_gradle_properties"] = f"org.gradle.java.home={tools.binding.root}/jdk\n".encode("ascii")
+        with self.assertRaises(subject.AndroidToolError):
+            subject._selection_data(chosen, tools.profile, root_module=False)
+
+    def test_signed_roles_use_protected_jdk_bounded_jvm_and_private_only_password_environment(self):
+        from mobile_release.android_build_signing import SignedAndroidOperation
+        from mobile_release._desktop_android_build_files import AndroidSigningCandidate
+        tools = mac_inert_tools(); operation = tools.operation
+        signing = object.__new__(SignedAndroidOperation); signing.operation, signing.guard = operation, operation.guard
+        operation.signing = signing
+        candidate = object.__new__(AndroidSigningCandidate)
+        candidate.files, candidate._native, candidate.integrity_checked = operation.files, True, True
+        candidate.native_path = Mock(return_value=WORK / "signing/app-release.aab")
+        operation.files.signing_candidate = candidate
+        home = f"{tools.binding.root}/{tools.profile.java_home}"
+        with patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK), \
+             patch.object(tools, "_work", return_value=WORK), \
+             patch.object(signing, "command_inputs", return_value=(WORK / "private-key", "inert-store-secret", "upload-key", "inert-key-secret")), \
+             patch.dict(os.environ, {"MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD": "ambient-secret", "JAVA_TOOL_OPTIONS": "ambient-jvm"}):
+            keytool = tools.keystore_input_command(); signer = tools.aab_sign_command(candidate)
+            self.assertEqual(keytool[0], f"{home}/bin/keytool"); self.assertEqual(signer[0], f"{home}/bin/jarsigner")
+            for argv in (keytool, signer):
+                self.assertIn("-J-Xmx1024m", argv); self.assertIn("-J-XX:MaxMetaspaceSize=512m", argv)
+                self.assertIn(f"-J-Djava.io.tmpdir={WORK}", argv)
+                self.assertIn("-storepass:env", argv); self.assertIn("-keypass:env", argv)
+                self.assertFalse(any("secret" in value or "ambient" in value for value in argv))
+            self.assertEqual(signer[-2:], (str(WORK / "signing/app-release.aab"), "upload-key"))
+            environment = operation.command_environment(); private_environment = signing.command_environment()
+            self.assertEqual(environment["MOBILE_RELEASE_REQUIRE_SIGNING"], "false")
+            self.assertNotIn("MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD", environment)
+            self.assertNotIn("MOBILE_RELEASE_ANDROID_KEY_PASSWORD", environment)
+            self.assertEqual(private_environment["MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD"], "inert-store-secret")
+            self.assertEqual(private_environment["MOBILE_RELEASE_ANDROID_KEY_PASSWORD"], "inert-key-secret")
+            self.assertNotIn("JAVA_TOOL_OPTIONS", private_environment)
+            candidate._native = False
+            with self.assertRaises(subject.AndroidToolError): tools.aab_sign_command(candidate)
+
+    def test_mac_identity_flags_do_not_change_linux_tuple_or_accept_named_drift(self):
+        original = observed(mode=stat.S_IFREG | 0o444)
+        original.st_flags = 0
+        self.assertEqual(len(subject._identity(original)), 9)
+        self.assertEqual(len(subject._identity(original, mac=True)), 10)
+        self.assertEqual(subject._identity(original, mac=True)[:-1], subject._identity(original))
+        tools = mac_inert_tools()
+        record = subject._Record(11, "java", Slot("DATA", []), False, True,
+                                 identity=subject._identity(original, mac=True))
+        replacement = observed(mode=stat.S_IFREG | 0o444)
+        replacement.st_flags = 2
+        with patch.object(tools, "_protected", return_value=record.identity), \
+             patch.object(subject.os, "stat", return_value=replacement), self.assertRaises(subject.AndroidToolError):
+            tools._check_record(record)
+
+    def test_streamed_closes_keep_original_records_and_do_not_claim_rehash(self):
+        class ConsumingDataSlot(Slot):
+            def close(self):
+                if self.close_state != "CLOSED":
+                    super().close()
+        tools, events = mac_inert_tools(), []
+        raw, os_raw, record_raw, native = mac_encoded()
+        mac = tools._mac
+        headers = []
+        hashes = {}
+        for name, raw_bytes in zip(("registration.json", subject.MANIFEST_NAME, "os-provider.json"),
+                                  (record_raw, raw, os_raw)):
+            slot = Slot(name, events)
+            original = subject._Record(11, name, slot, False, True,
+                identity=subject._identity(observed(size=len(raw_bytes))))
+            tools.slots.append(slot); headers.append(original)
+            hashes[original] = hashlib.sha256(raw_bytes).hexdigest()
+        mac.headers = tuple(headers); tools.manifest = headers[1]
+        spec = subject._FileSpec("sdk/licenses/inert", 7, "a" * 64, 0o444)
+        streamed = subject._Record(11, "inert", ConsumingDataSlot("streamed", events), False, True,
+                                   identity=subject._identity(observed()), spec=spec)
+        tools.slots.append(streamed.slot); tools.records = [*headers, streamed]
+        mac.live_slots.add(streamed.slot)
+        with patch.object(tools, "_check_record"):
+            mac.retire(streamed, tools.binding.root + "/" + spec.path)
+        self.assertIn(streamed, tools.records)
+        self.assertIn(streamed, mac.disposed)
+        self.assertNotIn(streamed.slot, mac.live_slots)
+        self.assertEqual(streamed.slot.calls, 1)
+        with patch.object(tools, "_check_metadata"), \
+             patch.object(tools, "_read", side_effect=lambda row, *args, **kw: (hashes[row], None)) as reads:
+            tools.close()
+        self.assertEqual([call.args[0] for call in reads.call_args_list], headers)
+        self.assertEqual(streamed.slot.calls, 1)  # A consumed original is not retried or replaced.
+        self.assertTrue(tools.closed())
+        self.assertEqual(len(tools.records), 4)
+
+    def test_native_serial_descriptor_budget_is_not_a_reopen_or_ambient_headroom_claim(self):
+        tools = mac_inert_tools()
+        mac = tools._mac
+        mac.live_slots = {Slot(str(index), []) for index in range(64)}
+        with patch.object(subject, "_FD") as opened, self.assertRaises(subject.AndroidToolError):
+            tools._new_slot()
+        opened.assert_not_called()
+        tools = mac_inert_tools(); mac = tools._mac
+        mac.live_slots = {Slot(str(index), []) for index in range(63)}
+        tools._directories[tools.binding.root] = 11
+        mac.current_iterator = subject._Entries(tools)
+        with patch.object(subject.os, "scandir") as scan, self.assertRaises(subject.AndroidToolError):
+            tools._inventory_names(tools.binding.root, set())
+        scan.assert_not_called()
+
+
+@contextmanager
+def artifact_inspection_tools_data(*, profile="android-registered-macos-arm64-v1"):
+    # Exact production types, deliberately inert fields and scoped original-port
+    # replacements. This tests closed routing, NOT native profile admission.
+    from contextlib import ExitStack
+    import io
+    from mobile_release.desktop_artifact_inspection import ArtifactInspectionOperation
+    from mobile_release._desktop_artifact_inspection_selection import ArtifactInspectionFiles, ArtifactInspectionArtifact
+    from mobile_release import android_build_tools_macos as mac
+    raw, provider, record, native = mac_encoded(profile=profile)
+    operation = object.__new__(ArtifactInspectionOperation)
+    operation.owner = Mock()
+    operation.guard = Guard(); operation.guard.check = Mock()
+    operation.source = types.SimpleNamespace(operation=operation, guard=operation.guard, active=True,
+        request_returned=True, close_claimed=False, failure_observed=Mock())
+    operation.guard._artifact_inspection_source = operation.source
+    operation.request = types.SimpleNamespace(native={"tools": {"android": native}})
+    operation.inputs = types.SimpleNamespace(config=object(), release=ReleaseVersion("1.2.3", 7))
+    operation.files = object.__new__(ArtifactInspectionFiles)
+    operation.files.operation = operation; operation.files.point = Mock()
+    operation.tools, operation.close_claimed = None, False
+    operation.checkpoint, operation.cleanup_checkpoint, operation.require = Mock(), Mock(), Mock()
+    operation.root = Path('/inert/registered-project')
+    operation.zip_metadata = None
+    operation.counters = {}
+    def charge(name, amount, limit):
+        before = operation.counters.get(name, 0)
+        if type(amount) is not int or amount < 0 or before > limit - amount:
+            raise subject.AndroidToolError("input-limit")
+        operation.counters[name] = before + amount
+    operation.charge = charge
+    operation.fail = lambda reason: (_ for _ in ()).throw(subject.AndroidToolError(reason))
+    tools = subject.AndroidValidationTools(operation, native); operation.tools = tools
+    tools.profile, tools._acquired = mac.parse_profile(raw, provider, record, tools.binding), True
+    artifact = object.__new__(ArtifactInspectionArtifact)
+    artifact.files, artifact._native, artifact._reader = operation.files, False, None
+    artifact.check = Mock(); artifact.size = 1024
+    operation.files.artifact = operation._artifact = artifact
+    events = []
+    @contextmanager
+    def reader():
+        original = io.BytesIO(b'original snapshot DATA')
+        artifact._reader = original; events.append('reader-open')
+        try:
+            yield original
+        finally:
+            artifact._reader = None; original.close(); events.append('reader-post-close')
+    @contextmanager
+    def native_input():
+        artifact.check(); artifact._native = True; events.append('native-open')
+        try:
+            yield snapshot
+        finally:
+            artifact.check(); artifact._native = False; events.append('native-post-close')
+    artifact.reader, artifact.native_input = reader, native_input
+    snapshot = WORK.parent / 'selected.aab'
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(ArtifactInspectionFiles, 'work_path', new_callable=PropertyMock, return_value=WORK))
+        stack.enter_context(patch.object(ArtifactInspectionArtifact, 'path', new_callable=PropertyMock, return_value=snapshot))
+        stack.enter_context(patch.object(tools, 'check'))
+        tools.require_signature_tools()
+        for role in ('bundletool', 'jarsigner', 'keytool'):
+            setattr(operation, role + '_command', lambda path, actual, name=role: getattr(tools, name + '_command')(path))
+        operation.command_environment = lambda: tools.command_environment(WORK, operation.inputs.release)
+        def captured(role, stdout, stderr):
+            assert type(stdout) is bytes and type(stderr) is bytes
+            events.append(('captured', role, len(stdout) + len(stderr)))
+            return stdout.decode('utf-8'), stderr.decode('utf-8')
+        def returned(role, code):
+            assert events[-1][:2] == ('captured', role)
+            events.append(('returned', role, code))
+        operation.captured, operation.returned = captured, returned
+        operation.command_error = Mock()
+        operation.signature_accepted = Mock()
+        yield tools, artifact, snapshot, events
+
+
+class ArtifactReadonlyAdmissionDataTests(unittest.TestCase):
+    def test_readonly_original_reuses_mac_provider_but_never_admits_build_or_signing(self):
+        for profile in MAC_DATA_PAIRS:
+            with self.subTest(profile=profile), artifact_inspection_tools_data(profile=profile) as (tools, artifact, snapshot, events):
+                self.assertIsNone(tools.task); self.assertIsNone(tools._project_data)
+                self.assertFalse(hasattr(tools.inputs, 'task')); self.assertFalse(hasattr(tools.inputs, 'check_signer'))
+                with artifact.native_input(), patch.object(subject.os, 'open') as opened:
+                    for name in ('bundletool', 'jarsigner', 'keytool'):
+                        argv = getattr(tools, name + '_command')(snapshot)
+                        self.assertTrue(argv[0].startswith(tools.binding.root + '/'))
+                        self.assertIn('Contents/Home/bin/', argv[0])
+                        self.assertIn(str(snapshot), ' '.join(argv))
+                    with self.assertRaises(subject.AndroidToolError): tools.bundletool_command(Path('/inert/wrong.aab'))
+                    for call in (lambda: tools.gradle_command(':app:bundleRelease', WORK),
+                                 lambda: tools.check_project_inputs({}), tools._signing_inputs,
+                                 tools.keystore_input_command, lambda: tools.aab_sign_command(object())):
+                        with self.assertRaises(subject.AndroidToolError): call()
+                    opened.assert_not_called()
+                self.assertEqual(events, ['native-open', 'native-post-close'])
+                self.assertFalse(tools._project_claimed)
+                for change in ('source', 'request', 'release', 'files', 'tools', 'retired'):
+                    with artifact_inspection_tools_data(profile=profile) as (bad, _, _, _):
+                        if change == 'source': bad.guard._artifact_inspection_source = object()
+                        elif change == 'request': bad.operation.request = object()
+                        elif change == 'release': bad.inputs.release = ReleaseVersion('1.2.3', 7)
+                        elif change == 'files': bad.operation.files = object()
+                        elif change == 'tools': bad.operation.tools = object()
+                        else: bad.source.active = False
+                        with self.assertRaises(subject.AndroidToolError): bad._owner()
+                tools.source.active = False
+                with self.assertRaises(subject.AndroidToolError): tools._owner()
+                tools._owner(active=False)  # Same original read-only finality query, not new work.
+
+    def test_observation_uses_actual_raw_roles_and_keeps_missing_tools_and_policy_distinct(self):
+        from mobile_release import android
+        from mobile_release.android_manifest import ManifestInspectionError
+        from contextlib import nullcontext
+        xml = ('<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.example.actual" '
+               'android:versionCode="7" android:versionName="1.2.3"><application/></manifest>')
+        fingerprint = 'a' * 64
+        certificate = 'Signer #1:\nCertificate #1:\nSHA256: ' + fingerprint + '\n'
+        def result(stdout, code=0): return types.SimpleNamespace(stdout=stdout.encode(), stderr=b'', returncode=code)
+        for case in ('valid', 'no-tools', 'bad-manifest', 'missing-xml', 'bad-signature', 'bad-signer', 'raw-decode', 'custody'):
+            with self.subTest(case=case), artifact_inspection_tools_data() as (tools, artifact, path, events), \
+                 patch.object(android, 'validate_aab_structure', return_value=['DATA']), \
+                 patch.object(android, 'run_owned') as native:
+                operation = tools.operation
+                # No expected certificate/property is available to the adapter.
+                self.assertFalse(hasattr(operation.inputs, 'expected_fingerprint'))
+                if case == 'no-tools':
+                    operation.tools = None
+                    with patch.dict(os.environ, {'MOBILE_RELEASE_BUNDLETOOL_JAR': '/must-not-read'}):
+                        observed = android.inspect_artifact_aab(path, artifact=artifact, cancellation=operation.guard, tools=None)
+                    self.assertTrue(observed.structure_ok); self.assertIsNone(observed.manifest)
+                    self.assertIsNone(observed.signature_ok); self.assertIsNone(observed.signer_sha256)
+                    native.assert_not_called(); self.assertEqual(events, []); continue
+                responses = [result('<bad/>' if case == 'bad-manifest' else xml),
+                             result('unverified' if case == 'bad-signature' else 'jar verified.\n'),
+                             result('not a certificate' if case == 'bad-signer' else certificate)]
+                native.side_effect = responses
+                if case == 'raw-decode':
+                    responses[0].stdout = b'\xff'
+                    with self.assertRaises(UnicodeDecodeError):
+                        android.inspect_artifact_aab(path, artifact=artifact, cancellation=operation.guard, tools=tools)
+                    operation.command_error.assert_called_once(); self.assertEqual(native.call_count, 1); continue
+                if case == 'custody':
+                    artifact.check.side_effect = RuntimeError('original failure')
+                    with self.assertRaisesRegex(RuntimeError, 'original failure'):
+                        android.inspect_artifact_aab(path, artifact=artifact, cancellation=operation.guard, tools=tools)
+                    native.assert_not_called(); continue
+                with (patch('mobile_release.android_manifest.parse_android_manifest', side_effect=ManifestInspectionError('runtime')) if case == 'missing-xml' else nullcontext()):
+                    observed = android.inspect_artifact_aab(path, artifact=artifact, cancellation=operation.guard, tools=tools)
+                self.assertTrue(observed.structure_ok)
+                self.assertEqual(observed.manifest_failed, case == 'bad-manifest')
+                self.assertEqual(observed.manifest_unavailable, case == 'missing-xml')
+                if observed.manifest is not None: self.assertEqual(observed.manifest.package, 'org.example.actual')
+                self.assertEqual(observed.signature_ok, case != 'bad-signature')
+                self.assertEqual(observed.signature_failed, case == 'bad-signature')
+                self.assertEqual(observed.signer_failed, case == 'bad-signer')
+                self.assertEqual(observed.signer_sha256, None if case in ('bad-signature', 'bad-signer') else fingerprint)
+                self.assertEqual(native.call_count, 2 if case == 'bad-signature' else 3)
+                for call in native.call_args_list:
+                    self.assertIs(call.kwargs['text'], False); self.assertEqual(call.kwargs['output_limit'], 2 * 1024 * 1024)
+                    self.assertIs(call.kwargs['cancellation'], operation.guard)
+                self.assertEqual(events[-1], 'native-post-close')
+                self.assertEqual([row[1] for row in events if type(row) is tuple and row[0] == 'returned'],
+                                 ['bundletool', 'jarsigner'] if case == 'bad-signature' else ['bundletool', 'jarsigner', 'keytool'])
+                operation.command_error.assert_not_called()
+                self.assertEqual(operation.signature_accepted.call_count, 0 if case == 'bad-signature' else 1)
+
+    def test_same_original_directory_prelude_limits_precede_integrity_and_exceptions_propagate(self):
+        from mobile_release import android, android_zip, android_zip_integrity
+        from mobile_release.artifact_inspection import ArtifactInspectionLimitError
+        from mobile_release.android_zip import ZipDirectoryPlan, ZipReadRange
+        for entries, central, expanded, refused in ((32768, 8*1024**2, 2*1024**3, False),
+                (32769, 8*1024**2, 0, True), (1, 8*1024**2+1, 0, True), (1, 100, 2*1024**3+1, True)):
+            with self.subTest(entries=entries, central=central, expanded=expanded), artifact_inspection_tools_data() as (tools, artifact, path, events):
+                plan = ZipDirectoryPlan(1024, 1000, entries, ZipReadRange(0, central))
+                metadata = types.SimpleNamespace(plan=plan, entries=tuple(types.SimpleNamespace(name=name)
+                    for name in ('BundleConfig.pb', 'base/manifest/AndroidManifest.xml', 'base/dex/classes.dex')))
+                observed = types.SimpleNamespace(metadata=metadata, expanded_bytes=expanded)
+                with patch.object(android_zip_integrity, '_read_range', return_value=b'bounded tail') as tail, \
+                     patch.object(android_zip, 'plan_zip_directory', return_value=plan), \
+                     patch.object(android_zip_integrity, 'inspect_zip_integrity', return_value=observed) as integrity:
+                    if refused:
+                        with self.assertRaises(ArtifactInspectionLimitError): android.validate_aab_structure(path, artifact=artifact)
+                    else:
+                        self.assertEqual(len(android.validate_aab_structure(path, artifact=artifact)), 3)
+                        self.assertIs(tools.operation.zip_metadata, metadata)
+                    self.assertEqual(integrity.call_count, 0 if entries>32768 or central>8*1024**2 else 1)
+                    tail.assert_called_once(); self.assertEqual(events, ['reader-open', 'reader-post-close'])
+        with artifact_inspection_tools_data() as (tools, artifact, path, events), \
+             patch.object(android, '_artifact_aab_directory_prelude', side_effect=RuntimeError('original stop')):
+            with self.assertRaisesRegex(RuntimeError, 'original stop'): android.validate_aab_structure(path, artifact=artifact)
+            self.assertEqual(events, ['reader-open', 'reader-post-close']); self.assertIsNone(tools.operation.zip_metadata)
 
 if __name__ == "__main__":
     unittest.main()

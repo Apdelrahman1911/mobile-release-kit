@@ -15,6 +15,43 @@ class AndroidBuildInput(_SavedCommandInput):
         super().__init__(started, domain=SavedCommandDomain.AndroidBuild)
         self.operation: AndroidBuildOperation | None = None
         self._engine: _Engine | None = None
+        self.material = None
+        self.material_pending = self.material_receiving = self.signed = False
+
+    def _request_material(self, request) -> None:
+        from ._desktop_android_build_protocol import is_signed
+        self._owner()
+        self.signed = is_signed(request.context)
+        self.material_pending = self.signed
+
+    def receive_material(self, operation) -> None:
+        self._owner()
+        self._require(self.signed and self.material_pending and not self.material_receiving
+                      and self.active and self.request_returned and operation is self.require_operation()
+                      and operation.signing is not None and operation.invocation is not None
+                      and operation.invocation.signing_lease is None
+                      and operation.invocation.project_owner is not None)
+        operation.checkpoint()
+        from ._desktop_android_signing_material import read_material
+        self.material_receiving = True
+        try:
+            read_material(self, operation.request)
+            self.material_pending = False
+        finally:
+            self.material_receiving = False
+        self.guard.check()
+
+    def close(self) -> None:
+        super().close()
+        if self.signed:
+            self.buffer.clear()
+        if self.material is not None:
+            self.material.retire()
+
+    def material_closed(self) -> bool:
+        self._owner()
+        return (self.closed and not self.material_receiving and not self.buffer
+                and (self.material is None or self.material._retired))
 
     def bind_operation(self, operation: AndroidBuildOperation) -> None:
         from .android_build_operation import AndroidBuildOperation

@@ -30,6 +30,20 @@ fn decoded(payload: Value, context: &Context) -> Result<Frame, BridgeError> {
 pub(crate) fn terminal_frame(context: &Context) -> Frame { decoded(terminal_value(context), context).unwrap() }
 
 #[test]
+fn native_preflight_request_refuses_windows_identity_before_posix_dto() {
+    use crate::asset_source::{DirectoryIdentity, ProjectIdentity};
+    // Absolute POSIX-shaped DATA isolates the identity check from path refusal.
+    // Neither fixture opens a project, observes a token or invokes a process.
+    let mut root = RegisteredRoot { path: "/inert-project".into(),
+        identity: ProjectIdentity::Posix(DirectoryIdentity::synthetic_evidence_identity()) };
+    assert!(request(&"a".repeat(32), &"b".repeat(32), &context(), Profile::LinuxX64,
+        &root, Path::new("/inert-cwd")).is_ok());
+    root.identity = ProjectIdentity::Windows { volume: u64::MAX, file_id: [0xff; 16] };
+    assert!(request(&"a".repeat(32), &"b".repeat(32), &context(), Profile::LinuxX64,
+        &root, Path::new("/inert-cwd")).is_err());
+}
+
+#[test]
 fn tauri_command_allowlist_keeps_saved_preflight_local_and_explicit() {
     // Compile-time source DATA only; no filesystem access or shell launch.
     let build = include_str!("../build.rs");

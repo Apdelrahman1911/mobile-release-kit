@@ -3,7 +3,9 @@
 import { GITHUB_WORKFLOWS } from './githubSetupProtocol.ts';
 import type { GitHubConnectionError, GitHubConnectionHelp, GitHubConnectionReason, GitHubConnectionStatus } from './githubConnectionTypes.ts';
 
-export const GITHUB_CONNECTION_ENTRY_AVAILABLE = false;
+// UI implementation is present; this is never native/platform/TLS authority.
+// Entry still requires current help, project context and native capability.
+export const GITHUB_CONNECTION_ENTRY_AVAILABLE = true;
 export const GITHUB_CONNECTION_EVENT = 'github-connection-status';
 export const GITHUB_CONNECTION_REASONS = ['none', 'unqualified', 'runtime-unavailable', 'publisher-unconfigured',
   'not-connected', 'invalid-input', 'busy', 'unauthorized', 'forbidden', 'not-found-or-inaccessible', 'target-changed',
@@ -125,6 +127,9 @@ function utc(value: unknown): value is string {
   const parsed = new Date(value); // Parse display DATA, never read the current clock.
   return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value.slice(0, -1) + '.000Z';
 }
+// Shared closed DATA checks only. Exporting them does not share read/dispatch
+// admission, a credential, a native gate or another operation's outcome.
+export { bounded as connectionBounded, keys as connectionKeys, numericId as connectionNumericId, utc as connectionUtc };
 function reason(value: unknown): value is GitHubConnectionReason { return oneOf(value, GITHUB_CONNECTION_REASONS); }
 function account(value: unknown): boolean { return keys(value, ['id', 'login']) && numericId(value.id) && text(value.login, 96); }
 function repository(value: unknown): boolean {

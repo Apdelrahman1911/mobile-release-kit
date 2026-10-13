@@ -12,7 +12,7 @@ pub const DEPTH_LIMIT: usize = 32;
 pub const NODE_LIMIT: usize = 20_000;
 
 #[derive(Clone, Copy, Debug)]
-pub enum Method { Capabilities, Catalog, ProjectSnapshot, ValidateConfig, SuggestConfig, PreviewConfig, ProposeGithubSetup, AssessCredentials, MetadataTextObserve, MetadataTextValidate, EnvironmentRequirements, ReleaseVersionObserve, CandidateEvidenceObserve }
+pub enum Method { Capabilities, Catalog, ProjectSnapshot, ValidateConfig, SuggestConfig, PreviewConfig, ProposeGithubSetup, AssessCredentials, MetadataTextObserve, MetadataTextValidate, EnvironmentRequirements, ReleaseVersionObserve, CandidateEvidenceObserve, ReleaseEvidenceObserve }
 impl Method {
     pub fn name(self) -> &'static str {
         match self {
@@ -26,6 +26,7 @@ impl Method {
             Self::EnvironmentRequirements => "environment.requirements",
             Self::ReleaseVersionObserve => "release.version.observe",
             Self::CandidateEvidenceObserve => "artifacts.candidate.observe",
+            Self::ReleaseEvidenceObserve => "release.evidence.observe",
         }
     }
 }
@@ -89,12 +90,12 @@ pub fn encode_request(id: &str, method: Method, params: &Value) -> Result<Vec<u8
     Ok(writer.bytes)
 }
 
-struct Seed<'a> { nodes: &'a mut usize, depth: usize }
+struct Seed<'a> { nodes: &'a mut usize, depth: usize, node_limit: usize, depth_limit: usize }
 impl<'de> DeserializeSeed<'de> for Seed<'_> {
     type Value = Value;
     fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
         *self.nodes += 1;
-        if *self.nodes > NODE_LIMIT || self.depth > DEPTH_LIMIT { return Err(de::Error::custom("JSON bounds exceeded")); }
+        if *self.nodes > self.node_limit || self.depth > self.depth_limit { return Err(de::Error::custom("JSON bounds exceeded")); }
         deserializer.deserialize_any(self)
     }
 }
@@ -112,33 +113,47 @@ impl<'de> Visitor<'de> for Seed<'_> {
     fn visit_unit<E: de::Error>(self) -> Result<Value, E> { Ok(Value::Null) }
     fn visit_none<E: de::Error>(self) -> Result<Value, E> { Ok(Value::Null) }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
-        if self.depth >= DEPTH_LIMIT { return Err(de::Error::custom("container nesting exceeded")); }
+        if self.depth >= self.depth_limit { return Err(de::Error::custom("container nesting exceeded")); }
         let mut items = Vec::new();
-        while let Some(value) = seq.next_element_seed(Seed { nodes: self.nodes, depth: self.depth + 1 })? { items.push(value); }
+        while let Some(value) = seq.next_element_seed(Seed { nodes: self.nodes, depth: self.depth + 1,
+            node_limit: self.node_limit, depth_limit: self.depth_limit })? { items.push(value); }
         Ok(Value::Array(items))
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
-        if self.depth >= DEPTH_LIMIT { return Err(de::Error::custom("container nesting exceeded")); }
+        if self.depth >= self.depth_limit { return Err(de::Error::custom("container nesting exceeded")); }
         let mut items = Map::new();
         let mut names = BTreeSet::new();
         while let Some(key) = map.next_key::<String>()? {
             *self.nodes += 1;
-            if *self.nodes > NODE_LIMIT || self.depth + 1 > DEPTH_LIMIT { return Err(de::Error::custom("JSON bounds exceeded")); }
+            if *self.nodes > self.node_limit || self.depth + 1 > self.depth_limit { return Err(de::Error::custom("JSON bounds exceeded")); }
             if !names.insert(key.clone()) { return Err(de::Error::custom("duplicate JSON key")); }
-            let value = map.next_value_seed(Seed { nodes: self.nodes, depth: self.depth + 1 })?;
+            let value = map.next_value_seed(Seed { nodes: self.nodes, depth: self.depth + 1,
+                node_limit: self.node_limit, depth_limit: self.depth_limit })?;
             items.insert(key, value);
         }
         Ok(Value::Object(items))
     }
 }
 
-pub fn strict_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+fn strict_json_with_limits(bytes: &[u8], node_limit: usize, depth_limit: usize) -> Result<Value, BridgeError> {
     std::str::from_utf8(bytes).map_err(|_| BridgeError::protocol())?;
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     let mut nodes = 0usize;
-    let value = Seed { nodes: &mut nodes, depth: 0 }.deserialize(&mut decoder).map_err(|_| BridgeError::protocol())?;
+    let value = Seed { nodes: &mut nodes, depth: 0, node_limit, depth_limit }
+        .deserialize(&mut decoder).map_err(|_| BridgeError::protocol())?;
     decoder.end().map_err(|_| BridgeError::protocol())?;
     Ok(value)
+}
+
+pub fn strict_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+    strict_json_with_limits(bytes, NODE_LIMIT, DEPTH_LIMIT)
+}
+
+// Fixed protected Android-file admission only; never an IPC/renderer policy.
+// The ordinary parser, runtime inventory and OS contract keep their old limits.
+pub(crate) fn strict_android_tool_manifest_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+    if bytes.len() > crate::android_toolchain::MANIFEST_LIMIT { return Err(BridgeError::protocol()); }
+    strict_json_with_limits(bytes, 150_000, 16)
 }
 
 #[derive(Deserialize)]
@@ -164,7 +179,10 @@ pub fn decode_response(bytes: &[u8], id: &str) -> Result<Value, BridgeError> {
         || error.message.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}') {
         return Err(BridgeError::protocol());
     }
-    Err(BridgeError::new(&error.code, &error.message))
+    let error = BridgeError::new(&error.code, &error.message);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let error = error.with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::EngineResponse));
+    Err(error)
 }
 
 #[cfg(test)]
@@ -174,6 +192,28 @@ mod tests {
     use serde_json::json;
     fn response(value: Value) -> Vec<u8> {
         let mut bytes = serde_json::to_vec(&value).unwrap_or_default(); bytes.push(b'\n'); bytes
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn only_a_valid_engine_error_can_supply_the_engine_response_cause() {
+        let valid = json!({"protocol":1,"id":"query-1","ok":false,
+            "error":{"code":"runtime_unavailable","message":"inert engine message","retryable":false}});
+        let error = decode_response(&response(valid.clone()), "query-1").unwrap_err();
+        assert_eq!(error, BridgeError::new("runtime_unavailable", "inert engine message"));
+        assert_eq!(error.linux_passive_cause(), Some(crate::error::LinuxPassiveCause::EngineResponse));
+        let mut invalid = Vec::new();
+        let mut row = valid.clone(); row["id"] = json!("other"); invalid.push(response(row));
+        let mut row = valid.clone(); row["error"]["retryable"] = json!(true); invalid.push(response(row));
+        let mut row = valid.clone(); row["error"]["message"] = json!("PRIVATE\nmessage"); invalid.push(response(row));
+        let mut row = valid.clone(); row["error"]["code"] = json!("PRIVATE\ncode"); invalid.push(response(row));
+        let mut row = valid.clone(); row["error"]["linux_passive_cause"] = json!("engine-response"); invalid.push(response(row));
+        let mut row = valid.clone(); row["linux_passive_cause"] = json!("engine-response"); invalid.push(response(row));
+        let mut frame = response(valid); frame.pop(); invalid.push(frame);
+        for bytes in invalid {
+            let error = decode_response(&bytes, "query-1").unwrap_err();
+            assert_eq!(error.code, "protocol_error");
+            assert_eq!(error.linux_passive_cause(), None);
+        }
     }
     #[test]
     fn request_is_closed_correlated_and_newline_terminated() {
@@ -228,6 +268,27 @@ mod tests {
         if let Value::Object(map) = &mut value { map.insert("extra".into(), Value::Null); }
         assert!(check_value(&value).is_err());
         assert!(strict_json(&serde_json::to_vec(&value).unwrap_or_default()).is_err());
+    }
+    #[test]
+    fn android_manifest_bounds_do_not_widen_the_ordinary_parser() {
+        // JSON DATA only, not a tool manifest/profile or an installed capability.
+        let mut value = Value::Array(vec![Value::Null; 149_999]);
+        let raw = serde_json::to_vec(&value).unwrap();
+        assert!(strict_android_tool_manifest_json(&raw).is_ok());
+        assert!(strict_json(&raw).is_err());
+        if let Value::Array(items) = &mut value { items.push(Value::Null); }
+        assert!(strict_android_tool_manifest_json(&serde_json::to_vec(&value).unwrap()).is_err());
+        let mut nested = Value::Null;
+        for _ in 0..16 { nested = Value::Array(vec![nested]); }
+        assert!(strict_android_tool_manifest_json(&serde_json::to_vec(&nested).unwrap()).is_ok());
+        nested = Value::Array(vec![nested]);
+        let raw = serde_json::to_vec(&nested).unwrap();
+        assert!(strict_android_tool_manifest_json(&raw).is_err() && strict_json(&raw).is_ok());
+        for raw in [br#"{"a":1,"a":2}"#.as_slice(), b"NaN", b"{} {}", &[0xff]] {
+            assert!(strict_android_tool_manifest_json(raw).is_err());
+        }
+        assert!(strict_android_tool_manifest_json(&vec![b' '; crate::android_toolchain::MANIFEST_LIMIT + 1]).is_err());
+        assert_eq!((NODE_LIMIT, DEPTH_LIMIT), (20_000, 32));
     }
     #[test]
     fn thirty_third_empty_container_is_not_a_depth_thirty_two_scalar() {

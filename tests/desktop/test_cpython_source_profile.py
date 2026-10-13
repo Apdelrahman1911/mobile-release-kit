@@ -683,13 +683,14 @@ class SourceCopierHostTests(unittest.TestCase):
     def test_source_copier_gates_refuse_before_caller_paths(self):
         # Fictional pins reach only negative guards; never a copy or approval.
         policy = P._SourcePolicy("1" * 64, "2" * 64, "3" * 64, P.LICENSE_BYTES, P.LICENSE_SHA256)
+        copier = {"imageOS": "ubuntu24", "images": {"20260907.300.1": record("/usr/bin/python3.12")}}
         for missing in range(4):
             fields = list(policy)
             if missing < 3:
                 fields[missing] = None
             with self.subTest(missing_gate=missing), \
                     patch.object(P, "_SOURCE_PRODUCTION_POLICY", P._SourcePolicy(*fields)), \
-                    patch.object(P, "APPROVED_SOURCE_COPIER_PYTHON_SHA256", "4" * 64 if missing < 3 else None), \
+                    patch.object(P, "APPROVED_SOURCE_COPIER_PYTHONS", copier if missing < 3 else None), \
                     patch.object(P, "_absolute", side_effect=AssertionError("caller path")), \
                     patch.object(P, "_write_payload", side_effect=AssertionError("output effect")), \
                     patch.object(P, "_read_checked", side_effect=AssertionError("input read")), \
@@ -701,40 +702,69 @@ class SourceCopierHostTests(unittest.TestCase):
                         P._require_source_copier_host()
 
     def test_source_copier_checks_fixed_python_flags_and_body_pin(self):
-        body = b"INERT actual copier Python DATA; never executed\n"
-        expected = P._digest(body)
-        flags = {"isolated": 1, "no_site": 1, "dont_write_bytecode": 1}
-        runtime = SimpleNamespace(executable="/inert/copier-python", flags=SimpleNamespace(**flags))
+        bodies = {"20260907.300.1": b"INERT older copier Python DATA; never executed\n",
+                  "20260920.314.1": b"INERT newer and distinct copier Python DATA; never executed\n"}
         fixed_path = "/usr/bin/python3.12"
-        with patch.object(P, "APPROVED_SOURCE_COPIER_PYTHON_SHA256", expected), patch.object(P, "sys", runtime), \
-                patch.object(P.os.path, "realpath", return_value=fixed_path) as resolved, \
-                patch.object(P, "_read_checked", return_value=body) as read:
-            P._require_source_copier_host()
-        resolved.assert_called_once_with(runtime.executable)
-        read.assert_called_once_with(Path(fixed_path), limit=16 * 1024 * 1024)
-        for changed in ("path", *flags):
-            current = dict(flags)
-            if changed != "path":
-                current[changed] = 0
-            runtime = SimpleNamespace(executable="/inert/copier-python", flags=SimpleNamespace(**current))
-            path = "/work/stage/python/bin/python3" if changed == "path" else fixed_path
-            with self.subTest(changed=changed), patch.object(P, "APPROVED_SOURCE_COPIER_PYTHON_SHA256", expected), \
-                    patch.object(P, "sys", runtime), patch.object(P.os.path, "realpath", return_value=path), \
-                    patch.object(P, "_read_checked", side_effect=AssertionError("unadmitted host read")):
-                with self.assertRaisesRegex(P.PayloadError, "admitted local copier Python with -I -S -B"):
+        profile = {"imageOS": "ubuntu24", "images": {image: record(fixed_path, raw) for image, raw in bodies.items()}}
+        flags = {"isolated": 1, "no_site": 1, "dont_write_bytecode": 1}
+        for image, body in bodies.items():
+            environment = {"ImageOS": "ubuntu24", "ImageVersion": image}
+            runtime = SimpleNamespace(executable="/inert/copier-python", flags=SimpleNamespace(**flags))
+            with self.subTest(image=image), patch.object(P, "APPROVED_SOURCE_COPIER_PYTHONS", profile), \
+                    patch.dict(P.os.environ, environment, clear=True), patch.object(P, "sys", runtime), \
+                    patch.object(P.os.path, "realpath", return_value=fixed_path) as resolved, \
+                    patch.object(P, "_read_checked", return_value=body) as read:
+                P._require_source_copier_host()
+            resolved.assert_called_once_with(runtime.executable)
+            read.assert_called_once_with(Path(fixed_path), limit=16 * 1024 * 1024)
+            for changed in ("path", *flags):
+                current = dict(flags)
+                if changed != "path":
+                    current[changed] = 0
+                runtime = SimpleNamespace(executable="/inert/copier-python", flags=SimpleNamespace(**current))
+                path = "/work/stage/python/bin/python3" if changed == "path" else fixed_path
+                with self.subTest(image=image, changed=changed), patch.object(P, "APPROVED_SOURCE_COPIER_PYTHONS", profile), \
+                        patch.dict(P.os.environ, environment, clear=True), patch.object(P, "sys", runtime), \
+                        patch.object(P.os.path, "realpath", return_value=path), \
+                        patch.object(P, "_read_checked", side_effect=AssertionError("unadmitted host read")):
+                    with self.assertRaisesRegex(P.PayloadError, "admitted local copier Python with -I -S -B"):
+                        P._require_source_copier_host()
+            runtime = SimpleNamespace(executable=fixed_path, flags=SimpleNamespace(**flags))
+            other = next(raw for version, raw in bodies.items() if version != image)
+            for wrong in (other, body + b"changed", body[:-1] + b"!"):
+                with self.subTest(image=image, crossed=wrong == other), patch.object(P, "APPROVED_SOURCE_COPIER_PYTHONS", profile), \
+                        patch.dict(P.os.environ, environment, clear=True), patch.object(P, "sys", runtime), \
+                        patch.object(P.os.path, "realpath", return_value=fixed_path), \
+                        patch.object(P, "_read_checked", return_value=wrong) as read:
+                    with self.assertRaisesRegex(P.PayloadError, "Pinned input hash/size differs"):
+                        P._require_source_copier_host()
+                read.assert_called_once_with(Path(fixed_path), limit=16 * 1024 * 1024)
+            changed_size = copy.deepcopy(profile)
+            changed_size["images"][image]["size"] += 1
+            with self.subTest(image=image, changed="size"), patch.object(P, "APPROVED_SOURCE_COPIER_PYTHONS", changed_size), \
+                    patch.dict(P.os.environ, environment, clear=True), patch.object(P, "sys", runtime), \
+                    patch.object(P.os.path, "realpath", return_value=fixed_path), \
+                    patch.object(P, "_read_checked", return_value=body):
+                with self.assertRaisesRegex(P.PayloadError, "Pinned input hash/size differs"):
                     P._require_source_copier_host()
-        runtime = SimpleNamespace(executable=fixed_path, flags=SimpleNamespace(**flags))
-        with patch.object(P, "APPROVED_SOURCE_COPIER_PYTHON_SHA256", expected), patch.object(P, "sys", runtime), \
-                patch.object(P.os.path, "realpath", return_value=fixed_path), \
-                patch.object(P, "_read_checked", return_value=body + b"changed") as read:
-            with self.assertRaisesRegex(P.PayloadError, "Pinned input hash/size differs"):
-                P._require_source_copier_host()
-        read.assert_called_once_with(Path(fixed_path), limit=16 * 1024 * 1024)
-        with patch.object(P, "APPROVED_SOURCE_COPIER_PYTHON_SHA256", "not-a-sha256"), \
-                patch.object(P.os.path, "realpath", side_effect=AssertionError("malformed pin host lookup")), \
-                patch.object(P, "_read_checked", side_effect=AssertionError("malformed pin host read")):
-            with self.assertRaisesRegex(P.PayloadError, "Invalid SHA256"):
-                P._require_source_copier_host()
+        for environment in ({}, {"ImageOS": "ubuntu24"}, {"ImageOS": "ubuntu22", "ImageVersion": "20260907.300.1"},
+                            {"ImageOS": "ubuntu24", "ImageVersion": "20260921.1.1"}):
+            with self.subTest(environment=environment), patch.object(P, "APPROVED_SOURCE_COPIER_PYTHONS", profile), \
+                    patch.dict(P.os.environ, environment, clear=True), \
+                    patch.object(P.os.path, "realpath", side_effect=AssertionError("unmatched image host lookup")), \
+                    patch.object(P, "_read_checked", side_effect=AssertionError("unmatched image host read")):
+                with self.assertRaisesRegex(P.PayloadError, "admitted hosted copier image/body pair"):
+                    P._require_source_copier_host()
+        for field, value in (("sha256", "not-a-sha256"), ("path", "/other/python"), ("size", True), ("size", 0)):
+            malformed = copy.deepcopy(profile)
+            # The unselected record must still be validated before any live lookup.
+            malformed["images"]["20260920.314.1"][field] = value
+            with self.subTest(malformed=field, value=value), patch.object(P, "APPROVED_SOURCE_COPIER_PYTHONS", malformed), \
+                    patch.dict(P.os.environ, {"ImageOS": "ubuntu24", "ImageVersion": "20260907.300.1"}, clear=True), \
+                    patch.object(P.os.path, "realpath", side_effect=AssertionError("malformed pin host lookup")), \
+                    patch.object(P, "_read_checked", side_effect=AssertionError("malformed pin host read")):
+                with self.assertRaises(P.PayloadError):
+                    P._require_source_copier_host()
 
 
 if __name__ == "__main__":

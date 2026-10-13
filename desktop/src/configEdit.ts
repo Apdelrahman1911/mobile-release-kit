@@ -1,10 +1,10 @@
 // Pure application-wide edit state. Native status is observation/authority;
 // drafts and this controller never manufacture a filesystem revision or save.
 import { sameJson } from './catalog.ts';
-import { editInputFits, isU32, normalEditResult, projectionProgress, statusProgress, U32_MAX } from './configEditProtocol.ts';
+import { editInputFits, isU32, configRecoveryResult, normalEditResult, projectionProgress, statusProgress, U32_MAX } from './configEditProtocol.ts';
 import type { ProjectSession } from './drafts.ts';
 import type { Tone } from './certainty.ts';
-import type { BridgeMode, Catalog, ConfigEditProjection, ConfigEditStatus, CoreEditReason, EditAvailability, HelpContent, JsonObject, NativeEditReason, PreparedConfigView } from './types.ts';
+import type { BridgeMode, Catalog, ConfigEditProjection, ConfigEditStatus, ConfigRecoveryAction, CoreEditReason, EditAvailability, HelpContent, JsonObject, NativeEditReason, PreparedConfigView } from './types.ts';
 
 export interface EditDraftBinding {
   projectId: string;
@@ -38,6 +38,44 @@ export interface EditAttempt {
   handled: boolean;
 }
 
+export interface ConfigRecoveryBinding {
+  projectId: string;
+  windowGeneration: string;
+  startStatusRevision: number;
+  previousTerminalId: string | null;
+  draftRevision: number;
+  baselineGeneration: number;
+  observationGeneration: number;
+  contextGeneration: number;
+}
+export interface ConfigRecoveryApplyBinding {
+  sessionId: string;
+  revision: string;
+  planToken: string;
+  action: ConfigRecoveryAction;
+  context: ConfigRecoveryBinding;
+}
+export interface ConfigRecoveryAttempt {
+  binding: ConfigRecoveryBinding;
+  sessionId: string | null;
+  projection: ConfigEditProjection | null;
+  projectionRevision: number;
+  prepareClaimed: boolean;
+  applyClaimed: boolean;
+  submitted: ConfigRecoveryApplyBinding | null;
+  closeRequested: boolean;
+  closeClaimed: boolean;
+  invalidated: boolean;
+  handled: boolean;
+  succeeded: boolean;
+}
+export interface ConfigRecoveryCompletion {
+  binding: ConfigRecoveryBinding;
+  statusRevision: number;
+  projection: ConfigEditProjection;
+  submitted: ConfigRecoveryApplyBinding;
+}
+
 // Negative project attention only. Retain no checkout, draft or prepared view
 // history, and never turn an observed foreign/old owner's result into a save.
 export type ConfigRecoveryAttention = Pick<ConfigEditProjection,
@@ -57,32 +95,36 @@ export interface ConfigEditState {
   unknownEvidence: ConfigEditProjection | null;
   recoveryProjects: readonly ConfigRecoveryAttention[];
   attempt: EditAttempt | null;
+  recovery: ConfigRecoveryAttempt | null;
 }
 
 export const initialConfigEdit: ConfigEditState = {
   mode: 'unavailable', listening: false, initialized: false, readPending: false,
   status: null, buffered: null, observationIssue: null, integrityFailed: false,
-  generationLost: false, nativeBlocked: false, unknownEvidence: null, recoveryProjects: [], attempt: null,
+  generationLost: false, nativeBlocked: false, unknownEvidence: null, recoveryProjects: [], attempt: null, recovery: null,
 };
 
 export type ConfigEditAction =
   | { type: 'connect'; mode: BridgeMode }
   | { type: 'listening' }
   | { type: 'read-start' }
-  | { type: 'observe'; status: ConfigEditStatus; source: 'read' | 'event' | 'reply' }
+  | { type: 'observe'; status: ConfigEditStatus; source: 'read' | 'event' | 'reply'; coveredAttention?: readonly string[] }
   | { type: 'observation-failed'; protocol?: boolean }
   | { type: 'begin'; binding: EditDraftBinding }
   | { type: 'prepare-claim'; sessionId: string }
   | { type: 'apply-claim'; binding: EditApplyBinding }
   | { type: 'close-request'; reason: 'user' | 'draft_changed' | 'baseline_mismatch' | 'invoke_failed' }
   | { type: 'close-claim'; sessionId: string }
-  | { type: 'handled'; sessionId: string };
+  | { type: 'handled'; sessionId: string }
+  | { type: 'recovery-begin'; binding: ConfigRecoveryBinding }
+  | { type: 'recovery-update'; binding: ConfigRecoveryBinding; patch: Partial<Omit<ConfigRecoveryAttempt, 'binding'>> }
+  | { type: 'recovery-cleared'; binding: ConfigRecoveryBinding; statusRevision: number };
 
 function isUnknown(projection: ConfigEditProjection | null): boolean {
   return projection?.phase === 'unknown' || projection?.nativeFinality === 'unknown';
 }
 
-function completedAttempt(attempt: EditAttempt | null): boolean {
+function completedAttempt(attempt: EditAttempt | ConfigRecoveryAttempt | null): boolean {
   return attempt === null || (attempt.projection?.phase === 'final' && attempt.projection.nativeFinality === 'settled');
 }
 
@@ -96,8 +138,9 @@ function minimumTimers(previous: ConfigEditStatus | null, incoming: ConfigEditSt
   return { ...incoming, active: clamp(incoming.active), lastTerminal: clamp(incoming.lastTerminal) };
 }
 
-function retainRecoveryAttention(state: ConfigEditState, status: ConfigEditStatus): ConfigEditState {
+function retainRecoveryAttention(state: ConfigEditState, status: ConfigEditStatus, covered: readonly string[]): ConfigEditState {
   for (const projection of [status.active, status.lastTerminal]) {
+    if (projection && covered.includes(projection.sessionId)) continue;
     if (projection?.phase !== 'final' || projection.nativeFinality !== 'settled' ||
         projection.coreOutcome?.journal !== 'recovery_required' || projection.coreOutcome.resources !== 'settled' ||
         state.recoveryProjects.some((item) => item.projectId === projection.projectId)) continue;
@@ -110,10 +153,10 @@ function retainRecoveryAttention(state: ConfigEditState, status: ConfigEditStatu
   return state;
 }
 
-function observe(state: ConfigEditState, status: ConfigEditStatus, source: 'read' | 'event' | 'reply'): ConfigEditState {
+function observe(state: ConfigEditState, status: ConfigEditStatus, source: 'read' | 'event' | 'reply', covered: readonly string[]): ConfigEditState {
   // Also remember initial/read-only/older observations before lastTerminal is
   // replaced. This is a bounded refusal latch, never current edit authority.
-  state = retainRecoveryAttention(state, status);
+  state = retainRecoveryAttention(state, status, covered);
   const readPending = source === 'read' ? false : state.readPending;
   // Events cannot choose this renderer's native generation before its initial
   // registry read. Keep at most one bounded projection while that read is pending.
@@ -139,6 +182,22 @@ function observe(state: ConfigEditState, status: ConfigEditStatus, source: 'read
     // Never automatically adopt its new generation inside an old controller.
     return { ...state, readPending, generationLost: true };
   }
+  let recovery = state.recovery;
+  if (recovery) {
+    const original = recovery;
+    const owner = [status.active, status.lastTerminal].find((item) => item?.recovery &&
+      item.ownerGeneration === original.binding.windowGeneration && item.projectId === original.binding.projectId &&
+      (original.sessionId !== null ? item.sessionId === original.sessionId :
+        status.statusRevision > original.binding.startStatusRevision && item.sessionId !== original.binding.previousTerminalId));
+    if (owner) {
+      const older = status.statusRevision < recovery.projectionRevision;
+      if (recovery.projection && !(older ? projectionProgress(owner, recovery.projection) : projectionProgress(recovery.projection, owner))) return { ...state, readPending, integrityFailed: true, observationIssue: 'protocol' };
+      if (!older) recovery = { ...recovery, sessionId: owner.sessionId,
+        projection: recovery.projection ? { ...owner, reviewRemainingMs: Math.min(recovery.projection.reviewRemainingMs, owner.reviewRemainingMs) } : owner,
+        projectionRevision: status.statusRevision };
+    }
+  }
+  state = { ...state, recovery };
   if (state.status && status.statusRevision < state.status.statusRevision) {
     // A stale delivery grants no authority, but an earlier native Unknown is
     // still permanent evidence: dropping it must not clear a global latch.
@@ -158,7 +217,7 @@ function observe(state: ConfigEditState, status: ConfigEditStatus, source: 'read
   let attempt = state.attempt;
   if (attempt) {
     const retained = attempt;
-    const owner = [status.active, status.lastTerminal].find((item) => item !== null &&
+    const owner = [status.active, status.lastTerminal].find((item) => item !== null && !item.recovery &&
       item.ownerGeneration === retained.binding.windowGeneration && item.projectId === retained.binding.projectId &&
       (retained.sessionId !== null ? item.sessionId === retained.sessionId :
         status.statusRevision > retained.binding.startStatusRevision && item.sessionId !== retained.binding.previousTerminalId));
@@ -172,7 +231,7 @@ function observe(state: ConfigEditState, status: ConfigEditStatus, source: 'read
   }
   const unknown = [status.active, status.lastTerminal].find((item) => isUnknown(item)) ?? null;
   return {
-    ...state, initialized: true, readPending, status, buffered: null, attempt,
+    ...state, initialized: true, readPending, status, buffered: null, attempt, recovery,
     observationIssue: state.integrityFailed ? 'protocol' : null,
     nativeBlocked: state.nativeBlocked || unknown !== null || status.capability.reason === 'cleanup_unknown',
     unknownEvidence: state.unknownEvidence && unknown?.sessionId !== state.unknownEvidence.sessionId ? state.unknownEvidence : unknown ?? state.unknownEvidence,
@@ -184,7 +243,7 @@ export function configEditReducer(state: ConfigEditState, action: ConfigEditActi
     case 'connect': return { ...state, mode: action.mode };
     case 'listening': return { ...state, listening: true };
     case 'read-start': return { ...state, readPending: true };
-    case 'observe': return observe(state, action.status, action.source);
+    case 'observe': return observe(state, action.status, action.source, action.coveredAttention ?? []);
     case 'observation-failed': return {
       ...state, readPending: false, observationIssue: action.protocol || state.integrityFailed ? 'protocol' : 'bridge',
       integrityFailed: state.integrityFailed || Boolean(action.protocol),
@@ -225,6 +284,21 @@ export function configEditReducer(state: ConfigEditState, action: ConfigEditActi
           completedAttempt(attempt) || isUnknown(attempt.projection) || state.generationLost) return state;
       return { ...state, attempt: { ...attempt, closeClaimed: true } };
     }
+    case 'recovery-begin': {
+      if (nativeStartReason(state) || !state.status || action.binding.windowGeneration !== state.status.windowGeneration ||
+          action.binding.startStatusRevision !== state.status.statusRevision ||
+          ![action.binding.draftRevision, action.binding.baselineGeneration, action.binding.observationGeneration, action.binding.contextGeneration]
+            .every((n) => isU32(n) && n < U32_MAX)) return state;
+      return { ...state, recovery: { binding: action.binding, sessionId: null, projection: null, projectionRevision: state.status.statusRevision,
+        prepareClaimed: false, applyClaimed: false, submitted: null, closeRequested: false, closeClaimed: false, invalidated: false, handled: false, succeeded: false } };
+    }
+    case 'recovery-update': return state.recovery?.binding === action.binding ? { ...state, recovery: { ...state.recovery, ...action.patch } } : state;
+    case 'recovery-cleared': {
+      const recovery = state.recovery;
+      if (!recovery || recovery.binding !== action.binding || recovery.projectionRevision !== action.statusRevision ||
+          state.status?.statusRevision !== action.statusRevision || !recovery.succeeded || !recovery.handled) return state;
+      return { ...state, recoveryProjects: state.recoveryProjects.filter((row) => row.projectId !== action.binding.projectId) };
+    }
     case 'handled':
       return state.attempt?.sessionId === action.sessionId ? { ...state, attempt: { ...state.attempt, handled: true } } : state;
   }
@@ -255,6 +329,7 @@ export function nativeStartReason(state: ConfigEditState): string | null {
   if (!state.status.capability.available) return availabilityCopy[state.status.capability.reason];
   if (state.status.statusRevision === U32_MAX) return 'The native status counter is exhausted. A new save session cannot reuse or wrap that sequence.';
   if (state.status.active) return 'A native save session is still active. Close or finish that original session before preparing another.';
+  if (!completedAttempt(state.recovery) || state.recovery && !state.recovery.handled) return 'The original configuration recovery must settle before another edit.';
   if (!completedAttempt(state.attempt)) return 'The original save session has not been confirmed settled. Check status; no replacement owner will be opened.';
   if (state.attempt && !state.attempt.handled) return 'Recording the original native result before another save session can be opened.';
   return null;
@@ -264,8 +339,9 @@ export function editStartReason(state: ConfigEditState, session: ProjectSession 
   const native = nativeStartReason(state);
   if (native) return native;
   if (session?.saveRecoveryRequired || (session && state.recoveryProjects.some((item) => item.projectId === session.project.id))) {
-    return 'This project needs separate transaction/recovery attention. No new save review or GUI recovery is offered here. Other projects remain independently gated.';
+    return 'This project needs separate transaction/recovery attention. Use explicit configuration recovery inspection below; a normal Save cannot bypass that journal. Other projects remain independently gated.';
   }
+  if (session?.saveRecoveryNeedsReload) return 'Recovery did not save this draft. Explicitly reload the saved observation before preparing a new Save.';
   if (!session?.draft) return 'Load or explicitly start a draft before preparing a save review.';
   if (!isU32(session.revision) || session.revision === U32_MAX || !isU32(session.baselineGeneration) || session.baselineGeneration === U32_MAX) return 'This in-memory revision counter is exhausted. No counter or save session will be reused.';
   if (!editInputFits(session.baseline, session.draft)) return 'The draft and retained baseline exceed the bounded JSON edit contract or contain unsupported JSON. Your values were not truncated.';
@@ -280,7 +356,7 @@ export function configurationOwnerReason(state: ConfigEditState, projectId: stri
   if (state.nativeBlocked || state.integrityFailed || state.generationLost || state.observationIssue) {
     return 'Configuration edit ownership is unverified. Observe the original native status; do not open a competing workflow edit.';
   }
-  if (state.status?.active || !completedAttempt(state.attempt) || (state.attempt && !state.attempt.handled)) {
+  if (state.status?.active || !completedAttempt(state.recovery) || state.recovery && !state.recovery.handled || !completedAttempt(state.attempt) || (state.attempt && !state.attempt.handled)) {
     return 'A configuration edit is still owned or awaiting settlement. Finish or close that original session before reviewing workflow files.';
   }
   if (state.recoveryProjects.some((item) => item.projectId === projectId)) {
@@ -346,7 +422,7 @@ export const saveHelp: HelpContent = {
   why: 'Bind the intended draft to the original configuration, ignore rules and file identities instead of silently overwriting a newer file or treating a missing reply as success.',
   where: 'Use Prepare save review in this editor. Save checks the folder currently at the displayed project path when the review opens; selecting a folder earlier does not lock it. Check that path and the proposed files before Apply. Pure draft review is separate and never grants a save token. Closing the save review keeps the draft; Discard draft changes is a different, destructive in-memory action.',
   format: 'A real configuration change rewrites the whole JSON document using core formatting. An unchanged configuration keeps its original bytes and inode, but ignore additions may still require a write. A missing release directory may be created. The native 15-minute absolute review lifetime starts at registration and is never renewed by clicks or status reads.',
-  failure: 'Stale, invalid, busy or pending state ends that attempt; keep the draft and reconcile explicitly after settlement. Cancellation can be too late. Saved requires original native finality, clean committed cleanup and no failure reason. Unknown completion disables saving; never repeat Apply. No force, GUI recovery, workflows, metadata files, assets, builds, credentials, Git or Store operation is included.',
+  failure: 'Stale, invalid, busy or pending state ends that attempt; keep the draft and reconcile explicitly after settlement. Cancellation can be too late. Saved requires original native finality, clean committed cleanup and no failure reason. Unknown completion disables saving; never repeat Apply. Normal Save includes no force, workflows, metadata files, assets, builds, credentials, Git or Store operation. Separate explicit recovery inspects only the fixed configuration journal, never repairs an incomplete or mixed legacy record blindly.',
 };
 
 export interface ConfirmedConfigSave {
@@ -371,6 +447,7 @@ export function confirmedConfigSave(state: ConfigEditState): ConfirmedConfigSave
 export function editRetainsDraft(state: ConfigEditState, projectId: string): boolean {
   if (state.attempt?.binding.projectId === projectId &&
       (!completedAttempt(state.attempt) || state.nativeBlocked || state.integrityFailed || state.observationIssue !== null)) return true;
+  if (state.recovery?.binding.projectId === projectId && (!completedAttempt(state.recovery) || state.nativeBlocked || state.integrityFailed || state.observationIssue)) return true;
   return state.status?.active?.projectId === projectId || state.unknownEvidence?.projectId === projectId;
 }
 
@@ -380,7 +457,7 @@ const coreCopy: Record<CoreEditReason, string> = {
   invalid_config: 'Configuration format or policy needs correction. An invalid existing file is not permission to replace it; use the pure draft checks for guidance.',
   ignore_conflict: 'The required ignore rules cannot be added safely. Existing negations or ambiguous coverage need explicit attention outside this save flow; no rules are automatically rewritten.',
   stale_revision: 'Configuration, ignore rules or their file/ancestor identities changed. Even formatting-only changes can conflict. Keep your draft and explicitly reconcile a fresh observation after settlement.',
-  pending_state: 'An existing transaction needs attention. This app will not recover it, clear its journal or save over it.',
+  pending_state: 'An existing transaction needs attention. Normal Save will not overwrite it. Only an explicit, completely inspected configuration recovery can act; incomplete or mixed journals remain untouched.',
   busy: 'Another owner is using the project. Wait for it to finish, then explicitly start a fresh review; there is no automatic retry.',
   cancelled: 'Cancellation was observed. The transaction facts below, not the cancellation request, determine what happened.',
   filesystem_error: 'A filesystem operation could not finish normally. Keep the draft and follow the reported effect and cleanup facts; do not guess or repeat Apply.',
@@ -407,6 +484,14 @@ export interface EditNotice { title: string; detail: string; tone: Tone; code?: 
 
 export function projectionNotice(owner: ConfigEditProjection): EditNotice {
   const core = owner.coreOutcome;
+  if (owner.recovery && owner.phase !== 'unknown' && owner.nativeFinality !== 'unknown') {
+    if (configRecoveryResult(owner)) return { title: 'Configuration recovery completed; draft not saved',
+      detail: 'The original submitted recovery settled with its action-specific effect and clean journal. Your draft and baseline were not saved or replaced. Clear only matching current attention, then explicitly reload the saved observation.', tone: 'info' };
+    if (owner.phase === 'final') return { title: 'Configuration recovery session ended',
+      detail: 'No successful submitted recovery is confirmed. Keep the original files, journal and draft; a readonly inspection or Close is not a cleanup result. Inspect the separate effect, journal and original-resource facts.', tone: 'warning' };
+    return { title: owner.phase === 'reviewing' ? 'Review the inspected configuration recovery' : 'Configuration recovery is owned',
+      detail: 'Inspect and Prepare are read-only. Only explicit confirmation submits one recovery of the two fixed files; this never saves the current draft. Wait for original finality after submission.', tone: 'info' };
+  }
   const reason = core && core.reason !== 'none' ? coreCopy[core.reason] : nativeCopy[owner.nativeReason];
   const code = core && core.reason !== 'none' ? core.reason : owner.nativeReason !== 'none' ? owner.nativeReason : undefined;
   if (isUnknown(owner)) return {
@@ -448,4 +533,18 @@ export function editNotice(state: ConfigEditState): EditNotice | null {
   if (owner) return projectionNotice(owner);
   if (attempt) return { title: 'Waiting for native save admission…', detail: 'The original registration has not been observed yet. No files or successful save are assumed. You can request Close without losing the draft.', tone: 'info' };
   return null;
+}
+
+export function configRecoveryPreparedMatches(attempt: ConfigRecoveryAttempt): boolean {
+  const owner = attempt.projection, checkout = owner?.recovery?.checkout, prepared = owner?.recovery?.prepared;
+  return !!owner && !!checkout && !!prepared && owner.sessionId === attempt.sessionId && owner.projectId === attempt.binding.projectId &&
+    owner.ownerGeneration === attempt.binding.windowGeneration && prepared.revision === checkout.revision &&
+    sameJson(prepared.view as unknown as import('./types.ts').JsonValue, checkout.view as unknown as import('./types.ts').JsonValue);
+}
+export function configRecoverySucceeded(attempt: ConfigRecoveryAttempt): boolean {
+  const owner = attempt.projection, submitted = attempt.submitted;
+  return !!owner && !!submitted && attempt.applyClaimed && !attempt.invalidated && configRecoveryPreparedMatches(attempt) &&
+    submitted.sessionId === owner.sessionId && submitted.planToken === owner.recovery?.prepared?.planToken &&
+    submitted.revision === owner.recovery?.prepared?.revision && submitted.action === owner.recovery?.prepared?.view.action &&
+    configRecoveryResult(owner);
 }

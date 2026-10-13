@@ -14,7 +14,8 @@ import time
 from typing import TYPE_CHECKING
 
 from ._desktop_edit_protocol import (EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL,
-                                     METADATA_PROTOCOL, REQUEST_LIMIT, parse_request)
+                                     METADATA_PROTOCOL, VERSION_PROTOCOL, IMAGES_PROTOCOL, INITIALIZATION_PROTOCOL,
+                                     VERSION_REQUEST_LIMIT, REQUEST_LIMIT, parse_request)
 
 if TYPE_CHECKING:
     from .cancellation import DefaultCancellation
@@ -22,9 +23,13 @@ if TYPE_CHECKING:
 
 class EditInput:
     def __init__(self, started: float, *, protocol: str = PROTOCOL) -> None:
-        if type(protocol) is not str or protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL}:
+        if type(protocol) is not str or protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL, IMAGES_PROTOCOL, INITIALIZATION_PROTOCOL}:
             raise ProtocolError("Invalid fixed edit domain")
         self.protocol = protocol
+        self.request_limit = VERSION_REQUEST_LIMIT if protocol == VERSION_PROTOCOL else REQUEST_LIMIT
+        if protocol == IMAGES_PROTOCOL:
+            from ._desktop_images_protocol import request_limit
+            self.request_limit = request_limit(0)
         self.pid = os.getpid()
         self.thread = threading.current_thread()
         self.started = started
@@ -99,7 +104,7 @@ class EditInput:
                 self.custody_unknown = True
                 guard._abort(ProtocolError("Original edit input custody changed"))
                 raise ProtocolError("Original edit input changed")
-            limit = 1 if self.active else min(64 * 1024, REQUEST_LIMIT + 1 - len(self.buffer))
+            limit = 1 if self.active else min(64 * 1024, self.request_limit + 1 - len(self.buffer))
             if limit <= 0:
                 raise ProtocolError("Edit input exceeded its bound")
             try:
@@ -112,7 +117,7 @@ class EditInput:
             self.buffer.extend(chunk)
             if self.active_end is None:
                 self.active_end = now + 30.0  # A partial request cannot hold review open.
-            if len(self.buffer) > REQUEST_LIMIT:
+            if len(self.buffer) > self.request_limit:
                 self._stop()
         except BaseException:
             # Read errors and identity uncertainty are STOP, never EOF/finality.
@@ -126,7 +131,12 @@ class EditInput:
             self.guard.check()
             position = self.buffer.find(b"\n")
             if position >= 0:
-                raw = bytes(self.buffer[:position + 1])
+                # Copy just the admitted frame once, not a full bytearray slice
+                # followed by bytes. Both views release before the sole buffer
+                # is mutated; prefetched data keeps the same STOP semantics.
+                with memoryview(self.buffer) as buffered:
+                    with buffered[:position + 1] as frame:
+                        raw = frame.tobytes()
                 del self.buffer[:position + 1]
                 # The sole reader becomes the exact active cancellation source
                 # before parsing/acceptance. This catches prefetched frame 2 as
@@ -136,6 +146,9 @@ class EditInput:
                 request = parse_request(raw, sequence=sequence, session=session, protocol=self.protocol)
                 self.guard.check()
                 self.frames += 1
+                if self.protocol == IMAGES_PROTOCOL:
+                    from ._desktop_images_protocol import request_limit
+                    self.request_limit = request_limit(self.frames)
                 self.apply_active = request.op == "apply"
                 if sequence != 0:
                     self.active_end = time.monotonic() + 30.0

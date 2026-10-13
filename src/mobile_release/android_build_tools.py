@@ -39,15 +39,20 @@ LAUNCH_CONTRACT = "gradle-posix-private-jvm-v1"
 PREFIX = "/opt/mobile-release-kit/android/"
 MANIFEST_NAME = "android-toolchain.json"
 OS_SHELL, OS_EXECUTABLE_DIRECTORY = "/usr/bin/dash", "/usr/bin"
-MAX_MANIFEST_BYTES, MAX_FILE_BYTES, MAX_TOTAL_BYTES = 1024**2, 512 * 1024**2, 1024**3
-MAX_TOOL_FILES, MAX_OS_FILES, MAX_ENTRIES, MAX_DESCRIPTORS = 2048, 128, 8192, 4096
-MIN_DESCRIPTOR_LIMIT = 8192  # Admission floor, NOT a claim of ambient headroom.
+MAX_MANIFEST_BYTES, MAX_FILE_BYTES, MAX_TOTAL_BYTES = 4 * 1024**2, 512 * 1024**2, 1024**3
+MAX_TOOL_FILES, MAX_OS_FILES, MAX_ENTRIES, MAX_DESCRIPTORS = 16_384, 256, 32_768, 32_768
+MAX_OS_HELPERS = 128
+MAX_MANIFEST_NODES = 150_000  # Closed schema maximum: 67 + 128 + 9 * (16384 + 256) = 149955.
+MAX_DIRECTORY_ADVANCES = 2 * MAX_ENTRIES  # Includes each original iterator's final next attempt.
+MIN_DESCRIPTOR_LIMIT = 65_536  # Admission floor, NOT a claim of ambient headroom.
 MAX_DEPTH, MAX_PATH_BYTES, READ_CHUNK = 16, 512, 64 * 1024
 MAX_SELECTION_BYTES, MAX_PROPERTY_LINES, MAX_PROPERTY_LINE = 512 * 1024, 4096, 4096
-MAX_CHECKPOINTS = 2_000_000
+MAX_CHECKPOINTS = 4_000_000  # Basic/upload inspection has14/23 metadata rounds; cleanup keeps its own cutoff.
 WORKERS = 2
 TOOL_ROLES = {"java": "jdk/bin/java", "javac": "jdk/bin/javac", "gradle": "gradle/bin/gradle",
               "bundletool": "bundletool/bundletool.jar", "sdk": "sdk"}
+AAPT2_PATH = "gradle/native/aapt2/aapt2"
+JARSIGNER_PATH, KEYTOOL_PATH = "jdk/bin/jarsigner", "jdk/bin/keytool"
 SELECTION_FIELDS = ("wrapper_properties", "local_properties", "root_gradle_properties",
                     "module_gradle_properties", "daemon_jvm_properties")
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -115,7 +120,7 @@ def _shape(value: object, depth: int = 0, count: list[int] | None = None) -> Non
     if count is None:
         count = [0]
     count[0] += 1
-    _need(depth <= 16 and count[0] <= 20_000, "input-limit")
+    _need(depth <= 16 and count[0] <= MAX_MANIFEST_NODES, "input-limit")
     if type(value) is dict:
         for key, item in value.items():
             _need(type(key) is str)
@@ -136,9 +141,15 @@ class _Binding:
     instance: str
     identity: tuple[int, int, int, int, int]
     sha256: str
+    profile: str = PROFILE
+    selection: tuple[tuple[str, str | int], ...] = ()
 
 
 def _binding(value: object) -> _Binding:
+    if type(value) is dict and value.get("profile") in (
+            "android-registered-macos-arm64-v1", "android-registered-macos-x86_64-v1"):
+        from .android_build_tools_macos import binding
+        return binding(value)
     value = _keys(value, {"schemaVersion", "profile", "root", "rootIdentity", "inventorySha256"})
     _need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
           and value["profile"] == PROFILE and _text(value["inventorySha256"], _SHA))
@@ -174,6 +185,31 @@ class _Profile:
     files: tuple[_FileSpec, ...]
     native_files: tuple[_FileSpec, ...]
     directories: tuple[str, ...]
+    java_home: str = "jdk"
+    roles: tuple[tuple[str, str], ...] = tuple(TOOL_ROLES.items())
+    aliases: tuple[tuple[str, str, str], ...] = ()
+
+
+def _direct_file(path: str, directory: str, suffix: str) -> bool:
+    if not path.startswith(directory):
+        return False
+    name = path[len(directory):]
+    return len(name) > len(suffix) and "/" not in name and name.endswith(suffix)
+
+
+def _native_path(path: str) -> bool:
+    # _file_specs first applies the shared absolute-path/component grammar.
+    # These families admit only explicitly inventoried canonical regular files,
+    # never directory discovery or ambient font/resolver configuration.
+    return (path.startswith(("/usr/bin/", "/usr/lib/", "/usr/lib64/", "/etc/ld.so.conf.d/"))
+            or path in {"/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/fonts/fonts.conf",
+                        "/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf"}
+            or any(_direct_file(path, directory, ".conf")
+                   for directory in ("/etc/fonts/conf.avail/", "/usr/share/fontconfig/conf.avail/"))
+            or any(_direct_file(path, f"/usr/share/fonts/truetype/{family}/", ".ttf")
+                   for family in ("dejavu", "lato", "liberation", "noto"))
+            or path == "/var/cache/fontconfig/CACHEDIR.TAG"
+            or re.fullmatch(r"/var/cache/fontconfig/[0-9a-f]{32}-le64\.cache-9", path) is not None)
 
 
 def _file_specs(value: object, *, native: bool = False) -> tuple[_FileSpec, ...]:
@@ -185,8 +221,7 @@ def _file_specs(value: object, *, native: bool = False) -> tuple[_FileSpec, ...]
         if native:
             # Canonical regular objects only. Known loader/helper aliases are
             # bound by the separate native OS profile, not followed here.
-            _need(item["path"].startswith(("/usr/bin/", "/usr/lib/", "/usr/lib64/", "/etc/ld.so.conf.d/"))
-                  or item["path"] in {"/etc/ld.so.cache", "/etc/ld.so.conf"})
+            _need(_native_path(item["path"]))
         else:
             _need(parts[0] in {"jdk", "gradle", "sdk", "bundletool"} and len(parts) >= 2)
         _need(_integer(item["size"], MAX_FILE_BYTES) and _text(item["sha256"], _SHA)
@@ -241,6 +276,10 @@ def _parse_manifest(raw: bytes, binding: _Binding) -> _Profile:
         _need(TOOL_ROLES[role] in by_name)
         item = by_name[TOOL_ROLES[role]]
         _need(item.size > 0 and (role == "bundletool" or bool(item.mode & 0o111)))
+    # AGP uses this exact protected member, not a runtime extraction whose
+    # loader search origins depend on an arbitrary project/cache spelling.
+    _need(AAPT2_PATH in by_name and by_name[AAPT2_PATH].size > 0
+          and bool(by_name[AAPT2_PATH].mode & 0o111))
     jar = by_name[TOOL_ROLES["bundletool"]]
     _need(jar.sha256 == BUNDLETOOL_SHA256 and jar.size <= BUNDLETOOL_MAX_BYTES
           and any(item.path.startswith("sdk/") for item in files))
@@ -248,7 +287,7 @@ def _parse_manifest(raw: bytes, binding: _Binding) -> _Profile:
     _need(_text(os_profile["id"], _LABEL) and _text(os_profile["inventorySha256"], _SHA)
           and os_profile["shell"] == OS_SHELL and os_profile["executableDirectory"] == OS_EXECUTABLE_DIRECTORY)
     helpers = os_profile["helpers"]
-    _need(type(helpers) is list and 1 <= len(helpers) <= MAX_OS_FILES
+    _need(type(helpers) is list and 1 <= len(helpers) <= MAX_OS_HELPERS
           and all(_text(name, _COMPONENT) and name not in {".", ".."} for name in helpers))
     _need(helpers == sorted(set(helpers)) and {"sed", "uname", "xargs"}.issubset(helpers))
     native = _file_specs(os_profile["files"], native=True)
@@ -317,15 +356,27 @@ def _properties(raw: bytes) -> dict[str, str]:
     return result
 
 
-def _fixed_properties(root: str) -> tuple[tuple[str, str], ...]:
-    return (("org.gradle.java.home", f"{root}/jdk"),
-            ("org.gradle.java.installations.paths", f"{root}/jdk"),
+def _fixed_properties(root: str, java_home: str = "jdk") -> tuple[tuple[str, str], ...]:
+    return (("org.gradle.java.home", f"{root}/{java_home}"),
+            ("org.gradle.java.installations.paths", f"{root}/{java_home}"),
             ("org.gradle.java.installations.fromEnv", ""),
             ("org.gradle.java.installations.auto-detect", "false"),
             ("org.gradle.java.installations.auto-download", "false"),
             ("android.builder.sdkDownload", "false"),
+            ("android.aapt2FromMavenOverride", f"{root}/{AAPT2_PATH}"),
             ("kotlin.compiler.execution.strategy", "in-process"),
             ("kotlin.daemon.enabled", "false"))
+
+
+def _native_selection_property(key: str) -> bool:
+    # Native resources are selected by the genuine JVM platform, never project
+    # properties. The same task-owned extraction root is fixed at both Gradle
+    # JVM startups; a systemProp spelling is not a separate configuration path.
+    target = key.casefold().removeprefix("systemprop.")
+    return (target in {"org.gradle.native", "os.arch", "os.name", "os.version",
+                       "sun.arch.data.model", "com.ibm.vm.bitmode"}
+            or target.startswith(("org.gradle.native.", "org.gradle.internal.native.",
+                                  "library.jansi.", "jansi.", "jna.", "jnidispatch.")))
 
 
 def _selection_data(data: object, profile: _Profile, *, root_module: bool) -> tuple[tuple[str, bytes | None], ...]:
@@ -343,46 +394,64 @@ def _selection_data(data: object, profile: _Profile, *, root_module: bool) -> tu
           and wrapper.get("distributionSha256Sum") == profile.distribution_sha256)
     local = {} if data["local_properties"] is None else _properties(data["local_properties"])
     for key, value in local.items():
+        target = key.casefold().removeprefix("systemprop.")
+        _need(target not in {"android.aapt2frommavenoverride", "android.aapt2version", "android.aapt2platform"}
+              and not _native_selection_property(key))
         if key == "sdk.dir":
             _need(value == f"{profile.binding.root}/sdk")
         else:
             _need(not key.casefold().startswith(("sdk.", "ndk.", "cmake."))
                   and key.casefold() not in {"android.dir", "flutter.sdk", "dart.sdk"})
-    fixed = dict(_fixed_properties(profile.binding.root))
+    fixed = dict(_fixed_properties(profile.binding.root, profile.java_home))
     fixed.update({"org.gradle.daemon": "false", "org.gradle.vfs.watch": "false",
                   "org.gradle.parallel": "false", "org.gradle.workers.max": str(WORKERS)})
     forbidden = {"org.gradle.jvmargs", "gradle.user.home", "org.gradle.user.home", "kotlin.daemon.jvmargs",
                  "kotlin.daemon.jvm.options", "java.home", "java.io.tmpdir", "user.home", "java.library.path",
-                 "sdk.dir", "ndk.dir", "cmake.dir", "android.sdk.path", "android.sdkDownload"}
+                 "sdk.dir", "ndk.dir", "cmake.dir", "android.sdk.path", "android.sdkDownload",
+                 "android.aapt2Version", "android.aapt2Platform"}
     for field in ("root_gradle_properties", "module_gradle_properties"):
         properties = {} if data[field] is None else _properties(data[field])
         for key, value in properties.items():
+            _need(not _native_selection_property(key))
             if key in fixed:
                 _need(value == fixed[key])
             else:
                 lower = key.casefold()
                 _need(lower not in {name.casefold() for name in (*fixed, *forbidden)}
-                      and not lower.startswith(("org.gradle.java.", "org.gradle.jvm", "kotlin.daemon.jvm")))
+                      and not lower.startswith(("org.gradle.java.", "org.gradle.jvm", "kotlin.daemon.jvm",
+                                                "jna.", "jnidispatch.")))
                 if lower.startswith("systemprop."):
                     target = lower[len("systemprop."):]
                     _need(target not in {name.casefold() for name in (*fixed, *forbidden)}
                           and not target.startswith(("java.", "javax.", "jdk.", "sun.", "org.gradle.java.",
-                                                    "org.gradle.jvm", "android.builder.sdk")))
+                                                    "org.gradle.jvm", "android.builder.sdk", "jna.", "jnidispatch.")))
     return tuple((field, data[field]) for field in SELECTION_FIELDS)
 
 
 def _jvm_arguments(work: Path, *, bundletool: bool = False) -> tuple[str, ...]:
-    return ("-Xms64m", "-Xmx1024m" if bundletool else "-Xmx2048m", "-XX:MaxMetaspaceSize=512m",
-            "-Dfile.encoding=UTF-8", f"-Duser.home={work}", f"-Djava.io.tmpdir={work}")
+    arguments = ("-Xms64m", "-Xmx1024m" if bundletool else "-Xmx2048m", "-XX:MaxMetaspaceSize=512m",
+                 "-Dfile.encoding=UTF-8", f"-Duser.home={work}", f"-Djava.io.tmpdir={work}",
+                 "-Djna.nosys=true", "-Djna.boot.library.path=", "-Djna.boot.library.name=jnidispatch",
+                 f"-Djna.tmpdir={work}")
+    # Both JAVA_OPTS (the Gradle client) and org.gradle.jvmargs (the single-use
+    # build JVM) consume this exact tuple. work is the existing original owned
+    # directory, not a new path-based grant. Gradle's version/platform/Jansi
+    # descendants remain real output under its unchanged accounting and cleanup.
+    return arguments if bundletool else (*arguments, f"-Dorg.gradle.native.dir={work}")
 
 
-def _identity(observed: os.stat_result, *, directory: bool = False, stable_contents: bool = True) -> tuple[int, ...]:
+def _identity(observed: os.stat_result, *, directory: bool = False, stable_contents: bool = True,
+              mac: bool = False) -> tuple[int, ...]:
     _need((stat.S_ISDIR(observed.st_mode) if directory else stat.S_ISREG(observed.st_mode))
           and observed.st_uid == 0 and not observed.st_mode & 0o7022
           and (directory or observed.st_nlink == 1))
     base = (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_uid, observed.st_gid)
+    flags = ()
+    if mac:
+        _need(type(observed.st_flags) is int and 0 <= observed.st_flags <= 2**32 - 1)
+        flags = (observed.st_flags,)
     return base + ((observed.st_nlink, observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns)
-                   if stable_contents else ())
+                   if stable_contents else ()) + flags
 
 
 @dataclass(eq=False, slots=True)
@@ -435,7 +504,7 @@ class _Entries:
                 raise
 
     def advance(self):
-        self.tools._charge("tool-directory-advances", 1, MAX_ENTRIES)
+        self.tools._charge("tool-directory-advances", 1, MAX_DIRECTORY_ADVANCES)
         _need(self.state == "OPEN" and self.close_state == "NOT_ATTEMPTED" and self.value is not None)
         result = next(self.value)
         self.tools._point()
@@ -459,22 +528,37 @@ class _Entries:
                 self.tools._unknown(error)
 
 
+def _inspection_operation(operation) -> bool:
+    """Closed second origin; no subtype, caller flag or fabricated build role."""
+    from .android_build_operation import AndroidBuildOperation
+    if type(operation) is AndroidBuildOperation:
+        return False
+    from .desktop_artifact_inspection import ArtifactInspectionOperation
+    _need(type(operation) is ArtifactInspectionOperation, "toolchain-unavailable")
+    return True
+
+
 class AndroidValidationTools:
     """Original operation child. Constructors and argv/environment builders grant no custody."""
 
     def __init__(self, operation, native_binding: object) -> None:
-        from .android_build_operation import AndroidBuildOperation
-        _need(type(operation) is AndroidBuildOperation, "toolchain-unavailable")
+        inspection = _inspection_operation(operation)
         operation.owner()
+        original_source = (operation.guard._artifact_inspection_source if inspection
+                           else operation.guard._android_build_source)
         _need(operation.tools is None and operation.inputs is not None and operation.files is not None
-              and not operation.close_claimed and operation.guard._android_build_source is operation.source
+              and not operation.close_claimed and original_source is operation.source
               and operation.source.active and operation.source.request_returned
               and not operation.source.close_claimed, "toolchain-unavailable")
         self.binding = _binding(native_binding)
-        _need(self.binding == _binding(operation.request.native["toolchain"]))
+        supplied = operation.request.native["tools"]["android"] if inspection else operation.request.native["toolchain"]
+        _need(self.binding == _binding(supplied))
+        if inspection:
+            _need(self.binding.profile in ("android-registered-macos-arm64-v1", "android-registered-macos-x86_64-v1"),
+                  "toolchain-unavailable")
         self.operation, self.guard, self.source = operation, operation.guard, operation.source
         self.request, self.inputs, self.files = operation.request, operation.inputs, operation.files
-        self.release, self.task = operation.inputs.release, operation.inputs.task
+        self.release, self.task = operation.inputs.release, None if inspection else operation.inputs.task
         self.pid, self.thread = os.getpid(), threading.current_thread()
         self.ancestry: _Ancestry | None = None
         self.slots: list[_FD] = []
@@ -487,24 +571,34 @@ class AndroidValidationTools:
         self._credentials: tuple[tuple[int, int, int], tuple[int, int, int]] | None = None
         self._project_data: tuple[tuple[str, bytes | None], ...] | None = None
         self._acquire_claimed = self._acquired = self._project_claimed = False
+        self._signature_claimed = self._signature_ready = False
         self._close_claimed = self._close_complete = self._cleanup_mode = self._unknown_seen = False
         self._final_hash_claimed = False
         self._first_error: BaseException | None = None
+        self._mac = None
+        if self.binding.profile in ("android-registered-macos-arm64-v1", "android-registered-macos-x86_64-v1"):
+            from .android_build_tools_macos import MacAdmission
+            self._mac = MacAdmission(self)
 
     def _owner(self, *, active: bool = True) -> None:
-        from .android_build_operation import AndroidBuildOperation
         operation = self.operation
-        _need(type(operation) is AndroidBuildOperation and type(self) is AndroidValidationTools
+        inspection = _inspection_operation(operation)
+        _need(type(self) is AndroidValidationTools
               and self.pid == os.getpid() and self.thread is threading.current_thread()
               and self.thread is threading.main_thread() and operation.tools is self
               and operation.request is self.request and operation.inputs is self.inputs and operation.files is self.files
               and operation.guard is self.guard and operation.source is self.source
               and self.source.operation is operation and self.source.guard is self.guard, "toolchain-unavailable")
         operation.owner()
-        _need(self.binding == _binding(self.request.native["toolchain"]) and self.inputs.release is self.release
-              and self.inputs.task == self.task)
+        supplied = self.request.native["tools"]["android"] if inspection else self.request.native["toolchain"]
+        _need(self.binding == _binding(supplied) and self.inputs.release is self.release
+              and (self.task is None if inspection else self.inputs.task == self.task))
+        if inspection:
+            _need(self.binding.profile in ("android-registered-macos-arm64-v1", "android-registered-macos-x86_64-v1"),
+                  "toolchain-unavailable")
         if active:
-            _need(self.guard._android_build_source is self.source and self.source.active
+            original_source = self.guard._artifact_inspection_source if inspection else self.guard._android_build_source
+            _need(original_source is self.source and self.source.active
                   and self.source.request_returned and not self.source.close_claimed, "toolchain-unavailable")
 
     def _point(self) -> None:
@@ -574,6 +668,8 @@ class AndroidValidationTools:
                 raise AndroidToolError()
 
     def _protected(self, number: int, *, directory: bool, stable_contents: bool) -> tuple[int, ...]:
+        if self._mac is not None:
+            return self._mac.protected(number, directory=directory, stable_contents=stable_contents)
         self._point()
         before = _identity(os.fstat(number), directory=directory, stable_contents=stable_contents)
         _need(self._device is None or before[0] == self._device)
@@ -583,9 +679,13 @@ class AndroidValidationTools:
         return before
 
     def _new_slot(self) -> _FD:
-        self._charge("tool-descriptor-slots", 1, MAX_DESCRIPTORS)
+        self._charge("tool-descriptor-slots", 1, MAX_DESCRIPTORS if self._mac is None else self._mac.record_limit)
+        if self._mac is not None:
+            _need(self._mac.live_count() < self._mac.live_limit, "input-limit")
         slot = _FD(self.guard)
         self.slots.append(slot)
+        if self._mac is not None:
+            self._mac.live_slots.add(slot)  # Prearm before the original open.
         return slot
 
     def _open_record(self, parent: int, name: str, *, directory: bool, stable_contents: bool = True,
@@ -607,7 +707,7 @@ class AndroidValidationTools:
         current = self._protected(record.slot.number, directory=record.directory, stable_contents=record.stable_contents)
         self._point()
         named = _identity(os.stat(record.name, dir_fd=record.parent, follow_symlinks=False),
-                          directory=record.directory, stable_contents=record.stable_contents)
+                          directory=record.directory, stable_contents=record.stable_contents, mac=self._mac is not None)
         _need(current == record.identity == named)
         if record.spec is not None:
             _need(current[6] == record.spec.size and stat.S_IMODE(current[2]) == record.spec.mode)
@@ -621,7 +721,8 @@ class AndroidValidationTools:
         while remaining:
             amount = min(READ_CHUNK, remaining)
             self._charge("tool-manifest-read-bytes" if manifest else "tool-file-read-bytes", amount,
-                         2 * MAX_MANIFEST_BYTES if manifest else 2 * MAX_TOTAL_BYTES)
+                         (2 * MAX_MANIFEST_BYTES if self._mac is None else self._mac.manifest_budget)
+                         if manifest else 2 * MAX_TOTAL_BYTES)
             block = os.read(record.slot.number, amount)
             _need(type(block) is bytes and 0 < len(block) <= amount)
             digest.update(block)
@@ -632,14 +733,20 @@ class AndroidValidationTools:
         return digest.hexdigest(), b"".join(blocks) if keep else None
 
     def _inventory_names(self, path: str, expected: set[str]) -> None:
-        self._charge("tool-directory-iterators", 1, MAX_DESCRIPTORS)
-        # One original iterator at a time; its extra live descriptor is in the
-        # precharged roster. Closed iterators do not consume permanent slots.
-        _need(all(item.close_state == "CLOSED" for item in self.iterators)
-              and len(self.slots) + (len(self.ancestry.slots) if self.ancestry is not None else 0)
-                  < MAX_DESCRIPTORS, "input-limit")
+        self._charge("tool-directory-iterators", 1, MAX_DESCRIPTORS if self._mac is None else self._mac.record_limit)
+        # One original iterator at a time. Mac streams complete membership with
+        # a separate 64-live-FD budget; it does not inherit Linux's 32K retained
+        # live-FD design or drop the records of consumed originals.
+        if self._mac is None:
+            _need(all(item.close_state == "CLOSED" for item in self.iterators)
+                  and len(self.slots) + (len(self.ancestry.slots) if self.ancestry is not None else 0)
+                      < MAX_DESCRIPTORS, "input-limit")
+        else:
+            _need(self._mac.current_iterator is None and self._mac.live_count() < self._mac.live_limit, "input-limit")
         iterator = _Entries(self)
         self.iterators.append(iterator)
+        if self._mac is not None:
+            self._mac.current_iterator = iterator
         primary = None
         try:
             iterator.acquire(self._directories[path])
@@ -660,6 +767,9 @@ class AndroidValidationTools:
         finally:
             try:
                 iterator.close()
+                if self._mac is not None:
+                    _need(self._mac.current_iterator is iterator and iterator.close_state == "CLOSED", "cleanup-unknown")
+                    self._mac.current_iterator = None
             except BaseException as error:
                 self._remember(error)
                 if primary is None:
@@ -671,6 +781,9 @@ class AndroidValidationTools:
         self._acquire_claimed = True
         try:
             self.operation.checkpoint()
+            if self._mac is not None:
+                self._mac.acquire()
+                return
             self._platform()
             self._charge("tool-descriptor-slots", len(Path(self.binding.root).parts), MAX_DESCRIPTORS)
             self.ancestry = _Ancestry(self)
@@ -741,6 +854,9 @@ class AndroidValidationTools:
             self._raise(error)
 
     def _check_metadata(self) -> None:
+        if self._mac is not None:
+            self._mac.check_metadata()
+            return
         self._point()
         _need(self._credentials is not None and (os.getresuid(), os.getresgid()) == self._credentials)
         _need(self.ancestry is not None and self.profile is not None and self.manifest is not None)
@@ -763,7 +879,9 @@ class AndroidValidationTools:
 
     def check_project_inputs(self, data: object) -> None:
         self._owner()
-        _need(self._acquired and not self._project_claimed and not self._close_claimed, "toolchain-unavailable")
+        _need(not _inspection_operation(self.operation), "toolchain-unavailable")
+        _need(self._acquired and not self._project_claimed and not self._close_claimed
+              and (self.inputs.check_signer is False or self._signature_ready), "toolchain-unavailable")
         self._project_claimed = True  # A failed supply cannot be replaced/retried.
         try:
             self.check()
@@ -773,24 +891,59 @@ class AndroidValidationTools:
         except BaseException as error:
             self._raise(error)
 
+    def require_signature_tools(self) -> None:
+        """Once-only upload-mode admission, before project selection or Gradle.
+
+        These are extra files of the same acquired JDK, not new manifest roles,
+        PATH searches or another tool owner. Acquisition already retained and
+        hashed every inventoried file; final closure rechecks those originals.
+        """
+        self._owner()
+        _need(self._acquired and (_inspection_operation(self.operation) or self.inputs.check_signer is True)
+              and not self._close_claimed and not self._signature_claimed and not self._project_claimed
+              and self._project_data is None, "toolchain-unavailable")
+        self._signature_claimed = True
+        try:
+            self.check()
+            _need(self.profile is not None)
+            files = {item.path: item for item in self.profile.files}
+            _need(all(path in files and files[path].size > 0 and bool(files[path].mode & 0o111)
+                      for path in (f"{self.profile.java_home}/bin/jarsigner", f"{self.profile.java_home}/bin/keytool")))
+            self._signature_ready = True
+        except BaseException as error:
+            self._raise(error)
+
     def _work(self, work_path: Path) -> Path:
         self._owner()
-        _need(self._acquired and self._project_data is not None and not self._close_claimed, "toolchain-unavailable")
+        inspection = _inspection_operation(self.operation)
+        _need(self._acquired and not self._close_claimed
+              and (self._signature_ready if inspection else
+                   self._project_data is not None and (self.inputs.check_signer is False or self._signature_ready)),
+              "toolchain-unavailable")
         self.operation.checkpoint()
-        from ._desktop_android_build_files import AndroidBuildFiles
-        _need(type(self.files) is AndroidBuildFiles and self.files.operation is self.operation)
+        if inspection:
+            from ._desktop_artifact_inspection_selection import ArtifactInspectionFiles
+            _need(type(self.files) is ArtifactInspectionFiles and self.files.operation is self.operation)
+            self.files.point()
+        else:
+            from ._desktop_android_build_files import AndroidBuildFiles
+            _need(type(self.files) is AndroidBuildFiles and self.files.operation is self.operation)
         expected = self.files.work_path  # Original namespace/read record check, not path authority.
         _need(type(work_path) is type(expected) and work_path == expected)
         self.check()
         return expected
 
     def gradle_command(self, task: str, work_path: Path) -> tuple[str, ...]:
+        self._owner()
+        _need(not _inspection_operation(self.operation), "toolchain-unavailable")
         work = self._work(work_path)
         _need(type(task) is str and task == self.task)
         jvm = shlex.join(_jvm_arguments(work))
-        controls = tuple(argument for key, value in _fixed_properties(self.binding.root)
+        _need(self.profile is not None)
+        controls = tuple(argument for key, value in _fixed_properties(self.binding.root, self.profile.java_home)
                          for argument in (f"-D{key}={value}", f"-P{key}={value}"))
-        return (OS_SHELL, f"{self.binding.root}/{TOOL_ROLES['gradle']}", "--no-daemon", "--no-watch-fs",
+        return ("/bin/sh" if self._mac is not None else OS_SHELL,
+                f"{self.binding.root}/{dict(self.profile.roles)['gradle']}", "--no-daemon", "--no-watch-fs",
                 "--no-parallel", "--console=plain", "--stacktrace", f"--max-workers={WORKERS}",
                 "--project-cache-dir", str(work / "project-cache"), "--gradle-user-home", str(work / "gradle-home"),
                 f"-Dorg.gradle.jvmargs={jvm}", f"-Duser.home={work}", f"-Djava.io.tmpdir={work}", *controls, task)
@@ -799,8 +952,12 @@ class AndroidValidationTools:
         work = self._work(work_path)
         _need(type(bound_release) is ReleaseVersion and bound_release is self.release)
         root = self.binding.root
-        return {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "PATH": f"{root}/jdk/bin:{OS_EXECUTABLE_DIRECTORY}",
-                "JAVA_HOME": f"{root}/jdk", "ANDROID_HOME": f"{root}/sdk", "ANDROID_SDK_ROOT": f"{root}/sdk",
+        _need(self.profile is not None)
+        java_home = f"{root}/{self.profile.java_home}"
+        locale = "C" if self._mac is not None else "C.UTF-8"
+        executable_path = "/usr/bin:/bin" if self._mac is not None else OS_EXECUTABLE_DIRECTORY
+        return {"LANG": locale, "LC_ALL": locale, "TZ": "UTC", "PATH": f"{java_home}/bin:{executable_path}",
+                "JAVA_HOME": java_home, "ANDROID_HOME": f"{root}/sdk", "ANDROID_SDK_ROOT": f"{root}/sdk",
                 "HOME": str(work), "TMPDIR": str(work), "XDG_RUNTIME_DIR": str(work),
                 "XDG_CONFIG_HOME": str(work / "xdg-config"), "XDG_CACHE_HOME": str(work / "xdg-cache"),
                 "XDG_DATA_HOME": str(work / "xdg-data"), "XDG_STATE_HOME": str(work / "xdg-state"),
@@ -809,20 +966,82 @@ class AndroidValidationTools:
                 "MOBILE_RELEASE_VERSION_NAME": bound_release.name, "MOBILE_RELEASE_BUILD_NUMBER": str(bound_release.build),
                 "MOBILE_RELEASE_REQUIRE_SIGNING": "false"}
 
-    def bundletool_command(self, snapshot_path: Path) -> tuple[str, ...]:
+    def _inspection_input(self, snapshot_path: Path) -> tuple[Path, Path]:
         self._owner()
-        _need(self._project_data is not None and not self._close_claimed, "toolchain-unavailable")
-        from ._desktop_android_build_files import OriginalAndroidArtifact
+        inspection = _inspection_operation(self.operation)
+        _need((inspection or self._project_data is not None) and not self._close_claimed, "toolchain-unavailable")
         artifact = self.operation._artifact
-        _need(type(artifact) is OriginalAndroidArtifact and artifact.files is self.files
-              and self.files.artifact is artifact and self.files._original_artifact is artifact
-              and artifact._native is True and artifact._reader is None)
+        if inspection:
+            from ._desktop_artifact_inspection_selection import ArtifactInspectionArtifact
+            _need(type(artifact) is ArtifactInspectionArtifact and artifact.files is self.files
+                  and self.files.artifact is artifact and artifact._native is True and artifact._reader is None)
+        else:
+            from ._desktop_android_build_files import OriginalAndroidArtifact
+            _need(type(artifact) is OriginalAndroidArtifact and artifact.files is self.files
+                  and self.files.artifact is artifact and self.files._original_artifact is artifact
+                  and artifact._native is True and artifact._reader is None)
         artifact.check()
         expected = artifact.path
         _need(type(snapshot_path) is type(expected) and snapshot_path == expected)
         work = self._work(self.files.work_path)
-        return (f"{self.binding.root}/{TOOL_ROLES['java']}", *_jvm_arguments(work, bundletool=True), "-jar",
-                f"{self.binding.root}/{TOOL_ROLES['bundletool']}", "dump", "manifest", f"--bundle={expected}", "--module=base")
+        return work, expected
+
+    def bundletool_command(self, snapshot_path: Path) -> tuple[str, ...]:
+        work, expected = self._inspection_input(snapshot_path)
+        _need(self.profile is not None)
+        roles = dict(self.profile.roles)
+        return (f"{self.binding.root}/{roles['java']}", *_jvm_arguments(work, bundletool=True), "-jar",
+                f"{self.binding.root}/{roles['bundletool']}", "dump", "manifest", f"--bundle={expected}", "--module=base")
+
+    def _signing_inputs(self):
+        self._owner()
+        _need(not _inspection_operation(self.operation), "toolchain-unavailable")
+        from .android_build_signing import SignedAndroidOperation
+        signing = self.operation.signing
+        _need(type(signing) is SignedAndroidOperation and signing.operation is self.operation
+              and self.inputs.check_signer and self._signature_claimed and self._signature_ready)
+        work = self._work(self.files.work_path)
+        keystore, _, alias, _ = signing.command_inputs()
+        _need(self.profile is not None and self._mac is not None)
+        return work, keystore, alias
+
+    def keystore_input_command(self) -> tuple[str, ...]:
+        work, keystore, alias = self._signing_inputs()
+        return (f"{self.binding.root}/{self.profile.java_home}/bin/keytool",
+                *("-J" + option for option in _jvm_arguments(work, bundletool=True)), "-J-Duser.timezone=UTC",
+                "-list", "-v", "-keystore", str(keystore), "-alias", alias,
+                "-storepass:env", "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+                "-keypass:env", "MOBILE_RELEASE_ANDROID_KEY_PASSWORD")
+
+    def aab_sign_command(self, candidate) -> tuple[str, ...]:
+        from ._desktop_android_build_files import AndroidSigningCandidate
+        work, keystore, alias = self._signing_inputs()
+        _need(type(candidate) is AndroidSigningCandidate and self.files.signing_candidate is candidate
+              and candidate.files is self.files and candidate._native and candidate.integrity_checked)
+        return (f"{self.binding.root}/{self.profile.java_home}/bin/jarsigner",
+                *("-J" + option for option in _jvm_arguments(work, bundletool=True)),
+                "-keystore", str(keystore), "-storepass:env", "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+                "-keypass:env", "MOBILE_RELEASE_ANDROID_KEY_PASSWORD", str(candidate.native_path()), alias)
+
+    def jarsigner_command(self, snapshot_path: Path) -> tuple[str, ...]:
+        self._owner()
+        _need((_inspection_operation(self.operation) or self.inputs.check_signer is True)
+              and self._signature_claimed and self._signature_ready, "toolchain-unavailable")
+        work, expected = self._inspection_input(snapshot_path)
+        _need(self.profile is not None)
+        return (f"{self.binding.root}/{self.profile.java_home}/bin/jarsigner",
+                *("-J" + option for option in _jvm_arguments(work, bundletool=True)),
+                "-verify", "-strict", str(expected))
+
+    def keytool_command(self, snapshot_path: Path) -> tuple[str, ...]:
+        self._owner()
+        _need((_inspection_operation(self.operation) or self.inputs.check_signer is True)
+              and self._signature_claimed and self._signature_ready, "toolchain-unavailable")
+        work, expected = self._inspection_input(snapshot_path)
+        _need(self.profile is not None)
+        return (f"{self.binding.root}/{self.profile.java_home}/bin/keytool",
+                *("-J" + option for option in _jvm_arguments(work, bundletool=True)),
+                "-printcert", "-jarfile", str(expected))
 
     def close(self) -> None:
         self._owner(active=False)
@@ -841,12 +1060,15 @@ class AndroidValidationTools:
             try:
                 if self._acquired:
                     self._check_metadata()
-                    _need(not self._final_hash_claimed and self.manifest is not None)
-                    self._final_hash_claimed = True
-                    _need(self._read(self.manifest, self.manifest.identity[6], manifest=True)[0] == self.binding.sha256)
-                    for record in self.records:
-                        if record.spec is not None:
-                            _need(self._read(record, record.spec.size)[0] == record.spec.sha256)
+                    if self._mac is not None:
+                        self._mac.final_hash()
+                    else:
+                        _need(not self._final_hash_claimed and self.manifest is not None)
+                        self._final_hash_claimed = True
+                        _need(self._read(self.manifest, self.manifest.identity[6], manifest=True)[0] == self.binding.sha256)
+                        for record in self.records:
+                            if record.spec is not None:
+                                _need(self._read(record, record.spec.size)[0] == record.spec.sha256)
                     self._check_metadata()
             except BaseException as error:
                 first = error

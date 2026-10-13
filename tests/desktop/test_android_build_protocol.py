@@ -27,11 +27,28 @@ def request_data():
                         "savedConfig": {"bytes": 512, "sha256": "c" * 64},
                         "savedVersion": {"source": "release/version.properties", "bytes": 41,
                                          "sha256": "d" * 64, "name": "1.2.3", "build": 42},
-                        "platform": "android", "operation": "android-build-inspect"},
+                        "platform": "android", "operation": "android-build-inspect",
+                        "artifactValidation": {"mode": "structure-and-version", "uploadCertificateSha256": None}},
             "native": {"profile": "linux-gnu-x86_64", "projectRoot": "/PRIVATE_PROJECT", "cwd": "/PRIVATE_CWD",
                        "rootIdentity": dict(identity), "toolchain": {"schemaVersion": 1,
                        "profile": wire.TOOLCHAIN_PROFILE, "root": "/PRIVATE_TOOLCHAIN", "rootIdentity": dict(identity),
                        "inventorySha256": "e" * 64}}}
+
+
+def signed_request_data(*, firebase=False):
+    value = request_data()
+    value["context"].update(operation="android-build-sign", signing={
+        "mode": "local-upload-key", "assignments": [
+            {"kind": kind, "recordId": letter * 32, "recordRevision": 1, "contextRevision": 2}
+            for kind, letter in (("android-keystore", "a"),) + ((("android-firebase", "b"),) if firebase else ())]})
+    value["context"]["artifactValidation"] = {"mode": "upload-signature", "uploadCertificateSha256": "ab" * 32}
+    selected = {"instance": "f" * 32, "ownerUid": 501, "catalogGeneration": 1,
+                "recordSha256": "0" * 64, "inventorySha256": "e" * 64, "osProviderSha256": "1" * 64}
+    value["native"].update(profile="macos-arm64", signingContext=copy.deepcopy(value["context"]["savedConfig"]))
+    value["native"]["toolchain"].update(schemaVersion=2, profile=wire.MAC_TOOLCHAIN_PROFILE,
+        root=f'{wire.MAC_TOOLCHAIN_PREFIX}/501/{selected["instance"]}', selection=selected,
+        rootIdentity={"device": "1", "inode": "3", "mode": stat.S_IFDIR | 0o555, "uid": 0, "gid": 0})
+    return value
 
 
 def selection():
@@ -58,7 +75,9 @@ def complete(request, findings=None):
     activity = wire.project_activity(report() if findings is None else findings, stage="disposing-work",
                                      selection=selection(), command={"outcome": "exited", "exitCode": 0})
     result = wire.project_result(activity, artifact(), used_config=request.context["savedConfig"],
-                                 used_version=request.context["savedVersion"], toolchain_profile=wire.TOOLCHAIN_PROFILE)
+                                 used_version=request.context["savedVersion"], toolchain_profile=request.native["toolchain"]["profile"],
+                                 toolchain_selection=request.native["toolchain"].get("selection"),
+                                 validation=request.context["artifactValidation"], signed=wire.is_signed(request.context))
     return {"schemaVersion": 1, "context": copy.deepcopy(request.context), "outcome": "complete", "reason": "none",
             "activity": activity, "disposition": {"work": "removed", "artifacts": "retained-local-result"}, "result": result,
             "lifetime": {"complete": True, "fatal": False, "contained": True, "commandDispatched": True,
@@ -77,9 +96,172 @@ def command_failure(request, code=7):
     return value
 
 
+def upload_complete(*, signature=Status.PASS, signer=Status.PASS, manifest=Status.PASS):
+    data = request_data()
+    data["context"]["artifactValidation"] = {"mode": "upload-signature", "uploadCertificateSha256": "aB" * 32}
+    request = wire.parse_request(encoded(data))
+    rows = [("android.aab.structure", Status.PASS), ("android.aab.manifest", manifest),
+            ("android.aab.signature", signature)]
+    if signer is not None:
+        rows.append(("android.aab.signer", signer))
+    value = complete(request, report(rows))
+    value["lifetime"]["commands"] = 3 if signer is None else 4
+    return request, value
+
+
 class AndroidBuildProtocolTests(unittest.TestCase):
     def setUp(self):
         self.request = wire.parse_request(encoded(request_data()))
+
+    def test_v3_choice_is_required_closed_transport_and_not_a_fingerprint_override(self):
+        self.assertEqual((wire.PROTOCOL, wire.CONSENT), ("mrk-android-build/3", "saved-android-build-inspect-v3"))
+        for comparison in ({"mode": "structure-and-version", "uploadCertificateSha256": None},
+                           {"mode": "upload-signature", "uploadCertificateSha256": "aB" * 32},
+                           {"mode": "upload-signature", "uploadCertificateSha256": ":".join(["aB"] * 32)}):
+            data = request_data()
+            data["context"]["artifactValidation"] = comparison
+            self.assertEqual(wire.parse_request(encoded(data)).context["artifactValidation"], comparison)
+        for comparison in (None, {}, {"mode": "upload-signature"},
+                           {"mode": "upload-signature", "uploadCertificateSha256": None},
+                           {"mode": "structure-and-version", "uploadCertificateSha256": "a" * 64},
+                           {"mode": "sign", "uploadCertificateSha256": "a" * 64},
+                           {"mode": "upload-signature", "uploadCertificateSha256": "a" * 96},
+                           {"mode": "upload-signature", "uploadCertificateSha256": "a" * 64 + "\n"}):
+            data = request_data()
+            data["context"]["artifactValidation"] = comparison
+            with self.subTest(comparison=comparison), self.assertRaises(wire.ProtocolError):
+                wire.parse_request(encoded(data))
+        data = request_data()
+        del data["context"]["artifactValidation"]
+        with self.assertRaises(wire.ProtocolError):
+            wire.parse_request(encoded(data))
+        with self.assertRaises(wire.ProtocolError):
+            wire.parse_request(encoded({**request_data(), "protocol": "mrk-android-build/1"}))
+        with self.assertRaises(wire.ProtocolError):
+            wire.parse_request(encoded({**request_data(), "protocol": "mrk-android-build/2"}))
+
+    def test_signed_request_is_closed_mac_only_and_not_an_unsigned_context_extension(self):
+        for firebase in (False, True):
+            data = signed_request_data(firebase=firebase)
+            self.assertTrue(wire.is_signed(wire.parse_request(encoded(data)).context))
+        for change in (lambda v: v["context"].update(operation="android-build-inspect"),
+                       lambda v: v["context"].update(signing=None),
+                       lambda v: v["context"]["signing"].update(mode="ambient"),
+                       lambda v: v["context"]["signing"]["assignments"][0].update(kind="apple-p12"),
+                       lambda v: v["context"]["signing"]["assignments"][0].update(recordRevision=True),
+                       lambda v: v["context"]["signing"]["assignments"][0].update(path="PRIVATE"),
+                       lambda v: v["context"].update(artifactValidation=request_data()["context"]["artifactValidation"]),
+                       lambda v: v["native"].pop("signingContext"),
+                       lambda v: v.update(native=request_data()["native"])):
+            data = signed_request_data(); change(data)
+            with self.subTest(change=change), self.assertRaises(wire.ProtocolError):
+                wire.parse_request(encoded(data))
+
+    def test_signed_success_needs_six_commands_both_material_closes_and_every_final_check(self):
+        request = wire.parse_request(encoded(signed_request_data()))
+        rows = [("android.aab.structure", Status.PASS), ("android.aab.manifest", Status.PASS),
+                ("android.aab.signature", Status.PASS), ("android.aab.signer", Status.PASS)]
+        terminal = complete(request, report(rows))
+        terminal["lifetime"].update(commands=6, buildInputsClosed=True, materialRetired=True)
+        wire.validate_terminal(terminal, request)
+        self.assertEqual(terminal["result"]["assurances"]["toolkitSigning"], "local-upload-key-verified")
+        for field, value in (("commands", 4), ("commands", 7), ("profileCalls", 1),
+                             ("buildInputsClosed", False), ("materialRetired", False)):
+            other = copy.deepcopy(terminal); other["lifetime"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(wire.ProtocolError):
+                wire.validate_terminal(other, request)
+        for index in range(len(rows)):
+            failing = list(rows); failing[index] = (rows[index][0], Status.FAIL)
+            with self.subTest(check=rows[index][0]), self.assertRaises(wire.ProtocolError):
+                complete(request, report(failing))
+        stream = wire.AndroidBuildFrames(request)
+        stream.response("accepted", {"schemaVersion": 1, "context": request.context})
+        for stage in wire.SIGNED_STAGES:
+            stream.response("progress", {"schemaVersion": 1, "stage": stage})
+        stream.response("terminal", terminal)
+        self.assertEqual(stream._frames, 10)
+
+    def test_unsigned_frames_reject_signing_stages_and_early_signing_failure_counts_dispatch(self):
+        for stage in ("validating-signing", "signing", "restoring-inputs"):
+            stream = wire.AndroidBuildFrames(self.request)
+            stream.response("accepted", {"schemaVersion": 1, "context": self.request.context})
+            with self.assertRaises(wire.ProtocolError):
+                stream.response("progress", {"schemaVersion": 1, "stage": stage})
+        request = wire.parse_request(encoded(signed_request_data()))
+        value = {"schemaVersion": 1, "context": request.context, "outcome": "failed",
+                 "reason": "signing-validation-failed", "result": None,
+                 "activity": wire.project_activity(None, stage="validating-signing", selection=selection(),
+                     command={"outcome": "unknown", "exitCode": None}),
+                 "disposition": {"work": "removed", "artifacts": "not-created"},
+                 "lifetime": {**complete(self.request)["lifetime"], "commands": 1,
+                              "buildInputsClosed": True, "materialRetired": True}}
+        wire.validate_terminal(value, request)
+        value["outcome"] = "refused"
+        with self.assertRaises(wire.ProtocolError): wire.validate_terminal(value, request)
+
+    def test_upload_assurances_require_both_actual_signature_and_signer_pass(self):
+        for signature, signer, expected_signature, expected_signer, commands in (
+            (Status.PASS, Status.PASS, "passed", "matches-saved-upload-certificate", 4),
+            (Status.PASS, Status.FAIL, "passed", "failed", 4),
+            (Status.FAIL, None, "failed", "not-checked", 3),
+        ):
+            request, value = upload_complete(signature=signature, signer=signer)
+            wire.validate_terminal(value, request)
+            self.assertEqual(value["result"]["assurances"]["signature"], expected_signature)
+            self.assertEqual(value["result"]["assurances"]["signer"], expected_signer)
+            self.assertNotIn("artifact-signer-not-inspected", value["result"]["limitations"])
+            for count in range(6):
+                changed = copy.deepcopy(value)
+                changed["lifetime"]["commands"] = count
+                if count == commands:
+                    wire.validate_terminal(changed, request)
+                else:
+                    with self.subTest(signature=signature, signer=signer, count=count), self.assertRaises(wire.ProtocolError):
+                        wire.validate_terminal(changed, request)
+        request, value = upload_complete(manifest=Status.FAIL)
+        wire.validate_terminal(value, request)
+        self.assertEqual(value["result"]["assurances"]["applicationVersion"], "not-established")
+        self.assertEqual(value["result"]["assurances"]["signer"], "matches-saved-upload-certificate")
+        # Valid content comparison does not upgrade independent manifest policy.
+        invalid = complete(request, report([("android.aab.structure", Status.FAIL)]))
+        invalid["lifetime"]["commands"] = 1
+        wire.validate_terminal(invalid, request)
+        self.assertEqual(invalid["result"]["assurances"]["signature"], "not-checked")
+
+    def test_basic_mode_or_wrong_bound_certificate_cannot_import_signature_success(self):
+        request, value = upload_complete()
+        for field, replacement in (("mode", "structure-and-version"), ("uploadCertificateSha256", "cd" * 32)):
+            changed = copy.deepcopy(value)
+            changed["result"]["artifactValidation"][field] = replacement
+            with self.assertRaises(wire.ProtocolError):
+                wire.validate_terminal(changed, request)
+        basic = complete(self.request)
+        basic["activity"] = copy.deepcopy(value["activity"])
+        basic["result"] = copy.deepcopy(value["result"])
+        with self.assertRaises(wire.ProtocolError):
+            wire.validate_terminal(basic, self.request)
+        for rows in ([('android.aab.signer', Status.PASS)],
+                     [('android.aab.signature', Status.FAIL), ('android.aab.signer', Status.PASS)],
+                     [('android.aab.signature', Status.PASS)],
+                     [('android.aab.signature', Status.PASS), ('android.aab.signature', Status.FAIL), ('android.aab.signer', Status.PASS)]):
+            with self.subTest(rows=rows), self.assertRaises(wire.ProtocolError):
+                complete(request, report([('android.aab.structure', Status.PASS), ('android.aab.manifest', Status.PASS), *rows]))
+
+    def test_upload_result_still_requires_original_closes_and_cannot_renew_context(self):
+        request, value = upload_complete()
+        for field in ("inputClosed", "handlersRestored", "invocationClosed", "artifactsClosed", "toolsClosed", "namespaceClosed"):
+            changed = copy.deepcopy(value)
+            changed["lifetime"][field] = False
+            with self.assertRaises(wire.ProtocolError):
+                wire.validate_terminal(changed, request)
+            changed.update(outcome="unknown", reason="cleanup-unknown", result=None)
+            changed["disposition"]["artifacts"] = "retained-incomplete"
+            wire.validate_terminal(changed, request)
+        stream = wire.AndroidBuildFrames(request)
+        stream.response("accepted", {"schemaVersion": 1, "context": request.context})
+        request.context["artifactValidation"]["uploadCertificateSha256"] = "cd" * 32
+        with self.assertRaises(wire.ProtocolError):
+            stream.response("progress", {"schemaVersion": 1, "stage": "inputs-bound"})
 
     def test_closed_request_domains_cannot_authorize_offline_argv_or_signing(self):
         data = request_data()
@@ -310,7 +492,7 @@ class AndroidBuildProtocolTests(unittest.TestCase):
         for suffix in ([("android.aab.manifest", Status.SKIP)],
                        [("android.aab.manifest", Status.PASS), ("android.aab.package", Status.FAIL)],
                        [("android.aab.manifest", Status.PASS), ("android.aab.manifest", Status.PASS)]):
-            value = complete(self.request, report([("android.aab.structure", Status.PASS), *suffix]))
+            value = complete(self.request, report([("android.aab.structure", Status.PASS), *suffix, ("android.aab.signer", Status.SKIP)]))
             wire.validate_terminal(value, self.request)
             self.assertEqual(value["result"]["assurances"]["applicationVersion"], "not-established")
         findings = report([("android.aab.structure", Status.PASS), ("android.build.process-lifetime", Status.FAIL)])
@@ -403,3 +585,109 @@ class AndroidBuildProtocolTests(unittest.TestCase):
             stream.response("terminal", complete(self.request))
         with self.assertRaises(wire.ProtocolError):
             wire.AndroidBuildFrames(self.request).response("terminal", complete(self.request))
+
+
+class MacAndroidBuildContractTests(unittest.TestCase):
+    """Predicate DATA only; no native registration/build/qualification."""
+    CASES = (
+        ("macos-arm64", "android-registered-macos-arm64-v1", "android-registered-macos-x86_64-v1", "arm64"),
+        ("macos-x86_64", "android-registered-macos-x86_64-v1", "android-registered-macos-arm64-v1", "x86_64"),
+    )
+
+    @staticmethod
+    def selected():
+        return {"instance": "c" * 32, "ownerUid": 501, "catalogGeneration": 1,
+                "recordSha256": "d" * 64, "inventorySha256": "e" * 64, "osProviderSha256": "f" * 64}
+
+    def mac_request(self, native="macos-arm64", toolchain="android-registered-macos-arm64-v1"):
+        data = request_data()
+        selected = self.selected()
+        data["native"]["profile"] = native
+        data["native"]["toolchain"] = {"schemaVersion": 2, "profile": toolchain,
+            "root": f'{wire.MAC_TOOLCHAIN_PREFIX}/{selected["ownerUid"]}/{selected["instance"]}',
+            "rootIdentity": {"device": "1", "inode": "2", "mode": stat.S_IFDIR | 0o555, "uid": 0, "gid": 0},
+            "inventorySha256": selected["inventorySha256"], "selection": selected}
+        return data
+
+    def mac_complete(self, request):
+        value = complete(request)
+        value["result"] = wire.project_result(value["activity"], artifact(),
+            used_config=request.context["savedConfig"], used_version=request.context["savedVersion"],
+            toolchain_profile=request.native["toolchain"]["profile"],
+            toolchain_selection=request.native["toolchain"]["selection"], validation=request.context["artifactValidation"])
+        return value
+
+    def test_native_profile_root_and_anchor_agree(self):
+        for native, toolchain, opposite, machine in self.CASES:
+            with self.subTest(native=native):
+                data = self.mac_request(native, toolchain)
+                parsed = wire.parse_request(encoded(data))
+                self.assertEqual(parsed.native["profile"], native)
+                self.assertEqual(parsed.native["toolchain"]["profile"], toolchain)
+                self.assertEqual(wire.PROFILES[native], ("macos", machine))
+                for field, replacement in (("root", "/tmp/borrowed"), ("schemaVersion", 1),
+                                           ("inventorySha256", "1" * 64), ("profile", wire.TOOLCHAIN_PROFILE),
+                                           ("profile", opposite), ("profile", "android-registered-macos-unknown-v1")):
+                    changed = copy.deepcopy(data)
+                    changed["native"]["toolchain"][field] = replacement
+                    with self.subTest(field=field, value=replacement), self.assertRaises(wire.ProtocolError):
+                        wire.parse_request(encoded(changed))
+                for foreign in ("linux-gnu-x86_64", "macos-unknown"):
+                    changed = copy.deepcopy(data)
+                    changed["native"]["profile"] = foreign
+                    with self.assertRaises(wire.ProtocolError):
+                        wire.parse_request(encoded(changed))
+                signed = signed_request_data()
+                signed["native"]["profile"] = native
+                signed["native"]["toolchain"]["profile"] = toolchain
+                wire.parse_request(encoded(signed))
+                del signed["native"]["signingContext"]
+                with self.assertRaises(wire.ProtocolError):
+                    wire.parse_request(encoded(signed))
+
+    def test_mac_terminal_requires_the_actual_request_selection_not_just_profile(self):
+        for native, toolchain, opposite, _machine in self.CASES:
+            with self.subTest(native=native):
+                request = wire.parse_request(encoded(self.mac_request(native, toolchain)))
+                value = self.mac_complete(request)
+                wire.validate_terminal(value, request)
+                for field, replacement in (("instance", "1" * 32), ("ownerUid", 502), ("catalogGeneration", 2),
+                                           ("recordSha256", "1" * 64), ("inventorySha256", "2" * 64), ("osProviderSha256", "3" * 64)):
+                    changed = copy.deepcopy(value)
+                    changed["result"]["toolchainSelection"][field] = replacement
+                    wire.validate_result(changed["result"])
+                    with self.subTest(field=field), self.assertRaises(wire.ProtocolError):
+                        wire.validate_terminal(changed, request)
+                opposite_target = copy.deepcopy(value)
+                opposite_target["result"]["toolchainProfile"] = opposite
+                wire.validate_result(opposite_target["result"])  # Same anchors; separately valid target.
+                with self.assertRaises(wire.ProtocolError):
+                    wire.validate_terminal(opposite_target, request)
+                stream = wire.AndroidBuildFrames(request)
+                stream.response("accepted", {"schemaVersion": 1, "context": request.context})
+                with self.assertRaises(wire.ProtocolError):
+                    stream.response("terminal", opposite_target)
+                with self.assertRaises(wire.ProtocolError):
+                    stream.response("terminal", value)  # Failure cannot be cleared by correcting the target.
+                missing_selection = copy.deepcopy(value)
+                del missing_selection["result"]["toolchainSelection"]
+                with self.assertRaises(wire.ProtocolError):
+                    wire.validate_terminal(missing_selection, request)
+                linux_result = complete(wire.parse_request(encoded(request_data())))["result"]
+                wire.validate_result(linux_result)
+                wrong_profile = copy.deepcopy(value)
+                wrong_profile["result"] = linux_result
+                with self.assertRaises(wire.ProtocolError):
+                    wire.validate_terminal(wrong_profile, request)
+                with self.assertRaises(wire.ProtocolError):
+                    wire.validate_terminal(value, wire.parse_request(encoded(request_data())))
+
+    def test_linux_cannot_import_mac_result_fields_or_schema(self):
+        request = wire.parse_request(encoded(request_data()))
+        value = complete(request)["result"]
+        wire.validate_result(value)
+        for change in ({"toolchainSelection": self.selected()}, {"schemaVersion": 2},
+                       {"toolchainProfile": "android-registered-macos-arm64-v1"},
+                       {"toolchainProfile": "android-registered-macos-x86_64-v1"}):
+            with self.subTest(change=change), self.assertRaises(wire.ProtocolError):
+                wire.validate_result({**value, **change})

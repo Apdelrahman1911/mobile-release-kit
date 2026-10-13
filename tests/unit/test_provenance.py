@@ -13,6 +13,7 @@ from mobile_release.errors import ValidationError
 from mobile_release.provenance import (
     build_receipt, load_evidence, seal, validate_store_receipt,
     validate_receipt_chain, validate_evidence_document, verify_sealed, write_evidence,
+    external_production_blocker,
 )
 from .evidence_helpers import build_lifecycle, fixture_chain, raw_receipt, workflow_environment
 from .helpers import android_config, ios_config, write_project
@@ -30,6 +31,7 @@ class ProvenanceTests(unittest.TestCase):
                 config = load_config(write_project(root, android_config() if platform == "android" else ios_config(), platform=platform))
                 docs = build_lifecycle(config, platform=platform)
                 validate_receipt_chain(**chain_arguments(docs), platform=platform, config=config)
+                self.assertIsNone(external_production_blocker(docs["external_receipt"], platform=platform))
                 path = root / "candidate.json"
                 write_evidence(path, docs["candidate"])
                 self.assertEqual(load_evidence(path), docs["candidate"])
@@ -71,8 +73,11 @@ class ProvenanceTests(unittest.TestCase):
             observation = build_receipt(stage="external-testing", platform="android", candidate_manifest=docs["candidate"], store_receipt=raw_receipt(observation_intent, result="already_present"), operation_intent=observation_intent, previous_receipt=docs["candidate_receipt"])
         args = {"candidate_manifest": docs["candidate"], "candidate_receipt": docs["candidate_receipt"], "candidate_intent": docs["candidate_intent"], "external_receipt": observation, "external_intent": observation_intent, "platform": "android"}
         validate_receipt_chain(**args)
-        with self.assertRaisesRegex(ValidationError, "observation-only"):
+        blocker = external_production_blocker(observation, platform="android")
+        self.assertEqual(blocker[0], "android-external-observation-only")
+        with self.assertRaisesRegex(ValidationError, "observation-only") as refused:
             validate_receipt_chain(**args, require_production_eligible_external=True)
+        self.assertEqual(str(refused.exception), blocker[1])
 
     def test_external_testflight_approved_is_pending_not_production_authority(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -86,8 +91,11 @@ class ProvenanceTests(unittest.TestCase):
                 pending = build_receipt(stage="external-testing", platform="ios", candidate_manifest=docs["candidate"], previous_receipt=docs["candidate_receipt"], operation_intent=intent, store_receipt=raw)
             args = {"candidate_manifest": docs["candidate"], "candidate_receipt": docs["candidate_receipt"], "candidate_intent": docs["candidate_intent"], "external_receipt": pending, "external_intent": intent, "platform": "ios"}
             validate_receipt_chain(**args)
-            with self.assertRaisesRegex(ValidationError, "available-to-testers"):
+            blocker = external_production_blocker(pending, platform="ios")
+            self.assertEqual(blocker[0], "ios-external-not-available")
+            with self.assertRaisesRegex(ValidationError, "available-to-testers") as refused:
                 validate_receipt_chain(**args, require_production_eligible_external=True)
+            self.assertEqual(str(refused.exception), blocker[1])
 
     def test_tampering_and_unknown_store_state_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

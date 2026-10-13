@@ -44,7 +44,7 @@ pub(crate) fn selection_id(value: &str) -> bool {
     value.strip_prefix("evidence-").is_some_and(|tail| !tail.is_empty() && tail.len() <= 55
         && tail.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
 }
-fn decimal(value: &str, positive: bool, limit: usize) -> bool {
+pub(crate) fn decimal(value: &str, positive: bool, limit: usize) -> bool {
     !value.is_empty() && value.len() <= limit && value.bytes().all(|b| b.is_ascii_digit())
         && (value == "0" && !positive || !value.starts_with('0'))
 }
@@ -52,7 +52,7 @@ pub(crate) fn operation_id(value: &str) -> Option<u32> {
     if !decimal(value, true, 10) { return None; }
     value.parse::<u32>().ok().filter(|id| *id < u32::MAX)
 }
-fn hex(value: &str, size: usize) -> bool {
+pub(crate) fn hex(value: &str, size: usize) -> bool {
     value.len() == size && value.bytes().all(|b| if size == 40 { b.is_ascii_hexdigit() } else { b.is_ascii_digit() || (b'a'..=b'f').contains(&b) })
 }
 pub(crate) fn display_text(value: &str, characters: usize, bytes: usize) -> bool {
@@ -108,7 +108,8 @@ pub(crate) struct RootIdentity {
 pub(crate) fn params(root: &RegisteredRoot) -> Result<Value, BridgeError> {
     let path = root.path.to_str().ok_or_else(invalid)?;
     if path.len() > 4096 || !root.path.is_absolute() || root.path.components().count() > 129 { return Err(invalid()); }
-    let value = json!({"root":path,"expectedRoot":root.identity.evidence_identity()});
+    let identity = root.identity.posix().map_err(|_| invalid())?.evidence_identity();
+    let value = json!({"root":path,"expectedRoot":identity});
     value_bounds(&value, 3, 8 * 1024).map_err(|_| invalid())?;
     Ok(value)
 }
@@ -118,13 +119,13 @@ pub(crate) fn params(root: &RegisteredRoot) -> Result<Value, BridgeError> {
 enum Kind { Manifest, Receipt, Intent }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum DocumentState { Missing, Invalid, Valid }
+pub(crate) enum DocumentState { Missing, Invalid, Valid }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document { kind: Kind, state: DocumentState }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum Outcome { Consistent, Incomplete, Invalid, Inconsistent }
+pub(crate) enum Outcome { Consistent, Incomplete, Invalid, Inconsistent }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Version { marketing: String, build: u32 }
@@ -140,13 +141,19 @@ struct Artifact { logical_name: String, declared_bytes: String, sha256: String }
 struct RecordedRun { run_id: String, attempt: String }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Runs { authorized_by: RecordedRun, executed_by: RecordedRun, produced_by: RecordedRun }
+pub(crate) struct Runs { authorized_by: RecordedRun, executed_by: RecordedRun, produced_by: RecordedRun }
+impl Runs {
+    pub(crate) fn valid(&self) -> bool {
+        [&self.authorized_by, &self.executed_by, &self.produced_by].into_iter()
+            .all(|run| decimal(&run.run_id, true, 64) && decimal(&run.attempt, true, 64))
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Digests { manifest: String, receipt: String, intent: String }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Summary {
+pub(crate) struct Summary {
     platform: String, application_id: String, version: Version, source: Source,
     artifacts: Vec<Artifact>, recorded_runs: Runs, document_payload_sha256: Digests,
 }
@@ -160,7 +167,11 @@ fn marketing_format(value: &str) -> bool {
     (2..=4).contains(&parts.len()) && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 impl Summary {
-    fn valid(&self) -> bool {
+    pub(crate) fn platform(&self) -> &str { &self.platform }
+    pub(crate) fn candidate_history_matches(&self, receipt: &str, intent: &str) -> bool {
+        self.document_payload_sha256.receipt == receipt && self.document_payload_sha256.intent == intent
+    }
+    pub(crate) fn valid(&self) -> bool {
         if !matches!(self.platform.as_str(), "android" | "ios") || !display_text(&self.application_id, 255, 1024)
             || self.application_id.chars().count() < 3 || !display_text(&self.version.marketing, 64, 256) || !marketing_format(&self.version.marketing)
             || !(1..=2_100_000_000).contains(&self.version.build)
@@ -176,19 +187,18 @@ impl Summary {
         if self.platform == "android" {
             if !present("android-aab") || self.artifacts.iter().any(|a| a.logical_name.starts_with("ios-")) { return false; }
         } else if !present("ios-ipa") || !present("ios-archive") || self.artifacts.iter().any(|a| a.logical_name.starts_with("android-")) { return false; }
-        [&self.recorded_runs.authorized_by, &self.recorded_runs.executed_by, &self.recorded_runs.produced_by].into_iter()
-            .all(|run| decimal(&run.run_id, true, 64) && decimal(&run.attempt, true, 64))
+        self.recorded_runs.valid()
             && [&self.document_payload_sha256.manifest, &self.document_payload_sha256.receipt, &self.document_payload_sha256.intent].into_iter().all(|sha| hex(sha, 64))
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Assurance {
+pub(crate) struct Assurance {
     level: String, documents_only: bool, artifact_bytes_verified: bool, workflow_authenticated: bool,
     store_state_observed: bool, compared_with_source_project: bool, release_ready: bool, recovery_authorized: bool,
 }
 impl Assurance {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         self.level == "local-document-consistency" && self.documents_only && !self.artifact_bytes_verified && !self.workflow_authenticated
             && !self.store_state_observed && !self.compared_with_source_project && !self.release_ready && !self.recovery_authorized
     }
@@ -210,7 +220,7 @@ impl Observation {
         }
     }
 }
-fn bounds(value: &Value) -> Result<(), BridgeError> {
+pub(crate) fn bounds(value: &Value) -> Result<(), BridgeError> {
     let mut pending = vec![(value, 1usize)]; let mut nodes = 0usize;
     while let Some((item, depth)) = pending.pop() {
         nodes += 1;
@@ -438,5 +448,74 @@ mod tests {
         status.operation = Some(Operation { operation_id: "9".to_owned(), kind: OperationKind::Choose, selection_id: None });
         assert!(status.clone().checked().is_ok());
         status.problem = Some(Problem::Deadline); assert!(status.checked().is_err());
+    }
+}
+
+// Read-only retained DATA capacities for the document installation census.
+// Inline structs are charged by their owner. No clone, serializer, authority,
+// credential copy, allocation, native call or settlement transition occurs here.
+impl Runs {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = 0usize;
+        for run in [&self.authorized_by, &self.executed_by, &self.produced_by] {
+            bytes = bytes.checked_add(run.run_id.capacity())?.checked_add(run.attempt.capacity())?;
+        }
+        Some(bytes)
+    }
+}
+impl Summary {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        if self.artifacts.len() > 5 { return None; }
+        let mut bytes = self.artifacts.capacity().checked_mul(std::mem::size_of::<Artifact>())?;
+        for value in [&self.platform, &self.application_id, &self.version.marketing, &self.source.commit, &self.source.tree, &self.document_payload_sha256.manifest, &self.document_payload_sha256.receipt, &self.document_payload_sha256.intent] {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        for artifact in &self.artifacts {
+            bytes = bytes.checked_add(artifact.logical_name.capacity())?.checked_add(artifact.declared_bytes.capacity())?
+                .checked_add(artifact.sha256.capacity())?;
+        }
+        bytes.checked_add(self.recorded_runs.retained_heap_bytes()?)
+    }
+}
+impl Assurance {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> { Some(self.level.capacity()) }
+}
+impl Observation {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        if self.documents.len() > 3 { return None; }
+        self.documents.capacity().checked_mul(std::mem::size_of::<Document>())?
+            .checked_add(self.summary.as_ref().map_or(Some(0), Summary::retained_heap_bytes)?)?
+            .checked_add(self.assurance.retained_heap_bytes()?)
+    }
+}
+
+#[cfg(test)]
+mod installation_memory_capacity_tests {
+    use super::*;
+    fn run(cap: usize) -> RecordedRun { RecordedRun { run_id: String::with_capacity(cap), attempt: String::with_capacity(cap + 1) } }
+    #[test]
+    fn candidate_capacity_walk_includes_all_nested_owned_projections() {
+        let runs = Runs { authorized_by: run(17), executed_by: run(19), produced_by: run(23) };
+        let runs_bytes = [&runs.authorized_by, &runs.executed_by, &runs.produced_by].iter()
+            .map(|run| run.run_id.capacity() + run.attempt.capacity()).sum::<usize>();
+        assert_eq!(runs.retained_heap_bytes(), Some(runs_bytes));
+        let mut summary = Summary { platform: String::new(), application_id: String::new(),
+            version: Version { marketing: String::new(), build: 1 }, source: Source { commit: String::new(), tree: String::new() },
+            artifacts: Vec::with_capacity(5), recorded_runs: runs,
+            document_payload_sha256: Digests { manifest: String::new(), receipt: String::new(), intent: String::new() } };
+        let before = summary.retained_heap_bytes().unwrap();
+        assert_eq!(before, runs_bytes + summary.artifacts.capacity() * std::mem::size_of::<Artifact>());
+        let artifact = Artifact { logical_name: String::with_capacity(31), declared_bytes: String::with_capacity(67), sha256: String::with_capacity(71) };
+        let extra = artifact.logical_name.capacity() + artifact.declared_bytes.capacity() + artifact.sha256.capacity();
+        summary.artifacts.push(artifact);
+        assert_eq!(summary.retained_heap_bytes(), Some(before + extra));
+        let assurance = Assurance { level: String::with_capacity(101), documents_only: true,
+            artifact_bytes_verified: false, workflow_authenticated: false, store_state_observed: false,
+            compared_with_source_project: false, release_ready: false, recovery_authorized: false };
+        let assurance_bytes = assurance.level.capacity();
+        let observation = Observation { schema_version: 1, outcome: Outcome::Incomplete,
+            documents: Vec::with_capacity(3), summary: Some(summary), assurance };
+        assert_eq!(observation.retained_heap_bytes(), Some(before + extra + assurance_bytes
+            + observation.documents.capacity() * std::mem::size_of::<Document>()));
     }
 }

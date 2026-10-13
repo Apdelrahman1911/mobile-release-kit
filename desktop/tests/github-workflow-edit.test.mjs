@@ -10,12 +10,12 @@ import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
 import { GitHubSetupController } from '../src/githubSetupController.ts';
 import { GITHUB_WORKFLOWS } from '../src/githubSetupProtocol.ts';
 import {
-  canApplyWorkflows, confirmedWorkflowResult, currentWorkflowApplyBinding,
+  canApplyWorkflows, canRecoverWorkflows, confirmedWorkflowResult, currentWorkflowApplyBinding, currentWorkflowRecoveryBinding,
   workflowDisplayDiff, workflowEditNotice, workflowNoOp, workflowOwnerReason,
   workflowProjectionNotice, workflowRetainsDraft,
 } from '../src/githubWorkflowEdit.ts';
 import { GitHubWorkflowEditController } from '../src/githubWorkflowEditController.ts';
-import { normalWorkflowResult, parseGitHubWorkflowEditStatus, workflowEditRequestFits, workflowProjectionProgress } from '../src/githubWorkflowEditProtocol.ts';
+import { normalWorkflowRecovery, normalWorkflowResult, parseGitHubWorkflowEditStatus, workflowEditRequestFits, workflowProjectionProgress } from '../src/githubWorkflowEditProtocol.ts';
 import { previewApi } from '../src/preview.ts';
 
 const ID = { window: 'a'.repeat(32), otherWindow: 'b'.repeat(32), session: 'c'.repeat(32), otherSession: 'd'.repeat(32), revision: 'e'.repeat(32), plan: 'f'.repeat(32) };
@@ -33,6 +33,11 @@ function view(actions = ['create', 'create', 'create', 'create']) {
       // Not real YAML and not a claim of valid core rendering or actual hashing.
       const content = `inert display row ${index}\n`;
       const generated = { content, byteLength: Buffer.byteLength(content), sha256: String(index + 1).repeat(64) };
+      if (actions[index] === 'update') {
+        const old = `inert previous row ${index}\n`;
+        const previous = { content: old, byteLength: Buffer.byteLength(old), sha256: String(index + 5).repeat(64) };
+        return { id, path, action: 'update', observed: { state: 'present', byteLength: previous.byteLength, sha256: previous.sha256 }, generated, previous };
+      }
       return { id, path, action: actions[index], observed: actions[index] === 'create' ? { state: 'absent' } : { state: 'present', byteLength: generated.byteLength, sha256: generated.sha256 }, generated };
     }),
     createDirectories: actions.every((action) => action === 'create') ? ['.github', '.github/workflows'] : [],
@@ -53,6 +58,42 @@ function owner(phase = 'opening', { plan = view(), ...overrides } = {}) {
     ...overrides,
   };
 }
+
+function recoveryView(action = 'rollback', state = 'recoverable') {
+  const files = GITHUB_WORKFLOWS.map(({ id, path }, index) => {
+    const before = index === 1 ? null : { size: 12, mode: 0o644, sha256: String(index + 1).repeat(64) };
+    const after = index === 2 ? null : { size: 16, mode: 0o644, sha256: String(index + 5).repeat(64) };
+    return { id, path, before, after, action: action !== 'rollback' || after === null ? 'preserve' : before === null ? 'remove' : 'restore' };
+  });
+  return {
+    schemaVersion: 1, kind: 'recovery', state, action: state === 'recoverable' ? action : null,
+    transactionId: state === 'recoverable' ? '6'.repeat(32) : null, files: state === 'recoverable' ? files : [],
+    privateCleanup: { fileCount: state === 'recoverable' ? 8 : 0, directoryCount: state === 'recoverable' ? 2 : 0, scope: 'inspected-workflow-journal-only' },
+  };
+}
+function recoveryOwner(phase = 'opening', { action = 'rollback', state = 'recoverable', sessionId = ID.otherSession, ...overrides } = {}) {
+  const plan = recoveryView(action, state);
+  const prepared = state === 'recoverable' && ['reviewing', 'applying', 'finalizing', 'final', 'unknown'].includes(phase);
+  const submitted = state === 'recoverable' && ['applying', 'finalizing', 'final', 'unknown'].includes(phase);
+  const effect = action === 'committed_cleanup' ? 'committed' : action === 'preparing_cleanup' ? 'not_started' : 'rolled_back';
+  return {
+    ...owner(phase, { sessionId }), checkout: null, prepared: null, conflict: null,
+    recovery: { checkout: phase === 'opening' ? null : { revision: ID.revision, view: structuredClone(plan) },
+      prepared: prepared ? { revision: ID.revision, planToken: ID.plan, view: structuredClone(plan) } : null },
+    applySubmitted: submitted,
+    coreOutcome: phase === 'final' ? { effect: submitted ? effect : 'not_started', journal: submitted ? 'clean' : 'not_created', resources: 'settled', reason: 'none' } : null,
+    ...overrides,
+  };
+}
+function reviewingRecovery(h, options = {}) {
+  const before = h.count('recovery-prepare');
+  assert.equal(h.controller.inspectRecovery(), true);
+  h.publish(recoveryOwner('opening', options)); h.publish(recoveryOwner('editing', options));
+  assert.equal(h.count('recovery-prepare'), before + 1);
+  h.publish(recoveryOwner('reviewing', options));
+  const binding = currentWorkflowRecoveryBinding(h.state); assert.ok(binding); return binding;
+}
+
 function status(revision = 0, active = null, lastTerminal = null, reason = 'available', windowGeneration = ID.window) {
   return { schemaVersion: 1, domain: 'github_workflows', windowGeneration, statusRevision: revision, capability: { available: reason === 'available', reason }, active, lastTerminal };
 }
@@ -78,6 +119,9 @@ function harness({ initial = status(), subscribeGate = null, mode = 'native' } =
     prepareGitHubWorkflowEdit: (input) => mutation('prepare', input),
     applyGitHubWorkflowEdit: (sessionId, planToken) => mutation('apply', { sessionId, planToken }),
     closeGitHubWorkflowEdit: (sessionId) => mutation('close', { sessionId }),
+    openGitHubWorkflowRecovery: (projectId) => mutation('recovery-open', { projectId }),
+    prepareGitHubWorkflowRecovery: (sessionId, revision) => mutation('recovery-prepare', { sessionId, revision }),
+    applyGitHubWorkflowRecovery: (sessionId, planToken) => mutation('recovery-apply', { sessionId, planToken }),
     subscribeConfigEdit: async (listener) => { configEvent = listener; return () => {}; },
     configEditStatus: async () => configStatus(),
     openConfigEdit: (projectId) => mutation('config-open', { projectId }),
@@ -180,6 +224,49 @@ test('success needs original revision, submitted Apply and clean native/core fin
   assert.equal(workflowProjectionProgress(installed, { ...installed, nativeReason: 'cancelled' }), false);
   assert.equal(workflowDisplayDiff(installed.prepared.view.files[0]), `--- /dev/null\n+++ ${GITHUB_WORKFLOWS[0].path}\n@@ -0,0 +1,1 @@\n+inert display row 0\n`);
   assert.match(workflowDisplayDiff(unchanged.prepared.view.files[0]), /\n inert display row 0\n$/);
+});
+
+test('canonical update DTOs require complete old/new correspondence and render all lines', () => {
+  const plan = view(['update', 'create', 'preserve', 'update']);
+  const valid = status(3, owner('reviewing', { plan }));
+  assert.ok(parseGitHubWorkflowEditStatus(valid));
+  const old = plan.files[0];
+  assert.equal(workflowDisplayDiff(old), `--- ${old.path}\n+++ ${old.path}\n@@ -1,1 +1,1 @@\n-inert previous row 0\n+inert display row 0\n`);
+  assert.equal(workflowDisplayDiff({ ...old, previous: { ...old.previous, content: 'first\nlast' }, generated: { ...old.generated, content: 'new\n' } }),
+    `--- ${old.path}\n+++ ${old.path}\n@@ -1,2 +1,1 @@\n-first\n-last\n\\ No newline at end of file\n+new\n`);
+  for (const mutate of [
+    (v) => { delete v.files[0].previous; }, (v) => { v.files[0].previous = null; },
+    (v) => { v.files[0].previous.byteLength += 1; }, (v) => { v.files[0].previous.sha256 = 'f'.repeat(64); },
+    (v) => { v.files[0].previous.private = 'unexpected'; }, (v) => { v.files[0].previous.content = 'x'.repeat(16385); },
+    (v) => { v.files[0].previous = v.files[0].generated; }, (v) => { v.files[0].action = 'preserve'; },
+    (v) => { v.files[1].previous = null; }, (v) => { v.files[2].previous = old.previous; },
+  ]) {
+    const bad = structuredClone(plan); mutate(bad);
+    assert.equal(parseGitHubWorkflowEditStatus(status(3, owner('reviewing', { plan: bad }))), null);
+  }
+  for (const actions of [['update', 'update', 'update', 'update'], ['update', 'preserve', 'preserve', 'preserve']]) {
+    const updated = owner('final', { plan: view(actions) });
+    assert.ok(parseGitHubWorkflowEditStatus(status(3, null, updated)));
+    assert.equal(normalWorkflowResult(updated), 'installed');
+    assert.equal(parseGitHubWorkflowEditStatus(status(3, null, { ...updated,
+      coreOutcome: { effect: 'unchanged', journal: 'not_created', resources: 'settled', reason: 'none' } })), null);
+  }
+});
+
+test('update consent keeps one original plan and never resends or adopts changed before text', async () => {
+  const h = await connected(); const plan = view(['update', 'preserve', 'preserve', 'update']);
+  const binding = reviewing(h, plan);
+  assert.equal(h.count('apply'), 0);
+  assert.equal(h.controller.apply(binding), true);
+  assert.equal(h.controller.apply(binding), false);
+  h.publish(owner('applying', { plan })); h.publish(owner('final', { plan }));
+  assert.equal(h.count('apply'), 1); assert.equal(confirmedWorkflowResult(h.state), 'installed');
+  assert.equal(isDirty(h.selected()), true);
+  const stale = await connected(); reviewing(stale, plan);
+  const changed = owner('reviewing', { plan }); changed.prepared.view.files[0].previous.content = 'changed original';
+  stale.publish(changed);
+  assert.equal(stale.state.integrityFailed, true); assert.equal(stale.count('apply'), 0);
+  h.controller.dispose(); stale.controller.dispose();
 });
 
 test('bridge uses only five exact workflow commands/event; denied or malformed calls never fall back to preview', async () => {
@@ -337,4 +424,173 @@ test('unknown, late settlement, recovery attention and contradictory plans remai
   const changed = owner('reviewing'); changed.prepared.planToken = ID.otherSession;
   invalid.publish(changed); assert.equal(invalid.state.integrityFailed, true); assert.equal(invalid.count('close'), 1); assert.equal(canApplyWorkflows(invalid.state, invalid.selected(), invalid.setup.getSnapshot()), false);
   h.controller.dispose(); recovery.controller.dispose(); invalid.controller.dispose();
+});
+
+
+test('recovery adapters retain the five original IPC names and send only closed explicit intent', async () => {
+  const calls = [];
+  const api = createNativeApi('native', async (command, args) => { calls.push({ command, args }); return status(); });
+  await api.openGitHubWorkflowRecovery('a');
+  await api.prepareGitHubWorkflowRecovery(ID.otherSession, ID.revision);
+  await api.applyGitHubWorkflowRecovery(ID.otherSession, ID.plan);
+  assert.deepEqual(calls, [
+    { command: 'github_workflow_edit_open', args: { projectId: 'a', intent: 'recover' } },
+    { command: 'github_workflow_edit_prepare', args: { sessionId: ID.otherSession, revision: ID.revision, intent: 'recover' } },
+    { command: 'github_workflow_edit_apply', args: { sessionId: ID.otherSession, planToken: ID.plan, intent: 'recover' } },
+  ]);
+  for (const [command, params] of [
+    ['github_workflow_edit_open', { projectId: 'a', intent: 'recover' }],
+    ['github_workflow_edit_prepare', { sessionId: ID.otherSession, revision: ID.revision, intent: 'recover' }],
+    ['github_workflow_edit_apply', { sessionId: ID.otherSession, planToken: ID.plan, intent: 'recover' }],
+  ]) {
+    assert.equal(workflowEditRequestFits(command, params), true);
+    for (const key of ['draft', 'toolingRepository', 'toolingSha', 'files', 'path', 'content', 'force', 'transactionId']) {
+      assert.equal(workflowEditRequestFits(command, { ...params, [key]: null }), false);
+    }
+    for (const intent of ['edit', 'rollback', 'Recover', null, false]) {
+      assert.equal(workflowEditRequestFits(command, { ...params, intent }), false);
+    }
+  }
+  let forbidden = 0;
+  const unavailable = createNativeApi('unavailable', async () => { forbidden += 1; });
+  for (const target of [previewApi, unavailable]) {
+    for (const operation of [() => target.openGitHubWorkflowRecovery('a'),
+      () => target.prepareGitHubWorkflowRecovery(ID.otherSession, ID.revision),
+      () => target.applyGitHubWorkflowRecovery(ID.otherSession, ID.plan)]) {
+      await assert.rejects(operation, { code: target === previewApi ? 'PreviewOnly' : 'NativeBridgeRequired' });
+    }
+  }
+  assert.equal(forbidden, 0);
+});
+
+test('recovery DTOs keep historical terminal facts while summaries, roster and intent are closed', () => {
+  const valid = status(3, recoveryOwner('reviewing', { action: 'committed_cleanup' }));
+  assert.ok(parseGitHubWorkflowEditStatus(valid));
+  for (const mutate of [
+    (v) => { v.files.pop(); }, (v) => { v.files.reverse(); },
+    (v) => { v.files[0].path = '/private/other'; }, (v) => { v.files[0].content = 'PRIVATE'; },
+    (v) => { delete v.files[0].before; }, (v) => { v.files[0].before = null; v.files[0].after = null; },
+    (v) => { v.files[0].action = 'restore'; }, (v) => { v.files[0].after.size = 16385; },
+    (v) => { v.files[0].before.size = 1048577; }, (v) => { v.files[0].after.mode = 0o100644; },
+    (v) => { v.files[0].after.mode = 0o600; }, (v) => { v.files[0].before.sha256 = 'z'.repeat(64); },
+    (v) => { v.privateCleanup.fileCount = 17; }, (v) => { v.privateCleanup.directoryCount = 3; },
+    (v) => { v.privateCleanup.scope = 'all-journals'; }, (v) => { v.transactionId = ID.plan + '0'; },
+  ]) {
+    const bad = structuredClone(valid); mutate(bad.active.recovery.prepared.view);
+    bad.active.recovery.checkout.view = structuredClone(bad.active.recovery.prepared.view);
+    assert.equal(parseGitHubWorkflowEditStatus(bad), null);
+  }
+  const mixed = structuredClone(valid); mixed.active.prepared = owner('reviewing').prepared;
+  assert.equal(parseGitHubWorkflowEditStatus(mixed), null);
+  for (const [action, effect] of [['committed_cleanup', 'committed'], ['rolled_back_cleanup', 'rolled_back'],
+    ['preparing_cleanup', 'not_started'], ['rollback', 'not_started']]) {
+    const stopped = recoveryOwner('final', { action, applySubmitted: false, nativeReason: 'discarded',
+      coreOutcome: { effect, journal: 'recovery_required', resources: 'settled', reason: 'pending_state' } });
+    assert.ok(parseGitHubWorkflowEditStatus(status(4, null, stopped)));
+    assert.equal(normalWorkflowRecovery(stopped), false); assert.equal(normalWorkflowResult(stopped), null);
+    const success = recoveryOwner('final', { action });
+    assert.ok(parseGitHubWorkflowEditStatus(status(5, null, success)));
+    assert.equal(normalWorkflowRecovery(success), true); assert.equal(normalWorkflowResult(success), null);
+  }
+  assert.equal(workflowProjectionProgress(valid.active, recoveryOwner('reviewing')), false);
+  assert.equal(workflowProjectionProgress(valid.active, owner('reviewing', { sessionId: ID.otherSession })), false);
+});
+
+test('recovery needs no valid draft or pin and its explicit one-use consent can never become ordinary Apply', async () => {
+  const h = await connected();
+  h.replaceSelected({ draft: null });
+  h.setup.setCoordinate('toolingRepository', ''); h.setup.setCoordinate('toolingSha', '');
+  assert.notEqual(h.controller.startReason(), null); assert.equal(h.controller.recoveryStartReason(), null);
+  const binding = reviewingRecovery(h);
+  assert.deepEqual(h.last('recovery-prepare').args, { sessionId: ID.otherSession, revision: ID.revision });
+  assert.equal(h.count('recovery-apply'), 0); assert.equal(currentWorkflowApplyBinding(h.state), null);
+  h.replaceSelected({ draft: { deliberately: 'not valid configuration' } });
+  h.setup.setCoordinate('toolingRepository', 'invalid//pin'); h.setup.setCoordinate('toolingSha', 'invalid');
+  assert.equal(h.state.attempt.invalidated, false); assert.equal(h.count('close'), 0);
+  assert.equal(canRecoverWorkflows(h.state, h.selected(), binding), true);
+  assert.equal(canApplyWorkflows(h.state, h.selected(), h.setup.getSnapshot()), false);
+  assert.equal(h.controller.apply({ sessionId: ID.otherSession, planToken: ID.plan, draftRevision: 1, baselineGeneration: 0 }), false);
+  assert.equal(h.controller.recover({ ...binding, revision: ID.session }), false);
+  const retained = structuredClone(h.workspace);
+  let repeated;
+  const stop = h.controller.subscribe(() => { if (h.state.attempt.applyClaimed) repeated = h.controller.recover(binding); });
+  assert.equal(h.controller.recover(binding), true); assert.equal(repeated, false);
+  stop();
+  assert.equal(h.controller.recover(binding), false);
+  h.publish(recoveryOwner('final'));
+  assert.equal(normalWorkflowRecovery(h.state.attempt.projection), true);
+  assert.equal(confirmedWorkflowResult(h.state), null);
+  assert.equal(h.count('recovery-open'), 1); assert.equal(h.count('recovery-prepare'), 1); assert.equal(h.count('recovery-apply'), 1);
+  assert.equal(h.count('open') + h.count('prepare') + h.count('apply'), 0);
+  assert.deepEqual(h.workspace, retained); assert.equal(h.workspace.projects.a.lastSave, null);
+  h.controller.dispose();
+});
+
+test('only fresh explicitly submitted recovery Final clears attention; Close and stale Apply evidence cannot', async () => {
+  const historical = owner('final', { coreOutcome: { effect: 'committed', journal: 'recovery_required', resources: 'settled', reason: 'filesystem_error' } });
+  const old = status(6, null, historical);
+  const h = await connected({ initial: old });
+  assert.equal(h.state.recoveryProjects.length, 1); assert.equal(h.controller.start(), false);
+  reviewingRecovery(h, { action: 'committed_cleanup' });
+  h.controller.requestClose(); assert.equal(h.count('close'), 1);
+  h.publish(recoveryOwner('final', { action: 'committed_cleanup', applySubmitted: false, nativeReason: 'discarded',
+    coreOutcome: { effect: 'committed', journal: 'recovery_required', resources: 'settled', reason: 'pending_state' } }));
+  assert.equal(h.state.recoveryProjects.length, 1); assert.equal(h.state.attempt.handled, true);
+  assert.equal(h.count('recovery-apply'), 0);
+  const options = { action: 'committed_cleanup', sessionId: '9'.repeat(32) };
+  const binding = reviewingRecovery(h, options);
+  assert.equal(h.controller.recover(binding), true);
+  const finished = recoveryOwner('final', options);
+  h.publish({ ...finished, phase: 'finalizing', nativeFinality: 'pending' });
+  assert.equal(h.state.recoveryProjects.length, 1); assert.equal(normalWorkflowRecovery(h.state.attempt.projection), false);
+  h.publish(finished);
+  assert.equal(h.state.recoveryProjects.length, 0); assert.equal(h.state.attempt.handled, true);
+  assert.equal(h.controller.startReason(), null); assert.equal(workflowOwnerReason(h.state, 'a'), null);
+  h.emit(old, false); // An older original terminal is observation, not a new pending journal.
+  assert.equal(h.state.recoveryProjects.length, 0); assert.equal(h.state.integrityFailed, false);
+  assert.equal(h.controller.recover(binding), false); assert.equal(h.count('recovery-apply'), 1);
+  h.controller.dispose();
+});
+
+test('lost Recover reply observes once without resend, and Unknown or late settlement stays blocking', async () => {
+  const h = await connected(); const binding = reviewingRecovery(h);
+  assert.equal(h.controller.recover(binding), true); h.publish(recoveryOwner('applying'));
+  h.last('recovery-apply').reject({ code: 'lost_reply', message: 'PRIVATE REJECTION' }); await flush();
+  assert.equal(h.count('recovery-open'), 1); assert.equal(h.count('recovery-prepare'), 1); assert.equal(h.count('recovery-apply'), 1);
+  assert.equal(h.count('status'), 2); assert.equal(h.count('close'), 0);
+  const unknown = recoveryOwner('unknown', { nativeReason: 'cleanup_unknown', coreOutcome: recoveryOwner('final').coreOutcome });
+  h.publish(unknown, { reason: 'cleanup_unknown' });
+  h.publish({ ...unknown, lateSettled: true }, { reason: 'available' });
+  assert.equal(h.state.nativeBlocked, true); assert.equal(normalWorkflowRecovery(h.state.attempt.projection), false);
+  assert.equal(h.controller.inspectRecovery(), false); assert.equal(h.controller.recover(binding), false);
+  assert.equal(h.controller.start(), false); assert.equal(h.count('recovery-apply'), 1);
+  h.controller.dispose();
+});
+
+test('idle or conflict inspection closes the same owner without Prepare or Recover', async () => {
+  for (const state of ['idle', 'conflict']) {
+    const h = await connected(); const retained = structuredClone(h.workspace);
+    assert.equal(h.controller.inspectRecovery(), true);
+    h.publish(recoveryOwner('editing', { state }));
+    assert.equal(h.count('close'), 1); assert.equal(h.count('recovery-prepare'), 0);
+    assert.equal(h.count('recovery-apply'), 0); assert.equal(currentWorkflowRecoveryBinding(h.state), null);
+    h.publish(recoveryOwner('final', { state, nativeReason: 'discarded',
+      coreOutcome: { effect: 'not_started', journal: state === 'idle' ? 'not_created' : 'recovery_required',
+        resources: 'settled', reason: state === 'idle' ? 'none' : 'pending_state' } }));
+    assert.equal(h.state.attempt.handled, true); assert.equal(normalWorkflowRecovery(h.state.attempt.projection), false);
+    assert.deepEqual(h.workspace, retained); assert.equal(h.count('close'), 1);
+    h.controller.dispose();
+  }
+});
+
+test('project or document changes retire a pre-Recover inspection and cannot reattach its token', async () => {
+  const changed = await connected(); const binding = reviewingRecovery(changed);
+  changed.dispatch({ type: 'select', project: { id: 'b', name: 'Other', path: '/never-read' } });
+  assert.equal(changed.state.attempt.invalidated, true); assert.equal(changed.count('close'), 1);
+  assert.equal(changed.controller.recover(binding), false); assert.equal(changed.count('recovery-apply'), 0);
+  const document = await connected(); const old = reviewingRecovery(document);
+  document.publish(recoveryOwner('reviewing'), { windowGeneration: ID.otherWindow });
+  assert.equal(document.state.generationLost, true); assert.equal(document.controller.recover(old), false);
+  assert.equal(document.controller.inspectRecovery(), false); assert.equal(document.count('recovery-apply'), 0);
+  changed.controller.dispose(); document.controller.dispose();
 });

@@ -45,7 +45,7 @@ def binding_environment(event: str = "push", attempt: str = "1", *, platform: st
 def native_inputs(platform: str = "linux", *, ref: str | None = None) -> dict:
     binding = helper.environment_native_binding(binding_environment(platform=platform, ref=ref))
     core = [{"path": name, "sha256": "4" * 64, "size": 1} for name in helper.GTK_CORE_PATHS]
-    names = {helper.ENVIRONMENT_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py", "desktop/environment_bootstrap.py",
+    names = {*helper.APP_BUILD_SELECTION_SOURCES, helper.ENVIRONMENT_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py", "desktop/environment_bootstrap.py",
         "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
         "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/environment_diagnostics_owner.rs",
         "desktop/src-tauri/src/environment_diagnostics_hosted_tests.rs", "tests/native_desktop_environment.py",
@@ -155,21 +155,23 @@ def projection_value(platform: str, case: str) -> dict:
 
 def original_resources(case: str) -> dict:
     absent, negative = case in {"L1", "L2"}, case == "L7"
+    late = case in {"L5", "L6a", "L6b", "L6c"}
     native = {"startup": {"attempted": not absent, "returned": not absent, "failed": False},
         "inspection": {"joined": case != "L1", "failed": False, "retained": False},
         "acquisition": {"joined": not absent, "failed": False, "retained": False},
         "child": {"present": not absent, "waited": not absent, "code": None if absent else 0, "waitFailed": False},
         **{role: {"close": "new" if absent else "settled", "retained": False} for role in ("input", "output", "error")},
         "writer": {"joined": True, "failed": False, "end": {"sent": not absent, "closed": not absent, "failed": False}},
-        "outputBytes": 0 if absent else 4096, "resourceUnknown": negative, "activeRetained": negative,
-        "disabled": negative or case in {"L5", "L6a", "L6b", "L6c"}, "canExit": not negative}
+        "outputBytes": 0 if absent else 4096, "resourceUnknown": negative or late, "activeRetained": negative or late,
+        "disabled": negative or late, "canExit": not (negative or late)}
     for role in ("stdout", "stderr"):
         native[role] = {"joined": True, "failed": False, "end": {"frames": 2 if role == "stdout" and not absent else 0,
                         "eof": not absent, "closed": not absent, "failed": False}}
     for role in ("driver", "manager", "observer", "watchdog"):
-        receipt = "panic" if negative and role == "driver" else "ok-false" if negative and role in {"observer", "watchdog"} else (
+        receipt = "panic" if negative and role == "driver" else "ok-false" if (
+            negative and role in {"observer", "watchdog"} or late and role == "watchdog") else (
             "ok-true" if role in {"observer", "watchdog"} else "ok-unit")
-        native[role] = {"receipt": receipt, "retained": negative and role != "manager"}
+        native[role] = {"receipt": receipt, "retained": negative and role != "manager" or late and role in {"observer", "watchdog"}}
     return native
 
 
@@ -617,6 +619,12 @@ class EnvironmentNativeCIContracts(unittest.TestCase):
             (("cases", index["L4"], "ordinary", 1, "capture", "stdout"), 8193),
             (("cases", index["L4"], "ordinary", 1, "stopBeforeWorkNs"), 10**9),
             (("cases", index["L5"], "timing", "unknownMs"), 1),
+            (("cases", index["L5"], "native", "activeRetained"), False),
+            (("cases", index["L6a"], "native", "observer", "retained"), False),
+            (("cases", index["L6b"], "native", "resourceUnknown"), False),
+            (("cases", index["L6c"], "native", "watchdog", "receipt"), "ok-true"),
+            (("cases", index["L6c"], "native", "watchdog", "retained"), False),
+            (("cases", index["L6c"], "native", "canExit"), True),
             (("cases", index["L6c"], "native", "watchdog", "receipt"), "not-joined"),
             (("cases", index["L7"], "native", "driver", "receipt"), "ok-unit"),
             (("cases", index["L7"], "native", "driver", "retained"), False),
@@ -1227,8 +1235,20 @@ class OfflineNativeCIContracts(unittest.TestCase):
         fixture = (SOURCE / "desktop/src-tauri/src/offline_preflight_owner_tests.rs").read_text(encoding="utf-8")
         self.assertIn("SavedCommandOwner::offline_preflight(runtime)", adapter)
         self.assertIn("self.saved.start_offline(", adapter)
-        for text in ("const OFFLINE_NATIVE_QUALIFIED: bool = false;", "const OFFLINE_RUNTIME_QUALIFIED: bool = false;",
-                     "const ANDROID_NATIVE_QUALIFIED: bool = false;", "const ANDROID_RUNTIME_QUALIFIED: bool = false;",
+        for obsolete in ("OFFLINE_NATIVE_QUALIFIED", "OFFLINE_RUNTIME_QUALIFIED"):
+            self.assertNotIn(obsolete, owner)
+        selected = owner.split("fn offline_installed_selected(&self) -> bool {", 1)[1].split("\n    }", 1)[0]
+        self.assertEqual(" ".join(selected.split()),
+            'self.domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol") '
+            '&& self.runtime.offline_preflight_installed_profile_available()')
+        admission = owner.split("pub(crate) fn admit_installed_observation(", 1)[1].split(
+            "pub(crate) fn installed_observation_snapshot(", 1)[0]
+        for original in ("r.revision != 0", "r.active.is_some()", "r.prepared.is_some()", "r.last.is_some()"):
+            self.assertIn(original, admission)
+        self.assertLess(admission.index("!self.inner.offline_installed_selected()"), admission.index("token.consume()"))
+        for forbidden in (".status(", ".status_offline("):
+            self.assertNotIn(forbidden, admission)
+        for text in ("const ANDROID_NATIVE_QUALIFIED: bool = false;", "const ANDROID_RUNTIME_QUALIFIED: bool = false;",
                      "const ANDROID_TOOLCHAIN_QUALIFIED: bool = false;",
                      "const OFFLINE_WORK: Duration = Duration::from_secs(1800);", "const OFFLINE_HARD: Duration = Duration::from_secs(1810);",
                      "const ANDROID_WORK: Duration = Duration::from_secs(3000);", "const ANDROID_HARD: Duration = Duration::from_secs(3010);",

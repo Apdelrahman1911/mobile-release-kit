@@ -22,12 +22,19 @@ fn rig_profile(profile: Profile, github_receipt: Option<Arc<Mutex<GitHubReadRece
     let (stop, _) = watch::channel(false);
     let owner = Arc::new(Owner {
         key: 1, id: "inert-only-1".into(), profile, github_receipt,
+        preflight_receipt: None, preflight_request: None, preflight_gate: None, preflight_go_claimed: AtomicBool::new(false),
+        release_receipt: None, release_request: None, release_gate: None,
+        setup_receipt: None, setup_request: None, setup_gate: None,
+        setup_material: None, setup_first_bound: None, secret_sealed: Mutex::new(None),
+        history_receipt: None, history_nomination: None, history_gate: None, history_endpoints: None,
         state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, reply)),
         resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(), permit: Mutex::new(Some(permit)),
         driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
         #[cfg(all(feature = "development-runtime"))]
         observation: Arc::new(Mutex::new(hosted_tests::Observation::default())),
     });
+    // Passive/read fixtures carry no remote setup request, receipt or GO gate.
+    assert!(owner.setup_receipt.is_none() && owner.setup_request.is_none() && owner.setup_gate.is_none());
     lock(&supervisor.inner.owners).insert(owner.key, owner.clone());
     Rig { supervisor, owner, receiver }
 }
@@ -62,6 +69,7 @@ fn staged_tasks(rig: &Rig) -> (oneshot::Sender<()>, oneshot::Sender<()>) {
     let outcome = match rig.owner.profile {
         Profile::Passive(_) => ReadOutcome::Passive(Value::String("inert-result".into())),
         Profile::GitHubReadOnly => ReadOutcome::GitHub(inert_github_outcome()),
+        Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory => panic!("action profiles are not passive/GitHub-read fixtures"),
     };
     *rig.owner.driver.try_lock().unwrap() = Some(tokio::spawn(async move {
         driver.await.unwrap();
@@ -113,6 +121,77 @@ async fn result(rig: &mut Rig) -> Result<Value, BridgeError> {
     tokio::time::timeout(Duration::from_secs(2), rig.receiver.take().unwrap()).await
         .expect("inert response exceeded the test-only wait bound").unwrap()
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[test]
+fn first_error_including_an_absent_cause_is_never_filled_or_replaced() {
+    use crate::{error::LinuxPassiveCause as Cause, installed_runtime::AdmissionFailure as Failure};
+    let start = Instant::now(); let endpoint = start + OPERATION_TIME;
+    let cause = Some(Cause::Inspection(Some(Failure::Namespace)));
+    for first in [BridgeError::timeout(), BridgeError::shutdown(),
+        BridgeError::unavailable("first returned failure").with_linux_passive_cause(cause)] {
+        let mut state = OwnerState::new(endpoint, None);
+        state.fail_at(first.clone(), start);
+        let cleanup = state.cleanup_endpoint;
+        state.fail_at(BridgeError::unavailable("later returned failure")
+            .with_linux_passive_cause(Some(Cause::Preparation(Failure::Deadline))), start + Duration::from_millis(1));
+        assert_eq!(state.error.as_ref(), Some(&first));
+        assert_eq!(state.error.as_ref().unwrap().linux_passive_cause(), first.linux_passive_cause());
+        assert_eq!((state.endpoint, state.cleanup_endpoint), (endpoint, cleanup));
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_copies_only_the_first_cause_and_late_returns_cannot_republish() {
+    use crate::{error::LinuxPassiveCause as Cause, installed_runtime::AdmissionFailure as Failure};
+    for cause in [None, Some(Cause::Inspection(Some(Failure::Namespace)))] {
+        let mut rig = rig();
+        let first = BridgeError::unavailable("first returned failure").with_linux_passive_cause(cause);
+        rig.owner.fail(first.clone());
+        let endpoints = { let state = lock(&rig.owner.state); (state.endpoint, state.cleanup_endpoint) };
+        rig.owner.unknown(&rig.supervisor.inner);
+        let delivered = result(&mut rig).await.unwrap_err();
+        assert_eq!(delivered.code, "cleanup_unknown");
+        assert_eq!(delivered.linux_passive_cause(), cause);
+        rig.owner.fail(BridgeError::unavailable("later returned failure")
+            .with_linux_passive_cause(Some(Cause::Preparation(Failure::Deadline))));
+        rig.owner.unknown(&rig.supervisor.inner);
+        let state = lock(&rig.owner.state);
+        assert_eq!(state.error.as_ref(), Some(&first));
+        assert_eq!(state.error.as_ref().unwrap().linux_passive_cause(), cause);
+        assert_eq!((state.endpoint, state.cleanup_endpoint), endpoints);
+        assert!(state.reply.is_none() && state.unknown && !state.terminal);
+        assert!(rig.supervisor.disabled() && !rig.supervisor.can_exit());
+        assert!(lock(&rig.owner.permit).is_some());
+        assert_eq!(rig.supervisor.inner.permits.available_permits(), ACTIVE_LIMIT - 1);
+        // No observer/driver/native task was created; this is inert mailbox DATA.
+        assert!(rig.owner.driver.try_lock().unwrap().is_none() && rig.owner.observer.try_lock().unwrap().is_none());
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[test]
+fn retirement_unknown_never_borrows_a_later_driver_failure_cause() {
+    use crate::{error::LinuxPassiveCause as Cause, installed_runtime::AdmissionFailure as Failure};
+    let start = Instant::now(); let endpoint = start + OPERATION_TIME;
+    for cause in [None, Some(Cause::Inspection(Some(Failure::Mount)))] {
+        let mut state = OwnerState::new(endpoint, None);
+        let first = BridgeError::timeout().with_linux_passive_cause(cause);
+        state.fail_at(first.clone(), start);
+        state.driver_join = ManagementJoin::Returned; state.watchdog_join = ManagementJoin::Returned;
+        state.watchdog_end = Some(WatchdogEnd::DriverObserved(ManagementJoin::Returned));
+        state.driver_end = Some(DriverEnd::Ready(Err(BridgeError::unavailable("later driver error")
+            .with_linux_passive_cause(Some(Cause::Preparation(Failure::Deadline))))));
+        state.unknown = true;
+        let error = state.retirement_result(start, false).unwrap().unwrap_err();
+        assert_eq!(error.code, "cleanup_unknown"); assert_eq!(error.linux_passive_cause(), cause);
+        assert_eq!(state.error.as_ref(), Some(&first));
+        assert_eq!(state.error.as_ref().unwrap().linux_passive_cause(), cause);
+        assert_eq!((state.endpoint, state.cleanup_endpoint), (endpoint, Some(start + CLEANUP_TIME)));
+    }
+}
+
 async fn end_inert_retained_observer(rig: &Rig) {
     // Test-only teardown: both inert tasks already produced their actual joins;
     // the remaining observer holds no native resource. This is NEVER authority

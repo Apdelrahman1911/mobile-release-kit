@@ -144,7 +144,8 @@ class GitHubSetupTests(unittest.TestCase):
 
     def test_catalog_has_closed_beginner_help_without_a_draft_or_proposal(self):
         with patch.object(setup, "propose_github_setup", side_effect=AssertionError("proposal not requested")):
-            result = execute("catalog", {})["githubSetup"]
+            catalog_result = execute("catalog", {})
+        result = catalog_result["githubSetup"]
         self.assertEqual(set(result), {"schemaVersion", "inputs", "guidance"})
         self.assertEqual([item["id"] for item in result["inputs"]], ["toolingRepository", "toolingSha", "suppliedSnapshot"])
         self.assertEqual([item["requiredness"] for item in result["inputs"]], ["required", "required", "optional"])
@@ -159,6 +160,28 @@ class GitHubSetupTests(unittest.TestCase):
         combined = json.dumps(result)
         for expected in ("not the application repository", "40", "not a snapshot read", "self-hosted", "secrets: inherit"):
             self.assertIn(expected, combined)
+        credential_help = {item["name"]: item for item in catalog_result["credentials"]}
+        for name, field, source_advice in (
+            ("ANDROID_KEYSTORE_BASE64", "where", "Your existing upload-key keystore"),
+            ("ANDROID_KEYSTORE_PASSWORD", "format", "A nonempty private keystore password"),
+            ("ANDROID_GOOGLE_SERVICES_JSON_BASE64", "format",
+             "The original Firebase client JSON; later checks must bind its application identity."),
+        ):
+            item = credential_help[f"MOBILE_RELEASE_{name}"]
+            text = item[field]
+            self.assertEqual(item["requiredness"], "conditional")
+            self.assertLessEqual(len(text.encode()), 1024)
+            self.assertIn(source_advice, text)
+            self.assertIn("Credentials & Signing", text)
+            self.assertIn("when available", text)
+            self.assertNotIn("future", text)
+            self.assertNotIn("Import is not yet implemented", text)
+            self.assertIn("No values are collected, read or checked here.", item["failure"])
+        for name, field in (("ANDROID_KEYSTORE_BASE64", "where"), ("ANDROID_GOOGLE_SERVICES_JSON_BASE64", "format")):
+            self.assertIn("current availability and scope", credential_help[f"MOBILE_RELEASE_{name}"][field])
+        password_help = credential_help["MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD"]["format"]
+        self.assertIn("private controls", password_help)
+        self.assertIn("Never enter it in this checklist, project configuration or command arguments", password_help)
         result["inputs"][0]["label"] = "mutated by caller"
         self.assertNotEqual(execute("catalog", {})["githubSetup"]["inputs"][0]["label"], "mutated by caller")
 
@@ -199,7 +222,12 @@ class GitHubSetupTests(unittest.TestCase):
         for item in propose()["workflows"]:
             raw = (SOURCE / "templates/workflows" / f"mobile-{item['id']}.yml").read_bytes()
             self.assertEqual(item["content"].encode(), render_workflow_caller(raw, "Example/mobile-release-kit", "A" * 40))
-            self.assertIn("${{ github.sha }}", item["content"])
+            expected_source = ("${{ inputs.desktop_source_sha || github.sha }}"
+                               if item["id"] == "preflight" else "${{ github.sha }}")
+            self.assertEqual(
+                [line for line in item["content"].splitlines() if line.lstrip().startswith("source_sha:")],
+                [f"      source_sha: {expected_source}"],
+            )
             self.assertEqual(item["content"].count("a" * 40), 2)
             self.assertNotIn("secrets: inherit", item["content"])
             if item["id"] != "preflight":
@@ -270,6 +298,254 @@ class GitHubSetupTests(unittest.TestCase):
         summary = {"workflows": [{"id": "preflight", "state": "present", "byteLength": 0, "sha256": hashlib.sha256(b"").hexdigest()}]}
         self.assertEqual(propose(suppliedSnapshot=summary)["workflows"][0]["comparison"], "supplied-digest-differs")
 
+        # The separate remote DATA path never treats absent optional policy as
+        # a default, and a complete unchanged resource needs no write consent.
+        from mobile_release import github_setup_remote as remote
+        from mobile_release._github_connection_transport import ReadFailure, ReadResult, _control
+        now = "2026-10-09T12:00:00Z"
+        for selection, policy in (
+            ({"kind": "actions_enabled", "enabled": True},
+             {"enabled": False, "allowed_actions": "selected", "sha_pinning_required": True}),
+            ({"kind": "workflow_token_policy", "defaultWorkflowPermissions": "write",
+              "canApprovePullRequestReviews": True},
+             {"default_workflow_permissions": "read", "can_approve_pull_request_reviews": False}),
+        ):
+            target = {"projectBinding": "a" * 64, "repository": "owner/repo", "accountId": "1",
+                      "repositoryId": "2", "selection": selection}
+            action = remote.Action.parse({"kind": "prepare", "target": target, "prepared": None})
+            repo = {"id": 2, "full_name": "owner/repo", "default_branch": "main",
+                    "visibility": "private", "archived": False}
+            class Reader:
+                def __init__(self, supplied, fault=None):
+                    self.supplied, self.fault = supplied, fault
+                    self.cursor = remote.Schedule(action)
+                def read(self, step, reference=None):
+                    request = self.cursor.claim(step, reference)
+                    if step == self.fault:
+                        raise ReadFailure("network-unavailable")
+                    if step == "account":
+                        body = {"id": 1, "login": "owner"}
+                    elif step.startswith("repository-"):
+                        body = repo
+                    else:
+                        body = self.supplied
+                    self_test.assertEqual(request.method, "GET")
+                    self_test.assertIsNone(request.body)
+                    return ReadResult({"status": 200, "body": body, "failure": "none"}, _control())
+            self_test = self
+            original = copy.deepcopy((target, policy))
+            reader = Reader(policy)
+            result = remote.execute(action, reader, observed_at=now)
+            self.assertEqual(reader.cursor.steps, ["account", "repository-before", "resource-before", "repository-after"])
+            self.assertEqual(result["reason"], "none")
+            prepared = remote.Prepared.parse(result["prepared"])
+            self.assertEqual(prepared.before.value(), policy)
+            self.assertFalse(result["writeClaimed"] or result["writeAcknowledged"])
+            raw = (json.dumps({"protocol": remote.PROTOCOL, "id": "case", "action": action.value()}) + "\n").encode()
+            request = remote.parse_initial(raw)
+            self.assertEqual(json.loads(remote.encode_result(request, result))["result"], result)
+            unchanged = Reader(prepared.after.value())
+            no_change = remote.execute(action, unchanged, observed_at=now)
+            self.assertEqual((no_change["reason"], no_change["prepared"]), ("no-change", None))
+            self.assertEqual(len(unchanged.cursor.steps), 4)
+            remote.encode_result(request, no_change)
+            # Equality alone is not JSON boolean validation (True == 1).
+            for field, value in prepared.after.value().items():
+                if type(value) is bool:
+                    forged = copy.deepcopy(prepared.value())
+                    forged["after"][field] = int(value)
+                    with self.assertRaises(ValueError):
+                        remote.Prepared.parse(forged)
+            for output in (result, no_change):
+                for field, value in output["observed"].items():
+                    if type(value) is bool:
+                        forged = copy.deepcopy(output)
+                        forged["observed"][field] = int(value)
+                        with self.assertRaises(ValueError):
+                            remote.encode_result(request, forged)
+            self.assertEqual((target, policy), original)
+            for index, step in enumerate(reader.cursor.steps):
+                failed = Reader(policy, step)
+                row = remote.execute(action, failed, observed_at=now)
+                self.assertEqual(failed.cursor.steps, reader.cursor.steps[:index + 1])
+                self.assertEqual((row["reason"], row["effect"]), ("network-unavailable", "not-started"))
+                self.assertIsNone(row["prepared"])
+                self.assertIsNone(row["observed"])
+                remote.encode_result(request, row)
+            if selection["kind"] == "actions_enabled":
+                self.assertEqual(prepared.after.value(), {**policy, "enabled": True})
+                for field in policy:
+                    missing = {key: value for key, value in policy.items() if key != field}
+                    refused = Reader(missing)
+                    row = remote.execute(action, refused, observed_at=now)
+                    self.assertEqual((row["reason"], row["prepared"], len(refused.cursor.steps)),
+                                     ("policy-unsupported", None, 3))
+                    self.assertFalse(row["writeClaimed"])
+                with_url = Reader({**policy, "selected_actions_url": "https://untrusted.invalid/not-followed"})
+                observed = remote.execute(action, with_url, observed_at=now)
+                self.assertEqual(observed, result)
+                self.assertNotIn("untrusted", remote.encode_result(request, observed).decode())
+                for allowed in ("all", "local_only", "selected"):
+                    for sha in (False, True):
+                        preserved = remote.Policy.parse(selection["kind"], {**policy, "allowed_actions": allowed,
+                                                                            "sha_pinning_required": sha})
+                        self.assertEqual(preserved.changed(action.target.selection).fields[1:], (allowed, sha))
+                for extra in ({"future_restriction": True}, {"selected_actions_url": None}):
+                    row = remote.execute(action, Reader({**policy, **extra}), observed_at=now)
+                    self.assertNotEqual(row["reason"], "none")
+                    self.assertIsNone(row["prepared"])
+
+        # Fixed inert environment responses: no credential, transport or operation.
+        from mobile_release import github_setup_remote as remote
+        now = "2026-10-09T12:00:00Z"
+        selection = {"kind": "environment_protection", "mode": "configure", "stage": "candidate",
+                     "waitTimerMinutes": 30, "preventSelfReview": True, "reviewerLogin": None, "branches": None}
+        target_value = {"projectBinding": "a" * 64, "repository": "owner/repo", "accountId": "1",
+                        "repositoryId": "2", "selection": selection}
+        body = {"id": 71, "node_id": "environment-node", "name": "mobile-candidate",
+                "url": "https://api.github.com/repos/owner/repo/environments/mobile-candidate",
+                "html_url": "https://github.com/owner/repo/deployments", "created_at": now, "updated_at": now,
+                "protection_rules": [
+                    {"id": 1, "node_id": "wait-node", "type": "wait_timer", "wait_timer": 10},
+                    {"id": 2, "node_id": "review-node", "type": "required_reviewers", "prevent_self_review": False,
+                     "reviewers": [{"type": "User", "reviewer": {"id": 91, "type": "User", "login": "Alice"}},
+                                   {"type": "Team", "reviewer": {"id": 92, "name": "Release"}}]},
+                    {"id": 3, "node_id": "branch-node", "type": "branch_policy"}],
+                "deployment_branch_policy": {"protected_branches": True, "custom_branch_policies": False}}
+        target = remote.EnvironmentTarget.parse(target_value)
+        facts = remote.EnvironmentFacts.upstream(body, target.selection.name)
+        prepared = remote.EnvironmentPrepared(target, facts, None, now)
+        prepared = remote.EnvironmentPrepared.parse(prepared.value())
+        empty_custom = {"total_count": 0, "custom_deployment_protection_rules": []}
+        permission = {"permission": "read", "role_name": "triage",
+                      "user": {"id": 91, "login": "Alice", "type": "User"}}
+        remote.environment_custom_rules_empty(empty_custom)
+        self.assertEqual(prepared.after.reviewers, facts.policy.reviewers)
+        self.assertTrue(prepared.after.protected_branches)
+        self.assertEqual(prepared.after.wait_timer, 30)
+        self.assertTrue(prepared.after.prevent_self_review)
+        self.assertIn("no atomic compare-and-set", prepared.value()["confirmation"])
+        self.assertIn("Administrator bypass is not observed", prepared.value()["confirmation"])
+        put = prepared.after.put_value()
+        self.assertEqual(set(put), {"wait_timer", "prevent_self_review", "reviewers", "deployment_branch_policy"})
+        self.assertEqual(put["reviewers"], [{"type": "Team", "id": 92}, {"type": "User", "id": 91}])
+        reordered = copy.deepcopy(body)
+        reordered["protection_rules"].reverse()
+        reordered["protection_rules"][1]["reviewers"].reverse()
+        self.assertEqual(remote.EnvironmentFacts.upstream(reordered, facts.name), facts)
+        # Known rule absence in the complete array is distinct from a malformed present rule.
+        no_rules = {**body, "protection_rules": [], "deployment_branch_policy": None}
+        unprotected = remote.EnvironmentFacts.upstream(no_rules, facts.name)
+        self.assertEqual(unprotected.policy.put_value(), {"wait_timer": 0, "prevent_self_review": False,
+                                                         "reviewers": None, "deployment_branch_policy": None})
+        timer_only_target = remote.EnvironmentTarget.parse({**target_value,
+            "selection": {**selection, "preventSelfReview": None}})
+        timer_only = remote.EnvironmentPrepared.parse(remote.EnvironmentPrepared(timer_only_target, unprotected, None, now).value())
+        self.assertIsNone(timer_only.after.prevent_self_review)
+        self.assertEqual(timer_only.after.reviewers, ())
+        # Six existing reviewers are preserved, including exact signed64 boundary IDs.
+        six = copy.deepcopy(body)
+        six["protection_rules"][1]["reviewers"] = [
+            {"type": "Team", "reviewer": {"id": 2**63 - 1 - index}} for index in range(6)]
+        maximal = remote.EnvironmentPrepared.parse(remote.EnvironmentPrepared(target,
+            remote.EnvironmentFacts.upstream(six, facts.name), None, now).value())
+        self.assertEqual(len(maximal.after.put_value()["reviewers"]), 6)
+        self.assertLessEqual(len(remote._canonical(maximal.after.value())), remote.ENVIRONMENT_POLICY_BYTES)
+        self.assertLessEqual(len(remote._canonical(maximal.before.value())), remote.ENVIRONMENT_FACTS_BYTES)
+        self.assertLessEqual(len(remote._canonical(maximal.value())), remote.ENVIRONMENT_PREPARED_BYTES)
+        # The future ENVIRONMENT_WRITE role must admit exactly this 43-node body;
+        # existing32-node roles remain unchanged and are intentionally insufficient.
+        from mobile_release._desktop_github_engine import _check_values
+        _check_values(maximal.after.put_value(), nodes=64, depth=3)
+        with self.assertRaises(ValueError):
+            _check_values(maximal.after.put_value(), nodes=32, depth=3)
+        for stage, name in remote._ENVIRONMENT_NAMES:
+            for branches in ("all", "protected"):
+                create = remote.EnvironmentTarget.parse({**target_value, "selection": {
+                    **selection, "mode": "create", "stage": stage, "reviewerLogin": "Alice", "branches": branches}})
+                absent = remote.EnvironmentFacts.absent({"total_count": 0, "environments": []}, name)
+                for base_permission in ("read", "write", "admin"):
+                    reviewer = remote.EnvironmentReviewer.upstream({**permission, "permission": base_permission}, "alice")
+                    created = remote.EnvironmentPrepared.parse(remote.EnvironmentPrepared(create, absent, reviewer, now).value())
+                    self.assertEqual(created.after.reviewers, (("User", "91"),))
+                    self.assertTrue(created.after.prevent_self_review)
+                    self.assertEqual(created.after.protected_branches, branches == "protected")
+                    self.assertEqual(created.before.value(), {"name": name, "id": None, "policy": None})
+                    created.check_fresh(absent, reviewer)
+        untouched = copy.deepcopy(body)
+        remote.EnvironmentFacts.upstream(body, facts.name)
+        self.assertEqual(body, untouched)
+
+        # Secret Prepare reads real fixed roles; absence exists only after its
+        # environment GET and never authorizes a value comparison or an Apply.
+        from mobile_release import github_setup_remote as remote
+        from mobile_release._github_connection_transport import ReadFailure, ReadResult, _control
+        selected = {"kind": "environment_secret", "mode": "create", "stage": "candidate",
+                    "requirement": "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+                    "source": {"recordId": "1" * 32, "recordRevision": 2, "contextRevision": 3}}
+        target = {"projectBinding": "a" * 64, "repository": "owner/repo", "accountId": "1",
+                  "repositoryId": "2", "selection": selected}
+        content = {"bytes": 27, "sha256": "b" * 64}
+        source = {"root": "/inert/project", "rootIdentity": {"device": "1", "inode": "2", "mode": 0o40700, "uid": 1, "gid": 1},
+                  "draft": content, "platform": "android", "purpose": "signing",
+                  "material": {"encoding": "utf8", "plaintextBytes": 4}}
+        action_value = {"kind": "prepare", "target": target, "prepared": None, "source": source}
+        action = remote.SecretAction.parse(action_value)
+        configuration = {"savedConfig": content, "canonicalConfig": content}
+        now = "2026-10-09T12:00:00Z"
+        steps = ("account", "repository-before", "environment-before", "secret-before", "key-before", "repository-after")
+        class SecretReader:
+            def __init__(self, action=action, changes=None, fault=None):
+                self.schedule, self.calls = remote.SecretSchedule(action), []
+                self.changes, self.fault = changes or {}, fault
+            def read(self, step, reference=None):
+                request = self.schedule.claim(step, reference)
+                self.calls.append((step, request))
+                if step == self.fault:
+                    raise ReadFailure("network-unavailable")
+                if step == "account":
+                    body = {"id": 1, "login": "owner"}
+                elif step.startswith("repository-"):
+                    body = {"id": 2, "full_name": "owner/repo", "default_branch": "main", "visibility": "private", "archived": False}
+                elif step == "environment-before":
+                    body = {"id": 3, "name": "mobile-candidate", "protection_rules": []}
+                elif step == "key-before":
+                    body = {"key_id": "inert-public-key", "key": "A" * 43 + "="}
+                else:
+                    body = None
+                body = self.changes.get(step, body)
+                return ReadResult({"status": 404 if body is None else 200, "body": body, "failure": "none"}, _control())
+        reader = SecretReader()
+        result = remote.execute_secret_read(action, reader, configuration, observed_at=now)
+        self.assertEqual([step for step, _ in reader.calls], list(steps))
+        self.assertTrue(all(q.method == "GET" and q.body is None for _, q in reader.calls))
+        self.assertEqual(reader.calls[3][1].path, "/repos/owner/repo/environments/mobile-candidate/secrets/" + selected["requirement"])
+        self.assertEqual(reader.calls[4][1].path, "/repos/owner/repo/environments/mobile-candidate/secrets/public-key")
+        self.assertIsNone(result["before"]["metadata"])
+        self.assertNotIn("prepared", result)  # Python cannot mint sealed consent.
+        request = remote.parse_initial(resource_bytes({"protocol": remote.PROTOCOL, "id": "secret_1", "action": action_value}) + b"\n")
+        reply = json.loads(remote.encode_result(request, result))
+        self.assertEqual(set(reply), {"protocol", "id", "secretRead"})
+        self.assertNotIn("ciphertext", json.dumps(reply))
+        self.assertLessEqual(len(remote.encode_result(request, result)), 8192)
+        metadata = {"name": selected["requirement"], "created_at": now, "updated_at": "2026-10-08T12:00:00Z"}
+        refused = remote.execute_secret_read(action, SecretReader(changes={"secret-before": metadata}), configuration, observed_at=now)
+        self.assertEqual(refused["reason"], "secret-exists")
+        replaced = copy.deepcopy(action_value); replaced["target"]["selection"]["mode"] = "replace"
+        replacement = remote.SecretAction.parse(replaced)
+        missing = remote.execute_secret_read(replacement, SecretReader(replacement), configuration, observed_at=now)
+        self.assertEqual(missing["reason"], "secret-missing")
+        found = remote.execute_secret_read(replacement, SecretReader(replacement, {"secret-before": metadata}), configuration, observed_at=now)
+        self.assertEqual(found["before"]["metadata"]["updatedAt"], metadata["updated_at"])
+        # Timestamps are independently valid UTC; no undocumented ordering rule.
+        for fault in steps:
+            reader = SecretReader(fault=fault)
+            failed = remote.execute_secret_read(action, reader, configuration, observed_at=now)
+            self.assertEqual(failed["reason"], "network-unavailable")
+            self.assertEqual([step for step, _ in reader.calls], list(steps[:steps.index(fault)+1]))
+            self.assertIs(failed["writeClaimed"], False)
+            self.assertIsNone(failed["prepared"])
+
     def test_snapshot_nested_shapes_and_no_authority_fields_are_closed(self):
         record = {"id": "preflight", "state": "present", "byteLength": 1, "sha256": "a" * 64}
         bad = [[], {}, {"workflows": {}}, {"workflows": [], "revision": "not-authority"},
@@ -286,6 +562,282 @@ class GitHubSetupTests(unittest.TestCase):
                 with self.subTest(summary=summary), self.assertRaises(ApiError) as caught:
                     propose(suppliedSnapshot=summary)
                 self.assertEqual(caught.exception.code, "invalid_params")
+
+        # Actual fixed settings sequences, including every failure prefix.
+        # No Operation, credential, subprocess, filesystem or network is used.
+        from mobile_release import github_setup_remote as remote
+        from mobile_release._github_connection_transport import ReadFailure, ReadResult, _control
+        now = "2026-10-09T12:00:00Z"
+        for selection, before in (
+            ({"kind": "actions_enabled", "enabled": True},
+             {"enabled": False, "allowed_actions": "selected", "sha_pinning_required": True}),
+            ({"kind": "workflow_token_policy", "defaultWorkflowPermissions": "write", "canApprovePullRequestReviews": True},
+             {"default_workflow_permissions": "read", "can_approve_pull_request_reviews": False}),
+        ):
+            target = remote.Target.parse({"projectBinding": "a" * 64, "repository": "owner/repo",
+                                          "accountId": "1", "repositoryId": "2", "selection": selection})
+            prepared = remote.Prepared.parse(remote.Prepared(target, remote.Policy.parse(selection["kind"], before), now).value())
+            action = remote.Action.parse({"kind": "apply", "target": target.value(), "prepared": prepared.value()})
+            initial = remote.parse_initial((json.dumps({"protocol": remote.PROTOCOL, "id": "apply", "action": action.value()}) + "\n").encode())
+            steps = ["account", "repository-before", "resource-before", "write", "resource-after", "repository-after"]
+            class Reader:
+                def __init__(self, fault=None, replacement=None):
+                    self.cursor = remote.Schedule(action)
+                    self.requests = []
+                    self.fault, self.replacement = fault, replacement
+                def read(self, step, reference=None):
+                    request = self.cursor.claim(step, reference)
+                    self.requests.append(request)
+                    if step == self.fault:
+                        if self.replacement is None:
+                            raise ReadFailure("network-unavailable")
+                        return self.replacement
+                    body = ({"id": 1, "login": "owner"} if step == "account" else
+                            {"id": 2, "full_name": "owner/repo", "default_branch": "main", "visibility": "private", "archived": False}
+                            if step.startswith("repository-") else before if step == "resource-before" else prepared.after.value())
+                    return ReadResult({"status": 204 if step == "write" else 200,
+                                       "body": None if step == "write" else body, "failure": "none"}, _control())
+            reader = Reader()
+            result = remote.execute(action, reader, observed_at=now)
+            self.assertEqual(reader.cursor.steps, steps)
+            self.assertEqual([r.method for r in reader.requests], ["GET", "GET", "GET", "PUT", "GET", "GET"])
+            endpoint = "/repos/owner/repo/actions/permissions" + ("/workflow" if selection["kind"] == "workflow_token_policy" else "")
+            self.assertEqual([r.path for r in reader.requests], ["/user", "/repos/owner/repo", endpoint, endpoint, endpoint, "/repos/owner/repo"])
+            self.assertEqual(json.loads(reader.requests[3].body), prepared.after.value())
+            self.assertLessEqual(len(reader.requests[3].body), remote.MAX_BODY_BYTES)
+            self.assertEqual((result["reason"], result["effect"], result["writeClaimed"], result["writeAcknowledged"]),
+                             ("none", "readback-confirmed", True, True))
+            self.assertEqual(result["observed"], prepared.after.value())
+            remote.encode_result(initial, result)
+            for field, value in result["observed"].items():
+                if type(value) is bool:
+                    forged = copy.deepcopy(result)
+                    forged["observed"][field] = int(value)
+                    with self.assertRaises(ValueError):
+                        remote.encode_result(initial, forged)
+            with self.assertRaises(ValueError):
+                reader.cursor.claim("write")
+            for index, step in enumerate(steps):
+                failed = Reader(step)
+                row = remote.execute(action, failed, observed_at=now)
+                self.assertEqual(failed.cursor.steps, steps[:index + 1])
+                self.assertEqual(row["reason"], "network-unavailable")
+                self.assertEqual(row["writeClaimed"], index >= 3)
+                self.assertEqual(row["writeAcknowledged"], index > 3)
+                self.assertEqual(row["effect"], "unknown" if index >= 3 else "not-started")
+                self.assertIsNone(row["observed"])
+                remote.encode_result(initial, row)
+            # Stale policy is not silently rebased; successful PUT followed by
+            # changed readback or failed identity POST never becomes success.
+            for step, body, reason in (
+                ("resource-before", prepared.after.value(), "policy-changed"),
+                ("resource-after", before, "policy-changed"),
+                ("account", {"id": 9, "login": "other"}, "target-changed"),
+                ("repository-after", {"id": 9, "full_name": "owner/repo", "default_branch": "main", "visibility": "private", "archived": False}, "target-changed"),
+            ):
+                failed = Reader(step, ReadResult({"status": 200, "body": body, "failure": "none"}, _control()))
+                row = remote.execute(action, failed, observed_at=now)
+                self.assertEqual(row["reason"], reason)
+                self.assertIsNone(row["observed"])
+                self.assertEqual(row["writeClaimed"], steps.index(step) >= 3)
+                remote.encode_result(initial, row)
+            for status, body, failure in ((200, {}, "none"), (201, None, "none"), (204, {}, "none"),
+                                          (204, None, "cancelled"), (409, None, "none")):
+                failed = Reader("write", ReadResult({"status": status, "body": body, "failure": failure}, _control()))
+                row = remote.execute(action, failed, observed_at=now)
+                self.assertFalse(row["writeAcknowledged"])
+                self.assertEqual(row["effect"], "unknown")
+                self.assertEqual(len(failed.cursor.steps), 4)
+                self.assertEqual(row["reason"], "organization-restricted" if status == 409 and selection["kind"] == "workflow_token_policy" else "response-invalid")
+                remote.encode_result(initial, row)
+            stopped = Reader("resource-before", ReadResult({"status": None, "body": None, "failure": "cancelled"}, _control("cancelled")))
+            row = remote.execute(action, stopped, observed_at=now)
+            self.assertEqual((row["reason"], row["effect"], len(stopped.cursor.steps)), ("cancelled", "not-started", 3))
+            remote.encode_result(initial, row)
+            for field, bad in (("effect", "accepted"), ("writeClaimed", False), ("writeAcknowledged", False),
+                               ("observed", before), ("reason", "cancelled"), ("schemaVersion", True)):
+                with self.assertRaises(ValueError):
+                    remote.encode_result(initial, {**result, field: bad})
+
+        # Fixed inert environment responses: no credential, transport or operation.
+        from mobile_release import github_setup_remote as remote
+        now = "2026-10-09T12:00:00Z"
+        selection = {"kind": "environment_protection", "mode": "configure", "stage": "candidate",
+                     "waitTimerMinutes": 30, "preventSelfReview": True, "reviewerLogin": None, "branches": None}
+        target_value = {"projectBinding": "a" * 64, "repository": "owner/repo", "accountId": "1",
+                        "repositoryId": "2", "selection": selection}
+        body = {"id": 71, "node_id": "environment-node", "name": "mobile-candidate",
+                "url": "https://api.github.com/repos/owner/repo/environments/mobile-candidate",
+                "html_url": "https://github.com/owner/repo/deployments", "created_at": now, "updated_at": now,
+                "protection_rules": [
+                    {"id": 1, "node_id": "wait-node", "type": "wait_timer", "wait_timer": 10},
+                    {"id": 2, "node_id": "review-node", "type": "required_reviewers", "prevent_self_review": False,
+                     "reviewers": [{"type": "User", "reviewer": {"id": 91, "type": "User", "login": "Alice"}},
+                                   {"type": "Team", "reviewer": {"id": 92, "name": "Release"}}]},
+                    {"id": 3, "node_id": "branch-node", "type": "branch_policy"}],
+                "deployment_branch_policy": {"protected_branches": True, "custom_branch_policies": False}}
+        target = remote.EnvironmentTarget.parse(target_value)
+        facts = remote.EnvironmentFacts.upstream(body, target.selection.name)
+        prepared = remote.EnvironmentPrepared(target, facts, None, now)
+        prepared = remote.EnvironmentPrepared.parse(prepared.value())
+        empty_custom = {"total_count": 0, "custom_deployment_protection_rules": []}
+        permission = {"permission": "read", "role_name": "triage",
+                      "user": {"id": 91, "login": "Alice", "type": "User"}}
+        bad_bodies = []
+        for field in body:
+            bad = copy.deepcopy(body)
+            del bad[field]
+            bad_bodies.append(bad)
+        for kind in ("unknown", "custom", "required_reviewers", "wait_timer", "branch_policy"):
+            bad = copy.deepcopy(body)
+            bad["protection_rules"] = [dict(body["protection_rules"][0], type=kind)]
+            if kind in {"wait_timer", "branch_policy"}:
+                bad["protection_rules"].append(copy.deepcopy(bad["protection_rules"][0]))
+            bad_bodies.append(bad)
+        for original_rule in body["protection_rules"]:
+            duplicate = [copy.deepcopy(original_rule), copy.deepcopy(original_rule)]
+            if original_rule["type"] != "branch_policy":
+                duplicate.append(copy.deepcopy(body["protection_rules"][2]))
+            bad_bodies.append({**body, "protection_rules": duplicate})
+        for rule_index, field in ((0, "wait_timer"), (1, "prevent_self_review"), (1, "reviewers")):
+            bad = copy.deepcopy(body)
+            del bad["protection_rules"][rule_index][field]
+            bad_bodies.append(bad)
+        for field, values in (("wait_timer", (True, -1, 43201, 1.0)), ("prevent_self_review", (0, 1, None))):
+            for value in values:
+                bad = copy.deepcopy(body)
+                bad["protection_rules"][0 if field == "wait_timer" else 1][field] = value
+                bad_bodies.append(bad)
+        for value in ([], None, body["protection_rules"][1]["reviewers"] * 4,
+                      [body["protection_rules"][1]["reviewers"][0]] * 2):
+            bad = copy.deepcopy(body)
+            bad["protection_rules"][1]["reviewers"] = value
+            bad_bodies.append(bad)
+        for branch in ({"protected_branches": False, "custom_branch_policies": True},
+                       {"protected_branches": 1, "custom_branch_policies": 0}, {}, None):
+            bad_bodies.append({**body, "deployment_branch_policy": branch})
+        bad_bodies.extend(({**body, "can_admins_bypass": False}, {**body, "id": True},
+                           {**body, "id": 2**63}, {**body, "name": "other"}))
+        for bad in bad_bodies:
+            with self.subTest(environment=bad), self.assertRaises(ValueError):
+                remote.EnvironmentFacts.upstream(bad, facts.name)
+        for bad in ({}, {"total_count": False, "custom_deployment_protection_rules": []},
+                    {"total_count": 1, "custom_deployment_protection_rules": []},
+                    {"total_count": 0, "custom_deployment_protection_rules": [{}]},
+                    {**empty_custom, "next_page": None}):
+            with self.assertRaises(ValueError):
+                remote.environment_custom_rules_empty(bad)
+        for bad in ({}, {"total_count": True, "environments": []}, {"total_count": 1, "environments": []},
+                    {"total_count": 101, "environments": [{"id": index + 1, "name": "e" + str(index)} for index in range(101)]},
+                    {"total_count": 2, "environments": [{"id": 1, "name": "Other"}, {"id": 2, "name": "other"}]},
+                    {"total_count": 2, "environments": [{"id": 1, "name": "one"}, {"id": 1, "name": "two"}]},
+                    {"total_count": 1, "environments": [{"id": 71, "name": "MOBILE-CANDIDATE"}]}):
+            with self.assertRaises(ValueError):
+                remote.EnvironmentFacts.absent(bad, facts.name)
+        complete = {"total_count": 100, "environments": [{"id": i + 1, "name": "other-" + str(i)} for i in range(100)]}
+        self.assertIsNone(remote.EnvironmentFacts.absent(complete, facts.name).identity)
+        for bad in ({**permission, "permission": "none"}, {**permission, "permission": "triage"},
+                    {**permission, "permission": "maintain"}, {**permission, "permission": True},
+                    {**permission, "user": None}, {**permission, "user": {**permission["user"], "type": "Bot"}},
+                    {**permission, "user": {**permission["user"], "id": True}},
+                    {**permission, "user": {**permission["user"], "login": "Mallory"}}):
+            with self.assertRaises(ValueError):
+                remote.EnvironmentReviewer.upstream(bad, "Alice")
+        for field, bad_value in (("waitTimerMinutes", True), ("preventSelfReview", 1), ("stage", "other"),
+                                 ("branches", "all"), ("reviewerLogin", "Alice"), ("mode", "delete")):
+            with self.assertRaises(ValueError):
+                remote.EnvironmentSelection.parse({**selection, field: bad_value})
+        for login in ("../x", "a/b", "-a", "a-", "a--b", "a" * 40, "a\n", "é"):
+            with self.assertRaises(ValueError):
+                remote.EnvironmentSelection.parse({**selection, "mode": "create", "branches": "all", "reviewerLogin": login})
+        for field, bad_value in (("waitTimerMinutes", True), ("protectedBranches", 1)):
+            bad = prepared.value()
+            bad["after"][field] = bad_value
+            with self.assertRaises(ValueError):
+                remote.EnvironmentPrepared.parse(bad)
+        bad = prepared.value()
+        bad["after"]["requiredReviewers"]["preventSelfReview"] = 1
+        with self.assertRaises(ValueError):
+            remote.EnvironmentPrepared.parse(bad)
+        for field in ("target", "before", "after", "reviewer", "observedAt", "confirmation"):
+            bad = prepared.value()
+            del bad[field]
+            with self.assertRaises(ValueError):
+                remote.EnvironmentPrepared.parse(bad)
+        for bad in ({"name": facts.name, "id": None, "policy": facts.policy.value()},
+                    {"name": facts.name, "id": "71", "policy": None}):
+            with self.assertRaises(ValueError):
+                remote.EnvironmentFacts.parse(bad)
+        unsupported = remote.EnvironmentFacts.upstream({**body, "protection_rules": [], "deployment_branch_policy": None}, facts.name)
+        with self.assertRaises(ValueError):
+            remote.EnvironmentPrepared.parse(remote.EnvironmentPrepared(target, unsupported, None, now).value())
+        no_change_target = remote.EnvironmentTarget.parse({**target_value, "selection": {
+            **selection, "waitTimerMinutes": 10, "preventSelfReview": None}})
+        with self.assertRaises(remote.Refused) as caught:
+            remote.EnvironmentPrepared.parse(remote.EnvironmentPrepared(no_change_target, facts, None, now).value())
+        self.assertEqual(caught.exception.reason, "no-change")
+
+        # Strict secret read-back DATA does not inherit Python bool/int equality.
+        from mobile_release import github_setup_remote as remote
+        from mobile_release._github_connection_transport import ReadFailure, ReadResult, _control
+        selected = {"kind": "environment_secret", "mode": "create", "stage": "candidate",
+                    "requirement": "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+                    "source": {"recordId": "1" * 32, "recordRevision": 2, "contextRevision": 3}}
+        target = {"projectBinding": "a" * 64, "repository": "owner/repo", "accountId": "1",
+                  "repositoryId": "2", "selection": selected}
+        content = {"bytes": 27, "sha256": "b" * 64}
+        source = {"root": "/inert/project", "rootIdentity": {"device": "1", "inode": "2", "mode": 0o40700, "uid": 1, "gid": 1},
+                  "draft": content, "platform": "android", "purpose": "signing",
+                  "material": {"encoding": "utf8", "plaintextBytes": 4}}
+        action_value = {"kind": "prepare", "target": target, "prepared": None, "source": source}
+        action = remote.SecretAction.parse(action_value)
+        configuration = {"savedConfig": content, "canonicalConfig": content}
+        now = "2026-10-09T12:00:00Z"
+        steps = ("account", "repository-before", "environment-before", "secret-before", "key-before", "repository-after")
+        class SecretReader:
+            def __init__(self, action=action, changes=None, fault=None):
+                self.schedule, self.calls = remote.SecretSchedule(action), []
+                self.changes, self.fault = changes or {}, fault
+            def read(self, step, reference=None):
+                request = self.schedule.claim(step, reference)
+                self.calls.append((step, request))
+                if step == self.fault:
+                    raise ReadFailure("network-unavailable")
+                if step == "account":
+                    body = {"id": 1, "login": "owner"}
+                elif step.startswith("repository-"):
+                    body = {"id": 2, "full_name": "owner/repo", "default_branch": "main", "visibility": "private", "archived": False}
+                elif step == "environment-before":
+                    body = {"id": 3, "name": "mobile-candidate", "protection_rules": []}
+                elif step == "key-before":
+                    body = {"key_id": "inert-public-key", "key": "A" * 43 + "="}
+                else:
+                    body = None
+                body = self.changes.get(step, body)
+                return ReadResult({"status": 404 if body is None else 200, "body": body, "failure": "none"}, _control())
+        result = remote.execute_secret_read(action, SecretReader(), configuration, observed_at=now)
+        request = remote.parse_initial(resource_bytes({"protocol": remote.PROTOCOL, "id": "secret_1", "action": action_value}) + b"\n")
+        for pointer, bad in (("schemaVersion", True), ("material.plaintextBytes", True),
+                             ("configuration.savedConfig.bytes", True), ("before.environmentId", 3),
+                             ("key.value", "A" * 42 + "B="), ("key.value", "A" * 44),
+                             ("key.id", "bad key"), ("target.selection.source.recordRevision", True)):
+            changed = copy.deepcopy(result); node = changed
+            parts = pointer.split(".")
+            for part in parts[:-1]: node = node[part]
+            node[parts[-1]] = bad
+            with self.subTest(pointer=pointer, bad=bad), self.assertRaises((ValueError, TypeError)):
+                remote.encode_result(request, changed)
+        for role in ("environment-before", "repository-before", "key-before"):
+            value = remote.execute_secret_read(action, SecretReader(changes={role: None}), configuration, observed_at=now)
+            self.assertNotIn("target", value)
+            self.assertNotEqual(value["reason"], "none")
+        for name, (platform, encoding) in remote.SECRET_REQUIREMENTS.items():
+            value = copy.deepcopy(action_value)
+            value["target"]["selection"]["requirement"] = name
+            value["source"].update(platform=platform, material={"encoding": encoding, "plaintextBytes": 49152})
+            remote.SecretAction.parse(value)
+            value["source"]["material"]["plaintextBytes"] += 1
+            with self.assertRaises(ValueError): remote.SecretAction.parse(value)
 
     def test_request_keys_pin_errors_and_future_action_names_reject_without_reads(self):
         bad = []
@@ -304,6 +856,431 @@ class GitHubSetupTests(unittest.TestCase):
             for action in ("github.setup", "github.authenticate", "github.setup.apply"):
                 with self.assertRaises(ApiError):
                     execute(action, {})
+
+        from mobile_release import github_setup_remote as remote
+        target = {"projectBinding": "a" * 64, "repository": "owner/repo", "accountId": "1", "repositoryId": "2",
+                  "selection": {"kind": "actions_enabled", "enabled": True}}
+        action = {"kind": "prepare", "target": target, "prepared": None}
+        envelope = {"protocol": remote.PROTOCOL, "id": "request_1", "action": action}
+        raw = (json.dumps(envelope) + "\n").encode()
+        request = remote.parse_initial(raw)
+        self.assertEqual(request.digest, hashlib.sha256(raw).hexdigest())
+        self.assertEqual(json.loads(remote.ready_frame(request)), {"protocol": remote.PROTOCOL, "id": "request_1", "ready": {"requestSha256": request.digest}})
+        go = {"protocol": remote.PROTOCOL, "id": "request_1", "go": {"requestSha256": request.digest, "token": "inert-token"}}
+        encode = lambda value: (json.dumps(value) + "\n").encode()
+        self.assertEqual(remote.parse_go(encode(go), request), "inert-token")
+        self.assertNotIn("inert-token", repr(request))
+        self.assertEqual((remote.MAX_INITIAL_BYTES, remote.MAX_GO_BYTES, remote.MAX_READY_BYTES, remote.MAX_RESULT_BYTES), (8192, 8192, 512, 65536))
+        for bad in (raw[:-1], raw + b"\n", b" \n" + raw, raw.replace(b"\n", b"\r\n"),
+                    b" " * remote.MAX_INITIAL_BYTES + raw,
+                    raw.replace(b'"id": "request_1"', b'"id": "request_1", "id": "second"')):
+            with self.assertRaises(ValueError):
+                remote.parse_initial(bad)
+        for key in ("token", "url", "home", "pendingScope", "method", "body", "deadline"):
+            with self.assertRaises(ValueError):
+                remote.parse_initial(encode({**envelope, key: "private-not-authority"}))
+        for key, bad in (("protocol", "mrk-github-readonly/1"), ("id", "different")):
+            with self.assertRaises(ValueError):
+                remote.parse_go(encode({**go, key: bad}), request)
+        for key, bad in (("requestSha256", "b" * 64), ("token", ""), ("token", "x" * 4097),
+                         ("token", "line\nbreak"), ("token", "é"), ("url", "https://untrusted.invalid")):
+            with self.assertRaises(ValueError):
+                remote.parse_go(encode({**go, "go": {**go["go"], key: bad}}), request)
+        for selection in ({"kind": "secret", "enabled": True}, {"kind": "environment", "enabled": True},
+                          {"kind": "actions_enabled", "enabled": 1}, {"kind": "actions_enabled", "enabled": True, "allowed_actions": "all"},
+                          {"kind": "workflow_token_policy", "defaultWorkflowPermissions": "admin", "canApprovePullRequestReviews": False}):
+            with self.assertRaises(ValueError):
+                remote.Action.parse({**action, "target": {**target, "selection": selection}})
+        for changes in ({"kind": "apply"}, {"prepared": {}}, {"kind": "delete"}, {"url": "https://untrusted.invalid"}):
+            with self.assertRaises(ValueError):
+                remote.Action.parse({**action, **changes})
+        original = copy.deepcopy(envelope)
+        remote.parse_initial(raw)
+        self.assertEqual(envelope, original)
+        # These pure codecs do not activate a route or instantiate transport.
+        self.assertFalse(hasattr(remote, "main"))
+        with patch.object(remote, "_make_live_reader", side_effect=AssertionError("pure codec entered transport")):
+            remote.parse_initial(raw)
+            remote.parse_go(encode(go), request)
+
+        # Fixed inert environment responses: no credential, transport or operation.
+        from mobile_release import github_setup_remote as remote
+        now = "2026-10-09T12:00:00Z"
+        selection = {"kind": "environment_protection", "mode": "configure", "stage": "candidate",
+                     "waitTimerMinutes": 30, "preventSelfReview": True, "reviewerLogin": None, "branches": None}
+        target_value = {"projectBinding": "a" * 64, "repository": "owner/repo", "accountId": "1",
+                        "repositoryId": "2", "selection": selection}
+        body = {"id": 71, "node_id": "environment-node", "name": "mobile-candidate",
+                "url": "https://api.github.com/repos/owner/repo/environments/mobile-candidate",
+                "html_url": "https://github.com/owner/repo/deployments", "created_at": now, "updated_at": now,
+                "protection_rules": [
+                    {"id": 1, "node_id": "wait-node", "type": "wait_timer", "wait_timer": 10},
+                    {"id": 2, "node_id": "review-node", "type": "required_reviewers", "prevent_self_review": False,
+                     "reviewers": [{"type": "User", "reviewer": {"id": 91, "type": "User", "login": "Alice"}},
+                                   {"type": "Team", "reviewer": {"id": 92, "name": "Release"}}]},
+                    {"id": 3, "node_id": "branch-node", "type": "branch_policy"}],
+                "deployment_branch_policy": {"protected_branches": True, "custom_branch_policies": False}}
+        target = remote.EnvironmentTarget.parse(target_value)
+        facts = remote.EnvironmentFacts.upstream(body, target.selection.name)
+        prepared = remote.EnvironmentPrepared(target, facts, None, now)
+        prepared = remote.EnvironmentPrepared.parse(prepared.value())
+        empty_custom = {"total_count": 0, "custom_deployment_protection_rules": []}
+        permission = {"permission": "read", "role_name": "triage",
+                      "user": {"id": 91, "login": "Alice", "type": "User"}}
+        create_target = remote.EnvironmentTarget.parse({**target_value, "selection": {
+            **selection, "mode": "create", "reviewerLogin": "Alice", "branches": "protected"}})
+        absent = remote.EnvironmentFacts.absent({"total_count": 0, "environments": []}, facts.name)
+        reviewer = remote.EnvironmentReviewer.upstream(permission, "Alice")
+        creation = remote.EnvironmentPrepared.parse(remote.EnvironmentPrepared(create_target, absent, reviewer, now).value())
+        with patch.object(remote, "_make_live_reader", side_effect=AssertionError("environment DATA entered live transport")):
+            for plan in (prepared, creation):
+                for action_kind in ("prepare", "apply"):
+                    action = remote.EnvironmentAction.parse({"kind": action_kind, "target": plan.target.value(),
+                        "prepared": None if action_kind == "prepare" else plan.value()})
+                    schedule = remote.EnvironmentSchedule(action)
+                    is_create = plan.target.selection.mode == "create"
+                    expected = ["account", "repository-before"] + (
+                        ["absence-before", "reviewer-before"] if is_create else ["environment-before", "custom-before"])
+                    if action_kind == "apply":
+                        expected += ["write", "environment-after", "custom-after"]
+                    expected += ["repository-after"]
+                    with self.assertRaises(ValueError):
+                        schedule.claim("write")
+                    self.assertEqual(schedule.steps, [])
+                    with self.assertRaises(ValueError):
+                        schedule.claim("account", "https://untrusted.invalid/")
+                    requests = [schedule.claim(step) for step in expected]
+                    self.assertEqual(schedule.steps, expected)
+                    self.assertEqual(len(requests), 5 if action_kind == "prepare" else 8)
+                    self.assertEqual(sum(request.method == "PUT" for request in requests), int(action_kind == "apply"))
+                    self.assertEqual(requests[0].path, "/user")
+                    self.assertEqual(requests[1].path, "/repos/owner/repo")
+                    self.assertEqual(requests[-1].path, "/repos/owner/repo")
+                    prefix = "/repos/owner/repo/environments/mobile-candidate"
+                    self.assertEqual(requests[2].path, "/repos/owner/repo/environments?per_page=100&page=1" if is_create else prefix)
+                    self.assertEqual(requests[3].path, "/repos/owner/repo/collaborators/Alice/permission" if is_create else prefix + "/deployment_protection_rules")
+                    if action_kind == "apply":
+                        self.assertEqual(requests[4].path, prefix)
+                        self.assertEqual(json.loads(requests[4].body), plan.after.put_value())
+                        self.assertEqual(requests[5].path, prefix)
+                        self.assertEqual(requests[6].path, prefix + "/deployment_protection_rules")
+                    for step in ("account", "write", "repository-after", "retry"):
+                        with self.assertRaises(ValueError):
+                            schedule.claim(step)
+                    # Old Action/Schedule never admit this new DATA variant.
+                    with self.assertRaises(ValueError):
+                        remote.Action.parse(action.value())
+                    with self.assertRaises(ValueError):
+                        remote.Schedule(action)
+        self.assertEqual(remote.MAX_REQUESTS, 6)
+        self.assertEqual(remote.KINDS, {"actions_enabled", "workflow_token_policy"})
+        prepared.check_fresh(facts, None)
+        after = remote.EnvironmentFacts.parse({"name": facts.name, "id": facts.identity, "policy": prepared.after.value()})
+        prepared.check_readback(after, after)
+        creation_after = remote.EnvironmentFacts.parse({"name": facts.name, "id": "72", "policy": creation.after.value()})
+        creation.check_readback(creation_after, creation_after)
+        for changed in (absent, remote.EnvironmentFacts.parse({**facts.value(), "id": "72"}), after):
+            with self.assertRaises(ValueError):
+                prepared.check_fresh(changed, None)
+        with self.assertRaises(ValueError):
+            creation.check_fresh(facts, reviewer)
+        for changed in (remote.EnvironmentReviewer("92", "Alice", "read"),
+                        remote.EnvironmentReviewer("91", "Alice", "write"),
+                        remote.EnvironmentReviewer("91", "Bob", "read"), None):
+            with self.assertRaises(ValueError):
+                creation.check_fresh(absent, changed)
+        recreated = remote.EnvironmentFacts.parse({**after.value(), "id": "72"})
+        for ack, post in ((after, facts), (after, absent), (after, recreated), (recreated, recreated)):
+            with self.assertRaises(ValueError):
+                prepared.check_readback(ack, post)
+        # No finality or write-success flag is manufactured by these DATA comparisons.
+        self.assertIsNone(prepared.check_readback(after, after))
+        self.assertFalse(hasattr(remote.EnvironmentSchedule, "execute"))
+
+        # Same real EnvironmentSchedule and execute_environment, with inert
+        # returned observations. Every claimed exchange can fail independently.
+        from mobile_release._github_connection_transport import ReadResult, ReadFailure, _control
+        repo = {"id": 2, "full_name": "owner/repo", "default_branch": "main", "visibility": "private", "archived": False}
+        def env_body(plan, identity):
+            desired = plan.after
+            rules = [{"id": 1, "node_id": "wait", "type": "wait_timer", "wait_timer": desired.wait_timer}]
+            if desired.prevent_self_review is not None:
+                rules.append({"id": 2, "node_id": "review", "type": "required_reviewers",
+                    "prevent_self_review": desired.prevent_self_review,
+                    "reviewers": [{"type": kind, "reviewer": {"id": int(number), **({"type": "User"} if kind == "User" else {})}}
+                                  for kind, number in desired.reviewers]})
+            if desired.protected_branches:
+                rules.append({"id": 3, "node_id": "branch", "type": "branch_policy"})
+            return {**body, "id": identity, "name": plan.target.selection.name, "protection_rules": rules,
+                    "deployment_branch_policy": desired.put_value()["deployment_branch_policy"]}
+        class EnvironmentReader:
+            def __init__(self, action, rows, fault=None, failure=None):
+                self.cursor = remote.EnvironmentSchedule(action)
+                self.rows, self.fault, self.failure = rows, fault, failure
+            def read(self, step, reference=None):
+                self.cursor.claim(step, reference)
+                if step == self.fault:
+                    if self.failure is None:
+                        raise ReadFailure("network-unavailable")
+                    return self.failure
+                return ReadResult({"status": 200, "body": self.rows[step], "failure": "none"}, _control())
+        for plan in (prepared, creation):
+            is_create = plan.target.selection.mode == "create"
+            rows = {"account": {"id": 1, "login": "owner"}, "repository-before": repo, "repository-after": repo,
+                    "environment-before": body, "custom-before": empty_custom,
+                    "absence-before": {"total_count": 0, "environments": []}, "reviewer-before": permission,
+                    "write": env_body(plan, 72 if is_create else 71),
+                    "environment-after": env_body(plan, 72 if is_create else 71), "custom-after": empty_custom}
+            for action_kind in ("prepare", "apply"):
+                action = remote.EnvironmentAction.parse({"kind": action_kind, "target": plan.target.value(),
+                    "prepared": plan.value() if action_kind == "apply" else None})
+                initial = remote.parse_initial(remote._canonical({"protocol": remote.PROTOCOL, "id": "setup",
+                                                                  "action": action.value()}) + b"\n")
+                reader = EnvironmentReader(action, rows)
+                result = remote.execute_environment(action, reader, observed_at=now)
+                steps = reader.cursor.steps
+                self.assertEqual((result["reason"], result["effect"], len(steps)),
+                                 ("none", "readback-confirmed" if action_kind == "apply" else "not-started",
+                                  8 if action_kind == "apply" else 5))
+                self.assertEqual(result["writeClaimed"], action_kind == "apply")
+                self.assertEqual(result["writeAcknowledged"], action_kind == "apply")
+                self.assertEqual(json.loads(remote.encode_result(initial, result))["result"], result)
+                for fault in steps:
+                    cut = EnvironmentReader(action, rows, fault)
+                    failed = remote.execute_environment(action, cut, observed_at=now)
+                    write_claimed = "write" in cut.cursor.steps
+                    self.assertEqual(failed["effect"], "unknown" if write_claimed else "not-started")
+                    self.assertEqual(failed["writeAcknowledged"], write_claimed and fault != "write")
+                    self.assertIsNone(failed["prepared"])
+                    self.assertIsNone(failed["observed"])
+                    self.assertEqual(len(cut.cursor.steps), steps.index(fault) + 1)
+                    remote.encode_result(initial, failed)
+                if action_kind == "apply":
+                    for status in (204, 409, 422, 401, 403, 404, 500):
+                        failed = remote.execute_environment(action, EnvironmentReader(action, rows, "write",
+                            ReadResult({"status": status, "body": None, "failure": "none"}, _control())), observed_at=now)
+                        self.assertEqual(failed["effect"], "unknown")
+                        self.assertFalse(failed["writeAcknowledged"])
+                        self.assertEqual(failed["reason"], {422: "policy-unsupported", 401: "unauthorized", 403: "forbidden",
+                            404: "not-found-or-inaccessible", 500: "network-unavailable"}.get(status, "response-invalid"))
+                        remote.encode_result(initial, failed)
+                    mutations = [("custom-after", {"total_count": 1, "custom_deployment_protection_rules": [{}]}),
+                        ("environment-after", {**rows["environment-after"], "id": 73}),
+                        ("repository-after", {**repo, "id": 9}), ("write", {**rows["write"], "protection_rules": []})]
+                    mutations += ([("absence-before", {"total_count": 1, "environments": [{"id": 71, "name": facts.name}]}),
+                                   ("reviewer-before", {**permission, "user": {**permission["user"], "id": 92}})] if is_create else
+                                  [("custom-before", {"total_count": 1, "custom_deployment_protection_rules": [{}]}),
+                                   ("environment-before", {**body, "id": 73})])
+                    for step, changed in mutations:
+                        cut = EnvironmentReader(action, {**rows, step: changed})
+                        failed = remote.execute_environment(action, cut, observed_at=now)
+                        self.assertNotEqual(failed["reason"], "none")
+                        self.assertEqual(failed["effect"], "unknown" if "write" in cut.cursor.steps else "not-started")
+                        self.assertIsNone(failed["observed"])
+                        remote.encode_result(initial, failed)
+                    for key, altered in (("observed", facts.value()), ("writeClaimed", False), ("writeAcknowledged", False),
+                                         ("effect", "not-started"), ("reason", "cancelled")):
+                        with self.assertRaises(ValueError):
+                            remote.encode_result(initial, {**result, key: altered})
+        # Configure no-change still performs the final identity observation and
+        # creates neither consent nor an invented write opportunity.
+        same_target = remote.EnvironmentTarget.parse({**target_value, "selection": {
+            **selection, "waitTimerMinutes": 10, "preventSelfReview": None}})
+        same = remote.EnvironmentAction("prepare", same_target)
+        same_rows = {"account": {"id": 1, "login": "owner"}, "repository-before": repo, "repository-after": repo,
+                     "environment-before": body, "custom-before": empty_custom}
+        same_reader = EnvironmentReader(same, same_rows)
+        same_result = remote.execute_environment(same, same_reader, observed_at=now)
+        self.assertEqual((same_result["reason"], len(same_reader.cursor.steps)), ("no-change", 5))
+        initial = remote.parse_initial(remote._canonical({"protocol": remote.PROTOCOL, "id": "setup", "action": same.value()}) + b"\n")
+        remote.encode_result(initial, same_result)
+        self.assertIsNone(same_result["prepared"])
+
+        # The new private source is mandatory only for the exact secret Prepare;
+        # no generic material, field, arbitrary name or missing Apply Prepared.
+        from mobile_release import github_setup_remote as remote
+        from mobile_release._github_connection_transport import ReadFailure, ReadResult, _control
+        selected = {"kind": "environment_secret", "mode": "create", "stage": "candidate",
+                    "requirement": "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+                    "source": {"recordId": "1" * 32, "recordRevision": 2, "contextRevision": 3}}
+        target = {"projectBinding": "a" * 64, "repository": "owner/repo", "accountId": "1",
+                  "repositoryId": "2", "selection": selected}
+        content = {"bytes": 27, "sha256": "b" * 64}
+        source = {"root": "/inert/project", "rootIdentity": {"device": "1", "inode": "2", "mode": 0o40700, "uid": 1, "gid": 1},
+                  "draft": content, "platform": "android", "purpose": "signing",
+                  "material": {"encoding": "utf8", "plaintextBytes": 4}}
+        action_value = {"kind": "prepare", "target": target, "prepared": None, "source": source}
+        action = remote.SecretAction.parse(action_value)
+        configuration = {"savedConfig": content, "canonicalConfig": content}
+        now = "2026-10-09T12:00:00Z"
+        steps = ("account", "repository-before", "environment-before", "secret-before", "key-before", "repository-after")
+        class SecretReader:
+            def __init__(self, action=action, changes=None, fault=None):
+                self.schedule, self.calls = remote.SecretSchedule(action), []
+                self.changes, self.fault = changes or {}, fault
+            def read(self, step, reference=None):
+                request = self.schedule.claim(step, reference)
+                self.calls.append((step, request))
+                if step == self.fault:
+                    raise ReadFailure("network-unavailable")
+                if step == "account":
+                    body = {"id": 1, "login": "owner"}
+                elif step.startswith("repository-"):
+                    body = {"id": 2, "full_name": "owner/repo", "default_branch": "main", "visibility": "private", "archived": False}
+                elif step == "environment-before":
+                    body = {"id": 3, "name": "mobile-candidate", "protection_rules": []}
+                elif step == "key-before":
+                    body = {"key_id": "inert-public-key", "key": "A" * 43 + "="}
+                else:
+                    body = None
+                body = self.changes.get(step, body)
+                return ReadResult({"status": 404 if body is None else 200, "body": body, "failure": "none"}, _control())
+        for mutate in (
+            lambda v: v.update(kind="apply"), lambda v: v.pop("source"),
+            lambda v: v.update(request=v.pop("target")),
+            lambda v: v["source"].update(material={"encoding": "base64", "plaintextBytes": 4}),
+            lambda v: v["target"]["selection"].update(requirement="MOBILE_RELEASE_ANDROID_KEY_ALIAS"),
+            lambda v: v["target"]["selection"]["source"].update(field="storePassword"),
+            lambda v: v["target"]["selection"]["source"].update(recordRevision=True),
+            lambda v: v["source"].update(rootIdentity={"device": "01", "inode": "2", "mode": 0o40700, "uid": 1, "gid": 1}),
+        ):
+            value = copy.deepcopy(action_value); mutate(value)
+            with self.assertRaises((ValueError, TypeError, KeyError)):
+                remote.parse_initial(resource_bytes({"protocol": remote.PROTOCOL, "id": "secret_1", "action": value}) + b"\n")
+        request = remote.parse_initial(resource_bytes({"protocol": remote.PROTOCOL, "id": "secret_1", "action": action_value}) + b"\n")
+        failed = {"schemaVersion": 1, "action": "prepare", "reason": "resources-unavailable", "effect": "not-started",
+                  "writeClaimed": False, "writeAcknowledged": False, "prepared": None, "observed": None, "control": _control()}
+        self.assertEqual(json.loads(remote.encode_result(request, failed))["result"]["reason"], "resources-unavailable")
+        # Actual HTTP control must survive a later configuration POST failure,
+        # including a prior finite failure already returned by the read engine.
+        for actual in (_control("unauthorized"), _control("rate-limited", 31),
+                       _control("rate-limited", blocked=True), _control("response-invalid", 9),
+                       {**_control(), "credentialExpiresAt": now}):
+            converted = remote.secret_configuration_failure("configuration-changed", actual)
+            self.assertEqual(converted["control"], actual)
+            self.assertIsNot(converted["control"], actual)
+            self.assertEqual(converted["reason"], actual["reason"] if actual["reason"] != "none" else "configuration-changed")
+            self.assertEqual((converted["writeClaimed"], converted["writeAcknowledged"], converted["effect"]), (False, False, "not-started"))
+            self.assertEqual(json.loads(remote.encode_result(request, converted))["result"]["control"], actual)
+            prior = {**converted, "reason": actual["reason"] if actual["reason"] != "none" else "network-unavailable"}
+            self.assertEqual(remote.secret_configuration_failure("resources-unavailable", actual, prior)["reason"], prior["reason"])
+        with self.assertRaises(ValueError):
+            remote.secret_configuration_failure("none", _control())
+        with self.assertRaises(ValueError):
+            remote.secret_configuration_failure("configuration-changed", _control("rate-limited", 0))
+        for field, value in (("reason", "none"), ("writeClaimed", 0), ("effect", "accepted-not-value-verified"), ("prepared", {})):
+            changed = {**failed, field: value}
+            with self.assertRaises(ValueError): remote.encode_result(request, changed)
+        schedule = remote.SecretSchedule(action)
+        with self.assertRaises(ValueError): schedule.claim("key-before")
+        for step in steps: schedule.claim(step)
+        with self.assertRaises(ValueError): schedule.claim("account")
+
+        # Sealed Apply uses the same explicit source/configuration but a new
+        # fixed nine-step plan. These ciphertext bytes are inert public DATA.
+        import base64
+        prepared_secret = {"target": target, "before": {"environmentName": "mobile-candidate", "environmentId": "3",
+            "name": selected["requirement"], "metadata": None}, "after": {"name": selected["requirement"], **source["material"]},
+            "configuration": configuration, "observedAt": now, "confirmation": remote.SECRET_CONFIRMATION}
+        applying = remote.SecretAction.parse({**action_value, "kind": "apply", "prepared": prepared_secret})
+        sealed = {"key": {"id": "inert-public-key", "value": "A" * 43 + "="}, "encryptedValue": base64.b64encode(bytes(52)).decode("ascii")}
+        apply_initial = remote.parse_initial(resource_bytes({"protocol": remote.PROTOCOL, "id": "secret_1", "action": applying.value()}) + b"\n")
+        go = {"protocol": remote.PROTOCOL, "id": "secret_1", "go": {"requestSha256": apply_initial.digest, "token": "inert", "sealed": sealed}}
+        go_raw = resource_bytes(go) + b"\n"
+        self.assertEqual(remote.parse_secret_apply_go(go_raw, apply_initial), ("inert", sealed))
+        with self.assertRaises(ValueError): remote.parse_go(go_raw, apply_initial)
+        with self.assertRaises(ValueError): remote.parse_secret_apply_go(go_raw, request)
+        for change in (lambda v: v["go"].update(requestSha256="c" * 64), lambda v: v["go"]["sealed"].update(encryptedValue="A" * 70),
+                       lambda v: v["go"]["sealed"].update(key={"id": "bad key", "value": "A" * 43 + "="}),
+                       lambda v: v.update(action="apply"), lambda v: v["go"].update(token="x" * 4097)):
+            changed = copy.deepcopy(go); change(changed)
+            with self.assertRaises(ValueError): remote.parse_secret_apply_go(resource_bytes(changed) + b"\n", apply_initial)
+        class ApplyReader:
+            def __init__(self, failure=None, changed=None):
+                self.plan = remote.SecretApplySchedule(applying, sealed)
+                self.steps = []; self.failure = failure; self.changed = changed
+            def read(self, step, reference=None):
+                admitted = self.plan.claim(step, reference); self.steps.append(step)
+                if self.failure == step: raise ReadFailure("network-unavailable")
+                if step == "write":
+                    self_outer.assertEqual((admitted.method, admitted.path), ("PUT", "/repos/owner/repo/environments/mobile-candidate/secrets/" + selected["requirement"]))
+                    self_outer.assertEqual(json.loads(admitted.body), {"encrypted_value": sealed["encryptedValue"], "key_id": sealed["key"]["id"]})
+                    return ReadResult({"status": 201, "body": {}, "failure": "none"}, _control())
+                if step == "secret-after":
+                    body = {"name": selected["requirement"], "created_at": now, "updated_at": now}
+                elif step == "environment-after": body = {"id": 3, "name": "mobile-candidate"}
+                else:
+                    source_reader = SecretReader()
+                    # Only observation rows are reused; actual Apply schedule
+                    # above still consumes every request in strict order.
+                    source_reader.schedule.next = steps.index(step)
+                    return source_reader.read(step)
+                if self.changed == step: body["id"] = 4
+                return ReadResult({"status": 200, "body": body, "failure": "none"}, _control())
+        self_outer = self
+        all_steps = ("account", "repository-before", "environment-before", "secret-before", "key-before", "write",
+                     "secret-after", "environment-after", "repository-after")
+        reader = ApplyReader(); progress = remote.SecretApplyProgress()
+        applied = remote.execute_secret_apply(applying, reader, configuration, key=sealed["key"], progress=progress)
+        self.assertEqual(reader.steps, list(all_steps))
+        self.assertEqual((applied["reason"], applied["effect"], applied["writeClaimed"], applied["writeAcknowledged"]),
+                         ("none", "accepted-not-value-verified", True, True))
+        self.assertEqual(json.loads(remote.encode_result(apply_initial, applied))["result"], applied)
+        for index, step in enumerate(all_steps):
+            reader = ApplyReader(failure=step); progress = remote.SecretApplyProgress()
+            failed_apply = remote.execute_secret_apply(applying, reader, configuration, key=sealed["key"], progress=progress)
+            self.assertEqual(reader.steps, list(all_steps[:index + 1]))
+            self.assertEqual((failed_apply["reason"], failed_apply["writeClaimed"], failed_apply["writeAcknowledged"]),
+                             ("network-unavailable", index >= 5, index > 5))
+            self.assertEqual(failed_apply["effect"], "unknown" if index >= 5 else "not-started")
+            remote.encode_result(apply_initial, failed_apply)
+        changed_reader = ApplyReader(changed="environment-after")
+        changed = remote.execute_secret_apply(applying, changed_reader, configuration, key=sealed["key"], progress=remote.SecretApplyProgress())
+        self.assertEqual((changed["reason"], changed["effect"], changed["writeAcknowledged"]), ("target-changed", "unknown", True))
+        self.assertEqual(changed_reader.steps[-1], "environment-after")
+        stale_key = {**sealed["key"], "id": "different-public-key"}
+        reader = ApplyReader()
+        changed = remote.execute_secret_apply(applying, reader, configuration, key=stale_key, progress=remote.SecretApplyProgress())
+        self.assertEqual((changed["reason"], len(reader.steps), changed["writeClaimed"]), ("secret-key-changed", 5, False))
+        progress = remote.SecretApplyProgress(); progress.claimed = True; progress.acknowledged = True
+        post_failure = remote.secret_configuration_failure("configuration-changed", _control(), applied, progress=progress)
+        self.assertEqual((post_failure["effect"], post_failure["writeClaimed"], post_failure["writeAcknowledged"], post_failure["observed"]),
+                         ("unknown", True, True, None))
+        remote.encode_result(apply_initial, post_failure)
+        self.assertEqual(remote.SECRET_APPLY_BUFFERS, sum((73728,65600,73729,73728,73728,65600,49200,65600,69632,69632,69632,32768,16384,8192,8192)))
+
+        # Actual private Initial/GO/result dispatch admits only the new fixed
+        # Variable action; the old token-only and secret Apply readers refuse it.
+        from mobile_release import github_setup_variable_runtime as variable_runtime
+        from mobile_release import github_setup_variables as variables
+        selected = {"kind": "environment_variable", "mode": "create", "stage": "candidate",
+            "requirement": "MOBILE_RELEASE_ANDROID_KEY_ALIAS", "source": {"recordId": "a" * 32,
+            "recordRevision": 1, "contextRevision": 2}}
+        text = "release.alias"
+        fingerprint = {"bytes": len(text), "sha256": hashlib.sha256(text.encode()).hexdigest()}
+        source = {"root": "/inert/project", "rootIdentity": {"device": "1", "inode": "2", "mode": 0o40700, "uid": 1, "gid": 1},
+            "draft": {"bytes": 2, "sha256": "b" * 64}, "platform": "android", "purpose": "signing", "material": fingerprint}
+        action = {"kind": "prepare", "target": {"projectBinding": "a" * 64, "repository": "owner/repo",
+            "accountId": "1", "repositoryId": "2", "selection": selected}, "prepared": None, "source": source}
+        initial = {"protocol": remote.PROTOCOL, "id": "variable_1", "action": action}
+        request = remote.parse_initial(encode(initial))
+        self.assertIs(type(request.action), variable_runtime.VariableRuntimeAction)
+        final = {"protocol": remote.PROTOCOL, "id": request.id, "go": {"requestSha256": request.digest, "token": "inert", "value": text}}
+        self.assertEqual(variable_runtime.parse_variable_go(encode(final), request), ("inert", text))
+        for changed in ({**final, "go": {**final["go"], "value": "other"}},
+                        {**final, "go": {**final["go"], "sealed": {}}}):
+            with self.assertRaises(ValueError): variable_runtime.parse_variable_go(encode(changed), request)
+        with self.assertRaises(ValueError): remote.parse_go(encode(final), request)
+        with self.assertRaises(ValueError): remote.parse_secret_apply_go(encode(final), request)
+        for selection_kind in ("environment_secret", "environment_protection", "unknown"):
+            changed = copy.deepcopy(initial); changed["action"]["target"]["selection"]["kind"] = selection_kind
+            with self.assertRaises(ValueError): remote.parse_initial(encode(changed))
+        failed = {"schemaVersion": 1, "action": "prepare", "reason": "configuration-changed", "effect": "not-started",
+            "writeClaimed": False, "writeAcknowledged": False, "prepared": None, "observed": None, "control": _control()}
+        self.assertEqual(json.loads(remote.encode_result(request, failed, variable_value=text))["result"], failed)
+        for key, changed in (("reason", "none"), ("observed", {}), ("effect", "accepted-not-value-verified")):
+            with self.assertRaises(ValueError): remote.encode_result(request, {**failed, key: changed}, variable_value=text)
+        with self.assertRaises(ValueError): remote.encode_result(request, failed)
 
     def test_python_only_complex_oversized_and_invalid_unicode_inputs_reject(self):
         deep = 0

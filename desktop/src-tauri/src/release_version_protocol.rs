@@ -100,6 +100,21 @@ pub(crate) struct Observation {
     saved_config: ContentComparison, saved_version: ContentComparison,
 }
 
+/// Borrowed comparison DATA from the one parsed original return. No path,
+/// renderer Prepare, serialization round trip or filesystem authority is added.
+pub(crate) struct SavedComparison<'a> {
+    pub(crate) source: &'a str, pub(crate) name: &'a str, pub(crate) build: u32,
+    pub(crate) config_bytes: u32, pub(crate) config_sha256: &'a str,
+    pub(crate) version_bytes: u32, pub(crate) version_sha256: &'a str,
+}
+impl Observation {
+    pub(crate) fn saved_comparison(&self) -> SavedComparison<'_> {
+        SavedComparison { source: &self.source, name: &self.version.name, build: self.version.build,
+            config_bytes: self.saved_config.bytes, config_sha256: &self.saved_config.sha256,
+            version_bytes: self.saved_version.bytes, version_sha256: &self.saved_version.sha256 }
+    }
+}
+
 pub(crate) fn relative_display_path(path: &str) -> bool {
     // Transport/display checks only. The core owns private-tree, Unicode
     // normalization, original-object admission and saved-config selection.

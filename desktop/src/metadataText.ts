@@ -1,5 +1,6 @@
 // Public text stays in memory, outside the configuration draft. These renderer
 // identities correlate views only; native/core owns paths, bytes and authority.
+import type { SavedTextRecoveryOpenRequest, SavedTextRecoveryPrepareRequest, SavedTextRecoveryProjection } from './savedTextRecovery.ts';
 import { getValue, sameJson } from './catalog.ts';
 import { isDirty } from './drafts.ts';
 import type { ProjectSession } from './drafts.ts';
@@ -62,7 +63,8 @@ export interface PreparedMetadataTextView {
   createDirectories: string[];
   validation: MetadataTextValidation;
 }
-export interface MetadataTextEditProjection {
+export interface NormalMetadataTextEditProjection {
+  recovery?: never;
   domain: 'metadata_text';
   projectId: string;
   sessionId: string;
@@ -79,6 +81,7 @@ export interface MetadataTextEditProjection {
   nativeFinality: 'pending' | 'settled' | 'unknown';
   lateSettled: boolean;
 }
+export type MetadataTextEditProjection = NormalMetadataTextEditProjection | SavedTextRecoveryProjection<'metadata_text'>;
 export interface MetadataTextEditStatus {
   schemaVersion: 1;
   domain: 'metadata_text';
@@ -99,9 +102,9 @@ export interface PrepareMetadataTextEditRequest {
 export interface MetadataTextApi {
   observeMetadataText(input: { projectId: string; platform: MetadataPlatform; locale: string }): Promise<MetadataTextObservation>;
   validateMetadataText(input: { platform: MetadataPlatform; fields: MetadataTextField[] }): Promise<MetadataTextValidation>;
-  openMetadataTextEdit(input: { projectId: string; platform: MetadataPlatform; locale: string }): Promise<MetadataTextEditStatus>;
-  prepareMetadataTextEdit(input: PrepareMetadataTextEditRequest): Promise<MetadataTextEditStatus>;
-  applyMetadataTextEdit(sessionId: string, planToken: string): Promise<MetadataTextEditStatus>;
+  openMetadataTextEdit(input: { projectId: string; platform: MetadataPlatform; locale: string } | SavedTextRecoveryOpenRequest): Promise<MetadataTextEditStatus>;
+  prepareMetadataTextEdit(input: PrepareMetadataTextEditRequest | SavedTextRecoveryPrepareRequest): Promise<MetadataTextEditStatus>;
+  applyMetadataTextEdit(sessionId: string, planToken: string, intent?: 'recover'): Promise<MetadataTextEditStatus>;
   closeMetadataTextEdit(sessionId: string): Promise<MetadataTextEditStatus>;
   metadataTextEditStatus(): Promise<MetadataTextEditStatus>;
   subscribeMetadataTextEdit(onStatus: (status: unknown) => void): Promise<() => void>;
@@ -166,6 +169,46 @@ export interface MetadataTextDraft {
   lastSave: MetadataSavedRevision | null;
 }
 
+export interface MetadataRetainedDraftChange {
+  id: MetadataFieldId;
+  path: string;
+  before: string | null;
+  after: string;
+}
+export type MetadataRetainedDraftComparison =
+  { reason: string; changes: null } | { reason: null; changes: MetadataRetainedDraftChange[] };
+
+// This is not a merge policy: every edited field must still have exactly its
+// original path and text/absence. Untouched fields belong to the new target.
+export function metadataCompareRetainedDraft(source: MetadataTextDraft, target: MetadataTextDraft): MetadataRetainedDraftComparison {
+  if (source.context.projectId !== target.context.projectId || source.context.metadataRoot !== target.context.metadataRoot ||
+      source.context.platform !== target.context.platform || source.context.locale !== target.context.locale ||
+      source.context.key === target.context.key || source.context.configBaselineGeneration >= target.context.configBaselineGeneration)
+    return { reason: 'Choose the same project, metadata root, platform and locale under a newer saved configuration. Retained text is never retargeted.', changes: null };
+  if (!source.baseline || !source.fields || !target.baseline || !target.fields)
+    return { reason: 'Both bundles need complete original comparison text. Load the current saved locale first.', changes: null };
+  const ids = METADATA_TEXT_IDS[source.context.platform];
+  if ([source, target].some((entry) => entry.fields!.length !== ids.length || entry.baseline!.originals.length !== ids.length || entry.baseline!.assertion.fields.length !== ids.length ||
+      ids.some((id, index) => entry.fields![index]?.id !== id || entry.baseline!.originals[index]?.id !== id || entry.baseline!.assertion.fields[index]?.id !== id ||
+        (entry.baseline!.assertion.fields[index]!.state === 'absent') !== (entry.baseline!.originals[index]!.text === null))))
+    return { reason: 'The complete public-text field roster is unavailable. No partial draft can be reused.', changes: null };
+  if (metadataTextDirty(target))
+    return { reason: 'The current locale already has unsaved text. Keep or explicitly discard it before reviewing a retained draft.', changes: null };
+  const changes: MetadataRetainedDraftChange[] = [];
+  for (const [index, field] of source.fields.entries()) {
+    const original = source.baseline.originals[index]!;
+    if (field.text === (original.text ?? '')) continue;
+    const current = target.baseline.originals[index]!;
+    // Absent and present-but-empty are deliberately different comparisons.
+    if (original.path !== current.path || original.text !== current.text)
+      return { reason: `The original comparison for ${field.id} changed. No fields were reused; compare the two bundles manually.`, changes: null };
+    if (/[\ud800-\udfff]/u.test(field.text) || new TextEncoder().encode(field.text).byteLength > METADATA_TEXT_FIELD_BYTES)
+      return { reason: 'A retained field exceeds the safe in-memory text limit. Its original draft is kept.', changes: null };
+    changes.push({ id: field.id, path: current.path, before: current.text, after: field.text });
+  }
+  return changes.length ? { reason: null, changes } : { reason: 'The retained bundle has no unsaved text changes to reuse.', changes: null };
+}
+
 export function metadataTextDirty(entry: MetadataTextDraft): boolean {
   return Boolean(entry.fields && entry.baseline && entry.fields.some((field) => field.text !== (entry.baseline!.originals.find((row) => row.id === field.id)?.text ?? '')));
 }
@@ -173,7 +216,7 @@ export function metadataProjectDirty(entries: Readonly<Record<string, MetadataTe
   return Object.values(entries).some((entry) => (projectId === undefined || entry.context.projectId === projectId) && metadataTextDirty(entry));
 }
 export function metadataTextSavedFresh(entry: MetadataTextDraft): boolean {
-  return entry.lastSave !== null && entry.lastSave.resultingBaselineGeneration === entry.baselineGeneration && entry.lastSave.draftRevision === entry.revision;
+  return !entry.stale && entry.lastSave !== null && entry.lastSave.resultingBaselineGeneration === entry.baselineGeneration && entry.lastSave.draftRevision === entry.revision;
 }
 
 // The textarea may display browser-normalized line endings. Its onChange value

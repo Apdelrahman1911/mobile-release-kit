@@ -38,6 +38,95 @@ class WorkflowLifecycleTests(unittest.TestCase):
     external boundaries and reconciliation, instead of assuming step success.
     """
 
+    def test_desktop_release_callers_match_packaged_templates_and_forward_optional_trio(self) -> None:
+        resource = json.loads((ROOT / "src/mobile_release/api/data/github-setup-v1.json").read_text())
+        trio = ("desktop_request", "desktop_source_sha", "desktop_expected_ref")
+        for stage in STAGES:
+            with self.subTest(stage=stage):
+                path = ROOT / "templates/workflows" / f"mobile-{stage}.yml"
+                self.assertEqual(path.read_text(), resource["workflows"][stage])
+                caller, reusable = load_workflow(path), workflow(stage)
+                self.assertEqual(1, len(caller["jobs"]))
+                call = next(iter(caller["jobs"].values()))
+                self.assertEqual("${{ github.sha }}", call["with"]["source_sha"])
+                self.assertEqual(f"__MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-{stage}.yml@__MOBILE_RELEASE_KIT_SHA__", call["uses"])
+                for name in trio:
+                    for kind, value in (("workflow_dispatch", caller), ("workflow_call", reusable)):
+                        # Psych's YAML1.1 loader turns unquoted `on` into the
+                        # boolean key; the harness's JSON spelling is `true`.
+                        event = value.get("on", value.get("true"))
+                        spec = event[kind]["inputs"][name]
+                        self.assertEqual((False, "", "string"), (spec["required"], spec["default"], spec["type"]))
+                    self.assertEqual("${{ inputs." + name + " }}", call["with"][name])
+                self.assertIn(f"format('MRK Desktop {stage} [{{0}}]', inputs.desktop_request)", caller["run-name"])
+                self.assertLessEqual(len(caller.get("on", caller.get("true"))["workflow_dispatch"]["inputs"]), 25)
+                self.assertEqual({}, caller["permissions"])
+                self.assertEqual({"group": "mobile-release-store-mutations", "cancel-in-progress": False}, reusable["concurrency"])
+
+    def test_desktop_source_guard_dominates_every_resolver_build_and_store_job(self) -> None:
+        for stage, guard_result, mode in product(STAGES, ("failure", "cancelled", "skipped"), ("fresh", "resume", "complete")):
+            with self.subTest(stage=stage, guard=guard_result, mode=mode):
+                jobs = workflow(stage)["jobs"]
+                guard = jobs["validate-platform"]
+                self.assertNotIn("needs", guard); self.assertNotIn("if", guard)
+                self.assertEqual({}, guard["permissions"])
+                self.assertEqual(1, len(guard["steps"]))
+                self.assertNotIn("continue-on-error", guard["steps"][0])
+                results = {"validate-platform": {"result": guard_result, "outputs": {}}}
+                for name, job in jobs.items():
+                    if name == "validate-platform":
+                        continue
+                    needs = job["needs"] if isinstance(job["needs"], list) else [job["needs"]]
+                    self.assertTrue(needs)
+                    self.assertTrue(set(needs) <= results.keys(), "every dependency must already have guard-derived results")
+                    context = {"inputs": {"platform": "both" if stage != "production-submit" else name},
+                               "needs": {key: results[key] for key in needs}}
+                    allowed = evaluate_condition(job.get("if"), context,
+                        success=all(results[key]["result"] == "success" for key in needs), cancelled=False)
+                    self.assertFalse(allowed, f"{stage}/{name} bypasses a non-successful earliest guard")
+                    results[name] = {"result": "skipped", "outputs": {"mode": mode}}
+
+    def test_desktop_builtin_guard_preserves_manual_calls_and_refuses_partial_or_drifted_review(self) -> None:
+        for stage in STAGES:
+            step = workflow(stage)["jobs"]["validate-platform"]["steps"][0]
+            platforms = "android|ios" if stage == "production-submit" else "android|ios|both"
+            # Admit ONLY this inspected builtin-only program for this contract
+            # test. A later script change cannot cause a general workflow step,
+            # checkout, project hook, service or Store operation to run here.
+            self.assertEqual([
+                "set -euo pipefail",
+                '[[ "$MOBILE_RELEASE_PLATFORM" =~ ^(' + platforms + ')$ ]]',
+                '[[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == "github-hosted" ]]',
+                'if [[ -n "$MOBILE_RELEASE_DESKTOP_REQUEST$MOBILE_RELEASE_DESKTOP_SOURCE_SHA$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" ]]; then',
+                '  [[ "$MOBILE_RELEASE_DESKTOP_REQUEST" =~ ^[0-9a-f]{32}$ ]]',
+                '  [[ "$MOBILE_RELEASE_DESKTOP_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]',
+                '  [[ "$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" == refs/heads/* ]]',
+                '  [[ "$MOBILE_RELEASE_DESKTOP_SOURCE_SHA" == "$MOBILE_RELEASE_SOURCE_SHA" ]]',
+                '  [[ "$MOBILE_RELEASE_DESKTOP_SOURCE_SHA" == "$MOBILE_RELEASE_CALLER_SHA" ]]',
+                '  [[ "$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" == "$MOBILE_RELEASE_CALLER_REF" ]]',
+                "fi",
+            ], step["run"].splitlines())
+            trio = {"MOBILE_RELEASE_DESKTOP_REQUEST": "d" * 32, "MOBILE_RELEASE_DESKTOP_SOURCE_SHA": SHA,
+                    "MOBILE_RELEASE_DESKTOP_EXPECTED_REF": "refs/heads/main"}
+            fixed = {"PATH": "/nonexistent", "LC_ALL": "C", "MOBILE_RELEASE_PLATFORM": "android",
+                     "MOBILE_RELEASE_RUNNER_ENVIRONMENT": "github-hosted", "MOBILE_RELEASE_SOURCE_SHA": SHA,
+                     "MOBILE_RELEASE_CALLER_SHA": SHA, "MOBILE_RELEASE_CALLER_REF": "refs/heads/main"}
+            cases = [(dict(zip(trio, values)), all(values) or not any(values))
+                     for values in product(*[("", value) for value in trio.values()])]
+            cases += [({**trio, name: bad}, False) for name, bad in (
+                ("MOBILE_RELEASE_DESKTOP_REQUEST", "short"), ("MOBILE_RELEASE_DESKTOP_SOURCE_SHA", "a" * 40),
+                ("MOBILE_RELEASE_DESKTOP_EXPECTED_REF", "refs/tags/main"), ("MOBILE_RELEASE_SOURCE_SHA", "b" * 40),
+                ("MOBILE_RELEASE_CALLER_SHA", "c" * 40), ("MOBILE_RELEASE_CALLER_REF", "refs/heads/other"),
+                ("MOBILE_RELEASE_RUNNER_ENVIRONMENT", "self-hosted"), ("MOBILE_RELEASE_PLATFORM", "invented"))]
+            cases += [({**{key: "" for key in trio}, "MOBILE_RELEASE_PLATFORM": "both"}, stage != "production-submit")]
+            for inputs, accepted in cases:
+                with self.subTest(stage=stage, inputs=inputs):
+                    result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", step["run"]],
+                        cwd=ROOT, env={**fixed, **inputs}, stdin=subprocess.DEVNULL,
+                        capture_output=True, text=True, close_fds=True, timeout=2)
+                    self.assertEqual(accepted, result.returncode == 0)
+                    self.assertEqual("", result.stdout)
+
     def test_candidate_needs_results_never_bypass_the_resolver_or_build(self) -> None:
         states = ("success", "failure", "cancelled", "skipped")
         modes = ("fresh", "prepare", "resume", "complete", "", "invalid")

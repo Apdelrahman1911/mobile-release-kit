@@ -2,8 +2,8 @@
 
 Only the selected root is admitted. No repository inference, project execution,
 credential probing or arbitrary file-content export occurs here. Independent
-reads are NOT an atomic snapshot or hostile-same-user containment. The staged
-original-parent Windows reader remains disabled pending independent qualification.
+reads are NOT an atomic snapshot or hostile-same-user containment. Windows uses
+the original-parent reader and retains its separate native ABI/platform refusal.
 """
 from __future__ import annotations
 
@@ -56,8 +56,11 @@ _EXCLUDED = {name.casefold() for name in IGNORED_PARTS} | {
     "private", "secrets", "credentials",
 }
 _SOURCE_NAMES = {"build.gradle", "build.gradle.kts", "project.pbxproj", "project.yml"}
-# Source presence is not ABI/native evidence. No environment/request opt-in.
-_WINDOWS_SNAPSHOT_QUALIFIED = False
+# Fixed successor activation, never an environment/request opt-in. This source
+# bit is not a receipt for packaged-core, GUI or native-platform verification.
+# The compiled desktop selector and original runtime owner gate its UI use;
+# the native reader still independently admits the actual ABI/architecture.
+_WINDOWS_SNAPSHOT_QUALIFIED = True
 
 
 def posix_snapshot_available() -> bool:
@@ -249,7 +252,8 @@ def _named_identity(value: os.stat_result) -> tuple[int, ...]:
 def _read_file(parent: int, name: str, relative: str, inventory: _Inventory, *,
                limit: int = MAX_SOURCE_BYTES,
                receipts: list[tuple[int, str, tuple[int, ...] | None]] | None = None,
-               binary: bool = False) -> str | bytes:
+               binary: bool = False,
+               held_leaves: list[tuple[int, tuple[int, ...]]] | None = None) -> str | bytes:
     if not inventory.tick():
         raise _ReadProblem("snapshot.deadline", "Static read was not attempted after its scan deadline.")
     if inventory.counts["sourceFiles"] >= MAX_SOURCE_FILES:
@@ -310,9 +314,17 @@ def _read_file(parent: int, name: str, relative: str, inventory: _Inventory, *,
             raise _ReadProblem("snapshot.encoding", f"Static source is not UTF-8 text: {relative}") from error
         if receipts is not None:
             receipts.append((parent, name, _named_identity(ending)))
+        if held_leaves is not None:
+            held_leaves.append((descriptor, _named_identity(ending)))
+            descriptor = None  # Transfer once only after successful content POST.
         return text
+    except BaseException as error:
+        if held_leaves is not None:
+            inventory.budget.remember(error)
+        raise
     finally:
-        _close_handles([descriptor], budget=inventory.budget)
+        if descriptor is not None:
+            _close_handles([descriptor], budget=inventory.budget)
 
 
 class _NamedTextReads:
@@ -324,8 +336,10 @@ class _NamedTextReads:
     to reject portable aliases; no sibling contents are opened.
     """
 
-    def __init__(self, root: int, inventory: _Inventory):
+    def __init__(self, root: int, inventory: _Inventory, *,
+                 held_leaves: list[tuple[int, tuple[int, ...]]] | None = None):
         self.root, self.inventory = root, inventory
+        self.held_leaves = held_leaves
         self.handles: list[int] = []
         self.links: list[tuple[int, str, int, tuple[int, ...]]] = []
         self.leaves: list[tuple[int, str, tuple[int, ...] | None]] = []
@@ -382,7 +396,8 @@ class _NamedTextReads:
             if index == len(parts) - 1:
                 try:
                     text = _read_file(parent, name, relative, self.inventory,
-                                      limit=limit, receipts=self.leaves, binary=binary)
+                                      limit=limit, receipts=self.leaves, binary=binary,
+                                      held_leaves=self.held_leaves)
                 except FileNotFoundError as error:
                     raise _ReadProblem("snapshot.changed", "Named file disappeared during admission.") from error
                 if self.leaves[-1][2] != _named_identity(before):
@@ -436,6 +451,9 @@ class _NamedTextReads:
                 raise _ReadProblem("snapshot.changed", "Original named parent cannot be rechecked.") from error
             if (_named_identity(current) != expected or _named_identity(opened) != expected):
                 raise _ReadProblem("snapshot.changed", "Original named parent changed.")
+        for descriptor, expected in self.held_leaves or ():
+            if _named_identity(os.fstat(descriptor)) != expected:
+                raise _ReadProblem("snapshot.changed", "Original held named file changed.")
         for parent, name, expected in self.leaves:
             self._alias(parent, name)
             try:
@@ -472,6 +490,36 @@ def borrowed_preflight_reads(budget) -> Iterator[_NamedTextReads]:
         budget.guard._abort(error)
         raise
     budget.checkpoint()
+
+
+@contextmanager
+def borrowed_setup_secret_reads(budget) -> Iterator[_NamedTextReads]:
+    """Fixed config-only exact Setup custody; never a preflight/build grant."""
+    from ..github_setup_secret_inputs import _SecretConfigurationBudget
+    if type(budget) is not _SecretConfigurationBudget or budget.root_fd is None:
+        raise ValueError("Named reader has no original Setup config custody")
+    budget.check()
+    # Same absolute end, not the generic snapshot's fresh five-second window.
+    inventory = _Inventory(budget=budget, deadline=budget.end)
+    held: list[tuple[int, tuple[int, ...]]] = []
+    reader = _NamedTextReads(budget.root_fd, inventory, held_leaves=held)
+    first: BaseException | None = None
+    try:
+        yield reader
+        reader.check()
+    except BaseException as error:
+        first = error
+        budget.remember(error)
+    finally:
+        handles = [descriptor for descriptor, _ in held] + reader.handles
+        try:
+            _close_handles(handles, budget=budget)
+        except BaseException as error:
+            if first is None:
+                first = error
+    if first is not None:
+        raise first
+    budget.check()
 
 
 def _config(root: int, relative: str, inventory: _Inventory) -> ConfigObservation:
@@ -634,7 +682,7 @@ def project_snapshot(root: object, config_path: object = "release/mobile-release
         from ._snapshot_windows import project_snapshot as windows_snapshot
         return windows_snapshot(root, config_path)
     if not posix_snapshot_available():
-        raise ApiError("platform_unavailable", "Static filesystem snapshots are unavailable on this profile; the staged Windows reader is not qualified")
+        raise ApiError("platform_unavailable", "Static filesystem snapshots are unavailable on this platform/profile")
     selected_root = validate_root(root)
     selected_config = validate_config_path(config_path)
     observed_at = datetime.now(timezone.utc).isoformat()

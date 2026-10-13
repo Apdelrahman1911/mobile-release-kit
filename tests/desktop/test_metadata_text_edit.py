@@ -7,6 +7,7 @@ flock, process, signal, write, native probe or actual recovery is acquired.
 """
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import json
@@ -33,7 +34,8 @@ from test_workflow_transaction_profile import (InertGuard, ROOT, binding, direct
 
 PROFILE = tx.TypedEditProfile.METADATA_TEXT
 REVISION, TOKEN = "a" * 32, "b" * 32
-COVERED = ("\n".join(tx.IGNORE_LINES) + "\n").encode()
+# Deliberately seven-only: adding version/image rules must not break metadata.
+COVERED = ("\n".join(tx.METADATA_IGNORE_LINES) + "\n").encode()
 _NATIVE = {"ctypes", "_ctypes", "fcntl", "subprocess", "socket"}
 _OWNERS = {"mobile_release.init_workspace_custody", "mobile_release.build_inputs", "mobile_release.cancellation",
            "mobile_release.owned_process", "mobile_release._native_process", "mobile_release._desktop_edit_engine",
@@ -158,7 +160,7 @@ class InertLease:
         assert self.active and owner is self.workspace and not self.targets_bound
         assert platform == self.platform and locale == "en-US"
         assert len(dependencies) == 2 and all(item is self.originals[path] for item, path in zip(dependencies, text.DEPENDENCY_PATHS))
-        if not sufficient_ignore_rules(dependencies[1].data):
+        if not sufficient_ignore_rules(dependencies[1].data, tx.METADATA_IGNORE_LINES):
             raise InertFailure(InertOutcome("not_started", "not_created", "settled", "ignore_conflict"))
         self.targets_bound = True
         return SimpleNamespace(paths=self.selection.paths)
@@ -193,7 +195,7 @@ def inert_adapter():
         stack.enter_context(no_io())
         actual = tx.InitWorkspace
         for name in ("__init__", "borrowed", "observe", "apply", "apply_typed", "apply_workflows_typed",
-                     "apply_metadata_text_typed", "recover", "_fixed_recovery"):
+                     "apply_metadata_text_typed", "apply_version_typed", "recover", "_fixed_recovery"):
             stack.enter_context(patch.object(actual, name, side_effect=forbidden))
         stack.enter_context(patch.object(tx, "_rename_function", side_effect=forbidden))
         stack.enter_context(patch.object(tx, "InitWorkspace", InertWorkspace))
@@ -446,7 +448,8 @@ def inert_current_reads(target, revision, *, change=None):
 def metadata_journal_fixture(custody, *, replace=False):
     values = [b"Old title", b"Preserved summary", b"Preserved description"] if replace else None
     lease, owner, targets, revision, dependencies, originals = captured_target_fixture(custody, raw_values=values)
-    header = {"schemaVersion": 1, "transactionId": "d" * 32, "root": dict(owner.root_identity), "domain": "metadata_text"}
+    header = {"schemaVersion": 2, "transactionId": "d" * 32, "root": dict(owner.root_identity),
+              "domain": "metadata_text", "recovery": targets.journal_context()}
     dirs = [{"path": path, "before": owner.parents[path],
              "after": None if owner.parents[path] is not None else dict(device=9, inode=80 + index, mode=0o755)}
             for index, path in enumerate(targets.directories)]
@@ -461,6 +464,113 @@ def metadata_journal_fixture(custody, *, replace=False):
     owner._bind_workflow_controls(400, contents["header.json"], contents["plan.json"], plan)
     owner._workflow_complete = True
     return lease, owner, targets, revision, dependencies, originals, plan, entries
+
+
+class MacSavedTextRoutingTests(unittest.TestCase):
+    def test_fixed_bootstrap_admits_only_its_exact_platform_domains_and_isolation(self):
+        # Exercise the actual fixed main body with inert module/path DATA. No
+        # engine, project import, process, native IO or alternate bootstrap runs.
+        source = Path(__file__).resolve().parents[2] / "desktop" / "config_edit_bootstrap.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        body = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        program = compile(ast.Module(body=[body], type_ignores=[]), str(source), "exec")
+
+        def invoke(argv, platform="darwin", **overrides):
+            state = SimpleNamespace(argv=argv, platform=platform, path=[],
+                                    flags=SimpleNamespace(isolated=1, no_site=1),
+                                    dont_write_bytecode=True, version_info=(3, 11))
+            for name, value in overrides.items():
+                setattr(state, name, value)
+            engine = ModuleType("mobile_release._desktop_edit_engine")
+            engine.main = Mock(return_value=37)
+            namespace = {"os": os, "sys": state, "time": SimpleNamespace(monotonic=lambda: 12.0)}
+            exec(program, namespace)
+            with no_io(), patch.dict(sys.modules, {engine.__name__: engine}):
+                result = namespace["main"]()
+            return result, state, engine.main
+
+        domains = ("configuration", "metadata_text", "release_version", "github_workflows", "metadata_images")
+        for platform in ("linux", "darwin", "darwin-extra", "linux2", "win32", "freebsd"):
+            for domain in domains:
+                with self.subTest(platform=platform, domain=domain):
+                    argv = ["config_edit_bootstrap.py", "/inert/core.zip"]
+                    if domain != "configuration":
+                        argv.append(domain)
+                    accepted = (platform in {"linux", "darwin"} or
+                                platform == "linux2" and domain == "configuration")
+                    result, state, called = invoke(argv, platform)
+                    self.assertEqual(result, 37 if accepted else 78)
+                    self.assertEqual(state.path, ["/inert/core.zip"] if accepted else [])
+                    if accepted:
+                        called.assert_called_once_with(started=12.0, domain=domain)
+                    else:
+                        called.assert_not_called()
+
+        invalid = [
+            (["bootstrap", "/inert/core.zip", "configuration"], {}),
+            (["bootstrap", "/inert/core.zip", "Metadata_Text"], {}),
+            (["bootstrap", "/inert/core.zip", "metadata_text", "extra"], {}),
+            (["bootstrap", "relative.zip", "release_version"], {}),
+            (["bootstrap", "/inert/core.zip", "metadata_text"], {"flags": SimpleNamespace(isolated=0, no_site=1)}),
+            (["bootstrap", "/inert/core.zip", "metadata_text"], {"flags": SimpleNamespace(isolated=1, no_site=0)}),
+            (["bootstrap", "/inert/core.zip", "release_version"], {"dont_write_bytecode": False}),
+            (["bootstrap", "/inert/core.zip", "release_version"], {"version_info": (3, 10)}),
+        ]
+        for argv, overrides in invalid:
+            with self.subTest(argv=argv, overrides=overrides):
+                result, state, called = invoke(argv, **overrides)
+                self.assertEqual(result, 78)
+                self.assertEqual(state.path, [])
+                called.assert_not_called()
+
+    def test_saved_text_mac_lease_keeps_registered_identity_and_one_original_acquire(self):
+        # Reuse the existing inert-custody seam: the directory's fd is DATA.
+        # Admitting a platform does not waive its original registered root.
+        with inert_custody() as custody:
+            for profile in (tx.TypedEditProfile.METADATA_TEXT, tx.TypedEditProfile.RELEASE_VERSION,
+                            tx.TypedEditProfile.METADATA_IMAGES):
+                for platform in ("darwin", "darwin-extra", "linux", "linux2", "win32"):
+                    with self.subTest(profile=profile, platform=platform), patch.object(sys, "platform", platform):
+                        guard = InertGuard()
+                        guard._activated, guard._borrowable, guard.check = True, Mock(), Mock()
+                        lease = custody.InitRootLease(Path("/inert-not-opened"), cancellation=guard,
+                                                      profile=profile, registered_identity=dict(ROOT))
+                        original = lease._registered_identity
+                        with patch.object(lease.directory, "acquire") as acquired, \
+                                patch.object(os, "fstat", return_value=stat_value()):
+                            admitted = platform in {"darwin", "linux", "linux2"}
+                            if not admitted:
+                                with self.assertRaises(tx.InitOperationFailure) as refused:
+                                    lease.acquire()
+                                self.assertEqual(refused.exception.outcome.reason, "unsupported_platform")
+                                self.assertFalse(lease._acquired)
+                                acquired.assert_not_called()
+                            else:
+                                lease.acquire()
+                                acquired.assert_called_once_with()
+                                self.assertTrue(lease._acquired)
+                                self.assertIs(lease.profile, profile)
+                                for changed in (dict(inode=11), dict(mode=stat.S_IFDIR | 0o755),
+                                                dict(uid=1002), dict(gid=1003)):
+                                    with patch.object(os, "fstat", return_value=stat_value(**changed)):
+                                        with self.assertRaises(tx.InitOperationFailure) as stale:
+                                            lease.check()
+                                        self.assertEqual(stale.exception.outcome.reason, "stale_revision")
+                                self.assertEqual(lease._registered_identity, original)
+                            self.assertTrue(lease._acquire_claimed)
+                            with self.assertRaises(tx.InitOperationFailure) as reused:
+                                lease.acquire()
+                            self.assertEqual(reused.exception.outcome.reason, "invalid_params")
+                            self.assertEqual(acquired.call_count, 1 if admitted else 0)
+
+    def test_mac_typed_edit_admission_requires_original_registration(self):
+        with inert_custody() as custody, patch.object(sys, "platform", "darwin"):
+            for profile in (tx.TypedEditProfile.METADATA_TEXT, tx.TypedEditProfile.RELEASE_VERSION,
+                            tx.TypedEditProfile.METADATA_IMAGES):
+                with self.subTest(profile=profile):
+                    with self.assertRaises(tx.InitOperationFailure) as refused:
+                        custody.InitRootLease(Path("/inert-not-opened"), cancellation=InertGuard(), profile=profile)
+                    self.assertEqual(refused.exception.outcome.reason, "invalid_params")
 
 
 class MetadataTargetAndStateTests(unittest.TestCase):
@@ -504,14 +614,20 @@ class MetadataTargetAndStateTests(unittest.TestCase):
 
     def test_legacy_four_ignore_lines_and_negation_refuse_before_any_target_binding(self):
         self.assertEqual(tx.STATE_NAMES, (tx.PREPARING, tx.READY, tx.CLEANUP))
-        self.assertEqual(len(tx.IGNORE_LINES), 7)
-        self.assertEqual(tx.IGNORE_LINES[4:], tuple(name + "/" for name in tx.METADATA_STATE_NAMES))
+        self.assertEqual(len(tx.IGNORE_LINES), 13)
+        self.assertEqual(len(tx.METADATA_IGNORE_LINES), 7)
+        self.assertEqual(tx.METADATA_IGNORE_LINES[4:], tuple(name + "/" for name in tx.METADATA_STATE_NAMES))
         with inert_custody() as custody, patch.object(os, "fstat", return_value=stat_value()):
             for ignored in [None, b"", ("\n".join(tx.IGNORE_LINES[:4]) + "\n").encode(), COVERED + b"!user-intent\n"]:
                 with self.subTest(ignored=ignored is None), self.assertRaises(tx.InitOperationFailure) as caught:
                     captured_target_fixture(custody, ignore=ignored)
                 self.assertEqual(caught.exception.outcome.reason, "ignore_conflict")
-            self.assertTrue(sufficient_ignore_rules(b"!earlier-intent\n" + COVERED))
+            self.assertTrue(sufficient_ignore_rules(b"!earlier-intent\n" + COVERED, tx.METADATA_IGNORE_LINES))
+            # Exercise the actual binder, not just the inert facade seam.
+            with patch.object(custody.uuid, "uuid4", return_value=SimpleNamespace(hex=REVISION)):
+                _, _, targets, _, _, _ = captured_target_fixture(custody, ignore=COVERED)
+            self.assertIs(type(targets), custody.MetadataTargets)
+            self.assertFalse(sufficient_ignore_rules(COVERED))
 
     def test_recheck_uses_original_config_ignore_and_parent_facts_without_retargeting(self):
         with inert_custody() as custody, patch.object(os, "fstat", return_value=stat_value()), \
@@ -697,6 +813,15 @@ class MetadataTargetAndStateTests(unittest.TestCase):
                     entries["header.json"] = ({**before, "inode": 999}, raw)
                 if change is None:
                     self.assertEqual(owner._load(400), plan)
+                    self.assertEqual(plan["schemaVersion"], 2)
+                    self.assertEqual(plan["recovery"], {"policy": "saved-text-recovery-v1",
+                        "config": text.content_digest(dependencies[0].data),
+                        "ignore": text.content_digest(dependencies[1].data),
+                        "selection": {"platform": "android", "locale": "en-US", "metadataRoot": "public/store"}})
+                    detached = targets.journal_context()
+                    detached["selection"]["locale"] = "fr-FR"
+                    detached["config"]["sha256"] = "0" * 64
+                    self.assertEqual(targets.journal_context(), plan["recovery"])
                     self.assertEqual(owner.parents["release"], dict(dict(targets._parents)["release"]))
                     self.assertNotIn("release", [entry["path"] for entry in plan["directories"]])
                     self.assertEqual([entry["path"] for entry in plan["files"]], list(targets.paths))

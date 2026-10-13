@@ -250,7 +250,7 @@ def _call_signatures(calls):
 
 
 def _read_expected_file(path, expected, *, partial=False):
-    content, info = fixture.read_fixture_file(path, limit=len(expected))
+    content, info = fixture.read_fixture_file(path, limit=len(expected), empty=not expected)
     assert info.st_nlink == 1, "observed effect file was linked"
     if partial:
         assert 0 < len(content) < len(expected) and content == expected[:len(content)], \
@@ -335,13 +335,18 @@ class NativePrefixTrace(OriginalInputTrace):
         record["originalCommand"] = {"command": expected_command, "ordinal": self.command_ordinal,
                                      "keychain": catalog.KEYCHAIN + "/" + catalog.DB_NAME,
                                      "revisionBefore": before["revisions"]}
-        record["physicalWrite"] = native_prefix_proof(self.root, self.prefix, record)
+        key = "physicalCreate" if self.prefix == "lock" else "physicalWrite"
+        record[key] = native_prefix_proof(self.root, self.prefix, record)
 
 
 def native_prefix_proof(root, name, cut):
-    """Compare actual physical bytes/oracle/state, not an alleged W operand."""
+    """Compare actual physical effect/oracle/state, not an alleged W operand."""
     selector = catalog.NATIVE_PREFIXES[name]
-    assert cut["selector"] == selector.record() and selector.routes(cut["event"]) and cut["edge"] == "partial"
+    creating = name == "lock"
+    assert cut["selector"] == selector.record() and selector.routes(cut["event"]) and cut["edge"] == selector.edge
+    assert ("physicalWrite" if creating else "physicalCreate") not in cut
+    if creating:
+        assert cut["event"].get("succeeded") is True and "error" not in cut["event"]
     selector.check_context(cut["context"])
     assert cut["context"]["recoveryAttempt"] is False
     observed, token = cut["snapshot"], cut["sessionToken"]
@@ -362,7 +367,7 @@ def native_prefix_proof(root, name, cut):
     assert model["calls"] == observed["nativeCalls"] and model["preferences"] == observed["preferences"]
     assert model["revisions"] == (1 if ordinal == 4 else 0)
     native = _native_identities(observed)
-    expected_names = {catalog.DB_NAME} if name == "database" else {catalog.DB_NAME, catalog.LOCK_NAME}
+    expected_names = {catalog.LOCK_NAME} if creating else {catalog.DB_NAME, catalog.LOCK_NAME}
     if name == "transaction-stage":
         expected_names.add("native-atomic-stage")
         assert state["native"] == {key: native[key] for key in (catalog.DB_NAME, catalog.LOCK_NAME)}
@@ -374,21 +379,27 @@ def native_prefix_proof(root, name, cut):
     oracle = fixture.ResourceOracle(root)
     oracle.assert_sentinels()
     oracle_native = oracle.read()["native"]
-    selected_name = selector.operation.removeprefix("native-effect/write/")
+    selected_name = selector.operation.rsplit("/", 1)[1]
+    assert set(oracle_native) == {str((directory / filename).relative_to(root)) for filename in expected_names}
     proof = None
     for filename in sorted(expected_names):
         selected = filename == selected_name
         payload = catalog.NATIVE_PREFIX_CONTENT[name] if selected else (
             catalog.NATIVE_PREFIX_CONTENT["database"] if filename == catalog.DB_NAME else catalog.NATIVE_PREFIX_CONTENT["lock"])
         path = directory / filename
-        facts = _read_expected_file(path, payload, partial=selected)
+        facts = _read_expected_file(path, payload, partial=selected and not creating)
         relative = str(path.relative_to(root))
-        assert facts["mode"] == 0o600 and facts == observed["native"][relative] == oracle_native[relative]
-        if selected:
+        assert facts["mode"] == (0o400 if filename == catalog.LOCK_NAME else 0o600)
+        assert facts == observed["native"][relative] == oracle_native[relative] == observed["ownedRemaining"][relative]
+        if selected and creating:
+            assert facts["size"] == 0 and catalog.DB_NAME not in native
+            proof = {"name": filename, "bytes": 0, "sha256": facts["sha256"], "facts": facts,
+                     "createdBeforeDatabase": True, "revisionAtCut": model["revisions"]}
+        elif selected:
             proof = {"name": filename, "bytes": facts["size"], "intendedBytes": len(payload),
                 "sha256": facts["sha256"], "intendedSha256": hashlib.sha256(payload).hexdigest(),
                 "facts": facts, "properPrefix": True, "revisionAtCut": model["revisions"]}
-    assert proof is not None and fixture.uncertainty(root, observed), "native prefix lost its genuine unknown-resource state"
+    assert proof is not None and fixture.uncertainty(root, observed), "native physical effect lost its genuine unknown-resource state"
     return proof
 
 
@@ -784,7 +795,10 @@ def assert_seed_cut(root, name, cut):
             assert (root / "home/Library/MobileDevice/Provisioning Profiles" / filename).lstat().st_nlink == 2
     elif name == "native-unrecorded-create":
         assert _phase(observed) == "ARMED" and state["inflight"]["kind"] == "create" and not state["native"]
-        assert set(native) == {signing.DB_NAME} and next(iter(observed["native"].values()))["size"] == 0
+        assert set(native) == {signing.DB_NAME, signing.LOCK_NAME}
+        effects = {Path(path).name: value for path, value in observed["native"].items()}
+        assert effects[signing.DB_NAME]["size"] == effects[signing.LOCK_NAME]["size"] == 0
+        assert effects[signing.LOCK_NAME]["mode"] == 0o400
     elif name == "native-transaction-stage":
         assert _phase(observed) == "ARMED" and state["inflight"]["kind"] == "settings"
         assert set(native) == {signing.DB_NAME, signing.LOCK_NAME, "native-atomic-stage"}
@@ -961,7 +975,8 @@ def seed(root, name, *, auto_add=False, after_effect=None, context=None, native_
     fixture.assert_original_return(original, expected=fixture.CRASH)
     cut = fixture.read_case_json(root, "seed-cut")
     if native_prefix:
-        assert cut["physicalWrite"] == native_prefix_proof(root, name, cut)
+        key = "physicalCreate" if name == "lock" else "physicalWrite"
+        assert cut[key] == native_prefix_proof(root, name, cut)
     elif name == "query-settled-partial":
         _assert_settlement_cut(cut, 1)
         assert not cut["snapshot"]["native"] and cut["context"]["operationKind"] == "observe"

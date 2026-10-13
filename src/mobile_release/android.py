@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import zipfile
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 from .config import ReleaseConfig, ReleaseVersion
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from .android_build_operation import AndroidBuildOperation
     from .android_build_tools import AndroidValidationTools
     from ._desktop_android_build_files import OriginalAndroidArtifact
+    from .android_manifest import AndroidManifest
 
 
 class _OwnedAabStructureError(ValidationError):
@@ -39,14 +41,29 @@ class _OwnedAabManifestError(ValidationError):
     """The settled bundletool invocation rejected the captured AAB DATA."""
 
 
+class _OwnedAabSignatureError(ValidationError):
+    """Common signature policy rejected an actually returned jarsigner result."""
+
+
+class _OwnedAabSignerError(ValidationError):
+    """Common signer policy rejected an actually returned keytool result."""
+
+
 def _owned_artifact(path: Path, artifact: OriginalAndroidArtifact) -> AndroidBuildOperation:
     from ._desktop_android_build_files import OriginalAndroidArtifact
     from .android_build_operation import AndroidBuildOperation
     from ._desktop_android_build_protocol import require
-    require(type(artifact) is OriginalAndroidArtifact)
-    operation = artifact.files.operation
-    require(type(operation) is AndroidBuildOperation and operation._artifact is artifact
-            and operation.files is artifact.files and operation.inputs is not None)
+    if type(artifact) is OriginalAndroidArtifact:
+        operation = artifact.files.operation
+        require(type(operation) is AndroidBuildOperation and operation._artifact is artifact
+                and operation.files is artifact.files and operation.inputs is not None)
+    else:
+        from ._desktop_artifact_inspection_selection import ArtifactInspectionArtifact, ArtifactInspectionFiles
+        from .desktop_artifact_inspection import ArtifactInspectionOperation
+        require(type(artifact) is ArtifactInspectionArtifact and type(artifact.files) is ArtifactInspectionFiles)
+        operation = artifact.files.operation
+        require(type(operation) is ArtifactInspectionOperation and operation._artifact is artifact
+                and operation.files is artifact.files and operation.files.artifact is artifact and operation.inputs is not None)
     operation.require(operation.inputs.config, operation.guard)
     artifact.check()
     require(path == artifact.path)
@@ -103,10 +120,14 @@ def _bundletool_manifest(path: Path, *, cancellation: DefaultCancellation | None
         # The tools/operation require the active original AAB native-input
         # borrow. A matching diagnostic path alone grants no read authority.
         argv = operation.bundletool_command(path, tools)
+        from .android_build_tools import _inspection_operation
+        inspection = _inspection_operation(operation)
         try:
             result = run_owned(argv, cwd=operation.root, environ=operation.command_environment(),
                                timeout=60, capture=True, output_limit=2 * 1024 * 1024,
-                               cancellation=cancellation)
+                               cancellation=cancellation, **({"text": False} if inspection else {}))
+            stdout, stderr = (operation.captured("bundletool", result.stdout, result.stderr) if inspection
+                              else (result.stdout, result.stderr))
             operation.returned("bundletool", result.returncode)
         except BaseException as error:
             operation.command_error("bundletool", error)
@@ -114,7 +135,7 @@ def _bundletool_manifest(path: Path, *, cancellation: DefaultCancellation | None
         tools.check()
         if result.returncode:
             raise _OwnedAabManifestError("bundletool could not inspect the captured AAB manifest")
-        return result.stdout
+        return stdout
     jar_value = os.environ.get("MOBILE_RELEASE_BUNDLETOOL_JAR")
     if not jar_value:
         return None
@@ -139,7 +160,32 @@ def _bundletool_manifest(path: Path, *, cancellation: DefaultCancellation | None
     return result.stdout
 
 
-def _signer_fingerprint(path: Path, *, cancellation: DefaultCancellation | None = None) -> str | None:
+def _signer_fingerprint(path: Path, *, cancellation: DefaultCancellation | None = None,
+                        tools: AndroidValidationTools | None = None) -> str | None:
+    if tools is not None:
+        from .android_build_tools import AndroidValidationTools
+        from ._desktop_android_build_protocol import require
+        require(type(tools) is AndroidValidationTools)
+        operation = tools.operation
+        require(operation.tools is tools and cancellation is operation.guard)
+        argv = operation.keytool_command(path, tools)
+        from .android_build_tools import _inspection_operation
+        inspection = _inspection_operation(operation)
+        try:
+            result = run_owned(argv, cwd=operation.root, environ=operation.command_environment(),
+                               timeout=30, capture=True, output_limit=2 * 1024 * 1024,
+                               cancellation=cancellation, **({"text": False} if inspection else {}))
+            stdout, stderr = (operation.captured("keytool", result.stdout, result.stderr) if inspection
+                              else (result.stdout, result.stderr))
+            operation.returned("keytool", result.returncode)
+        except BaseException as error:
+            operation.command_error("keytool", error)
+            raise
+        tools.check()
+        try:
+            return _keytool_fingerprint(result.returncode, stdout)
+        except ValidationError as error:
+            raise _OwnedAabSignerError(str(error)) from None
     environment = _validation_environment()
     try:
         result = run_owned(
@@ -155,10 +201,15 @@ def _signer_fingerprint(path: Path, *, cancellation: DefaultCancellation | None 
         return None
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
-    if result.returncode:
+    return _keytool_fingerprint(result.returncode, result.stdout)
+
+
+def _keytool_fingerprint(returncode: int, stdout: str) -> str:
+    """Unchanged common leaf-certificate parser/policy, independent of tool IO."""
+    if returncode:
         raise ValidationError("keytool could not verify the final AAB signature")
     signer_blocks = re.findall(
-        r"(?ms)^Signer #[0-9]+:\s*(.*?)(?=^Signer #[0-9]+:|\Z)", result.stdout
+        r"(?ms)^Signer #[0-9]+:\s*(.*?)(?=^Signer #[0-9]+:|\Z)", stdout
     )
     fingerprints: set[str] = set()
     if not signer_blocks:
@@ -179,9 +230,36 @@ def _signer_fingerprint(path: Path, *, cancellation: DefaultCancellation | None 
     return fingerprints.pop()
 
 
-def _verify_jar_signature(path: Path, *, cancellation: DefaultCancellation | None = None) -> bool | None:
+def _verify_jar_signature(path: Path, *, cancellation: DefaultCancellation | None = None,
+                          tools: AndroidValidationTools | None = None) -> bool | None:
     """Verify every signed AAB entry; permit only the expected untrusted-root warning."""
 
+    if tools is not None:
+        from .android_build_tools import AndroidValidationTools
+        from ._desktop_android_build_protocol import require
+        require(type(tools) is AndroidValidationTools)
+        operation = tools.operation
+        require(operation.tools is tools and cancellation is operation.guard)
+        argv = operation.jarsigner_command(path, tools)
+        from .android_build_tools import _inspection_operation
+        inspection = _inspection_operation(operation)
+        try:
+            result = run_owned(argv, cwd=operation.root, environ=operation.command_environment(),
+                               timeout=120, capture=True, output_limit=2 * 1024 * 1024,
+                               cancellation=cancellation, **({"text": False} if inspection else {}))
+            stdout, stderr = (operation.captured("jarsigner", result.stdout, result.stderr) if inspection
+                              else (result.stdout, result.stderr))
+            operation.returned("jarsigner", result.returncode)
+        except BaseException as error:
+            operation.command_error("jarsigner", error)
+            raise
+        tools.check()
+        try:
+            verified = _jar_signature_policy(result.returncode, stdout, stderr)
+        except ValidationError as error:
+            raise _OwnedAabSignatureError(str(error)) from None
+        operation.signature_accepted(path, tools)
+        return verified
     environment = _validation_environment()
     try:
         result = run_owned(
@@ -199,7 +277,12 @@ def _verify_jar_signature(path: Path, *, cancellation: DefaultCancellation | Non
         return None
     except (subprocess.TimeoutExpired, OSError) as error:
         raise ValidationError("jarsigner could not complete final AAB verification") from error
-    output = result.stdout + result.stderr
+    return _jar_signature_policy(result.returncode, result.stdout, result.stderr)
+
+
+def _jar_signature_policy(returncode: int, stdout: str, stderr: str) -> bool:
+    """Unchanged strict warning/exit policy for CLI and owned Desktop readers."""
+    output = stdout + stderr
     forbidden_warning = re.search(
         r"(?i)(?:expired|not yet valid|disabled algorithm|algorithm (?:is )?disabled|"
         r"algorithm constraints|"
@@ -257,12 +340,12 @@ def _verify_jar_signature(path: Path, *, cancellation: DefaultCancellation | Non
     # accompany the no-timestamp warning. Every validity/algorithm/content
     # warning still fails.
     if (
-        result.returncode not in {0, 4}
+        returncode not in {0, 4}
         or not re.search(r"\bjar verified(?:, with signer errors)?\.\s*", output, re.I)
         or forbidden_warning
         or ("Warning:" in output and (not warning_sections or not warnings_allowed))
         or (
-            result.returncode == 4
+            returncode == 4
             and (
                 not self_signed
                 or not untrusted_self_signed_chain
@@ -277,8 +360,32 @@ def _verify_jar_signature(path: Path, *, cancellation: DefaultCancellation | Non
 
 def _canonicalize_aab_signature(path: Path, *, project_root: Path, execution_source=None,
                                 cancellation: DefaultCancellation | None = None,
-                                build_inputs: BuildInputs | None = None) -> None:
+                                build_inputs: BuildInputs | None = None,
+                                operation: AndroidBuildOperation | None = None) -> None:
     """Re-sign the final copy so JAR stream and central-directory views agree."""
+    if operation is not None:
+        from .android_build_operation import AndroidBuildOperation
+        from ._desktop_android_build_protocol import require
+        require(type(operation) is AndroidBuildOperation and operation.signing is not None
+                and operation.root == project_root and cancellation is operation.guard
+                and execution_source is None and build_inputs is operation.signing.materialization)
+        operation.require(operation.inputs.config, cancellation)
+        candidate = operation.files.signing_candidate
+        require(candidate is not None and candidate.path == path)
+        with candidate.native_signing_input():
+            argv = operation.aab_sign_command(candidate)
+            try:
+                result = run_owned(argv, cwd=project_root, environ=operation.signing.command_environment(),
+                                   capture=True, timeout=120, output_limit=2 * 1024 * 1024,
+                                   cancellation=cancellation)
+                operation.returned("aab-sign", result.returncode)
+            except BaseException as error:
+                operation.command_error("aab-sign", error)
+                raise
+            if result.returncode:
+                operation.fail("signing-command-failed")
+            operation.signing.command_inputs()
+        return
 
     required = (
         "MOBILE_RELEASE_ANDROID_KEYSTORE_PATH",
@@ -357,7 +464,15 @@ def validate_aab_structure(path: Path, *, artifact: OriginalAndroidArtifact | No
         operation = _owned_artifact(path, artifact)
         try:
             with artifact.reader() as reader:
+                from .android_build_tools import _inspection_operation
+                inspection = _inspection_operation(operation)
+                if inspection:
+                    _artifact_aab_directory_prelude(reader, artifact)
                 integrity = inspect_zip_integrity(reader, archive_bytes=artifact.size, checkpoint=artifact.check)
+                if inspection:
+                    from .artifact_inspection import aab_directory_data
+                    plan = integrity.metadata.plan
+                    aab_directory_data(plan.entry_count, plan.central_directory.length, artifact.size, integrity.expanded_bytes)
             operation.zip_metadata = integrity.metadata
             names = []
             for entry in integrity.metadata.entries:
@@ -376,6 +491,78 @@ def validate_aab_structure(path: Path, *, artifact: OriginalAndroidArtifact | No
     return names
 
 
+def _artifact_aab_directory_prelude(reader, artifact) -> None:
+    """Same original tail/plan; reject before the larger central allocation."""
+    from .android_zip import zip_tail_range, plan_zip_directory
+    from .android_zip_integrity import _read_range
+    from .artifact_inspection import aab_directory_data
+    artifact.check()
+    requested = zip_tail_range(artifact.size)
+    tail = _read_range(reader, requested, artifact.size, artifact.check)
+    plan = plan_zip_directory(artifact.size, tail)
+    # Zero is only the prospective expansion charge. The actual integrity pass
+    # independently checks every expanded byte and its returned total below.
+    aab_directory_data(plan.entry_count, plan.central_directory.length, artifact.size, 0)
+    artifact.check()
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactAabObservation:
+    """Observed DATA only: no expected-policy, current-result or Store authority."""
+    structure_ok: bool
+    manifest: AndroidManifest | None = None
+    signature_ok: bool | None = None
+    signer_sha256: str | None = None
+    manifest_failed: bool = False
+    manifest_unavailable: bool = False
+    signature_failed: bool = False
+    signer_failed: bool = False
+
+
+def inspect_artifact_aab(path: Path, *, artifact, cancellation: DefaultCancellation,
+                         tools: AndroidValidationTools | None) -> ArtifactAabObservation:
+    from .desktop_artifact_inspection import ArtifactInspectionOperation
+    from .android_build_tools import AndroidValidationTools
+    from ._desktop_android_build_protocol import require
+    operation = _owned_artifact(path, artifact)
+    require(type(operation) is ArtifactInspectionOperation and cancellation is operation.guard
+            and tools is operation.tools and (tools is None or type(tools) is AndroidValidationTools))
+    try:
+        validate_aab_structure(path, artifact=artifact)
+    except _OwnedAabStructureError:
+        return ArtifactAabObservation(False)
+    if tools is None:
+        # Known absent native provider never selects the ordinary CLI fallback.
+        return ArtifactAabObservation(True)
+    from .android_manifest import ManifestInspectionError, parse_android_manifest
+    manifest = None
+    signature = None
+    signer = None
+    manifest_failed = manifest_unavailable = signature_failed = signer_failed = False
+    with artifact.native_input() as original_path:
+        try:
+            text = _bundletool_manifest(original_path, cancellation=cancellation, tools=tools)
+        except _OwnedAabManifestError:
+            manifest_failed = True
+        else:
+            try:
+                manifest = parse_android_manifest(text, cancellation=cancellation)
+            except ManifestInspectionError as error:
+                manifest_unavailable = error.reason == "runtime"
+                manifest_failed = not manifest_unavailable
+        try:
+            signature = _verify_jar_signature(original_path, cancellation=cancellation, tools=tools)
+        except _OwnedAabSignatureError:
+            signature, signature_failed = False, True
+        if signature is True:
+            try:
+                signer = _signer_fingerprint(original_path, cancellation=cancellation, tools=tools)
+            except _OwnedAabSignerError:
+                signer_failed = True
+    return ArtifactAabObservation(True, manifest, signature, signer, manifest_failed,
+                                  manifest_unavailable, signature_failed, signer_failed)
+
+
 def validate_aab(
     path: Path,
     *,
@@ -391,8 +578,12 @@ def validate_aab(
     if artifact is not None:
         from ._desktop_android_build_protocol import require
         operation = _owned_artifact(path, artifact)
+        from .android_build_operation import AndroidBuildOperation
+        require(type(operation) is AndroidBuildOperation)
         require(tools is operation.tools and tools is not None and cancellation is operation.guard
-                and require_tools is True and check_signer is False and expected_fingerprint is None
+                and require_tools is True and check_signer is operation.inputs.check_signer
+                and expected_fingerprint == (operation.inputs.saved.configuration.upload_certificate_sha256 if check_signer else None)
+                and (not check_signer or expected_fingerprint is not None)
                 and expected_application_id == operation.inputs.saved.configuration.application_id
                 and release is operation.inputs.release)
     elif tools is not None:
@@ -416,15 +607,31 @@ def validate_aab(
             raise
         return [Finding("android.aab.structure", Status.FAIL, str(error), category="android-artifact")]
 
+    if artifact is None:
+        return _inspect_aab_contents(path, findings, expected_application_id=expected_application_id,
+                                     release=release, expected_fingerprint=expected_fingerprint,
+                                     require_tools=require_tools, check_signer=check_signer, cancellation=cancellation)
+    # Exactly one original borrow spans every native reader; returning findings
+    # cannot bypass its byte recheck or original consumer-settlement predicate.
+    with artifact.native_input() as original_path:
+        return _inspect_aab_contents(original_path, findings, expected_application_id=expected_application_id,
+                                     release=release, expected_fingerprint=expected_fingerprint,
+                                     require_tools=require_tools, check_signer=check_signer,
+                                     cancellation=cancellation, tools=tools)
+
+
+def _inspect_aab_contents(path: Path, findings: list[Finding], *, expected_application_id: str,
+                          release: ReleaseVersion, expected_fingerprint: str | None, require_tools: bool,
+                          check_signer: bool, cancellation: DefaultCancellation | None,
+                          tools: AndroidValidationTools | None = None) -> list[Finding]:
     try:
-        if artifact is None:
-            manifest = _bundletool_manifest(path, cancellation=cancellation)
-        else:
-            with artifact.native_input() as original_path:
-                manifest = _bundletool_manifest(original_path, cancellation=cancellation, tools=tools)
+        manifest = (_bundletool_manifest(path, cancellation=cancellation) if tools is None else
+                    _bundletool_manifest(path, cancellation=cancellation, tools=tools))
     except ValidationError as error:
-        if ((isinstance(error, ProcessError) and error.fatal)
-                or artifact is not None and not isinstance(error, _OwnedAabManifestError)):
+        fatal = fatal_lifetime_error(error, "Android manifest custody did not settle")
+        if fatal is not None:
+            raise fatal from None
+        if tools is not None and not isinstance(error, _OwnedAabManifestError):
             raise
         findings.append(
             Finding("android.aab.manifest", Status.FAIL, str(error), category="android-artifact")
@@ -441,7 +648,7 @@ def validate_aab(
             )
         )
     else:
-        # Same policy for CLI and future owned-artifact inspection. Root identity
+        # Same policy for CLI and owned-artifact inspection. Root identity
         # cannot be established by finding expected text in a comment/descendant.
         from .android_manifest import validate_android_manifest
         findings.extend(validate_android_manifest(
@@ -451,7 +658,7 @@ def validate_aab(
 
     if not check_signer:
         signer_message = "AAB signer inspection is not applicable to unsigned offline preflight."
-        if artifact is not None:
+        if tools is not None:
             from ._desktop_android_build_protocol import SIGNER_MESSAGE
             signer_message = SIGNER_MESSAGE
         findings.append(
@@ -464,9 +671,13 @@ def validate_aab(
         )
     else:
         try:
-            signature_verified = _verify_jar_signature(path, cancellation=cancellation)
+            signature_verified = (_verify_jar_signature(path, cancellation=cancellation) if tools is None else
+                                  _verify_jar_signature(path, cancellation=cancellation, tools=tools))
         except ValidationError as error:
-            if isinstance(error, ProcessError) and error.fatal:
+            fatal = fatal_lifetime_error(error, "Android signature custody did not settle")
+            if fatal is not None:
+                raise fatal from None
+            if tools is not None and not isinstance(error, _OwnedAabSignatureError):
                 raise
             findings.append(
                 Finding("android.aab.signature", Status.FAIL, str(error), category="android-artifact")
@@ -493,9 +704,13 @@ def validate_aab(
         if signature_verified is not True:
             return findings
         try:
-            fingerprint = _signer_fingerprint(path, cancellation=cancellation)
+            fingerprint = (_signer_fingerprint(path, cancellation=cancellation) if tools is None else
+                           _signer_fingerprint(path, cancellation=cancellation, tools=tools))
         except ValidationError as error:
-            if isinstance(error, ProcessError) and error.fatal:
+            fatal = fatal_lifetime_error(error, "Android signer custody did not settle")
+            if fatal is not None:
+                raise fatal from None
+            if tools is not None and not isinstance(error, _OwnedAabSignerError):
                 raise
             findings.append(
                 Finding("android.aab.signer", Status.FAIL, str(error), category="android-artifact")
@@ -557,8 +772,9 @@ def run_android_build(config: ReleaseConfig, *, signed: bool, execution_source=N
     if operation is not None:
         from .android_build_operation import AndroidBuildOperation
         from ._desktop_android_build_protocol import require
-        require(type(operation) is AndroidBuildOperation and signed is False
-                and execution_source is None and build_inputs is None)
+        require(type(operation) is AndroidBuildOperation and type(signed) is bool
+                and signed is (operation.signing is not None) and execution_source is None
+                and (build_inputs is operation.signing.materialization if signed else build_inputs is None))
         operation.require(config, cancellation)
         argv = operation.gradle_command()
         try:
@@ -573,7 +789,15 @@ def run_android_build(config: ReleaseConfig, *, signed: bool, execution_source=N
         operation.tools.check()
         operation.check_inputs()
         operation.advance("capturing")
-        captured = operation.capture_after()
+        if signed:
+            candidate = operation.capture_signing_after()
+            candidate.validate_integrity()
+            operation.advance("signing")
+            _canonicalize_aab_signature(candidate.path, project_root=config.root, cancellation=cancellation,
+                                        build_inputs=build_inputs, operation=operation)
+            captured = operation.finalize_signing_capture()
+        else:
+            captured = operation.capture_after()
         # Compatibility/diagnostic map only; Desktop consumes the original
         # operation.artifact(), never reopens this returned path as authority.
         return {"android-aab": captured.path}

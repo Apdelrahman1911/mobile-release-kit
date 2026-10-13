@@ -50,6 +50,34 @@ class AndroidBuildSelectionTests(unittest.TestCase):
         self.assertEqual(raised.exception.reason, reason)
         self.assertEqual(str(raised.exception), "The saved Android release selection was refused")
 
+    def test_upload_certificate_is_exact_saved_comparison_not_renderer_override(self):
+        data = config_data()
+        data["android"]["uploadCertificateSha256"] = "aB" * 32
+        private, configured = selected_config(data)
+        self.assertEqual(configured.upload_certificate_sha256, "aB" * 32)
+        self.assertTrue(selection.bind_saved_android_validation(configured, {
+            "mode": "upload-signature", "uploadCertificateSha256": "aB" * 32}))
+        self.assertFalse(selection.bind_saved_android_validation(configured, {
+            "mode": "structure-and-version", "uploadCertificateSha256": None}))
+        for fingerprint in ("ab" * 32, "cd" * 32, ":".join(["aB"] * 32)):
+            self.refuse("saved-config-changed", lambda: selection.bind_saved_android_validation(configured, {
+                "mode": "upload-signature", "uploadCertificateSha256": fingerprint}))
+        private["android"]["uploadCertificateSha256"] = "cd" * 32
+        self.assertEqual(configured.upload_certificate_sha256, "aB" * 32)
+
+    def test_signature_choice_does_not_extend_saved_fingerprint_syntax_or_accept_missing_material(self):
+        _, configured = selected_config()
+        self.refuse("saved-config-invalid", lambda: selection.bind_saved_android_validation(configured, {
+            "mode": "upload-signature", "uploadCertificateSha256": "a" * 64}))
+        for fingerprint in ("0" * 64, ":".join(["ab"] * 32), "a" * 63, "g" * 64):
+            data = config_data()
+            data["android"]["uploadCertificateSha256"] = fingerprint
+            self.refuse("saved-config-invalid", lambda: selected_config(data))
+        for compared in ({"mode": "upload-signature", "uploadCertificateSha256": None},
+                         {"mode": "structure-and-version", "uploadCertificateSha256": "a" * 64},
+                         {"mode": "upload-signature"}, {"mode": "sign", "uploadCertificateSha256": None}):
+            self.refuse("protocol-error", lambda: selection.bind_saved_android_validation(configured, compared))
+
     def test_saved_config_selects_private_policy_and_one_immutable_effective_version(self):
         data = config_data()
         data["android"].update(module=":mobile:app", variant="demoRelease", applicationId="org.example.current")

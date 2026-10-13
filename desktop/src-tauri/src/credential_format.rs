@@ -14,6 +14,11 @@
 use std::{fmt, io, mem};
 use serde::{de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor}, Serialize};
 
+#[path = "credential_plist.rs"]
+mod plist_xml;
+#[path = "credential_apple.rs"]
+mod apple;
+
 const JKS_LIMIT: usize = 32 * 1024 * 1024;
 const JSON_LIMIT: usize = 4 * 1024 * 1024;
 const QUOTED_LIMIT: usize = 8192; // Includes both encoded quote bytes.
@@ -34,7 +39,7 @@ const NO_KEY: u32 = u32::MAX;
 const PARSE_ERROR: &str = "credential document refused";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FileKind { AndroidKeystore, AndroidFirebase }
+pub(crate) enum FileKind { AndroidKeystore, AndroidFirebase, IosFirebase, AppleP12, AppleProfile, AscP8 }
 
 pub(crate) struct Interrupted;
 
@@ -67,7 +72,47 @@ enum Observed {
     Jks { #[serde(rename = "byteCount")] byte_count: u64, version: u8 },
     #[serde(rename = "firebase-json")]
     FirebaseJson { #[serde(rename = "byteCount")] byte_count: u64, document: AndroidProjection },
+    #[serde(rename = "firebase-plist")]
+    FirebasePlist { #[serde(rename = "byteCount")] byte_count: u64, encoding: PlistEncoding, document: IosProjection },
+    #[serde(rename = "pkcs12")]
+    Pkcs12 { #[serde(rename = "byteCount")] byte_count: u64, version: u8, #[serde(rename = "authSafe")] auth_safe: Pkcs12AuthSafe },
+    #[serde(rename = "cms-signed-data")]
+    CmsSignedData { #[serde(rename = "byteCount")] byte_count: u64, encoding: CmsEncoding },
+    #[serde(rename = "pkcs8")]
+    Pkcs8 { #[serde(rename = "byteCount")] byte_count: u64, encoding: Pkcs8Encoding, algorithm: Pkcs8Algorithm, curve: Option<Pkcs8Curve> },
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum PlistEncoding { Xml }
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum Pkcs12AuthSafe { Data, SignedData }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum CmsEncoding { Der }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Pkcs8Encoding { Pem, Der }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Pkcs8Algorithm { Ec, Rsa, Other }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Pkcs8Curve { P256, Other }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum IosRoot { Dictionary, Other }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IosProjection { root: IosRoot, bundle_id: Option<String> }
 
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -106,20 +151,27 @@ pub(crate) fn inspect(
     kind: FileKind, bytes: &[u8], stop: &mut dyn FnMut() -> bool,
 ) -> Result<FileObservation, Interrupted> {
     if stop() { return Err(Interrupted); }
-    let maximum = match kind { FileKind::AndroidKeystore => JKS_LIMIT, FileKind::AndroidFirebase => JSON_LIMIT };
+    let maximum = match kind { FileKind::AndroidKeystore | FileKind::AppleP12 => JKS_LIMIT,
+        FileKind::AndroidFirebase | FileKind::IosFirebase | FileKind::AppleProfile | FileKind::AscP8 => JSON_LIMIT };
     let observation = if bytes.len() > maximum {
         FileObservation::unavailable(UnavailableReason::MaterialLimit)
     } else if bytes.is_empty() {
         FileObservation::rejected(RejectedReason::EmptyFile)
     } else {
-        match kind {
-            FileKind::AndroidKeystore => jks(bytes),
-            FileKind::AndroidFirebase => match firebase_json(bytes, stop) {
-                Ok(observation) => observation,
-                Err(Failure::Interrupted) => return Err(Interrupted),
-                Err(Failure::Limit(_)) => FileObservation::unavailable(UnavailableReason::ParserLimit),
-                Err(Failure::Malformed) => FileObservation::rejected(RejectedReason::MalformedContainer),
-            },
+        let parsed = match kind {
+            FileKind::AndroidKeystore => Ok(jks(bytes)),
+            FileKind::AndroidFirebase => firebase_json(bytes, stop),
+            FileKind::IosFirebase => plist_xml::inspect(bytes, stop),
+            FileKind::AppleP12 => apple::pfx(bytes, stop),
+            FileKind::AppleProfile => apple::profile(bytes, stop),
+            FileKind::AscP8 => apple::p8(bytes, stop),
+        };
+        match parsed {
+            Ok(observation) => observation,
+            Err(Failure::Interrupted) => return Err(Interrupted),
+            Err(Failure::Limit(_)) => FileObservation::unavailable(UnavailableReason::ParserLimit),
+            Err(Failure::Malformed) => FileObservation::rejected(RejectedReason::MalformedContainer),
+            Err(Failure::UnsupportedVariant) => FileObservation::unavailable(UnavailableReason::UnsupportedVariant),
         }
     };
     if stop() { Err(Interrupted) } else { Ok(observation) }
@@ -138,10 +190,10 @@ fn jks(bytes: &[u8]) -> FileObservation {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Limit { Lexical, Number, Depth, Nodes, KeyStorage, KeyComparison, Projection, Allocation }
+enum Limit { Lexical, Number, Depth, Nodes, KeyStorage, KeyComparison, Projection, Allocation, Asn1Work }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Failure { Interrupted, Limit(Limit), Malformed }
+enum Failure { Interrupted, Limit(Limit), Malformed, UnsupportedVariant }
 
 fn poll(stop: &mut dyn FnMut() -> bool) -> Result<(), Failure> {
     if stop() { Err(Failure::Interrupted) } else { Ok(()) }

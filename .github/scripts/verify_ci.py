@@ -33,6 +33,9 @@ from types import MappingProxyType
 
 AGGREGATE_SECONDS = 3300
 DISK_RESERVE = 4 * 1024**3 + 512 * 1024**2
+SOURCE_MAX_FILES = 2048
+SOURCE_MAX_FILE_BYTES = 32 * 1024**2
+SOURCE_MAX_TOTAL_BYTES = 128 * 1024**2
 MINITEST_FOOTER = (r"(?m)^(\d{1,9}) runs, (\d{1,9}) assertions, (\d{1,9}) failures, "
                    r"(\d{1,9}) errors, (\d{1,9}) skips[ \t]*$")
 NATIVE_DIAGNOSTIC_PREFIX = "MRK_NATIVE_DIAGNOSTIC="
@@ -725,6 +728,7 @@ RUBY_PARTITION_CONTRACTS = (
 PARTITIONED_RUBY_GATES = tuple(row[0] for row in RUBY_PARTITION_CONTRACTS)
 RUBY_SUITES = (
     ("ruby-support", "test_fastlane_support.rb", 12),
+    ("ruby-metadata-image-catalog", "test_metadata_image_catalog.rb", 0),
     ("ruby-store_document", "test_store_document.rb", 0),
     ("ruby-store_lane_lifetime", "test_store_lane_lifetime.rb", 0),
     ("ruby-store_lane_nested_validation", "test_store_lane_nested_validation.rb", 0),
@@ -1511,6 +1515,21 @@ def trusted_command(argv: tuple[str, ...], *, deadline: float, cwd: Path | None 
     return result.stdout
 
 
+def source_inventory_bytes(inventory: dict) -> int:
+    """One finite source-only envelope; unrelated input readers stay bounded."""
+    if type(inventory) is not dict or not 1 <= len(inventory) <= SOURCE_MAX_FILES:
+        raise VerificationError("SOURCE_INVENTORY_BOUND")
+    total = 0
+    for expected in inventory.values():
+        if (type(expected) is not dict or type(expected.get("bytes")) is not int
+                or not 0 <= expected["bytes"] <= SOURCE_MAX_FILE_BYTES):
+            raise VerificationError("SOURCE_FILE_BOUND")
+        total += expected["bytes"]
+        if total > SOURCE_MAX_TOTAL_BYTES:
+            raise VerificationError("SOURCE_TOTAL_BOUND")
+    return total
+
+
 def snapshot_source(checkout: Path, destination: Path, commit: str, *, deadline: float) -> tuple[dict, dict]:
     """Copy the exact committed ordinary-file tree; no worktree/index mutation."""
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -1523,11 +1542,12 @@ def snapshot_source(checkout: Path, destination: Path, commit: str, *, deadline:
     if trusted_command((*git, "status", "--porcelain=v1", "--untracked-files=all"), deadline=deadline):
         raise VerificationError("CHECKOUT_NOT_CLEAN")
     entries = trusted_command((*git, "ls-tree", "-rz", "--full-tree", "HEAD"), deadline=deadline).split(b"\0")
-    if entries[-1] or not 1 <= len(entries) - 1 <= 512:
+    if entries[-1] or not 1 <= len(entries) - 1 <= SOURCE_MAX_FILES:
         raise VerificationError("SOURCE_INVENTORY_BOUND")
-    check_capacity(destination.parent, 16 * 1024**2)
+    check_capacity(destination.parent, SOURCE_MAX_TOTAL_BYTES)
     destination.mkdir(mode=0o755)
     inventory = {}
+    total = 0
     for entry in entries[:-1]:
         check_clock(deadline)
         header, raw_name = entry.split(b"\t", 1)
@@ -1538,7 +1558,10 @@ def snapshot_source(checkout: Path, destination: Path, commit: str, *, deadline:
                 or ".." in relative.parts or ".git" in relative.parts or relative.as_posix() != name
                 or re.search(r"[\x00-\x1f\x7f\\]", name) or name in inventory):
             raise VerificationError("SOURCE_ENTRY")
-        raw = read_regular(checkout / relative, deadline=deadline)
+        raw = read_regular(checkout / relative, deadline=deadline, maximum=SOURCE_MAX_FILE_BYTES)
+        total += len(raw)
+        if total > SOURCE_MAX_TOTAL_BYTES:
+            raise VerificationError("SOURCE_TOTAL_BOUND")
         if bool((checkout / relative).stat().st_mode & 0o111) != (mode == "100755"):
             raise VerificationError("SOURCE_CHECKOUT_MODE")
         if hashlib.sha1(f"blob {len(raw)}\0".encode("ascii") + raw).hexdigest() != blob:
@@ -1578,6 +1601,7 @@ def freeze_tree(root: Path, *, deadline: float, link_roots: tuple[Path, ...] = (
 
 
 def verify_source(root: Path, inventory: dict, *, deadline: float, generated: bool = False) -> None:
+    source_inventory_bytes(inventory)
     if root.resolve(strict=True) != root or not stat.S_ISDIR(root.lstat().st_mode):
         raise VerificationError("SOURCE_ROOT_NOT_DIRECTORY")
     actual = set()
@@ -1596,7 +1620,7 @@ def verify_source(root: Path, inventory: dict, *, deadline: float, generated: bo
             expected = inventory.get(relative)
             if expected is None:
                 raise VerificationError("SOURCE_UNEXPECTED_FILE")
-            raw = read_regular(path, deadline=deadline)
+            raw = read_regular(path, deadline=deadline, maximum=SOURCE_MAX_FILE_BYTES)
             if len(raw) != expected["bytes"] or hashlib.sha256(raw).hexdigest() != expected["sha256"]:
                 raise VerificationError("SOURCE_CONTENT_DRIFT")
             if bool(path.stat().st_mode & 0o111) != (expected["git_mode"] == "100755"):
@@ -1610,13 +1634,15 @@ def walk_error(_error: OSError) -> None:
 
 
 def copy_build(source: Path, destination: Path, inventory: dict, uid: int, gid: int, *, deadline: float) -> None:
+    source_inventory_bytes(inventory)
+    check_capacity(destination.parent, SOURCE_MAX_TOTAL_BYTES)
     destination.mkdir(mode=0o700)
     for relative, expected in inventory.items():
         check_clock(deadline)
         path = destination / relative
         path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-        data = read_regular(source / relative, deadline=deadline)
-        if hashlib.sha256(data).hexdigest() != expected["sha256"]:
+        data = read_regular(source / relative, deadline=deadline, maximum=SOURCE_MAX_FILE_BYTES)
+        if len(data) != expected["bytes"] or hashlib.sha256(data).hexdigest() != expected["sha256"]:
             raise VerificationError("BUILD_COPY_SOURCE_CHANGED")
         create_file(path, data, mode=0o755 if expected["git_mode"] == "100755" else 0o644, deadline=deadline)
     for directory, dirs, files in os.walk(destination, followlinks=False, onerror=walk_error):
@@ -5816,7 +5842,24 @@ def perform_step(step: Step, paths: Paths, session, checks, inventory: dict,
         freeze_tree(paths.work / "wheels", deadline=deadline)
         if list((paths.work / "wheels").iterdir()) != [paths.wheel]:
             raise VerificationError("WHEEL_OUTPUT_INVENTORY")
-        details = checks.inspect_project_wheel(paths.wheel, paths.source, deadline=deadline)
+        try:
+            details = checks.inspect_project_wheel(paths.wheel, paths.source, deadline=deadline)
+        except checks.CheckError as error:
+            # Only literal policy codes from the exact admitted helper may
+            # cross this DATA boundary. Never stringify private/unknown errors.
+            codes = frozenset({
+                "SOURCE_BUILD_BACKEND", "SOURCE_PACKAGE_CONTRACT", "SOURCE_PACKAGE_DATA",
+                "SOURCE_PACKAGE_FILES", "SOURCE_PUBLIC_RESOURCE_PINS", "WHEEL_METADATA_SIZE",
+                "WHEEL_METADATA_PARSE", "WHEEL_METADATA_HEADER", "WHEEL_EXTRAS",
+                "WHEEL_RUNTIME_OR_UNPINNED_DEPENDENCY", "WHEEL_README_BYTES", "WHEEL_MEMBER_LIMIT",
+                "WHEEL_UNSAFE_MEMBER", "WHEEL_DUPLICATE_OR_OVERSIZED_MEMBER", "WHEEL_EXPANDED_LIMIT",
+                "WHEEL_MEMBER_SIZE", "WHEEL_COMPLETE_INVENTORY", "WHEEL_FIRST_PARTY_BYTES",
+                "WHEEL_RECORD_INVENTORY", "WHEEL_RECORD_SELF", "WHEEL_RECORD_BYTES", "WHEEL_ENTRY_CONTRACT",
+            })
+            if (type(error) is checks.CheckError and type(error.args) is tuple and len(error.args) == 1
+                    and type(error.args[0]) is str and error.args[0] in codes):
+                raise VerificationError(error.args[0]) from error
+            raise
     elif step.id == "wheel-freeze":
         current = paths.work / "wheel-venv"
         freeze_tree(current, deadline=deadline, link_roots=(current, *session.tool_prefixes))

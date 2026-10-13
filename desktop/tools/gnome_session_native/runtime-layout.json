@@ -1,0 +1,708 @@
+{
+  "credentials": {
+    "actualNonzeroGid": 61000,
+    "actualNonzeroUid": 61000,
+    "capabilities": {
+      "ambient": [],
+      "bounding": [],
+      "effective": [],
+      "inheritable": [],
+      "permitted": []
+    },
+    "finalUidGid": "real/effective/saved/fs IDs all equal root-admitted nonzero numeric pair",
+    "hostAccountFilesChanged": true,
+    "noNewPrivileges": true,
+    "requiredGidMap": "0 0 4294967295",
+    "requiredUidMap": "0 0 4294967295",
+    "reservation": {
+      "path": "/account-reservation.json",
+      "scope": "actual static files+systemd reservation retained until disposable VM retirement; not NSS transport qualification"
+    },
+    "supplementaryGroups": [],
+    "uidReserved": true,
+    "userNamespaceCreation": false
+  },
+  "fixtureWritableRoot": {
+    "bytes": 67108864,
+    "children": [
+      "home",
+      "run",
+      "data",
+      "config",
+      "control-1",
+      "control-2"
+    ],
+    "childrenMode": "0o700",
+    "initialContents": "only the six empty directories; Fixture writes exclusive bus configuration and stderr files",
+    "mode": "0o700",
+    "owner": "actual UID/GID61000 after positive host reservation and fresh host census",
+    "path": "/mrk-gnome-fixture"
+  },
+  "guiQualification": false,
+  "hostedCarrierSchema": "gnome-session-hosted-layout-1",
+  "installedBodyBytes": 16587872,
+  "installedFileMounts": [
+    {
+      "bytes": 236176,
+      "interpreter": "/lib64/ld-linux-x86-64.so.2",
+      "mode": "0o755",
+      "nativeDestination": "/usr/bin/dbus-daemon",
+      "needed": [
+        "libdbus-1.so.3",
+        "libsystemd.so.0",
+        "libexpat.so.1",
+        "libselinux.so.1",
+        "libaudit.so.1",
+        "libcap-ng.so.0",
+        "libapparmor.so.1",
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/00",
+      "role": "executable",
+      "sha256": "8c479f1fcddfd6693c736ce541da0955f6752834bdeeef4b928e27f5e974c247",
+      "soname": null
+    },
+    {
+      "bytes": 39304,
+      "interpreter": "/lib64/ld-linux-x86-64.so.2",
+      "mode": "0o755",
+      "nativeDestination": "/usr/bin/setpriv",
+      "needed": [
+        "libcap-ng.so.0",
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/01",
+      "role": "executable",
+      "sha256": "96b083b79c32fd2f0c29657e88e20c7495839349fc64ad5d0503f32d26bf8733",
+      "soname": null
+    },
+    {
+      "bytes": 1887792,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libgio-2.0.so.0.8000.0",
+      "needed": [
+        "libglib-2.0.so.0",
+        "libgobject-2.0.so.0",
+        "libgmodule-2.0.so.0",
+        "libz.so.1",
+        "libmount.so.1",
+        "libselinux.so.1",
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/02",
+      "role": "library",
+      "sha256": "d8c4cf698e9b8790584cc5ede813a86ec4f041c0d58daa452b72431572685a87",
+      "soname": "libgio-2.0.so.0"
+    },
+    {
+      "bytes": 399752,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libgobject-2.0.so.0.8000.0",
+      "needed": [
+        "libglib-2.0.so.0",
+        "libffi.so.8",
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/03",
+      "role": "library",
+      "sha256": "99bf0727e0ca4faf12ab09b753b3d03294562c29c559b970c4dad435f9ec2bc6",
+      "soname": "libgobject-2.0.so.0"
+    },
+    {
+      "bytes": 1343056,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libglib-2.0.so.0.8000.0",
+      "needed": [
+        "libm.so.6",
+        "libpcre2-8.so.0",
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/04",
+      "role": "library",
+      "sha256": "42467d0dbcc0a6c9e0a31f05a5944095504ce98f093c3fe0825f0a1533fa8207",
+      "soname": "libglib-2.0.so.0"
+    },
+    {
+      "bytes": 1340976,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libgcrypt.so.20.4.3",
+      "needed": [
+        "libgpg-error.so.0",
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/05",
+      "role": "library",
+      "sha256": "9f872b8956edfa11a3ad093f509cf312e8d135dd801ca548c990daa214c03bd4",
+      "soname": "libgcrypt.so.20"
+    },
+    {
+      "bytes": 910592,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libsystemd.so.0.38.0",
+      "needed": [
+        "libcap.so.2",
+        "libgcrypt.so.20",
+        "liblz4.so.1",
+        "liblzma.so.5",
+        "libzstd.so.1",
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ],
+      "path": "/inputs/native/06",
+      "role": "library",
+      "sha256": "bdf59c828b547bcdbe7b3576c0810d9d9d2e982d8b61b365812542da6a4c4a99",
+      "soname": "libsystemd.so.0"
+    },
+    {
+      "bytes": 1714008,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libp11-kit.so.0.3.1",
+      "needed": [
+        "libffi.so.8",
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ],
+      "path": "/inputs/native/07",
+      "role": "library",
+      "sha256": "c6b469a006685ebf2075e200180c3b21f41b88ad722c5697d736ea558cfe3ea1",
+      "soname": "libp11-kit.so.0"
+    },
+    {
+      "bytes": 2125328,
+      "interpreter": "/lib64/ld-linux-x86-64.so.2",
+      "mode": "0o755",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+      "needed": [
+        "ld-linux-x86-64.so.2"
+      ],
+      "path": "/inputs/native/08",
+      "role": "library",
+      "sha256": "8db37cf3f2169f59a0f07ef1fea308c35656668c64c8ff294e1860f4121eb161",
+      "soname": "libc.so.6"
+    },
+    {
+      "bytes": 183024,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+      "needed": [
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ],
+      "path": "/inputs/native/09",
+      "role": "library",
+      "sha256": "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb",
+      "soname": "libgcc_s.so.1"
+    },
+    {
+      "bytes": 952616,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libm.so.6",
+      "needed": [
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ],
+      "path": "/inputs/native/10",
+      "role": "library",
+      "sha256": "e9c4b28d340e415b8137480ec442662f981e1399386c5931dae0e886e3639e91",
+      "soname": "libm.so.6"
+    },
+    {
+      "bytes": 317752,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libdbus-1.so.3.32.4",
+      "needed": [
+        "libsystemd.so.0",
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/11",
+      "role": "library",
+      "sha256": "a6ae7b4ef48562b40d7b9ba8efd2e49f6528b7cc6364bea382dcee4b473b5413",
+      "soname": "libdbus-1.so.3"
+    },
+    {
+      "bytes": 174336,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libexpat.so.1.9.1",
+      "needed": [
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/12",
+      "role": "library",
+      "sha256": "c42ff317838b4b4639e2ea801905f0317177c6df7e31b2f0d0240e3c3ac0cfde",
+      "soname": "libexpat.so.1"
+    },
+    {
+      "bytes": 174472,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libselinux.so.1",
+      "needed": [
+        "libpcre2-8.so.0",
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ],
+      "path": "/inputs/native/13",
+      "role": "library",
+      "sha256": "0ec0843463f90e227b0e138e1f379774f50b5514bd7f5dbd4c8a87aca0aa6670",
+      "soname": "libselinux.so.1"
+    },
+    {
+      "bytes": 133200,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libaudit.so.1.0.0",
+      "needed": [
+        "libcap-ng.so.0",
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/14",
+      "role": "library",
+      "sha256": "8a4ca5eda7607f2e65da7cb32a780cc0dcfbf202037482ef4261a3c1ec339083",
+      "soname": "libaudit.so.1"
+    },
+    {
+      "bytes": 26848,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libcap-ng.so.0.0.0",
+      "needed": [
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ],
+      "path": "/inputs/native/15",
+      "role": "library",
+      "sha256": "25349c22956c7af94f46e728d7e4c1eba57d0e4a0517f72781fb495d541eeef3",
+      "soname": "libcap-ng.so.0"
+    },
+    {
+      "bytes": 84864,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libapparmor.so.1.17.2",
+      "needed": [
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/16",
+      "role": "library",
+      "sha256": "458c492fee00047f9f7680a1148eacba9a357f89d19da6d1f7ad662f63f6b00c",
+      "soname": "libapparmor.so.1"
+    },
+    {
+      "bytes": 236616,
+      "interpreter": null,
+      "mode": "0o755",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+      "needed": [],
+      "path": "/inputs/native/17",
+      "role": "library",
+      "sha256": "cd4df4f3c7b83673d61189bf2eaebd33ca4f2853ab9772b8a25e025ef99b1e81",
+      "soname": "ld-linux-x86-64.so.2"
+    },
+    {
+      "bytes": 22736,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libgmodule-2.0.so.0.8000.0",
+      "needed": [
+        "libglib-2.0.so.0",
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/18",
+      "role": "library",
+      "sha256": "f8445c01952fd3ff0bb4f17f73be821af3e4b9b61546ff517392e9baeb8f2126",
+      "soname": "libgmodule-2.0.so.0"
+    },
+    {
+      "bytes": 113000,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libz.so.1.3",
+      "needed": [
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/19",
+      "role": "library",
+      "sha256": "86200da370f20476a2507e9097a789b5ef97269b4ca8d5e164ad82dab9d99892",
+      "soname": "libz.so.1"
+    },
+    {
+      "bytes": 309960,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libmount.so.1.1.0",
+      "needed": [
+        "libblkid.so.1",
+        "libselinux.so.1",
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/20",
+      "role": "library",
+      "sha256": "43831ab1f85948e5599c5c0295d87ad6d03e3d58b801534abdf4cd5d266388de",
+      "soname": "libmount.so.1"
+    },
+    {
+      "bytes": 47672,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libffi.so.8.1.4",
+      "needed": [
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/21",
+      "role": "library",
+      "sha256": "00f593fe192f2851b8ce23b25cec2488d769beb5a8f63e8c9e563071e1075153",
+      "soname": "libffi.so.8"
+    },
+    {
+      "bytes": 625344,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0.11.2",
+      "needed": [
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/22",
+      "role": "library",
+      "sha256": "e00576d71d81d3ba0cfa4903c835a44a8723aac96f72f79ff75200b4cff9071b",
+      "soname": "libpcre2-8.so.0"
+    },
+    {
+      "bytes": 149760,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libgpg-error.so.0.34.0",
+      "needed": [
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/23",
+      "role": "library",
+      "sha256": "6cb18a007bfcb623029f4528a36b46578fea7dc34c2b505b8e6e0d99e6348cd1",
+      "soname": "libgpg-error.so.0"
+    },
+    {
+      "bytes": 51536,
+      "interpreter": "/lib64/ld-linux-x86-64.so.2",
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libcap.so.2.66",
+      "needed": [
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/24",
+      "role": "library",
+      "sha256": "6ac6abc86ac891c6e13486470e26f1d939f47fda9e6b5d5508a7f5ec881adc84",
+      "soname": "libcap.so.2"
+    },
+    {
+      "bytes": 137440,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/liblz4.so.1.9.4",
+      "needed": [
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/25",
+      "role": "library",
+      "sha256": "40bffd0a098387368b16b992abd5f7cf43c0fa2f05cabe5a6d483719554adfda",
+      "soname": "liblz4.so.1"
+    },
+    {
+      "bytes": 202904,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/liblzma.so.5.4.5",
+      "needed": [
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/26",
+      "role": "library",
+      "sha256": "696e868dd0700a19a6d65fc01608ec2d70d3cb91f65710e89180cd2e688f30cb",
+      "soname": "liblzma.so.5"
+    },
+    {
+      "bytes": 755864,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libzstd.so.1.5.5",
+      "needed": [
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/27",
+      "role": "library",
+      "sha256": "0a2128bc10841fb29e76d08d945864dfb0b6a66da5df6df5d8299197439e54bb",
+      "soname": "libzstd.so.1"
+    },
+    {
+      "bytes": 236592,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libblkid.so.1.1.0",
+      "needed": [
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/28",
+      "role": "library",
+      "sha256": "f3d6283f6b58de134f0f13094deac9c3af6764923c62e85f08a5780ad4ebe039",
+      "soname": "libblkid.so.1"
+    },
+    {
+      "bytes": 1446024,
+      "interpreter": "/lib64/ld-linux-x86-64.so.2",
+      "mode": "0o755",
+      "nativeDestination": "/usr/bin/bash",
+      "needed": [
+        "libtinfo.so.6",
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/29",
+      "role": "identity-gate-shell",
+      "sha256": "bc5945feb8bd26203ebfafea5ce1878bb2e32cb8fb50ab7ae395cfb1e1aaaef1",
+      "soname": null
+    },
+    {
+      "bytes": 208328,
+      "interpreter": null,
+      "mode": "0o644",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libtinfo.so.6.4",
+      "needed": [
+        "libc.so.6"
+      ],
+      "path": "/inputs/native/30",
+      "role": "library",
+      "sha256": "e6089d7bb95eee5b545f3770dd69095b0bca47d26701cad145af429561d16306",
+      "soname": "libtinfo.so.6"
+    }
+  ],
+  "installedFiles": 31,
+  "installedProviderQualification": false,
+  "limitations": [
+    "DT_NEEDED frontier is DATA, not execution or dynamic-module proof",
+    "Actual newly compiled G libtest still requires inert ELF/interpreter/RPATH/NEEDED check against this closed layout",
+    "If the exact minimal fixture cannot start, preserve genuine failure and admit only evidenced necessary prerequisite; never use ambient service/module/config fallback",
+    "Tool/template/mount/credential/layout/output/finality command still requires distinct review and fresh root admission",
+    "Original gcr acquisition and offline02 failures remain failed; only separately recorded offline03 DATA succeeds",
+    "Focused01 remains failed; source-bound DATA2 belongs only to separately joined focused02 evidence. This carrier never reruns DATA2."
+  ],
+  "nativeAbsentPaths": [
+    "/tmp",
+    "/var",
+    "/root",
+    "/run",
+    "/etc/ld.so.cache",
+    "/etc/ld.so.conf",
+    "/etc/ld.so.preload",
+    "/etc/xdg",
+    "/etc/pkcs11",
+    "/usr/share/dbus-1",
+    "/usr/share/p11-kit",
+    "/usr/share/glib-2.0",
+    "/usr/lib/systemd",
+    "/usr/lib/x86_64-linux-gnu/gio",
+    "/usr/lib/x86_64-linux-gnu/pkcs11",
+    "/usr/lib/x86_64-linux-gnu/gnome-keyring"
+  ],
+  "nativeArguments": [
+    "--ignored",
+    "--exact",
+    "--test-threads=1",
+    "--color=never",
+    "--nocapture"
+  ],
+  "nativeArtifact": {
+    "copyOrExport": false,
+    "destination": "/mrk-libtest",
+    "inertReadelfRequired": true,
+    "maximumBytesExclusive": 134217728,
+    "modeTransition": "actual current executable mode to0o555 only on same held inode; size/hash/owner/linkcount/mtime unchanged; record ctime/mode transition then require exact stability",
+    "source": "one original fresh compiler-selected libtest in the same outer disposable namespace",
+    "unknownInterpreterRpathOrNeeded": "refuse; no runtime discovery/download"
+  },
+  "nativeControlledSymlinks": [
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libapparmor.so.1",
+      "to": "libapparmor.so.1.17.2"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libaudit.so.1",
+      "to": "libaudit.so.1.0.0"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libblkid.so.1",
+      "to": "libblkid.so.1.1.0"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libcap-ng.so.0",
+      "to": "libcap-ng.so.0.0.0"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libcap.so.2",
+      "to": "libcap.so.2.66"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libdbus-1.so.3",
+      "to": "libdbus-1.so.3.32.4"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libexpat.so.1",
+      "to": "libexpat.so.1.9.1"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libffi.so.8",
+      "to": "libffi.so.8.1.4"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libgcrypt.so.20",
+      "to": "libgcrypt.so.20.4.3"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libgio-2.0.so.0",
+      "to": "libgio-2.0.so.0.8000.0"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libglib-2.0.so.0",
+      "to": "libglib-2.0.so.0.8000.0"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libgmodule-2.0.so.0",
+      "to": "libgmodule-2.0.so.0.8000.0"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libgobject-2.0.so.0",
+      "to": "libgobject-2.0.so.0.8000.0"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libgpg-error.so.0",
+      "to": "libgpg-error.so.0.34.0"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/liblz4.so.1",
+      "to": "liblz4.so.1.9.4"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/liblzma.so.5",
+      "to": "liblzma.so.5.4.5"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libmount.so.1",
+      "to": "libmount.so.1.1.0"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libp11-kit.so.0",
+      "to": "libp11-kit.so.0.3.1"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0",
+      "to": "libpcre2-8.so.0.11.2"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libsystemd.so.0",
+      "to": "libsystemd.so.0.38.0"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libz.so.1",
+      "to": "libz.so.1.3"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libzstd.so.1",
+      "to": "libzstd.so.1.5.5"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libtinfo.so.6",
+      "to": "libtinfo.so.6.4"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libgck-1.so.0",
+      "to": "libgck-1.so.0.0.0"
+    },
+    {
+      "at": "/usr/lib/x86_64-linux-gnu/libgcr-base-3.so.1",
+      "to": "libgcr-base-3.so.1.0.0"
+    },
+    {
+      "at": "/lib",
+      "to": "usr/lib"
+    },
+    {
+      "at": "/lib64",
+      "to": "usr/lib64"
+    },
+    {
+      "at": "/usr/lib64/ld-linux-x86-64.so.2",
+      "to": "../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+    }
+  ],
+  "nativeEnvironment": {
+    "atLibtestExec": {},
+    "providerChildren": [
+      "HOME",
+      "XDG_RUNTIME_DIR",
+      "XDG_DATA_HOME",
+      "XDG_CONFIG_HOME",
+      "DBUS_SESSION_BUS_ADDRESS",
+      "LANG",
+      "LC_ALL"
+    ]
+  },
+  "nativeSelector": "asset_session::gnome_transport_fixture::real_gnome_session_transport_originals",
+  "nativeWholeUsrMount": false,
+  "packageBodyBytes": 1847808,
+  "persistentQualification": false,
+  "runtimeQualification": false,
+  "schema": "gnome-session-native-fixed-layout-1",
+  "sourceFreeze": {
+    "fullCarrierInventory": "recorded from actual reviewed source, not the product-only count",
+    "path": "/source-binding.json",
+    "productFiles": 964,
+    "productTree": "d8686187fd23d74dc5bd179d1b44f63f696d987b"
+  },
+  "stagedPackageMembers": [
+    {
+      "bytes": 988488,
+      "member": "usr/bin/gnome-keyring-daemon",
+      "nativeDestination": "/usr/bin/gnome-keyring-daemon",
+      "sha256": "b7b284305f8a4c4f5c5a1000ee93e22f3d7df4925dbf2a8f3f768a66b162884d",
+      "sourceTar": "/inputs/native-tars/00.tar",
+      "stagedMode": "0o555",
+      "tarBytes": 2846720,
+      "tarSha256": "68ed6f10d57a3e2fcdb02198487fe24b51d7ec1b9459eaa16e730b2bde39d200"
+    },
+    {
+      "bytes": 223368,
+      "member": "usr/lib/x86_64-linux-gnu/libgck-1.so.0.0.0",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libgck-1.so.0.0.0",
+      "sha256": "85aacf19e971c242e14d69037ea1b2e6aa762b2a329dd24a7828a36af5a11372",
+      "sourceTar": "/inputs/native-tars/01.tar",
+      "stagedMode": "0o444",
+      "tarBytes": 245760,
+      "tarSha256": "2491c5976f92e7a51279c8bd0b0d870f51ea73f664cfeda20a7c1676b01d338d"
+    },
+    {
+      "bytes": 635952,
+      "member": "usr/lib/x86_64-linux-gnu/libgcr-base-3.so.1.0.0",
+      "nativeDestination": "/usr/lib/x86_64-linux-gnu/libgcr-base-3.so.1.0.0",
+      "sha256": "1896b0b2f211694cdd8c13a07a7d527aaac6cdd5a96c8adf744f158552faa577",
+      "sourceTar": "/inputs/native-tars/02.tar",
+      "stagedMode": "0o444",
+      "tarBytes": 655360,
+      "tarSha256": "19fde0b7b895b231900ef7a70fe7249f6187faed5c32a6ba037f5754310a4a3f"
+    }
+  ],
+  "status": "FROZEN AUTHORING ONLY; no carrier execution; distinct COMMAND review and fresh root admission required",
+  "syntheticNss": {
+    "allReadOnly": true,
+    "group": "mrk-gnome-fixture:x:61000:\n",
+    "hosts": "",
+    "machineId": "11111111111111111111111111111111\n",
+    "nsswitch": "passwd: files\ngroup: files\nhosts: files\n",
+    "passwd": "mrk-gnome-fixture:x:61000:61000:MRK GNOME fixture:/mrk-gnome-fixture/home:/nonexistent\n"
+  }
+}

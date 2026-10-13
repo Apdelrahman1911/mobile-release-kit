@@ -22,7 +22,7 @@ MAX_DEPTH = 32
 MAX_VALUES = 20_000
 METHODS = frozenset({"capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
                      "github.setup.propose", "credentials.assess", "metadata.text.observe", "metadata.text.validate",
-                     "environment.requirements", "release.version.observe", "artifacts.candidate.observe"})
+                     "environment.requirements", "release.version.observe", "artifacts.candidate.observe", "release.evidence.observe"})
 _ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z", re.ASCII)
 
 

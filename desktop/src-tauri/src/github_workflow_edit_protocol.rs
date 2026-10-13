@@ -19,7 +19,7 @@ const GENERATED_LIMIT: u32 = 16 * 1024;
 pub enum WorkflowId { Preflight, Candidate, ExternalTesting, ProductionSubmit }
 const IDS: [WorkflowId; 4] = [WorkflowId::Preflight, WorkflowId::Candidate, WorkflowId::ExternalTesting, WorkflowId::ProductionSubmit];
 impl WorkflowId {
-    fn path(self) -> &'static str {
+    pub(crate) fn path(self) -> &'static str {
         match self {
             Self::Preflight => ".github/workflows/mobile-preflight.yml",
             Self::Candidate => ".github/workflows/mobile-candidate.yml",
@@ -121,13 +121,27 @@ fn observations_valid(observed: &[ObservedFile]) -> bool {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum Action { Create, Preserve }
+pub enum Action { Create, Preserve, Update }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Generated { pub content: String, pub byte_length: u32, pub sha256: String }
+impl Generated {
+    fn valid(&self) -> bool {
+        self.byte_length > 0 && self.byte_length <= GENERATED_LIMIT
+            && self.content.len() == self.byte_length as usize && hex(&self.sha256, 64)
+            && digest(self.content.as_bytes()) == self.sha256
+    }
+}
+fn present_previous<'de, D: serde::Deserializer<'de>>(value: D) -> Result<Option<Generated>, D::Error> {
+    Generated::deserialize(value).map(Some) // An explicitly supplied null is not omission.
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FileView { pub id: WorkflowId, pub path: String, pub action: Action, pub observed: Observation, pub generated: Generated }
+pub struct FileView {
+    pub id: WorkflowId, pub path: String, pub action: Action, pub observed: Observation, pub generated: Generated,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_previous")]
+    pub previous: Option<Generated>,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TemplateSet { pub core_version: String, pub resource_version: u32, pub resource_sha256: String }
@@ -140,31 +154,39 @@ pub struct PreparedView {
     pub schema_version: u32, pub files: Vec<FileView>, pub create_directories: Vec<String>,
     pub template_set: TemplateSet, pub tooling: Tooling,
 }
+pub(crate) fn tooling_coordinate_valid(repository: &str, sha: &str) -> bool {
+    plain(repository, 140) && coordinate(repository) && hex(sha, 40)
+}
+pub(crate) fn template_tooling_valid(template: &TemplateSet, tooling: &Tooling) -> bool {
+    version(&template.core_version) && template.resource_version == 1 && hex(&template.resource_sha256, 64)
+        && tooling_coordinate_valid(&tooling.repository, &tooling.sha)
+        && tooling.schema_reference == format!("https://raw.githubusercontent.com/{}/{}/schemas/project.schema.json", tooling.repository, tooling.sha)
+        && tooling.state == "format-only"
+}
 impl PreparedView {
     fn valid(&self) -> bool {
         if self.schema_version != 1 || self.files.len() != 4 || bounded(self, RESPONSE_LIMIT).is_err()
-            || !version(&self.template_set.core_version) || self.template_set.resource_version != 1
-            || !hex(&self.template_set.resource_sha256, 64) || !plain(&self.tooling.repository, 140)
-            || !coordinate(&self.tooling.repository) || !hex(&self.tooling.sha, 40)
-            || self.tooling.schema_reference != format!("https://raw.githubusercontent.com/{}/{}/schemas/project.schema.json", self.tooling.repository, self.tooling.sha)
-            || self.tooling.state != "format-only" { return false; }
+            || !template_tooling_valid(&self.template_set, &self.tooling) { return false; }
         let mut generated_total = 0u32;
+        let mut previous_total = 0u32;
         for (row, id) in self.files.iter().zip(IDS) {
             let generated = &row.generated;
-            if row.id != id || row.path != id.path() || !row.observed.valid()
-                || generated.byte_length == 0 || generated.byte_length > GENERATED_LIMIT
-                || generated.content.len() != generated.byte_length as usize || !hex(&generated.sha256, 64)
-                || digest(generated.content.as_bytes()) != generated.sha256 { return false; }
+            if row.id != id || row.path != id.path() || !row.observed.valid() || !generated.valid() { return false; }
             generated_total += generated.byte_length;
-            match (&row.action, &row.observed) {
-                (Action::Create, Observation::Absent {}) => {},
-                (Action::Preserve, Observation::Present { byte_length, sha256 })
+            match (&row.action, &row.observed, &row.previous) {
+                (Action::Create, Observation::Absent {}, None) => {},
+                (Action::Preserve, Observation::Present { byte_length, sha256 }, None)
                     if *byte_length == generated.byte_length && *sha256 == generated.sha256 => {},
+                (Action::Update, Observation::Present { byte_length, sha256 }, Some(previous))
+                    if previous.valid() && *byte_length == previous.byte_length && *sha256 == previous.sha256
+                        && previous.content != generated.content && previous.sha256 != generated.sha256 => {
+                            previous_total += previous.byte_length;
+                        },
                 _ => return false,
             }
         }
         let directories: Vec<&str> = self.create_directories.iter().map(String::as_str).collect();
-        generated_total <= 64 * 1024
+        generated_total <= 64 * 1024 && previous_total <= 64 * 1024
             && matches!(directories.as_slice(), [] | [".github/workflows"] | [".github", ".github/workflows"])
             && (directories.is_empty() || self.files.iter().all(|f| f.action == Action::Create))
     }
@@ -197,19 +219,153 @@ impl ConflictView {
     }
 }
 
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryAction { Rollback, CommittedCleanup, RolledBackCleanup, PreparingCleanup }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryState { Idle, Conflict, Recoverable }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryFileAction { Preserve, Remove, Restore }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RecoverySummary { pub size: u32, pub mode: u32, pub sha256: String }
+impl RecoverySummary {
+    fn valid(&self, staged: bool) -> bool {
+        self.size <= if staged { GENERATED_LIMIT } else { OBSERVED_LIMIT }
+            && (!staged || self.size > 0) && self.mode <= 0o7777 && hex(&self.sha256, 64)
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryFile {
+    pub id: WorkflowId, pub path: String, pub action: RecoveryFileAction,
+    pub before: Option<RecoverySummary>, pub after: Option<RecoverySummary>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryCleanup { pub file_count: u32, pub directory_count: u32, pub scope: String }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryView {
+    pub schema_version: u32, pub kind: String, pub state: RecoveryState,
+    pub action: Option<RecoveryAction>, pub transaction_id: Option<String>,
+    pub files: Vec<RecoveryFile>, pub private_cleanup: RecoveryCleanup,
+}
+impl RecoveryView {
+    pub(crate) fn valid(&self) -> bool {
+        if self.schema_version != 1 || self.kind != "recovery" || bounded(self, 4096).is_err()
+            || self.private_cleanup.scope != "inspected-workflow-journal-only"
+            || self.private_cleanup.file_count > 16 || self.private_cleanup.directory_count > 2
+            || self.private_cleanup.file_count + self.private_cleanup.directory_count > 16 { return false; }
+        if self.state != RecoveryState::Recoverable {
+            return self.action.is_none() && self.transaction_id.is_none() && self.files.is_empty()
+                && self.private_cleanup.file_count == 0 && self.private_cleanup.directory_count == 0;
+        }
+        if self.action.is_none() || !self.transaction_id.as_deref().is_some_and(token)
+            || self.files.len() != 4 || self.private_cleanup.file_count < 2 { return false; }
+        self.files.iter().zip(IDS).all(|(file, id)| {
+            let action = if self.action != Some(RecoveryAction::Rollback) || file.after.is_none() { RecoveryFileAction::Preserve }
+                else if file.before.is_none() { RecoveryFileAction::Remove } else { RecoveryFileAction::Restore };
+            file.id == id && file.path == id.path() && file.action == action
+                && file.before.as_ref().is_none_or(|s| s.valid(false))
+                && file.after.as_ref().is_none_or(|s| s.valid(true))
+                && (file.before.is_some() || file.after.is_some())
+                && match (&file.before, &file.after) { (Some(before), Some(after)) => before.mode == after.mode, _ => true }
+        })
+    }
+    pub(crate) fn expected_success(&self) -> Option<(Effect, Journal)> {
+        if !self.valid() || self.state != RecoveryState::Recoverable { return None; }
+        let effect = match self.action? {
+            RecoveryAction::CommittedCleanup => Effect::Committed,
+            RecoveryAction::Rollback | RecoveryAction::RolledBackCleanup => Effect::RolledBack,
+            RecoveryAction::PreparingCleanup => Effect::NotStarted,
+        };
+        Some((effect, Journal::Clean))
+    }
+}
+fn recovery_shape(value: &Value) -> bool {
+    keys(value, &["schemaVersion", "kind", "state", "action", "transactionId", "files", "privateCleanup"])
+        && keys(&value["privateCleanup"], &["fileCount", "directoryCount", "scope"])
+        && value["files"].as_array().is_some_and(|files| files.iter().all(|file|
+            keys(file, &["id", "path", "action", "before", "after"])
+                && ["before", "after"].into_iter().all(|key| file[key].is_null()
+                    || keys(&file[key], &["size", "mode", "sha256"]))))
+}
+#[derive(Clone, Serialize)]
+pub struct RecoveryCheckout { pub revision: String, pub view: RecoveryView }
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryPrepared { pub revision: String, pub plan_token: String, pub view: RecoveryView }
+#[derive(Clone, Default, Serialize)]
+pub struct RecoveryDetails { pub checkout: Option<RecoveryCheckout>, pub prepared: Option<RecoveryPrepared> }
+impl RecoveryDetails {
+    pub(crate) fn terminal_admissible(&self, applied: bool, core: &CoreEditOutcome) -> bool {
+        if core.effect == Effect::Unchanged || applied && self.prepared.is_none()
+            || !applied && core.journal == Journal::Clean { return false; }
+        let view = self.checkout.as_ref().map(|c| &c.view);
+        if let Some(view) = view {
+            let effect_valid = match view.action {
+                Some(RecoveryAction::CommittedCleanup) => core.effect == Effect::Committed,
+                Some(RecoveryAction::RolledBackCleanup) => core.effect == Effect::RolledBack,
+                Some(RecoveryAction::PreparingCleanup) => core.effect == Effect::NotStarted,
+                Some(RecoveryAction::Rollback) => core.effect == Effect::NotStarted
+                    || applied && matches!(core.effect, Effect::RolledBack | Effect::Unknown),
+                None => core.effect == Effect::NotStarted,
+            };
+            if !effect_valid || view.state == RecoveryState::Recoverable && core.journal == Journal::NotCreated { return false; }
+        }
+        if applied && core.reason == CoreReason::None {
+            return self.prepared.as_ref().and_then(|p| p.view.expected_success())
+                .is_some_and(|(effect, journal)| core.effect == effect && core.journal == journal && core.resources == ResourceState::Settled);
+        }
+        true
+    }
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryOpened { pub revision: String, pub recovery: RecoveryView, pub scope_resources: ResourceState }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryPreparedReply { pub revision: String, pub plan_token: String, pub recovery: RecoveryView, pub scope_resources: ResourceState }
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecoveryIntent { Recover }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrepareWorkflowRecovery { pub session_id: String, pub revision: String, pub intent: RecoveryIntent }
+
 #[derive(Clone, Serialize)]
 pub struct Checkout { pub revision: String, pub observed: Vec<ObservedFile> }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Prepared { pub revision: String, pub plan_token: String, pub draft_revision: u32, pub baseline_generation: u32, pub view: PreparedView }
 #[derive(Clone, Default)]
-pub(crate) struct Details { pub(crate) checkout: Option<Checkout>, pub(crate) prepared: Option<Prepared>, pub(crate) conflict: Option<ConflictView> }
+pub(crate) struct Details {
+    pub(crate) checkout: Option<Checkout>, pub(crate) prepared: Option<Prepared>, pub(crate) conflict: Option<ConflictView>,
+    pub(crate) recovery: Option<RecoveryDetails>,
+}
+impl Details {
+    pub(crate) fn recovery() -> Self { Self { recovery: Some(RecoveryDetails::default()), ..Self::default() } }
+    pub(crate) fn revision(&self) -> Option<&str> {
+        if let Some(recovery) = &self.recovery { recovery.checkout.as_ref().map(|c| c.revision.as_str()) }
+        else { self.checkout.as_ref().map(|c| c.revision.as_str()) }
+    }
+    pub(crate) fn plan_token(&self) -> Option<&str> {
+        if let Some(recovery) = &self.recovery { recovery.prepared.as_ref().map(|p| p.plan_token.as_str()) }
+        else { self.prepared.as_ref().map(|p| p.plan_token.as_str()) }
+    }
+}
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Projection {
     pub domain: &'static str, pub project_id: String, pub session_id: String, pub owner_generation: String,
     pub phase: Phase, pub review_remaining_ms: u32, pub checkout: Option<Checkout>, pub prepared: Option<Prepared>,
     pub conflict: Option<ConflictView>, pub apply_submitted: bool, pub core_outcome: Option<CoreEditOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<RecoveryDetails>,
     pub native_reason: NativeEditReason, pub native_finality: NativeFinality, pub late_settled: bool,
 }
 #[derive(Clone, Serialize)]
@@ -251,14 +407,20 @@ impl TerminalReply {
 pub(crate) fn request(session: &str, seq: u32, op: &str, params: Value) -> Result<Vec<u8>, BridgeError> {
     if !token(session) || seq > 2 { return Err(BridgeError::invalid()); }
     let legal = match (seq, op) {
-        (0, "open") => keys(&params, &["root", "registeredIdentity"]) && params["root"].as_str().is_some_and(|s| s.len() <= 4096)
+        (0, "open") => (keys(&params, &["root", "registeredIdentity"])
+            || keys(&params, &["root", "registeredIdentity", "intent"]) && params["intent"] == "recover")
+            && params["root"].as_str().is_some_and(|s| s.len() <= 4096)
             && serde_json::from_value::<RegisteredIdentity>(params["registeredIdentity"].clone()).is_ok_and(|id| id.valid()),
+        (1, "prepare") if params.get("intent").is_some() => keys(&params, &["revision", "intent"])
+            && params["intent"] == "recover" && params["revision"].as_str().is_some_and(token),
         (1, "prepare") => keys(&params, &["revision", "draft", "toolingRepository", "toolingSha"])
             && params["revision"].as_str().is_some_and(token) && params["draft"].is_object()
             && params["toolingRepository"].as_str().is_some_and(|s| s.len() <= 140)
             && params["toolingSha"].as_str().is_some_and(|s| s.len() <= 40)
             && value_bounds(&params["draft"], 28, 512 * 1024).is_ok(),
-        (2, "apply") => keys(&params, &["planToken"]) && params["planToken"].as_str().is_some_and(token),
+        (2, "apply") => (keys(&params, &["planToken"])
+            || keys(&params, &["planToken", "intent"]) && params["intent"] == "recover")
+            && params["planToken"].as_str().is_some_and(token),
         (1 | 2, "discard") => keys(&params, &[]),
         _ => false,
     };
@@ -278,11 +440,25 @@ pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeEr
     let raw = &value["result"];
     value_bounds(raw, 16, RESPONSE_LIMIT).map_err(|_| BridgeError::protocol())?;
     match value["kind"].as_str() {
+        Some("opened") if seq == 0 && raw.get("recovery").is_some() => {
+            if !keys(raw, &["revision", "recovery", "scopeResources"]) || !recovery_shape(&raw["recovery"]) { return Err(BridgeError::protocol()); }
+            let result: RecoveryOpened = serde_json::from_value(raw.clone()).map_err(|_| BridgeError::protocol())?;
+            if !token(&result.revision) || result.scope_resources != ResourceState::Settled || !result.recovery.valid() { return Err(BridgeError::protocol()); }
+            Ok(ChildFrame::WorkflowRecoveryOpened(result))
+        }
         Some("opened") if seq == 0 => {
             if !keys(raw, &["revision", "observed", "scopeResources"]) { return Err(BridgeError::protocol()); }
             let result: Opened = serde_json::from_value(raw.clone()).map_err(|_| BridgeError::protocol())?;
             if !token(&result.revision) || result.scope_resources != ResourceState::Settled || !observations_valid(&result.observed) { return Err(BridgeError::protocol()); }
             Ok(ChildFrame::WorkflowOpened(result))
+        }
+        Some("prepared") if seq == 1 && raw.get("recovery").is_some() => {
+            if !keys(raw, &["revision", "planToken", "recovery", "scopeResources"]) || !recovery_shape(&raw["recovery"]) { return Err(BridgeError::protocol()); }
+            let result: RecoveryPreparedReply = serde_json::from_value(raw.clone()).map_err(|_| BridgeError::protocol())?;
+            if !token(&result.revision) || !token(&result.plan_token) || result.revision == result.plan_token
+                || result.scope_resources != ResourceState::Settled || !result.recovery.valid()
+                || result.recovery.state != RecoveryState::Recoverable { return Err(BridgeError::protocol()); }
+            Ok(ChildFrame::WorkflowRecoveryPrepared(result))
         }
         Some("prepared") if seq == 1 => {
             if !keys(raw, &["revision", "planToken", "view", "scopeResources"]) { return Err(BridgeError::protocol()); }
@@ -432,6 +608,45 @@ mod tests {
         assert!(serde_json::from_value::<ObservedFile>(bad).is_err(), "literal mutation observed-file-present-extra-unrelated");
     }
     #[test]
+    fn canonical_update_view_requires_complete_matching_previous_content() {
+        let mut updated = view(true);
+        let content = "name: previous é\n";
+        let previous = json!({"content":content,"byteLength":content.len(),"sha256":digest(content.as_bytes())});
+        updated["files"][0]["action"] = json!("update");
+        updated["files"][0]["previous"] = previous.clone();
+        updated["files"][0]["observed"] = json!({"state":"present","byteLength":content.len(),"sha256":previous["sha256"]});
+        assert!(decode(&prepared(updated.clone()),SESSION).is_ok());
+        let decoded: PreparedView = serde_json::from_value(updated.clone()).unwrap();
+        assert!(serde_json::to_value(decoded).unwrap() == updated);
+        for case in ["missing", "null", "create", "preserve", "observation", "hash", "length", "extra", "same", "oversize"] {
+            let mut bad = updated.clone();
+            let file = &mut bad["files"][0];
+            match case {
+                "missing" => { file.as_object_mut().unwrap().remove("previous"); },
+                "null" => file["previous"] = Value::Null,
+                "create" | "preserve" => file["action"] = json!(case),
+                "observation" => file["observed"]["sha256"] = json!("f".repeat(64)),
+                "hash" => file["previous"]["sha256"] = json!("f".repeat(64)),
+                "length" => file["previous"]["byteLength"] = json!(true),
+                "extra" => file["previous"]["unrelated"] = json!(true),
+                "same" => {
+                    file["previous"] = file["generated"].clone();
+                    file["observed"]["byteLength"] = file["generated"]["byteLength"].clone();
+                    file["observed"]["sha256"] = file["generated"]["sha256"].clone();
+                },
+                "oversize" => file["previous"]["content"] = json!("x".repeat(16 * 1024 + 1)),
+                _ => unreachable!(),
+            }
+            assert!(decode(&prepared(bad),SESSION).is_err(), "update mutation {case}");
+        }
+        for preserve in [false,true] {
+            for previous in [Value::Null,previous.clone()] {
+                let mut bad = view(preserve); bad["files"][0]["previous"] = previous;
+                assert!(decode(&prepared(bad),SESSION).is_err(), "previous is update-only");
+            }
+        }
+    }
+    #[test]
     fn missing_directories_and_template_tooling_display_are_closed_data() {
         for directories in [json!([]),json!([".github/workflows"]),json!([".github",".github/workflows"])] {
             let mut candidate = view(false); candidate["createDirectories"] = directories;
@@ -494,5 +709,92 @@ mod tests {
         let oversized = frame(1,"terminal",json!({"kind":"outcome","planToken":null,"effect":"not_started",
             "journal":"not_created","resources":"settled","reason":"x".repeat(edit::TERMINAL_LIMIT)}));
         assert!(decode(&oversized,SESSION).is_err());
+    }
+
+    fn recovery_view(action: &str) -> Value {
+        let files: Vec<Value> = IDS.into_iter().map(|id| json!({"id":id,"path":id.path(),
+            "action":if action == "rollback" { "remove" } else { "preserve" },
+            "before":null,"after":{"size":1,"mode":0o644,"sha256":"a".repeat(64)}})).collect();
+        json!({"schemaVersion":1,"kind":"recovery","state":"recoverable","action":action,
+            "transactionId":"c".repeat(32),"files":files,
+            "privateCleanup":{"fileCount":6,"directoryCount":1,"scope":"inspected-workflow-journal-only"}})
+    }
+    fn recovery_opened(view: Value) -> Vec<u8> {
+        frame(0,"opened",json!({"revision":REVISION,"recovery":view,"scopeResources":"settled"}))
+    }
+    #[test]
+    fn recovery_uses_distinct_frames_and_four_fixed_non_installation_success_actions() {
+        // Pure wire DATA, not a claim about an original native owner/close.
+        for (action,effect) in [("rollback",Effect::RolledBack),("committed_cleanup",Effect::Committed),
+            ("rolled_back_cleanup",Effect::RolledBack),("preparing_cleanup",Effect::NotStarted)] {
+            let view = recovery_view(action);
+            assert!(matches!(decode(&recovery_opened(view.clone()),SESSION),Ok(ChildFrame::WorkflowRecoveryOpened(_))));
+            let prepared = frame(1,"prepared",json!({"revision":REVISION,"planToken":"b".repeat(32),
+                "recovery":view.clone(),"scopeResources":"settled"}));
+            assert!(matches!(decode(&prepared,SESSION),Ok(ChildFrame::WorkflowRecoveryPrepared(_))));
+            let typed: RecoveryView = serde_json::from_value(view).unwrap();
+            assert_eq!(typed.expected_success(),Some((effect,Journal::Clean)));
+            assert!(edit::decode(&prepared,SESSION).is_err());
+        }
+        for state in ["idle","conflict"] {
+            let view = json!({"schemaVersion":1,"kind":"recovery","state":state,"action":null,
+                "transactionId":null,"files":[],
+                "privateCleanup":{"fileCount":0,"directoryCount":0,"scope":"inspected-workflow-journal-only"}});
+            assert!(matches!(decode(&recovery_opened(view.clone()),SESSION),Ok(ChildFrame::WorkflowRecoveryOpened(_))));
+            assert!(decode(&frame(1,"prepared",json!({"revision":REVISION,"planToken":"b".repeat(32),
+                "recovery":view.clone(),"scopeResources":"settled"})),SESSION).is_err());
+            for missing in ["action","transactionId"] {
+                let mut bad = view.clone(); bad.as_object_mut().unwrap().remove(missing);
+                assert!(decode(&recovery_opened(bad),SESSION).is_err());
+            }
+        }
+    }
+    #[test]
+    fn recovery_view_requires_exact_roster_nullable_fields_and_bounded_summaries() {
+        let view = recovery_view("rollback");
+        for (key,value) in [("id",json!("candidate")),("path",json!("/private/user.yml")),
+            ("action",json!("restore")),("content",json!("private contents")),("before",json!({}))] {
+            let mut bad = view.clone(); bad["files"][0][key] = value;
+            assert!(decode(&recovery_opened(bad),SESSION).is_err());
+        }
+        for (key,value) in [("size",json!(0)),("size",json!(GENERATED_LIMIT+1)),("size",json!(true)),
+            ("mode",json!(0o100644)),("sha256",json!("A".repeat(64))),("content",json!("private contents"))] {
+            let mut bad = view.clone(); bad["files"][0]["after"][key] = value;
+            assert!(decode(&recovery_opened(bad),SESSION).is_err());
+        }
+        for key in ["before","after"] {
+            let mut bad = view.clone(); bad["files"][0].as_object_mut().unwrap().remove(key);
+            assert!(decode(&recovery_opened(bad),SESSION).is_err());
+        }
+        for value in [json!(17),json!(u32::MAX),json!(-1),json!(true)] {
+            let mut bad = view.clone(); bad["privateCleanup"]["fileCount"] = value;
+            assert!(decode(&recovery_opened(bad),SESSION).is_err());
+        }
+        let mut bad = view.clone(); bad["files"].as_array_mut().unwrap().reverse();
+        assert!(decode(&recovery_opened(bad),SESSION).is_err());
+        let mut bad = view.clone(); bad["files"].as_array_mut().unwrap().pop();
+        assert!(decode(&recovery_opened(bad),SESSION).is_err());
+        let mut bad = view; bad["files"][0]["before"] = json!({"size":1,"mode":0o600,"sha256":"b".repeat(64)});
+        bad["files"][0]["action"] = json!("restore");
+        assert!(decode(&recovery_opened(bad),SESSION).is_err()); // Before/after modes cannot disagree.
+    }
+    #[test]
+    fn recovery_private_requests_never_accept_draft_pin_or_extra_file_authority() {
+        for (seq,op,params) in [
+            (0,"open",json!({"root":"/inert/project","registeredIdentity":identity(),"intent":"recover"})),
+            (1,"prepare",json!({"revision":REVISION,"intent":"recover"})),
+            (2,"apply",json!({"planToken":"b".repeat(32),"intent":"recover"})),
+        ] {
+            assert!(request(SESSION,seq,op,params.clone()).is_ok());
+            assert!(edit::request(SESSION,seq,op,params.clone()).is_err());
+            for intent in [json!("edit"),json!("rollback"),json!("Recover"),json!(true),Value::Null] {
+                let mut bad = params.clone(); bad["intent"] = intent;
+                assert!(request(SESSION,seq,op,bad).is_err());
+            }
+            for key in ["draft","toolingRepository","toolingSha","files","path","force","transactionId"] {
+                let mut bad = params.clone(); bad[key] = Value::Null;
+                assert!(request(SESSION,seq,op,bad).is_err());
+            }
+        }
     }
 }

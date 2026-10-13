@@ -3,7 +3,7 @@
 //! This is NOT executable runtime qualification. In particular, a compiled
 //! manifest, equal hashes, and retained descriptors cannot prove the external
 //! fresh-inode installer / immutable published-version / interpreter-loader
-//! contracts. The fixed passive and configuration selectors still require
+//! contracts. The fixed passive and domain-sealed edit selectors still require
 //! those independently established contracts; other production profiles stay closed.
 //!
 //! The Android retained path keeps the SAME originals until its saved-command
@@ -42,6 +42,9 @@ pub(crate) const ENTRY_COUNT: usize = 8192;
 pub(crate) const TREE_DEPTH: usize = 16;
 const RECORD_COUNT: usize = ENTRY_COUNT + 64;
 const LIVE_COUNT: usize = 48;
+const ANDROID_LIVE_COUNT: usize = 32_768;
+const ANDROID_TOOL_RECORD_COUNT: usize = ANDROID_LIVE_COUNT + ANDROID_CONTROL_SLOTS;
+const ANDROID_NOFILE_FLOOR: u64 = 65_536;
 const BLOCK_SIZE: usize = 64 * 1024;
 const PREFIX_COUNT: usize = 7;
 const RETAINED_COUNT: usize = PREFIX_COUNT + 2;
@@ -64,7 +67,85 @@ pub(crate) enum AdmissionFailure {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase { New, Inspecting, InspectedOnly, PassivePreparing, PassivePrepared, ConfigurationPreparing, ConfigurationPrepared,
+    GitHubWorkflowPreparing, GitHubWorkflowPrepared, GitHubReadOnlyPreparing, GitHubReadOnlyPrepared, GitHubPreflightPreparing, GitHubPreflightPrepared, GitHubReleasePreparing, GitHubReleasePrepared, MetadataTextPreparing, MetadataTextPrepared, ReleaseVersionPreparing, ReleaseVersionPrepared, MetadataImagesPreparing, MetadataImagesPrepared,
+    EnvironmentDiagnosticsPreparing, EnvironmentDiagnosticsPrepared, OfflinePreflightPreparing, OfflinePreflightPrepared, ProjectRecoveryPreparing, ProjectRecoveryPrepared,
     Retained, Auditing, Refused, Settling, Settled, Unknown }
+
+// Closed identity for edit, finite command and session-only GitHub domains, never a
+// renderer argument or extensible runtime interface. Keep the existing edit
+// facades stable; the slot, original ledger and sealed profile must agree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InstalledEditDomain { Configuration, GitHubWorkflows, GitHubReadOnly, GitHubPreflight, GitHubRelease, MetadataText, ReleaseVersion, MetadataImages, EnvironmentDiagnostics, OfflinePreflight, ProjectRecovery }
+impl InstalledEditDomain {
+    fn preparing(self) -> Phase { match self {
+        Self::Configuration => Phase::ConfigurationPreparing, Self::GitHubWorkflows => Phase::GitHubWorkflowPreparing,
+        Self::GitHubReadOnly => Phase::GitHubReadOnlyPreparing,
+        Self::GitHubPreflight => Phase::GitHubPreflightPreparing,
+        Self::GitHubRelease => Phase::GitHubReleasePreparing,
+        Self::MetadataText => Phase::MetadataTextPreparing,
+        Self::ReleaseVersion => Phase::ReleaseVersionPreparing,
+        Self::MetadataImages => Phase::MetadataImagesPreparing,
+        Self::EnvironmentDiagnostics => Phase::EnvironmentDiagnosticsPreparing, Self::OfflinePreflight => Phase::OfflinePreflightPreparing, Self::ProjectRecovery => Phase::ProjectRecoveryPreparing,
+    } }
+    fn prepared(self) -> Phase { match self {
+        Self::Configuration => Phase::ConfigurationPrepared, Self::GitHubWorkflows => Phase::GitHubWorkflowPrepared,
+        Self::GitHubReadOnly => Phase::GitHubReadOnlyPrepared,
+        Self::GitHubPreflight => Phase::GitHubPreflightPrepared,
+        Self::GitHubRelease => Phase::GitHubReleasePrepared,
+        Self::MetadataText => Phase::MetadataTextPrepared,
+        Self::ReleaseVersion => Phase::ReleaseVersionPrepared,
+        Self::MetadataImages => Phase::MetadataImagesPrepared,
+        Self::EnvironmentDiagnostics => Phase::EnvironmentDiagnosticsPrepared, Self::OfflinePreflight => Phase::OfflinePreflightPrepared, Self::ProjectRecovery => Phase::ProjectRecoveryPrepared,
+    } }
+}
+enum InstalledEditProfile {
+    Configuration(crate::runtime::ConfigurationInstalledProfile),
+    GitHubWorkflows(crate::runtime::GitHubWorkflowInstalledProfile),
+    GitHubReadOnly(crate::runtime::GitHubReadOnlyInstalledProfile),
+    GitHubPreflight(crate::runtime::GitHubPreflightInstalledProfile),
+    GitHubRelease(crate::runtime::GitHubReleaseInstalledProfile),
+    MetadataText(crate::runtime::MetadataTextInstalledProfile),
+    ReleaseVersion(crate::runtime::ReleaseVersionInstalledProfile),
+    MetadataImages(crate::runtime::MetadataImagesInstalledProfile),
+    EnvironmentDiagnostics(crate::runtime::EnvironmentDiagnosticsInstalledProfile),
+    OfflinePreflight(crate::runtime::OfflinePreflightInstalledProfile),
+    ProjectRecovery(crate::runtime::ProjectRecoveryInstalledProfile),
+}
+impl InstalledEditProfile {
+    fn domain(&self) -> InstalledEditDomain { match self {
+        Self::Configuration(_) => InstalledEditDomain::Configuration, Self::GitHubWorkflows(_) => InstalledEditDomain::GitHubWorkflows,
+        Self::GitHubReadOnly(_) => InstalledEditDomain::GitHubReadOnly,
+        Self::GitHubPreflight(_) => InstalledEditDomain::GitHubPreflight,
+        Self::GitHubRelease(_) => InstalledEditDomain::GitHubRelease,
+        Self::MetadataText(_) => InstalledEditDomain::MetadataText,
+        Self::ReleaseVersion(_) => InstalledEditDomain::ReleaseVersion,
+        Self::MetadataImages(_) => InstalledEditDomain::MetadataImages,
+        Self::EnvironmentDiagnostics(_) => InstalledEditDomain::EnvironmentDiagnostics, Self::OfflinePreflight(_) => InstalledEditDomain::OfflinePreflight, Self::ProjectRecovery(_) => InstalledEditDomain::ProjectRecovery,
+    } }
+    fn selection(&self) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> { match self {
+        Self::Configuration(profile) => profile.selection(), Self::GitHubWorkflows(profile) => profile.selection(),
+        Self::GitHubReadOnly(profile) => profile.selection(),
+        Self::GitHubPreflight(profile) => profile.selection(),
+        Self::GitHubRelease(profile) => profile.selection(),
+        Self::MetadataText(profile) => profile.selection(),
+        Self::ReleaseVersion(profile) => profile.selection(),
+        Self::MetadataImages(profile) => profile.selection(),
+        Self::EnvironmentDiagnostics(profile) => profile.selection(), Self::OfflinePreflight(profile) => profile.selection(), Self::ProjectRecovery(profile) => profile.selection(),
+    } }
+    fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool { match self {
+        Self::Configuration(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::GitHubWorkflows(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::GitHubReadOnly(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::GitHubPreflight(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::GitHubRelease(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::MetadataText(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::ReleaseVersion(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::MetadataImages(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::EnvironmentDiagnostics(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::OfflinePreflight(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::ProjectRecovery(profile) => profile.accepts_platform(sysname, machine, release),
+    } }
+}
 
 #[must_use]
 #[derive(Debug)]
@@ -96,6 +177,16 @@ impl CustodyObservation {
             Phase::New => "new", Phase::Inspecting => "inspecting",
             Phase::PassivePreparing => "passivePreparing", Phase::PassivePrepared => "passivePrepared",
             Phase::ConfigurationPreparing => "configurationPreparing", Phase::ConfigurationPrepared => "configurationPrepared",
+            Phase::GitHubWorkflowPreparing => "githubWorkflowPreparing", Phase::GitHubWorkflowPrepared => "githubWorkflowPrepared",
+            Phase::GitHubReadOnlyPreparing => "githubReadOnlyPreparing", Phase::GitHubReadOnlyPrepared => "githubReadOnlyPrepared",
+            Phase::GitHubPreflightPreparing => "githubPreflightPreparing", Phase::GitHubPreflightPrepared => "githubPreflightPrepared",
+            Phase::GitHubReleasePreparing => "githubReleasePreparing", Phase::GitHubReleasePrepared => "githubReleasePrepared",
+            Phase::MetadataTextPreparing => "metadataTextPreparing", Phase::MetadataTextPrepared => "metadataTextPrepared",
+            Phase::ReleaseVersionPreparing => "releaseVersionPreparing", Phase::ReleaseVersionPrepared => "releaseVersionPrepared",
+            Phase::MetadataImagesPreparing => "metadataImagesPreparing", Phase::MetadataImagesPrepared => "metadataImagesPrepared",
+            Phase::EnvironmentDiagnosticsPreparing => "environmentDiagnosticsPreparing", Phase::EnvironmentDiagnosticsPrepared => "environmentDiagnosticsPrepared",
+            Phase::OfflinePreflightPreparing => "offlinePreflightPreparing", Phase::OfflinePreflightPrepared => "offlinePreflightPrepared",
+            Phase::ProjectRecoveryPreparing => "projectRecoveryPreparing", Phase::ProjectRecoveryPrepared => "projectRecoveryPrepared",
             Phase::InspectedOnly => "inspectedOnly", Phase::Retained => "retained", Phase::Auditing => "auditing", Phase::Refused => "refused",
             Phase::Settling => "settling", Phase::Settled => "settled", Phase::Unknown => "unknown",
         }
@@ -168,6 +259,150 @@ struct FdRecord {
     charged: bool,
 }
 
+// Native-fixture diagnostics only. These closed-record tuples are historical
+// DATA, never a live payload pin, current-content proof or execution capability.
+#[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+mod historical_payload {
+    use super::{Acquisition, CloseReceipt, FdRecord, Phase, Purpose, SlotId};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Role { Python, Ssl, Crypto }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Relation { Zero, Ambiguous, PythonInode, SslInode, CryptoInode, MultipleInodes, DeviceOnly, Other }
+    #[derive(Clone, Copy)]
+    pub(crate) struct Snapshot { tuples: [(u64, u64, u64); 3] }
+    impl Snapshot {
+        pub(crate) fn matching_role(self, major: u64, minor: u64, inode: u64) -> Option<Role> {
+            if inode == 0 { return None; }
+            let mut found = None;
+            for (tuple, role) in self.tuples.into_iter().zip([Role::Python, Role::Ssl, Role::Crypto]) {
+                if tuple == (major, minor, inode) {
+                    if found.is_some() { return None; }
+                    found = Some(role);
+                }
+            }
+            found
+        }
+        pub(crate) fn coordinate_relation(self, major: u64, minor: u64, inode: u64) -> Option<Relation> {
+            // Numeric resemblance of closed records only, never live identity.
+            // Unique exact correspondence keeps the older role diagnostic.
+            if inode == 0 { return Some(Relation::Zero); }
+            let exact = self.tuples.iter().filter(|tuple| **tuple == (major, minor, inode)).count();
+            if exact == 1 { return None; }
+            if exact > 1 { return Some(Relation::Ambiguous); }
+            Some(match self.tuples.map(|tuple| tuple.2 == inode) {
+                [true, false, false] => Relation::PythonInode,
+                [false, true, false] => Relation::SslInode,
+                [false, false, true] => Relation::CryptoInode,
+                [false, false, false] => {
+                    if self.tuples.into_iter().any(|(old_major, old_minor, _)| (old_major, old_minor) == (major, minor)) {
+                        Relation::DeviceOnly
+                    } else { Relation::Other }
+                },
+                _ => Relation::MultipleInodes,
+            })
+        }
+        #[cfg(all(debug_assertions, any(all(feature = "desktop-shell", feature = "custom-protocol"),
+            all(not(feature = "desktop-shell"), not(feature = "custom-protocol")))))]
+        pub(crate) fn for_contract(tuples: [(u64, u64, u64); 3]) -> Self { Self { tuples } }
+    }
+    pub(super) fn slot_index(relative: &str) -> Option<usize> {
+        match relative {
+            "python/bin/python3" => Some(0), "python/lib/libssl.so.3" => Some(1),
+            "python/lib/libcrypto.so.3" => Some(2), _ => None,
+        }
+    }
+    pub(super) fn claim_ready(phase: Phase, transferred: bool, originals_ready: bool, claimed: bool, refused: bool) -> bool {
+        phase == Phase::PassivePrepared && transferred && originals_ready && claimed && !refused
+    }
+    pub(super) fn from_records(records: &[FdRecord], slots: [Option<SlotId>; 3]) -> Option<Snapshot> {
+        let slots = [slots[0]?, slots[1]?, slots[2]?];
+        let mut tuples = [(0, 0, 0); 3];
+        for (index, slot) in slots.iter().copied().enumerate() {
+            if slots[..index].contains(&slot) { return None; }
+            let record = records.get(slot.0)?;
+            if record.sequence != slot || record.purpose != Purpose::Payload || record.acquisition != Acquisition::Original
+                || record.original.is_some() || record.close != CloseReceipt::Positive { return None; }
+            let identity = record.identity?;
+            tuples[index] = (nix::sys::stat::major(identity.device), nix::sys::stat::minor(identity.device), identity.inode);
+        }
+        Some(Snapshot { tuples })
+    }
+
+    pub(crate) fn assert_contract() {
+        // Inert tombstone DATA only: no OwnedFd, registered positive runtime,
+        // actual close, native observation or capability is manufactured here.
+        fn records() -> [FdRecord; 3] {
+            std::array::from_fn(|index| FdRecord {
+                sequence: SlotId(index), purpose: Purpose::Payload, acquisition: Acquisition::Original,
+                original: None, identity: Some(super::Identity { device: 1, inode: 11 + index as u64,
+                    mode: 0o100644, uid: 0, gid: 0, links: 1, size: 10, mtime: 1, mtime_nsec: 0, ctime: 1, ctime_nsec: 0 }),
+                close: CloseReceipt::Positive, parent: None, digest: None, charged: false,
+            })
+        }
+        let selected = [Some(SlotId(0)), Some(SlotId(1)), Some(SlotId(2))];
+        for (relative, index, role) in [("python/bin/python3", 0, Role::Python),
+            ("python/lib/libssl.so.3", 1, Role::Ssl), ("python/lib/libcrypto.so.3", 2, Role::Crypto)] {
+            assert_eq!(slot_index(relative), Some(index));
+            assert_eq!(from_records(&records(), selected).unwrap().matching_role(0, 1, 11 + index as u64), Some(role));
+        }
+        for path in ["/python/bin/python3", "python/bin/python3 ", "prefix/python/bin/python3", "python/lib/libssl.so.3.extra"] {
+            assert_eq!(slot_index(path), None);
+        }
+        for missing in [None, Some(SlotId(1)), Some(SlotId(3))] {
+            assert!(from_records(&records(), [missing, selected[1], selected[2]]).is_none());
+        }
+        for close in [CloseReceipt::Unattempted, CloseReceipt::Attempted, CloseReceipt::Unknown] {
+            let mut rows = records(); rows[0].close = close; assert!(from_records(&rows, selected).is_none());
+        }
+        for change in 0..4 {
+            let mut rows = records();
+            match change { 0 => rows[0].sequence = SlotId(1), 1 => rows[0].purpose = Purpose::Manifest,
+                2 => rows[0].acquisition = Acquisition::NoHandle, _ => rows[0].identity = None }
+            assert!(from_records(&rows, selected).is_none());
+        }
+        for phase in [Phase::New, Phase::InspectedOnly, Phase::PassivePreparing, Phase::PassivePrepared,
+            Phase::Refused, Phase::Settling, Phase::Settled, Phase::Unknown] {
+            assert_eq!(claim_ready(phase, true, true, true, false), phase == Phase::PassivePrepared);
+        }
+        for (transferred, originals, claimed, refused) in [(false, true, true, false), (true, false, true, false),
+            (true, true, false, false), (true, true, true, true)] {
+            assert!(!claim_ready(Phase::PassivePrepared, transferred, originals, claimed, refused));
+        }
+        let history = Snapshot { tuples: [(8, 1, 11), (8, 1, 22), (8, 1, 33)] };
+        for (inode, role, relation) in [(11, Role::Python, Relation::PythonInode),
+            (22, Role::Ssl, Relation::SslInode), (33, Role::Crypto, Relation::CryptoInode)] {
+            assert_eq!(history.matching_role(8, 1, inode), Some(role));
+            assert_eq!(history.coordinate_relation(8, 1, inode), None);
+            assert_eq!(history.coordinate_relation(9, 2, inode), Some(relation));
+        }
+        assert_eq!(history.coordinate_relation(8, 1, 0), Some(Relation::Zero));
+        assert_eq!(Snapshot { tuples: [(8, 1, 0); 3] }.coordinate_relation(8, 1, 0), Some(Relation::Zero));
+        for tuples in [[(8, 1, 11), (8, 1, 11), (8, 1, 33)], [(8, 1, 11); 3]] {
+            let snapshot = Snapshot { tuples };
+            assert_eq!(snapshot.matching_role(8, 1, 11), None);
+            assert_eq!(snapshot.coordinate_relation(8, 1, 11), Some(Relation::Ambiguous));
+        }
+        for tuples in [[(8, 1, 11), (8, 2, 11), (8, 3, 33)],
+            [(8, 1, 11), (8, 2, 22), (8, 3, 11)], [(8, 1, 22), (8, 2, 11), (8, 3, 11)],
+            [(8, 1, 11), (8, 2, 11), (8, 3, 11)]] {
+            assert_eq!(Snapshot { tuples }.coordinate_relation(9, 4, 11), Some(Relation::MultipleInodes));
+        }
+        let overlapping = Snapshot { tuples: [(8, 1, 11), (8, 2, 11), (8, 3, 11)] };
+        for (minor, role) in [(1, Role::Python), (2, Role::Ssl), (3, Role::Crypto)] {
+            assert_eq!(overlapping.matching_role(8, minor, 11), Some(role));
+            assert_eq!(overlapping.coordinate_relation(8, minor, 11), None);
+        }
+        assert_eq!(history.coordinate_relation(8, 1, 99), Some(Relation::DeviceOnly));
+        assert_eq!(history.coordinate_relation(9, 2, 99), Some(Relation::Other));
+        let empty = super::PassiveRuntimeSlots::new();
+        assert!(empty.historical_payload_snapshot().is_none() && empty.never_started());
+    }
+}
+#[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) use historical_payload::{Role as HistoricalPayloadRole, Relation as HistoricalPayloadRelation, Snapshot as HistoricalPayloadSnapshot,
+    assert_contract as assert_historical_payload_diagnostic_contract};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Credentials { uid: u32, gid: u32, pid: u32, tid: u32 }
 
@@ -221,6 +456,8 @@ struct RuntimeWork {
     files_verified: usize,
     directories_verified: usize,
     saw_manifest: bool,
+    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    historical_payload_slots: [Option<SlotId>; 3],
 }
 
 /// Keep this same object registered through actual worker/child/IO joins and
@@ -240,6 +477,7 @@ pub(crate) struct OriginalDescriptorBook {
     unknown: bool,
     records: Vec<FdRecord>,
     budget: Option<Arc<AndroidDescriptorBudget>>,
+    android_toolset: bool,
     control_slots: usize,
     control_rounds: usize,
     entry_observations: usize,
@@ -264,23 +502,33 @@ pub(crate) struct InstalledRuntimeCustody {
     ancestors: [Option<SlotId>; PREFIX_COUNT],
     transferred: bool,
     retain_android: bool,
+    edit_domain: Option<InstalledEditDomain>,
     work: RuntimeWork,
 }
 
 impl OriginalDescriptorBook {
     /// Pure allocation/initialization only; acquires no OS resource.
     pub(crate) fn new() -> Self {
+        Self::new_with_toolset_capacity(false)
+    }
+
+    // Two fixed allocation profiles inside this same owner, not a caller policy.
+    // The retained Python runtime keeps its ordinary inventory/record limits.
+    fn new_with_toolset_capacity(android_toolset: bool) -> Self {
+        let manifest_limit = if android_toolset { crate::android_toolchain::MANIFEST_LIMIT } else { MANIFEST_LIMIT };
+        let record_limit = if android_toolset { ANDROID_TOOL_RECORD_COUNT } else { RECORD_COUNT };
         Self {
             phase: Phase::New, operation: Operation::Idle, interrupted_at: None,
             failure: None, settlement_started: false, interrupted: false,
             unknown: false,
-            records: Vec::with_capacity(RECORD_COUNT), budget: None, control_slots: 0, control_rounds: 0, entry_observations: 0,
-            root: None, mount_namespace: None, hash_left: [TOTAL_LIMIT + MANIFEST_LIMIT as u64; 2],
+            records: Vec::with_capacity(record_limit), budget: None, android_toolset,
+            control_slots: 0, control_rounds: 0, entry_observations: 0,
+            root: None, mount_namespace: None, hash_left: [TOTAL_LIMIT + manifest_limit as u64; 2],
             audit_started: false, checkpoints: 0, original_stop: None,
             namespaces: [None; 2], root_mount: None, proc_mount: None, credentials: None,
             work: Work {
                 block: vec![0; BLOCK_SIZE], directory_buffer: vec![MaybeUninit::uninit(); BLOCK_SIZE],
-                data: Vec::with_capacity(MANIFEST_LIMIT.max(MOUNTINFO_LIMIT)), attribute_buffer: [0],
+                data: Vec::with_capacity(manifest_limit.max(MOUNTINFO_LIMIT)), attribute_buffer: [0],
                 hash: Sha256::new(), reader: None, read_bytes: 0, read_eof: false, last_digest: None,
                 directory: None,
             },
@@ -315,7 +563,8 @@ impl OriginalDescriptorBook {
     /// EINTR/EBADF and a missing close return are unknown, not retry permission.
     pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
         self.settlement_started = true; // Absorbing: even empty/positive settlement disables transfer.
-        if matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing) { self.mark_interrupted(); }
+        if matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing | Phase::GitHubWorkflowPreparing | Phase::GitHubReadOnlyPreparing
+            | Phase::MetadataTextPreparing | Phase::ReleaseVersionPreparing | Phase::MetadataImagesPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing) { self.mark_interrupted(); }
         if !self.unknown { self.phase = Phase::Settling; }
         for index in (0..self.records.len()).rev() {
             let _ = self.close_one(SlotId(index)); // Continue every independent known original.
@@ -351,7 +600,8 @@ impl OriginalDescriptorBook {
     }
 
     fn begin(&mut self, operation: Operation, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
-        if !matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing | Phase::Retained | Phase::Auditing)
+        if !matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing | Phase::GitHubWorkflowPreparing | Phase::GitHubReadOnlyPreparing
+            | Phase::MetadataTextPreparing | Phase::ReleaseVersionPreparing | Phase::MetadataImagesPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing | Phase::Retained | Phase::Auditing)
             || self.unknown || self.interrupted || self.settlement_started {
             return Err(AdmissionFailure::LedgerInvariant);
         }
@@ -369,7 +619,8 @@ impl OriginalDescriptorBook {
     }
 
     fn arm(&mut self, purpose: Purpose) -> AdmissionResult<SlotId> {
-        if self.records.len() >= RECORD_COUNT
+        let record_limit = if self.android_toolset { ANDROID_TOOL_RECORD_COUNT } else { RECORD_COUNT };
+        if self.records.len() >= record_limit
             || self.budget.is_none() && self.records.iter().filter(|r| r.original.is_some()).count() >= LIVE_COUNT {
             return Err(AdmissionFailure::Bounds);
         }
@@ -482,10 +733,12 @@ impl InstalledRuntimeCustody {
     /// Pure book allocation; legacy inspection still retains only its original nine witnesses.
     pub(crate) fn new() -> Self {
         Self { book: OriginalDescriptorBook::new(), ancestors: [None; PREFIX_COUNT], transferred: false,
-            retain_android: false, work: RuntimeWork {
+            retain_android: false, edit_domain: None, work: RuntimeWork {
                 walk: Vec::with_capacity(TREE_DEPTH + 1), inventory: None,
                 actual_names: BTreeSet::new(), actual_folded: BTreeSet::new(), tree_entries: 0,
                 files_verified: 0, directories_verified: 0, saw_manifest: false,
+                #[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+                historical_payload_slots: [None; 3],
             } }
     }
     pub(crate) fn observation(&self) -> CustodyObservation { self.book.observation() }
@@ -541,7 +794,7 @@ impl InstalledRuntimeCustody {
     }
     fn transfer_ready(&self) -> bool { !self.transferred && self.inspected_originals_ready() }
     fn start_passive_preparation(&mut self) -> AdmissionResult<()> {
-        if !self.transferred || self.retain_android || self.book.budget.is_some() || !self.inspected_originals_ready() {
+        if !self.transferred || self.retain_android || self.edit_domain.is_some() || self.book.budget.is_some() || !self.inspected_originals_ready() {
             return Err(AdmissionFailure::TransferUnavailable);
         }
         // One-shot, passive-only native borrow. Neither Android's budget nor
@@ -549,18 +802,42 @@ impl InstalledRuntimeCustody {
         self.book.phase = Phase::PassivePreparing;
         Ok(())
     }
-    fn inspect_configuration_once(&mut self, profile: &crate::runtime::ConfigurationInstalledProfile,
+    fn inspect_edit_once(&mut self, profile: &InstalledEditProfile,
         end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
-        if self.retain_android || self.book.budget.is_some() || self.book.phase != Phase::New
+        if self.retain_android || self.edit_domain.is_some() || self.book.budget.is_some() || self.book.phase != Phase::New
             || self.book.settlement_started || self.book.interrupted || self.transferred {
             return Err(AdmissionFailure::AlreadyUsed);
         }
+        self.edit_domain = Some(profile.domain());
         self.book.phase = Phase::Inspecting;
-        let result = self.book.inspect_configuration_platform(profile, end, stop).and_then(|_| self.inspect_inner(end, stop));
+        let result = self.book.inspect_edit_platform(profile, end, stop).and_then(|_| {
+            match profile {
+                InstalledEditProfile::GitHubReadOnly(github) => {
+                    // The SAME sealed profile supplies paths and the original
+                    // ledger's manifest. Private D observation cannot inspect N
+                    // then launch D, and normal discovery never inherits D.
+                    let anchor = github.manifest_anchor().map_err(|_| AdmissionFailure::MissingCompileAnchor)?;
+                    self.inspect_inner_with_manifest(Some(anchor), end, stop)
+                },
+                InstalledEditProfile::GitHubPreflight(github) => {
+                    // Independent sealed action selection, never the read-only
+                    // book. Inspection and launch must select the SAME original.
+                    let anchor = github.manifest_anchor().map_err(|_| AdmissionFailure::MissingCompileAnchor)?;
+                    self.inspect_inner_with_manifest(Some(anchor), end, stop)
+                },
+                InstalledEditProfile::GitHubRelease(github) => {
+                    // R owns this selector/book; inspection and launch consume
+                    // the SAME normal V or private observation D-S original.
+                    let anchor = github.manifest_anchor().map_err(|_| AdmissionFailure::MissingCompileAnchor)?;
+                    self.inspect_inner_with_manifest(Some(anchor), end, stop)
+                },
+                _ => self.inspect_inner(end, stop),
+            }
+        });
         match result {
             Ok(()) => { self.book.operation = Operation::Idle; self.book.phase = Phase::InspectedOnly; Ok(()) },
             Err(failure) => {
-                // Unlike legacy inspection-only refusal, the configuration
+                // Unlike legacy inspection-only refusal, the installed edit
                 // borrower NEVER settles the ledger. Its original join comes
                 // first; even refused partials stay in the registered slots.
                 self.book.refuse(failure);
@@ -568,11 +845,12 @@ impl InstalledRuntimeCustody {
             },
         }
     }
-    fn start_configuration_preparation(&mut self) -> AdmissionResult<()> {
-        if !self.transferred || self.retain_android || self.book.budget.is_some() || !self.inspected_originals_ready() {
+    fn start_edit_preparation(&mut self, domain: InstalledEditDomain) -> AdmissionResult<()> {
+        if !self.transferred || self.retain_android || self.edit_domain != Some(domain)
+            || self.book.budget.is_some() || !self.inspected_originals_ready() {
             return Err(AdmissionFailure::TransferUnavailable);
         }
-        self.book.phase = Phase::ConfigurationPreparing;
+        self.book.phase = domain.preparing();
         Ok(())
     }
 }
@@ -586,7 +864,7 @@ pub(crate) fn transfer_original(
 ) -> AdmissionResult<TransferReceipt> {
     if destination.is_some() { return Err(AdmissionFailure::DestinationOccupied); }
     let Some(book) = source.as_ref() else { return Err(AdmissionFailure::TransferUnavailable); };
-    if !book.transfer_ready() { return Err(AdmissionFailure::TransferUnavailable); }
+    if book.edit_domain.is_some() || !book.transfer_ready() { return Err(AdmissionFailure::TransferUnavailable); }
     let receipt = TransferReceipt { original_records: book.book.records.len(), retained_originals: RETAINED_COUNT };
     let Some(mut original) = source.take() else { return Err(AdmissionFailure::TransferUnavailable); };
     original.transferred = true;
@@ -688,8 +966,8 @@ impl PassiveRuntimeSlots {
                 Ok(crate::runtime::VerifiedRuntime { python: data.python.clone(), bootstrap: data.bootstrap.clone(),
                     core: data.core.clone(), cwd: data.cwd.clone() }) // DATA only; originals never leave these slots.
             }
-            InspectionOutcome::Refused(_) => Err(BridgeError::unavailable("The passive installed runtime failed original-custody inspection.")),
-            InspectionOutcome::Unknown => Err(BridgeError::cleanup_unknown()),
+            InspectionOutcome::Refused(failure) => Err(passive_inspection_refusal(failure)),
+            InspectionOutcome::Unknown => Err(passive_inspection_unknown(original.observation().failure())),
         }
     }
     pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
@@ -714,6 +992,16 @@ impl PassiveRuntimeSlots {
     pub(crate) fn capability(&mut self) -> AdmissionResult<&mut PassiveInstalledRuntime> {
         if self.settlement_started { return Err(AdmissionFailure::TransferUnavailable); }
         self.acquisition.as_mut().ok_or(AdmissionFailure::TransferUnavailable)
+    }
+    /// Optional diagnostic DATA from this already-claimed original. No live-file
+    /// lookup, state change, new admission failure or native authority is created.
+    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(crate) fn historical_payload_snapshot(&self) -> Option<HistoricalPayloadSnapshot> {
+        if self.settlement_started || self.inspection.is_some() { return None; }
+        let runtime = self.acquisition.as_ref()?;
+        if !historical_payload::claim_ready(runtime.original.book.phase, runtime.original.transferred,
+            runtime.original.retained_originals_ready(), runtime.claimed, runtime.refused_before_effect) { return None; }
+        historical_payload::from_records(&runtime.original.book.records, runtime.original.work.historical_payload_slots)
     }
     pub(crate) fn no_child_effect(&self) -> bool {
         match (&self.inspection, &self.acquisition) {
@@ -762,35 +1050,52 @@ impl PassiveRuntimeSlots {
     }
 }
 
-/// Configuration-domain storage INSIDE the existing EditOwner. These are the
-/// original inspection/acquisition slots, not a passive capability or another
-/// owner. Workers borrow the same ledger, including all refused partials.
-pub(crate) struct ConfigurationRuntimeSlots {
+fn passive_inspection_refusal(failure: AdmissionFailure) -> crate::error::BridgeError {
+    crate::error::BridgeError::unavailable("The passive installed runtime failed original-custody inspection.")
+        .with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::Inspection(Some(failure))))
+}
+
+fn passive_inspection_unknown(failure: Option<AdmissionFailure>) -> crate::error::BridgeError {
+    // Only the same original's already-recorded DATA after its inspect return.
+    // A known refusal reason is not a positive settlement/close receipt.
+    crate::error::BridgeError::cleanup_unknown()
+        .with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::Inspection(failure)))
+}
+
+// Shared mechanics are private and closed to the declared sealed profiles.
+// The public(crate) facades below fix their domain at allocation; callers cannot
+// pass an arbitrary domain/profile or replace the original ledger.
+struct InstalledEditRuntimeSlots {
+    domain: InstalledEditDomain,
     inspection: Option<InstalledRuntimeCustody>,
-    profile: Option<crate::runtime::ConfigurationInstalledProfile>,
+    profile: Option<InstalledEditProfile>,
     selection: Option<crate::runtime::VerifiedRuntime>,
-    acquisition: Option<ConfigurationInstalledRuntime>,
+    acquisition: Option<InstalledEditRuntime>,
     inspection_started: bool,
     settlement_started: bool,
 }
 
-pub(crate) struct ConfigurationInstalledRuntime {
+pub(crate) struct InstalledEditRuntime {
+    domain: InstalledEditDomain,
     original: InstalledRuntimeCustody,
-    profile: crate::runtime::ConfigurationInstalledProfile,
+    profile: InstalledEditProfile,
     selection: crate::runtime::VerifiedRuntime,
     claimed: bool,
 }
 
-fn configuration_claim_ready(phase: Phase, transferred: bool, originals_ready: bool, claimed: bool) -> bool {
-    phase == Phase::ConfigurationPrepared && transferred && originals_ready && !claimed
+fn edit_claim_ready(domain: InstalledEditDomain, phase: Phase, transferred: bool, originals_ready: bool, claimed: bool) -> bool {
+    phase == domain.prepared() && transferred && originals_ready && !claimed
 }
 
-impl ConfigurationInstalledRuntime {
+impl InstalledEditRuntime {
+    fn matches_domain(&self, domain: InstalledEditDomain) -> bool {
+        self.domain == domain && self.profile.domain() == domain && self.original.edit_domain == Some(domain)
+    }
     pub(crate) fn prepare_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<&crate::runtime::VerifiedRuntime> {
-        if self.claimed { return Err(AdmissionFailure::TransferUnavailable); }
-        self.original.start_configuration_preparation()?;
+        if self.claimed || !self.matches_domain(self.domain) { return Err(AdmissionFailure::TransferUnavailable); }
+        self.original.start_edit_preparation(self.domain)?;
         let result = (|| {
-            self.original.book.inspect_configuration_platform(&self.profile, end, stop)?;
+            self.original.book.inspect_edit_platform(&self.profile, end, stop)?;
             self.original.book.check_launch_thread(end, stop)?; // THIS original acquisition worker's thread.
             self.original.book.check_names(end, stop)?;
             self.original.book.begin(Operation::Idle, end, stop)?;
@@ -798,50 +1103,66 @@ impl ConfigurationInstalledRuntime {
             Ok(())
         })();
         match result {
-            Ok(()) => { self.original.book.phase = Phase::ConfigurationPrepared; Ok(&self.selection) },
+            Ok(()) => { self.original.book.phase = self.domain.prepared(); Ok(&self.selection) },
             Err(failure) => { self.original.book.refuse(failure); Err(failure) },
         }
     }
-    /// Pure one-use transition, called only under the existing EditOwner
+    /// Pure one-use transition, called only under the original domain owner's
     /// registry after all native preparation and Command allocation returned.
     pub(crate) fn claim_once(&mut self) -> AdmissionResult<()> {
-        if !configuration_claim_ready(self.original.book.phase, self.original.transferred,
+        if !self.matches_domain(self.domain) || !edit_claim_ready(self.domain, self.original.book.phase, self.original.transferred,
             self.original.retained_originals_ready(), self.claimed) { return Err(AdmissionFailure::TransferUnavailable); }
         self.claimed = true;
         Ok(())
     }
 }
 
-impl ConfigurationRuntimeSlots {
-    pub(crate) fn new() -> Self {
-        Self { inspection: Some(InstalledRuntimeCustody::new()), profile: None, selection: None,
+impl InstalledEditRuntimeSlots {
+    fn new(domain: InstalledEditDomain) -> Self {
+        Self { domain, inspection: Some(InstalledRuntimeCustody::new()), profile: None, selection: None,
             acquisition: None, inspection_started: false, settlement_started: false }
     }
-    pub(crate) fn never_started(&self) -> bool {
+    fn require_domain(&self, domain: InstalledEditDomain) -> AdmissionResult<()> {
+        if self.domain == domain { Ok(()) } else { Err(AdmissionFailure::LedgerInvariant) }
+    }
+    fn never_started(&self) -> bool {
         !self.inspection_started && !self.settlement_started && self.profile.is_none() && self.selection.is_none()
             && self.acquisition.is_none() && self.inspection.as_ref().is_some_and(|original|
-                original.book.phase == Phase::New && original.book.records.is_empty()
+                original.edit_domain.is_none() && original.book.phase == Phase::New && original.book.records.is_empty()
                 && !original.book.unknown && !original.book.interrupted && !original.book.settlement_started)
     }
-    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::ConfigurationInstalledProfile,
+    fn inspect_once(&mut self, profile: InstalledEditProfile,
         end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
         use crate::error::BridgeError;
-        if !self.never_started() { return Err(BridgeError::cleanup_unknown()); }
+        if profile.domain() != self.domain || !self.never_started() { return Err(BridgeError::cleanup_unknown()); }
         self.selection = Some(profile.selection()?);
         self.profile = Some(profile);
         self.inspection_started = true;
         let profile = self.profile.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
         let original = self.inspection.as_mut().ok_or_else(BridgeError::cleanup_unknown)?;
-        original.inspect_configuration_once(profile, end, stop)
-            .map_err(|_| BridgeError::unavailable("The configuration installed runtime failed original-custody inspection."))?;
+        original.inspect_edit_once(profile, end, stop).map_err(|_| BridgeError::unavailable(match self.domain {
+            InstalledEditDomain::Configuration => "The configuration installed runtime failed original-custody inspection.",
+            InstalledEditDomain::GitHubWorkflows => "The GitHub workflow installed runtime failed original-custody inspection.",
+            InstalledEditDomain::GitHubReadOnly => "The GitHub read-only installed runtime failed original-custody inspection.",
+            InstalledEditDomain::GitHubPreflight => "The GitHub preflight installed runtime failed original-custody inspection.",
+            InstalledEditDomain::GitHubRelease => "The GitHub release installed runtime failed original-custody inspection.",
+            InstalledEditDomain::MetadataText => "The metadata text installed runtime failed original-custody inspection.",
+            InstalledEditDomain::ReleaseVersion => "The saved-version installed runtime failed original-custody inspection.",
+            InstalledEditDomain::MetadataImages => "The public-image installed runtime failed original-custody inspection.",
+            InstalledEditDomain::EnvironmentDiagnostics => "The build-tool diagnostics installed runtime failed original-custody inspection.",
+            InstalledEditDomain::OfflinePreflight => "The saved offline-preflight installed runtime failed original-custody inspection.",
+            InstalledEditDomain::ProjectRecovery => "The project recovery installed runtime failed original-custody inspection.",
+        }))?;
         let data = self.selection.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
         Ok(crate::runtime::VerifiedRuntime { python: data.python.clone(), bootstrap: data.bootstrap.clone(),
             core: data.core.clone(), cwd: data.cwd.clone() }) // DATA only, never original custody.
     }
-    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+    fn transfer_once(&mut self) -> AdmissionResult<()> {
         if self.acquisition.is_some() { return Err(AdmissionFailure::DestinationOccupied); }
-        if !self.inspection_started || self.settlement_started || self.profile.is_none() || self.selection.is_none()
-            || !self.inspection.as_ref().is_some_and(InstalledRuntimeCustody::transfer_ready) {
+        if !self.inspection_started || self.settlement_started || self.selection.is_none()
+            || !self.profile.as_ref().is_some_and(|profile| profile.domain() == self.domain)
+            || !self.inspection.as_ref().is_some_and(|original|
+                original.edit_domain == Some(self.domain) && original.transfer_ready()) {
             return Err(AdmissionFailure::TransferUnavailable);
         }
         let profile = self.profile.take().ok_or(AdmissionFailure::LedgerInvariant)?;
@@ -851,27 +1172,37 @@ impl ConfigurationRuntimeSlots {
             return Err(AdmissionFailure::LedgerInvariant);
         };
         original.transferred = true;
-        self.acquisition = Some(ConfigurationInstalledRuntime { original, profile, selection, claimed: false });
+        self.acquisition = Some(InstalledEditRuntime { domain: self.domain, original, profile, selection, claimed: false });
         Ok(()) // Whole original move: no IO, allocation, callback or fallible step after take.
     }
-    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut ConfigurationInstalledRuntime> {
+    fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
         if self.settlement_started { return Err(AdmissionFailure::TransferUnavailable); }
-        self.acquisition.as_mut().ok_or(AdmissionFailure::TransferUnavailable)
+        self.acquisition.as_mut().filter(|runtime| runtime.matches_domain(self.domain)).ok_or(AdmissionFailure::TransferUnavailable)
     }
-    pub(crate) fn no_child_effect(&self) -> bool {
+    fn original_domain(&self, original: &InstalledRuntimeCustody) -> bool {
+        original.edit_domain == self.inspection_started.then_some(self.domain)
+            && self.profile.as_ref().is_none_or(|profile| profile.domain() == self.domain)
+    }
+    fn no_child_effect(&self) -> bool {
         match (&self.inspection, &self.acquisition) {
-            (Some(_), None) => true,
-            (None, Some(runtime)) => !runtime.claimed,
+            (Some(original), None) => self.original_domain(original),
+            (None, Some(runtime)) => runtime.matches_domain(self.domain) && !runtime.claimed,
             _ => false,
         } // No OS spawn-error or missing-child shortcut can create this fact.
     }
-    pub(crate) fn mark_interrupted(&mut self) {
+    fn mark_interrupted(&mut self) {
         if let Some(original) = &mut self.inspection { original.mark_interrupted(); }
         if let Some(runtime) = &mut self.acquisition { runtime.original.mark_interrupted(); }
     }
-    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+    fn settle_originals(&mut self) -> CloseOutcome {
         if self.settlement_started { return CloseOutcome::Unknown; }
+        let same_domain = match (&self.inspection, &self.acquisition) {
+            (Some(original), None) => self.original_domain(original),
+            (None, Some(runtime)) => runtime.matches_domain(self.domain),
+            _ => false,
+        };
         self.settlement_started = true;
+        if !same_domain { self.mark_interrupted(); return CloseOutcome::Unknown; }
         let outcome = match (&mut self.inspection, &mut self.acquisition) {
             (Some(original), None) => original.settle_originals(),
             (None, Some(runtime)) => runtime.original.settle_originals(),
@@ -879,13 +1210,283 @@ impl ConfigurationRuntimeSlots {
         };
         if outcome == CloseOutcome::Settled && self.settled() { CloseOutcome::Settled } else { CloseOutcome::Unknown }
     }
-    pub(crate) fn settled(&self) -> bool {
+    fn settled(&self) -> bool {
         self.settlement_started && match (&self.inspection, &self.acquisition) {
-            (Some(original), None) => original.settled(),
-            (None, Some(runtime)) => runtime.original.settled(),
+            (Some(original), None) => self.original_domain(original) && original.settled(),
+            (None, Some(runtime)) => runtime.matches_domain(self.domain) && runtime.original.settled(),
             _ => false,
         }
     }
+}
+
+/// Domain-fixed storage INSIDE the existing EditOwner, not a second owner.
+/// Keep this facade stable for the separately implemented Mac Configuration path.
+pub(crate) struct ConfigurationRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl ConfigurationRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::Configuration) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::ConfigurationInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::Configuration(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::Configuration).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::Configuration)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::Configuration)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::Configuration).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::Configuration).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::Configuration).is_ok() && self.inner.settled() }
+}
+
+pub(crate) struct GitHubWorkflowRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl GitHubWorkflowRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubWorkflows) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::GitHubWorkflowInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::GitHubWorkflows(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubWorkflows).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::GitHubWorkflows)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::GitHubWorkflows)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubWorkflows).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::GitHubWorkflows).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubWorkflows).is_ok() && self.inner.settled() }
+}
+
+/// Domain-fixed custody INSIDE the original Supervisor; never a workflow/edit owner.
+pub(crate) struct GitHubReadOnlyRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl GitHubReadOnlyRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubReadOnly) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::GitHubReadOnlyInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::GitHubReadOnly(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubReadOnly).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::GitHubReadOnly)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::GitHubReadOnly)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubReadOnly).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::GitHubReadOnly).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubReadOnly).is_ok() && self.inner.settled() }
+}
+
+/// Original Supervisor action custody; cannot accept the readonly domain book.
+pub(crate) struct GitHubPreflightRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl GitHubPreflightRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubPreflight) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::GitHubPreflightInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::GitHubPreflight(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubPreflight).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::GitHubPreflight)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::GitHubPreflight)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubPreflight).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::GitHubPreflight).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubPreflight).is_ok() && self.inner.settled() }
+}
+
+/// Original Supervisor action custody; cannot accept the readonly/preflight domain book.
+pub(crate) struct GitHubReleaseRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl GitHubReleaseRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubRelease) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::GitHubReleaseInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::GitHubRelease(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubRelease).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::GitHubRelease)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::GitHubRelease)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubRelease).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::GitHubRelease).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubRelease).is_ok() && self.inner.settled() }
+}
+
+pub(crate) struct MetadataTextRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl MetadataTextRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::MetadataText) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::MetadataTextInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::MetadataText(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::MetadataText).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::MetadataText)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::MetadataText)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::MetadataText).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::MetadataText).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::MetadataText).is_ok() && self.inner.settled() }
+}
+
+pub(crate) struct ReleaseVersionRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl ReleaseVersionRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::ReleaseVersion) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::ReleaseVersionInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::ReleaseVersion(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::ReleaseVersion).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::ReleaseVersion)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::ReleaseVersion)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::ReleaseVersion).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::ReleaseVersion).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::ReleaseVersion).is_ok() && self.inner.settled() }
+}
+
+/// Domain-fixed storage inside the original diagnostics Session. The owner
+/// must settle its core C/A/W and native consumers BEFORE consuming these closes.
+pub(crate) struct MetadataImagesRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl MetadataImagesRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::MetadataImages) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::MetadataImagesInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::MetadataImages(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::MetadataImages).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::MetadataImages)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::MetadataImages)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::MetadataImages).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::MetadataImages).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::MetadataImages).is_ok() && self.inner.settled() }
+}
+
+/// Domain-fixed storage inside the original diagnostics Session. The owner
+/// must settle its core C/A/W and native consumers BEFORE consuming these closes.
+pub(crate) struct EnvironmentDiagnosticsRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl EnvironmentDiagnosticsRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::EnvironmentDiagnostics) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::EnvironmentDiagnosticsInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::EnvironmentDiagnostics(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::EnvironmentDiagnostics).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::EnvironmentDiagnostics)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::EnvironmentDiagnostics)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::EnvironmentDiagnostics).is_ok() && self.inner.no_child_effect() }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn inspected_untransferred(&self) -> bool {
+        self.inner.require_domain(InstalledEditDomain::EnvironmentDiagnostics).is_ok() && self.inner.inspection_started
+            && self.inner.acquisition.is_none() && self.inner.inspection.as_ref().is_some_and(|original|
+                self.inner.original_domain(original) && !original.transferred)
+    }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::EnvironmentDiagnostics).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::EnvironmentDiagnostics).is_ok() && self.inner.settled() }
+}
+
+/// Offline custody never accepts an Android toolchain or another domain's slot.
+pub(crate) struct OfflinePreflightRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl OfflinePreflightRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::OfflinePreflight) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::OfflinePreflightInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::OfflinePreflight(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::OfflinePreflight).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::OfflinePreflight)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::OfflinePreflight)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::OfflinePreflight).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::OfflinePreflight).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::OfflinePreflight).is_ok() && self.inner.settled() }
+}
+
+/// Recovery uses its own fixed source selection, not an offline/native permit.
+pub(crate) struct ProjectRecoveryRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl ProjectRecoveryRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::ProjectRecovery) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::ProjectRecoveryInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::ProjectRecovery(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::ProjectRecovery).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::ProjectRecovery)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::ProjectRecovery)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::ProjectRecovery).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::ProjectRecovery).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::ProjectRecovery).is_ok() && self.inner.settled() }
 }
 
 fn checkpoint(end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
@@ -1161,7 +1762,7 @@ impl OriginalDescriptorBook {
     fn inspect_kernel(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
         self.begin(Operation::Kernel, end, stop)?;
         if self.budget.is_some() && rustix::process::getrlimit(rustix::process::Resource::Nofile)
-            .current.is_some_and(|limit| limit < 8192) { return Err(AdmissionFailure::Bounds); }
+            .current.is_some_and(|limit| limit < ANDROID_NOFILE_FLOOR) { return Err(AdmissionFailure::Bounds); }
         let actual = rustix::system::uname();
         self.operation = Operation::Idle;
         if !supported_kernel(actual.sysname().to_bytes(), actual.machine().to_bytes(), actual.release().to_bytes()) {
@@ -1181,7 +1782,7 @@ impl OriginalDescriptorBook {
         Ok(()) // Narrow passive candidate only; the shared GA6.8/Azure ABI rule is unchanged.
     }
 
-    fn inspect_configuration_platform(&mut self, profile: &crate::runtime::ConfigurationInstalledProfile,
+    fn inspect_edit_platform(&mut self, profile: &InstalledEditProfile,
         end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
         self.begin(Operation::Kernel, end, stop)?;
         let actual = rustix::system::uname();
@@ -1298,9 +1899,15 @@ impl OriginalDescriptorBook {
 
 impl InstalledRuntimeCustody {
     fn inspect_inner(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
+        self.inspect_inner_with_manifest(MANIFEST_ANCHOR, end, stop)
+    }
+    // Private mechanics only: entry is normal compile selection or the exact
+    // domain-fixed GitHub profile above, never a caller path/hash/FD argument.
+    fn inspect_inner_with_manifest(&mut self, manifest_anchor: Option<&str>,
+        end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
         self.book.begin(Operation::Inventory, end, stop)?;
         if COMPILED_TARGET != TARGET { return Err(AdmissionFailure::UnsupportedPlatform); }
-        let manifest_anchor = MANIFEST_ANCHOR.filter(|value| sha(value)).ok_or(AdmissionFailure::MissingCompileAnchor)?;
+        let manifest_anchor = manifest_anchor.filter(|value| sha(value)).ok_or(AdmissionFailure::MissingCompileAnchor)?;
         let protocol_anchor = PROTOCOL_ANCHOR.filter(|value| sha(value)).ok_or(AdmissionFailure::MissingCompileAnchor)?;
         self.book.inspect_kernel(end, stop)?;
         let credentials = self.book.current_credentials(end, stop)?;
@@ -1486,6 +2093,10 @@ impl InstalledRuntimeCustody {
                     return Err(AdmissionFailure::Manifest);
                 }
                 self.book.inspect_protected(slot, FileType::RegularFile, Some(expected_size), end, stop)?;
+                #[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+                if let Some(index) = historical_payload::slot_index(&relative) {
+                    self.work.historical_payload_slots[index] = Some(slot);
+                }
                 if self.retain_android { self.book.records[slot.0].digest = Some(expected_hash); }
                 else { self.book.close_finished(slot)?; }
                 self.work.files_verified += 1;
@@ -1507,7 +2118,7 @@ impl InstalledRuntimeCustody {
 
 // The only second consumer of these private primitives is the fixed Android
 // tool book. Two books precharge 64 kernel-control slots EACH; every other live
-// original (including ancestry and aliases) competes below the SAME 4096 cap.
+// original (including ancestry and aliases) competes below the SAME 32768 cap.
 const ANDROID_CONTROL_SLOTS: usize = 64;
 pub(crate) struct AndroidDescriptorBudget {
     live: AtomicUsize,
@@ -1524,7 +2135,7 @@ impl AndroidDescriptorBudget {
         Ok(end.min(*self.audit_cutoff.borrow()))
     }
     fn claim(&self) -> AdmissionResult<()> {
-        self.live.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < 4096).then_some(n + 1))
+        self.live.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < ANDROID_LIVE_COUNT).then_some(n + 1))
             .map(|_| ()).map_err(|_| AdmissionFailure::Bounds)
     }
     fn release(&self) { self.live.fetch_sub(1, Ordering::SeqCst); }
@@ -1533,6 +2144,9 @@ pub(crate) struct ProtectedEntry { pub(crate) name: String, pub(crate) inode: u6
 impl OriginalDescriptorBook {
     pub(crate) fn new_android(budget: Arc<AndroidDescriptorBudget>) -> Self {
         let mut book = Self::new(); book.budget = Some(budget); book
+    }
+    pub(crate) fn new_android_toolset(budget: Arc<AndroidDescriptorBudget>) -> Self {
+        let mut book = Self::new_with_toolset_capacity(true); book.budget = Some(budget); book
     }
     pub(crate) fn identity(&self, slot: SlotId) -> AdmissionResult<Identity> {
         let _ = fd_at(&self.records, slot)?;
@@ -1576,7 +2190,8 @@ impl OriginalDescriptorBook {
         self.inspect_protected(slot, FileType::RegularFile, None, end, stop)?;
         let size = u64::try_from(self.identity(slot)?.size).map_err(|_| AdmissionFailure::Bounds)?;
         if size == 0 { return Err(AdmissionFailure::Manifest); }
-        if hex(&self.read_original(slot, Some(size), MANIFEST_LIMIT as u64, true, end, stop)?) != expected {
+        let limit = if self.android_toolset { crate::android_toolchain::MANIFEST_LIMIT } else { MANIFEST_LIMIT };
+        if hex(&self.read_original(slot, Some(size), limit as u64, true, end, stop)?) != expected {
             return Err(AdmissionFailure::Manifest);
         }
         self.records[slot.0].digest = Some(expected.to_owned());
@@ -1614,7 +2229,8 @@ impl OriginalDescriptorBook {
                     if dotdot || kind != FileType::Directory || inode == 0 { return Err(AdmissionFailure::Inventory); }
                     dotdot = true; continue;
                 }
-                if self.entry_observations >= ENTRY_COUNT { return Err(AdmissionFailure::Bounds); }
+                let limit = if self.android_toolset { crate::android_toolchain::TOOL_ENTRY_COUNT } else { ENTRY_COUNT };
+                if self.entry_observations >= limit { return Err(AdmissionFailure::Bounds); }
                 self.entry_observations += 1;
                 if inode == 0 || !tool_component(name)
                     || !matches!(kind, FileType::Directory | FileType::RegularFile) { return Err(AdmissionFailure::Inventory); }
@@ -2015,6 +2631,26 @@ pub(crate) fn assert_installed_configuration_slots_contract() {
 }
 
 #[cfg(test)]
+pub(crate) fn assert_installed_workflow_slots_contract() {
+    pure_tests::workflow_slot_facades_and_original_domains_cannot_be_substituted();
+    pure_tests::workflow_partials_and_unreturned_preparation_retain_original_unknown();
+    pure_tests::all_edit_claim_domains_require_their_own_preparation_once();
+}
+
+#[cfg(test)]
+pub(crate) fn assert_installed_metadata_slots_contract() {
+    pure_tests::metadata_slot_facades_and_original_domains_cannot_be_substituted();
+    pure_tests::metadata_partials_and_unreturned_preparation_retain_original_unknown();
+    pure_tests::all_edit_claim_domains_require_their_own_preparation_once();
+}
+
+#[cfg(test)]
+pub(crate) fn assert_installed_version_slots_contract() {
+    pure_tests::version_slots_keep_the_same_empty_originals_and_reject_all_foreign_domains_data();
+    pure_tests::version_unreturned_acquisition_and_preparation_stay_unknown_without_retry_or_new_owner_data();
+}
+
+#[cfg(test)]
 mod pure_tests {
     use super::*;
 
@@ -2022,6 +2658,49 @@ mod pure_tests {
     // native descriptor, proc read, runtime, process, fixture installer or
     // executable capability is used or fabricated. Empty/pending books below
     // cannot make a syscall even when testing original-settlement refusal.
+    #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[test]
+    fn historical_payload_projection_is_only_closed_record_data() { assert_historical_payload_diagnostic_contract(); }
+
+    #[test]
+    fn passive_inspection_maps_every_returned_reason_without_promoting_unknown() {
+        let failures = [
+            AdmissionFailure::UnsupportedPlatform,
+            AdmissionFailure::MissingCompileAnchor,
+            AdmissionFailure::Stopped,
+            AdmissionFailure::Deadline,
+            AdmissionFailure::NativeUnavailable,
+            AdmissionFailure::NativeDenied,
+            AdmissionFailure::Namespace,
+            AdmissionFailure::Mount,
+            AdmissionFailure::Ownership,
+            AdmissionFailure::ExtendedAttributes,
+            AdmissionFailure::IdentityChanged,
+            AdmissionFailure::Manifest,
+            AdmissionFailure::Inventory,
+            AdmissionFailure::Bounds,
+            AdmissionFailure::AlreadyUsed,
+            AdmissionFailure::Interrupted,
+            AdmissionFailure::CloseUncertain,
+            AdmissionFailure::LedgerInvariant,
+            AdmissionFailure::TransferUnavailable,
+            AdmissionFailure::DestinationOccupied,
+        ];
+        for failure in failures {
+            let refused = passive_inspection_refusal(failure);
+            let unknown = passive_inspection_unknown(Some(failure));
+            assert_eq!(refused.code, "runtime_unavailable");
+            assert_eq!(unknown.code, "cleanup_unknown");
+            let cause = Some(crate::error::LinuxPassiveCause::Inspection(Some(failure)));
+            assert_eq!(refused.linux_passive_cause(), cause);
+            assert_eq!(unknown.linux_passive_cause(), cause);
+            assert!(!refused.retryable && !unknown.retryable);
+        }
+        let unknown = passive_inspection_unknown(None);
+        assert_eq!(unknown.code, "cleanup_unknown");
+        assert_eq!(unknown.linux_passive_cause(), Some(crate::error::LinuxPassiveCause::Inspection(None)));
+    }
+
     #[test]
     fn digest_and_component_policy_are_exact() {
         assert!(sha(&"a".repeat(64)));
@@ -2199,9 +2878,9 @@ mod pure_tests {
         let (cutoff, receiver) = watch::channel(work);
         let budget = AndroidDescriptorBudget::new(receiver);
         assert_eq!(budget.live.load(Ordering::SeqCst), 128);
-        for _ in 128..4096 { assert_eq!(budget.claim(), Ok(())); }
+        for _ in 128..ANDROID_LIVE_COUNT { assert_eq!(budget.claim(), Ok(())); }
         assert_eq!(budget.claim(), Err(AdmissionFailure::Bounds));
-        assert_eq!(budget.live.load(Ordering::SeqCst), 4096);
+        assert_eq!(budget.live.load(Ordering::SeqCst), ANDROID_LIVE_COUNT);
         budget.release(); assert_eq!(budget.claim(), Ok(()));
         assert_eq!(budget.audit_end(work), Ok(work));
         let earlier = start + std::time::Duration::from_secs(11);
@@ -2209,6 +2888,42 @@ mod pure_tests {
         assert_eq!(budget.audit_end(work), Ok(earlier));
         assert_eq!(budget.audit_end(start), Ok(start)); // Never renew a supplied earlier bound.
         drop(cutoff); assert_eq!(budget.audit_end(work), Err(AdmissionFailure::Interrupted));
+    }
+
+    #[test]
+    fn android_tool_capacity_is_preallocated_without_widening_retained_runtime() {
+        let (_cutoff, receiver) = watch::channel(Instant::now());
+        let budget = Arc::new(AndroidDescriptorBudget::new(receiver));
+        let ordinary = OriginalDescriptorBook::new();
+        let runtime = InstalledRuntimeCustody::new_android(budget.clone());
+        let mut tools = OriginalDescriptorBook::new_android_toolset(budget.clone());
+        for book in [&ordinary, &runtime.book] {
+            assert!(!book.android_toolset);
+            assert_eq!(book.records.capacity(), RECORD_COUNT);
+            assert_eq!(book.work.data.capacity(), MANIFEST_LIMIT);
+            assert_eq!(book.hash_left, [TOTAL_LIMIT + MANIFEST_LIMIT as u64; 2]);
+            assert!(book.records.is_empty());
+        }
+        assert!(tools.android_toolset);
+        assert_eq!(tools.records.capacity(), ANDROID_TOOL_RECORD_COUNT);
+        assert_eq!(tools.work.data.capacity(), crate::android_toolchain::MANIFEST_LIMIT);
+        assert_eq!(tools.hash_left, [TOTAL_LIMIT + crate::android_toolchain::MANIFEST_LIMIT as u64; 2]);
+        assert_eq!((MANIFEST_LIMIT, FILE_COUNT, ENTRY_COUNT, RECORD_COUNT), (1024 * 1024, 2048, 8192, 8256));
+        assert_eq!((ANDROID_LIVE_COUNT, ANDROID_TOOL_RECORD_COUNT, ANDROID_NOFILE_FLOOR), (32768, 32832, 65536));
+        // Inert no-handle DATA only: no native open, fake FD, or positive close.
+        // Closed/no-handle records consume permanent capacity even though the
+        // original shared live charge has been returned. Capacity never grows.
+        let allocated = tools.records.capacity();
+        for _ in 0..ANDROID_TOOL_RECORD_COUNT {
+            let slot = tools.arm(Purpose::Payload).unwrap();
+            assert!(tools.receive_open(slot, Err(Errno::ACCESS)).is_err());
+            assert_eq!(tools.records[slot.0].acquisition, Acquisition::NoHandle);
+        }
+        assert_eq!(tools.records.capacity(), allocated);
+        assert_eq!(budget.live.load(Ordering::SeqCst), 2 * ANDROID_CONTROL_SLOTS);
+        assert_eq!(tools.arm(Purpose::Payload), Err(AdmissionFailure::Bounds));
+        assert_eq!(tools.settle_originals(), CloseOutcome::Settled);
+        assert!(tools.records.iter().all(|record| record.original.is_none()));
     }
 
     #[test]
@@ -2341,7 +3056,7 @@ mod pure_tests {
     pub(super) fn empty_configuration_slots_preserve_the_same_original_and_settle_only_once() {
         // Actual empty storage only. No selected profile, native inspection,
         // synthetic descriptor, executable capability or close syscall.
-        let mut slots = ConfigurationRuntimeSlots::new();
+        let mut slots = ConfigurationRuntimeSlots::new().inner;
         let original = slots.inspection.as_ref().map(std::ptr::from_ref);
         assert!(slots.never_started() && slots.no_child_effect() && !slots.settled());
         assert!(slots.transfer_once().is_err() && slots.capability().is_err());
@@ -2355,7 +3070,7 @@ mod pure_tests {
         assert_eq!(slots.inspection.as_ref().unwrap().observation().positive_closes(), 0);
     }
     pub(super) fn refused_configuration_partials_remain_in_original_slots_for_consuming_settlement() {
-        let mut slots = ConfigurationRuntimeSlots::new();
+        let mut slots = ConfigurationRuntimeSlots::new().inner;
         let original = slots.inspection.as_mut().unwrap();
         // Negative pre-effect state only: arm but NEVER open/receive a handle.
         // Refusal cannot turn an unreturned native acquisition into no-handle.
@@ -2375,10 +3090,10 @@ mod pure_tests {
     }
     pub(super) fn configuration_preparation_and_lost_workers_cannot_restore_capability_or_positive_close() {
         let mut uninspected = InstalledRuntimeCustody::new();
-        assert_eq!(uninspected.start_configuration_preparation(), Err(AdmissionFailure::TransferUnavailable));
+        assert_eq!(uninspected.start_edit_preparation(InstalledEditDomain::Configuration), Err(AdmissionFailure::TransferUnavailable));
         assert_eq!(uninspected.settle_originals(), CloseOutcome::Settled); // Empty only.
-        assert_eq!(uninspected.start_configuration_preparation(), Err(AdmissionFailure::TransferUnavailable));
-        let mut slots = ConfigurationRuntimeSlots::new();
+        assert_eq!(uninspected.start_edit_preparation(InstalledEditDomain::Configuration), Err(AdmissionFailure::TransferUnavailable));
+        let mut slots = ConfigurationRuntimeSlots::new().inner;
         slots.mark_interrupted();
         assert!(slots.transfer_once().is_err() && slots.capability().is_err());
         assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
@@ -2394,15 +3109,312 @@ mod pure_tests {
         // Test the real predicate as DATA, never mint an installed profile,
         // transferred original or capability from synthetic successful facts.
         for phase in [Phase::New, Phase::Inspecting, Phase::InspectedOnly, Phase::PassivePreparing, Phase::PassivePrepared,
-            Phase::ConfigurationPreparing, Phase::ConfigurationPrepared, Phase::Retained, Phase::Auditing,
+            Phase::ConfigurationPreparing, Phase::ConfigurationPrepared, Phase::GitHubWorkflowPreparing, Phase::GitHubWorkflowPrepared, Phase::GitHubReadOnlyPreparing, Phase::GitHubReadOnlyPrepared, Phase::MetadataTextPreparing, Phase::MetadataTextPrepared, Phase::ReleaseVersionPreparing, Phase::ReleaseVersionPrepared, Phase::MetadataImagesPreparing, Phase::MetadataImagesPrepared, Phase::Retained, Phase::Auditing,
+            Phase::EnvironmentDiagnosticsPreparing, Phase::EnvironmentDiagnosticsPrepared, Phase::OfflinePreflightPreparing, Phase::OfflinePreflightPrepared, Phase::ProjectRecoveryPreparing, Phase::ProjectRecoveryPrepared,
             Phase::Refused, Phase::Settling, Phase::Settled, Phase::Unknown] {
             for transferred in [false, true] { for ready in [false, true] { for claimed in [false, true] {
-                assert_eq!(configuration_claim_ready(phase, transferred, ready, claimed),
+                assert_eq!(edit_claim_ready(InstalledEditDomain::Configuration, phase, transferred, ready, claimed),
                     phase == Phase::ConfigurationPrepared && transferred && ready && !claimed);
             } } }
         }
-        assert!(!configuration_claim_ready(Phase::ConfigurationPrepared, true, true, true));
-        assert!(!configuration_claim_ready(Phase::PassivePrepared, true, true, false));
+        assert!(!edit_claim_ready(InstalledEditDomain::Configuration, Phase::ConfigurationPrepared, true, true, true));
+        assert!(!edit_claim_ready(InstalledEditDomain::Configuration, Phase::PassivePrepared, true, true, false));
+    }
+
+    #[test]
+    fn github_readonly_slots_are_domain_fixed_and_do_not_turn_interruption_into_success() {
+        let mut slots = GitHubReadOnlyRuntimeSlots::new();
+        let original = slots.inner.inspection.as_ref().map(std::ptr::from_ref);
+        assert!(slots.never_started() && slots.no_child_effect() && !slots.settled());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Settled); // Empty, not a native close witness.
+        assert!(slots.settled() && !slots.never_started());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(slots.inner.inspection.as_ref().map(std::ptr::from_ref), original);
+
+        let mut interrupted = GitHubReadOnlyRuntimeSlots::new();
+        interrupted.mark_interrupted();
+        assert!(interrupted.transfer_once().is_err() && interrupted.capability().is_err());
+        assert_eq!(interrupted.settle_originals(), CloseOutcome::Unknown);
+        assert!(!interrupted.settled() && !interrupted.never_started());
+        let mut pending = OriginalDescriptorBook::new();
+        pending.phase = Phase::GitHubReadOnlyPreparing;
+        assert_eq!(pending.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(pending.observation().positive_closes(), 0);
+
+        for wrong in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows,
+            InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
+            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
+            let mut other = GitHubReadOnlyRuntimeSlots { inner: InstalledEditRuntimeSlots::new(wrong) };
+            assert!(!other.never_started() && !other.no_child_effect() && !other.settled());
+            assert!(other.transfer_once().is_err() && other.capability().is_err());
+            assert_eq!(other.settle_originals(), CloseOutcome::Unknown);
+            assert!(!edit_claim_ready(InstalledEditDomain::GitHubReadOnly, wrong.prepared(), true, true, false));
+            assert!(!edit_claim_ready(wrong, Phase::GitHubReadOnlyPrepared, true, true, false));
+        }
+        assert!(edit_claim_ready(InstalledEditDomain::GitHubReadOnly, Phase::GitHubReadOnlyPrepared, true, true, false));
+        assert!(!edit_claim_ready(InstalledEditDomain::GitHubReadOnly, Phase::GitHubReadOnlyPrepared, true, true, true));
+    }
+    #[test]
+    fn github_preflight_slots_are_distinct_from_readonly_and_keep_original_refusal() {
+        let mut slots = GitHubPreflightRuntimeSlots::new();
+        let original = slots.inner.inspection.as_ref().map(std::ptr::from_ref);
+        assert!(slots.never_started() && slots.no_child_effect() && !slots.settled());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Settled); // Empty DATA only, not a native close witness.
+        assert_eq!(slots.inner.inspection.as_ref().map(std::ptr::from_ref), original);
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        let mut foreign = GitHubPreflightRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubReadOnly) };
+        assert!(foreign.transfer_once().is_err() && foreign.capability().is_err());
+        assert_eq!(foreign.settle_originals(), CloseOutcome::Unknown);
+        let mut interrupted = GitHubPreflightRuntimeSlots::new(); interrupted.mark_interrupted();
+        assert!(interrupted.transfer_once().is_err() && interrupted.capability().is_err());
+        assert_eq!(interrupted.settle_originals(), CloseOutcome::Unknown);
+        let mut pending = OriginalDescriptorBook::new(); pending.phase = Phase::GitHubPreflightPreparing;
+        assert_eq!(pending.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(pending.observation().positive_closes(), 0);
+    }
+    #[test]
+    fn installed_workflow_slots_contract_is_inert() { assert_installed_workflow_slots_contract(); }
+    pub(super) fn workflow_slot_facades_and_original_domains_cannot_be_substituted() {
+        let mut slots = GitHubWorkflowRuntimeSlots::new();
+        let original = slots.inner.inspection.as_ref().map(std::ptr::from_ref);
+        assert!(slots.never_started() && slots.no_child_effect() && !slots.settled());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Settled); // Empty: no descriptor/close witness.
+        assert!(slots.settled() && !slots.never_started());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(slots.inner.inspection.as_ref().map(std::ptr::from_ref), original);
+        assert_eq!(slots.inner.inspection.as_ref().unwrap().observation().positive_closes(), 0);
+
+        // Deliberately wrong EMPTY DATA, never a constructed native capability.
+        let mut config = ConfigurationRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubWorkflows) };
+        let mut workflow = GitHubWorkflowRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::Configuration) };
+        assert!(!config.never_started() && !config.no_child_effect() && !config.settled());
+        assert!(!workflow.never_started() && !workflow.no_child_effect() && !workflow.settled());
+        assert!(config.transfer_once().is_err() && config.capability().is_err());
+        assert!(workflow.transfer_once().is_err() && workflow.capability().is_err());
+        assert_eq!(config.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(workflow.settle_originals(), CloseOutcome::Unknown);
+        assert!(!config.settled() && !workflow.settled());
+        for (domain, different) in [(InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows),
+            (InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::Configuration)] {
+            let mut slots = InstalledEditRuntimeSlots::new(domain);
+            slots.inspection_started = true;
+            slots.inspection.as_mut().unwrap().edit_domain = Some(different);
+            assert!(!slots.no_child_effect() && slots.transfer_once().is_err() && slots.capability().is_err());
+            assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+            assert!(!slots.settled());
+            assert_eq!(slots.inspection.as_ref().unwrap().observation().positive_closes(), 0);
+        }
+    }
+    pub(super) fn workflow_partials_and_unreturned_preparation_retain_original_unknown() {
+        let mut slots = GitHubWorkflowRuntimeSlots::new();
+        let original = slots.inner.inspection.as_mut().unwrap();
+        let pending = original.book.arm(Purpose::Payload).unwrap(); // Armed, never opened.
+        original.book.refuse(AdmissionFailure::Stopped);
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        let original = slots.inner.inspection.as_ref().unwrap();
+        assert_eq!(original.book.records[pending.0].acquisition, Acquisition::Attempted);
+        assert_eq!(original.observation().positive_closes(), 0);
+        assert_eq!(original.observation().pending_acquisitions(), 1);
+        let mut interrupted = GitHubWorkflowRuntimeSlots::new();
+        interrupted.mark_interrupted();
+        assert!(interrupted.transfer_once().is_err() && interrupted.capability().is_err());
+        assert_eq!(interrupted.settle_originals(), CloseOutcome::Unknown);
+        let mut pending = OriginalDescriptorBook::new();
+        pending.phase = Phase::GitHubWorkflowPreparing;
+        assert_eq!(pending.settle_originals(), CloseOutcome::Unknown);
+        pending.refuse(AdmissionFailure::Stopped);
+        assert_eq!(pending.observation().phase(), "unknown");
+        assert_eq!(pending.observation().positive_closes(), 0);
+    }
+    #[test]
+    fn installed_metadata_slots_contract_is_inert() { assert_installed_metadata_slots_contract(); }
+    pub(super) fn metadata_slot_facades_and_original_domains_cannot_be_substituted() {
+        let mut slots = MetadataTextRuntimeSlots::new();
+        let original = slots.inner.inspection.as_ref().map(std::ptr::from_ref);
+        assert!(slots.never_started() && slots.no_child_effect() && !slots.settled());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Settled); // Empty DATA, never native close evidence.
+        assert!(slots.settled() && !slots.never_started());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(slots.inner.inspection.as_ref().map(std::ptr::from_ref), original);
+        assert_eq!(slots.inner.inspection.as_ref().unwrap().observation().positive_closes(), 0);
+
+        for wrong in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows] {
+            let mut metadata = MetadataTextRuntimeSlots { inner: InstalledEditRuntimeSlots::new(wrong) };
+            assert!(!metadata.never_started() && !metadata.no_child_effect() && !metadata.settled());
+            assert!(metadata.transfer_once().is_err() && metadata.capability().is_err());
+            assert_eq!(metadata.settle_originals(), CloseOutcome::Unknown);
+            assert!(!metadata.settled());
+        }
+        let mut config = ConfigurationRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::MetadataText) };
+        let mut workflow = GitHubWorkflowRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::MetadataText) };
+        assert!(!config.never_started() && !config.no_child_effect() && !config.settled());
+        assert!(!workflow.never_started() && !workflow.no_child_effect() && !workflow.settled());
+        assert!(config.transfer_once().is_err() && config.capability().is_err());
+        assert!(workflow.transfer_once().is_err() && workflow.capability().is_err());
+        assert_eq!(config.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(workflow.settle_originals(), CloseOutcome::Unknown);
+        for domain in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
+            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
+            for other in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
+                InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
+                if domain == other { continue; }
+                let mut slots = InstalledEditRuntimeSlots::new(domain);
+                slots.inspection_started = true;
+                slots.inspection.as_mut().unwrap().edit_domain = Some(other);
+                assert!(!slots.no_child_effect() && slots.transfer_once().is_err() && slots.capability().is_err());
+                assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+                assert!(!slots.settled());
+                assert_eq!(slots.inspection.as_ref().unwrap().observation().positive_closes(), 0);
+            }
+        }
+    }
+    pub(super) fn metadata_partials_and_unreturned_preparation_retain_original_unknown() {
+        let mut slots = MetadataTextRuntimeSlots::new();
+        let original = slots.inner.inspection.as_mut().unwrap();
+        let pending = original.book.arm(Purpose::Payload).unwrap(); // Armed, never opened.
+        original.book.refuse(AdmissionFailure::Stopped);
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        let original = slots.inner.inspection.as_ref().unwrap();
+        assert_eq!(original.book.records[pending.0].acquisition, Acquisition::Attempted);
+        assert_eq!(original.observation().positive_closes(), 0);
+        assert_eq!(original.observation().pending_acquisitions(), 1);
+        let mut interrupted = MetadataTextRuntimeSlots::new();
+        interrupted.mark_interrupted();
+        assert!(interrupted.transfer_once().is_err() && interrupted.capability().is_err());
+        assert_eq!(interrupted.settle_originals(), CloseOutcome::Unknown);
+        let mut pending = OriginalDescriptorBook::new();
+        pending.phase = Phase::MetadataTextPreparing;
+        assert_eq!(pending.settle_originals(), CloseOutcome::Unknown);
+        pending.refuse(AdmissionFailure::Stopped);
+        assert_eq!(pending.observation().phase(), "unknown");
+        assert_eq!(pending.observation().positive_closes(), 0);
+    }
+
+    #[test]
+    fn version_slots_keep_the_same_empty_originals_and_reject_all_foreign_domains() { version_slots_keep_the_same_empty_originals_and_reject_all_foreign_domains_data(); }
+    pub(super) fn version_slots_keep_the_same_empty_originals_and_reject_all_foreign_domains_data() {
+        // Empty bookkeeping DATA only: no OS descriptor, inspection, transfer,
+        // executable capability or positive native close is synthesized.
+        let mut slots = ReleaseVersionRuntimeSlots::new();
+        let original = slots.inner.inspection.as_ref().map(std::ptr::from_ref);
+        assert!(slots.never_started() && slots.no_child_effect() && !slots.settled());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(),CloseOutcome::Settled);
+        assert!(slots.settled() && !slots.never_started());
+        assert_eq!(slots.settle_originals(),CloseOutcome::Unknown);
+        assert_eq!(slots.inner.inspection.as_ref().map(std::ptr::from_ref),original);
+        assert_eq!(slots.inner.inspection.as_ref().unwrap().observation().positive_closes(),0);
+        for wrong in [InstalledEditDomain::Configuration,InstalledEditDomain::GitHubWorkflows,InstalledEditDomain::MetadataText,
+            InstalledEditDomain::EnvironmentDiagnostics,InstalledEditDomain::OfflinePreflight,InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
+            let mut foreign = ReleaseVersionRuntimeSlots { inner:InstalledEditRuntimeSlots::new(wrong) };
+            assert!(!foreign.never_started() && !foreign.no_child_effect() && !foreign.settled());
+            assert!(foreign.transfer_once().is_err() && foreign.capability().is_err());
+            assert_eq!(foreign.settle_originals(),CloseOutcome::Unknown);
+            assert!(!foreign.settled());
+        }
+        all_edit_claim_domains_require_their_own_preparation_once();
+    }
+    #[test]
+    fn version_unreturned_acquisition_and_preparation_stay_unknown_without_retry_or_new_owner() { version_unreturned_acquisition_and_preparation_stay_unknown_without_retry_or_new_owner_data(); }
+    pub(super) fn version_unreturned_acquisition_and_preparation_stay_unknown_without_retry_or_new_owner_data() {
+        let mut slots = ReleaseVersionRuntimeSlots::new();
+        let original = slots.inner.inspection.as_mut().unwrap();
+        let pending = original.book.arm(Purpose::Payload).unwrap(); // Armed, NEVER opened.
+        original.book.refuse(AdmissionFailure::Stopped);
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(),CloseOutcome::Unknown);
+        assert_eq!(slots.settle_originals(),CloseOutcome::Unknown);
+        let original = slots.inner.inspection.as_ref().unwrap();
+        assert_eq!(original.book.records[pending.0].acquisition,Acquisition::Attempted);
+        assert_eq!(original.observation().positive_closes(),0);
+        assert_eq!(original.observation().pending_acquisitions(),1);
+        let mut interrupted = ReleaseVersionRuntimeSlots::new(); interrupted.mark_interrupted();
+        assert!(interrupted.transfer_once().is_err() && interrupted.capability().is_err());
+        assert_eq!(interrupted.settle_originals(),CloseOutcome::Unknown);
+        let mut pending = OriginalDescriptorBook::new(); pending.phase = Phase::ReleaseVersionPreparing;
+        assert_eq!(pending.settle_originals(),CloseOutcome::Unknown);
+        pending.refuse(AdmissionFailure::Stopped);
+        assert_eq!(pending.observation().phase(),"unknown");
+        assert_eq!(pending.observation().positive_closes(),0);
+    }
+    pub(super) fn all_edit_claim_domains_require_their_own_preparation_once() {
+        for domain in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
+            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
+            for phase in [Phase::New, Phase::Inspecting, Phase::InspectedOnly, Phase::PassivePreparing, Phase::PassivePrepared,
+                Phase::ConfigurationPreparing, Phase::ConfigurationPrepared, Phase::GitHubWorkflowPreparing, Phase::GitHubWorkflowPrepared, Phase::GitHubReadOnlyPreparing, Phase::GitHubReadOnlyPrepared, Phase::MetadataTextPreparing, Phase::MetadataTextPrepared, Phase::ReleaseVersionPreparing, Phase::ReleaseVersionPrepared, Phase::MetadataImagesPreparing, Phase::MetadataImagesPrepared,
+                Phase::EnvironmentDiagnosticsPreparing, Phase::EnvironmentDiagnosticsPrepared, Phase::OfflinePreflightPreparing, Phase::OfflinePreflightPrepared, Phase::ProjectRecoveryPreparing, Phase::ProjectRecoveryPrepared, Phase::GitHubPreflightPreparing, Phase::GitHubPreflightPrepared, Phase::GitHubReleasePreparing, Phase::GitHubReleasePrepared,
+                Phase::Retained, Phase::Auditing, Phase::Refused, Phase::Settling, Phase::Settled, Phase::Unknown] {
+                for transferred in [false, true] { for ready in [false, true] { for claimed in [false, true] {
+                    assert_eq!(edit_claim_ready(domain, phase, transferred, ready, claimed),
+                        phase == domain.prepared() && transferred && ready && !claimed);
+                } } }
+            }
+        }
+    }
+    #[test]
+    fn installed_tools_and_offline_facades_keep_original_empty_custody_and_domain() {
+        let mut tools = EnvironmentDiagnosticsRuntimeSlots::new(); let mut offline = OfflinePreflightRuntimeSlots::new();
+        let tool_original = tools.inner.inspection.as_ref().map(std::ptr::from_ref);
+        let offline_original = offline.inner.inspection.as_ref().map(std::ptr::from_ref);
+        assert!(tools.never_started() && tools.no_child_effect() && !tools.settled());
+        assert!(offline.never_started() && offline.no_child_effect() && !offline.settled());
+        assert!(tools.transfer_once().is_err() && tools.capability().is_err());
+        assert!(offline.transfer_once().is_err() && offline.capability().is_err());
+        assert_eq!(tools.settle_originals(), CloseOutcome::Settled); // Empty only, no native descriptor is fabricated.
+        assert_eq!(offline.settle_originals(), CloseOutcome::Settled);
+        assert!(tools.settled() && offline.settled() && !tools.never_started() && !offline.never_started());
+        assert_eq!(tools.settle_originals(), CloseOutcome::Unknown); assert_eq!(offline.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(tools.inner.inspection.as_ref().map(std::ptr::from_ref), tool_original);
+        assert_eq!(offline.inner.inspection.as_ref().map(std::ptr::from_ref), offline_original);
+        assert_eq!(tools.inner.inspection.as_ref().unwrap().observation().positive_closes(), 0);
+        assert_eq!(offline.inner.inspection.as_ref().unwrap().observation().positive_closes(), 0);
+        for wrong in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
+            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
+            if wrong != InstalledEditDomain::EnvironmentDiagnostics {
+                let mut bad = EnvironmentDiagnosticsRuntimeSlots { inner: InstalledEditRuntimeSlots::new(wrong) };
+                assert!(!bad.never_started() && !bad.no_child_effect() && !bad.settled());
+                assert!(bad.transfer_once().is_err() && bad.capability().is_err());
+                assert_eq!(bad.settle_originals(), CloseOutcome::Unknown);
+            }
+            if wrong != InstalledEditDomain::OfflinePreflight {
+                let mut bad = OfflinePreflightRuntimeSlots { inner: InstalledEditRuntimeSlots::new(wrong) };
+                assert!(!bad.never_started() && !bad.no_child_effect() && !bad.settled());
+                assert!(bad.transfer_once().is_err() && bad.capability().is_err());
+                assert_eq!(bad.settle_originals(), CloseOutcome::Unknown);
+            }
+        }
+        all_edit_claim_domains_require_their_own_preparation_once();
+    }
+    #[test]
+    fn installed_tools_and_offline_pending_acquisitions_or_preparations_retain_unknown() {
+        for domain in [InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery] {
+            let mut slots = InstalledEditRuntimeSlots::new(domain);
+            let original = slots.inspection.as_mut().unwrap();
+            let pending = original.book.arm(Purpose::Payload).unwrap(); // Armed but never opened.
+            original.book.refuse(AdmissionFailure::Stopped);
+            assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+            assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+            assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+            let original = slots.inspection.as_ref().unwrap();
+            assert_eq!(original.book.records[pending.0].acquisition, Acquisition::Attempted);
+            assert_eq!(original.observation().pending_acquisitions(), 1);
+            assert_eq!(original.observation().positive_closes(), 0);
+            let mut pending = OriginalDescriptorBook::new(); pending.phase = domain.preparing();
+            assert_eq!(pending.settle_originals(), CloseOutcome::Unknown);
+            assert!(pending.interrupted && pending.unknown && pending.settlement_started);
+            assert_eq!(pending.observation().positive_closes(), 0);
+            let mut interrupted = InstalledEditRuntimeSlots::new(domain); interrupted.mark_interrupted();
+            assert!(interrupted.transfer_once().is_err() && interrupted.capability().is_err());
+            assert_eq!(interrupted.settle_originals(), CloseOutcome::Unknown); assert!(!interrupted.settled());
+        }
     }
 }
 

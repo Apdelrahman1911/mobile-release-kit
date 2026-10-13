@@ -699,7 +699,7 @@ def _offline_cli_admit(core, control_path, value):
     names, size = [], 0
     for row in rows:
         require(type(row) is dict and set(row) == {"path", "size", "sha256"}
-                and type(row["path"]) is str and re.fullmatch(r"[A-Za-z0-9_./-]+", row["path"]) is not None
+                and type(row["path"]) is str and re.fullmatch(r"[A-Za-z0-9_./+-]+", row["path"]) is not None
                 and not row["path"].startswith("/") and not any(part in {"", ".", ".."} for part in row["path"].split("/"))
                 and type(row["size"]) is int and 0 <= row["size"] <= 8 * 1024 * 1024
                 and hexadecimal(row["sha256"], 64))

@@ -1,10 +1,10 @@
 // Workflow-only orchestration using the existing edit observer pattern. The
 // shared native EditOwner, not a JS promise/controller, owns all real resources.
 import {
-  canApplyWorkflows, githubWorkflowEditReducer, initialGitHubWorkflowEdit,
-  workflowContextMatches, workflowPreparedMatches, workflowStartReason,
+  canApplyWorkflows, canRecoverWorkflows, githubWorkflowEditReducer, initialGitHubWorkflowEdit,
+  workflowContextMatches, workflowPreparedMatches, workflowRecoveryStartReason, workflowStartReason,
 } from './githubWorkflowEdit.ts';
-import type { GitHubWorkflowEditState, WorkflowApplyBinding, WorkflowDraftBinding, WorkflowEditAction } from './githubWorkflowEdit.ts';
+import type { GitHubWorkflowEditState, WorkflowApplyBinding, WorkflowBinding, WorkflowDraftBinding, WorkflowEditAction, WorkflowRecoveryApplyBinding, WorkflowRecoveryBinding } from './githubWorkflowEdit.ts';
 import { parseGitHubWorkflowEditStatus, workflowEditError } from './githubWorkflowEditProtocol.ts';
 import type { GitHubWorkflowEditStatus } from './githubWorkflowEditTypes.ts';
 import type { ProjectSession } from './drafts.ts';
@@ -96,6 +96,34 @@ export class GitHubWorkflowEditController {
     const project = this.context.selectedProject();
     return workflowStartReason(this.state, project, this.context.setup(), project ? this.context.otherEditReason(project.project.id) : null);
   }
+  recoveryStartReason(): string | null {
+    const project = this.context.selectedProject();
+    return workflowRecoveryStartReason(this.state, project, project ? this.context.otherEditReason(project.project.id) : null);
+  }
+  inspectRecovery(): boolean {
+    if (this.disposed || !this.api || this.api.mode !== 'native' || this.recoveryStartReason() !== null) return false;
+    const project = this.context.selectedProject(); const status = this.state.status;
+    if (!project || !status) return false;
+    const binding: WorkflowRecoveryBinding = freeze({ intent: 'recover', projectId: project.project.id,
+      windowGeneration: status.windowGeneration, startStatusRevision: status.statusRevision,
+      previousTerminalId: status.lastTerminal?.sessionId ?? null });
+    const previous = this.state.attempt;
+    this.change({ type: 'begin', binding });
+    if (this.state.attempt === previous || this.state.attempt?.binding !== binding) return false;
+    void this.command('open', binding, () => this.api!.openGitHubWorkflowRecovery(binding.projectId));
+    return true;
+  }
+  recover(confirmation: WorkflowRecoveryApplyBinding): boolean {
+    if (this.disposed || !this.api || !this.state.attempt ||
+        !canRecoverWorkflows(this.state, this.context.selectedProject(), confirmation)) return false;
+    const binding = this.state.attempt.binding; const previous = this.state.attempt;
+    this.change({ type: 'recover-claim', binding: confirmation });
+    if (this.state.attempt === previous || !this.state.attempt?.applyClaimed) return false;
+    if (this.state.attempt.binding === binding && !this.state.attempt.closeRequested) {
+      void this.command('apply', binding, () => this.api!.applyGitHubWorkflowRecovery(confirmation.sessionId, confirmation.planToken));
+    }
+    return true;
+  }
   start(): boolean {
     if (this.disposed || !this.api || this.api.mode !== 'native' || this.startReason() !== null) return false;
     const project = this.context.selectedProject(); const setup = this.context.setup(); const status = this.state.status;
@@ -153,7 +181,7 @@ export class GitHubWorkflowEditController {
             (this.state.generationLost || !workflowContextMatches(attempt.binding, this.context.selectedProject(), this.context.setup()))) {
           this.change({ type: 'close-request', reason: 'context_changed' });
         }
-        if (owner?.prepared && !workflowPreparedMatches(attempt)) {
+        if ((owner?.prepared || owner?.recovery?.prepared) && !workflowPreparedMatches(attempt)) {
           this.change({ type: 'observation-failed', protocol: true });
           this.change({ type: 'close-request', reason: 'invoke_failed' });
         }
@@ -172,22 +200,38 @@ export class GitHubWorkflowEditController {
           if (this.state.attempt?.binding === binding && this.state.attempt.closeClaimed) void this.command('close', binding, () => this.api!.closeGitHubWorkflowEdit(sessionId));
           continue;
         }
-        if (attempt.projection.phase === 'editing' && attempt.projection.checkout && !attempt.prepareClaimed &&
+        if (attempt.projection.phase === 'editing' && !attempt.prepareClaimed &&
             !attempt.closeRequested && !attempt.applyClaimed && !attempt.invalidated) {
-          const sessionId = attempt.sessionId; const revision = attempt.projection.checkout.revision; const binding = attempt.binding;
-          this.change({ type: 'prepare-claim', sessionId });
-          if (this.state.attempt?.binding === binding && this.state.attempt.prepareClaimed && !this.state.attempt.closeRequested) {
-            void this.command('prepare', binding, () => this.api!.prepareGitHubWorkflowEdit({
-              sessionId, revision, draft: binding.draft, toolingRepository: binding.toolingRepository, toolingSha: binding.toolingSha,
-              draftRevision: binding.draftRevision, baselineGeneration: binding.baselineGeneration,
-            }));
+          const sessionId = attempt.sessionId; const binding = attempt.binding;
+          if (binding.intent === 'recover') {
+            const checkout = attempt.projection.recovery?.checkout;
+            if (!checkout) continue;
+            if (checkout.view.state !== 'recoverable') {
+              this.change({ type: 'close-request', reason: 'user' });
+              this.processAgain = true;
+              continue; // Read-only idle/conflict inspection retires the same owner.
+            }
+            this.change({ type: 'prepare-claim', sessionId });
+            if (this.state.attempt?.binding === binding && this.state.attempt.prepareClaimed && !this.state.attempt.closeRequested) {
+              void this.command('prepare', binding, () => this.api!.prepareGitHubWorkflowRecovery(sessionId, checkout.revision));
+            }
+          } else {
+            const checkout = attempt.projection.checkout;
+            if (!checkout) continue;
+            this.change({ type: 'prepare-claim', sessionId });
+            if (this.state.attempt?.binding === binding && this.state.attempt.prepareClaimed && !this.state.attempt.closeRequested) {
+              void this.command('prepare', binding, () => this.api!.prepareGitHubWorkflowEdit({
+                sessionId, revision: checkout.revision, draft: binding.draft, toolingRepository: binding.toolingRepository, toolingSha: binding.toolingSha,
+                draftRevision: binding.draftRevision, baselineGeneration: binding.baselineGeneration,
+              }));
+            }
           }
         }
       } while (this.processAgain);
     } finally { this.processing = false; }
   }
 
-  private async command(kind: 'open' | 'prepare' | 'apply' | 'close', binding: WorkflowDraftBinding, call: () => Promise<GitHubWorkflowEditStatus>): Promise<void> {
+  private async command(kind: 'open' | 'prepare' | 'apply' | 'close', binding: WorkflowBinding, call: () => Promise<GitHubWorkflowEditStatus>): Promise<void> {
     try { this.receive(await call(), 'reply'); }
     catch (error) {
       if (this.disposed || this.state.attempt?.binding !== binding) return;

@@ -1,16 +1,28 @@
+import { artifactInspectionError } from './artifactInspectionProtocol.ts';
+import { initializationError } from './projectInitializationProtocol.ts';
+import { installationError, installationCheckError, installationPreparationError } from './installation.ts';
+import { projectRecoveryError } from './projectRecoveryProtocol.ts';
 import { offlinePreflightError } from './offlinePreflightProtocol.ts';
 import { androidBuildError } from './androidBuildProtocol.ts';
+import { androidCatalogError } from './androidToolchainCatalogProtocol.ts';
+import { iosArchiveError } from './iosArchiveProtocol.ts';
 import fieldHelp from '../../src/mobile_release/api/data/field-help.json' with { type: 'json' };
 import projectSchema from '../../src/mobile_release/api/data/project.schema.json' with { type: 'json' };
 import githubSetupResource from '../../src/mobile_release/api/data/github-setup-v1.json' with { type: 'json' };
 import credentialGuideResource from '../../src/mobile_release/api/data/credential-guide-v1.json' with { type: 'json' };
 import githubConnectionResource from '../../src/mobile_release/api/data/github-connection-v1.json' with { type: 'json' };
 import metadataTextResource from '../../src/mobile_release/api/data/metadata-text-help-v1.json' with { type: 'json' };
+import versionEditResource from '../../src/mobile_release/api/data/release-version-help-v1.json' with { type: 'json' };
+import { parseVersionEditGuide, versionEditError } from './releaseVersionEdit.ts';
 import { githubSetupError, parseGitHubSetupHelp } from './githubSetupProtocol.ts';
 import { parseCredentialGuide } from './credentialGuide.ts';
 import { assetError } from './assetSessionProtocol.ts';
 import { workflowEditError } from './githubWorkflowEditProtocol.ts';
 import { githubConnectionError, parseGitHubConnectionHelp } from './githubConnectionProtocol.ts';
+import { githubRemoteSetupError } from './GitHubRemoteSetupProtocol.ts';
+import { githubPreflightError } from './githubPreflightProtocol.ts';
+import { githubReleaseError } from './githubReleaseProtocol.ts';
+import { githubHistoryError } from './githubHistoryProtocol.ts';
 import { metadataTextError, parseMetadataTextGuide } from './metadataTextProtocol.ts';
 import { environmentError, environmentRequestFits } from './environment.ts';
 import { environmentDiagnosticsError } from './environmentDiagnosticsProtocol.ts';
@@ -36,6 +48,7 @@ const catalog: Catalog = {
   credentialGuide: parseCredentialGuide(credentialGuideResource),
   githubConnection: parseGitHubConnectionHelp(githubConnectionResource),
   metadataText: parseMetadataTextGuide(metadataTextResource),
+  releaseVersionEdit: parseVersionEditGuide(versionEditResource),
   // TypeScript adds optional `undefined` properties when inferring heterogeneous
   // JSON arrays. The exact core-owned JSON resource cannot contain undefined.
   schemaVersion: 1, schema: projectSchema as unknown as JsonObject, fields: fieldHelp as FieldHelp[],
@@ -70,11 +83,20 @@ const editUnavailable = async (): Promise<never> => {
   throw { code: 'PreviewOnly', message: 'Browser preview has no native edit owner, save plan or finality. No save operation was performed.', retryable: false } satisfies ApiError;
 };
 const assetUnavailable = async (): Promise<never> => { throw assetError({ code: 'AssetSessionUnavailable' }); };
+const initializationUnavailable=async():Promise<never>=>{throw initializationError({code:'PreviewOnly'});};
 const workflowUnavailable = async (): Promise<never> => { throw workflowEditError({ code: 'PreviewOnly' }); };
 const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
+const githubRemoteSetupUnavailable = (): Promise<never> => Promise.reject(githubRemoteSetupError({ code: 'github_remote_setup_refused_runtime_unavailable' }));
+const githubPreflightUnavailable = (): Promise<never> => Promise.reject(githubPreflightError({ code: 'github_preflight_refused_unqualified' }));
+const githubReleaseUnavailable = (): Promise<never> => Promise.reject(githubReleaseError({ code: 'github_release_refused_unqualified' }));
+const githubHistoryUnavailable = (): Promise<never> => Promise.reject(githubHistoryError({ code: 'github_history_refused_runtime_unavailable' }));
+const versionEditUnavailable = (): Promise<never> => Promise.reject(versionEditError(null));
 const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextError(null));
+const recoveryUnavailable = (): Promise<never> => Promise.reject(projectRecoveryError({ code: 'project_recovery_unavailable' }));
 const offlineUnavailable = (): Promise<never> => Promise.reject(offlinePreflightError({ code: 'offline_preflight_unavailable' }));
 const androidUnavailable = (): Promise<never> => Promise.reject(androidBuildError({ code: 'android_build_unavailable' }));
+const androidCatalogUnavailable = (): Promise<never> => Promise.reject(androidCatalogError({ code: 'android_catalog_unavailable' }));
+const iosUnavailable = (): Promise<never> => Promise.reject(iosArchiveError({ code: 'ios_archive_unavailable' }));
 const diagnosticsUnavailable = (): Promise<never> => Promise.reject(environmentDiagnosticsError({ code: 'environment_diagnostics_unavailable' }));
 
 // Deliberate design fixture, not a core assessment or a source of version policy.
@@ -115,14 +137,23 @@ function exampleEnvironment(request: EnvironmentRequest): EnvironmentResult {
     assurance: { ...assurance, basis: 'schema-policy' } };
 }
 
+const artifactInspectionUnavailable = async ():Promise<never> => { throw artifactInspectionError({code:'artifact_inspection_unavailable'}); };
+
 export const previewApi: DesktopApi = {
   mode: 'preview',
   appInfo: async () => ({
     appName: 'Mobile Release Kit', appVersion: 'Example only',
     runtime: { state: 'unavailable', mode: 'unavailable', reason: 'Browser preview has no native runtime or core validation.' },
     capabilities: null,
+    installation: null,
     projectPathSelection: { available: false, reason: 'Browser preview has no native project-path picker.' },
   }),
+  revealInstallation: async () => { throw installationError({ code: 'installation_reveal_unavailable' }); },
+  installationStatus: async () => { throw installationCheckError({ code: 'installation_check_unavailable' }); },
+  inspectInstallation: async () => { throw installationCheckError({ code: 'installation_check_unavailable' }); },
+  cancelInstallation: async () => { throw installationCheckError({ code: 'installation_check_unavailable' }); },
+  installationPreparationStatus: async () => { throw installationPreparationError({ code: 'macos_maintenance_unavailable' }); },
+  prepareInstallationQuit: async () => { throw installationPreparationError({ code: 'macos_maintenance_unavailable' }); },
   chooseProject: async () => ({ id: 'preview-example', name: 'Northstar Notes', path: example.root }),
   // No invented relative path or successful native selection in design mode.
   chooseProjectPath: async () => { throw projectPathError({ code: 'project_path_unavailable' }); },
@@ -131,6 +162,10 @@ export const previewApi: DesktopApi = {
   evidenceStatus: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
   observeEvidence: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
   cancelEvidence: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
+  chooseReleaseEvidenceFolder: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
+  releaseEvidenceStatus: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
+  observeReleaseEvidence: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
+  cancelReleaseEvidence: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
   snapshot: async () => structuredClone(example),
   observeReleaseVersion: async () => {
     // No successful saved-file fixture, including after native bridge failure.
@@ -154,11 +189,34 @@ export const previewApi: DesktopApi = {
   },
   // Browser requirements are explicit design examples. There is no successful
   // diagnostics fixture, native status, owner or fallback after a bridge error.
+  prepareProjectRecovery: recoveryUnavailable,
+  startProjectRecovery: recoveryUnavailable,
+  projectRecoveryStatus: recoveryUnavailable,
+  cancelProjectRecovery: recoveryUnavailable,
+  subscribeProjectRecovery: recoveryUnavailable,
+  androidToolchainCatalogStatus: androidCatalogUnavailable,
+  refreshAndroidToolchainCatalog: androidCatalogUnavailable,
+  recoverAndroidToolchain: androidCatalogUnavailable,
+  selectAndroidToolchain: androidCatalogUnavailable,
+  cancelAndroidToolchainCatalog: androidCatalogUnavailable,
+  subscribeAndroidToolchainCatalog: androidCatalogUnavailable,
   prepareAndroidBuild: androidUnavailable,
   startAndroidBuild: androidUnavailable,
   androidBuildStatus: androidUnavailable,
   cancelAndroidBuild: androidUnavailable,
   subscribeAndroidBuild: androidUnavailable,
+  prepareIOSArchive: iosUnavailable,
+  startIOSArchive: iosUnavailable,
+  iosArchiveStatus: iosUnavailable,
+  cancelIOSArchive: iosUnavailable,
+  subscribeIOSArchive: iosUnavailable,
+  pickArtifactInspection: artifactInspectionUnavailable,
+  prepareArtifactInspection: artifactInspectionUnavailable,
+  startArtifactInspection: artifactInspectionUnavailable,
+  cancelArtifactInspection: artifactInspectionUnavailable,
+  artifactInspectionStatus: artifactInspectionUnavailable,
+  discardArtifactInspection: artifactInspectionUnavailable,
+  subscribeArtifactInspection: artifactInspectionUnavailable,
   prepareOfflinePreflight: offlineUnavailable,
   startOfflinePreflight: offlineUnavailable,
   offlinePreflightStatus: offlineUnavailable,
@@ -171,15 +229,33 @@ export const previewApi: DesktopApi = {
   openConfigEdit: editUnavailable,
   prepareConfigEdit: editUnavailable,
   applyConfigEdit: editUnavailable,
+  openConfigRecovery: editUnavailable,
+  prepareConfigRecovery: editUnavailable,
+  applyConfigRecovery: editUnavailable,
   closeConfigEdit: editUnavailable,
   configEditStatus: editUnavailable,
   subscribeConfigEdit: editUnavailable,
+  openProjectInitialization: initializationUnavailable,
+  prepareProjectInitialization: initializationUnavailable,
+  applyProjectInitialization: initializationUnavailable,
+  discardProjectInitialization: initializationUnavailable,
+  projectInitializationStatus: initializationUnavailable,
+  subscribeProjectInitialization: initializationUnavailable,
+  openGitHubWorkflowRecovery: workflowUnavailable,
+  prepareGitHubWorkflowRecovery: workflowUnavailable,
+  applyGitHubWorkflowRecovery: workflowUnavailable,
   openGitHubWorkflowEdit: workflowUnavailable,
   prepareGitHubWorkflowEdit: workflowUnavailable,
   applyGitHubWorkflowEdit: workflowUnavailable,
   closeGitHubWorkflowEdit: workflowUnavailable,
   githubWorkflowEditStatus: workflowUnavailable,
   subscribeGitHubWorkflowEdit: workflowUnavailable,
+  openReleaseVersionEdit: versionEditUnavailable,
+  prepareReleaseVersionEdit: versionEditUnavailable,
+  applyReleaseVersionEdit: versionEditUnavailable,
+  closeReleaseVersionEdit: versionEditUnavailable,
+  releaseVersionEditStatus: versionEditUnavailable,
+  subscribeReleaseVersionEdit: versionEditUnavailable,
   observeMetadataText: metadataUnavailable,
   validateMetadataText: metadataUnavailable,
   openMetadataTextEdit: metadataUnavailable,
@@ -193,8 +269,36 @@ export const previewApi: DesktopApi = {
   refreshGitHubConnection: connectionUnavailable,
   disconnectGitHubConnection: connectionUnavailable,
   subscribeGitHubConnection: connectionUnavailable,
+  githubRemoteSetupStatus: githubRemoteSetupUnavailable,
+  githubRemoteSetupPrepare: githubRemoteSetupUnavailable,
+  githubRemoteSetupApply: githubRemoteSetupUnavailable,
+  githubRemoteSetupDiscard: githubRemoteSetupUnavailable,
+  githubRemoteSetupCancel: githubRemoteSetupUnavailable,
+  subscribeGitHubRemoteSetup: githubRemoteSetupUnavailable,
+  githubHistoryStatus: githubHistoryUnavailable,
+  startGitHubHistory: githubHistoryUnavailable,
+  cancelGitHubHistory: githubHistoryUnavailable,
+  subscribeGitHubHistory: githubHistoryUnavailable,
+  githubPreflightStatus: githubPreflightUnavailable,
+  githubReleaseStatus: githubReleaseUnavailable,
+  prepareGitHubPreflight: githubPreflightUnavailable,
+  prepareGitHubRelease: githubReleaseUnavailable,
+  dispatchGitHubPreflight: githubPreflightUnavailable,
+  dispatchGitHubRelease: githubReleaseUnavailable,
+  trackGitHubPreflight: githubPreflightUnavailable,
+  trackGitHubRelease: githubReleaseUnavailable,
+  reconcileGitHubPreflight: githubPreflightUnavailable,
+  reconcileGitHubRelease: githubReleaseUnavailable,
+  loadGitHubPreflightPending: githubPreflightUnavailable,
+  loadGitHubReleasePending: githubReleaseUnavailable,
+  cancelGitHubPreflight: githubPreflightUnavailable,
+  cancelGitHubRelease: githubReleaseUnavailable,
+  subscribeGitHubPreflight: githubPreflightUnavailable,
+  subscribeGitHubRelease: githubReleaseUnavailable,
   assetStatus: assetUnavailable,
   openAssetSession: assetUnavailable,
+  prepareVaultInitialize: assetUnavailable,
+  unlockVault: assetUnavailable,
   setAssetContext: assetUnavailable,
   chooseAsset: assetUnavailable,
   prepareCredential: assetUnavailable,

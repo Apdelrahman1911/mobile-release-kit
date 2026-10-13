@@ -4,6 +4,30 @@ Recovery continues the original candidate; it never rebuilds, re-signs, changes 
 version, overwrites evidence, or silently adopts a different Store build. Keep the
 original tooling SHA. Do not edit an intent, manifest, receipt, or diagnostic journal.
 
+## Desktop local guidance is not recovery authorization
+
+The Desktop's Releases and Artifacts pages can inspect fixed documents in one
+explicitly selected, extracted **final evidence folder**, with its original
+nested layout intact. Select Candidate, External testing or Production submission
+before choosing the folder. Recovery shows guidance from the same observation;
+opening that page does not read files, search runs, inspect journals or retry an
+operation. The new installed lifecycle path still requires its own source-bound
+native qualification; pure tests or the old candidate-only witness do not supply it.
+
+**Saved documents only, not live Store status or retry approval.** Recorded
+outcomes, run roles and stage links are local declarations, not authenticated
+history. The inspection checks consistency using existing core validators and
+the existing external-to-production predicate, but does not fetch or verify
+proofs, artifact bytes, current configuration or live Store state. A recorded
+production receipt is not proof of publication. Missing/incomplete documents
+do not prove that no mutation happened. No recovery or retry authority follows
+from a consistent result, a recorded recovery outcome or a suggested next step.
+
+Retain the original evidence and use the authenticated workflow process below
+for an actual continuation decision. **Project recovery remains unassessed**;
+the separate file-edit alerts retained during the app session remain visible
+and are neither cleared nor resolved by this local evidence inspection.
+
 ## What becomes durable before mutation
 
 Every platform and stage first performs a read-only preparation. Its immutable

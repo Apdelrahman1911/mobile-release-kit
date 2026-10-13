@@ -3590,6 +3590,25 @@ def validate_receipt_intent_binding(
         _validate_create_retry(receipt["createRetry"], operation_intent=operation_intent, executed_by=receipt["executedBy"])
 
 
+def external_production_blocker(receipt: Mapping[str, Any], *, platform: str) -> tuple[str, str] | None:
+    """One recorded-evidence predicate, not release/recovery authorization.
+
+    Callers validate the receipt and its exact intent/predecessor chain first.
+    A missing blocker says nothing about authentication or current Store state.
+    """
+    if platform == "ios" and receipt.get("readback", {}).get("state") != "available-to-testers":
+        return ("ios-external-not-available",
+                "iOS production requires an external receipt whose readback.state is "
+                "available-to-testers; start a NEW external-testing dispatch after Beta Review "
+                "approval using the original candidate, without recovery_run_id. "
+                "Rerunning the old dispatch preserves its immutable pending receipt.")
+    if platform == "android" and receipt.get("outcome") not in {"mutated", "reconciled"}:
+        return ("android-external-observation-only",
+                "Android production requires an external receipt produced by a confirmed "
+                "promotion; an observation-only already-present receipt is not authorization")
+    return None
+
+
 def validate_receipt_chain(
     *,
     candidate_manifest: Mapping[str, Any],
@@ -3670,26 +3689,10 @@ def validate_receipt_chain(
             raise ValidationError(
                 "external receipt lacks closed Play tester-assignment verification"
             )
-        if (
-            platform == "ios"
-            and (production_receipt is not None or require_production_eligible_external)
-            and receipt.get("readback", {}).get("state") != "available-to-testers"
-        ):
-            raise ValidationError(
-                "iOS production requires an external receipt whose readback.state is "
-                "available-to-testers; start a NEW external-testing dispatch after Beta Review "
-                "approval using the original candidate, without recovery_run_id. "
-                "Rerunning the old dispatch preserves its immutable pending receipt."
-            )
-        if (
-            platform == "android"
-            and (production_receipt is not None or require_production_eligible_external)
-            and receipt.get("outcome") not in {"mutated", "reconciled"}
-        ):
-            raise ValidationError(
-                "Android production requires an external receipt produced by a confirmed "
-                "promotion; an observation-only already-present receipt is not authorization"
-            )
+        if production_receipt is not None or require_production_eligible_external:
+            blocker = external_production_blocker(receipt, platform=platform)
+            if blocker is not None:
+                raise ValidationError(blocker[1])
     if production_receipt is not None:
         if candidate_receipt is None or external_receipt is None:
             raise ValidationError(

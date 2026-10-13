@@ -870,3 +870,18 @@ main:focus { outline: none; }
 .offline-findings li { padding: .6rem .25rem; }
 .offline-findings .badge { margin-right: .6rem; }
 .offline-report { margin-top: 1.5rem; }
+
+/* Saved-version values: full bounded text remains selectable and scrollable. */
+.version-editor { margin-block: 1.25rem; }
+.version-selection, .version-review { margin-block: 1.25rem; padding: 1rem; border: 1px solid var(--border); border-radius: 12px; }
+.version-editor code, .version-review code, .version-status code { overflow-wrap: anywhere; }
+.version-digest { display: block; white-space: normal; overflow-wrap: anywhere; font-size: .78rem; margin-block: .5rem; }
+.version-values, .version-raw-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.version-values label { display: flex; align-items: center; gap: .5rem; font-weight: 600; margin-bottom: .5rem; }
+.version-values label span { font-size: .75rem; font-weight: 400; }
+.version-values input { width: 100%; min-width: 0; }
+.version-raw { min-width: 0; }
+.version-raw pre { max-height: 28rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; padding: 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.version-raw pre code { white-space: inherit; }
+.version-status .notice { margin-block: .5rem; }
+@media (max-width: 900px) { .version-values, .version-raw-grid { grid-template-columns: minmax(0, 1fr); } }

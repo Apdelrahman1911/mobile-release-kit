@@ -2,11 +2,23 @@
 
 ## Availability
 
-**Run offline checks (Android)** is a staged implementation, not an enabled or
-qualified desktop capability. Its native and runtime qualification gates remain
-closed. Windows is unsupported. Browser-preview data and another operation's
-test permission cannot enable it. Source preparation is not evidence that tests,
-native process/window behavior, installed runtimes or clean-machine checks passed.
+**Run offline checks (Android)** is selected only for the fixed installed Linux
+x86_64 engineering build (`x86_64-unknown-linux-gnu`) with manifest anchor
+`8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66`
+and protocol anchor
+`083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5`.
+Actual runtime admission additionally requires kernel `6.17.0-1022-azure`.
+Other profiles, macOS and Windows remain unavailable. This is not portable Linux,
+cross-platform or standalone-distribution qualification.
+
+**Available** means the build permits Review and an explicit Run attempt, not
+that the actual host or bundled runtime has passed admission. Status and Prepare
+do not inspect the runtime or launch work. Start checks the original host,
+payload and custody; a wrong kernel, missing or changed payload, or custody
+failure refuses before project execution, without a fallback. Observation tokens,
+browser-preview data and another operation's permission cannot enable execution.
+Source preparation alone is not evidence that native behavior, installed runtimes
+or clean-machine checks passed.
 
 ## Saved input and explicit consent
 

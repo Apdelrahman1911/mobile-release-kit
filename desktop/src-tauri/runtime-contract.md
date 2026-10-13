@@ -14,17 +14,24 @@ The installed read-only/preparation renderer commands are `app_info`, `choose_pr
 `release_version_observe {projectId}`,
 `metadata_text_observe {projectId, platform, locale}`, and
 `metadata_text_validate {platform, fields}`.
-Evidence has separate lifecycle commands: `artifact_evidence_choose {}`,
+Legacy candidate evidence retains its strict commands: `artifact_evidence_choose {}`,
 `artifact_evidence_status {}`, `artifact_evidence_observe {selectionId}`, and
-`artifact_evidence_cancel {operationId, selectionId}`. Cancellation addresses
+`artifact_evidence_cancel {operationId, selectionId}`. The new separate family is
+`release_evidence_choose {stage}`, `release_evidence_status {}`,
+`release_evidence_observe {selectionId}`, and
+`release_evidence_cancel {operationId, selectionId}`. Stage is exactly
+`candidate`, `external-testing` or `production-submit`; choosing natively binds
+it to the folder ID, original operation and result. Cancellation addresses
 the original owner; it is not another passive core method.
 Snapshot and draft validation return the core result without inventing verified
 facts or saving files. Project IDs refer to Rust-held native picker selections;
 renderer-provided roots/executables/command lines/method names are not admitted.
 There are also five finite configuration-edit commands and four fixed GitHub
-connection commands, described below. Configuration editing has a separate
-installed Linux profile; the GitHub connection qualification gate remains
-disabled. There are no generic shell,
+connection commands, described below. Configuration, local workflow Apply and
+public metadata text editing have separate sealed installed Linux profiles;
+the remote GitHub connection qualification gate remains disabled. Installed
+metadata integration is source-authored, awaiting independent native evidence.
+There are no generic shell,
 filesystem, opener, build, Store, credential, or recovery commands/plugins.
 The sole local webview denies remote/new-window navigation.
 The CSP allows only local assets and Tauri IPC, not project-provided web content.
@@ -41,7 +48,8 @@ or renderer override. Other platforms/profiles do not gain production launch.
 That installed profile admits exactly `capabilities`, `catalog`,
 `project.snapshot`, `config.validate`, `config.suggest`, `config.preview`,
 `environment.requirements`, `github.setup.propose`, `release.version.observe`,
-`metadata.text.observe`, `metadata.text.validate` and `artifacts.candidate.observe`.
+`metadata.text.observe`, `metadata.text.validate`, `artifacts.candidate.observe`
+and `release.evidence.observe` (13 methods).
 The native bridge intersects core availability with this allowlist. A separate
 project-only gate uses the existing document/picker/source/registry chain, not
 the closed credential/asset-session grant. `app_info.projectSelection` is
@@ -53,12 +61,20 @@ The two guidance methods use the current draft: prerequisites do not inspect
 installed tools, and workflow proposals do not observe or modify a repository,
 resolve a remote ref, contact GitHub or grant Apply authority.
 Version and public-text reads use the saved configuration, never unsaved drafts.
-Candidate inspection has a separate evidence registry and native folder picker;
-its gate intersects installed project-selection availability with the exact
-candidate passive method, while retaining the original shared lifecycle gates.
-It never grants private-asset authority or replaces the source project. Its
-three document checks prove consistency only, not artifact bytes, authenticated
-provenance, Store state, source correspondence, readiness or recovery authority.
+Both evidence wire families share one evidence registry, native folder picker,
+OriginalWork coordinator and Supervisor query owner. The gate intersects
+installed project-selection availability with the exact requested passive
+method, retaining the original shared lifecycle gates. Purpose and stage are
+checked across selection, binding, job and result; an incompatible active route
+cannot replace, stop or reconcile the original. Stage changes need a new native
+choice, and status recovery never repeats inspection. Neither family grants
+private-asset authority or replaces the source project. The legacy fixed-three
+DTO is unchanged; lifecycle reads the fixed 3/5/10-document JSON projection of
+the selected final bundle, capped at 2 MiB/document, 6 MiB accepted aggregate,
+20,000 decoded values/document and 60,000 total. Complete consistent chains alone
+export summary/recorded stages; all six assurance flags stay false. These checks
+do not authenticate a full inventory, provenance, artifact bytes, live Store
+state, source correspondence, readiness or recovery authority.
 Configuration saving separately uses the existing `EditOwner`, a sealed
 configuration-only installed-A selector and its own original runtime ledger.
 Passive queries never grant write authority. Inspection and acquisition workers
@@ -70,6 +86,14 @@ Installed-shell/project/guidance/Save and the read-only batch's native acceptanc
 are still pending. These changes
 do not qualify a standalone installer, general Linux, macOS or Windows. There
 is no source, PATH, ambient-Python, browser-preview or synthetic-result fallback.
+The installed observer's 13-method bootstrap inventory is source accounting,
+not qualification of the new lifecycle UI. Its legacy candidate-only witness
+does not exercise the new routes or shared Releases/Artifacts/Recovery state.
+GTK/compiler/core ZIP rosters include the new inputs without reopening any
+fixture admission; old conventional payload pins intentionally refuse changed
+bytes until final reviewed package freeze. New source-bound installed evidence
+is required for the new path.
+
 `inspect_bundle_for_packaging` is explicitly **unqualified preparation work**;
 its result contains no executable/core/bootstrap paths and active app commands
 never reach it. Its current pathname-based reads are not a safe execution admission
@@ -86,6 +110,45 @@ package directory or ZIP; the bootstrap is the compile-source fixed
 project configuration, PATH search, or a failed production launch. Development
 paths and sources must be developer-controlled/quiescent. This route does not
 claim a production protected bundle or hostile same-user filesystem protection.
+
+## Windows installed passive candidate (source, not native acceptance)
+
+The Windows x64 MSVC headless test build has one fixed, no-argument candidate
+selector. It connects the existing passive query Supervisor to the same
+`WindowsVersionBook` through inspection, whole-original transfer, preparation,
+one-use claim and explicit settlement. It is unavailable in the normal Desktop,
+development-runtime and publisher profiles; no environment variable, renderer
+path or successful DATA receipt activates it. The generic packaged resolver and
+path-taking process entry remain closed.
+
+Its five methods are `capabilities`, `catalog`, `config.validate`, `config.suggest`
+and `config.preview`. The separate six-method Windows DATA policy does not make
+`project.snapshot` available. Project selection/document ownership, Save,
+credentials, builds, GitHub/Store operations, MSI, WebView2 and a real installed
+UI session remain separate, unqualified work.
+
+Before Python creation, the book admits the complete immutable fixed payload,
+native-known Windows/System32 ancestry, the protected legacy System directory
+or its absence, and the31 fixed physical System32 image names. API-set contracts
+remain OS resolver dependencies, not filenames. Only the sealed same-book,
+native-System32-parent and closed-image-enum role permits positive OS hardlink
+counts; payload and publisher files still require exactly one link. Existing
+owner/DACL, local NTFS, canonical/full-ID, reparse, stream and read-only-sharing
+checks remain mandatory. Shared roots/cursors and the actual48-live-original
+peak have one aggregate budget; branches do not restart it. CPython's complete
+relevant paths must fit512 UTF-16 units including conservative verbatim-prefix
+expansion and NUL before creation.
+
+The fixed command uses the capability's native-derived SystemRoot, protected
+cwd, `-I -S -B` and a cleared environment. Original query10s/cleanup2s clocks,
+child/writer/readers/EOFs, borrower and management joins, one close attempt and
+absorbing Unknown are unchanged. A separate ignored native batch requests five
+unchanged-engine queries, one compile-embedded import/image observation, genuine
+preclaim/outstanding-child cancellation and a closed snapshot check under the
+original ordinary-account owner. Its fresh source-stage/normal-publisher/read-only
+setup does not replay the earlier fullwalk/collision qualification. Added source
+and tests are not execution evidence: actual-diff review, focused checks and the
+source-bound Windows job must succeed before this increment is accepted.
 
 ## Packaged preparation shape (not launch authorization)
 
@@ -376,10 +439,59 @@ cleanup or assumed rollback is provided. Unsaved newer renderer drafts are not
 replaced by an older successful save, and native quit confirmation remains
 independent of renderer state.
 
-`NATIVE_EDIT_QUALIFIED` stays false. Only the exact installed Linux configuration
-profile adds its separate original-owned route; workflow/metadata Save and the
-general resolver remain closed. The ignored hosted fixture has only a private
+`NATIVE_EDIT_QUALIFIED` stays false. The exact installed Linux configuration,
+workflow and metadata profiles add separate original-owned routes; the general
+resolver remains closed. Metadata reuses the original slots and settlement,
+requires registered-root ownership at the same serialized final claim as
+workflow, and supplies the closed `metadata_text` bootstrap argument before
+that claim. The metadata preparation phase participates in interruption and
+absorbing Unknown handling; no new ledger or fallback owner is introduced.
+The observer-only metadata finality accessor returns only the exact settled
+original session from the existing tagged terminal record, never another
+domain's last result. A discarded first Review must settle before a later
+Review replaces that record. The new installed Save case requires exact
+plan/readback and independent filesystem postconditions; source and inert
+checks do not establish installed qualification.
+The ignored hosted fixture has only a private
 test-build authorization after its fixed environment/source/root checks; it
 cannot enable production constructors. Core inert tests, three initial actual-
 owner cases, compilation, or a passing negative fault assertion alone cannot
 qualify saving, native document lifecycle, Windows custody or installed runtimes.
+
+
+## Separate saved-version VALUE profile (closed)
+
+The existing `EditOwner`, native document/root registration, lifecycle and
+installed-runtime slots carry a fourth fixed edit domain, `release_version`.
+Its closed renderer commands are `release_version_edit_open {projectId}`,
+`release_version_edit_prepare {sessionId, revision, expectedBaseline, intent,
+values, draftRevision, baselineGeneration}`, `release_version_edit_apply
+{sessionId, planToken}`, `release_version_edit_close {sessionId}` and
+`release_version_edit_status {}`. The event is `release-version-edit-status`;
+the private child uses `mrk-release-version/1` and the fixed `release_version`
+bootstrap argument. No generic passive API mutation or path/key/policy override
+is added; `release.version.observe` schema 2 is unchanged.
+
+Open captures the saved config-derived source through the original concrete
+lease-bound `VersionTargets`. Only that one source is writable; config and ignore
+are read-only dependencies. Prepare validates the two proposed strings through
+shared core policy and changes only admitted inner value spans. Explicit true
+absence alone permits two-line LF Create. Review contains full original/after
+text and native byte hashes, action/mode/ancestor/separator facts. The original
+lease/revision and one-use Prepare/Apply remain mandatory; no auto-rebase,
+serializer, CLI fallback or second transaction/cancellation engine is introduced.
+
+`NATIVE_RELEASE_VERSION_EDIT_QUALIFIED` is independently **false** and the new
+`ReleaseVersionInstalledProfile::SOURCE_BINDING` is **None**. Both must be
+separately reviewed; neither the old installed A payload, a metadata profile nor
+a configuration/workflow fixture permit can select this writer. A new core ZIP,
+exact source/member inventory and manifest/compiler binding are required before
+authorizing original-owner Linux filesystem/UI/process/finality observations.
+The thin version slots preserve the same ledger and finality rather than
+constructing replacement owners. Uncertain outcomes retain the original evidence
+and block retries, including after late settlement. Windows, macOS writes,
+persisted recovery and shipping remain unqualified.
+
+See the [ordinary UI and byte-preservation contract](../../docs/desktop-release-version-edit.md)
+for synchronous lifecycle retirement, explicit reload/discard, ten-rule version
+prerequisites and the unchanged positive seven-rule metadata proof.

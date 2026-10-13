@@ -101,7 +101,21 @@ SOURCE_PROFILE = "cpython-3.14.7-linux-x86_64-source-v1"
 APPROVED_SOURCE_OUTPUT_SHA256: str | None = "e647aaa18464665a7912a3627a27351ce604cb4cb85a483daaffb919016108fa"
 APPROVED_SOURCE_COMPONENTS_SHA256: str | None = "5b760d254b8069dc28068cd86c6e580437396ee7f1450f24bde2793e77d3dacb"
 APPROVED_SOURCE_NOTICES_SHA256: str | None = "db4ae8be90761067fc4589df7cf0403db14f24253b5d2436795ca098f17eeec6"
-APPROVED_SOURCE_COPIER_PYTHON_SHA256: str | None = "a92f0f95e883390c7256b2e441484aac06b1002dbe1d924141a77c8d82f96223"
+APPROVED_SOURCE_COPIER_PYTHONS: dict | None = {
+    "imageOS": "ubuntu24",
+    "images": {
+        "20260907.300.1": {
+            "path": "/usr/bin/python3.12",
+            "sha256": "a92f0f95e883390c7256b2e441484aac06b1002dbe1d924141a77c8d82f96223",
+            "size": 8025024
+        },
+        "20260920.314.1": {
+            "path": "/usr/bin/python3.12",
+            "sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+            "size": 8020928
+        }
+    }
+}
 _SOURCE_COPIER_PYTHON = "/usr/bin/python3.12"
 
 
@@ -662,13 +676,25 @@ def _require_source_copier_host() -> None:
     # This is the actual local DATA interpreter, NOT the original build root's
     # host_python role. The separately admitted command must still bind the
     # existing accepted stdlib/support TCB; this executable pin cannot replace it.
-    expected = APPROVED_SOURCE_COPIER_PYTHON_SHA256
-    _need(expected is not None, "Source preparation closed: actual copier Python admission missing")
-    _sha(expected)
+    profile = APPROVED_SOURCE_COPIER_PYTHONS
+    _need(profile is not None, "Source preparation closed: actual copier Python admission missing")
+    _keys(profile, {"imageOS", "images"})
+    _need(profile["imageOS"] == "ubuntu24" and type(profile["images"]) is dict
+          and 1 <= len(profile["images"]) <= 2, "Actual copier Python admission differs")
+    for version, body in profile["images"].items():
+        _need(type(version) is str and re.fullmatch(r"[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}", version) is not None,
+              "Actual copier Python image differs")
+        _record(body, limit=16 * 1024 * 1024, absolute=True)
+        _need(body["path"] == _SOURCE_COPIER_PYTHON and body["size"] > 0,
+              "Actual copier Python body admission differs")
+    version = os.environ.get("ImageVersion")
+    _need(os.environ.get("ImageOS") == profile["imageOS"] and type(version) is str and version in profile["images"],
+          "Use only an admitted hosted copier image/body pair")
+    expected = profile["images"][version]
     _need(os.path.realpath(sys.executable) == _SOURCE_COPIER_PYTHON and sys.flags.isolated == 1
           and sys.flags.no_site == 1 and sys.flags.dont_write_bytecode == 1,
           "Use only the admitted local copier Python with -I -S -B")
-    _checked(Path(_SOURCE_COPIER_PYTHON), expected, limit=16 * 1024 * 1024)
+    _checked(Path(_SOURCE_COPIER_PYTHON), expected["sha256"], size=expected["size"], limit=16 * 1024 * 1024)
 
 
 def _source_host_inputs(raw: bytes, output: dict, root_raw: bytes, lock_raw: bytes) -> dict:

@@ -1,9 +1,9 @@
 //! Fixed application services. Project roots enter the registry only through
 //! the Rust-side native picker, never through a renderer-supplied path.
-use std::{collections::BTreeMap, path::PathBuf, sync::{Mutex, atomic::{AtomicU32, Ordering}}};
+use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}}};
 #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
 use std::sync::atomic::AtomicU64;
-#[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
 use std::path::Component;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -17,6 +17,7 @@ pub struct AppInfo {
     pub app_name: &'static str, pub app_version: &'static str,
     pub runtime: RuntimeStatus, pub capabilities: Option<Value>, pub project_selection: ProjectSelectionAvailability,
     pub project_path_selection: ProjectPathSelectionAvailability,
+    pub installation: Option<crate::installation::Description>,
 }
 #[derive(Serialize)]
 pub struct ProjectSelectionAvailability { pub available: bool, pub reason: Option<&'static str> }
@@ -48,7 +49,158 @@ fn native_capabilities(mut value: Value, available: impl Fn(&str) -> bool) -> Va
     value
 }
 
-struct RegisteredProject { view: Project, root: PathBuf, identity: Option<crate::asset_source::DirectoryIdentity> }
+#[cfg(any(feature = "desktop-shell", test))]
+#[derive(Clone, Copy)]
+enum CapabilitiesFailureOrigin { Admission, QueryWait }
+
+#[cfg(any(feature = "desktop-shell", test))]
+fn capabilities_failure_line(origin: CapabilitiesFailureOrigin, error: &BridgeError) -> &'static [u8] {
+    // Only complete source literals leave this classifier. QueryWait means the
+    // SAME original wait returned an error, not that dispatch/finality succeeded.
+    use CapabilitiesFailureOrigin::{Admission, QueryWait};
+    match (origin, error.code.as_str()) {
+        (Admission, "runtime_unavailable") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-runtime_unavailable\n",
+        (Admission, "cleanup_unknown") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-cleanup_unknown\n",
+        (Admission, "invalid_request") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-invalid_request\n",
+        (Admission, "shutting_down") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-shutting_down\n",
+        (Admission, "busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-busy\n",
+        (Admission, "unavailable") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-unavailable\n",
+        (Admission, "offline_preflight_busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-offline_preflight_busy\n",
+        (Admission, "android_build_busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-android_build_busy\n",
+        (Admission, "environment_diagnostics_busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-environment_diagnostics_busy\n",
+        (Admission, "query_timeout") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-query_timeout\n",
+        (Admission, "protocol_error") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-protocol_error\n",
+        (Admission, "engine_failed") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-engine_failed\n",
+        (Admission, "io_error") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-io_error\n",
+        (Admission, "output_limit") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-output_limit\n",
+        (Admission, _) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-other\n",
+        (QueryWait, "runtime_unavailable") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-runtime_unavailable\n",
+        (QueryWait, "cleanup_unknown") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-cleanup_unknown\n",
+        (QueryWait, "invalid_request") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-invalid_request\n",
+        (QueryWait, "shutting_down") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-shutting_down\n",
+        (QueryWait, "busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-busy\n",
+        (QueryWait, "unavailable") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-unavailable\n",
+        (QueryWait, "offline_preflight_busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-offline_preflight_busy\n",
+        (QueryWait, "android_build_busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-android_build_busy\n",
+        (QueryWait, "environment_diagnostics_busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-environment_diagnostics_busy\n",
+        (QueryWait, "query_timeout") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-query_timeout\n",
+        (QueryWait, "protocol_error") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-protocol_error\n",
+        (QueryWait, "engine_failed") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-engine_failed\n",
+        (QueryWait, "io_error") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-io_error\n",
+        (QueryWait, "output_limit") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-output_limit\n",
+        (QueryWait, _) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-other\n",
+    }
+}
+
+#[cfg(all(any(feature = "desktop-shell", test), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn capabilities_cause_line(error: &BridgeError) -> &'static [u8] {
+    // Only a returned first-error fact, never a custody/finality assertion.
+    // Do not derive a label from the public code/message or format native errors.
+    use crate::error::{LinuxPassiveCause::*, LinuxSpawnFailure as Spawn};
+    use crate::installed_runtime::AdmissionFailure as Failure;
+    match error.linux_passive_cause() {
+        Some(SelectionProfileClosed) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-selection-profile-closed\n",
+        Some(SelectionCompileBinding) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-selection-compile-binding\n",
+        Some(SelectionMethodOutsideProfile) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-selection-method-outside-profile\n",
+        Some(Inspection(None)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-unavailable\n",
+        Some(AcquisitionEntryNotReleased) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-acquisition-entry-not-released\n",
+        Some(AcquisitionCustodyMissing) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-acquisition-custody-missing\n",
+        Some(AcquisitionLock) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-acquisition-lock\n",
+        Some(FinalClaimOwnerGate) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-owner-gate\n",
+        Some(Inspection(Some(Failure::UnsupportedPlatform))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-unsupported-platform\n",
+        Some(Inspection(Some(Failure::MissingCompileAnchor))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-missing-compile-anchor\n",
+        Some(Inspection(Some(Failure::Stopped))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-stopped\n",
+        Some(Inspection(Some(Failure::Deadline))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-deadline\n",
+        Some(Inspection(Some(Failure::NativeUnavailable))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-native-unavailable\n",
+        Some(Inspection(Some(Failure::NativeDenied))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-native-denied\n",
+        Some(Inspection(Some(Failure::Namespace))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-namespace\n",
+        Some(Inspection(Some(Failure::Mount))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-mount\n",
+        Some(Inspection(Some(Failure::Ownership))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-ownership\n",
+        Some(Inspection(Some(Failure::ExtendedAttributes))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-extended-attributes\n",
+        Some(Inspection(Some(Failure::IdentityChanged))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-identity-changed\n",
+        Some(Inspection(Some(Failure::Manifest))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-manifest\n",
+        Some(Inspection(Some(Failure::Inventory))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-inventory\n",
+        Some(Inspection(Some(Failure::Bounds))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-bounds\n",
+        Some(Inspection(Some(Failure::AlreadyUsed))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-already-used\n",
+        Some(Inspection(Some(Failure::Interrupted))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-interrupted\n",
+        Some(Inspection(Some(Failure::CloseUncertain))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-close-uncertain\n",
+        Some(Inspection(Some(Failure::LedgerInvariant))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-ledger-invariant\n",
+        Some(Inspection(Some(Failure::TransferUnavailable))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-transfer-unavailable\n",
+        Some(Inspection(Some(Failure::DestinationOccupied))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-destination-occupied\n",
+        Some(Capability(Failure::UnsupportedPlatform)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-unsupported-platform\n",
+        Some(Capability(Failure::MissingCompileAnchor)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-missing-compile-anchor\n",
+        Some(Capability(Failure::Stopped)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-stopped\n",
+        Some(Capability(Failure::Deadline)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-deadline\n",
+        Some(Capability(Failure::NativeUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-native-unavailable\n",
+        Some(Capability(Failure::NativeDenied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-native-denied\n",
+        Some(Capability(Failure::Namespace)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-namespace\n",
+        Some(Capability(Failure::Mount)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-mount\n",
+        Some(Capability(Failure::Ownership)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-ownership\n",
+        Some(Capability(Failure::ExtendedAttributes)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-extended-attributes\n",
+        Some(Capability(Failure::IdentityChanged)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-identity-changed\n",
+        Some(Capability(Failure::Manifest)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-manifest\n",
+        Some(Capability(Failure::Inventory)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-inventory\n",
+        Some(Capability(Failure::Bounds)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-bounds\n",
+        Some(Capability(Failure::AlreadyUsed)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-already-used\n",
+        Some(Capability(Failure::Interrupted)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-interrupted\n",
+        Some(Capability(Failure::CloseUncertain)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-close-uncertain\n",
+        Some(Capability(Failure::LedgerInvariant)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-ledger-invariant\n",
+        Some(Capability(Failure::TransferUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-transfer-unavailable\n",
+        Some(Capability(Failure::DestinationOccupied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-destination-occupied\n",
+        Some(Preparation(Failure::UnsupportedPlatform)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-unsupported-platform\n",
+        Some(Preparation(Failure::MissingCompileAnchor)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-missing-compile-anchor\n",
+        Some(Preparation(Failure::Stopped)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-stopped\n",
+        Some(Preparation(Failure::Deadline)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-deadline\n",
+        Some(Preparation(Failure::NativeUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-native-unavailable\n",
+        Some(Preparation(Failure::NativeDenied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-native-denied\n",
+        Some(Preparation(Failure::Namespace)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-namespace\n",
+        Some(Preparation(Failure::Mount)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-mount\n",
+        Some(Preparation(Failure::Ownership)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-ownership\n",
+        Some(Preparation(Failure::ExtendedAttributes)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-extended-attributes\n",
+        Some(Preparation(Failure::IdentityChanged)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-identity-changed\n",
+        Some(Preparation(Failure::Manifest)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-manifest\n",
+        Some(Preparation(Failure::Inventory)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-inventory\n",
+        Some(Preparation(Failure::Bounds)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-bounds\n",
+        Some(Preparation(Failure::AlreadyUsed)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-already-used\n",
+        Some(Preparation(Failure::Interrupted)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-interrupted\n",
+        Some(Preparation(Failure::CloseUncertain)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-close-uncertain\n",
+        Some(Preparation(Failure::LedgerInvariant)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-ledger-invariant\n",
+        Some(Preparation(Failure::TransferUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-transfer-unavailable\n",
+        Some(Preparation(Failure::DestinationOccupied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-destination-occupied\n",
+        Some(FinalClaim(Failure::UnsupportedPlatform)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-unsupported-platform\n",
+        Some(FinalClaim(Failure::MissingCompileAnchor)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-missing-compile-anchor\n",
+        Some(FinalClaim(Failure::Stopped)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-stopped\n",
+        Some(FinalClaim(Failure::Deadline)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-deadline\n",
+        Some(FinalClaim(Failure::NativeUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-native-unavailable\n",
+        Some(FinalClaim(Failure::NativeDenied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-native-denied\n",
+        Some(FinalClaim(Failure::Namespace)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-namespace\n",
+        Some(FinalClaim(Failure::Mount)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-mount\n",
+        Some(FinalClaim(Failure::Ownership)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-ownership\n",
+        Some(FinalClaim(Failure::ExtendedAttributes)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-extended-attributes\n",
+        Some(FinalClaim(Failure::IdentityChanged)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-identity-changed\n",
+        Some(FinalClaim(Failure::Manifest)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-manifest\n",
+        Some(FinalClaim(Failure::Inventory)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-inventory\n",
+        Some(FinalClaim(Failure::Bounds)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-bounds\n",
+        Some(FinalClaim(Failure::AlreadyUsed)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-already-used\n",
+        Some(FinalClaim(Failure::Interrupted)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-interrupted\n",
+        Some(FinalClaim(Failure::CloseUncertain)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-close-uncertain\n",
+        Some(FinalClaim(Failure::LedgerInvariant)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-ledger-invariant\n",
+        Some(FinalClaim(Failure::TransferUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-transfer-unavailable\n",
+        Some(FinalClaim(Failure::DestinationOccupied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-destination-occupied\n",
+        Some(ReturnedSpawn(Spawn::ProcessFdLimit)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-process-fd-limit\n",
+        Some(ReturnedSpawn(Spawn::SystemFdLimit)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-system-fd-limit\n",
+        Some(ReturnedSpawn(Spawn::Memory)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-memory\n",
+        Some(ReturnedSpawn(Spawn::ResourceUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-resource-unavailable\n",
+        Some(ReturnedSpawn(Spawn::PermissionDenied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-permission-denied\n",
+        Some(ReturnedSpawn(Spawn::NotFound)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-not-found\n",
+        Some(ReturnedSpawn(Spawn::ExecFormat)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-exec-format\n",
+        Some(ReturnedSpawn(Spawn::Other)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-other\n",
+        Some(EngineResponse) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-engine-response\n",
+        None => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-unavailable\n",
+    }
+}
+
+struct RegisteredProject { view: Project, root: PathBuf, identity: Option<crate::asset_source::ProjectIdentity> }
 pub(crate) struct ProjectRoster { pub(crate) generation: u32, pub(crate) roots: Vec<crate::asset_source::RegisteredRoot> }
 
 pub struct DesktopBridge {
@@ -57,8 +209,12 @@ pub struct DesktopBridge {
     pub(crate) diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner,
     pub(crate) preflight: crate::offline_preflight_owner::OfflinePreflightOwner,
     pub(crate) android_build: crate::android_build_owner::AndroidBuildOwner,
+    pub(crate) project_recovery: crate::project_recovery_owner::ProjectRecoveryOwner,
+    pub(crate) ios_archive: crate::ios_archive_owner::IOSArchiveOwner,
+    pub(crate) artifact_inspection: crate::saved_command_owner::SavedCommandOwner,
     installed_project_selection_available: bool,
     installed_project_path_selection_available: bool,
+    installed_android_source_selection_available: bool,
     installed_evidence_selection_available: bool,
     projects: Mutex<BTreeMap<String, RegisteredProject>>,
     project_generation: AtomicU32,
@@ -68,18 +224,60 @@ pub struct DesktopBridge {
 impl DesktopBridge {
     pub fn new(resource_dir: PathBuf) -> Self {
         let runtime = RuntimeConfig::packaged(resource_dir);
+        Self::from_runtime(runtime)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn for_installed_github_observation(resource_dir: PathBuf,
+        profile: crate::runtime::GitHubReadOnlyObservationProfile) -> Result<Self, BridgeError> {
+        // Selection is DATA before the SAME original Supervisor is created.
+        // It changes only GitHub's closed installed fixture; all other domains use N.
+        let mut runtime = RuntimeConfig::packaged(resource_dir);
+        runtime.select_github_readonly_observation(profile)?;
+        Ok(Self::from_runtime(runtime))
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn for_installed_github_preflight_observation(resource_dir: PathBuf,
+        profile: crate::runtime::GitHubPreflightObservationProfile) -> Result<Self, BridgeError> {
+        let mut runtime = RuntimeConfig::packaged(resource_dir);
+        // Connect still uses its unchanged, separately selected GET-only domain.
+        runtime.select_github_readonly_observation(crate::runtime::GitHubReadOnlyObservationProfile::DialSyntheticCa)?;
+        runtime.select_github_preflight_observation(profile)?;
+        Ok(Self::from_runtime(runtime))
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn for_installed_github_release_observation(resource_dir: PathBuf,
+        profile: Option<crate::runtime::GitHubReleaseObservationProfile>) -> Result<Self, BridgeError> {
+        let mut runtime = RuntimeConfig::packaged(resource_dir);
+        // The genuine Connect remains a separate read-only original. None
+        // leaves R normal-V: it is essential to the Pending journey.
+        runtime.select_github_readonly_observation(crate::runtime::GitHubReadOnlyObservationProfile::DialSyntheticCa)?;
+        if let Some(profile) = profile { runtime.select_github_release_observation(profile)?; }
+        Ok(Self::from_runtime(runtime))
+    }
+    fn from_runtime(runtime: RuntimeConfig) -> Self {
         let installed_project_selection_available = runtime.project_selection_profile_available();
         let installed_project_path_selection_available = runtime.project_path_selection_profile_available();
+        let installed_android_source_selection_available = runtime.android_source_selection_profile_available();
         let installed_evidence_selection_available = runtime.evidence_selection_profile_available();
         Self {
             supervisor: Supervisor::new(runtime.clone()), edits: EditOwner::new(runtime.clone()),
             diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime.clone()),
             preflight: crate::offline_preflight_owner::OfflinePreflightOwner::new(runtime.clone()),
+            project_recovery: crate::project_recovery_owner::ProjectRecoveryOwner::new(runtime.clone()),
             // Retain the owner and compiled profile DATA only; neither is tool
             // custody or qualification. The renderer cannot select this profile.
-            android_build: crate::android_build_owner::AndroidBuildOwner::new(runtime, crate::android_toolchain::AndroidToolchainProfile::compiled()),
+            android_build: crate::android_build_owner::AndroidBuildOwner::new(runtime.clone(), crate::android_toolchain::AndroidToolchainProfile::compiled()),
+            artifact_inspection: crate::saved_command_owner::SavedCommandOwner::artifact_inspection(runtime.clone()),
+            ios_archive: crate::ios_archive_owner::IOSArchiveOwner::new(runtime),
             installed_project_selection_available,
             installed_project_path_selection_available,
+            installed_android_source_selection_available,
             installed_evidence_selection_available,
             projects: Mutex::new(BTreeMap::new()), project_generation: AtomicU32::new(1),
             #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
@@ -88,10 +286,27 @@ impl DesktopBridge {
     }
     pub(crate) fn installed_project_selection_available(&self) -> bool { self.installed_project_selection_available }
     pub(crate) fn installed_project_path_selection_available(&self) -> bool { self.installed_project_path_selection_available }
+    pub(crate) fn installed_android_source_selection_available(&self) -> bool { self.installed_android_source_selection_available }
     pub(crate) fn installed_evidence_selection_available(&self) -> bool { self.installed_evidence_selection_available }
+    pub(crate) fn installed_session_available(&self, document: &Arc<()>) -> bool { self.supervisor.installed_session_available(document) }
+    pub(crate) fn installed_persistence_available(&self, document: &Arc<()>) -> bool { self.supervisor.installed_persistence_available(document) }
     pub(crate) async fn app_info(&self, document: &crate::asset_session::DocumentBinding) -> AppInfo {
         let result = match document.passive_query(self, Method::Capabilities, json!({})) {
-            Ok(query) => query.wait().await, Err(error) => Err(error),
+            Ok(query) => {
+                let result = query.wait().await;
+                #[cfg(feature = "desktop-shell")]
+                if let Err(error) = &result {
+                    crate::shell::diagnostic(capabilities_failure_line(CapabilitiesFailureOrigin::QueryWait, error));
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    crate::shell::diagnostic(capabilities_cause_line(error));
+                }
+                result
+            },
+            Err(error) => {
+                #[cfg(feature = "desktop-shell")]
+                crate::shell::diagnostic(capabilities_failure_line(CapabilitiesFailureOrigin::Admission, &error));
+                Err(error)
+            },
         };
         let (runtime, capabilities) = match result {
             Ok(value) => (RuntimeStatus { state: "available", reason: None, mode: self.supervisor.runtime_mode() },
@@ -104,6 +319,7 @@ impl DesktopBridge {
         // Display DATA only. Selection does not imply that snapshot or any
         // other core method is available, nor that live native admission holds.
         AppInfo { app_name: "Mobile Release Kit", app_version: env!("CARGO_PKG_VERSION"), runtime, capabilities,
+            installation: crate::installation::description(document.installation_reveal_available()),
             project_selection: ProjectSelectionAvailability::new(document.project_selection_available()),
             project_path_selection: ProjectPathSelectionAvailability::new(document.project_path_selection_available()) }
     }
@@ -139,13 +355,11 @@ impl DesktopBridge {
         document.passive_query(self, Method::ProjectSnapshot, json!({"root": root}))?.wait().await
     }
     pub(crate) async fn observe_release_version(&self, document: &crate::asset_session::DocumentBinding, input: crate::release_version_protocol::Request) -> Result<crate::release_version_protocol::Observation, BridgeError> {
-        // Native-selected root only. The existing passive owner/runtime gate is
-        // unchanged; this observation creates no write or preflight authority.
-        let root = self.project_root(&input.project_id).map_err(crate::release_version_protocol::public_error)?;
-        let params = crate::release_version_protocol::params(&root)?;
-        let value = document.passive_query(self, Method::ReleaseVersionObserve, params).map_err(crate::release_version_protocol::public_error)?.wait().await
-            .map_err(crate::release_version_protocol::public_error)?;
-        crate::release_version_protocol::result(value)
+        // Admission/root/stamp and completion belong to the original Document
+        // and Supervisor. Nothing after this await can install authority.
+        document.saved_observation(self, &input.project_id)
+            .map_err(crate::release_version_protocol::public_error)?.wait().await
+            .map_err(crate::release_version_protocol::public_error)
     }
     pub(crate) async fn observe_candidate_evidence(&self, root: &crate::asset_source::RegisteredRoot) -> Result<crate::candidate_evidence_protocol::Observation, BridgeError> {
         // Only the separate native evidence registry can supply this identity.
@@ -153,6 +367,11 @@ impl DesktopBridge {
         let params = crate::candidate_evidence_protocol::params(root)?;
         let value = self.supervisor.query(Method::CandidateEvidenceObserve, params).await?;
         crate::candidate_evidence_protocol::result(value)
+    }
+    pub(crate) async fn observe_release_evidence(&self, root: &crate::asset_source::RegisteredRoot, stage: crate::lifecycle_evidence_protocol::Stage) -> Result<crate::lifecycle_evidence_protocol::Observation, BridgeError> {
+        let params = crate::lifecycle_evidence_protocol::params(root, stage)?;
+        let value = self.supervisor.query(Method::ReleaseEvidenceObserve, params).await?;
+        crate::lifecycle_evidence_protocol::result(value, stage)
     }
     pub(crate) async fn observe_metadata_text(&self, document: &crate::asset_session::DocumentBinding, input: crate::metadata_text_commands::Open) -> Result<crate::metadata_text_edit_protocol::Observation, BridgeError> {
         // Only the native-selected root reaches this bounded named-file query.
@@ -183,7 +402,7 @@ impl DesktopBridge {
     /// Fixture DATA only, called under the original DocumentBinding lock. It
     /// grants no ProjectProbe, picker, filesystem identity, asset or GitHub gate.
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     pub(crate) fn environment_fixture_registration(&self,
         permit: &crate::environment_diagnostics_owner::EnvironmentRegistrationPermit, change: bool) -> Result<(), BridgeError> {
         let (id, root, generation) = permit.validate(&self.diagnostics)?;
@@ -203,7 +422,7 @@ impl DesktopBridge {
     /// Separate offline fixture permit and actual held-root identity. Never
     /// upgrade the diagnostics fixture's identity:None registration in place.
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     pub(crate) fn offline_fixture_registration(&self,
         permit: &crate::offline_preflight_owner::OfflineRegistrationPermit) -> Result<(), BridgeError> {
         let (id, root, generation) = permit.validate(&self.preflight)?;
@@ -219,6 +438,8 @@ impl DesktopBridge {
     pub fn open_config_edit(&self, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
         self.preflight.ensure_idle()?;
         self.android_build.ensure_idle()?;
+        self.project_recovery.ensure_idle()?;
+        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
@@ -228,6 +449,40 @@ impl DesktopBridge {
         let root = self.project_root(&project_id)?;
         self.edits.open(window, project_id, root)
     }
+    pub(crate) fn open_config_edit_published(&self, publisher: &crate::saved_command_owner::AndroidRegistrationPublisher, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
+        self.preflight.ensure_idle()?;
+        self.android_build.ensure_idle()?;
+        self.project_recovery.ensure_idle()?;
+        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
+        self.diagnostics.ensure_idle()?;
+        if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
+        if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
+        // The same exact native-selected root is retained separately from its
+        // display string. The edit registry linearizes registration with STOP
+        // and document invalidation after this in-memory lookup.
+        let root = self.project_root(&project_id)?;
+        self.edits.open_published(publisher, window, project_id, root)
+    }
+    pub(crate) fn open_project_initialization(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::project_initialization_edit_protocol::Open) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+        let project_id = args.project_id().to_owned();
+        let ticket = self.edits.initialization_open_ticket(window, args)?;
+        let selected = project_id.clone();
+        document.initialization_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_initialization_published(publisher, window, project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_project_initialization(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::project_initialization_edit_protocol::Prepare) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.initialization_edit_admit_published(|bridge| bridge.edits.initialization_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_initialization_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_project_initialization(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::project_initialization_edit_protocol::Apply) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.initialization_edit_admit_published(|bridge| bridge.edits.initialization_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.apply_initialization_published(publisher, window, args, registration))
+    }
     pub(crate) fn open_workflow_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         project_id: String) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
         // A ticket contains only preallocated identity/executor DATA. The real
@@ -235,38 +490,163 @@ impl DesktopBridge {
         // the shared owner's synchronous claim/enqueue, with no path fallback.
         let ticket = self.edits.workflow_open_ticket(window)?;
         let selected = project_id.clone();
-        document.workflow_edit_admit(|_| Ok(selected), |bridge, registration|
-            bridge.edits.open_workflow(window, project_id, registration, ticket))
+        document.workflow_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_workflow_published(publisher, window, project_id, registration, ticket))
+    }
+    pub(crate) fn open_configuration_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::edit_commands::ConfigurationRecoveryOpen) -> Result<crate::edit_protocol::ConfigEditStatus, BridgeError> {
+        let ticket = self.edits.configuration_recovery_open_ticket(window)?;
+        let selected = args.project_id.clone();
+        document.configuration_recovery_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_configuration_recovery_published(publisher, window, args.project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_configuration_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::edit_protocol::PrepareConfigurationRecovery) -> Result<crate::edit_protocol::ConfigEditStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.configuration_recovery_admit_published(|bridge| bridge.edits.configuration_recovery_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_configuration_recovery_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_configuration_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::edit_commands::ConfigurationRecoveryApply) -> Result<crate::edit_protocol::ConfigEditStatus, BridgeError> {
+        document.configuration_recovery_admit_published(|bridge| bridge.edits.configuration_recovery_project(window, &args.session_id), |bridge, registration, publisher|
+            bridge.edits.apply_configuration_recovery_published(publisher, window, &args.session_id, &args.plan_token, registration))
+    }
+    pub(crate) fn open_workflow_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::edit_commands::WorkflowRecoveryOpen) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
+        let ticket = self.edits.workflow_recovery_open_ticket(window)?;
+        let selected = args.project_id.clone();
+        document.workflow_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_workflow_published(publisher, window, args.project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_workflow_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::github_workflow_edit_protocol::PrepareWorkflowRecovery) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.workflow_edit_admit_published(|bridge| bridge.edits.workflow_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_workflow_recovery_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_workflow_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::edit_commands::WorkflowRecoveryApply) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
+        document.workflow_edit_admit_published(|bridge| bridge.edits.workflow_project(window, &args.session_id), |bridge, registration, publisher|
+            bridge.edits.apply_workflow_recovery_published(publisher, window, &args.session_id, &args.plan_token, registration))
     }
     pub(crate) fn prepare_workflow_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::github_workflow_edit_protocol::PrepareWorkflowEdit) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
         let session_id = args.session_id.clone();
-        document.workflow_edit_admit(|bridge| bridge.edits.workflow_project(window, &session_id), |bridge, registration|
-            bridge.edits.prepare_workflow(window, args, registration))
+        document.workflow_edit_admit_published(|bridge| bridge.edits.workflow_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_workflow_published(publisher, window, args, registration))
     }
     pub(crate) fn apply_workflow_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         session_id: &str, plan_token: &str) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
-        document.workflow_edit_admit(|bridge| bridge.edits.workflow_project(window, session_id), |bridge, registration|
-            bridge.edits.apply_workflow(window, session_id, plan_token, registration))
+        document.workflow_edit_admit_published(|bridge| bridge.edits.workflow_project(window, session_id), |bridge, registration, publisher|
+            bridge.edits.apply_workflow_published(publisher, window, session_id, plan_token, registration))
     }
     pub(crate) fn open_metadata_text_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::metadata_text_commands::Open) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
         let ticket = self.edits.metadata_text_open_ticket(window)?;
         let context = args.context();
         let selected = args.project_id.clone();
-        document.metadata_text_edit_admit(|_| Ok(selected), |bridge, registration|
-            bridge.edits.open_metadata_text(window, args.project_id, context, registration, ticket))
+        document.metadata_text_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_metadata_text_published(publisher, window, args.project_id, context, registration, ticket))
     }
     pub(crate) fn prepare_metadata_text_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::metadata_text_edit_protocol::PrepareMetadataTextEdit) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
         let session_id = args.session_id.clone();
-        document.metadata_text_edit_admit(|bridge| bridge.edits.metadata_text_project(window, &session_id), |bridge, registration|
-            bridge.edits.prepare_metadata_text(window, args, registration))
+        document.metadata_text_edit_admit_published(|bridge| bridge.edits.metadata_text_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_metadata_text_published(publisher, window, args, registration))
     }
     pub(crate) fn apply_metadata_text_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         session_id: &str, plan_token: &str) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
-        document.metadata_text_edit_admit(|bridge| bridge.edits.metadata_text_project(window, session_id), |bridge, registration|
-            bridge.edits.apply_metadata_text(window, session_id, plan_token, registration))
+        document.metadata_text_edit_admit_published(|bridge| bridge.edits.metadata_text_project(window, session_id), |bridge, registration, publisher|
+            bridge.edits.apply_metadata_text_published(publisher, window, session_id, plan_token, registration))
+    }
+    pub(crate) fn open_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::release_version_edit_commands::Open) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        let ticket = self.edits.release_version_open_ticket(window)?;
+        let selected = args.project_id.clone();
+        document.release_version_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_release_version_published(publisher, window, args.project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::release_version_edit_protocol::PrepareReleaseVersionEdit) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_release_version_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        session_id: &str, plan_token: &str) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, session_id), |bridge, registration, publisher|
+            bridge.edits.apply_release_version_published(publisher, window, session_id, plan_token, registration))
+    }
+    pub(crate) fn open_metadata_text_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Open) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
+        let ticket=self.edits.metadata_text_recovery_open_ticket(window)?;
+        let selected=args.project_id.clone();
+        document.metadata_text_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_metadata_text_recovery_published(publisher, window, args.project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_metadata_text_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Prepare) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
+        let session_id=args.session_id.clone();
+        document.metadata_text_edit_admit_published(|bridge| bridge.edits.metadata_text_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_metadata_text_recovery_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_metadata_text_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Apply) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
+        document.metadata_text_edit_admit_published(|bridge| bridge.edits.metadata_text_project(window, &args.session_id), |bridge, registration, publisher|
+            bridge.edits.apply_metadata_text_recovery_published(publisher, window, &args.session_id, &args.plan_token, registration))
+    }
+    pub(crate) fn open_release_version_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Open) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        let ticket=self.edits.release_version_recovery_open_ticket(window)?;
+        let selected=args.project_id.clone();
+        document.release_version_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_release_version_recovery_published(publisher, window, args.project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_release_version_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Prepare) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        let session_id=args.session_id.clone();
+        document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_release_version_recovery_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_release_version_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Apply) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, &args.session_id), |bridge, registration, publisher|
+            bridge.edits.apply_release_version_recovery_published(publisher, window, &args.session_id, &args.plan_token, registration))
+    }
+    pub(crate) fn metadata_images_selection_available(&self) -> bool {
+        self.edits.metadata_images_selection_profile_available()
+    }
+    pub(crate) fn open_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::metadata_images_commands::Open) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+        // Keep entropy outside the document mutex, but a matching selection
+        // must still be retired when ticket/admission preparation fails.
+        let ticket = self.edits.metadata_images_open_ticket(window);
+        let selected = args.project_id.clone();
+        document.metadata_images_import_admit_published(&selected, &args.selection_token, |bridge, registration, data, claimed, publisher|
+            bridge.edits.open_metadata_images_published(publisher, window, args.project_id, data, registration, ticket?, claimed))
+    }
+    pub(crate) fn open_metadata_images_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::metadata_images_commands::RecoveryOpen) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+        use crate::metadata_images_commands::recovery_not_admitted;
+        let ticket = self.edits.metadata_images_open_ticket(window).map_err(recovery_not_admitted)?;
+        let selected = args.project_id.clone();
+        let mut entered_original_open = false;
+        let result = document.metadata_images_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher| {
+            entered_original_open = true;
+            bridge.edits.open_metadata_images_recovery_published(publisher, window, args.project_id, registration, ticket)
+        });
+        result.map_err(|error| if entered_original_open { error } else { recovery_not_admitted(error) })
+    }
+    pub(crate) fn prepare_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::metadata_images_edit_protocol::PrepareMetadataImagesEdit) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+        let session = args.session_id.clone();
+        document.metadata_images_edit_admit_published(|bridge| bridge.edits.metadata_images_project(window, &session), |bridge, registration, publisher|
+            bridge.edits.prepare_metadata_images_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        session: &str, plan: &str) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+        document.metadata_images_edit_admit_published(|bridge| bridge.edits.metadata_images_project(window, session), |bridge, registration, publisher|
+            bridge.edits.apply_metadata_images_published(publisher, window, session, plan, registration))
     }
     /// Only called while the real DocumentBinding admission lock is held. No
     /// project method calls back into that lock. These are private native hints.
@@ -327,10 +707,12 @@ impl DesktopBridge {
         self.project_generation.store(next_generation, Ordering::SeqCst);
         Ok(project)
     }
-    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
     pub(crate) fn register_picked_project(&self, path: PathBuf) -> Result<Project, BridgeError> {
         self.preflight.ensure_idle()?;
         self.android_build.ensure_idle()?;
+        self.project_recovery.ensure_idle()?;
+        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() || self.edits.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() || self.edits.disabled() { return Err(BridgeError::cleanup_unknown()); }
@@ -397,6 +779,99 @@ pub(crate) fn assert_project_path_availability_contract() {
 #[cfg(test)]
 mod capability_tests {
     use super::*;
+    #[test]
+    fn capability_failure_diagnostic_is_closed_data_with_original_origins() {
+        let codes = ["runtime_unavailable", "cleanup_unknown", "invalid_request", "shutting_down", "busy", "unavailable",
+            "offline_preflight_busy", "android_build_busy", "environment_diagnostics_busy", "query_timeout",
+            "protocol_error", "engine_failed", "io_error", "output_limit"];
+        let mut records = std::collections::BTreeSet::new();
+        for (origin, name) in [(CapabilitiesFailureOrigin::Admission, "admission"), (CapabilitiesFailureOrigin::QueryWait, "query-wait")] {
+            for code in codes {
+                let error = BridgeError::new(code, "PRIVATE_MESSAGE must not enter diagnostic DATA");
+                let original = error.clone();
+                let line = capabilities_failure_line(origin, &error);
+                assert_eq!(line, format!("MRKDBG_DESKTOP_BOOTSTRAP=capabilities-{name}-{code}\n").as_bytes());
+                assert!(line.len() <= 78 && records.insert(line));
+                assert_eq!(error, original);
+            }
+            let long_code = "PRIVATE_CODE".repeat(1024);
+            for code in ["", "PRIVATE_CODE", "runtime_unavailable\nPRIVATE_CODE", "runtime_unavailable\r", "\u{1b}[31mPRIVATE_CODE", long_code.as_str()] {
+                let error = BridgeError::new(code, "PRIVATE_MESSAGE");
+                let line = capabilities_failure_line(origin, &error);
+                assert_eq!(line, format!("MRKDBG_DESKTOP_BOOTSTRAP=capabilities-{name}-other\n").as_bytes());
+                assert!(line.len() <= 78);
+                records.insert(line);
+            }
+        }
+        assert_eq!(records.len(), 30);
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn passive_causes_are_complete_private_literals_without_result_changes() {
+        use crate::error::{LinuxPassiveCause as Cause, LinuxSpawnFailure as Spawn};
+        use crate::installed_runtime::AdmissionFailure as Failure;
+        fn check(cause: Option<Cause>, label: &str, records: &mut std::collections::BTreeSet<&'static [u8]>) {
+            let error = BridgeError::new("PRIVATE_CODE\n\u{1b}[31m", "PRIVATE_MESSAGE must never enter cause DATA")
+                .with_linux_passive_cause(cause);
+            let original = error.clone();
+            let line = capabilities_cause_line(&error);
+            assert_eq!(line, format!("MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-{label}\n").as_bytes());
+            assert!(line.len() <= 96 && line.is_ascii() && records.insert(line));
+            assert!(!line.windows(7).any(|window| window == b"PRIVATE"));
+            assert_eq!(error, original);
+            assert_eq!(error.linux_passive_cause(), original.linux_passive_cause());
+        }
+        let failures = [
+            (Failure::UnsupportedPlatform, "unsupported-platform"),
+            (Failure::MissingCompileAnchor, "missing-compile-anchor"),
+            (Failure::Stopped, "stopped"),
+            (Failure::Deadline, "deadline"),
+            (Failure::NativeUnavailable, "native-unavailable"),
+            (Failure::NativeDenied, "native-denied"),
+            (Failure::Namespace, "namespace"),
+            (Failure::Mount, "mount"),
+            (Failure::Ownership, "ownership"),
+            (Failure::ExtendedAttributes, "extended-attributes"),
+            (Failure::IdentityChanged, "identity-changed"),
+            (Failure::Manifest, "manifest"),
+            (Failure::Inventory, "inventory"),
+            (Failure::Bounds, "bounds"),
+            (Failure::AlreadyUsed, "already-used"),
+            (Failure::Interrupted, "interrupted"),
+            (Failure::CloseUncertain, "close-uncertain"),
+            (Failure::LedgerInvariant, "ledger-invariant"),
+            (Failure::TransferUnavailable, "transfer-unavailable"),
+            (Failure::DestinationOccupied, "destination-occupied"),
+        ];
+        let origins: [(fn(Failure) -> Cause, &str); 4] = [
+            (|failure| Cause::Inspection(Some(failure)), "inspection"),
+            (Cause::Capability, "capability"), (Cause::Preparation, "preparation"), (Cause::FinalClaim, "final-claim"),
+        ];
+        let mut records = std::collections::BTreeSet::new();
+        for (origin, stage) in origins {
+            for (failure, reason) in failures { check(Some(origin(failure)), &format!("{stage}-{reason}"), &mut records); }
+        }
+        for (cause, label) in [
+            (Some(Cause::SelectionProfileClosed), "selection-profile-closed"),
+            (Some(Cause::SelectionCompileBinding), "selection-compile-binding"),
+            (Some(Cause::SelectionMethodOutsideProfile), "selection-method-outside-profile"),
+            (Some(Cause::Inspection(None)), "inspection-unavailable"),
+            (Some(Cause::AcquisitionEntryNotReleased), "acquisition-entry-not-released"),
+            (Some(Cause::AcquisitionCustodyMissing), "acquisition-custody-missing"),
+            (Some(Cause::AcquisitionLock), "acquisition-lock"),
+            (Some(Cause::FinalClaimOwnerGate), "final-claim-owner-gate"),
+            (Some(Cause::ReturnedSpawn(Spawn::ProcessFdLimit)), "returned-spawn-process-fd-limit"),
+            (Some(Cause::ReturnedSpawn(Spawn::SystemFdLimit)), "returned-spawn-system-fd-limit"),
+            (Some(Cause::ReturnedSpawn(Spawn::Memory)), "returned-spawn-memory"),
+            (Some(Cause::ReturnedSpawn(Spawn::ResourceUnavailable)), "returned-spawn-resource-unavailable"),
+            (Some(Cause::ReturnedSpawn(Spawn::PermissionDenied)), "returned-spawn-permission-denied"),
+            (Some(Cause::ReturnedSpawn(Spawn::NotFound)), "returned-spawn-not-found"),
+            (Some(Cause::ReturnedSpawn(Spawn::ExecFormat)), "returned-spawn-exec-format"),
+            (Some(Cause::ReturnedSpawn(Spawn::Other)), "returned-spawn-other"),
+            (Some(Cause::EngineResponse), "engine-response"), (None, "unavailable"),
+        ] { check(cause, label, &mut records); }
+        assert_eq!(records.len(), 98);
+    }
     #[test]
     fn project_path_availability_is_separate_bounded_display_data() { assert_project_path_availability_contract(); }
     #[test]

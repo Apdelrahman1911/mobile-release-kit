@@ -36,6 +36,12 @@ BOOTSTRAPS = (
     "engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
     "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py",
 )
+# Keep the historical supplier preparation exact. Current product callers must
+# select this complete roster explicitly; file presence never selects a domain.
+CURRENT_BOOTSTRAPS = (
+    *BOOTSTRAPS, "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+    "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py",
+)
 GITHUB_CA_NAME = "github-ca.pem"
 MAX_GITHUB_CA_BYTES = 512 * 1024
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
@@ -51,7 +57,17 @@ def _safe_name(name: str) -> bool:
             and name.split(".", 1)[0].lower() not in _RESERVED)
 
 
+def _windows_identity(value: os.stat_result, mode: int) -> tuple[int, ...]:
+    return (value.st_dev, value.st_ino, mode, value.st_nlink, value.st_size,
+            value.st_mtime_ns, value.st_birthtime_ns, value.st_file_attributes,
+            value.st_reparse_tag)
+
+
 def _state(value: os.stat_result) -> tuple[int, ...]:
+    if os.name == "nt":
+        # Same-API snapshots retain raw mode and ctime (descriptor ChangeTime)
+        # plus every comparable Windows field. Only cross-API checks differ.
+        return _windows_identity(value, value.st_mode) + (value.st_ctime_ns,)
     return (value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
             value.st_size, value.st_mtime_ns, value.st_ctime_ns)
 
@@ -123,14 +139,30 @@ def read_checked(path: Path, *, limit: int) -> bytes:
     if before.st_size > limit:
         raise PreparationError("Payload file byte limit exceeded")
     with path.open("rb") as stream:
-        if _state(os.fstat(stream.fileno())) != _state(before):
+        opened = os.fstat(stream.fileno())
+        if os.name == "nt":
+            # CPython 3.14 Windows pathname stat decorates these suffixes with
+            # 0111 and exposes birthtime as ctime; fstat keeps raw mode and
+            # ChangeTime. Normalize only the named suffix decoration, compare
+            # birthtime across APIs, and retain both raw same-API snapshots.
+            named_mode = before.st_mode
+            if path.name.lower().endswith((".exe", ".bat", ".cmd", ".com")):
+                named_mode &= ~0o111
+            matches = (_windows_identity(before, named_mode)
+                       == _windows_identity(opened, opened.st_mode))
+        else:
+            matches = _state(opened) == _state(before)
+        if not matches:
             raise PreparationError("Payload file changed before reading")
         # The ceiling is not the expected allocation. Reading a tiny file with
         # read(512 MiB) can reserve that much memory before seeing EOF. One byte
         # beyond the admitted size still detects growth without that overhead.
         content = stream.read(before.st_size + 1)
         after = os.fstat(stream.fileno())
-    if len(content) > limit or len(content) != before.st_size or _state(after) != _state(before) or _state(path.lstat()) != _state(before):
+    descriptor_before = opened if os.name == "nt" else before
+    if (len(content) > limit or len(content) != before.st_size
+            or _state(after) != _state(descriptor_before)
+            or _state(path.lstat()) != _state(before)):
         raise PreparationError("Payload file changed during reading")
     return content
 
@@ -144,11 +176,47 @@ def digest(data: bytes) -> str:
 
 
 def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
+    """Historical fixed preparation; does not include newer product domains."""
+    return _prepare(source, runtime, target, current=False)
+
+
+def prepare_current(source: Path, runtime: Path, target: str, *, history_provider: bool = False) -> dict[str, str]:
+    """Current complete fixed roster, still DATA only and never qualification."""
+    return _prepare(source, runtime, target, current=True, history_provider=history_provider)
+
+
+def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
+             history_provider: bool = False) -> dict[str, str]:
+    bootstrap_names = CURRENT_BOOTSTRAPS if current else BOOTSTRAPS
     if target not in TARGETS:
         raise PreparationError("Unsupported desktop package target")
+    if type(history_provider) is not bool or (history_provider and
+            (not current or target not in {"aarch64-apple-darwin", "x86_64-apple-darwin"})):
+        raise PreparationError("History provider is a fixed current Mac input only")
     source, runtime = _root(source), _root(runtime)
+    provider = None
+    provider_paths = None
+    provider_state = None
+    provider_directory_state = None
+    provider_digest = None
+    total_limit = MAX_TOTAL_BYTES
     # No merging, overwriting or adoption of another preparation's output.
-    if set(os.listdir(runtime)) != {"python"}:
+    if history_provider:
+        # The existing incremental inventory bounds every entry before the
+        # closed root/one-provider roster is inspected; no new eager listdir.
+        provider_paths = files(runtime, reserve_entries=len(bootstrap_names) + 3)
+        relative = [path.relative_to(runtime).as_posix() for path in provider_paths]
+        if ({name.split("/", 1)[0] for name in relative} != {"python", "tools"}
+                or [name for name in relative if not name.startswith("python/")] != ["tools/gh"]):
+            raise PreparationError("Current provider input must be exactly tools/gh beside python")
+        provider = runtime / "tools/gh"
+        provider_directory_state = _state(_ordinary(provider.parent, directory=True))
+        value = _ordinary(provider)
+        if stat.S_IMODE(value.st_mode) != 0o555 or not 0 < value.st_size <= 128 * 1024 * 1024:
+            raise PreparationError("Current provider input mode or byte bound")
+        provider_state = _state(value)
+        total_limit = min(MAX_TOTAL_BYTES, 512 * 1024 * 1024)
+    elif set(os.listdir(runtime)) != {"python"}:
         raise PreparationError("Runtime output must contain only its pre-admitted python payload")
     python = runtime / "python"
     _ordinary(python, directory=True)
@@ -157,10 +225,11 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
     _root(executable.parent)
     # Every fixed entry point, the core ZIP and the fixed CA are payload. Their
     # presence/digests do not qualify an owner, TLS, or native execution custody.
-    generated_payloads = len(BOOTSTRAPS) + 2
+    generated_payloads = len(bootstrap_names) + 2
     # Reserve every generated payload and the final manifest before any write.
     # This is only publisher preparation, not runtime-custody admission.
-    if len(files(runtime, reserve_entries=generated_payloads + 1)) > MAX_FILES - generated_payloads:
+    preadmitted = provider_paths if provider_paths is not None else files(runtime, reserve_entries=generated_payloads + 1)
+    if len(preadmitted) > MAX_FILES - generated_payloads - (1 if history_provider else 0):
         raise PreparationError("Python payload leaves no room for core resources")
     package = _root(source / "src/mobile_release")
     candidates = files(package)
@@ -177,14 +246,29 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
     if version is None:
         raise PreparationError("Core version must be an explicit package version")
     desktop = _root(source / "desktop")
-    # Admit all six fixed entry points and the CA before creating output;
+    # Admit every selected fixed entry point and the CA before creating output;
     # an absent source must not leave a deceptively complete passive bundle.
     # CA bytes are opaque publisher input, not an acquired trust store or proof
     # of certificate correctness. Never synthesize a placeholder or use the OS.
-    bootstraps = [(name, read_checked(desktop / name, limit=MAX_BOOTSTRAP_BYTES)) for name in BOOTSTRAPS]
+    bootstraps = [(name, read_checked(desktop / name, limit=MAX_BOOTSTRAP_BYTES)) for name in bootstrap_names]
     github_ca = read_checked(desktop / GITHUB_CA_NAME, limit=MAX_GITHUB_CA_BYTES)
     if not github_ca:
         raise PreparationError("The fixed GitHub CA payload is empty")
+    provider_expected = None
+    if provider is not None:
+        # Quote actual input lengths and bounded generated resources before
+        # reading the large provider or creating any generated payload. The
+        # containing stager independently keeps the same512MiB total ceiling.
+        quote = (sum(_ordinary(path).st_size for path in preadmitted) + size + MAX_FILES * 2048
+                 + sum(len(content) for _, content in bootstraps) + len(github_ca) + 1024 * 1024)
+        if quote > total_limit:
+            raise PreparationError("Current provider leaves no room for complete runtime resources")
+        if (_state(_ordinary(provider)) != provider_state
+                or _state(_ordinary(provider.parent, directory=True)) != provider_directory_state):
+            raise PreparationError("Current provider original changed before preparation")
+        provider_digest = digest(read_checked(provider, limit=128 * 1024 * 1024))
+        provider_expected = {path.relative_to(runtime).as_posix() for path in preadmitted}
+        provider_expected.update((*bootstrap_names, "core.zip", GITHUB_CA_NAME))
     for name, content in bootstraps:
         with (runtime / name).open("xb") as stream:
             stream.write(content)
@@ -200,9 +284,23 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
     inventory = []
     total = 0
     for path in files(runtime, reserve_entries=1):
-        content = read_checked(path, limit=min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total))
+        relative = path.relative_to(runtime).as_posix()
+        if provider_expected is not None and relative not in provider_expected:
+            raise PreparationError("Current provider runtime acquired an unexpected payload")
+        limit = min(MAX_FILE_BYTES, total_limit - total)
+        if path == provider:
+            limit = min(limit, 128 * 1024 * 1024)
+        content = read_checked(path, limit=limit)
         total += len(content)
-        inventory.append({"path": path.relative_to(runtime).as_posix(), "sha256": digest(content), "size": len(content)})
+        content_digest = digest(content)
+        if path == provider and (_state(_ordinary(provider)) != provider_state or content_digest != provider_digest):
+            raise PreparationError("Current provider original changed during preparation")
+        inventory.append({"path": relative, "sha256": content_digest, "size": len(content)})
+    if provider is not None:
+        if ({row["path"] for row in inventory} != provider_expected
+                or _state(_ordinary(provider)) != provider_state
+                or _state(_ordinary(provider.parent, directory=True)) != provider_directory_state):
+            raise PreparationError("Current provider runtime original or roster changed")
     manifest = {
         "schemaVersion": 1, "protocol": 1, "coreVersion": version[1].decode("ascii"), "target": target,
         "coreSha256": next(item["sha256"] for item in inventory if item["path"] == "core.zip"),
@@ -212,20 +310,25 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
     encoded = canonical(manifest) + b"\n"
     if len(encoded) > 1024 * 1024:
         raise PreparationError("Manifest byte limit exceeded")
+    if history_provider and total + len(encoded) > total_limit:
+        raise PreparationError("Complete current provider runtime exceeds its byte limit")
     with (runtime / "manifest.json").open("xb") as stream:
         stream.write(encoded)
     return {"manifestSha256": digest(encoded), "protocolSha256": manifest["protocolSha256"],
             "qualification": "prepared-not-native-verified"}
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--runtime-root", required=True, type=Path)
     parser.add_argument("--target", required=True, choices=sorted(TARGETS))
-    args = parser.parse_args()
+    parser.add_argument("--profile", choices=("historical", "current"), default="historical",
+                        help="Explicit current ten-bootstrap product roster, or backward-compatible historical roster")
+    args = parser.parse_args(argv)
     try:
-        print(json.dumps(prepare(args.source, args.runtime_root, args.target), sort_keys=True))
+        action = prepare_current if args.profile == "current" else prepare
+        print(json.dumps(action(args.source, args.runtime_root, args.target), sort_keys=True))
     except (OSError, ValueError, KeyError, UnicodeError):
         parser.exit(1, "Runtime preparation failed. Existing inputs/partial output were preserved; no native qualification was performed.\n")
 

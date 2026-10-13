@@ -159,7 +159,7 @@ export function parseCatalogGitHubSetup(value: unknown): GitHubSetupHelp | null 
     // additive guides. Each guide's own consumer validates its contents;
     // no independent guide grants Setup authority or permits unknown keys.
     const envelope = ['schemaVersion', 'schema', 'fields', 'credentials', 'metadata', 'githubSetup', 'assurance'];
-    const guides = ['credentialGuide', 'githubConnection', 'metadataText'];
+    const guides = ['credentialGuide', 'githubConnection', 'metadataText', 'releaseVersionEdit'];
     return record(value) && keys(value, [...envelope, ...guides.filter((key) => Object.hasOwn(value, key))]) && value.schemaVersion === 1
       ? parseGitHubSetupHelp(value.githubSetup) : null;
   } catch { return null; }

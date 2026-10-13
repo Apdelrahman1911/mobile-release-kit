@@ -3,6 +3,9 @@
 import { methodReason } from './certainty.ts';
 import { parseCredentialGuide } from './credentialGuide.ts';
 import { isDirty } from './drafts.ts';
+import { assetIntentPending, assetSessionReason } from './assetSessionController.ts';
+import { ASSET_KINDS } from './assetSessionProtocol.ts';
+import type { AssetDisplayState, AssetKind, AssetScope } from './assetSessionTypes.ts';
 import type { ProjectSession, WorkspaceAction } from './drafts.ts';
 import { ENVIRONMENTS, assurance, boundedJson, keys, oneOf, record, requirement, requirementName, text } from './requirementProtocol.ts';
 import type { AppInfo, BridgeMode, CredentialGuide, CredentialHelp, CredentialKindId, DesktopApi, HelpContent, JsonObject, RequirementDescriptor } from './types.ts';
@@ -120,6 +123,45 @@ export interface ReleaseInputGuidanceState {
   mode: BridgeMode; reason: string | null; loading: boolean; selectionPending: boolean; project: ProjectBinding | null;
   stage: ReleaseInputStage; pending: boolean; result: ReleaseInputResult | null; help: ReleaseInputHelp; notice: string | null;
 }
+// Navigation-only data. The exact frozen source/row, not matching strings or
+// cached counters, binds a hint to the requirements the user actually opened.
+export interface ReleaseInputPreparationTarget {
+  readonly source: ReleaseInputGuidanceState;
+  readonly requirement: RequirementDescriptor;
+  readonly guideId: CredentialKindId;
+  readonly scope: Readonly<AssetScope>;
+}
+export interface ReleaseInputPreparationLocal {
+  kindId: AssetKind; replacementId: string | null; confirmLock: boolean; writeOnlyFormMounted: boolean;
+}
+export function sessionPreparationKind(kind: CredentialKindId): AssetKind | null {
+  return ASSET_KINDS.find((entry) => entry === kind) ?? null;
+}
+export function preparationScopeChanged(target: ReleaseInputPreparationTarget, scope: AssetScope): boolean {
+  return target.scope.platform !== scope.platform || target.scope.stage !== scope.stage || target.scope.purpose !== scope.purpose;
+}
+// Pure UI protection only; existing native/core admission still owns context,
+// collection and assignment. No action or private field value enters this helper.
+export function preparationSessionReason(target: ReleaseInputPreparationTarget, state: AssetDisplayState,
+  local: ReleaseInputPreparationLocal, otherReason: string | null = null): string | null {
+  const kind = sessionPreparationKind(target.guideId);
+  if (!kind) return 'This input has a reference guide only. Its session importer is not available.';
+  if (otherReason !== null) return otherReason || 'Other original work must settle before continuing.';
+  const reason = assetSessionReason(state);
+  if (reason !== null) return reason;
+  if (state.observing) return 'Wait for the original session status check to settle.';
+  if (state.originPending || assetIntentPending(state)) return 'The original requested action is still pending or unconfirmed. Keep its existing target and status.';
+  const operation = state.status?.operation;
+  if (operation && (operation.phase !== 'idle' || operation.settlement !== 'known')) return 'Finish the original operation before changing preparation context.';
+  if (operation?.selectionToken || operation?.preview || state.reviewReady || state.previewDeadline !== null)
+    return 'Keep the original selection or review. Guidance cannot replace its target or extend its deadline.';
+  if (state.status?.records.some((record) => record.availability === 'mutation-pending')) return 'A session record change is still pending. Keep its original status.';
+  if (local.replacementId !== null) return 'A replacement target is already selected. Use its existing controls before changing preparation context.';
+  if (local.confirmLock) return 'Finish the open session-discard confirmation before continuing.';
+  if (local.writeOnlyFormMounted && (kind !== local.kindId || preparationScopeChanged(target, state.scope)))
+    return 'A private-input form is already open. Continue with it, or use its existing controls before changing preparation context. Its values have not been changed.';
+  return null;
+}
 type GuidanceApi = Pick<DesktopApi, 'mode' | 'validate'>;
 interface RequestBinding {
   service: object; selection: object; context: object; help: object; api: GuidanceApi;
@@ -233,6 +275,27 @@ export class ReleaseInputGuidanceController {
     return includePending && this.state.pending ? 'Reading requirements for this in-memory draft…' : null;
   }
   startReason = (): string | null => this.blocked(true);
+  private preparationRow(source: ReleaseInputGuidanceState, input: RequirementDescriptor): ReleaseInputRow | null {
+    if (this.disposed || this.state !== source || this.blocked(true) !== null) return null;
+    const selected = this.selectedProject();
+    if (this.state !== source || source.pending || source.result?.state !== 'format-valid' ||
+        !source.project || !this.draft || selected?.draft !== this.draft || !sameProject(source.project, projectBinding(selected)) ||
+        !source.result.requirements.includes(input)) return null;
+    return releaseInputRows(source.result, source.stage, source.help).find((row) => row.requirement === input && row.guideId !== null) ?? null;
+  }
+  preparationTarget(source: ReleaseInputGuidanceState, input: RequirementDescriptor): ReleaseInputPreparationTarget | null {
+    const row = this.preparationRow(source, input);
+    const kind = source.help.guide?.kinds.find((entry) => entry.id === row?.guideId);
+    if (!row?.guideId || !kind) return null;
+    return Object.freeze({ source, requirement: input, guideId: row.guideId,
+      scope: Object.freeze({ platform: kind.platform, stage: source.stage, purpose: 'full' as const }) });
+  }
+  preparationCurrent(target: ReleaseInputPreparationTarget, activeTarget: ReleaseInputPreparationTarget | null): boolean {
+    if (activeTarget !== target) return false;
+    const row = this.preparationRow(target.source, target.requirement);
+    return !!row && row.guideId === target.guideId && target.scope.platform === row.requirement.platform &&
+      target.scope.stage === target.source.stage && target.scope.purpose === 'full';
+  }
   private current(binding: RequestBinding): boolean {
     return !this.disposed && this.attempt === binding && this.api === binding.api && this.service === binding.service &&
       this.selection === binding.selection && this.context === binding.context && this.help === binding.help &&

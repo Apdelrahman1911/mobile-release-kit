@@ -194,25 +194,41 @@ class ObservationContractTests(unittest.TestCase):
             self.assertEqual((row.kind, row.manual, row.expected), ("native-prefix", "none", catalog.REFUSED))
             self.assertEqual(row.resolution, catalog.CONFLICT if name == "transaction-stage" else catalog.RECOVERED)
             self.assertIs(row.selector, catalog.NATIVE_PREFIXES[name])
+            creating = name == "lock"
             self.assertEqual((row.selector.phase, row.selector.slot, row.selector.origin, row.selector.edge),
-                             ("setup", "native", "model", "partial"))
+                             ("setup", "native", "model", "after" if creating else "partial"))
+            if creating:
+                self.assertEqual((row.selector.operation, payload), ("native-effect/create/" + catalog.LOCK_NAME, b""))
             with tempfile.TemporaryDirectory(prefix="mrk-prefix-bytes-inert-") as temporary:
                 path = Path(temporary) / "fixed-source-effect"
                 prefix = payload[:max(1, len(payload) // 2)]
-                path.write_bytes(prefix)
-                path.chmod(0o600)
-                actual = semantic._read_expected_file(path, payload, partial=True)
+                if creating:
+                    descriptor = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o400)
+                    os.close(descriptor)
+                else:
+                    path.write_bytes(prefix)
+                    path.chmod(0o600)
+                actual = semantic._read_expected_file(path, payload, partial=not creating)
                 self.assertEqual(actual["size"], len(prefix))
                 self.assertEqual(actual["sha256"], hashlib.sha256(prefix).hexdigest())
-                for invalid in (payload, b"x" * len(prefix)):
-                    path.write_bytes(invalid)
-                    with self.subTest(name=name, invalid=len(invalid)), \
-                            self.assertRaisesRegex(AssertionError, "proper native prefix"):
+                self.assertEqual(actual["mode"], 0o400 if creating else 0o600)
+                if creating:
+                    with self.assertRaisesRegex(AssertionError, "proper native prefix"):
                         semantic._read_expected_file(path, payload, partial=True)
+                    path.unlink()
+                    path.write_bytes(b"x")
+                    with self.assertRaisesRegex(AssertionError, "byte bound"):
+                        semantic._read_expected_file(path, payload)
+                else:
+                    for invalid in (payload, b"x" * len(prefix)):
+                        path.write_bytes(invalid)
+                        with self.subTest(name=name, invalid=len(invalid)), \
+                                self.assertRaisesRegex(AssertionError, "proper native prefix"):
+                            semantic._read_expected_file(path, payload, partial=True)
                 path.unlink()
                 path.symlink_to(Path(temporary) / "absent")
                 with self.assertRaisesRegex(AssertionError, "evidence inode"):
-                    semantic._read_expected_file(path, payload, partial=True)
+                    semantic._read_expected_file(path, payload, partial=not creating)
 
     def test_checkpoint_observation_follows_original_return_and_never_records_a_failed_write(self):
         with tempfile.TemporaryDirectory(prefix="mrk-checkpoint-return-inert-") as temporary:

@@ -1,0 +1,140 @@
+name: Canonical Mac sealed-box helper
+
+on:
+  push:
+    branches:
+      - verify/desktop-macos-github-seal
+      - verify/desktop-macos-history-provider-probe
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-github-seal-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BASH_ENV: ''
+  ENV: ''
+  DEVELOPER_DIR: /Library/Developer/CommandLineTools
+
+jobs:
+  seal-build:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && (github.ref == 'refs/heads/verify/desktop-macos-github-seal' || github.ref == 'refs/heads/verify/desktop-macos-history-provider-probe')
+    name: canonical seal (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-26
+          - target: x86_64-apple-darwin
+            runner: macos-26-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      MRK_SEAL_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Exact detached public source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Prepare the ordinary engineering Python interpreter
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+          check-latest: false
+
+      - name: Admit unchanged checkout
+        id: sourcepre
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git symbolic-ref -q HEAD || true)" = ''
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Prepare only the selected hosted Python executable mode
+        timeout-minutes: 1
+        shell: bash
+        env:
+          MRK_SEAL_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          # The official framework installer uses root:admin 0775. Tighten this
+          # exact original before normal admission; no recursive/cache changes.
+          /usr/bin/sudo -n -- "$MRK_SEAL_PYTHON" -I -S -B \
+            desktop/tools/macos_github_seal_build.py --prepare-hosted-python "$MRK_SEAL_PYTHON"
+
+      - name: Fixed canonical static build and native tests
+        id: build
+        timeout-minutes: 18
+        shell: bash
+        env:
+          MRK_SEAL_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          # One actual child entry, same900s/60s owner. Seal keeps23 calls;
+          # the isolated History verification ref has exactly3 denied-network probes.
+          if [ "$GITHUB_REF" = refs/heads/verify/desktop-macos-history-provider-probe ]; then
+            "$MRK_SEAL_PYTHON" -I -S -B desktop/tools/macos_github_seal_build.py --history-provider-probe --publish-build-capsule
+          else
+            test "$GITHUB_REF" = refs/heads/verify/desktop-macos-github-seal
+            "$MRK_SEAL_PYTHON" -I -S -B desktop/tools/macos_github_seal_build.py --publish-build-capsule
+          fi
+
+      - name: Verify source after the original entry returned
+        id: sourcepost
+        if: always() && steps.sourcepre.outcome == 'success' && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git symbolic-ref -q HEAD || true)" = ''
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Retain only finalized public output
+        if: always() && steps.sourcepost.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ github.ref == 'refs/heads/verify/desktop-macos-history-provider-probe' && 'history-provider-probe' || 'canonical-seal' }}-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /Users/runner/work/_temp/${{ github.ref == 'refs/heads/verify/desktop-macos-history-provider-probe' && 'mrk-history-provider' || 'mrk-github-seal' }}-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}/public/
+          # Unknown custody produces no public directory, never guessed cleanup
+          # or a successful receipt. A failed original job remains failed even
+          # when its separately settled diagnostic evidence exists.
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 7
+
+      # Separate success-only two-member capsules; diagnostics never qualify them.
+      - name: Publish finalized History provider build capsule
+        id: history_capsule
+        if: success() && github.ref == 'refs/heads/verify/desktop-macos-history-provider-probe' && steps.build.outcome == 'success' && steps.sourcepost.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tool-build-history-provider-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /Users/runner/work/_temp/mrk-history-provider-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}/capsule/gh
+            /Users/runner/work/_temp/mrk-history-provider-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}/capsule/tool-build-receipt.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Publish finalized sealed-box helper build capsule
+        id: seal_capsule
+        if: success() && github.ref == 'refs/heads/verify/desktop-macos-github-seal' && steps.build.outcome == 'success' && steps.sourcepost.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tool-build-github-seal-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /Users/runner/work/_temp/mrk-github-seal-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}/capsule/mrk-github-seal
+            /Users/runner/work/_temp/mrk-github-seal-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}/capsule/tool-build-receipt.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

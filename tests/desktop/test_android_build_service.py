@@ -17,7 +17,7 @@ import unittest
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, call, patch
+from unittest.mock import Mock, PropertyMock, call, patch
 
 from mobile_release import android, android_manifest, android_zip_integrity
 from mobile_release import desktop_android_build as service
@@ -39,10 +39,13 @@ from mobile_release.owned_process import ProcessCleanupError, ProcessError
 from mobile_release.reporting import Finding, Report, Status
 
 
+VERIFY_JAR_SIGNATURE = android._verify_jar_signature
+SIGNER_FINGERPRINT = android._signer_fingerprint
+
 NAMES = ("BundleConfig.pb", "base/manifest/AndroidManifest.xml", "base/dex/classes.dex")
 
 
-def values():
+def values(*, signature=False):
     data = {"schemaVersion": 1,
             "version": {"source": "release/version.properties", "nameKey": "VERSION_NAME", "buildKey": "BUILD_NUMBER"},
             "source": {"candidateBranch": "main", "productionBranch": "main"},
@@ -52,14 +55,16 @@ def values():
             "metadata": {"root": "release/store", "androidLocales": ["en-US"], "iosLocales": []},
             "services": {"androidFirebase": "disabled", "iosFirebase": "disabled"},
             "projectChecks": {"preflight": [], "androidArtifact": [], "iosArtifact": []}}
+    if signature:
+        data["android"]["uploadCertificateSha256"] = "aB" * 32
     raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
     version = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
     release = ReleaseVersion("1.2.3", 7)
     selected = SavedAndroidConfiguration(raw, "release/version.properties", "VERSION_NAME", "BUILD_NUMBER",
-                                         False, ":app", "release", "org.example.saved")
+                                         False, ":app", "release", "org.example.saved", data["android"].get("uploadCertificateSha256"))
     root = Path("/inert/project")
     bound = BoundAndroidInputs(ReleaseConfig(root / "release/mobile-release.json", root, data),
-                               SavedAndroidSelection(selected, version, release), ":app:bundleRelease")
+                               SavedAndroidSelection(selected, version, release), ":app:bundleRelease", signature)
     identity = {"device": "1", "inode": "2", "mode": stat.S_IFDIR | 0o700, "uid": 123, "gid": 123}
     request = {"protocol": wire.PROTOCOL, "operationId": "a" * 32, "ownerGeneration": "b" * 32,
                "context": {"projectId": "inert-android", "draftRevision": 2, "baselineGeneration": 3,
@@ -67,7 +72,9 @@ def values():
                            "savedVersion": {"source": selected.source, "bytes": len(version),
                                             "sha256": hashlib.sha256(version).hexdigest(), "name": release.name,
                                             "build": release.build},
-                           "platform": "android", "operation": "android-build-inspect"},
+                           "platform": "android", "operation": "android-build-inspect",
+                           "artifactValidation": {"mode": "upload-signature" if signature else "structure-and-version",
+                                                  "uploadCertificateSha256": selected.upload_certificate_sha256 if signature else None}},
                "native": {"profile": "linux-gnu-x86_64", "projectRoot": str(root), "cwd": "/inert/cwd",
                           "rootIdentity": identity, "toolchain": {"schemaVersion": 1,
                           "profile": wire.TOOLCHAIN_PROFILE, "root": "/opt/mobile-release-kit/android/inert",
@@ -126,14 +133,17 @@ class _InertCase(unittest.TestCase):
 
 
 class _InertRun:
-    def __init__(self, case):
+    def __init__(self, case, *, signature=False):
         # Import the actual integration type; never counterfeit a production
         # module, skip a missing dependency or run the tool-owner constructor.
         from mobile_release.android_build_tools import AndroidValidationTools
 
         self.case, self.events = case, []
-        self.request, self.bound = values()
+        self.request, self.bound = values(signature=signature)
         self.metadata, self.findings = metadata(), findings()
+        if signature:
+            self.findings = [*self.findings[:2], Finding("android.aab.signature", Status.PASS, "inert"),
+                             Finding("android.aab.signer", Status.PASS, "inert")]
         self.flags = dict(invocation=False, artifacts=False, tools=False, namespace=False)
         self.disposition = {"work": "not-created", "artifacts": "not-created"}
         thread = threading.current_thread()
@@ -154,6 +164,8 @@ class _InertRun:
                                work_end=4000.0, fd=None, identity=None, acquired=True, active=True,
                                request_returned=True, close_claimed=False, closed=False, stop_reason="none",
                                first_failure=None, custody_unknown=False, buffer=bytearray(), _engine=None)
+        source.signed = source.material_pending = source.material_receiving = False
+        source.material = None
         guard._saved_command_source = source
         case.patched(guard, "check", return_value=None)
         case.patched(source, "poll", return_value=None)
@@ -164,7 +176,10 @@ class _InertRun:
                            invocation_attempted=False, counters={}, failure=None, prepared=True, close_claimed=False,
                            resources_closed=False, work_finish_attempted=False, cleanup_errors=[], _pending=None,
                            _roles={"gradle": "new", "bundletool": "new"}, _command_before={}, _returned={},
-                           zip_metadata=None, stage="accepted")
+                           zip_metadata=None, stage="accepted", _signature_passed=False)
+        op.signing = None
+        if signature:
+            op._roles.update(jarsigner="new", keytool="new")
         source.operation = op
         self.invocation = invocation = object.__new__(InvocationCustody)
         invocation.root, invocation.cancellation, invocation.signing_lease = op.root, guard, None
@@ -212,7 +227,7 @@ class _InertRun:
 
         case.patched(op, "returned", side_effect=returned)
         self.run = run = object.__new__(service.AndroidBuildRun)
-        run.__dict__.update(request=self.request, guard=guard, source=source, operation=op, primary=None,
+        run.__dict__.update(request=self.request, guard=guard, source=source, operation=op, primary=None, primary_signing_phase=None,
                             report=None, _candidate=None, _run_claimed=False, _close_claimed=False)
         self.custody_call = case.patched(service, "invocation_custody", side_effect=self.custody)
         self.build_call = case.patched(service, "run_android_build", side_effect=self.build)
@@ -273,6 +288,7 @@ class _InertRun:
     def build(self, *_args, **_kwargs):
         self.events.append("build")
         self.operation._returned["gradle"] = 0
+        self.operation._roles["gradle"] = "returned"
         self.ledger._commands, self.ledger._command_dispatched = 1, True
         self.disposition.update(work="retained-work", artifacts="retained-incomplete")
         self.operation.advance("capturing")
@@ -282,7 +298,7 @@ class _InertRun:
     def inspect(self, *_args, **_kwargs):
         self.events.append("inspect")
         self.operation.zip_metadata = self.metadata
-        self.ledger._commands = 2
+        self.ledger._commands = 4 if self.bound.check_signer else 2
         return self.findings
 
     def finish_work(self):
@@ -316,6 +332,7 @@ class _InertRun:
             self.operation.gradle_command.side_effect = arm
         else:
             self.operation._returned["gradle"] = 0
+            self.operation._roles["gradle"] = "returned"
             self.ledger._commands, self.ledger._command_dispatched = 1, True
 
         def dispatch(argv, **kwargs):
@@ -333,7 +350,8 @@ class _InertRun:
 
     def validate(self, **changes):
         args = dict(expected_application_id=self.bound.saved.configuration.application_id, release=self.bound.release,
-                    expected_fingerprint=None, require_tools=True, check_signer=False, cancellation=self.guard,
+                    expected_fingerprint=self.bound.saved.configuration.upload_certificate_sha256 if self.bound.check_signer else None,
+                    require_tools=True, check_signer=self.bound.check_signer, cancellation=self.guard,
                     artifact=self.artifact, tools=self.tools)
         args.update(changes)
         return android.validate_aab(self.artifact.path, **args)
@@ -504,6 +522,20 @@ class AndroidOwnedSeamTests(_InertCase):
                 self.assertIs(raised.exception, error)
                 self.assertEqual(f.operation.command_outcome(), {"outcome": "exited", "exitCode": 0})
                 f.operation.capture_after.assert_not_called()
+        # Actual successful operation/core wrappers contribute two checks;
+        # real tool argv/environment builders separately prove one each.
+        f = _InertRun(self)
+        f.command("gradle")
+        f.operation.gradle_command.side_effect = lambda: AndroidBuildOperation.gradle_command(f.operation)
+        f.operation.command_environment.side_effect = lambda: AndroidBuildOperation.command_environment(f.operation)
+        f.tools.gradle_command.side_effect = lambda task, work: ("/inert/gradle", "--no-daemon", task)
+        self.patched(f.tools, "command_environment", return_value={"INERT_FIXED": "environment"})
+        with patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=Path("/inert/work")):
+            self.assertEqual(android.run_android_build(f.bound.config, signed=False, cancellation=f.guard,
+                                                       operation=f.operation), {"android-aab": f.artifact.path})
+        self.assertEqual(f.tools.check.call_count, 2)
+        f.tools.gradle_command.assert_called_once_with(f.bound.task, Path("/inert/work"))
+        f.tools.command_environment.assert_called_once_with(Path("/inert/work"), f.bound.release)
 
     def test_command_exception_has_no_return_code_or_substitute_artifact(self):
         cases = ((False, ProcessError("PRIVATE dispatch", dispatched=True)),
@@ -593,7 +625,13 @@ class AndroidOwnedSeamTests(_InertCase):
         inspector = f.inspector()
         command = f.command("bundletool")
         manifest = self.patched(android_manifest, "validate_android_manifest", return_value=[findings()[1]])
-        result = f.validate()
+        f.operation.command_environment.side_effect = lambda: AndroidBuildOperation.command_environment(f.operation)
+        self.patched(f.tools, "command_environment", return_value={"INERT_FIXED": "environment"})
+        with patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=Path("/inert/work")):
+            result = f.validate()
+        self.assertEqual(f.tools.check.call_count, 2)  # Actual operation wrapper plus returned bundletool.
+        f.tools.bundletool_command.assert_called_once_with(f.artifact.path)
+        f.tools.command_environment.assert_called_once_with(Path("/inert/work"), f.bound.release)
         inspector.assert_called_once_with(f.reader_token, archive_bytes=f.artifact.size, checkpoint=f.artifact.check)
         manifest.assert_called_once_with("INERT_MANIFEST", expected_application_id="org.example.saved",
                                          release=f.bound.release, cancellation=f.guard)
@@ -624,6 +662,225 @@ class AndroidOwnedSeamTests(_InertCase):
                 self.assertFalse(f.artifact._native)
 
 
+def self_signed_output():
+    # Reuses the existing CLI policy example; inert text, not crypto evidence.
+    return SimpleNamespace(returncode=4, stdout="jar verified, with signer errors.\n", stderr=(
+        "Error:\nThis jar contains entries whose certificate chain is invalid. Reason: "
+        "PKIX path building failed: test: unable to find valid certification path to requested target\n"
+        "This jar contains entries whose signer certificate is self-signed.\n"
+        "Warning:\nThis jar contains signatures that do not include a timestamp.\n"
+        "POSIX file permission and/or symlink attributes detected. These attributes "
+        "are ignored when signing and are not protected by the signature.\n"))
+
+
+class AndroidUploadSignatureTests(_InertCase):
+    def inspection(self):
+        f = _InertRun(self, signature=True)
+        f.inspector()
+        self.patched(android_manifest, "validate_android_manifest", return_value=[findings()[1]])
+        self.patched(android, "_verify_jar_signature", new=VERIFY_JAR_SIGNATURE)
+        self.patched(android, "_signer_fingerprint", new=SIGNER_FINGERPRINT)
+        f.inspect_call.side_effect = android.validate_aab
+        f.operation._returned["gradle"] = 0
+        f.operation._roles["gradle"] = "returned"
+        f.ledger._commands, f.ledger._command_dispatched = 1, True
+        # Exercise the real one-borrow control/finalizer, with only its original
+        # IO and metadata observations replaced by inert predicate DATA.
+        f.files.guard = f.guard
+        f.artifact._reader = None
+        self.patched(f.files, "_owner", return_value=None)
+        self.patched(f.artifact, "native_input", new=OriginalAndroidArtifact.native_input.__get__(f.artifact))
+
+        def argv(role, path):
+            self.assertTrue(f.artifact._native)
+            self.assertEqual(path, f.artifact.path)
+            return ("/inert/" + role, str(path))
+
+        self.patched(f.tools, "jarsigner_command", side_effect=lambda path: argv("jarsigner", path))
+        self.patched(f.tools, "keytool_command", side_effect=lambda path: argv("keytool", path))
+        f.native_results = {
+            "bundletool": SimpleNamespace(returncode=0, stdout="INERT_MANIFEST", stderr=""),
+            "jarsigner": self_signed_output(),
+            "keytool": SimpleNamespace(returncode=0, stdout="Signer #1:\nCertificate #1:\n SHA256: " + ":".join(["AB"] * 32) + "\n", stderr=""),
+        }
+        f.native_fault = None
+
+        def dispatch(_argv, **kwargs):
+            role = f.operation._pending
+            self.assertTrue(f.artifact._native)
+            self.assertEqual(kwargs, {"cwd": f.operation.root, "environ": {"INERT_FIXED": "environment"},
+                "timeout": {"bundletool": 60, "jarsigner": 120, "keytool": 30}[role], "capture": True,
+                "output_limit": 2 * 1024 * 1024, "cancellation": f.guard})
+            self.assertEqual(f.source.command_limits(kwargs["timeout"], True, kwargs["output_limit"]),
+                             (kwargs["timeout"], kwargs["output_limit"]))
+            f.events.append("dispatch:" + role)
+            f.ledger._commands += 1
+            f.ledger._command_dispatched = True
+            if f.native_fault:
+                f.native_fault(role)
+            return f.native_results[role]
+
+        f.native_command = self.patched(android, "run_owned", side_effect=dispatch)
+        return f
+
+    def test_same_captured_aab_has_one_borrow_and_separate_signature_and_saved_match(self):
+        f = self.inspection()
+        result = f.validate()
+        self.assertEqual([(row.code, row.status) for row in result[-2:]],
+                         [("android.aab.signature", Status.PASS), ("android.aab.signer", Status.PASS)])
+        self.assertEqual([event for event in f.events if event.startswith("dispatch:")],
+                         ["dispatch:bundletool", "dispatch:jarsigner", "dispatch:keytool"])
+        self.assertEqual(f.operation.counters["artifact-native-borrows"], 1)
+        self.assertEqual(f.artifact.verify_bytes.call_count, 2)
+        self.assertFalse(f.artifact._native)
+        self.assertEqual(f.operation._returned, {"gradle": 0, "bundletool": 0, "jarsigner": 4, "keytool": 0})
+        with self.assertRaises(AndroidBuildError):
+            with f.artifact.native_input():
+                self.fail("cannot renew the original borrow")
+        self.assertEqual(f.native_command.call_count, 3)
+        android._validation_environment.assert_not_called()
+
+    def test_unsigned_tampered_weak_expired_and_unknown_warning_are_negative_not_keytool_work(self):
+        results = [SimpleNamespace(returncode=0, stdout="jar is unsigned.\n", stderr=""),
+                   SimpleNamespace(returncode=1, stdout="", stderr="invalid signature digest error")]
+        for warning in ("The SHA1 algorithm is disabled by the security properties.", "The signer certificate has expired.",
+                        "This jar contains unsigned entries.", "Unexpected verifier warning."):
+            accepted = self_signed_output()
+            results.append(SimpleNamespace(returncode=accepted.returncode, stdout=accepted.stdout,
+                                           stderr=accepted.stderr + warning + "\n"))
+        for rejected in results:
+            with self.subTest(output=rejected.stdout, warning=rejected.stderr[-70:]):
+                f = self.inspection()
+                f.native_results["jarsigner"] = rejected
+                f.run.run()
+                f.settle_outer()
+                terminal = f.run.terminal()
+                self.assertEqual((terminal["outcome"], terminal["lifetime"]["commands"]), ("complete", 3))
+                self.assertEqual(terminal["result"]["assurances"]["signature"], "failed")
+                self.assertEqual(terminal["result"]["assurances"]["signer"], "not-checked")
+                self.assertFalse(f.run.report.ok)
+                self.assertNotIn("keytool", f.operation._returned)
+                f.tools.keytool_command.assert_not_called()
+
+    def test_wrong_absent_ambiguous_and_distinct_leaf_signers_fail_after_signature_pass(self):
+        leaf = "Signer #1:\nCertificate #1:\n SHA256: " + ":".join(["CD"] * 32) + "\n"
+        outputs = [(0, output) for output in ("", "SHA256: " + "ab" * 32,
+                   "Signer #1:\nCertificate #2:\n SHA256: " + "ab" * 32,
+                   leaf, leaf + "Signer #2:\nCertificate #1:\n SHA256: " + "ab" * 32)]
+        outputs.append((1, "Signer #1:\nCertificate #1:\n SHA256: " + "ab" * 32))
+        for code, output in outputs:
+            with self.subTest(code=code, output=output[:30]):
+                f = self.inspection()
+                f.native_results["keytool"] = SimpleNamespace(returncode=code, stdout=output, stderr="")
+                f.run.run()
+                f.settle_outer()
+                terminal = f.run.terminal()
+                self.assertEqual(terminal["outcome"], "complete")
+                self.assertEqual(terminal["lifetime"]["commands"], 4)
+                self.assertEqual(terminal["result"]["assurances"]["signature"], "passed")
+                self.assertEqual(terminal["result"]["assurances"]["signer"], "failed")
+                self.assertFalse(f.run.report.ok)
+        # Existing common policy permits identical leaves; a chain's second
+        # certificate is not the leaf and cannot replace it.
+        stdout = "Signer #1:\nCertificate #1:\n SHA256: " + "ab" * 32 + "\nCertificate #2:\n SHA256: " + "cd" * 32
+        self.assertEqual(android._keytool_fingerprint(0, stdout), "ab" * 32)
+        self.assertEqual(android._keytool_fingerprint(0, stdout + "\nSigner #2:\nCertificate #1:\n SHA256: " + "ab" * 32), "ab" * 32)
+
+    def test_settled_manifest_rejection_does_not_skip_independent_signature_comparison(self):
+        f = self.inspection()
+        f.native_results["bundletool"] = SimpleNamespace(returncode=1, stdout="", stderr="inert manifest rejection")
+        f.run.run()
+        f.settle_outer()
+        terminal = f.run.terminal()
+        self.assertEqual((terminal["outcome"], terminal["lifetime"]["commands"]), ("complete", 4))
+        self.assertEqual(terminal["result"]["assurances"]["nativeManifest"], "failed")
+        self.assertEqual(terminal["result"]["assurances"]["signature"], "passed")
+        self.assertEqual(terminal["result"]["assurances"]["signer"], "matches-saved-upload-certificate")
+        self.assertFalse(f.run.report.ok)
+        self.assertEqual(f.operation.counters["artifact-native-borrows"], 1)
+
+    def test_lost_return_or_unknown_consumer_cannot_be_relabelled_signature_negative(self):
+        for unknown in (False, True):
+            with self.subTest(unknown=unknown):
+                f = self.inspection()
+                error = ProcessCleanupError("inert unknown custody") if unknown else ProcessError("inert lost return", dispatched=True)
+
+                def lose(role):
+                    if role == "jarsigner":
+                        if unknown:
+                            f.ledger._fatal = True
+                            f.ledger._command_contained = False
+                        raise error
+
+                f.native_fault = lose
+                with self.assertRaises(type(error)):
+                    f.run.run()
+                self.assertIsNone(f.run.report)
+                self.assertIsNone(f.run._candidate)
+                self.assertNotIn("jarsigner", f.operation._returned)
+                f.tools.keytool_command.assert_not_called()
+                f.settle_outer()
+                terminal = f.run.terminal()
+                self.assertEqual(terminal["outcome"], "unknown" if unknown else "failed")
+                self.assertIsNone(terminal["result"])
+                self.assertEqual(f.artifact._native, unknown)
+
+    def test_stop_between_inspectors_preserves_actual_returns_and_prevents_next_role(self):
+        for after, count in (("bundletool", 2), ("jarsigner", 3)):
+            with self.subTest(after=after):
+                f = self.inspection()
+
+                def stop_after_return():
+                    if after in f.operation._returned:
+                        f.source.stop("cancelled")
+                        raise KeyboardInterrupt()
+
+                f.tools.check.side_effect = stop_after_return
+                with self.assertRaises(KeyboardInterrupt):
+                    f.run.run()
+                self.assertIn(after, f.operation._returned)
+                self.assertEqual(f.ledger._commands, count)
+                f.tools.keytool_command.assert_not_called()
+                if after == "bundletool":
+                    f.tools.jarsigner_command.assert_not_called()
+                self.assertEqual(f.native_command.call_count, count - 1)
+                f.settle_outer()
+                terminal = f.run.terminal()
+                # The inert close settles flags but leaves its work DATA
+                # retained. STOP must not relabel retained work as clean.
+                self.assertEqual((terminal["outcome"], terminal["reason"]), ("failed", "cancelled"))
+                self.assertEqual(terminal["lifetime"]["stopObserved"], "cancelled")
+                self.assertEqual(terminal["disposition"]["work"], "retained-work")
+                self.assertIsNone(terminal["result"])
+                self.assertIsNone(f.run.report)
+                self.assertIsNone(f.run._candidate)
+
+    def test_original_post_borrow_byte_failure_withholds_an_otherwise_matching_signature(self):
+        f = self.inspection()
+        f.artifact.verify_bytes.side_effect = [None, AndroidFileError("artifact-changed")]
+        with self.assertRaises(AndroidFileError):
+            f.run.run()
+        self.assertEqual(f.operation._returned["keytool"], 0)
+        self.assertIsNone(f.run.report)
+        self.assertIsNone(f.run._candidate)
+        self.assertFalse(f.artifact._native)
+        f.settle_outer()
+        self.assertEqual((f.run.terminal()["outcome"], f.run.terminal()["reason"]), ("failed", "artifact-changed"))
+
+    def test_fingerprint_comparison_refuses_before_version_read_tools_or_build(self):
+        from mobile_release._desktop_android_build_selection import AndroidSelectionRefused
+        f = _InertRun(self, signature=True)
+        f.operation.inputs = None
+        f.request.context["artifactValidation"]["uploadCertificateSha256"] = "cd" * 32
+        read = self.patched(f.files, "read_input", return_value=f.bound.saved.configuration.raw)
+        with self.assertRaises(AndroidSelectionRefused) as error:
+            AndroidBuildOperation.bind_inputs(f.operation)
+        self.assertEqual(error.exception.reason, "saved-config-changed")
+        read.assert_called_once_with("release/mobile-release.json", limit=wire.MAX_CONFIG_BYTES, optional=True)
+        f.operation.prepare.assert_not_called()
+        f.build_call.assert_not_called()
+
+
 class AndroidBuildServiceTests(_InertCase):
     def test_service_uses_bound_originals_not_diagnostic_paths_and_closes_before_terminal(self):
         f = _InertRun(self)
@@ -638,6 +895,7 @@ class AndroidBuildServiceTests(_InertCase):
         self.assertLess(f.events.index("operation-close"), f.events.index("project-exit"))
         self.assertLess(f.events.index("project-exit"), f.events.index("invocation-exit"))
         f.operation.close.assert_called_once_with()
+        self.assertEqual(f.tools.check.call_count, 2)  # Post-inspection AND post-disposal, part of the14-round budget.
         self.assertEqual(f.artifact.verify_bytes.call_count, 2)
         self.assertEqual(f.run.terminal()["outcome"], "unknown")  # Input and handlers are not retired DATA yet.
         f.settle_outer()
@@ -655,6 +913,22 @@ class AndroidBuildServiceTests(_InertCase):
         with self.assertRaises(wire.ProtocolError):
             f.run.run()
         self.assertEqual(f.build_call.call_count, 1)
+        # Actual preparation contributes one direct check and invokes the
+        # separately exercised acquisition(1)/project-selection(2) exactly once.
+        prepared = _InertRun(self)
+        prepared.operation.prepared, prepared.operation.tools = False, None
+        inputs = object()
+        self.patched(prepared.operation, "_project_tool_inputs", return_value=inputs)
+        self.patched(prepared.files, "prepare_namespace")
+        self.patched(prepared.tools, "acquire")
+        self.patched(prepared.tools, "check_project_inputs")
+        with patch("mobile_release.android_build_tools.AndroidValidationTools", return_value=prepared.tools) as constructor:
+            AndroidBuildOperation.prepare(prepared.operation)
+        constructor.assert_called_once_with(prepared.operation, prepared.request.native["toolchain"])
+        prepared.tools.acquire.assert_called_once_with()
+        prepared.tools.check_project_inputs.assert_called_once_with(inputs)
+        prepared.tools.check.assert_called_once_with()
+        self.assertTrue(prepared.operation.prepared)
 
     def test_invalid_aab_can_complete_negative_inspection_but_never_claim_native_check(self):
         f = _InertRun(self)

@@ -1,4 +1,5 @@
 """Inert lifecycle policy tests; never start a service, child or package tool."""
+from contextlib import ExitStack
 from copy import deepcopy
 from itertools import permutations
 import ast
@@ -22,6 +23,13 @@ spec = importlib.util.spec_from_file_location(
     "publication_lifecycle_data", SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py")
 L = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(L)
+
+# Invented DATA for parser/mocked-filesystem tests ONLY; never native material.
+ANDROID_MATERIAL_DATA = {"instance": "inert-android", "manifestSha256": "1" * 64,
+    "osContractSha256": "2" * 64, "distributionSha256": "3" * 64}
+ANDROID_PUBLICATION_DATA = {"documents": {key: {"size": 1, "sha256": digit * 64}
+    for key, digit in (("manifest", "1"), ("osContract", "2"), ("sources", "4"))},
+    "totals": {"toolFiles": 5, "toolDirectories": 6, "toolBytes": 5, "osFiles": 4, "osAliases": 1, "osBytes": 4}}
 
 NEEDRESTART_CONFIG_DATA = (
     b"# needrestart - Restart daemons after library updates.\n#\n"
@@ -276,6 +284,8 @@ class GuardedXattrDiagnostics(unittest.TestCase):
             self.assertEqual(query.call_count, 1)
 
 
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
 class LifecycleData(unittest.TestCase):
     def test_compact_shell_policy_is_exact_lossless_and_independent_of_wire_inputs(self):
         value, _, _ = shell_loader_data(compact=False)
@@ -445,6 +455,42 @@ class LifecycleData(unittest.TestCase):
                             L.shell_result(*changed, case, 0, expected)
                 with self.assertRaises(ValueError):
                     L.shell_result(stdout, stderr, case, True, expected)
+
+        stdout, stderr = settled_failure_capture()
+        labels = L.SHELL_SETTLED_FAILURE_LABELS
+        observed = L.shell_result(stdout, stderr, "settled-failure", 1, expected, failure_labels=labels)
+        self.assertEqual(observed, {"case": "settled-failure", "exitCode": 1, "bootstrapReturned": True,
+            "domAndGtkObserved": True, "maps": [], "qualified": False, "expectedFailureObserved": True,
+            "failureHandoff": "original-quit-relay-loop-returned"})
+        for code in (0, True, 2, -1):
+            with self.subTest(code=code), self.assertRaises(ValueError):
+                L.shell_result(stdout, stderr, "settled-failure", code, expected, failure_labels=labels)
+        for wrong in (None, b"", labels[:-1], labels.replace(b"=dom", b"=tick"),
+                      labels.replace(b"=SettledFailure", b"=ReadCancelled")):
+            with self.subTest(labels=wrong), self.assertRaises(ValueError):
+                L.shell_result(stdout, stderr, "settled-failure", 1, expected, failure_labels=wrong)
+        for wrong_case in ("normal", "positive", "offline-negative"):
+            with self.subTest(case=wrong_case), self.assertRaises(ValueError):
+                L.shell_result(stdout, stderr, wrong_case, 1, expected, failure_labels=labels)
+        for marker in (b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n",
+                       b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n"):
+            variants = ((stdout.replace(marker, b""), stderr), (stdout + marker, stderr),
+                        (stdout.replace(marker, b"prefixed " + marker), stderr),
+                        (stdout.replace(marker, marker.replace(b"\n", b"\r\n")), stderr),
+                        (stdout.replace(marker, b"") + marker[:-1], stderr),
+                        (stdout.replace(marker, b""), marker))
+            for changed in variants:
+                with self.subTest(marker=marker, changed=changed), self.assertRaises(ValueError):
+                    L.shell_result(*changed, "settled-failure", 1, expected, failure_labels=labels)
+        for changed in ((stdout.replace(b"=available", b"=unavailable"), stderr),
+                        (stdout.replace(b"=advanced", b"=pending"), stderr),
+                        (stdout + b"MRK_INSTALLED_SHELL_OBSERVATION=settled-failure-verified\n", stderr),
+                        (stdout + contracts, stderr), (stdout, b"MRK_EXTRA=contradiction\n"),
+                        (stdout + b"MRK_EXTRA=truncated", stderr)):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                L.shell_result(*changed, "settled-failure", 1, expected, failure_labels=labels)
+        with self.assertRaises(ValueError):
+            L.shell_result(*positive_capture(), "positive", 0, expected, failure_labels=labels)
 
     def test_normal_controller_joins_the_original_even_when_start_or_input_fails(self):
         value, expected = installed_handoff(), map_data()
@@ -714,6 +760,18 @@ class LifecycleData(unittest.TestCase):
             self.assertTrue(all(count == 0 for count in row["markers"].values()))
             self.assertTrue(all(count == 0 for count in row["stages"].values()))
             self.assertEqual((row["unexpectedMrk"], row["unexpectedBootstrap"]), (0, 0))
+        # A finite original failure in an omitted middle is counted from the
+        # SAME validated capture, not recovered by opening another log.
+        failed_capability = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-query_timeout\n"
+        failed_cause = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-namespace\n"
+        middle = subprocess.CompletedProcess(argv, 0, b"h" * 1024 + b"\n" + failed_capability + failed_cause + b"t" * 2048, b"")
+        counted_middle = observe(dict(holder, result=middle), display_log=b"")
+        self.assertEqual(counted_middle["bootstrap"]["stdout"]["stages"]["capabilities-query-wait-query_timeout"], 1)
+        self.assertEqual(counted_middle["bootstrap"]["stdout"]["stages"]["capabilities-cause-inspection-namespace"], 1)
+        summary = counted_middle["capture"]["stdout"]
+        self.assertTrue(summary["truncated"])
+        self.assertNotIn("capabilities-query-wait-query_timeout", summary["head"] + summary["tail"])
+        self.assertNotIn("capabilities-cause-inspection-namespace", summary["head"] + summary["tail"])
         self.assertEqual(observed["resources"], resource_observation())
         self.assertLess(len(L.canonical(observed["resources"])), 1024)
         unavailable = observe(resources=resource_observation(unavailable=True))
@@ -748,6 +806,18 @@ class LifecycleData(unittest.TestCase):
         for name in ("stdout", "stderr"):
             self.assertEqual(observed["controller"]["lastCompleted"]["capture"][name]["sha256"],
                              hashlib.sha256(getattr(query, name)).hexdigest())
+        # Expanded cause counts survive the SAME <=32768-byte fallback;
+        # neither another capture nor a larger report limit is permitted.
+        tagged = subprocess.CompletedProcess(argv, 127, original.stdout + b"\n" + failed_cause,
+                                             original.stderr + b"\n" + failed_cause)
+        trimmed = observe(dict(holder, result=tagged), controller=controller)
+        for name in ("stdout", "stderr"):
+            self.assertEqual(trimmed["bootstrap"][name]["stages"]["capabilities-cause-inspection-namespace"], 1)
+            self.assertNotIn("head", trimmed["capture"][name])
+            self.assertNotIn("tail", trimmed["capture"][name])
+            self.assertEqual(trimmed["capture"][name]["sha256"], hashlib.sha256(getattr(tagged, name)).hexdigest())
+        self.assertFalse(trimmed["qualified"])
+        self.assertFalse(trimmed["cleanupEstablished"])
         # A returned object is not a valid capture, and mistyped scalar facts
         # must not be presented as known observations.
         altered = deepcopy(controller)
@@ -845,6 +915,59 @@ class LifecycleData(unittest.TestCase):
                   "page-finish-untrusted", "hook-installed", "app-info-enter", "catalog-enter", "content-terminated",
                   "content-reason-crashed", "content-reason-exceeded-memory-limit",
                   "content-reason-terminated-by-api", "content-reason-unknown")
+        capability_codes = ("runtime_unavailable", "cleanup_unknown", "invalid_request", "shutting_down", "busy", "unavailable",
+                            "offline_preflight_busy", "android_build_busy", "environment_diagnostics_busy", "query_timeout",
+                            "protocol_error", "engine_failed", "io_error", "output_limit", "other")
+        capability_stages = tuple("capabilities-" + origin + "-" + code
+                                  for origin in ("admission", "query-wait") for code in capability_codes)
+        native_failures = (
+            'unsupported-platform',
+            'missing-compile-anchor',
+            'stopped',
+            'deadline',
+            'native-unavailable',
+            'native-denied',
+            'namespace',
+            'mount',
+            'ownership',
+            'extended-attributes',
+            'identity-changed',
+            'manifest',
+            'inventory',
+            'bounds',
+            'already-used',
+            'interrupted',
+            'close-uncertain',
+            'ledger-invariant',
+            'transfer-unavailable',
+            'destination-occupied',
+        )
+        local_causes = (
+            'selection-profile-closed',
+            'selection-compile-binding',
+            'selection-method-outside-profile',
+            'inspection-unavailable',
+            'acquisition-entry-not-released',
+            'acquisition-custody-missing',
+            'acquisition-lock',
+            'final-claim-owner-gate',
+            'returned-spawn-process-fd-limit',
+            'returned-spawn-system-fd-limit',
+            'returned-spawn-memory',
+            'returned-spawn-resource-unavailable',
+            'returned-spawn-permission-denied',
+            'returned-spawn-not-found',
+            'returned-spawn-exec-format',
+            'returned-spawn-other',
+            'engine-response',
+            'unavailable',
+        )
+        cause_stages = tuple("capabilities-cause-" + origin + "-" + reason
+                             for origin in ("inspection", "capability", "preparation", "final-claim") for reason in native_failures)
+        cause_stages += tuple("capabilities-cause-" + label for label in local_causes)
+        self.assertEqual(len(cause_stages), 98)
+        self.assertEqual(len(set(cause_stages)), 98)
+        stages += capability_stages + cause_stages
         prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
         stdout = (b"ordinary wrapper text\n" + b"".join(markers) + markers[0]
                   + b"".join(prefix + stage.encode("ascii") + b"\n" for stage in stages)
@@ -861,16 +984,37 @@ class LifecycleData(unittest.TestCase):
             "markers": {"capabilitiesAvailable": 0, "capabilitiesUnavailable": 1, "catalogueReturned": 0, "catalogueRefused": 0},
             "unexpectedMrk": 1, "stages": {stage: int(stage == "catalog-enter") for stage in stages}, "unexpectedBootstrap": 0})
         self.assertNotIn(b"private", L.canonical(counted))
-        for reason in stages[-4:]:
+        for reason in ("content-reason-crashed", "content-reason-exceeded-memory-limit",
+                       "content-reason-terminated-by-api", "content-reason-unknown", *capability_stages, *cause_stages):
             line = prefix + reason.encode("ascii")
             for malformed in (line, line + b"\r\n", line + b" extra\n"):
                 row = L._shell_normal_markers(malformed, b"")["stdout"]
                 self.assertEqual(row["stages"][reason], 0)
                 self.assertEqual(row["unexpectedBootstrap"], 1)
-        # Counts are diagnostic-only; a completed or empty stage sequence
-        # cannot manufacture normal bootstrap success.
-        with self.assertRaises(ValueError):
-            L.shell_result(prefix + b"setup-enter\n", b"", "normal", 0, map_data())
+        for line in (prefix + b"capabilities-admission-PRIVATE_CODE\n",
+                     prefix + b"capabilities-PRIVATE_ORIGIN-query_timeout\n",
+                     prefix + b"capabilities-query-wait-protocol_error\x1b[31mPRIVATE\n",
+                     prefix + b"capabilities-cause-inspection-PRIVATE_REASON\n",
+                     prefix + b"capabilities-cause-PRIVATE_ORIGIN-namespace\n",
+                     prefix + b"capabilities-cause-returned-spawn-13\n",
+                     prefix + b"capabilities-cause-engine-response\x1b[31mPRIVATE\n"):
+            row = L._shell_normal_markers(line, b"")["stdout"]
+            self.assertTrue(all(row["stages"][stage] == 0 for stage in capability_stages + cause_stages))
+            self.assertEqual(row["unexpectedBootstrap"], 1)
+            self.assertNotIn(b"PRIVATE", L.canonical(row))
+        duplicate = prefix + b"capabilities-admission-busy\n"
+        row = L._shell_normal_markers(duplicate * 2, b"")["stdout"]
+        self.assertEqual(row["stages"]["capabilities-admission-busy"], 2)
+        self.assertEqual(row["unexpectedBootstrap"], 0)
+        cause = prefix + b"capabilities-cause-inspection-namespace\n"
+        row = L._shell_normal_markers(cause * 2, b"")["stdout"]
+        self.assertEqual(row["stages"]["capabilities-cause-inspection-namespace"], 2)
+        self.assertEqual(row["unexpectedBootstrap"], 0)
+        # Counts are diagnostic-only; neither all causes nor a stage can
+        # manufacture normal capabilities/catalogue or observer success.
+        for raw in (prefix + b"setup-enter\n", b"".join(prefix + stage.encode("ascii") + b"\n" for stage in cause_stages)):
+            with self.assertRaises(ValueError):
+                L.shell_result(raw, b"", "normal", 0, map_data())
 
 
     def test_normal_resource_diagnostic_is_original_bounded_and_failure_only(self):
@@ -1007,7 +1151,7 @@ class LifecycleData(unittest.TestCase):
             with self.assertRaises(FileExistsError): L._shell_log_prepare(value, "normal")
             self.assertEqual(opening.call_count, 1); closing.assert_not_called(); removing.assert_not_called()
 
-    def test_shell_capacity_adds_fixed_private_logs_without_changing_other_profiles(self):
+    def test_shell_capacity_adds_fixed_private_logs_and_label_leaves_without_changing_other_profiles(self):
         value = installed_handoff()
         value["compilerRecords"]["capacity"] = {"runtimeBytes": 1024,
             "installedBytes": {key: 2048 for key in L.VERSIONS},
@@ -1021,17 +1165,38 @@ class LifecycleData(unittest.TestCase):
             baseline = (sum(row["size"] for row in candidate["packages"].values()) + candidate["library"]["size"]
                         + (12 if profile == "installed" else 68 if profile == "shell" else 0)
                         + 2 * 1024 + 1 + 2 * 2048 + (32 << 20) + (1 << 20))
-            required = baseline + ((256 << 20) if profile == "shell" else 0)
+            # Twenty-five logs plus twenty-four failure leaves retain the64MiB
+            # ceiling. Android adds100 controls/48 GUI nodes; iOS adds8/12.
+            # Only the shell roster cap is190;
+            # the other profiles and32MiB aggregate evidence cap stay fixed.
+            session_bytes = sum(len(data) for case in L.SHELL_SESSION_CASES
+                for _, mode, _, data in L._shell_session_roster(value, case) if not stat.S_ISDIR(mode))
+            tools_bytes = sum(len(data) for case in L.SHELL_TOOLS_OFFLINE_CASES
+                for _, mode, _, data in L._shell_tools_offline_roster(value, case, True) if stat.S_ISREG(mode))
+            android_bytes = sum(len(data) for case in L.SHELL_ANDROID_CASES
+                for _, mode, _, data in L._shell_android_roster(value, case, True) if stat.S_ISREG(mode))
+            version_bytes = len(L.SHELL_PROJECT_CONFIG) + len(L.SHELL_PROJECT_IGNORE) + len(b"keep unrelated version fixture data\n") + 34
+            required = baseline + ((3136 << 20) + 7235 + session_bytes + tools_bytes + android_bytes + 1186 + 11 + version_bytes + 579 if profile == "shell" else 0)
+            inodes = 2 * 16 + 2 * 8192 + (190 + 603 if profile == "shell" else 128)
+            if profile == "shell":
+                # Five one-byte synthetic files, six directories, one-byte
+                # manifest and at most three new publication directories.
+                required += 5 + 1 + 15
+                inodes += 15
             for available in (required - 1, required):
                 with self.subTest(profile=profile, available=available), \
                      patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
                      patch.object(L.os, "statvfs", return_value=SimpleNamespace(
-                         f_bavail=available, f_frsize=1, f_favail=2 * 16 + 2 * 8192 + 128)):
+                         f_bavail=available, f_frsize=1, f_favail=inodes)):
                     if available < required:
                         with self.assertRaisesRegex(ValueError, "Insufficient original host capacity"):
                             L._capacity(candidate)
                     else:
                         self.assertIsNone(L._capacity(candidate))
+            with patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
+                 patch.object(L.os, "statvfs", return_value=SimpleNamespace(f_bavail=required, f_frsize=1, f_favail=inodes - 1)):
+                with self.assertRaisesRegex(ValueError, "Insufficient original host capacity"):
+                    L._capacity(candidate)
 
     def test_shell_display_capture_requires_bound_original_and_complete_combined_bytes(self):
         value = installed_handoff(); value.pop("installed"); value["shell"] = {}
@@ -1068,26 +1233,81 @@ class LifecycleData(unittest.TestCase):
     def test_shell_command_log_finality_and_primary_failure_are_preserved(self):
         value = installed_handoff(); value.pop("installed"); value["shell"] = {}
         argv = L.shell_argv(value, "positive")
-        for case in ("complete", "owner-error", "bad-result", "nonzero", "log-error", "nonzero-log-error", "diagnostic-error", "wrong-route"):
-            primary, events = OSError("inert original log failure"), []
-            result = subprocess.CompletedProcess(argv, 2 if case in ("nonzero", "nonzero-log-error", "diagnostic-error") else 0, b"", b"")
+        frame = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                 b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"
+                 b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+                 b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=6;eval=13;"
+                 b"reject=reply-assessment-unavailable;wait=native-reply-pending;"
+                 b"o=supervisor-disabled;d=none;a=bound;q=cleanup.none.pp;w=none-recorded;"
+                 b"ao=bridge;ac=runtime-unavailable;ax=prepare;af=missing-compile-anchor;u=native-observe;g=na\n")
+        parsed = L._shell_label_pair(frame)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["session"]["firstOrigin"]["unknownBoundary"], "native-observe")
+        self.assertIsNone(parsed["session"]["gtkCallbacks"])
+        original_finish, original_capture = L._shell_call_finished, L._command_capture
+        nonzero = {"nonzero", "nonzero-log-error", "diagnostic-error", "missing-label", "malformed-label", "label-read-error",
+                   "clock-error", "finish-dispatch-error", "reporter-dispatch-error", "format-error", "nonzero-close-error", "nonzero-log-close-error"}
+        log_failure = {"log-error", "nonzero-log-error", "nonzero-log-close-error"}
+        for case in ("complete", "owner-error", "bad-result", "nonzero", "log-error", "nonzero-log-error", "diagnostic-error", "wrong-route",
+                     "late-return", "post-log-expiry", "missing-label", "malformed-label", "label-read-error", "clock-error",
+                     "finish-dispatch-error", "reporter-dispatch-error", "format-error", "nonzero-close-error", "nonzero-log-close-error"):
+            primary, events, clock, calls = OSError("inert original log failure"), [], [100.0], {}
+            result = subprocess.CompletedProcess(argv, 2 if case in nonzero else 0, b"", b"")
             if case == "bad-result": result.args = ["/other/original"]
             def run(*args, **options):
                 events.append("owner")
                 if case == "owner-error": raise primary
+                if case == "late-return": clock[0] = 1000.0
+                events.append("owner-return")
                 return result
-            def capture(*args):
-                self.assertEqual(events, ["owner", "stdout", "stderr"])
+            def diagnostic_time():
+                if "record" in calls:
+                    self.assertIs(calls["record"]["ownerReturned"], case != "owner-error")
+                    events.append("finish-clock")
+                    if case == "clock-error": raise OSError("inert finish clock failure")
+                return clock[0]
+            def finish(record, returned):
+                events.append("finish")
+                calls["record"] = record
+                if case == "finish-dispatch-error": raise OSError("inert finish dispatch failure")
+                original_finish(record, returned)
+            def capture_result(*args):
+                self.assertEqual(events[:3], ["owner", "owner-return", "finish"])
+                events.append("capture")
+                return original_capture(*args)
+            def capture_log(*args):
+                self.assertEqual(events[-3:], ["capture", "stdout", "stderr"])
                 events.append("log")
-                if case in ("log-error", "nonzero-log-error"): raise primary
+                if case in log_failure: raise primary
+                if case == "post-log-expiry": clock[0] = 1000.0
                 return b"inert display output\n"
-            with self.subTest(case=case), patch.multiple(L, _ROOT=L.root_path(value), _END=value["deadline"], _FAILED=False,
-                    _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=run)), patch.object(L, "_root_ids"), \
-                 patch.object(L.time, "monotonic", return_value=100.0), \
+            def read_labels(original):
+                self.assertEqual(original, (41, "original-label-binding"))
+                self.assertEqual(events[-1], "log")
+                events.append("labels")
+                if case == "label-read-error": raise InterruptedError("inert original sidecar read failure")
+                return None if case == "missing-label" else L._shell_label_pair(frame[:-1]) if case == "malformed-label" else parsed
+            def close(original):
+                self.assertEqual(original, 41)
+                events.append("close")
+                if case in ("nonzero-close-error", "nonzero-log-close-error"): raise OSError("inert original close failure")
+            with self.subTest(case=case), patch.multiple(L, _ROOT=L.root_path(value), _END=1000.0, _FAILED=False,
+                    _PHASE="inert", _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=run)), patch.object(L, "_root_ids"), \
+                 patch.object(L.time, "monotonic", side_effect=lambda: clock[0]), \
+                 patch.object(L, "_shell_diagnostic_time", side_effect=diagnostic_time), \
+                 patch.object(L, "_shell_call_finished", side_effect=finish) as finishing, \
+                 patch.object(L, "_command_capture", side_effect=capture_result), \
                  patch.object(L, "_retain", side_effect=lambda name, raw: events.append(name.rsplit(".", 1)[1])), \
-                 patch.object(L, "_shell_log_capture", side_effect=capture) as log, \
+                 patch.object(L, "_shell_log_capture", side_effect=capture_log) as log, \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original-label-binding")) as labels, \
+                 patch.object(L, "_shell_labels_read", side_effect=read_labels) as label_read, \
+                 patch.object(L, "_shell_command_failure", wraps=L._shell_command_failure) as reporting, \
+                 patch.object(L, "canonical", wraps=L.canonical) as formatting, \
+                 patch.object(L.os, "close", side_effect=close) as closing, \
                  patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
                 if case == "diagnostic-error": stream.write = Mock(side_effect=OSError("inert diagnostic error"))
+                if case == "reporter-dispatch-error": reporting.side_effect = OSError("inert reporter dispatch failure")
+                if case == "format-error": formatting.side_effect = OSError("inert diagnostic format failure")
                 arguments = dict(maximum=60, shell_log=(value, "normal" if case == "wrong-route" else "positive", "original-log-binding"))
                 if case == "complete":
                     self.assertIs(L.command("shell-positive", argv, **arguments), result)
@@ -1095,18 +1315,154 @@ class LifecycleData(unittest.TestCase):
                 else:
                     with self.assertRaises((ValueError, OSError)) as raised: L.command("shell-positive", argv, **arguments)
                     if case in ("owner-error", "log-error"): self.assertIs(raised.exception, primary)
-                    if case == "nonzero-log-error":
+                    if case in nonzero or case == "late-return":
                         self.assertEqual(str(raised.exception), "Original root command failed or completed late")
-                        self.assertIs(raised.exception.__cause__, primary)
+                        self.assertIs(raised.exception.__cause__, primary if case in log_failure else None)
+                    if case == "post-log-expiry": self.assertEqual(str(raised.exception), "Original shell log captured after endpoint")
                     if case != "wrong-route": self.assertTrue(L._FAILED)
+                reports = case in nonzero or case in ("log-error", "late-return")
+                reads = reports and case != "reporter-dispatch-error"
                 self.assertEqual(log.call_count, int(case not in ("owner-error", "bad-result", "wrong-route")))
-                if case == "nonzero":
+                self.assertEqual(labels.call_count, int(case != "wrong-route"))
+                self.assertEqual(finishing.call_count, int(case != "wrong-route"))
+                if case != "wrong-route": self.assertIs(finishing.call_args.args[1], case != "owner-error")
+                self.assertEqual(reporting.call_count, int(reports))
+                if reports:
+                    self.assertIs(reporting.call_args.args[1], result)
+                    self.assertEqual(reporting.call_args.args[5], (41, "original-label-binding"))
+                    self.assertIs(reporting.call_args.args[6], calls["record"])
+                self.assertEqual(label_read.call_count, int(reads))
+                self.assertEqual(closing.call_args_list, [] if case == "wrong-route" else [unittest.mock.call(41)])
+                expected = [] if case == "wrong-route" else ["owner"] + ([] if case == "owner-error" else ["owner-return"]) + ["finish"]
+                if case not in ("wrong-route", "finish-dispatch-error"): expected.append("finish-clock")
+                if case not in ("wrong-route", "owner-error"):
+                    expected.append("capture")
+                    if case != "bad-result": expected += ["stdout", "stderr", "log"]
+                if reads: expected.append("labels")
+                if case != "wrong-route": expected.append("close")
+                self.assertEqual(events, expected)
+                if reports and case not in ("diagnostic-error", "reporter-dispatch-error", "format-error"):
                     raw = stream.getvalue().encode("ascii")
                     self.assertLessEqual(len(raw), 32768)
                     diagnostic = json.loads(raw.split(b"=", 1)[1])
-                    self.assertEqual(diagnostic["capture"]["exitCode"], 2)
-                    self.assertEqual(diagnostic["capture"]["display"]["head"], "inert display output\n")
-                    self.assertFalse(diagnostic["qualified"])
+                    self.assertEqual(diagnostic["capture"]["exitCode"], result.returncode)
+                    if case not in log_failure: self.assertEqual(diagnostic["capture"]["display"]["head"], "inert display output\n")
+                    self.assertEqual(diagnostic["logErrorType"], "OSError" if case in log_failure else None)
+                    missing = case in ("missing-label", "malformed-label", "label-read-error")
+                    self.assertEqual(diagnostic["labels"], None if missing else parsed)
+                    self.assertEqual(diagnostic["labelsReason"], "unavailable" if missing else None)
+                    self.assertIs(diagnostic["ownerCall"]["ownerReturned"], case != "finish-dispatch-error")
+                    if case in ("clock-error", "finish-dispatch-error"): self.assertIsNone(diagnostic["ownerCall"]["endMonotonic"])
+                    self.assertFalse(diagnostic["qualified"]); self.assertFalse(diagnostic["cleanupEstablished"])
+
+        # The one expected-negative route uses these same command/FD owners.
+        # All capture, file, clock and owner operations below are inert doubles.
+        argv = L.shell_argv(value, "settled-failure")
+        original_classifier = L._shell_settled_failure_result
+        route_errors = {"wrong-route", "missing-route", "exit-override"}
+        for case in ("complete", "owner-error", "owner-interrupt", "bad-result", "wrong-route", "missing-route", "exit-override",
+                     "zero", "other-code", "capture-error", "log-error", "label-read-error", "label-grammar-error",
+                     "marker-error", "retention-error", "label-read-interrupt", "retention-interrupt", "close-error", "log-close-error", "expiry-before-label",
+                     "expiry-before-close", "expiry-after-close", "clock-after-close"):
+            events, now, retained = [], [100.0], {}
+            primary = KeyboardInterrupt("inert original interruption") if case.endswith("-interrupt") else OSError("inert original failure")
+            close_error = OSError("inert checked-close failure")
+            stdout, stderr = settled_failure_capture()
+            if case == "marker-error": stdout += b"MRK_INSTALLED_SHELL_OBSERVATION=settled-failure-verified\n"
+            result = subprocess.CompletedProcess(argv, 0 if case == "zero" else 2 if case == "other-code" else 1, stdout, stderr)
+            if case == "bad-result": result.args = ["/other/original"]
+            def run(*args, **options):
+                events.append("owner")
+                self.assertTrue(L._FAILED)
+                if case in ("owner-error", "owner-interrupt"): raise primary
+                return result
+            def clock():
+                if events and events[-1] == "close":
+                    events.append("post-close-clock")
+                    if case == "clock-after-close": raise primary
+                return now[0]
+            def capture(*args):
+                events.append("capture")
+                return original_capture(*args)
+            def retain(name, raw):
+                self.assertTrue(L._FAILED)
+                events.append("label-export" if name.endswith(".labels") else name.rsplit(".", 1)[1])
+                if case == "capture-error" or case in ("retention-error", "retention-interrupt") and name.endswith(".labels"): raise primary
+                retained[name] = raw
+                if case == "expiry-before-close" and name.endswith(".labels"): now[0] = 200.0
+            def log(*args):
+                self.assertEqual(events[-3:], ["capture", "stdout", "stderr"])
+                events.append("log")
+                if case in ("log-error", "log-close-error"): raise primary
+                if case == "expiry-before-label": now[0] = 200.0
+                return b"inert display output\n"
+            def labels(original, *, with_raw=False):
+                self.assertEqual(original, (41, "original-label-binding"))
+                events.append("labels")
+                if case in ("label-read-error", "label-read-interrupt"): raise primary
+                raw = L.SHELL_SETTLED_FAILURE_LABELS
+                if case == "label-grammar-error": raw = raw[:-1]
+                parsed = L._shell_label_pair(raw)
+                return (raw, parsed) if with_raw else parsed
+            def classify(*args):
+                self.assertEqual(events[-1], "labels")
+                events.append("classify")
+                return original_classifier(*args)
+            def close(fd):
+                self.assertEqual(fd, 41)
+                self.assertTrue(L._FAILED)
+                events.append("close")
+                if case in ("close-error", "log-close-error"): raise close_error
+                if case == "expiry-after-close": now[0] = 200.0
+            with self.subTest(negative=case), patch.multiple(L, _ROOT=L.root_path(value), _END=200.0, _FAILED=False,
+                    _PHASE="inert", _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=run)), \
+                 patch.object(L, "_root_ids"), patch.object(L.time, "monotonic", side_effect=clock), \
+                 patch.object(L, "_command_capture", side_effect=capture), patch.object(L, "_retain", side_effect=retain), \
+                 patch.object(L, "_shell_log_capture", side_effect=log) as capturing_log, \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original-label-binding")) as prepare, \
+                 patch.object(L, "_shell_labels_read", side_effect=labels) as reading, \
+                 patch.object(L, "_shell_settled_failure_result", side_effect=classify) as classifier, \
+                 patch.object(L, "_shell_command_failure", wraps=L._shell_command_failure) as reporting, \
+                 patch.object(L, "_shell_owner_failure") as owner_diagnostic, \
+                 patch.object(L.os, "close", side_effect=close) as closing, \
+                 patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                options = dict(maximum=60, env={}, shell_log=(value,
+                    "positive" if case == "wrong-route" else "settled-failure", "original-log-binding"))
+                if case == "missing-route": options.pop("shell_log")
+                if case == "exit-override": options["codes"] = (1,)
+                if case == "complete":
+                    self.assertIs(L.command("shell-settled-failure", argv, **options), result)
+                    self.assertFalse(L._FAILED)
+                    self.assertEqual(events, ["owner", "capture", "stdout", "stderr", "log", "labels", "classify",
+                                              "label-export", "close", "post-close-clock"])
+                    self.assertEqual(retained["shell-settled-failure-failure.labels"], L.SHELL_SETTLED_FAILURE_LABELS)
+                    reporting.assert_not_called()
+                else:
+                    with self.assertRaises((ValueError, OSError, KeyboardInterrupt)) as raised:
+                        L.command("shell-settled-failure", argv, **options)
+                    self.assertIs(L._FAILED, case not in route_errors)
+                    if case in ("owner-error", "owner-interrupt"): self.assertIs(raised.exception, primary)
+                    elif case not in route_errors | {"bad-result"}:
+                        self.assertEqual(str(raised.exception), "Original root command failed or completed late")
+                    if case in ("capture-error", "log-error", "log-close-error", "label-read-error", "retention-error", "clock-after-close",
+                                "label-read-interrupt", "retention-interrupt"):
+                        self.assertIs(raised.exception.__cause__, primary)
+                    if case == "close-error": self.assertIs(raised.exception.__cause__, close_error)
+                self.assertEqual(closing.call_args_list, [] if case in route_errors else [unittest.mock.call(41)])
+                self.assertEqual(prepare.call_count, int(case not in route_errors))
+                self.assertEqual(owner_diagnostic.call_count, int(case in ("owner-error", "owner-interrupt")))
+                self.assertEqual(capturing_log.call_count, int(case not in route_errors | {"owner-error", "owner-interrupt", "bad-result", "capture-error"}))
+                self.assertLessEqual(reading.call_count, 1)  # Even failed reads/classification/export never cause a retry.
+                attempted = case not in route_errors | {"owner-error", "owner-interrupt", "bad-result", "capture-error", "zero", "other-code",
+                                                       "log-error", "log-close-error", "expiry-before-label"}
+                if attempted: reading.assert_called_once_with((41, "original-label-binding"), with_raw=True)
+                self.assertEqual(classifier.call_count, int(attempted and case not in ("label-read-error", "label-read-interrupt")))
+                if L._COMMANDS:
+                    self.assertEqual(L._COMMANDS[-1]["phase"], "shell-settled-failure")
+                    self.assertEqual(L._COMMANDS[-1]["exitCode"], result.returncode)
+                if reporting.called:
+                    diagnostic = json.loads(stream.getvalue().split("=", 1)[1])
+                    self.assertFalse(diagnostic["qualified"]); self.assertFalse(diagnostic["cleanupEstablished"])
 
     def test_version_store_prefixes_bind_exact_application_children(self):
         app = Path("/var/lib/mobile-release-kit")
@@ -1807,6 +2163,10 @@ class LifecycleData(unittest.TestCase):
                 self.assertEqual({key: properties[key] for key in defaults if key != "TasksMax"},
                                  {key: item for key, item in defaults.items() if key != "TasksMax"})
                 self.assertEqual(properties["RuntimeMaxSec"], "1160s")
+                if profile == "shell":
+                    self.assertEqual(properties["LimitNOFILE"], "65536")
+                else:
+                    self.assertNotIn("LimitNOFILE", properties)
 
                 # The collector must authenticate this original profile's argv
                 # before any public-root observation. The sentinel is not a
@@ -1829,12 +2189,26 @@ class LifecycleData(unittest.TestCase):
                             directory.assert_not_called()
                         read.assert_not_called()
 
-                observed = {key: defaults[key] for key in L.SHOW if key in defaults}
+                if profile == "shell":
+                    for wrong in (None, "65535", "65536:131072", "infinity"):
+                        args = [arg if not arg.startswith("--property=LimitNOFILE=")
+                                else "--property=LimitNOFILE=" + wrong for arg in argv
+                                if wrong is not None or not arg.startswith("--property=LimitNOFILE=")]
+                        client = subprocess.CompletedProcess(args, 0, b"", b"")
+                        with self.subTest(client_nofile=wrong), patch.object(L, "directory") as directory:
+                            with self.assertRaisesRegex(ValueError, "Original service client argv differs"):
+                                L.verify_service_result(handoff_path, handoff_sha, entry_sha, client, Path("/inert/public"))
+                            directory.assert_not_called()
+
+                show = L.SHOW + (("LimitNOFILE", "LimitNOFILESoft") if profile == "shell" else ())
+                observed = {key: defaults[key] for key in show if key in defaults}
                 observed.update(Id=unit, Type="exec", InvocationID="d" * 32, ControlGroup=group, Result="success",
                                 MemoryMax=str(6 << 30), TasksMax=tasks, RuntimeMaxUSec="1160s",
                                 RuntimeRandomizedExtraUSec="0", TimeoutStartUSec="10s", TimeoutStopUSec="10s",
                                 **{key: "no" for key in ("PrivateMounts", "PrivateTmp", "PrivateUsers",
                                                         "PrivateNetwork", "ProtectControlGroups")})
+                if profile == "shell":
+                    observed.update(LimitNOFILE="65536", LimitNOFILESoft="65536")
                 kernel = {"/proc/self/cgroup": "0::" + group + "\n",
                           **{str(Path("/sys/fs/cgroup" + group) / key): item for key, item in {
                               "cgroup.type": "domain\n", "memory.max": str(6 << 30) + "\n",
@@ -1842,7 +2216,10 @@ class LifecycleData(unittest.TestCase):
                               "cpu.max": "200000 100000\n", "memory.events": "max 0\noom 0\noom_kill 0\n",
                               "pids.events": "max 0\n"}.items()}}
                 for phase in ("start", "stop"):
-                    for fault in (None, "systemd-limit", "kernel-limit", "both-limits", "unlimited", "task-denial", "memory-denial"):
+                    faults = (None, "systemd-limit", "kernel-limit", "both-limits", "unlimited", "task-denial", "memory-denial")
+                    if profile == "shell":
+                        faults += ("nofile-soft", "nofile-hard", "nofile-kernel", "nofile-unlimited")
+                    for fault in faults:
                         props, counters = dict(observed), dict(kernel)
                         other = "64" if tasks == "256" else "256"
                         if fault in {"systemd-limit", "both-limits", "unlimited"}:
@@ -1853,19 +2230,29 @@ class LifecycleData(unittest.TestCase):
                             key = "pids.events" if fault == "task-denial" else "memory.events"
                             path = "/sys/fs/cgroup" + group + "/" + key
                             counters[path] = counters[path].replace("max 0", "max 1")
-                        stdout = "".join(key + "=" + props[key] + "\n" for key in L.SHOW).encode("ascii")
+                        if fault == "nofile-soft": props["LimitNOFILESoft"] = "65535"
+                        if fault == "nofile-hard": props["LimitNOFILE"] = "131072"
+                        if fault == "nofile-unlimited": props["LimitNOFILE"] = "infinity"
+                        nofile = (65535, 65536) if fault == "nofile-kernel" else (65536, 65536)
+                        stdout = "".join(key + "=" + props[key] + "\n" for key in show).encode("ascii")
                         result = subprocess.CompletedProcess(["/inert-show"], 0, stdout, b"")
                         with self.subTest(phase=phase, fault=fault), patch.object(L, "command", return_value=result) as command, \
-                                patch.object(L, "_kernel", side_effect=lambda path: counters[str(path)]):
+                                patch.object(L, "_kernel", side_effect=lambda path: counters[str(path)]), \
+                                patch.object(L.resource, "getrlimit", return_value=nofile) as limits:
                             if fault is None:
                                 actual = L._domain(value, phase)
                                 self.assertEqual(actual["unit"]["TasksMax"], tasks)
                                 self.assertEqual(actual["effective"]["pids.max"], tasks)
+                                if profile == "shell":
+                                    limits.assert_called_once_with(L.resource.RLIMIT_NOFILE)
+                                    self.assertEqual(actual["effective"]["nofile"], [65536, 65536])
+                                else:
+                                    limits.assert_not_called()
                             else:
-                                with self.assertRaisesRegex(ValueError, "Effective aggregate limits differ|Original aggregate resource denial"):
+                                with self.assertRaisesRegex(ValueError, "Effective aggregate limits differ|Original aggregate resource denial|Inherited shell descriptor limits differ"):
                                     L._domain(value, phase)
                             command.assert_called_once_with(phase + "-unit-show",
-                                ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(L.SHOW), unit], maximum=3)
+                                ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(show), unit], maximum=3)
         self.assertEqual(L.PROPERTIES, defaults)
 
     def test_namespace_keys_survive_reopen_but_original_checks_stay_exact(self):
@@ -2079,11 +2466,87 @@ class LifecycleData(unittest.TestCase):
                     L.verify_finality(first, last, 0)
 
 
+class GitHubPeerNamespaceWitnessContracts(unittest.TestCase):
+    @staticmethod
+    def observations():
+        start = {
+            "sourceSha": "a" * 40, "entrySha256": "b" * 64, "handoffSha256": "c" * 64,
+            "invocationId": "d" * 32, "deadline": 1300.0,
+            "namespaces": {"user": [4, 11], "pid": [4, 12], "mnt": [4, 13]},
+            "githubPeerNamespaces": {"user": [4, 11], "pid": [4, 12], "mnt": [4, 13], "net": [4, 14]},
+            "unit": {"Id": "mrk-ubuntu-native-10-2.service", "InvocationID": "d" * 32,
+                     "Result": "success", "ControlGroup": "/system.slice/mrk-ubuntu-native-10-2.service"},
+            "effective": {"KillMode": "control-group", "ExitType": "cgroup"},
+            "events": {"memory.events": {"max": 0, "oom": 0, "oom_kill": 0}, "pids.events": {"max": 0}},
+        }
+        stop = {**deepcopy(start), "completion": {
+            "SERVICE_RESULT": "success", "EXIT_CODE": "exited", "EXIT_STATUS": "0"}}
+        return start, stop
+
+    def test_route_requires_both_witnesses_and_preserves_ordinary_finality(self):
+        start, stop = self.observations()
+        L.verify_finality(start, stop, 0, github=True)
+        for remove_start, remove_stop in ((True, False), (False, True), (True, True)):
+            first, last = deepcopy(start), deepcopy(stop)
+            if remove_start:
+                first.pop("githubPeerNamespaces")
+            if remove_stop:
+                last.pop("githubPeerNamespaces")
+            with self.subTest(remove_start=remove_start, remove_stop=remove_stop), self.assertRaises(ValueError):
+                L.verify_finality(first, last, 0, github=True)
+        for first, last in ((start, stop), ({k: v for k, v in start.items() if k != "githubPeerNamespaces"}, stop)):
+            with self.assertRaises(ValueError):
+                L.verify_finality(first, last, 0)
+        start.pop("githubPeerNamespaces")
+        stop.pop("githubPeerNamespaces")
+        L.verify_finality(start, stop, 0)
+        for invalid_context in (None, 0, 1, "true"):
+            with self.assertRaises(ValueError):
+                L.verify_finality(start, stop, 0, github=invalid_context)
+
+    def test_witness_rejects_malformed_pairs_roles_and_changed_stop_domain(self):
+        start, stop = self.observations()
+        self.assertEqual(L._github_peer_namespace_witness(start), start["githubPeerNamespaces"])
+        for field in ("namespaces", "githubPeerNamespaces"):
+            for malformed in ([0, 11], [4, 0], [True, 11], [4, 11.0], [4, -1], [4, 2**64],
+                              [4], [4, 11, 12], (4, 11), ["4", 11], None):
+                invalid = deepcopy(start)
+                invalid[field]["user"] = malformed
+                with self.subTest(field=field, pair=malformed), self.assertRaises(ValueError):
+                    L._github_peer_namespace_witness(invalid)
+            missing = deepcopy(start)
+            missing[field].pop("user")
+            with self.assertRaises(ValueError):
+                L._github_peer_namespace_witness(missing)
+            extra = deepcopy(start)
+            extra[field]["extra"] = [4, 15]
+            with self.assertRaises(ValueError):
+                L._github_peer_namespace_witness(extra)
+        changed = deepcopy(stop)
+        changed["githubPeerNamespaces"]["net"] = [4, 15]
+        with self.assertRaises(ValueError):
+            L.verify_finality(start, changed, 0, github=True)
+        changed = deepcopy(start)
+        changed["namespaces"]["mnt"] = [4, 15]
+        with self.assertRaises(ValueError):
+            L._github_peer_namespace_witness(changed)
+
+    def test_real_producers_and_finality_callers_keep_the_explicit_route(self):
+        source = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text()
+        for producer, following in (("unit_start", "_no_denials"), ("unit_stop", "installed_closed_result")):
+            body = source.split("def " + producer + "(", 1)[1].split("def " + following + "(", 1)[0]
+            self.assertIn('if shell_github(value):', body)
+            self.assertIn('["githubPeerNamespaces"] = _github_boundary_namespaces()', body)
+            self.assertIn('_github_peer_namespace_witness(', body)
+        self.assertIn('verify_finality(start, stop, 0, github=shell_github(value))', source)
+        self.assertIn('verify_finality(start, stop, client_result.returncode, github=shell_github(value))', source)
+
+
 def project_draft_receipt():
     """Expected typed schema DATA, not a native observation or original owner."""
     return {
-        "schemaVersion": 3, "fixture": "android-saved-readonly-v1", "projectGateContract": True,
-        "methods": "twelve-passive", "passiveActions": False,
+        "schemaVersion": 4, "fixture": "android-saved-readonly-v1", "projectGateContract": True,
+        "methods": "14-input-assess", "passiveActions": False,
         "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
         "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
         "snapshot": {"initial": "missing", "androidHint": True, "sourceFiles": 2},
@@ -2100,7 +2563,7 @@ def project_draft_receipt():
         "originals": {"sessions": 2, "writerFrames": [3, 2], "stdoutFrames": [3, 3],
                       "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
                       "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
-        "quit": {"operation": 6, "originalsSettled": True, "relayJoined": True, "exit": True},
+        "quit": {"operation": 7, "originalsSettled": True, "relayJoined": True, "exit": True},
         "guidance": {
             "draftUnchanged": True,
             "requirements": {"requestResultDomMatched": True, "context": "android/build", "roles": 3},
@@ -2124,7 +2587,33 @@ CANDIDATE_FIXTURE_PINS = (
 )
 
 
-def candidate_documents_receipt():
+def lifecycle_documents_receipt():
+    """Independent expected DATA; source-only tests are not an installed witness."""
+    return {
+        "schemaVersion": 1, "fixture": "android-candidate-documents-v1",
+        "gate": "installed-project-profile+lifecycle-passive", "privacy": "independent-predicate+gtk-readback",
+        "requests": {"choose": 3, "observe": 1, "cancel": 1},
+        "cancel": {"operation": 3, "stage": "candidate", "gtkSettled": True, "nativeFinal": True, "probeUnstarted": True},
+        "select": {"operation": 4, "stage": "candidate", "gtkSettled": True, "filenameMatched": True,
+                   "nativeFinal": True, "selectionMatched": True},
+        "observe": {"operation": 5, "method": "release.evidence.observe", "stage": "candidate", "bindingMatched": True,
+                    "requestResultDomMatched": True, "nativeFinal": True},
+        "shared": {"current": ["Artifacts", "Releases", "Recovery"], "stale": ["Releases", "Artifacts", "Recovery"],
+                   "sameObservation": True, "noExtraObservation": True, "recoveryCurrent": False},
+        "stageChange": {"requested": "external-testing", "retained": "candidate", "inspectDisabled": True, "currentBeforeChoice": True},
+        "opposite": {"boundary": "native-owner-endpoints", "checks": 1, "status": "busy", "cancel": "stale-selection",
+                     "sameOriginal": True, "noStop": True},
+        "stop": {"operation": 6, "stage": "external-testing", "rendererRequest": True, "createdBeforeStop": True,
+                 "deleteEvent": True, "gtkCancel": False, "gtkSettled": True, "nativeFinal": True, "probeUnstarted": True, "noResult": True},
+        "preserved": {"sourceProject": True, "registry": True, "credentialStateEmpty": True, "savedReads": True, "wholeDraft": True},
+        "scope": {"documents": 3, "formatsDigestsBindingsMatched": True, "artifactPayloadsObserved": False,
+                  "sourceCompared": False, "signingVerified": False, "workflowAuthenticated": False,
+                  "storeObserved": False, "releaseReady": False, "recoveryAuthority": False},
+        "quit": {"operation": 7, "gtkSettled": True, "coordinatorJoined": True, "relayJoined": True, "exit": True},
+    }
+
+
+def legacy_candidate_documents_receipt():
     """Independent compact expected DATA; no paths, IDs or release authority."""
     return {
         "schemaVersion": 1, "fixture": "android-candidate-documents-v1",
@@ -2142,12 +2631,58 @@ def candidate_documents_receipt():
     }
 
 
-def positive_capture(receipt=None, candidate=None):
+def positive_capture(receipt=None, lifecycle=None):
     return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
             + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
             + L.SHELL_PROJECT_MARKER + L.canonical(project_draft_receipt() if receipt is None else receipt)
-            + L.SHELL_CANDIDATE_MARKER + L.canonical(candidate_documents_receipt() if candidate is None else candidate)
+            + L.SHELL_LIFECYCLE_MARKER + L.canonical(lifecycle_documents_receipt() if lifecycle is None else lifecycle)
             + b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n", b"")
+
+
+def fixture_namespace_data(value):
+    suffix = value["runId"] + "-" + value["attempt"]
+    return {"root": "/var/lib/mrk-ubuntu-shell-fixtures-" + suffix,
+            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 26, 4096, 11, 11],
+            "children": ["android-build", "android-build-cancel", "android-build-failure", "android-build-refusals",
+                         "candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative",
+                         "offline-pass", "offline-settlement", "path-outside", "path-project", "positive-project",
+                         "session-deadline", "session-inputs", "session-ios-firebase", "session-loss", "session-refusals", "tools-cancel",
+                         "tools-observed", "tools-settlement", "version-project", "workflow-project"],
+            "control": {"path": "/var/lib/mrk-ubuntu-native-" + suffix, "identity": [1, 4, stat.S_IFDIR | 0o711, 0, 0]},
+            "ancestors": [{"path": path, "identity": [1, i + 1, stat.S_IFDIR | 0o755, 0, 0]}
+                          for i, path in enumerate(("/", "/var", "/var/lib"))]}
+
+
+def ordinary_placeholder_data(value):
+    """Fictional closed namespace DATA, never original host metadata."""
+    return {"schemaVersion": 1, "fixture": "ordinary21-inert-placeholders-v1",
+            "ordinary21": L.shell_ordinary_selection(), "namespace": fixture_namespace_data(value),
+            "entries": [{"path": name, "kind": "directory", "children": [],
+                         "identity": [1, 2000 + index, stat.S_IFDIR | 0o700, 0, 0, 2, 4096, 11, 11]}
+                        for index, name in enumerate(("android-build", "android-build-cancel", "android-build-failure", "android-build-refusals"))]}
+
+
+def session_fixture_data(value, case, *, changed=False):
+    """In-memory fixture correspondence only; no native inputs are created."""
+    namespace = fixture_namespace_data(value)
+    roster = L._shell_session_roster(value, case, changed)
+    original_names = [name for name, _, _, _ in L._shell_session_roster(value, case)]
+    offset = 600 + 100 * L.SHELL_SESSION_CASES.index(case)
+    rows = []
+    for name, mode, owners, expected in roster:
+        original_name = "sources/changed-next.jks" if changed and name == "sources/changed.jks" else name
+        stamp = 22 if changed and name in ("sources", "sources/changed.jks") else 11
+        kind = "directory" if stat.S_ISDIR(mode) else "symlink" if stat.S_ISLNK(mode) else "file"
+        original = [1, offset + original_names.index(original_name), mode, *owners,
+                    2 if kind == "directory" else 1, 4096 if kind == "directory" else len(expected),
+                    22 if changed and name == "sources" else 11, stamp]
+        row = {"path": name, "kind": kind, "identity": original}
+        row.update({"children": expected} if kind == "directory" else {"target": expected} if kind == "symlink"
+                   else {"size": len(expected), "sha256": hashlib.sha256(expected).hexdigest()})
+        rows.append(row)
+    return {"schemaVersion": 1, "fixture": "ios-firebase-session-v1" if case == "session-ios-firebase" else "four-kind-session-v1", "case": case,
+            "root": namespace["root"] + "/" + case, "changed": changed, "entries": rows,
+            "absent": L._shell_session_absent(case, changed), "namespace": namespace}
 
 
 def project_fixture_data(value, *, saved=False):
@@ -2170,8 +2705,9 @@ def project_fixture_data(value, *, saved=False):
         for index, (relative, data) in enumerate((("release/mobile-release.json", L.SHELL_PROJECT_CONFIG), (".gitignore", L.SHELL_PROJECT_IGNORE))):
             rows.append({"path": relative, "kind": "file", "identity": [1, 105 + index, stat.S_IFREG | 0o600, uid, gid, 1, len(data), 22, 22],
                          "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
-    return {"schemaVersion": 2, "fixture": "android-saved-readonly-v1", "root": str(L.root_path(value) / "positive-project"),
-            "saved": saved, "entries": rows,
+    namespace = fixture_namespace_data(value)
+    return {"schemaVersion": 3, "fixture": "android-saved-readonly-v1", "root": namespace["root"] + "/positive-project",
+            "saved": saved, "entries": rows, "namespace": namespace,
             "absent": ["release/store"] if saved else [".gitignore", "release"]}
 
 
@@ -2184,8 +2720,10 @@ def candidate_fixture_data(value):
     for index, (relative, _, size, digest) in enumerate(CANDIDATE_FIXTURE_PINS):
         rows.append({"path": relative, "kind": "file", "identity": [1, 202 + index, stat.S_IFREG | 0o600, uid, gid, 1, size, 11, 11],
                      "size": size, "sha256": digest})
-    return {"schemaVersion": 1, "fixture": "android-candidate-documents-v1", "root": str(L.root_path(value) / "candidate-evidence"),
-            "entries": rows, "absent": ["reader-1.2.3-42.aab", "store-metadata-1.2.3-42.zip", "validation-report-1.2.3-42.json"]}
+    namespace = fixture_namespace_data(value)
+    return {"schemaVersion": 2, "fixture": "android-candidate-documents-v1", "root": namespace["root"] + "/candidate-evidence",
+            "entries": rows, "namespace": namespace,
+            "absent": ["reader-1.2.3-42.aab", "store-metadata-1.2.3-42.zip", "validation-report-1.2.3-42.json"]}
 
 
 def project_path_receipt():
@@ -2231,36 +2769,459 @@ def path_fixture_data(value, *, changed=False):
                      "identity": [1, 314, stat.S_IFLNK | 0o777, value["runnerUid"], value["runnerGid"], 1, 13, 22, 22], "target": "link-original"})
     absent = ["path-project/.gitignore", "path-project/release", "path-project/.mobile-release",
               "path-project/.mobile-release-init-prepare", "path-project/.mobile-release-init", "path-project/.mobile-release-init-cleanup",
-              "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup"]
+              "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup",
+              "path-project/.mobile-release-version-prepare", "path-project/.mobile-release-version", "path-project/.mobile-release-version-cleanup",
+              "path-project/.mobile-release-metadata-images-prepare", "path-project/.mobile-release-metadata-images", "path-project/.mobile-release-metadata-images-cleanup"]
     absent += ["path-project/inputs/kind-directory", "path-project/ios/Kind.file"] if changed else [
         "path-project/inputs/link-original", "path-project/inputs/kind-original", "path-project/ios/Kind.original"]
-    return {"schemaVersion": 1, "fixture": "project-paths-v1", "root": str(L.root_path(value)), "changed": changed, "entries": rows, "absent": absent}
+    namespace = fixture_namespace_data(value)
+    return {"schemaVersion": 2, "fixture": "project-paths-v1", "root": namespace["root"], "changed": changed,
+            "entries": rows, "absent": absent, "namespace": namespace}
 
 
-def closed_shell_data():
+def workflow_capture():
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + L.SHELL_WORKFLOW_MARKER + L.canonical(L.SHELL_WORKFLOW_RECEIPT)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=workflow-apply-verified\n", b"")
+
+
+def session_capture(case, receipt=None, *, expected=None, maps=None):
+    observed = deepcopy(L.SHELL_SESSION_RECEIPTS[case]) if receipt is None else receipt
+    expected = map_data() if expected is None else expected
+    rows = [{"role": role, "path": row["paths"][0], **{key: row[key] for key in ("deviceMajor", "deviceMinor", "inode")}}
+            for role, row in sorted(expected.items())]
+    maps = [rows] * L.SHELL_SESSION_RECEIPTS[case]["behavior"]["assessments"] if maps is None else maps
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + b"".join(L.CHILD_MARKER.encode("ascii") + L.canonical(rows) for rows in maps)
+            + L.SHELL_SESSION_MARKER + L.canonical(observed)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n", b"")
+
+
+def workflow_fixture_data(value, *, installed=False):
+    """Finite synthetic before/after DATA; no fixture construction or renderer."""
+    owner = (value["runnerUid"], value["runnerGid"])
+    callers = (".github/workflows/mobile-preflight.yml", ".github/workflows/mobile-candidate.yml",
+               ".github/workflows/mobile-external-testing.yml", ".github/workflows/mobile-production-submit.yml")
+    selected = callers if installed else callers[:1]
+    directories = ((".", 0o700, owner, 4, [".github", ".gitignore", "app", "version.properties"]),
+                   ("app", 0o555, (0, 0), 2, ["build.gradle.kts"]),
+                   (".github", 0o700, owner, 3, ["workflows"]),
+                   (".github/workflows", 0o700, owner, 2, sorted([Path(name).name for name in selected] + ["unrelated.yml"])))
+    rows = []
+    for index, (name, mode, owners, links, children) in enumerate(directories):
+        stamp = 22 if installed and name in (".", ".github/workflows") else 11
+        rows.append({"path": name, "kind": "directory", "children": children,
+                     "identity": [1, 400 + index, stat.S_IFDIR | mode, *owners, links, 4096, stamp, stamp]})
+    files = [("app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444, (0, 0)),
+             ("version.properties", L.SHELL_PROJECT_VERSION, 0o600, owner),
+             (".gitignore", L.SHELL_WORKFLOW_IGNORE, 0o640, owner),
+             (".github/workflows/unrelated.yml", L.SHELL_WORKFLOW_SIBLING, 0o600, owner),
+             *((name, L.SHELL_WORKFLOW_CALLERS[name], 0o640 if index == 0 else 0o600, owner)
+               for index, name in enumerate(selected))]
+    for index, (name, raw, mode, owners) in enumerate(files):
+        stamp = 22 if index >= 5 else 11
+        rows.append({"path": name, "kind": "file", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                     "identity": [1, 404 + index, stat.S_IFREG | mode, *owners, 1, len(raw), stamp, stamp]})
+    absent = ["release", ".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init", ".mobile-release-init-cleanup",
+              ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup",
+              ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup",
+              ".mobile-release-metadata-images-prepare", ".mobile-release-metadata-images", ".mobile-release-metadata-images-cleanup"]
+    namespace = fixture_namespace_data(value)
+    return {"schemaVersion": 1, "fixture": "android-workflow-apply-v1", "root": namespace["root"] + "/workflow-project",
+            "installed": installed, "entries": rows, "absent": absent + ([] if installed else list(callers[1:])), "namespace": namespace}
+
+
+def metadata_receipt_data():
+    """Independent fixed expected DATA, not native finality or Save authority."""
+    return {
+        "schemaVersion": 1, "fixture": "android-metadata-save-v1", "gate": "installed-metadata-profile",
+        "project": {"cancelSettled": True, "registered": True, "snapshot": True},
+        "requests": {"observe": 2, "validate": 1, "open": 2, "prepare": 2, "apply": 1, "close": 1,
+                     "configuration": [0, 0, 0, 0], "workflow": [0, 0, 0, 0]},
+        "draft": {"revision": 2, "baselineGeneration": 0, "wholeMatched": True,
+                  "retainedAfterClose": True, "browserEdit": "insertText"},
+        "reviews": {"fullText": 2, "actions": [1, 1, 1], "distinctOriginals": True, "configBlocked": 2},
+        "confirmation": {"opened": 1, "initiallyDisabled": True, "checkboxOnlyDisabled": True,
+                         "typedSave": True, "acknowledged": True},
+        "outcomes": [["not_started", "not_created", "settled", "cancelled"], ["committed", "clean", "settled", "none"]],
+        "nativeReasons": ["discarded", "none"],
+        "originals": {"sessions": 2, "writerFrames": [2, 3], "stdoutFrames": [3, 3],
+                      "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
+                      "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
+        "readback": {"planMatched": True, "savedBaseline": True, "originalObservation": True},
+        "quit": {"operation": 3, "gtkSettled": True, "originalsSettled": True, "relayJoined": True, "exit": True},
+    }
+
+
+def metadata_capture(receipt=None):
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + b"MRK_INSTALLED_SHELL_METADATA_SAVE=" + L.canonical(metadata_receipt_data() if receipt is None else receipt)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=metadata-save-verified\n", b"")
+
+
+def metadata_fixture_data(value, *, saved=False):
+    """Finite synthetic originals and one replacement/create; never a writer."""
+    owner = (value["runnerUid"], value["runnerGid"])
+    locale = "release/store/android/en-US"
+    names = ["keep.txt", "short_description.txt", "title.txt"]
+    directories = ((".", 0o700, owner, 4, [".gitignore", "app", "release", "version.properties"]),
+                   ("app", 0o555, (0, 0), 2, ["build.gradle.kts"]),
+                   ("release", 0o700, owner, 3, ["mobile-release.json", "store"]),
+                   ("release/store", 0o700, owner, 3, ["android"]),
+                   ("release/store/android", 0o700, owner, 3, ["en-US"]),
+                   (locale, 0o700, owner, 2, ["full_description.txt", *names] if saved else names))
+    rows = []
+    for index, (name, mode, owners, links, children) in enumerate(directories):
+        stamp = 22 if saved and name in (".", locale) else 11
+        rows.append({"path": name, "kind": "directory", "children": children,
+                     "identity": [1, 500 + index, stat.S_IFDIR | mode, *owners, links, 4096, stamp, stamp]})
+    files = [("app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444, (0, 0)),
+             ("version.properties", L.SHELL_PROJECT_VERSION, 0o600, owner),
+             (".gitignore", L.SHELL_PROJECT_IGNORE, 0o600, owner),
+             ("release/mobile-release.json", L.SHELL_PROJECT_CONFIG, 0o600, owner),
+             (locale + "/title.txt", b"Public title", 0o600, owner),
+             (locale + "/short_description.txt", b"Public summary" if saved else b"Old summary", 0o600, owner),
+             (locale + "/keep.txt", b"untouched\n", 0o600, owner)]
+    if saved:
+        files.append((locale + "/full_description.txt", b"Public description", 0o600, owner))
+    for index, (name, raw, mode, owners) in enumerate(files):
+        replaced = saved and name == locale + "/short_description.txt"
+        stamp = 22 if replaced or index == 7 else 11
+        rows.append({"path": name, "kind": "file", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                     "identity": [1, 514 if replaced else 506 + index, stat.S_IFREG | mode, *owners, 1, len(raw), stamp, stamp]})
+    absent = [".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init", ".mobile-release-init-cleanup",
+              ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup",
+              ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup",
+              ".mobile-release-metadata-images-prepare", ".mobile-release-metadata-images", ".mobile-release-metadata-images-cleanup"]
+    namespace = fixture_namespace_data(value)
+    return {"schemaVersion": 1, "fixture": "android-metadata-save-v1", "root": namespace["root"] + "/metadata-project",
+            "saved": saved, "entries": rows, "absent": absent + ([] if saved else [locale + "/full_description.txt"]), "namespace": namespace}
+
+
+def version_receipt_data():
+    """Independent expected DATA only, never proof of native execution."""
+    return {'confirmation': {'acknowledged': 3,
+                      'checkboxOnlyDisabled': 3,
+                      'initiallyDisabled': 3,
+                      'opened': 3,
+                      'typedSave': 3},
+     'domain': 'release_version',
+     'draft': {'bindings': [[2, 0], [4, 1], [4, 2]], 'browserEdit': 'insertText', 'wholeMatched': True},
+     'filesystem': {'afterModes': [384, 384, 384],
+                    'parents': 2,
+                    'preserveFull9': True,
+                    'preservedFiles': 3,
+                    'replaceIdentityChanged': True},
+     'fixture': 'release-version-save-v1',
+     'gate': 'installed-version-profile',
+     'lateSettled': [False, False, False],
+     'nativeFinality': ['settled', 'settled', 'settled'],
+     'nativeReasons': ['none', 'none', 'none'],
+     'originals': {'childWaited': 3,
+                   'ioSettled': 3,
+                   'ownersJoined': 3,
+                   'runtimeLedgerSettled': 3,
+                   'runtimeSettlementJoined': 3,
+                   'sessions': 3,
+                   'startupJoined': 3,
+                   'stdoutFrames': [3, 3, 3],
+                   'writerFrames': [3, 3, 3]},
+     'outcomes': [['committed', 'clean', 'settled', 'none'],
+                  ['committed', 'clean', 'settled', 'none'],
+                  ['unchanged', 'not_created', 'settled', 'none']],
+     'project': {'cancelSettled': True, 'registered': True, 'snapshot': True},
+     'quit': {'exit': True, 'gtkSettled': True, 'operation': 3, 'originalsSettled': True, 'relayJoined': True},
+     'readback': {'originalObservations': 3,
+                  'planMatched': 3,
+                  'savedBaseline': 3,
+                  'values': [['1.2.3', 7], ['2.3.4', 8], ['2.3.4', 8]]},
+     'requests': {'apply': 3,
+                  'close': 0,
+                  'configuration': [0, 0, 0, 0],
+                  'metadata': [0, 0, 0, 0],
+                  'observe': 3,
+                  'open': 3,
+                  'prepare': 3,
+                  'workflow': [0, 0, 0, 0]},
+     'reviews': {'actions': ['create', 'replace', 'preserve'],
+                 'configBlocked': 3,
+                 'distinctOriginals': True,
+                 'distinctPlans': True,
+                 'fullText': 3},
+     'schemaVersion': 1}
+
+
+def version_capture(receipt=None):
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + b"MRK_INSTALLED_SHELL_VERSION_SAVE=" + L.canonical(version_receipt_data() if receipt is None else receipt)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=version-save-verified\n", b"")
+
+
+def version_fixture_data(value, *, saved=False):
+    """Finite DATA with an absent source followed by the final replacement."""
+    owner = (value["runnerUid"], value["runnerGid"])
+    rows = []
+    for index, (name, links, children) in enumerate((
+        (".", 3, [".gitignore", "release", "unrelated.txt", "version.properties"] if saved
+         else [".gitignore", "release", "unrelated.txt"]),
+        ("release", 2, ["mobile-release.json"]),
+    )):
+        stamp = 22 if saved and name == "." else 11
+        rows.append({"path": name, "kind": "directory", "children": children,
+                     "identity": [1, 600 + index, stat.S_IFDIR | 0o700, *owner, links, 4096, stamp, stamp]})
+    files = [(".gitignore", L.SHELL_PROJECT_IGNORE), ("release/mobile-release.json", L.SHELL_PROJECT_CONFIG),
+             ("unrelated.txt", b"keep unrelated version fixture data\n")]
+    if saved:
+        files.append(("version.properties", b"VERSION_NAME=2.3.4\nBUILD_NUMBER=8\n"))
+    for index, (name, raw) in enumerate(files):
+        stamp = 22 if name == "version.properties" else 11
+        rows.append({"path": name, "kind": "file", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                     "identity": [1, 602 + index, stat.S_IFREG | 0o600, *owner, 1, len(raw), stamp, stamp]})
+    absent = [".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init", ".mobile-release-init-cleanup",
+              ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup",
+              ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup",
+              ".mobile-release-metadata-images-prepare", ".mobile-release-metadata-images", ".mobile-release-metadata-images-cleanup"]
+    namespace = fixture_namespace_data(value)
+    return {"schemaVersion": 1, "fixture": "release-version-save-v1", "root": namespace["root"] + "/version-project",
+            "saved": saved, "entries": rows, "absent": absent + ([] if saved else ["version.properties"]), "namespace": namespace}
+
+
+def android_receipt_data(lifecycle, case):
+    """Invented Android terminal DATA; no owner, process, SDK or AAB is created."""
+    cancelled, refused = case == "android-build-cancel", case == "android-build-refusals"
+    complete = case == "android-build"
+    config = lifecycle.SHELL_ANDROID_CONFIG
+    version = lifecycle.SHELL_ANDROID_VERSION
+    context = {"projectId": "inert_android", "draftRevision": 1, "baselineGeneration": 0,
+        "platform": "android", "operation": "android-build-inspect",
+        "savedConfig": {"bytes": len(config), "sha256": hashlib.sha256(config).hexdigest()},
+        "savedVersion": {"source": "release/version.properties", "bytes": len(version), "sha256": hashlib.sha256(version).hexdigest(),
+                        "name": "1.2.3", "build": 7}}
+    flags = {key: True for key in ("inspectionJoined", "acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed",
+        "stdoutEofClosed", "stderrEofClosed", "ioJoined", "coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined",
+        "driverJoined", "managerJoined", "observerJoined", "watchdogJoined", "retiredBeforeCutoff")}
+    flags.update(domain="android", id="a" * 32, generation="b" * 32, noChild=False, activeRetained=False, resourceUnknown=False)
+    selection = {"module": ":app", "variant": "release", "applicationId": "org.example.saved", "task": ":app:bundleRelease"}
+    command = {"outcome": "not-dispatched" if refused else "unknown" if cancelled else "exited",
+               "exitCode": None if refused or cancelled else 0 if complete else 1}
+    findings = [{"ordinal": index, "check": check, "status": status} for index, (check, status) in
+                enumerate((("aab-structure", "PASS"), ("aab-manifest", "PASS"), ("signer", "SKIP")))] if complete else []
+    counts = {key: 0 for key in ("PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE")}
+    if complete: counts.update(PASS=2, SKIP=1)
+    summary = {"total": len(findings), "shown": len(findings), "omitted": 0, "counts": counts}
+    activity = {"stage": "accepted" if refused else "disposing-work", "selection": None if refused else selection,
+                "command": command, "findings": findings, "summary": summary}
+    result = None
+    if complete:
+        result = {"schemaVersion": 1, "scope": "local-post-build-artifact-observation",
+            "usedConfig": deepcopy(context["savedConfig"]), "usedVersion": deepcopy(context["savedVersion"]),
+            "selection": deepcopy(selection), "toolchainProfile": "android-local-linux-gnu-x86_64-v1", "command": deepcopy(command),
+            "findings": deepcopy(findings), "summary": deepcopy(summary),
+            "artifacts": [{"logicalName": "android-aab", "platform": "android", "kind": "aab", "fileName": "app-release.aab",
+                "size": 4096, "sha256": "c" * 64, "architectures": [], "unknownAbi": False, "freshness": "not-established"}],
+            "assurances": {"structure": "passed", "nativeManifest": "passed", "applicationVersion": "native-checked",
+                "signer": "not-inspected", "toolkitSigning": "not-requested", "storeOperation": "not-requested",
+                "sourceBinding": "not-established", "releaseReadiness": "not-assessed"},
+            "limitations": ["saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated",
+                "post-run-bytes-may-be-incremental-reused-or-stale", "source-binding-not-established", "artifact-signer-not-inspected",
+                "toolkit-signing-not-requested", "store-operation-not-requested", "release-readiness-not-assessed",
+                "local-output-observation-not-current-file-authority", "core-terminal-requires-original-native-finality"]}
+    terminal = {"operationId": flags["id"], "ownerGeneration": flags["generation"], "context": context,
+        "phase": "terminal", "intentUsable": False, "outcome": "complete" if complete else "refused" if refused else "cancelled" if cancelled else "failed",
+        "reason": "none" if complete else "saved-version-changed" if refused else "cancelled" if cancelled else "command-failed",
+        "stage": activity["stage"], "activity": activity,
+        "disposition": {"work": "not-created" if refused else "removed",
+            "artifacts": "not-created" if refused else "retained-local-result" if complete else "retained-incomplete"}, "result": result}
+    lifetime = {"complete": True, "fatal": False, "contained": True, "commandDispatched": not refused, "commands": 0 if refused else 2 if complete else 1,
+        "profileCalls": 0, "inputClosed": True, "handlersRestored": True, "invocationClosed": True, "artifactsClosed": True,
+        "toolsClosed": True, "namespaceClosed": True, "stopObserved": "cancelled" if cancelled else "none"}
+    fixture = {"sourceControlsAccounted": True, "savedVersionChanged": refused, "gradleBoundary": "" if refused else "active\n",
+               "generatedScopesNotExported": ["project/.mobile-release", "project/app/build", "project/build"]}
+    return {"schema": "installed-android-build-v2", "case": case, "qualificationOnly": True, "builder": "normal",
+        "normalSelection": {"selectedBeforeObservation": True, "observerGranted": False},
+        "projectPicker": True, "savedObservation": True, "savedVersionObservation": True,
+        "requests": {"androidPrepare": 1, "androidStart": 1, "androidCancel": 1 if cancelled else 0},
+        "ui": {"start": True, "consent": True, "terminal": True, "cancel": cancelled}, "busyObserved": cancelled,
+        "original": flags, "toolsLedgerSettled": True, "nativeIntegrity": True, "coreLifetime": lifetime, "terminal": terminal, "fixture": fixture,
+        "limits": {key: False for key in ("normalActivation", "work3000Expiry", "privateJvmProfile", "noAutoInstall", "allHelperNativeGates", "networkIsolated")}}
+
+
+def android_fixture_data(value, case, *, after=False):
+    """Synthetic inode/ns correspondence only. No real fixture/material is read."""
+    namespace = fixture_namespace_data(value)
+    roster = L._shell_android_roster(value, case, after)
+    offset = 3000 + 100 * L.SHELL_ANDROID_CASES.index(case)
+    rows = []
+    for index, (name, mode, owners, expected) in enumerate(roster):
+        directory = stat.S_ISDIR(mode)
+        changed = after and (name == L.SHELL_ANDROID_VERSION_PATH and case == "android-build-refusals"
+                             or name == L.SHELL_ANDROID_TRACE and case != "android-build-refusals")
+        size = 4096 if directory else len(expected)
+        links = 2 + sum(stat.S_ISDIR(m) and n != "." and str(Path(n).parent) == name for n, m, _, _ in roster) if directory else 1
+        row = {"path": name, "kind": "directory" if directory else "file",
+               "identity": [1, offset + index, mode, *owners, links, size,
+                            1790240000326184301 if changed else 1790240000326184300,
+                            1790240000326184301 if changed else 1790240000326184300]}
+        row.update({"children": expected, "contentsInspected": expected is not None} if directory else
+                   {"size": size, "sha256": hashlib.sha256(expected).hexdigest()})
+        rows.append(row)
+    generated = ({"path": "project/.mobile-release", "kind": "directory", "contentsInspected": False,
+                  "identity": [1, offset + 99, stat.S_IFDIR | 0o700, value["runnerUid"], value["runnerGid"], 3, 4096,
+                               1790240000326184302, 1790240000326184302]}
+                 if after and case != "android-build-refusals" else None)
+    return {"schemaVersion": 1, "fixture": "installed-android-build-fixture-v1", "case": case, "root": namespace["root"] + "/" + case,
+        "after": after, "entries": rows, "generatedNamespace": generated, "generatedScopesNotExported": list(L.SHELL_ANDROID_GENERATED),
+        "namespace": namespace, "materials": deepcopy(ANDROID_MATERIAL_DATA)}
+
+
+def android_capture(case, receipt=None):
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + b"MRK_INSTALLED_SHELL_ANDROID_BUILD=" + L.canonical(android_receipt_data(L, case) if receipt is None else receipt)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n", b"")
+
+
+def tools_offline_receipt(case):
+    """Fictional closed protocol DATA; no host executable or owner is invoked."""
+    offline, cancel = case.startswith("offline-"), case in ("tools-cancel", "offline-cancel")
+    context = {"projectId": "inert_project", "draftRevision": 1, "baselineGeneration": 0,
+               "platform": "android", "operation": "offline-preflight" if offline else "build"}
+    if offline:
+        config = L.SHELL_TOOLS_OFFLINE_CONFIGS[case]
+        context["savedConfig"] = {"bytes": len(config), "sha256": hashlib.sha256(config).hexdigest()}
+    original = {key: True for key in ("inspectionJoined", "acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed",
+        "stdoutEofClosed", "stderrEofClosed", "ioJoined", "coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined",
+        "driverJoined", "managerJoined", "observerJoined", "watchdogJoined", "retiredBeforeCutoff")}
+    original.update(domain="offline" if offline else "tools", id="a" * 32, generation="b" * 32,
+                    noChild=False, activeRetained=False, resourceUnknown=False)
+    if case == "tools-cancel":
+        original.update({key: False for key in ("acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed", "stdoutEofClosed",
+                                               "stderrEofClosed", "coreLifetimeSettled")})
+        original["noChild"] = True
+    outcome, reason = (("cancelled", "cancelled") if cancel else ("refused", "saved-config-changed") if case == "offline-drift"
+                       else ("complete", "none"))
+    terminal = {"ownerGeneration": "b" * 32, "context": context, "phase": "terminal" if offline else "settled",
+                "outcome": outcome, "reason": reason, "result": None}
+    terminal.update({"operationId": "a" * 32, "intentUsable": False} if offline else {"runId": "a" * 32, "finality": "settled"})
+    if outcome == "complete" and not offline:
+        checks = [{"id": role, "state": "completed", "reason": "observed", "version": "2.43.0" if role == "git" else "17.0.16",
+            "build": None, "returnCode": 0, "baseline": {"kind": "no-local-policy" if role == "git" else "workflow-reference",
+                "version": None if role == "git" else "21", "build": None}, "assessment": "no-local-policy", "help": "Fixed core explanation"}
+            for role in ("git", "java", "javac")]
+        terminal["result"] = {"schemaVersion": 1, "policyVersion": "environment-diagnostics-v1", "context": deepcopy(context),
+            "hostPlatform": "linux", "outcome": "complete", "checks": checks, "commandsAttempted": 3,
+            "lifetime": {"complete": True, "fatal": False, "contained": True, "commandDispatched": True, "commands": 3,
+                "inputClosed": True, "handlersRestored": True, "toolDescriptorsClosed": True, "stopObserved": "none"},
+            "assurance": {"basis": "local-tool-observation", "toolsAttempted": True, "projectCodeExecuted": False, "projectFilesRead": False,
+                "repositoryObserved": False, "sdkInspected": False, "credentialsRead": False, "storeContacted": False,
+                "dependencyCompleteness": "unknown", "releaseReadiness": "unknown", "toolCacheEffects": "possible"}}
+    elif outcome == "complete":
+        negative = case == "offline-negative"
+        counts = {status: 0 for status in ("PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE")}
+        counts.update(PASS=1 if negative else 2, FAIL=1 if negative else 0)
+        terminal["result"] = {"schemaVersion": 1, "scope": "saved-offline-android-no-core-build", "usedConfig": deepcopy(context["savedConfig"]),
+            "findings": [{"ordinal": 0, "check": "version-source", "status": "PASS", "message": "version-source", "projectCheckIndex": None},
+                         {"ordinal": 1, "check": "configured-project-check", "status": "FAIL" if negative else "PASS",
+                          "message": "configured-project-check", "projectCheckIndex": 0}],
+            "summary": {"total": 2, "shown": 2, "omitted": 0, "counts": counts},
+            "limitations": ["saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated", "core-builds-disabled",
+                "artifact-validation-not-requested", "toolkit-signing-credentials-store-not-requested", "release-readiness-not-assessed"]}
+    boundary = "inspection" if case == "tools-cancel" else "settlement" if case in ("tools-settlement", "offline-settlement") else "none"
+    trace = "pass\n" if case in ("offline-pass", "offline-settlement") else "exit-7\n" if case == "offline-negative" else "active\n" if case == "offline-cancel" else ""
+    return {"schema": "installed-tools-offline-v1", "case": case, "qualificationOnly": True, "builder": "normal", "projectPicker": True,
+        "savedObservation": True, "requests": {"toolsStart": 0 if offline else 1, "toolsCancel": 1 if case == "tools-cancel" else 0,
+            "offlinePrepare": 1 if offline else 0, "offlineStart": 1 if offline else 0, "offlineCancel": 1 if case == "offline-cancel" else 0},
+        "initial": {"toolsAvailable": True, "offlineAvailable": True}, "ui": {"start": True, "consent": offline, "terminal": True, "cancel": cancel},
+        "reciprocalBusy": case in ("tools-settlement", "offline-cancel", "offline-settlement"),
+        "hold": {"boundary": boundary, "entered": boundary != "none", "released": boundary != "none"},
+        "original": original, "terminal": terminal, "fixture": {"scriptTrace": trace, "laterTrace": "", "savedConfigChanged": case == "offline-drift"}}
+
+
+def tools_offline_fixture_data(value, case, *, after=False):
+    namespace = fixture_namespace_data(value)
+    roster = L._shell_tools_offline_roster(value, case, after)
+    offset = 1000 + 100 * L.SHELL_TOOLS_OFFLINE_CASES.index(case)
+    rows = []
+    for index, (name, mode, owners, expected) in enumerate(roster):
+        directory = stat.S_ISDIR(mode)
+        changed = after and (name == "project/release/mobile-release.json" and case == "offline-drift"
+                             or name == "project/script.trace" and bool(L.SHELL_TOOLS_OFFLINE_TRACES[case]))
+        size = 4096 if directory else len(expected)
+        links = 2 + sum(stat.S_ISDIR(m) and n != "." and str(Path(n).parent) == name for n, m, _, _ in roster) if directory else 1
+        row = {"path": name, "kind": "directory" if directory else "file",
+               "identity": [1, offset + index, mode, *owners, links, size, 22 if changed else 11, 22 if changed else 11]}
+        row.update({"children": expected} if directory else {"size": size, "sha256": hashlib.sha256(expected).hexdigest()})
+        rows.append(row)
+    return {"schemaVersion": 1, "fixture": "installed-tools-offline-fixture-v1", "case": case, "root": namespace["root"] + "/" + case,
+            "changed": after and case.startswith("offline-"), "entries": rows, "absent": list(L.SHELL_TOOLS_OFFLINE_ABSENT), "namespace": namespace}
+
+
+def tools_offline_capture(case, receipt=None):
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + b"MRK_INSTALLED_SHELL_TOOLS_OFFLINE=" + L.canonical(tools_offline_receipt(case) if receipt is None else receipt)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n", b"")
+
+
+def settled_failure_capture():
+    # Fixed synthetic parser DATA; never native execution/finality evidence.
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            + b"MRK_INSTALLED_SHELL_FAILURE_STEP=SettledFailure\n"
+            + b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\n"
+            + b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+            + b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n"
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n", b"")
+
+
+def closed_shell_data(*, ordinary=False):
     value, expected = installed_handoff(), map_data()
     value.pop("installed")
     value["shell"] = {"rosterSha256": "a" * 64, "producerAttempt": "1", "artifactId": "7",
                       "acceptedU": {"sourceSha": "b" * 40, "runId": "8", "attempt": "1", "artifactId": "9"}}
+    if ordinary:
+        value["shell"]["ordinary21"] = L.shell_ordinary_selection()
+    else:
+        value["shell"]["androidPublication"] = L.shell_android_publication_request(value["taskRoot"])
     maps = [{"role": role, "path": row["paths"][0], **{key: row[key] for key in ("deviceMajor", "deviceMinor", "inode")}}
             for role, row in sorted(expected.items())]
     captures = {"normal": (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n", b""),
                 "positive": positive_capture(),
                 "quit-outstanding": (b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
                     + L.CHILD_MARKER.encode() + L.canonical(maps) + b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n", b""),
-                "project-paths": path_capture()}
+                "project-paths": path_capture(), "workflow-apply": workflow_capture(),
+                **{case: session_capture(case, expected=expected) for case in L.SHELL_SESSION_CASES}, "metadata-save": metadata_capture(),
+                **{case: tools_offline_capture(case) for case in L.SHELL_TOOLS_OFFLINE_CASES},
+                "settled-failure": settled_failure_capture(), "version-save": version_capture(),
+                **{case: android_capture(case) for case in (() if ordinary else L.SHELL_ANDROID_CASES)}}
     cases, files, commands = {}, {}, []
     for case, (stdout, stderr) in captures.items():
-        cases[case] = L.shell_result(stdout, stderr, case, 0, expected)
+        code = 1 if case == "settled-failure" else 0
+        cases[case] = L.shell_result(stdout, stderr, case, code, expected,
+                                    failure_labels=L.SHELL_SETTLED_FAILURE_LABELS if case == "settled-failure" else None)
         files["shell-" + case + ".stdout"], files["shell-" + case + ".stderr"] = stdout, stderr
         files["shell-" + case + "-xvfb.stderr"] = b"inert original display output\n"
-        commands.append({"phase": "shell-" + case, "argv": L.shell_argv(value, case), "exitCode": 0})
+        commands.append({"phase": "shell-" + case, "argv": L.shell_argv(value, case), "exitCode": code})
+    files["shell-settled-failure-failure.labels"] = L.SHELL_SETTLED_FAILURE_LABELS
     files["shell-cases.json"] = L.canonical(cases)
     files["shell-positive-project-before.json"] = L.canonical(project_fixture_data(value))
     files["shell-positive-project-after.json"] = L.canonical(project_fixture_data(value, saved=True))
     for phase in ("before", "after"):
         files["shell-positive-candidate-" + phase + ".json"] = L.canonical(candidate_fixture_data(value))
         files["shell-project-paths-" + phase + ".json"] = L.canonical(path_fixture_data(value, changed=phase == "after"))
+        files["shell-workflow-apply-" + phase + ".json"] = L.canonical(workflow_fixture_data(value, installed=phase == "after"))
+        for case in L.SHELL_SESSION_CASES:
+            files["shell-" + case + "-" + phase + ".json"] = L.canonical(
+                session_fixture_data(value, case, changed=phase == "after" and case == "session-refusals"))
+        files["shell-metadata-save-" + phase + ".json"] = L.canonical(metadata_fixture_data(value, saved=phase == "after"))
+        files["shell-version-save-" + phase + ".json"] = L.canonical(version_fixture_data(value, saved=phase == "after"))
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            files["shell-" + case + "-" + phase + ".json"] = L.canonical(tools_offline_fixture_data(value, case, after=phase == "after"))
+        for case in (() if ordinary else L.SHELL_ANDROID_CASES):
+            files["shell-" + case + "-" + phase + ".json"] = L.canonical(android_fixture_data(value, case, after=phase == "after"))
     keys = [{"phase": "key", "exitCode": 0, "stdout": "", "stderr": "",
              "argv": L._drop(value, ["/usr/bin/xdotool", "key", "--clearmodifiers", key])} for key in ("ctrl+q", "alt+o")]
     files["shell-normal-control.json"] = L.canonical({"joined": True, "inputs": 2, "workerGuardState": "RESTORED",
@@ -2270,9 +3231,325 @@ def closed_shell_data():
     outcome = {"shellRosterSha256": value["shell"]["rosterSha256"], "shellProducerAttempt": "1", "shellArtifactId": "7",
                "acceptedU": value["shell"]["acceptedU"], "consumerAttempt": value["attempt"],
                "packageLifecycleQualified": False, "shellPackageBuilt": False, "commands": commands}
+    if ordinary:
+        outcome["ordinary21"] = L.shell_ordinary_selection()
+        for phase in ("before", "after"):
+            files["shell-ordinary21-placeholders-" + phase + ".json"] = L.canonical(ordinary_placeholder_data(value))
+        for name in L.public_files(value):
+            files.setdefault(name, b"")  # Unconsumed outer-finality captures remain inert in this direct decoder fixture.
+    else:
+        outcome["androidPublication"] = {"state": "verified-after-consumers", "instance": ANDROID_MATERIAL_DATA["instance"],
+            "materials": deepcopy(ANDROID_MATERIAL_DATA), **deepcopy(ANDROID_PUBLICATION_DATA), "createdDirectories": 7,
+            "verifiedFiles": 5, "verifiedBytes": 5, "manifestPublished": True, "uncertainEntry": None,
+            "qualified": False, "cleanupClaimed": False}
     return value, outcome, files, expected
 
 
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
+class ShellFixtureNamespaceContracts(unittest.TestCase):
+    def test_readable_ancestry_preserves_control_private_and_only_stable_identity(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        namespace = fixture_namespace_data(value); root = L.root_path(value)
+        expected = {key: namespace[key] for key in ("control", "ancestors")}
+        for fault in (None, "unreadable", "writable", "control-mode", "private-mode", "owner", "device", "alias", "symlink", "drift", "acl"):
+            nodes = {Path(row["path"]): inert_stat(row["identity"][1], row["identity"][2])
+                     for row in [namespace["control"], *namespace["ancestors"]]}
+            nodes[root / "private"] = inert_stat(6, stat.S_IFDIR | 0o700)
+            if fault == "unreadable": nodes[Path("/var/lib")].st_mode = stat.S_IFDIR | 0o711
+            if fault == "writable": nodes[Path("/var")].st_mode = stat.S_IFDIR | 0o777
+            if fault == "control-mode": nodes[root].st_mode = stat.S_IFDIR | 0o755
+            if fault == "private-mode": nodes[root / "private"].st_mode = stat.S_IFDIR | 0o711
+            if fault == "owner": nodes[Path("/var/lib")].st_uid = value["runnerUid"]
+            if fault == "device": nodes[root].st_dev = 2
+            if fault == "alias": nodes[root].st_ino = 3
+            if fault == "symlink": nodes[Path("/var")].st_mode = stat.S_IFLNK | 0o755
+            observed = []
+            def metadata(path):
+                observed.append(path); node = deepcopy(nodes[path])
+                # Legitimate sibling/control activity is not stable authority.
+                node.st_nlink += len(observed); node.st_size += len(observed)
+                node.st_mtime_ns += len(observed); node.st_ctime_ns += len(observed)
+                if fault == "drift" and path == root and observed.count(root) == 2: node.st_ino += 100
+                return node
+            with self.subTest(fault=fault), patch.object(L, "_ROOT", root), patch.object(Path, "lstat", metadata), \
+                 patch.object(L, "_xattrs", side_effect=L.Refused("inert ACL") if fault == "acl" else None) as attrs, \
+                 patch.object(L.os, "scandir", side_effect=AssertionError("No private/fixture scan")):
+                if fault is None:
+                    self.assertEqual(L._shell_fixture_ancestry(value), expected)
+                    self.assertEqual([call.args for call in attrs.call_args_list],
+                                     [(path, True) for path in (Path("/"), Path("/var"), Path("/var/lib"), root, root / "private")])
+                else:
+                    with self.assertRaises(ValueError): L._shell_fixture_ancestry(value)
+
+    def test_constructor_exact_fixed_bytes_then_original_publication_or_refusal(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        namespace = fixture_namespace_data(value); root = Path(namespace["root"])
+        ancestry = {key: namespace[key] for key in ("control", "ancestors")}
+        for fault in (None, "occupied", "mode", "owner", "device", "alias", "acl", "leaf-acl", "metadata-acl", "metadata-leaf-acl", "version-acl", "version-leaf-acl",
+                      "write", "unknown-child", "identity", "ancestry", "published-identity"):
+            node = inert_stat(5, stat.S_IFDIR | 0o700, size=4096, stamp=11)
+            if fault == "mode": node.st_mode = stat.S_IFDIR | 0o755
+            if fault == "owner": node.st_uid = value["runnerUid"]
+            if fault == "device": node.st_dev = 2
+            if fault == "alias": node.st_ino = 4
+            created = []
+            def mkdir(path, *, mode):
+                self.assertEqual(mode, 0o700)
+                if fault == "occupied" and path == root: raise FileExistsError("inert occupied sibling")
+                created.append(path)
+                if path.parent == root: node.st_nlink += 1
+            def metadata(path):
+                self.assertEqual(path, root)
+                current = deepcopy(node)
+                if fault == "identity" and len(created) > 1: current.st_ino += 100
+                if fault == "published-identity" and stat.S_IMODE(node.st_mode) == 0o755: current.st_ino += 100
+                return current
+            def chmod(path, mode):
+                self.assertIn((path, mode), ((root / "positive-project/app", 0o555),
+                    (root / "workflow-project/.github/workflows", 0o700), (root / "workflow-project/.github", 0o700),
+                    (root / "workflow-project/app", 0o555), (root / "workflow-project", 0o700),
+                    (root / "metadata-project/release/store/android/en-US", 0o700), (root / "metadata-project/release/store/android", 0o700),
+                    (root / "metadata-project/release/store", 0o700), (root / "metadata-project/release", 0o700),
+                    (root / "metadata-project/app", 0o555), (root / "metadata-project", 0o700),
+                    (root / "version-project/release", 0o700), (root / "version-project", 0o700), (root, 0o755)))
+                if path == root: node.st_mode = stat.S_IFDIR | mode
+            def attrs(path, directory):
+                if (fault == "acl" and path == root or fault == "leaf-acl" and path == root / "path-outside/VERSION"
+                        or fault == "metadata-acl" and path == root / "metadata-project/release/store/android/en-US"
+                        or fault == "metadata-leaf-acl" and path == root / "metadata-project/release/store/android/en-US/short_description.txt"
+                        or fault == "version-acl" and path == root / "version-project/release"
+                        or fault == "version-leaf-acl" and path == root / "version-project/unrelated.txt"):
+                    raise L.Refused("inert ACL")
+            def scan(path):
+                self.assertEqual(path, root)
+                names = [p.name for p in created if p.parent == root]
+                if fault == "unknown-child": names.insert(0, "unexpected")
+                context = Mock(); context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=n) for n in names))
+                context.__exit__ = Mock(return_value=False); return context
+            def ancestors(_):
+                current = deepcopy(ancestry)
+                if fault == "ancestry" and len(created) > 1: current["control"]["identity"][1] += 100
+                return current
+            writer = Mock(side_effect=OSError("inert write failure") if fault == "write" else None)
+            with self.subTest(fault=fault), patch.object(L, "_ROOT", L.root_path(value)), \
+                 patch.object(L, "_shell_fixture_ancestry", side_effect=ancestors), \
+                 patch.object(Path, "mkdir", autospec=True, side_effect=mkdir) as making, \
+                 patch.object(Path, "lstat", autospec=True, side_effect=metadata) as reading, \
+                 patch.object(L, "_D", SimpleNamespace(write=writer)), patch.object(L.os, "chown") as ownership, \
+                 patch.object(L.os, "chmod", side_effect=chmod) as modes, patch.object(L, "_xattrs", side_effect=attrs), \
+                 patch.object(L.os, "scandir", side_effect=scan) as scans, patch.object(L.os, "symlink") as links:
+                if fault is None:
+                    binding = L._shell_fixtures_prepare(value)
+                    self.assertIs(type(binding), bytes); self.assertEqual(L.decode(binding), namespace)
+                    self.assertEqual(created, [root, root / "positive-project", root / "positive-project/app",
+                        root / "candidate-evidence", root / "candidate-evidence/operation",
+                        *(root / name for name, directory in PATH_FIXTURE_NODES if directory),
+                        root / "workflow-project", root / "workflow-project/app", root / "workflow-project/.github",
+                        root / "workflow-project/.github/workflows", root / "metadata-project", root / "metadata-project/app",
+                        root / "metadata-project/release", root / "metadata-project/release/store",
+                        root / "metadata-project/release/store/android", root / "metadata-project/release/store/android/en-US",
+                        root / "version-project", root / "version-project/release",
+                        *(root / case / name for case in L.SHELL_SESSION_CASES for name in (".", "project", "project/release", "sources")),
+                        *(root / case / name for case in L.SHELL_TOOLS_OFFLINE_CASES
+                          for name, mode, _, _ in L._shell_tools_offline_roster(value, case) if stat.S_ISDIR(mode)),
+                         *(root / case / name for case in L.SHELL_ANDROID_CASES
+                           for name, mode, _, _ in L._shell_android_roster(value, case) if stat.S_ISDIR(mode))])
+                    self.assertEqual([call.args for call in writer.call_args_list], [
+                        (root / "positive-project/app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
+                        (root / "positive-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
+                        *((root / "candidate-evidence" / name, raw, 0o600) for name, raw in L.SHELL_CANDIDATE_DOCUMENTS.items()),
+                        *((root / name, b"inert path-picker fixture\n", 0o600) for name, directory in PATH_FIXTURE_NODES if not directory),
+                        (root / "workflow-project/app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
+                        (root / "workflow-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
+                        (root / "workflow-project/.gitignore", L.SHELL_WORKFLOW_IGNORE, 0o640),
+                        (root / "workflow-project/.github/workflows/unrelated.yml", L.SHELL_WORKFLOW_SIBLING, 0o600),
+                        (root / "workflow-project/.github/workflows/mobile-preflight.yml", L.SHELL_WORKFLOW_CALLERS[".github/workflows/mobile-preflight.yml"], 0o640),
+                        (root / "metadata-project/app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
+                        (root / "metadata-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
+                        (root / "metadata-project/.gitignore", L.SHELL_PROJECT_IGNORE, 0o600),
+                        (root / "metadata-project/release/mobile-release.json", L.SHELL_PROJECT_CONFIG, 0o600),
+                        (root / "metadata-project/release/store/android/en-US/title.txt", b"Public title", 0o600),
+                        (root / "metadata-project/release/store/android/en-US/short_description.txt", b"Old summary", 0o600),
+                        (root / "metadata-project/release/store/android/en-US/keep.txt", b"untouched\n", 0o600),
+                        (root / "version-project/.gitignore", L.SHELL_PROJECT_IGNORE, 0o600),
+                        (root / "version-project/release/mobile-release.json", L.SHELL_PROJECT_CONFIG, 0o600),
+                        (root / "version-project/unrelated.txt", b"keep unrelated version fixture data\n", 0o600),
+                        *((root / case / name, data, stat.S_IMODE(mode)) for case in L.SHELL_SESSION_CASES
+                          for name, mode, _, data in L._shell_session_roster(value, case) if stat.S_ISREG(mode)),
+                        *((root / case / name, data, 0o600) for case in L.SHELL_TOOLS_OFFLINE_CASES
+                          for name, mode, _, data in L._shell_tools_offline_roster(value, case) if stat.S_ISREG(mode)),
+                         *((root / case / name, data, 0o600) for case in L.SHELL_ANDROID_CASES
+                           for name, mode, _, data in L._shell_android_roster(value, case) if stat.S_ISREG(mode))])
+                    self.assertEqual([call.args for call in ownership.call_args_list], [
+                        (path, value["runnerUid"], value["runnerGid"]) for path in
+                        (root / "positive-project/version.properties", root / "positive-project",
+                         *(root / "candidate-evidence" / name for name in L.SHELL_CANDIDATE_DOCUMENTS),
+                         root / "candidate-evidence/operation", root / "candidate-evidence", *(root / name for name, _ in PATH_FIXTURE_NODES))] + [
+                        (root / "workflow-project/app/build.gradle.kts", 0, 0),
+                        *((root / "workflow-project" / name, value["runnerUid"], value["runnerGid"]) for name in
+                          ("version.properties", ".gitignore", ".github/workflows/unrelated.yml", ".github/workflows/mobile-preflight.yml",
+                           ".github/workflows", ".github")),
+                        (root / "workflow-project/app", 0, 0), (root / "workflow-project", value["runnerUid"], value["runnerGid"]),
+                        (root / "metadata-project/app/build.gradle.kts", 0, 0),
+                        *((root / "metadata-project" / name, value["runnerUid"], value["runnerGid"]) for name in
+                          ("version.properties", ".gitignore", "release/mobile-release.json", "release/store/android/en-US/title.txt",
+                           "release/store/android/en-US/short_description.txt", "release/store/android/en-US/keep.txt",
+                           "release/store/android/en-US", "release/store/android", "release/store", "release")),
+                        (root / "metadata-project/app", 0, 0), (root / "metadata-project", value["runnerUid"], value["runnerGid"]),
+                        *((root / "version-project" / name, value["runnerUid"], value["runnerGid"]) for name in
+                          (".gitignore", "release/mobile-release.json", "unrelated.txt", "release", ".")),
+                        *((root / case / name, *owners) for case in L.SHELL_SESSION_CASES
+                          for name, _, owners, _ in L._shell_session_roster(value, case)),
+                        *((root / case / name, *owners) for case in L.SHELL_TOOLS_OFFLINE_CASES
+                          for name, _, owners, _ in L._shell_tools_offline_roster(value, case)),
+                         *((root / case / name, *owners) for case in L.SHELL_ANDROID_CASES
+                           for name, _, owners, _ in L._shell_android_roster(value, case))])
+                    links.assert_called_once_with("input.jks", root / "session-refusals/sources/link.jks")
+                    self.assertTrue(all(call.kwargs == {"follow_symlinks": False} for call in ownership.call_args_list[-310:]))
+                    self.assertEqual([call.args for call in modes.call_args_list], [(root / "positive-project/app", 0o555),
+                        (root / "workflow-project/.github/workflows", 0o700), (root / "workflow-project/.github", 0o700),
+                        (root / "workflow-project/app", 0o555), (root / "workflow-project", 0o700),
+                        (root / "metadata-project/release/store/android/en-US", 0o700), (root / "metadata-project/release/store/android", 0o700),
+                        (root / "metadata-project/release/store", 0o700), (root / "metadata-project/release", 0o700),
+                        (root / "metadata-project/app", 0o555), (root / "metadata-project", 0o700),
+                        (root / "version-project/release", 0o700), (root / "version-project", 0o700), (root, 0o755)])
+                else:
+                    with self.assertRaises((ValueError, OSError)): L._shell_fixtures_prepare(value)
+                    publications = [call.args for call in modes.call_args_list if call.args[0] == root]
+                    self.assertEqual(publications, [(root, 0o755)] if fault == "published-identity" else [])
+                    if fault == "occupied":
+                        making.assert_called_once_with(root, mode=0o700)
+                        reading.assert_not_called(); scans.assert_not_called(); ownership.assert_not_called(); writer.assert_not_called()
+
+    def test_original_namespace_drift_and_unexpected_names_refuse_without_descendant_reads(self):
+        value = installed_handoff(); namespace = fixture_namespace_data(value); root = Path(namespace["root"])
+        binding = L.canonical(namespace); ancestry = {key: namespace[key] for key in ("control", "ancestors")}
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        for fault in (None, *range(9), "unknown-child", "after-scan", "ancestry"):
+            values = list(namespace["identity"])
+            if type(fault) is int: values[fault] += 1
+            node = SimpleNamespace(**dict(zip(fields, values))); scans_seen = []
+            def metadata(path):
+                self.assertEqual(path, root)
+                current = deepcopy(node)
+                if fault == "after-scan" and scans_seen: current.st_ctime_ns += 1
+                return current
+            def scan(path):
+                self.assertEqual(path, root); scans_seen.append(path)
+                names = ["unrelated"] if fault == "unknown-child" else namespace["children"]
+                context = Mock(); context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=n) for n in names))
+                context.__exit__ = Mock(return_value=False); return context
+            current_ancestry = deepcopy(ancestry)
+            if fault == "ancestry": current_ancestry["control"]["identity"][1] += 1
+            with self.subTest(fault=fault), patch.object(L, "_shell_fixture_ancestry", return_value=current_ancestry), \
+                 patch.object(Path, "lstat", metadata), patch.object(L, "_xattrs"), patch.object(L.os, "scandir", side_effect=scan), \
+                 patch.object(L, "record", side_effect=AssertionError("Namespace check cannot read a fixture leaf")):
+                if fault is None: self.assertEqual(L._shell_namespace_check(value, binding), namespace)
+                else:
+                    with self.assertRaises(ValueError): L._shell_namespace_check(value, binding)
+                if type(fault) is int or fault == "ancestry": self.assertEqual(scans_seen, [])
+        with patch.object(L, "_shell_fixture_ancestry", side_effect=AssertionError("Malformed DATA cannot authorize filesystem observation")):
+            for raw in (bytearray(binding), binding.decode(), binding + b" ", b"{}", b"x" * 2049):
+                with self.subTest(kind=type(raw)), self.assertRaises(ValueError): L._shell_namespace_check(value, raw)
+
+    def test_closed_namespaces_reject_old_shapes_wrong_authority_and_cross_family_mismatch(self):
+        value, outcome, files, expected = closed_shell_data(); original = fixture_namespace_data(value)
+        self.assertEqual(L._shell_namespace_data(value, original), original)
+        for mutate in (lambda d: d.pop("control"), lambda d: d.update(root=str(L.root_path(value))),
+                       lambda d: d.update(children=d["children"][:-1]), lambda d: d["identity"].__setitem__(2, stat.S_IFDIR | 0o711),
+                       lambda d: d["identity"].__setitem__(0, 2), lambda d: d["identity"].__setitem__(1, 4),
+                       lambda d: d["identity"].__setitem__(3, 1001), lambda d: d["identity"].__setitem__(5, True),
+                       lambda d: d["identity"].__setitem__(8, -1), lambda d: d["identity"].append(0),
+                       lambda d: d["control"].update(path="/other"), lambda d: d["control"]["identity"].append(0),
+                       lambda d: d["control"]["identity"].__setitem__(2, stat.S_IFDIR | 0o755),
+                       lambda d: d["ancestors"][0].update(path="/var"),
+                       lambda d: d["ancestors"][1]["identity"].__setitem__(2, stat.S_IFDIR | 0o711)):
+            altered = deepcopy(original); mutate(altered)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError): L._shell_namespace_data(value, altered)
+        families = ((L.shell_project_fixture, "shell-positive-project"), (L.shell_candidate_fixture, "shell-positive-candidate"),
+                    (L.shell_paths_fixture, "shell-project-paths"), (L.shell_workflow_fixture, "shell-workflow-apply"),
+                    (L.shell_metadata_fixture, "shell-metadata-save"), (L.shell_version_fixture, "shell-version-save"),
+                    *((lambda value, before, after, case=case: L.shell_session_fixture(value, case, before, after),
+                       "shell-" + case) for case in L.SHELL_SESSION_CASES),
+                    *((lambda value, before, after, case=case: L.shell_tools_offline_fixture(value, case, before, after),
+                       "shell-" + case) for case in L.SHELL_TOOLS_OFFLINE_CASES))
+        for validate, prefix in families:
+            for change in ("missing", "old-schema", "old-root", "binding-drift"):
+                before, after = (L.decode(files[prefix + "-" + phase + ".json"]) for phase in ("before", "after"))
+                if change == "missing": after.pop("namespace")
+                elif change == "old-schema": after["schemaVersion"] -= 1
+                elif change == "old-root": after["root"] = after["root"].replace("mrk-ubuntu-shell-fixtures-", "mrk-ubuntu-native-")
+                else: after["namespace"]["identity"][1] = 50
+                with self.subTest(family=prefix, change=change), self.assertRaises(ValueError):
+                    validate(value, L.canonical(before), L.canonical(after))
+        for validate, prefix in families[1:]:
+            altered = dict(files)
+            for phase in ("before", "after"):
+                name = prefix + "-" + phase + ".json"; document = L.decode(altered[name])
+                document["namespace"]["identity"][1] = 50; altered[name] = L.canonical(document)
+            validate(value, altered[prefix + "-before.json"], altered[prefix + "-after.json"])
+            with self.subTest(family=prefix), patch.object(L, "shell_closed_loader", return_value=expected), \
+                 patch.object(L, "_shell_namespace_check", side_effect=AssertionError("Closed DATA is not live authority")), \
+                 self.assertRaisesRegex(ValueError, "different original namespaces"):
+                L.shell_closed_result(value, outcome, altered)
+
+    def test_twenty_digit_roots_keep_existing_inventory_byte_caps(self):
+        value = installed_handoff(); value.update(runId="9" * 20, attempt="9" * 20)
+        namespace = fixture_namespace_data(value)
+        self.assertEqual(str(L.shell_fixture_root(value)), namespace["root"])
+        self.assertLess(len(L.canonical(namespace)), 2048)
+        for document in (project_fixture_data(value), project_fixture_data(value, saved=True), candidate_fixture_data(value),
+                         path_fixture_data(value), path_fixture_data(value, changed=True),
+                         workflow_fixture_data(value), workflow_fixture_data(value, installed=True),
+                         metadata_fixture_data(value), metadata_fixture_data(value, saved=True),
+                         version_fixture_data(value), version_fixture_data(value, saved=True)):
+            self.assertLessEqual(len(L.canonical(document)), 8192)
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            for after in (False, True):
+                self.assertLessEqual(len(L.canonical(tools_offline_fixture_data(value, case, after=after))), 16 << 10)
+        for field in ("runId", "attempt"):
+            for bad in ("", "0", "01", "1-2", "9" * 21, 10, True):
+                altered = dict(value); altered[field] = bad
+                with self.subTest(field=field, bad=bad), self.assertRaises(ValueError): L.shell_fixture_root(altered)
+
+    def test_source_has_one_constructor_after_admission_and_postchecks_after_success(self):
+        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
+        unit = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "unit_start")
+        branch = next(n for n in unit.body if isinstance(n, ast.If) and ast.unparse(n.test) == "'shell' in value")
+        loop = next(n for n in branch.body if isinstance(n, ast.For))
+        self.assertEqual(ast.unparse(loop.iter), "shell_cases(value)")
+        self.assertEqual(ast.unparse(branch.body[1]), "expected = _installed_payload(value, loader, original)")
+        self.assertEqual(ast.unparse(branch.body[2]),
+                         "github_expected = _shell_github_materials_prepare(value, loader, original, expected) if shell_github(value) else None")
+        self.assertEqual(ast.unparse(branch.body[3]), "namespace = _shell_fixtures_prepare(value)")
+        self.assertEqual(ast.unparse(branch.body[4]), "boundary_host = None")
+        self.assertEqual(ast.unparse(branch.body[5].test), "shell_normal_boundaries(value)")
+        self.assertEqual(ast.unparse(branch.body[6].test), "shell_github(value)")
+        self.assertIs(branch.body[7], loop)
+        self.assertEqual(ast.unparse(branch.body[8]), "_shell_fixtures_final(value, namespace)")
+        self.assertEqual(L.SHELL_CASES[10], "metadata-save")
+        self.assertEqual(L.SHELL_CASES[18:21], ("offline-settlement", "settled-failure", "version-save"))
+        self.assertEqual(ast.unparse(loop.body[0]), "boundary = None")
+        self.assertIsInstance(loop.body[1], ast.Try)
+        guarded = loop.body[1]
+        self.assertEqual(guarded.handlers, [])  # No exception swallowing or retry.
+        self.assertEqual(guarded.orelse, [])
+        self.assertEqual(ast.unparse(guarded.body[0].test), "case in SHELL_GITHUB_BOUNDARY_CASES")
+        self.assertEqual(ast.unparse(guarded.body[1]), "environment, log_binding = _shell_prepare(value, case, namespace)")
+        self.assertEqual(ast.unparse(guarded.body[2].body[0]), "cases[case] = _shell_normal(value, environment, expected, log_binding)")
+        self.assertEqual(ast.unparse(guarded.body[-2]), "_shell_namespace_check(value, namespace)")
+        self.assertEqual(ast.unparse(guarded.body[-1]), "if boundary is not None:\n    _github_boundary_finish(boundary, cases[case])")
+        self.assertEqual(ast.unparse(guarded.finalbody[0]), "if boundary is not None:\n    _github_boundary_close_after(boundary)")
+        self.assertEqual(sum(isinstance(n, ast.Try) for n in ast.walk(branch)), 1)
+        calls = [n.func.id for n in ast.walk(unit) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+        self.assertEqual(calls.count("_shell_fixtures_prepare"), 1)
+        prepare = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_shell_prepare")
+        self.assertEqual(ast.unparse(prepare.body[0]), "_shell_namespace_check(value, namespace)")
+
+
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
 class ProjectDraftLifecycleContracts(unittest.TestCase):
     def test_fixed_saved_bytes_are_derived_from_actual_pure_core_and_wire_order(self):
         # Import the actual in-memory functions only when this focused DATA
@@ -2305,11 +3582,47 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(hashlib.sha256(L.SHELL_PROJECT_CONFIG).hexdigest(), L.SHELL_PROJECT_RECEIPT["readback"]["sha256"])
         ignored, additions = prepare_edit_ignore(b"")
         self.assertEqual(ignored, L.SHELL_PROJECT_IGNORE)
-        self.assertEqual(len(additions), 7)
+        self.assertEqual(len(additions), 13)
         self.assertEqual(prepare_edit_ignore(ignored), (ignored, ()))
+        # The installed observers compare against these literal bytes; stale
+        # count/size copies must fail here rather than in an expensive GUI run.
+        for name in ("installed_shell_observation.rs", "installed_shell_observation_macos.rs"):
+            native = (SOURCE / "desktop/src-tauri/src" / name).read_text()
+            declared, lines = native.split("const IGNORE_LINES: [&str; ", 1)[1].split("] = [", 1)
+            self.assertEqual((int(declared), tuple(json.loads("[" + lines.split("];", 1)[0] + "]"))),
+                             (len(additions), additions))
+            if name == "installed_shell_observation.rs":
+                self.assertIn(f"const IGNORE_BYTES: u32 = {len(ignored)};", native)
+        aqua = ast.parse((SOURCE / "desktop/tools/macos_aqua_qualification.py").read_bytes())
+        rules = next(node for node in aqua.body if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "IGNORE_RULES" for target in node.targets))
+        self.assertEqual(ast.literal_eval(rules.value), ignored)
 
-    def test_shell_fixture_roster_fits_the_unchanged_root_evidence_cap(self):
+    def test_shell_fixture_roster_fits_shell_only_cap_without_changing_aggregate_or_other_profiles(self):
         value, _, _, _ = closed_shell_data()
+        # The namespace exists before every old session/Tools/Offline original,
+        # so its shared Rust roster and both finite link bounds must agree.
+        native = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        tools_native = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        marker = "const SESSION_FIXTURE_NAMESPACE: [&str; "
+        self.assertEqual(native.count(marker), 1)
+        declared, entries = native.split(marker, 1)[1].split("] = [", 1)
+        names = tuple(json.loads("[" + entries.split("];", 1)[0].strip().removesuffix(",") + "]"))
+        self.assertEqual((int(declared), len(names), len(set(names))), (24, 24, 24))
+        self.assertEqual(names, L.SHELL_FIXTURE_CHILDREN)
+        namespace = fixture_namespace_data(value)
+        self.assertEqual(namespace["children"], list(names))
+        self.assertEqual(namespace["identity"][5], len(names) + 2)
+        session_capture = native.split("impl SessionFixture {", 1)[1].split("    fn namespace_unchanged", 1)[0]
+        self.assertEqual(session_capture.count("id[5] > (SESSION_FIXTURE_NAMESPACE.len() as u64 + 2)"), 1)
+        self.assertEqual(tools_native.count("id[5] > (super::SESSION_FIXTURE_NAMESPACE.len() as u64 + 2)"), 1)
+        self.assertNotIn("id[5] > 20", session_capture)
+        self.assertNotIn("id[5] > 20", tools_native)
+        self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
+                                       "session-inputs", "session-refusals", "session-loss", "session-deadline", "session-ios-firebase", "metadata-save",
+                                       "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
+                                       "offline-drift", "offline-cancel", "offline-settlement", "settled-failure", "version-save",
+                                       "android-build", "android-build-failure", "android-build-cancel", "android-build-refusals"))
         roster = L.public_files(value)
         self.assertEqual({name for name in roster if name.startswith("shell-positive-project-")},
                          {"shell-positive-project-before.json", "shell-positive-project-after.json"})
@@ -2317,19 +3630,45 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                          {"shell-" + case + "-xvfb.stderr" for case in L.SHELL_CASES})
         self.assertEqual({name for name in roster if name.startswith("shell-positive-candidate-")},
                          {"shell-positive-candidate-before.json", "shell-positive-candidate-after.json"})
-        self.assertEqual(len(roster), 84)
-        self.assertEqual(len(roster) + 2, 86)
-        self.assertEqual(len(L.root_phases(value)), 18)
-        self.assertLessEqual(len(roster), 128)
+        self.assertEqual({name for name in roster if name.startswith("shell-workflow-apply-") and name.endswith(".json")},
+                         {"shell-workflow-apply-before.json", "shell-workflow-apply-after.json"})
+        self.assertEqual({name for name in roster if name.startswith("shell-metadata-save-") and name.endswith(".json")},
+                         {"shell-metadata-save-before.json", "shell-metadata-save-after.json"})
+        self.assertEqual({name for name in roster if name.startswith("shell-session-") and name.endswith(".json")},
+                         {"shell-" + case + "-" + phase + ".json" for case in L.SHELL_SESSION_CASES for phase in ("before", "after")})
+        self.assertEqual({name for name in roster if name.startswith(("shell-tools-", "shell-offline-")) and name.endswith(".json")},
+                         {"shell-" + case + "-" + phase + ".json" for case in L.SHELL_TOOLS_OFFLINE_CASES for phase in ("before", "after")})
+        self.assertEqual({name for name in roster if name.startswith("shell-settled-failure")},
+                         {"shell-settled-failure.stdout", "shell-settled-failure.stderr",
+                          "shell-settled-failure-xvfb.stderr", "shell-settled-failure-failure.labels"})
+        self.assertEqual({name for name in roster if name.endswith("failure.labels")},
+                         {"shell-settled-failure-failure.labels"})
+        self.assertEqual({name for name in roster if name.startswith("shell-version-save")},
+                         {"shell-version-save.stdout", "shell-version-save.stderr", "shell-version-save-xvfb.stderr",
+                          "shell-version-save-before.json", "shell-version-save-after.json"})
+        self.assertEqual({name for name in roster if name.startswith("shell-session-ios-firebase")},
+                         {"shell-session-ios-firebase" + suffix for suffix in
+                          (".stdout", ".stderr", "-xvfb.stderr", "-before.json", "-after.json")})
+        self.assertEqual(len(roster), 188)
+        self.assertEqual(len(roster) + 2, 190)
+        self.assertEqual(len(L.root_phases(value)), 39)
+        self.assertEqual(L.SHELL_PUBLIC_FILE_LIMIT, 190)
+        self.assertEqual(L.TOTAL_LIMIT, 32 << 20)
+        self.assertLessEqual(len(roster), L.SHELL_PUBLIC_FILE_LIMIT)
         for case in ("positive", "refuse-writable", "refuse-pth"):
             self.assertFalse(any(name.startswith("shell-positive-project-") for name in L.public_files(installed_handoff(case))))
             self.assertFalse(any(name.startswith("shell-positive-candidate-") for name in L.public_files(installed_handoff(case))))
+            self.assertFalse(any(name.startswith("shell-workflow-apply-") for name in L.public_files(installed_handoff(case))))
+            self.assertFalse(any(name.startswith("shell-metadata-save-") for name in L.public_files(installed_handoff(case))))
+            self.assertFalse(any(name.startswith("shell-version-save-") for name in L.public_files(installed_handoff(case))))
+            self.assertFalse(any(name.startswith(("shell-tools-", "shell-offline-")) for name in L.public_files(installed_handoff(case))))
+            self.assertLessEqual(len(L.public_files(installed_handoff(case))), 128)
 
     def test_positive_typed_schema_rejects_each_missing_or_changed_leaf(self):
         expected = project_draft_receipt()
         raw = L.canonical(expected)
-        self.assertEqual(len(raw), 2041)  # The one receipt includes its trailing newline.
-        self.assertEqual(hashlib.sha256(raw).hexdigest(), "9896be85da12227c4920d61c65a0c50d6701ca4ae5c405a6d5c6a072a133d9af")
+        self.assertEqual(len(raw), 2042)  # The one receipt includes its trailing newline.
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), "4abcdf39143d07b5ed4a4bd474e983fcdd12a3f24a3e61a1a6bc0ac0bc2bf57a")
         self.assertTrue(raw.endswith(b"\n"))
         self.assertLessEqual(len(raw), 2048)
         self.assertEqual(L.shell_project_receipt(raw), expected)
@@ -2368,6 +3707,9 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     with patch.object(L, "shell_closed_loader", return_value=mappings), self.assertRaises(ValueError):
                         L.shell_closed_result(value, outcome, altered)
         prior_u = deepcopy(expected)
+        prior_u["schemaVersion"] = 3
+        prior_u["methods"] = "twelve-passive"
+        prior_u["quit"]["operation"] = 6
         prior_u["save"]["createReleaseDirectory"] = False
         prior_u["readback"].update(size=692, sha256="4b3a5aaa718b018101ee0fcd0e612285be8a1b93cab20c5ff15e8d441069b917")
         self.assertEqual(hashlib.sha256(L.canonical(prior_u)).hexdigest(), "40389f4ea473b4324690bf44bbc98fb8cc8106e829364fe07d1a3a2b8b9340ad")
@@ -2386,10 +3728,15 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(len(L.canonical(legacy_v2)), 2029)
         legacy_r = {**prior_u, "methods": "eleven-passive", "quit": {**prior_u["quit"], "operation": 3}}
         self.assertEqual(hashlib.sha256(L.canonical(legacy_r)).hexdigest(), "aae33b86cb288492032b903bc845929b08e904173264762971e65b3903f05af8")
+        predecessor = {**expected, "schemaVersion": 3, "methods": "thirteen-passive"}
+        self.assertEqual(hashlib.sha256(L.canonical(predecessor)).hexdigest(), "bb1e915f24abab3a6ba30e188af070abf7ad99bc735733f3fb28d045d6773b53")
+        prior_twelve = {**expected, "schemaVersion": 3, "methods": "twelve-passive", "quit": {**expected["quit"], "operation": 6}}
+        stale_thirteen = {**expected, "methods": "13-input-assess"}
         save_only = {key: child for key, child in expected.items() if key not in {"guidance", "savedReads"}}
         guidance_only = {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals", "savedReads"}}
         saved_reads_only = {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals", "guidance"}}
         for changed in (b"", b"{}", L.canonical(prior_u), L.canonical(legacy), L.canonical(legacy_v2), L.canonical(legacy_r), L.canonical({**expected, "methods": "six-passive"}),
+                        L.canonical(predecessor), L.canonical(prior_twelve), L.canonical(stale_thirteen),
                         L.canonical(save_only), L.canonical(guidance_only), L.canonical(saved_reads_only),
                         L.canonical({key: child for key, child in expected.items() if key != "save"}),
                         L.canonical({**expected, "save": {}}), L.canonical({**expected, "save": []}),
@@ -2413,7 +3760,7 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         stdout, stderr = positive_capture()
         parsed = L.shell_result(stdout, stderr, "positive", 0, map_data())
         self.assertEqual(parsed["projectDraft"], project_draft_receipt())
-        self.assertEqual(parsed["candidateDocuments"], candidate_documents_receipt())
+        self.assertEqual(parsed["lifecycleDocuments"], lifecycle_documents_receipt())
         lines = stdout.splitlines(keepends=True)
         noise = b"ordinary wrapper text\nMRKDBG_DESKTOP_BOOTSTRAP=setup-enter\n"
         self.assertEqual(L.shell_result(noise + noise.join(lines), noise, "positive", 0, map_data()), parsed)
@@ -2517,7 +3864,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                 L.shell_project_fixture(value, before, after)
 
     def test_actual_inventory_observes_only_fixed_nodes_and_refuses_changed_or_pending_data(self):
-        value = installed_handoff(); root = L.root_path(value); project = root / "positive-project"
+        value = installed_handoff(); root = L.root_path(value); namespace = fixture_namespace_data(value)
+        binding = L.canonical(namespace); project = Path(namespace["root"]) / "positive-project"
         for saved in (False, True):
             fixture = project_fixture_data(value, saved=saved)
             by_path = {project if row["path"] == "." else project / row["path"]: row for row in fixture["entries"]}
@@ -2533,9 +3881,11 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                 row = by_path[path]
                 return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
             with self.subTest(saved=saved), patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
+                 patch.object(L, "_shell_namespace_check", return_value=namespace) as namespace_check, \
                  patch.object(Path, "lstat", file_stat), patch.object(L.os, "scandir", side_effect=scan), \
                  patch.object(L, "record", side_effect=read_data) as reads, patch.object(L, "_absent") as absent:
-                self.assertEqual(L._shell_project_inventory(value, saved=saved), fixture)
+                self.assertEqual(L._shell_project_inventory(value, binding, saved=saved), fixture)
+                self.assertEqual([call.args for call in namespace_check.call_args_list], [(value, binding)] * 2)
                 self.assertEqual([call.args for call in reads.call_args_list],
                                  [(project / row["path"], row["size"]) for row in fixture["entries"] if row["kind"] == "file"])
                 self.assertEqual(reads.call_count, 4 if saved else 2)
@@ -2544,53 +3894,107 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     reads.reset_mock()
                     by_path[parent]["children"].append(extra)
                     with self.assertRaises(ValueError):
-                        L._shell_project_inventory(value, saved=saved)
+                        L._shell_project_inventory(value, binding, saved=saved)
                     reads.assert_not_called()  # Never inspect an unadmitted journal/metadata subtree.
                     by_path[parent]["children"].pop()
 
-    def test_prepare_creates_only_fixed_positive_siblings_without_running_anything(self):
-        value = installed_handoff(); root = L.root_path(value); project = root / "positive-project"
-        evidence = root / "candidate-evidence"
+    def test_prepare_keeps_per_case_before_captures_without_recreating_fixtures(self):
+        value = installed_handoff(); root = L.root_path(value); namespace = fixture_namespace_data(value)
+        binding = L.canonical(namespace)
         for case in L.SHELL_CASES:
             writer = Mock()
-            with self.subTest(case=case), patch.object(L, "_ROOT", root), patch.object(L, "_D", SimpleNamespace(write=writer)), \
-                 patch.object(Path, "mkdir", autospec=True) as mkdir, patch.object(L.os, "chown") as chown, patch.object(L.os, "chmod") as chmod, \
-                 patch.object(L, "_shell_log_prepare", return_value="original-log-binding") as log, \
-                 patch.object(L, "_absent"), patch.object(L, "_retain") as retain, \
-                 patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)) as inventory, \
-                 patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)) as candidate_inventory, \
-                 patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value)) as path_inventory:
-                self.assertEqual(L._shell_prepare(value, case), (L.shell_environment(value, case), "original-log-binding"))
+            # Each comma-separated context manager adds a static Python block.
+            # Keep the same left-to-right acquisition and reverse-order cleanup
+            # without exceeding the compiler's nesting limit as cases grow.
+            with self.subTest(case=case), ExitStack() as stack:
+                stack.enter_context(patch.object(L, "_ROOT", root))
+                stack.enter_context(patch.object(L, "_D", SimpleNamespace(write=writer)))
+                mkdir = stack.enter_context(patch.object(Path, "mkdir", autospec=True))
+                chown = stack.enter_context(patch.object(L.os, "chown"))
+                chmod = stack.enter_context(patch.object(L.os, "chmod"))
+                namespace_check = stack.enter_context(patch.object(L, "_shell_namespace_check", return_value=namespace))
+                prepare = stack.enter_context(patch.object(L, "_shell_fixtures_prepare"))
+                log = stack.enter_context(patch.object(L, "_shell_log_prepare", return_value="original-log-binding"))
+                stack.enter_context(patch.object(L, "_absent"))
+                retain = stack.enter_context(patch.object(L, "_retain"))
+                inventory = stack.enter_context(patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)))
+                candidate_inventory = stack.enter_context(patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)))
+                path_inventory = stack.enter_context(patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value)))
+                workflow_inventory = stack.enter_context(patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value)))
+                metadata_inventory = stack.enter_context(patch.object(L, "_shell_metadata_inventory", return_value=metadata_fixture_data(value)))
+                version_inventory = stack.enter_context(patch.object(L, "_shell_version_inventory", return_value=version_fixture_data(value)))
+                session_inventory = stack.enter_context(patch.object(L, "_shell_session_inventory", return_value={"inert": "session-fixture"}))
+                tools_inventory = stack.enter_context(patch.object(L, "_shell_tools_offline_inventory", return_value={"inert": "tools-offline-fixture"}))
+                android_inventory = stack.enter_context(patch.object(L, "_shell_android_inventory", return_value={"inert": "android-fixture"}))
+                self.assertEqual(L._shell_prepare(value, case, binding), (L.shell_environment(value, case), "original-log-binding"))
+                namespace_check.assert_called_once_with(value, binding)
+                prepare.assert_not_called(); chmod.assert_not_called()
                 log.assert_called_once_with(value, case)
-                fixture_writes = [call.args for call in writer.call_args_list if project in call.args[0].parents]
-                self.assertEqual(fixture_writes, [(project / "app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
-                                                (project / "version.properties", L.SHELL_PROJECT_VERSION, 0o600)] if case == "positive" else [])
-                candidate_writes = [call.args for call in writer.call_args_list if evidence in call.args[0].parents]
-                self.assertEqual(candidate_writes, [(evidence / relative, raw, 0o600) for relative, raw in L.SHELL_CANDIDATE_DOCUMENTS.items()]
-                                 if case == "positive" else [])
-                self.assertEqual(mkdir.call_count, 12 if case == "positive" else 17 if case == "project-paths" else 8)
+                self.assertEqual(mkdir.call_count, 8)
+                self.assertEqual(chown.call_count, 9)
+                self.assertEqual(writer.call_count, 2)
+                self.assertTrue(all(root in call.args[0].parents for call in
+                                    [*mkdir.call_args_list, *chown.call_args_list, *writer.call_args_list]))
                 if case == "positive":
-                    self.assertNotIn(project / "release", [call.args[0] for call in mkdir.call_args_list])
-                    self.assertEqual([call.args for call in chmod.call_args_list], [(project / "app", 0o555)])
-                    self.assertEqual([call.args for call in chown.call_args_list if call.args[0] == project or project in call.args[0].parents],
-                                     [(path, value["runnerUid"], value["runnerGid"]) for path in
-                                      (project / "version.properties", project)])
-                    inventory.assert_called_once_with(value)
-                    candidate_inventory.assert_called_once_with(value)
-                    self.assertEqual([call.args for call in chown.call_args_list if call.args[0] == evidence or evidence in call.args[0].parents],
-                                     [(path, value["runnerUid"], value["runnerGid"]) for path in
-                                      (*(evidence / relative for relative in L.SHELL_CANDIDATE_DOCUMENTS), evidence / "operation", evidence)])
+                    inventory.assert_called_once_with(value, binding)
+                    candidate_inventory.assert_called_once_with(value, binding)
+                    path_inventory.assert_not_called(); workflow_inventory.assert_not_called()
+                    metadata_inventory.assert_not_called()
                     self.assertEqual([call.args for call in retain.call_args_list], [
                         ("shell-positive-project-before.json", L.canonical(project_fixture_data(value))),
                         ("shell-positive-candidate-before.json", L.canonical(candidate_fixture_data(value)))])
                 elif case == "project-paths":
-                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); chmod.assert_not_called()
-                    path_inventory.assert_called_once_with(value)
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called()
+                    path_inventory.assert_called_once_with(value, binding)
+                    workflow_inventory.assert_not_called(); metadata_inventory.assert_not_called()
                     retain.assert_called_once_with("shell-project-paths-before.json", L.canonical(path_fixture_data(value)))
-                    self.assertEqual([call.args for call in writer.call_args_list if call.args[0].name not in {"authority", "shell-project-paths-bus.conf"}][-5:],
-                                     [(root / name, b"inert path-picker fixture\n", 0o600) for name, directory in PATH_FIXTURE_NODES if not directory])
+                elif case == "workflow-apply":
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_called_once_with(value, binding)
+                    metadata_inventory.assert_not_called()
+                    retain.assert_called_once_with("shell-workflow-apply-before.json", L.canonical(workflow_fixture_data(value)))
+                elif case == "metadata-save":
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_not_called()
+                    metadata_inventory.assert_called_once_with(value, binding)
+                    retain.assert_called_once_with("shell-metadata-save-before.json", L.canonical(metadata_fixture_data(value)))
+                elif case == "version-save":
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_not_called()
+                    version_inventory.assert_called_once_with(value, binding)
+                    retain.assert_called_once_with("shell-version-save-before.json", L.canonical(version_fixture_data(value)))
+                elif case in L.SHELL_SESSION_CASES:
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_not_called()
+                    session_inventory.assert_called_once_with(value, binding, case)
+                    retain.assert_called_once_with("shell-" + case + "-before.json", L.canonical({"inert": "session-fixture"}))
+                elif case in L.SHELL_TOOLS_OFFLINE_CASES:
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_not_called()
+                    tools_inventory.assert_called_once_with(value, binding, case)
+                    retain.assert_called_once_with("shell-" + case + "-before.json", L.canonical({"inert": "tools-offline-fixture"}))
+                elif case in L.SHELL_ANDROID_CASES:
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_not_called()
+                    android_inventory.assert_called_once_with(value, binding, case)
+                    retain.assert_called_once_with("shell-" + case + "-before.json", L.canonical({"inert": "android-fixture"}))
                 else:
-                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called(); retain.assert_not_called(); chmod.assert_not_called()
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_not_called(); retain.assert_not_called(); chmod.assert_not_called()
+                if case not in L.SHELL_SESSION_CASES:
+                    session_inventory.assert_not_called()
+                if case != "metadata-save":
+                    metadata_inventory.assert_not_called()
+                if case != "version-save":
+                    version_inventory.assert_not_called()
+                if case not in L.SHELL_TOOLS_OFFLINE_CASES:
+                    tools_inventory.assert_not_called()
+                if case not in L.SHELL_ANDROID_CASES:
+                    android_inventory.assert_not_called()
+        with patch.object(L, "_shell_namespace_check", side_effect=L.Refused("original namespace changed")), \
+             patch.object(L, "_shell_log_prepare") as logs, patch.object(Path, "mkdir") as mkdir:
+            with self.assertRaises(ValueError): L._shell_prepare(value, "normal", binding)
+            logs.assert_not_called(); mkdir.assert_not_called()
 
     def test_closed_case_requires_native_receipt_and_same_before_after_originals(self):
         value, outcome, files, expected = closed_shell_data()
@@ -2601,6 +4005,10 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertNotEqual(result["projectDraft"]["fixture"]["before"], result["projectDraft"]["fixture"]["after"])
         self.assertEqual(result["cases"]["normal"]["domAndGtkObserved"], False)
         self.assertEqual(len(result["cases"]["quit-outstanding"]["maps"]), 1)
+        self.assertEqual(result["settledFailure"], result["cases"]["settled-failure"])
+        self.assertEqual(result["settledFailure"]["exitCode"], 1)
+        self.assertIs(result["settledFailure"]["qualified"], False)
+        self.assertIs(result["settledFailure"]["expectedFailureObserved"], True)
         for change in ("missing-before", "missing-after", "different-after", "coerced-case", "missing-receipt",
                        "case-save-only", "stdout-save-only", "case-guidance-only", "stdout-guidance-only",
                        "case-saved-reads-only", "stdout-saved-reads-only", "case-no-saved-reads", "stdout-no-saved-reads", "wrong-argv",
@@ -2638,7 +4046,601 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             with self.subTest(change=change), patch.object(L, "shell_closed_loader", return_value=expected), self.assertRaises((ValueError, KeyError)):
                 L.shell_closed_result(value, current, changed)
 
+        for change in ("missing-label", "truncated-label", "wrong-label", "missing-handoff", "duplicate-handoff", "verified",
+                       "zero-exit", "bool-exit", "other-exit", "wrong-argv", "missing-case", "case-qualified", "case-exit", "case-coerced"):
+            changed, current = deepcopy(files), deepcopy(outcome)
+            name = "shell-settled-failure"
+            if change == "missing-label": changed.pop(name + "-failure.labels")
+            elif change == "truncated-label": changed[name + "-failure.labels"] = L.SHELL_SETTLED_FAILURE_LABELS[:-1]
+            elif change == "wrong-label": changed[name + "-failure.labels"] = L.SHELL_SETTLED_FAILURE_LABELS.replace(b"=dom", b"=tick")
+            elif change in ("missing-handoff", "duplicate-handoff"):
+                handoff = b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n"
+                changed[name + ".stdout"] = changed[name + ".stdout"].replace(handoff, b"" if change == "missing-handoff" else handoff * 2)
+            elif change == "verified": changed[name + ".stdout"] += b"MRK_INSTALLED_SHELL_OBSERVATION=settled-failure-verified\n"
+            elif change in ("zero-exit", "bool-exit", "other-exit", "wrong-argv"):
+                command = next(row for row in current["commands"] if row["phase"] == name)
+                if change == "wrong-argv": command["argv"][-1] = "positive"
+                else: command["exitCode"] = {"zero-exit": 0, "bool-exit": True, "other-exit": 2}[change]
+            else:
+                cases = L.decode(changed["shell-cases.json"])
+                if change == "missing-case": cases.pop("settled-failure")
+                elif change == "case-qualified": cases["settled-failure"]["qualified"] = True
+                elif change == "case-exit": cases["settled-failure"]["exitCode"] = 0
+                else: cases["settled-failure"]["expectedFailureObserved"] = 1
+                changed["shell-cases.json"] = L.canonical(cases)
+            with self.subTest(negative=change), patch.object(L, "shell_closed_loader", return_value=expected), \
+                 self.assertRaises((ValueError, KeyError)):
+                L.shell_closed_result(value, current, changed)
 
+    def test_metadata_receipt_requires_each_typed_original_finality_and_readback_leaf(self):
+        expected = metadata_receipt_data(); raw = L.canonical(expected)
+        self.assertLessEqual(len(raw), 2048)
+        self.assertEqual(L.shell_metadata_receipt(raw), expected)
+        value, outcome, files, mappings = closed_shell_data()
+
+        def leaves(value, prefix=()):
+            for key, child in (value.items() if type(value) is dict else enumerate(value)):
+                if type(child) in (dict, list):
+                    yield from leaves(child, (*prefix, key))
+                else:
+                    yield (*prefix, key), child
+
+        for path, original in leaves(expected):
+            for mode in ("missing", "changed", "wrong-type"):
+                changed = deepcopy(expected); parent = changed
+                for key in path[:-1]:
+                    parent = parent[key]
+                if mode == "missing":
+                    del parent[path[-1]]
+                elif mode == "wrong-type":
+                    parent[path[-1]] = int(original) if type(original) is bool else float(original) if type(original) is int else None
+                else:
+                    parent[path[-1]] = not original if type(original) is bool else original + 1 if type(original) is int else original + "-other"
+                with self.subTest(path=path, mode=mode):
+                    with self.assertRaises(ValueError):
+                        L.shell_metadata_receipt(L.canonical(changed))
+                    with self.assertRaises(ValueError):
+                        L.shell_result(*metadata_capture(changed), "metadata-save", 0, mappings)
+                    altered = dict(files); cases = L.decode(altered["shell-cases.json"])
+                    cases["metadata-save"]["metadataSave"] = changed
+                    altered["shell-cases.json"] = L.canonical(cases)
+                    with patch.object(L, "shell_closed_loader", return_value=mappings), self.assertRaises(ValueError):
+                        L.shell_closed_result(value, outcome, altered)
+        for changed in (b"", b"{}", b"[]", b"null", raw + b" " * 2048,
+                        raw.replace(b'"apply":1', b'"apply":1,"apply":1'),
+                        raw.replace(b'"originals":{', b'"originals":{},"originals":{'),
+                        L.canonical(project_draft_receipt()), L.canonical(L.SHELL_WORKFLOW_RECEIPT),
+                        L.canonical({**expected, "message": "not a finality fact"}),
+                        *(L.canonical({key: child for key, child in expected.items() if key != omitted})
+                          for omitted in ("requests", "draft", "reviews", "confirmation", "outcomes", "nativeReasons", "originals", "readback", "quit"))):
+            with self.subTest(raw=changed), self.assertRaises(ValueError):
+                L.shell_metadata_receipt(changed)
+
+    def test_metadata_requires_original_stdout_order_complete_receipt_and_zero_exit(self):
+        stdout, stderr = metadata_capture(); expected = map_data()
+        parsed = L.shell_result(stdout, stderr, "metadata-save", 0, expected)
+        self.assertEqual(parsed["metadataSave"], metadata_receipt_data())
+        lines = stdout.splitlines(keepends=True)
+        self.assertEqual(len(lines), 5)
+        noise = b"ordinary wrapper text\nMRKDBG_DESKTOP_BOOTSTRAP=setup-enter\n"
+        self.assertEqual(L.shell_result(noise + noise.join(lines), noise, "metadata-save", 0, expected), parsed)
+        for order in permutations(range(5)):
+            if order != (0, 1, 2, 3, 4):
+                with self.subTest(order=order), self.assertRaises(ValueError):
+                    L.shell_result(b"".join(lines[index] for index in order), stderr, "metadata-save", 0, expected)
+        changes = [(b"", b""), (b"", stdout), (stdout.rstrip(b"\n"), b""), (stdout.replace(b"\n", b"\r\n"), b""),
+                   (stdout.replace(b"=available", b"=unavailable"), b""), (stdout + b"MRK_UNEXPECTED=1\n", b""),
+                   (stdout + L.SHELL_WORKFLOW_MARKER + L.canonical(L.SHELL_WORKFLOW_RECEIPT), b"")]
+        for index, line in enumerate(lines):
+            changes.extend(((b"".join(lines[:index] + lines[index + 1:]), b""), (stdout + line, b""),
+                            (b"".join(lines[:index] + lines[index + 1:]), line), (stdout, line)))
+        # JSON and its original LF must fit the same unchanged receipt bound.
+        body = lines[3][len(L.SHELL_METADATA_MARKER):-1]
+        changes.append((b"".join(lines[:3]) + L.SHELL_METADATA_MARKER + body + b" " * (2048 - len(body)) + b"\n" + lines[4], b""))
+        for out, err in changes:
+            with self.subTest(stdout=out, stderr=err), self.assertRaises(ValueError):
+                L.shell_result(out, err, "metadata-save", 0, expected)
+        for code in (True, False, 1, -1, None):
+            with self.subTest(code=code), self.assertRaises(ValueError):
+                L.shell_result(stdout, stderr, "metadata-save", code, expected)
+        for case in L.SHELL_CASES:
+            if case != "metadata-save":
+                with self.subTest(case=case), self.assertRaises(ValueError):
+                    L.shell_result(stdout, stderr, case, 0, expected)
+
+    def test_metadata_fixture_preserves_originals_and_requires_one_new_and_one_replaced_inode(self):
+        value = installed_handoff(); before = metadata_fixture_data(value); after = metadata_fixture_data(value, saved=True)
+        raw, final = L.canonical(before), L.canonical(after)
+        locale = "release/store/android/en-US"
+        short, full = (locale + "/" + name + "_description.txt" for name in ("short", "full"))
+        first, last = ({row["path"]: row for row in document["entries"]} for document in (before, after))
+        with patch.object(Path, "lstat", side_effect=AssertionError("Closed metadata DATA cannot inspect a live tree")), \
+             patch.object(L, "record", side_effect=AssertionError("Closed metadata DATA cannot reopen text")):
+            result = L.shell_metadata_fixture(value, raw, final)
+        self.assertEqual(result, {
+            "fixture": "android-metadata-save-v1", "rootRetained": True, "preservedOriginals": True,
+            "createdCount": 1, "replacedCount": 1, "beforeCount": 13, "afterCount": 14,
+            "configurationUnchanged": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "files": [{"path": locale + "/" + name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "mode": 0o600}
+                      for name, data in (("title.txt", b"Public title"), ("short_description.txt", b"Public summary"),
+                                         ("keep.txt", b"untouched\n"), ("full_description.txt", b"Public description"))],
+            "before": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+            "after": {"size": len(final), "sha256": hashlib.sha256(final).hexdigest()}})
+        self.assertEqual((len(first), len(last), set(last) - set(first)), (13, 14, {full}))
+        self.assertEqual((sum(row["size"] for row in first.values() if row["kind"] == "file"),
+                          sum(row["size"] for row in last.values() if row["kind"] == "file"), first[short]["size"]), (1165, 1186, 11))
+        self.assertEqual(first[short]["sha256"], hashlib.sha256(b"Old summary").hexdigest())
+        self.assertEqual(before["absent"], [*after["absent"], full])
+        for name, original in first.items():
+            if name == short:
+                continue
+            if name not in (".", locale):
+                self.assertEqual(original, last[name])
+            # Only staging-root and locale timestamps/size may move. The
+            # title, sentinel, hint, version, config and ignore stay identical.
+            for field in range(6 if name in (".", locale) else 9):
+                changed = deepcopy(after)
+                next(row for row in changed["entries"] if row["path"] == name)["identity"][field] += 1
+                with self.subTest(preserved=name, identity=field), self.assertRaises(ValueError):
+                    L.shell_metadata_fixture(value, raw, L.canonical(changed))
+        for name in (short, full):
+            for original in first.values():
+                changed = deepcopy(after)
+                next(row for row in changed["entries"] if row["path"] == name)["identity"][1] = original["identity"][1]
+                with self.subTest(new=name, reused=original["path"]), self.assertRaises(ValueError):
+                    L.shell_metadata_fixture(value, raw, L.canonical(changed))
+        changed = deepcopy(after)
+        next(row for row in changed["entries"] if row["path"] == full)["identity"][1] = last[short]["identity"][1]
+        with self.assertRaises(ValueError): L.shell_metadata_fixture(value, raw, L.canonical(changed))
+        fresh = deepcopy(after)
+        for index, name in enumerate((short, full)):
+            next(row for row in fresh["entries"] if row["path"] == name)["identity"][1] = 900 + index
+        self.assertTrue(L.shell_metadata_fixture(value, raw, L.canonical(fresh))["preservedOriginals"])
+        mutations = (
+            lambda d: d.update(schemaVersion=True), lambda d: d.update(fixture="android-workflow-apply-v1"),
+            lambda d: d.update(root=d["root"].replace("metadata-project", "positive-project")),
+            lambda d: d.update(saved=int(d["saved"])), lambda d: d.update(absent=[]),
+            lambda d: d["entries"].pop(), lambda d: d["entries"].append(deepcopy(d["entries"][-1])),
+            lambda d: d["entries"].reverse(), lambda d: d["entries"][0]["children"].append(".mobile-release-metadata-text"),
+            lambda d: d["entries"][5]["children"].append("private"),
+            lambda d: d["entries"][6].update(path="app/../build.gradle.kts"),
+            lambda d: d["entries"][-1].update(sha256="f" * 64), lambda d: d["entries"][-1].update(size=True),
+            lambda d: d["entries"][-1].update(extra=True), lambda d: d["entries"][-1]["identity"].__setitem__(1, True),
+            lambda d: d["entries"][-1]["identity"].__setitem__(2, stat.S_IFLNK | 0o600),
+            lambda d: d["entries"][-1]["identity"].__setitem__(2, stat.S_IFREG | 0o644),
+            lambda d: d["entries"][-1]["identity"].__setitem__(3, 0),
+            lambda d: d["entries"][-1]["identity"].__setitem__(5, 2),
+            lambda d: d["entries"][-1]["identity"].__setitem__(0, 2),
+            lambda d: d["entries"][-1]["identity"].__setitem__(1, d["namespace"]["identity"][1]),
+        )
+        for phase, document in (("before", before), ("after", after)):
+            for mutate in mutations:
+                changed = deepcopy(document); mutate(changed)
+                with self.subTest(phase=phase, mutate=mutate), self.assertRaises(ValueError):
+                    L.shell_metadata_fixture(value, L.canonical(changed) if phase == "before" else raw,
+                                              L.canonical(changed) if phase == "after" else final)
+            for index, row in enumerate(document["entries"]):
+                if row["kind"] == "file":
+                    for field, bad in (("sha256", "f" * 64), ("size", float(row["size"]))):
+                        changed = deepcopy(document); changed["entries"][index][field] = bad
+                        with self.subTest(phase=phase, text=row["path"], field=field), self.assertRaises(ValueError):
+                            L.shell_metadata_fixture(value, L.canonical(changed) if phase == "before" else raw,
+                                                      L.canonical(changed) if phase == "after" else final)
+        for first_raw, last_raw in ((raw, raw), (final, final), (final, raw), (b"{}", final), (raw, b"[]"),
+                                   (json.dumps(before, indent=2).encode(), final), (raw, final + b" " * 8192),
+                                   (raw, final.replace(b'"saved":true', b'"saved":true,"saved":true'))):
+            with self.subTest(before=first_raw, after=last_raw), self.assertRaises(ValueError):
+                L.shell_metadata_fixture(value, first_raw, last_raw)
+
+    def test_metadata_inventory_reads_only_fixed_public_files_and_refuses_drift_or_residue(self):
+        value = installed_handoff(); namespace = fixture_namespace_data(value); binding = L.canonical(namespace)
+        project = Path(namespace["root"]) / "metadata-project"
+        for saved in (False, True):
+            for fault in (None, "pending", "locale-child", "mode", "owner", "bytes", "file-drift", "parent-drift", "residue", "namespace-drift"):
+                fixture = metadata_fixture_data(value, saved=saved)
+                by_path = {project if row["path"] == "." else project / row["path"]: row for row in fixture["entries"]}
+                if fault == "pending": by_path[project]["children"].append(".mobile-release-metadata-text")
+                if fault == "locale-child": by_path[project / "release/store/android/en-US"]["children"].append("private")
+                source = by_path[project / "app/build.gradle.kts"]
+                if fault == "mode": source["identity"][2] = stat.S_IFLNK | 0o444
+                if fault == "owner": source["identity"][3] = value["runnerUid"]
+                reads_seen = []
+                def file_stat(path):
+                    values = list(by_path[path]["identity"])
+                    if (fault == "file-drift" and path in reads_seen
+                            or fault == "parent-drift" and path == project and reads_seen):
+                        values[8] += 1
+                    return SimpleNamespace(**dict(zip(("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"), values)))
+                def scan(path):
+                    context = Mock()
+                    context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=name) for name in by_path[path]["children"]))
+                    context.__exit__ = Mock(return_value=False)
+                    return context
+                def read_data(path, limit):
+                    row = by_path[path]; self.assertEqual(limit, row["size"]); reads_seen.append(path)
+                    return {"path": str(path), "size": row["size"], "sha256": "f" * 64 if fault == "bytes" else row["sha256"]}
+                with self.subTest(saved=saved, fault=fault), patch.object(L, "_ROOT", L.root_path(value)), patch.object(L, "directory"), \
+                     patch.object(L, "_shell_namespace_check", side_effect=[namespace, L.Refused("changed namespace")]
+                                  if fault == "namespace-drift" else None, return_value=namespace) as namespace_check, \
+                     patch.object(Path, "lstat", file_stat), patch.object(L.os, "scandir", side_effect=scan) as scans, \
+                     patch.object(L, "record", side_effect=read_data) as reads, \
+                     patch.object(L, "_absent", side_effect=L.Refused("pending state") if fault == "residue" else None) as absent:
+                    if fault is None:
+                        self.assertEqual(L._shell_metadata_inventory(value, binding, saved=saved), fixture)
+                        self.assertEqual([call.args for call in namespace_check.call_args_list], [(value, binding)] * 2)
+                        self.assertEqual([call.args for call in reads.call_args_list],
+                                         [(project / row["path"], row["size"]) for row in fixture["entries"] if row["kind"] == "file"])
+                        self.assertEqual(reads.call_count, 8 if saved else 7)
+                        self.assertEqual([call.args[0] for call in absent.call_args_list], [project / name for name in fixture["absent"]])
+                    else:
+                        with self.assertRaises(ValueError): L._shell_metadata_inventory(value, binding, saved=saved)
+                        if fault in ("pending", "locale-child", "mode", "owner"): reads.assert_not_called()
+                    self.assertTrue(all(by_path[call.args[0]]["kind"] == "directory" for call in scans.call_args_list))
+                    self.assertTrue(all(by_path[call.args[0]]["kind"] == "file" for call in reads.call_args_list))
+        with patch.object(L, "_ROOT", L.root_path(value)), \
+             patch.object(L, "_shell_namespace_check", side_effect=AssertionError("Untyped phase cannot authorize observation")):
+            for saved in (0, 1, None, "true"):
+                with self.subTest(saved=saved), self.assertRaises(ValueError):
+                    L._shell_metadata_inventory(value, binding, saved=saved)
+
+    def test_closed_metadata_requires_native_receipt_original_exports_and_successful_command(self):
+        value, outcome, files, expected = closed_shell_data()
+        with patch.object(L, "shell_closed_loader", return_value=expected):
+            result = L.shell_closed_result(value, outcome, files)
+        self.assertEqual(result["metadataSave"]["native"], metadata_receipt_data())
+        fixture = result["metadataSave"]["fixture"]
+        self.assertEqual((fixture["createdCount"], fixture["replacedCount"]), (1, 1))
+        self.assertTrue(fixture["preservedOriginals"] and fixture["configurationUnchanged"] and fixture["noPendingState"])
+        self.assertNotEqual(fixture["before"], fixture["after"])
+        for change in ("missing-before", "missing-after", "missing-display", "display-type", "missing-metadata-case", "partial-closed",
+                       "foreign-closed", "session-closed", "extra-case", "missing-session-case", "mixed-session-case",
+                       "partial-native", "foreign-native", "session-native", "unchanged-after", "journal", "short-in-place",
+                       "missing-command", "wrong-exit", "wrong-argv"):
+            altered, current = dict(files), deepcopy(outcome)
+            if change in ("missing-before", "missing-after"):
+                altered.pop("shell-metadata-save-" + change.removeprefix("missing-") + ".json")
+            elif change == "missing-display":
+                altered.pop("shell-metadata-save-xvfb.stderr")
+            elif change == "display-type":
+                altered["shell-metadata-save-xvfb.stderr"] = "not captured bytes"
+            elif change in ("missing-metadata-case", "partial-closed", "foreign-closed", "session-closed",
+                             "extra-case", "missing-session-case", "mixed-session-case"):
+                cases = L.decode(altered["shell-cases.json"])
+                if change == "missing-metadata-case": cases.pop("metadata-save")
+                elif change == "partial-closed": cases["metadata-save"]["metadataSave"].pop("readback")
+                elif change == "session-closed": cases["metadata-save"]["metadataSave"] = L.SHELL_SESSION_RECEIPTS["session-inputs"]
+                elif change == "extra-case": cases["unexpected"] = deepcopy(cases["normal"])
+                elif change == "missing-session-case": cases.pop("session-inputs")
+                elif change == "mixed-session-case": cases["session-inputs"]["metadataSave"] = L.SHELL_METADATA_RECEIPT
+                else: cases["metadata-save"]["metadataSave"] = L.SHELL_WORKFLOW_RECEIPT
+                altered["shell-cases.json"] = L.canonical(cases)
+            elif change == "partial-native":
+                receipt = metadata_receipt_data(); receipt.pop("originals")
+                altered["shell-metadata-save.stdout"] = metadata_capture(receipt)[0]
+            elif change == "foreign-native":
+                altered["shell-metadata-save.stdout"] = workflow_capture()[0]
+            elif change == "session-native":
+                altered["shell-metadata-save.stdout"] = session_capture("session-inputs")[0]
+            elif change == "unchanged-after":
+                altered["shell-metadata-save-after.json"] = altered["shell-metadata-save-before.json"]
+            elif change in ("journal", "short-in-place"):
+                document = L.decode(altered["shell-metadata-save-after.json"])
+                if change == "journal": document["entries"][0]["children"].append(".mobile-release-metadata-text")
+                else:
+                    name = "release/store/android/en-US/short_description.txt"
+                    original = L.decode(altered["shell-metadata-save-before.json"])
+                    next(row for row in document["entries"] if row["path"] == name)["identity"][1] = next(
+                        row for row in original["entries"] if row["path"] == name)["identity"][1]
+                altered["shell-metadata-save-after.json"] = L.canonical(document)
+            elif change == "missing-command":
+                current["commands"] = [row for row in current["commands"] if row["phase"] != "shell-metadata-save"]
+            else:
+                command = next(row for row in current["commands"] if row["phase"] == "shell-metadata-save")
+                if change == "wrong-exit": command["exitCode"] = 1
+                else: command["argv"][-1] = "workflow-apply"
+            with self.subTest(change=change), patch.object(L, "shell_closed_loader", return_value=expected), \
+                 patch.object(L, "_shell_metadata_inventory", side_effect=AssertionError("No failed-work metadata rescan")), \
+                 patch.object(L, "_shell_namespace_check", side_effect=AssertionError("Closed DATA is not live authority")), \
+                 self.assertRaises((ValueError, KeyError)):
+                L.shell_closed_result(value, current, altered)
+
+    def test_metadata_postexit_inventory_and_other_original_rechecks_follow_the_success_gate(self):
+        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
+        unit = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "unit_start")
+        loop = next(node for node in ast.walk(unit) if isinstance(node, ast.For)
+                    and ast.unparse(node.iter) == "shell_cases(value)")
+        transaction = next(node for node in loop.body if isinstance(node, ast.Try))
+        branch = next(node for node in transaction.body if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'normal'")
+        self.assertEqual(len(branch.orelse), 14)
+        self.assertEqual(ast.unparse(branch.orelse[0]),
+                         "result = command('shell-' + case, shell_argv(value, case), maximum=SHELL_RECOVERY_NEGATIVE_SECONDS if case == SHELL_RECOVERY_PARTIAL else 60, env=environment, shell_log=(value, case, log_binding))")
+        self.assertEqual(ast.unparse(branch.orelse[1]),
+                         "failure_labels = read(_ROOT / 'public/shell-settled-failure-failure.labels', SHELL_FAILURE_LABEL_LIMIT) if case == 'settled-failure' else None")
+        self.assertEqual(ast.unparse(branch.orelse[2]),
+                         "cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, github_expected if shell_github(value) else expected, failure_labels=failure_labels)")
+        self.assertEqual(ast.unparse(branch.orelse[3]),
+                         "if case in SHELL_RECOVERY_CASES:\n"
+                         "    after = canonical(_shell_recovery_inventory(value, namespace, case, 'after'))\n"
+                         "    _retain('shell-' + case + '-after.json', after)\n"
+                         "    shell_recovery_fixture(value, case, *(read(_ROOT / 'public' / ('shell-' + case + '-' + stage + '.json'), SHELL_RECOVERY_INVENTORY_LIMIT) for stage in ('initial', 'generated', 'before')), after)\n"
+                         "    need(cases[case]['projectRecovery']['sourceCommit'] == value['sourceSha'], 'Recovery native source differs')")
+        self.assertEqual(ast.unparse(branch.orelse[4]),
+                         "if shell_github_preflight(value):\n    _shell_github_preflight_after(value, case, cases[case])")
+        metadata = next(node for node in branch.orelse[5:] if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'metadata-save'")
+        self.assertEqual(len(metadata.body), 3)
+        self.assertEqual([ast.unparse(node) for node in metadata.body[:3]], [
+            "metadata_after = canonical(_shell_metadata_inventory(value, namespace, saved=True))",
+            "_retain('shell-metadata-save-after.json', metadata_after)",
+            "shell_metadata_fixture(value, read(_ROOT / 'public/shell-metadata-save-before.json', 8192), metadata_after)"])
+        final = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_shell_fixtures_final")
+        self.assertEqual(len(final.body), 8)  # Recovery return, GitHub return, common21 families, selected Android and inert placeholders.
+        self.assertIsInstance(final.body[1], ast.If)
+        self.assertEqual(ast.unparse(final.body[1].test), "shell_recovery(value)")
+        self.assertEqual(len(final.body[1].body), 3)
+        self.assertEqual(ast.unparse(final.body[1].body[0]),
+                         "need(not shell_recovery_negative(value), 'Failed recovery experiment cannot enter success finality')")
+        self.assertEqual(ast.unparse(final.body[1].body[1].iter), "shell_cases(value)")
+        self.assertEqual(ast.unparse(final.body[1].body[1].body[0]),
+                         "need(canonical(_shell_recovery_inventory(value, namespace, case, 'after')) == read(_ROOT / 'public' / ('shell-' + case + '-after.json'), SHELL_RECOVERY_INVENTORY_LIMIT), 'A later Recovery case changed an earlier original fixture')")
+        self.assertIsInstance(final.body[1].body[-1], ast.Return)
+        self.assertIsInstance(final.body[2], ast.If)
+        self.assertEqual(ast.unparse(final.body[2].test), "shell_github(value)")
+        self.assertEqual(ast.unparse(final.body[2].body[0]),
+                         "if shell_github_preflight(value):\n    _shell_github_preflight_journals_final(value)")
+        self.assertIsInstance(final.body[2].body[-1], ast.Return)
+        recheck = final.body[3].value
+        self.assertEqual(ast.unparse(recheck.func), "need")
+        self.assertEqual([ast.unparse(node) for node in recheck.args[0].values], [
+            "canonical(_shell_project_inventory(value, namespace, saved=True)) == read(_ROOT / 'public/shell-positive-project-after.json', 8192)",
+            "canonical(_shell_candidate_inventory(value, namespace)) == read(_ROOT / 'public/shell-positive-candidate-after.json', 8192)",
+            "canonical(_shell_paths_inventory(value, namespace, changed=True)) == read(_ROOT / 'public/shell-project-paths-after.json', 8192)",
+            "canonical(_shell_workflow_inventory(value, namespace, installed=True)) == read(_ROOT / 'public/shell-workflow-apply-after.json', 8192)",
+            "canonical(_shell_metadata_inventory(value, namespace, saved=True)) == read(_ROOT / 'public/shell-metadata-save-after.json', 8192)",
+            "canonical(_shell_version_inventory(value, namespace, saved=True)) == read(_ROOT / 'public/shell-version-save-after.json', 8192)"])
+        session_loop = final.body[4]
+        self.assertEqual(ast.unparse(session_loop.iter), "SHELL_SESSION_CASES")
+        self.assertEqual(ast.unparse(session_loop.body[0].value.args[0]),
+            "canonical(_shell_session_inventory(value, namespace, case, changed=case == 'session-refusals')) == read(_ROOT / 'public' / ('shell-' + case + '-after.json'), SHELL_SESSION_INVENTORY_LIMIT)")
+        tools_loop = final.body[5]
+        self.assertEqual(ast.unparse(tools_loop.iter), "SHELL_TOOLS_OFFLINE_CASES")
+        self.assertEqual(ast.unparse(tools_loop.body[0].value.args[0]),
+            "canonical(_shell_tools_offline_inventory(value, namespace, case, after=True)) == read(_ROOT / 'public' / ('shell-' + case + '-after.json'), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)")
+        self.assertEqual(ast.unparse(final.body[6].iter), "shell_android_cases(value)")
+        self.assertEqual(ast.unparse(final.body[7].test), "shell_ordinary(value)")
+        self.assertEqual(ast.unparse(final.body[7].body[-1]),
+                         "_retain('shell-ordinary21-placeholders-after.json', after)")
+        shell = next(node for node in unit.body if isinstance(node, ast.If) and ast.unparse(node.test) == "'shell' in value")
+        loop_index = shell.body.index(loop)
+        self.assertEqual(ast.unparse(shell.body[loop_index + 1]), "_shell_fixtures_final(value, namespace)")
+        self.assertFalse(any(isinstance(node, (ast.Try, ast.While)) for node in ast.walk(final)))
+        calls = [node for node in ast.walk(unit) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "_shell_metadata_inventory"]
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(metadata.body[0].lineno <= calls[0].lineno <= metadata.body[0].end_lineno)
+        version = next(node for node in branch.orelse[3:] if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'version-save'")
+        self.assertEqual([ast.unparse(node) for node in version.body], [
+            "version_after = canonical(_shell_version_inventory(value, namespace, saved=True))",
+            "_retain('shell-version-save-after.json', version_after)",
+            "shell_version_fixture(value, read(_ROOT / 'public/shell-version-save-before.json', 8192), version_after)"])
+        version_calls = [node for node in ast.walk(unit) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                         and node.func.id == "_shell_version_inventory"]
+        self.assertEqual(len(version_calls), 1)
+        self.assertTrue(version.body[0].lineno <= version_calls[0].lineno <= version.body[0].end_lineno)
+        self.assertEqual([node for node in ast.walk(loop) if isinstance(node, ast.Try)], [transaction])
+        self.assertEqual((transaction.handlers, transaction.orelse), ([], []))
+        self.assertEqual([ast.unparse(node) for node in transaction.finalbody],
+                         ["if boundary is not None:\n    _github_boundary_close_after(boundary)"])
+
+
+
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
+class VersionSaveLifecycleContracts(unittest.TestCase):
+    def test_version_receipt_requires_three_original_sessions_and_typed_finality(self):
+        expected = version_receipt_data(); raw = L.canonical(expected)
+        compact = json.dumps(expected, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        self.assertEqual((len(compact), len(raw)), (1431, 1432))
+        self.assertEqual(raw, compact + b"\n")
+        self.assertLessEqual(len(raw), 2048)
+        self.assertEqual(L.shell_version_receipt(raw), expected)
+        self.assertEqual(expected["reviews"]["actions"], ["create", "replace", "preserve"])
+        self.assertEqual(expected["readback"]["values"], [["1.2.3", 7], ["2.3.4", 8], ["2.3.4", 8]])
+        self.assertEqual(expected["draft"]["bindings"], [[2, 0], [4, 1], [4, 2]])
+        # Different booleans/integers, wrong domains and apparent success before
+        # any original writer/child/owner/ledger/relay retirement all fail closed.
+        changes = (
+            (("schemaVersion",), True), (("domain",), "metadata"), (("gate",), "installed-metadata-profile"),
+            (("requests", "apply"), 2), (("requests", "workflow", 0), 1),
+            (("draft", "bindings", 2, 1), 1), (("reviews", "distinctOriginals"), 1),
+            (("confirmation", "checkboxOnlyDisabled"), True), (("confirmation", "acknowledged"), 2),
+            (("originals", "writerFrames", 2), 2), (("originals", "stdoutFrames", 1), 2),
+            (("originals", "startupJoined"), 2), (("originals", "childWaited"), 2),
+            (("originals", "ioSettled"), 2), (("originals", "ownersJoined"), 2),
+            (("originals", "runtimeLedgerSettled"), 2), (("originals", "runtimeSettlementJoined"), 2),
+            (("nativeFinality", 2), "retained"), (("nativeReasons", 0), "unknown"), (("lateSettled", 0), True),
+            (("outcomes", 2, 0), "committed"), (("filesystem", "preserveFull9"), False),
+            (("filesystem", "replaceIdentityChanged"), False), (("readback", "savedBaseline"), 2),
+            (("quit", "relayJoined"), False), (("quit", "originalsSettled"), False),
+        )
+        for path, bad in changes:
+            changed = deepcopy(expected); parent = changed
+            for key in path[:-1]:
+                parent = parent[key]
+            parent[path[-1]] = bad
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                L.shell_version_receipt(L.canonical(changed))
+        for key in expected:
+            changed = deepcopy(expected); changed.pop(key)
+            with self.subTest(missing=key), self.assertRaises(ValueError):
+                L.shell_version_receipt(L.canonical(changed))
+        for malformed in (b"", b"{}", b"[]", raw + b" ", raw.replace(b'"apply":3', b'"apply":3,"apply":3'),
+                          json.dumps(expected, indent=2).encode(), raw + b" " * 2048,
+                          L.canonical(metadata_receipt_data()), L.canonical({**expected, "qualified": True})):
+            with self.subTest(raw=malformed), self.assertRaises(ValueError):
+                L.shell_version_receipt(malformed)
+        labels = [b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step.encode() + b"\n" for step in (
+            "VersionOpen", "VersionReadOpen", "VersionName", "VersionBuild", "VersionReadInputs",
+            "VersionReview", "VersionReadReview", "VersionConfirm", "VersionReadConfirmation", "VersionCheck",
+            "VersionReadChecked", "VersionType", "VersionReadTyped", "VersionApply", "VersionReadSaved",
+            "VersionReadback", "VersionReadReadback")]
+        self.assertEqual([label for label in L.SHELL_FAILURE_STEPS if b"=Version" in label], labels)
+        self.assertEqual(L.SHELL_FAILURE_LABEL_LIMIT, 512)
+
+    def test_version_original_stdout_framing_rejects_missing_foreign_or_premature_success(self):
+        stdout, stderr = version_capture(); lines = stdout.splitlines(keepends=True)
+        result = L.shell_result(stdout, stderr, "version-save", 0, {})
+        self.assertEqual(result["versionSave"], version_receipt_data())
+        self.assertEqual(len(lines), 5)
+        invalid = [(b"", b""), (stdout, lines[3]), (b"", stdout),
+                   (stdout.rstrip(b"\n"), b""), (stdout.replace(b"\n", b"\r\n"), b""),
+                   (b"".join(lines[:3] + [lines[4], lines[3]]), b""),
+                   (metadata_capture()[0], b""), (stdout + b"MRK_UNEXPECTED=1\n", b"")]
+        for index, line in enumerate(lines):
+            invalid.extend(((b"".join(lines[:index] + lines[index + 1:]), b""), (stdout + line, b"")))
+        for out, err in invalid:
+            with self.subTest(stdout=out, stderr=err), self.assertRaises(ValueError):
+                L.shell_result(out, err, "version-save", 0, {})
+        for code in (1, -1, True, False, None):
+            with self.subTest(code=code), self.assertRaises(ValueError):
+                L.shell_result(stdout, stderr, "version-save", code, {})
+        for case in ("normal", "positive", "metadata-save", "settled-failure"):
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                L.shell_result(stdout, stderr, case, 0, {})
+
+    def test_version_fixture_preserves_every_original_and_one_distinct_final_source(self):
+        value = installed_handoff(); before = version_fixture_data(value); after = version_fixture_data(value, saved=True)
+        raw, final = L.canonical(before), L.canonical(after)
+        with patch.object(Path, "lstat", side_effect=AssertionError("Closed DATA cannot inspect a live fixture")), \
+             patch.object(L, "record", side_effect=AssertionError("Closed DATA cannot reopen originals")):
+            result = L.shell_version_fixture(value, raw, final)
+        self.assertEqual(result, {
+            "fixture": "release-version-save-v1", "rootRetained": True, "preservedOriginals": True,
+            "createdFileCount": 1, "beforeCount": 5, "afterCount": 6,
+            "configurationUnchanged": True, "ignoreUnchanged": True, "sentinelUnchanged": True,
+            "noUnexpectedEntries": True, "noPendingState": True,
+            "version": {"path": "version.properties", "size": 34,
+                        "sha256": hashlib.sha256(b"VERSION_NAME=2.3.4\nBUILD_NUMBER=8\n").hexdigest(), "mode": 0o600},
+            "before": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+            "after": {"size": len(final), "sha256": hashlib.sha256(final).hexdigest()}})
+        self.assertEqual(before["absent"], [*after["absent"], "version.properties"])
+        self.assertEqual((len(L._shell_version_roster(value, False)), len(L._shell_version_roster(value, True))), (5, 6))
+        for index, original in enumerate(before["entries"]):
+            for field in range(6 if original["path"] == "." else 9):
+                changed = deepcopy(after); changed["entries"][index]["identity"][field] += 1
+                with self.subTest(preserved=original["path"], field=field), self.assertRaises(ValueError):
+                    L.shell_version_fixture(value, raw, L.canonical(changed))
+            changed = deepcopy(after); changed["entries"][-1]["identity"][1] = original["identity"][1]
+            with self.subTest(alias=original["path"]), self.assertRaises(ValueError):
+                L.shell_version_fixture(value, raw, L.canonical(changed))
+        mutations = (
+            lambda d: d.update(schemaVersion=True), lambda d: d.update(saved=int(d["saved"])),
+            lambda d: d.update(root=d["root"].replace("version-project", "metadata-project")),
+            lambda d: d.update(absent=[]), lambda d: d["entries"].pop(),
+            lambda d: d["entries"].reverse(), lambda d: d["entries"].append(deepcopy(d["entries"][-1])),
+            lambda d: d["entries"][0]["children"].append(".mobile-release-version"),
+            lambda d: d["entries"][1]["children"].append("unexpected"),
+            lambda d: d["entries"][-1].update(sha256="0" * 64), lambda d: d["entries"][-1].update(size=True),
+            lambda d: d["entries"][-1]["identity"].__setitem__(2, stat.S_IFLNK | 0o600),
+            lambda d: d["entries"][-1]["identity"].__setitem__(2, stat.S_IFREG | 0o644),
+            lambda d: d["entries"][-1]["identity"].__setitem__(3, 0),
+            lambda d: d["entries"][-1]["identity"].__setitem__(5, 2),
+            lambda d: d["entries"][-1]["identity"].__setitem__(0, 2),
+            lambda d: d["entries"][-1]["identity"].__setitem__(1, d["namespace"]["identity"][1]),
+        )
+        for saved, document in ((False, before), (True, after)):
+            for mutate in mutations:
+                changed = deepcopy(document); mutate(changed)
+                with self.subTest(saved=saved, mutate=mutate), self.assertRaises(ValueError):
+                    L.shell_version_fixture(value, raw if saved else L.canonical(changed), L.canonical(changed) if saved else final)
+        for first, last in ((raw, raw), (final, raw), (final, final), (b"{}", final),
+                            (json.dumps(before, indent=2).encode(), final), (raw, final + b" "),
+                            (raw, final.replace(b'"saved":true', b'"saved":true,"saved":true'))):
+            with self.subTest(first=first, last=last), self.assertRaises(ValueError):
+                L.shell_version_fixture(value, first, last)
+
+    def test_version_inventory_uses_only_fixed_files_and_rejects_namespace_or_original_drift(self):
+        value = installed_handoff(); namespace = fixture_namespace_data(value); binding = L.canonical(namespace)
+        project = Path(namespace["root"]) / "version-project"
+        for saved in (False, True):
+            for fault in (None, "pending", "release-child", "file-mode", "bytes", "parent-drift", "namespace-drift", "residue"):
+                fixture = version_fixture_data(value, saved=saved)
+                by_path = {project if row["path"] == "." else project / row["path"]: row for row in fixture["entries"]}
+                if fault == "pending": by_path[project]["children"].append(".mobile-release-version")
+                if fault == "release-child": by_path[project / "release"]["children"].append("unexpected")
+                if fault == "file-mode": by_path[project / "unrelated.txt"]["identity"][2] = stat.S_IFLNK | 0o600
+                counts = {}
+                def metadata(path):
+                    row = by_path[path]; n = list(row["identity"]); counts[path] = counts.get(path, 0) + 1
+                    if fault == "parent-drift" and path == project and counts[path] > 1: n[8] += 1
+                    return SimpleNamespace(**dict(zip(("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+                                                       "st_size", "st_mtime_ns", "st_ctime_ns"), n)))
+                class Entries:
+                    def __init__(self, path): self.children = by_path[path]["children"]
+                    def __enter__(self): return iter(SimpleNamespace(name=name) for name in self.children)
+                    def __exit__(self, *_): return False
+                def record(path, limit):
+                    row = by_path[path]; self.assertEqual(limit, row["size"])
+                    return {"path": str(path), "size": row["size"], "sha256": "0" * 64 if fault == "bytes" else row["sha256"]}
+                with self.subTest(saved=saved, fault=fault), patch.object(L, "_ROOT", L.root_path(value)), patch.object(L, "directory"), \
+                     patch.object(Path, "lstat", metadata), patch.object(L.os, "scandir", side_effect=Entries), \
+                     patch.object(L, "_shell_namespace_check", side_effect=[namespace, L.Refused("namespace drift")] if fault == "namespace-drift"
+                                  else None, return_value=namespace) as namespaces, \
+                     patch.object(L, "record", side_effect=record) as reads, \
+                     patch.object(L, "_absent", side_effect=L.Refused("residue") if fault == "residue" else None) as absent:
+                    if fault is None:
+                        self.assertEqual(L._shell_version_inventory(value, binding, saved=saved), fixture)
+                        self.assertEqual([call.args for call in namespaces.call_args_list], [(value, binding)] * 2)
+                        self.assertEqual([call.args for call in reads.call_args_list],
+                            [(project / row["path"], row["size"]) for row in fixture["entries"] if row["kind"] == "file"])
+                        self.assertEqual([call.args[0] for call in absent.call_args_list], [project / name for name in fixture["absent"]])
+                    else:
+                        with self.assertRaises(ValueError): L._shell_version_inventory(value, binding, saved=saved)
+                        if fault in ("pending", "release-child", "parent-drift"): reads.assert_not_called()
+        with patch.object(L, "_ROOT", L.root_path(value)), \
+             patch.object(L, "_shell_namespace_check", side_effect=AssertionError("Invalid phase must not inspect originals")):
+            for saved in (0, 1, None, "true"):
+                with self.subTest(saved=saved), self.assertRaises(ValueError):
+                    L._shell_version_inventory(value, binding, saved=saved)
+
+    def test_closed_version_requires_original_capture_fixture_and_successful_command(self):
+        value, outcome, files, expected = closed_shell_data()
+        with patch.object(L, "shell_closed_loader", return_value=expected):
+            result = L.shell_closed_result(value, outcome, files)
+        self.assertEqual(result["versionSave"]["native"], version_receipt_data())
+        self.assertEqual(result["versionSave"]["fixture"]["afterCount"], 6)
+        for change in ("before", "after", "display", "case", "receipt", "capture", "command", "exit", "argv", "unchanged", "journal"):
+            altered, current = dict(files), deepcopy(outcome)
+            if change in ("before", "after"):
+                altered.pop("shell-version-save-" + change + ".json")
+            elif change == "display":
+                altered.pop("shell-version-save-xvfb.stderr")
+            elif change in ("case", "receipt"):
+                cases = L.decode(altered["shell-cases.json"])
+                if change == "case": cases.pop("version-save")
+                else: cases["version-save"]["versionSave"] = metadata_receipt_data()
+                altered["shell-cases.json"] = L.canonical(cases)
+            elif change == "capture":
+                altered["shell-version-save.stdout"] = metadata_capture()[0]
+            elif change == "command":
+                current["commands"] = [row for row in current["commands"] if row["phase"] != "shell-version-save"]
+            elif change in ("exit", "argv"):
+                command = next(row for row in current["commands"] if row["phase"] == "shell-version-save")
+                if change == "exit": command["exitCode"] = 1
+                else: command["argv"][-1] = "metadata-save"
+            elif change == "unchanged":
+                altered["shell-version-save-after.json"] = altered["shell-version-save-before.json"]
+            else:
+                document = L.decode(altered["shell-version-save-after.json"])
+                document["entries"][0]["children"].append(".mobile-release-version")
+                altered["shell-version-save-after.json"] = L.canonical(document)
+            with self.subTest(change=change), patch.object(L, "shell_closed_loader", return_value=expected), \
+                 patch.object(L, "_shell_version_inventory", side_effect=AssertionError("No failed-work rescan")), \
+                 self.assertRaises((ValueError, KeyError)):
+                L.shell_closed_result(value, current, altered)
+
+
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
 class CandidateDocumentsLifecycleContracts(unittest.TestCase):
     def test_fixed_literal_bytes_produce_the_existing_android_documents_only_dto(self):
         # Only an explicitly run DATA check imports the actual pure validators.
@@ -2682,13 +4684,63 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
             self.assertIs(actual["assurance"][key], False)
         self.assertNotEqual(actual["summary"]["documentPayloadSha256"]["manifest"], CANDIDATE_FIXTURE_PINS[0][3])
 
+    def test_unchanged_candidate_bytes_produce_the_new_lifecycle_candidate_projection(self):
+        from mobile_release import provenance
+        from mobile_release.api import _lifecycle_evidence as evidence
+        expected = json.loads((SOURCE / "desktop/tests/fixtures/lifecycle-evidence.json").read_bytes())["androidCandidate"]
+        inventory = SimpleNamespace(counts={"sourceBytes": 0}, tick=lambda: True)
+        def read_document(relative, *, limit):
+            raw = L.SHELL_CANDIDATE_DOCUMENTS[relative]
+            self.assertLessEqual(len(raw), limit)
+            inventory.counts["sourceBytes"] += len(raw)
+            return raw.decode("utf-8")
+        reader = SimpleNamespace(read=Mock(side_effect=read_document))
+        with patch.object(os, "open", side_effect=AssertionError("No fixture or artifact open")), \
+             patch.object(Path, "open", side_effect=AssertionError("No document-directed read")), \
+             patch.object(provenance, "sha256_file", side_effect=AssertionError("No payload hashing")), \
+             patch.object(provenance, "seal", side_effect=AssertionError("No evidence generation")), \
+             patch.object(subprocess, "Popen", side_effect=AssertionError("No execution")):
+            actual = evidence._read_outcome("candidate", reader, inventory)
+        self.assertEqual(actual, expected)
+        self.assertEqual([call.args[0] for call in reader.read.call_args_list],
+                         [row["path"] for row in expected["documents"]])
+        self.assertEqual(inventory.counts["sourceBytes"], 11366)
+        self.assertEqual(actual["stage"], "candidate")
+        self.assertEqual([row["stage"] for row in actual["history"]], ["candidate"])
+        self.assertEqual(actual["guidance"]["code"], "candidate-only")
+        self.assertIs(actual["assurance"]["documentsOnly"], True)
+        for key in ("artifactBytesVerified", "workflowAuthenticated", "storeStateObserved", "comparedWithSourceProject", "releaseReady", "recoveryAuthorized"):
+            self.assertIs(actual["assurance"][key], False)
+
+    def test_legacy_candidate_marker_body_or_combined_key_cannot_be_relabelled_as_lifecycle_proof(self):
+        legacy = legacy_candidate_documents_receipt()
+        marker = b"MRK_INSTALLED_SHELL_CANDIDATE_DOCUMENTS="
+        with self.assertRaises(ValueError):
+            L.shell_lifecycle_receipt(L.canonical(legacy))
+        stdout, stderr = positive_capture()
+        for changed in (stdout.replace(L.SHELL_LIFECYCLE_MARKER, marker),
+                        positive_capture(lifecycle=legacy)[0],
+                        positive_capture(lifecycle=legacy)[0].replace(L.SHELL_LIFECYCLE_MARKER, marker),
+                        stdout + marker + L.canonical(legacy)):
+            with self.subTest(stdout=changed), self.assertRaises(ValueError):
+                L.shell_result(changed, stderr, "positive", 0, map_data())
+        value, outcome, files, mappings = closed_shell_data()
+        for body in (legacy, lifecycle_documents_receipt()):
+            changed = dict(files)
+            cases = L.decode(changed["shell-cases.json"])
+            cases["positive"].pop("lifecycleDocuments")
+            cases["positive"]["candidateDocuments"] = body
+            changed["shell-cases.json"] = L.canonical(cases)
+            with self.subTest(body=body), patch.object(L, "shell_closed_loader", return_value=mappings), self.assertRaises(ValueError):
+                L.shell_closed_result(value, outcome, changed)
+
     def test_candidate_receipt_rejects_each_missing_changed_or_wrongly_typed_leaf(self):
-        expected = candidate_documents_receipt()
+        expected = lifecycle_documents_receipt()
         raw = L.canonical(expected)
         self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()),
-                         (1069, "e7a6cf04edfd5b331ca0a2e8fa8afab42d1fdfda1a6cbc40c979188679ac5902"))
+                         (1690, "7d7bef285e1d9aace0e4a5b6811c063ea6e2c2ef058b31bffc4b1cb37c16cb53"))
         self.assertLessEqual(len(raw), 2048)
-        self.assertEqual(L.shell_candidate_receipt(raw), expected)
+        self.assertEqual(L.shell_lifecycle_receipt(raw), expected)
         value, outcome, files, mappings = closed_shell_data()
         def leaves(value, prefix=()):
             for key, child in value.items():
@@ -2707,15 +4759,15 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
                 elif mode == "wrong-type":
                     parent[path[-1]] = int(original) if type(original) is bool else True if type(original) is int else None
                 else:
-                    parent[path[-1]] = not original if type(original) is bool else original + 1 if type(original) is int else original + "-other"
+                    parent[path[-1]] = not original if type(original) is bool else original + 1 if type(original) is int else original[::-1] if type(original) is list else original + "-other"
                 with self.subTest(path=path, mode=mode):
                     with self.assertRaises(ValueError):
-                        L.shell_candidate_receipt(L.canonical(changed))
+                        L.shell_lifecycle_receipt(L.canonical(changed))
                     with self.assertRaises(ValueError):
-                        L.shell_result(*positive_capture(candidate=changed), "positive", 0, mappings)
+                        L.shell_result(*positive_capture(lifecycle=changed), "positive", 0, mappings)
                     altered = dict(files)
                     cases = L.decode(altered["shell-cases.json"])
-                    cases["positive"]["candidateDocuments"] = changed
+                    cases["positive"]["lifecycleDocuments"] = changed
                     altered["shell-cases.json"] = L.canonical(cases)
                     with patch.object(L, "shell_closed_loader", return_value=mappings), self.assertRaises(ValueError):
                         L.shell_closed_result(value, outcome, altered)
@@ -2727,7 +4779,7 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
                         *(L.canonical({key: child for key, child in expected.items() if key != omitted})
                           for omitted in ("cancel", "select", "observe", "preserved", "scope", "quit"))):
             with self.subTest(raw=changed), self.assertRaises(ValueError):
-                L.shell_candidate_receipt(changed)
+                L.shell_lifecycle_receipt(changed)
 
     def test_both_independent_receipts_must_precede_completion_in_exact_stdout_order(self):
         stdout, stderr = positive_capture()
@@ -2749,7 +4801,7 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
                 L.shell_result(b"".join(lines[:index] + lines[index + 1:]), stderr + lines[index], "positive", 0, map_data())
             # Exactly 2048 bytes of JSON without LF must fail once the
             # independent line terminator is counted, not share another cap.
-            marker = L.SHELL_PROJECT_MARKER if index == 3 else L.SHELL_CANDIDATE_MARKER
+            marker = L.SHELL_PROJECT_MARKER if index == 3 else L.SHELL_LIFECYCLE_MARKER
             raw = lines[index][len(marker):-1]
             inflated = list(lines)
             inflated[index] = marker + raw + b" " * (2048 - len(raw)) + b"\n"
@@ -2808,7 +4860,8 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
                 L.shell_candidate_fixture(value, malformed, raw)
 
     def test_actual_candidate_inventory_never_reads_artifacts_or_unexpected_subtrees(self):
-        value = installed_handoff(); root = L.root_path(value); evidence = root / "candidate-evidence"
+        value = installed_handoff(); root = L.root_path(value); namespace = fixture_namespace_data(value)
+        binding = L.canonical(namespace); evidence = Path(namespace["root"]) / "candidate-evidence"
         for case in ("complete", "artifact", "private-subtree", "mode", "owner", "links", "special", "bytes", "alias", "device", "drift"):
             fixture = candidate_fixture_data(value)
             by_path = {evidence if row["path"] == "." else evidence / row["path"]: row for row in fixture["entries"]}
@@ -2837,15 +4890,17 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
                     first["identity"][8] += 1
                 return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
             with self.subTest(case=case), patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
+                 patch.object(L, "_shell_namespace_check", return_value=namespace) as namespace_check, \
                  patch.object(Path, "lstat", file_stat), patch.object(L.os, "scandir", side_effect=scan) as scans, \
                  patch.object(L, "record", side_effect=read_data) as reads, patch.object(L, "_absent") as absent:
                 if case == "complete":
-                    self.assertEqual(L._shell_candidate_inventory(value), fixture)
+                    self.assertEqual(L._shell_candidate_inventory(value, binding), fixture)
+                    self.assertEqual([call.args for call in namespace_check.call_args_list], [(value, binding)] * 2)
                     self.assertEqual([call.args for call in reads.call_args_list], [(evidence / name, size) for name, _, size, _ in CANDIDATE_FIXTURE_PINS])
                     self.assertEqual([call.args[0] for call in absent.call_args_list], [evidence / relative for relative in fixture["absent"]])
                 else:
                     with self.assertRaises(ValueError):
-                        L._shell_candidate_inventory(value)
+                        L._shell_candidate_inventory(value, binding)
                     if case in {"artifact", "private-subtree", "mode", "owner", "links", "special"}:
                         reads.assert_not_called()
                 self.assertTrue(all(call.args[0] in {evidence, evidence / "operation"} for call in scans.call_args_list))
@@ -2855,8 +4910,8 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
         value, outcome, files, mappings = closed_shell_data()
         with patch.object(L, "shell_closed_loader", return_value=mappings):
             result = L.shell_closed_result(value, outcome, files)
-        self.assertEqual(result["candidateDocuments"]["native"], candidate_documents_receipt())
-        self.assertEqual(result["candidateDocuments"]["fixture"]["before"], result["candidateDocuments"]["fixture"]["after"])
+        self.assertEqual(result["lifecycleDocuments"]["native"], lifecycle_documents_receipt())
+        self.assertEqual(result["lifecycleDocuments"]["fixture"]["before"], result["lifecycleDocuments"]["fixture"]["after"])
         self.assertEqual(result["projectDraft"]["native"], project_draft_receipt())
         for change in ("missing-before", "missing-after", "changed-after", "case-partial", "case-missing", "stdout-partial", "stdout-missing", "wrong-exit"):
             changed, current = dict(files), deepcopy(outcome)
@@ -2868,15 +4923,15 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
                 changed["shell-positive-candidate-after.json"] = L.canonical(fixture)
             elif change.startswith("case-"):
                 cases = L.decode(changed["shell-cases.json"])
-                if change == "case-missing": cases["positive"].pop("candidateDocuments")
-                else: cases["positive"]["candidateDocuments"].pop("observe")
+                if change == "case-missing": cases["positive"].pop("lifecycleDocuments")
+                else: cases["positive"]["lifecycleDocuments"].pop("observe")
                 changed["shell-cases.json"] = L.canonical(cases)
             elif change == "stdout-partial":
-                partial = candidate_documents_receipt(); partial.pop("quit")
-                changed["shell-positive.stdout"] = positive_capture(candidate=partial)[0]
+                partial = lifecycle_documents_receipt(); partial.pop("quit")
+                changed["shell-positive.stdout"] = positive_capture(lifecycle=partial)[0]
             elif change == "stdout-missing":
                 changed["shell-positive.stdout"] = b"".join(line for line in changed["shell-positive.stdout"].splitlines(keepends=True)
-                                                          if not line.startswith(L.SHELL_CANDIDATE_MARKER))
+                                                          if not line.startswith(L.SHELL_LIFECYCLE_MARKER))
             else:
                 current["commands"][1]["exitCode"] = 1
             with self.subTest(change=change), patch.object(L, "shell_closed_loader", return_value=mappings), \
@@ -2886,23 +4941,39 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
         body = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "unit_start")
         calls = [(node.func.id, node.lineno) for node in ast.walk(body) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
         gated = [line for name, line in calls if name == "shell_result"]
-        inventories = [line for name, line in calls if name == "_shell_candidate_inventory"]
-        self.assertEqual((len(gated), len(inventories)), (1, 1))
+        inventories = sorted(line for name, line in calls if name == "_shell_candidate_inventory")
+        self.assertEqual((len(gated), len(inventories)), (1, 2))
         self.assertLess(gated[0], inventories[0])
         loop = next(node for node in ast.walk(body) if isinstance(node, ast.For)
-                    and isinstance(node.iter, ast.Name) and node.iter.id == "SHELL_CASES")
-        branch = next(node for node in loop.body if isinstance(node, ast.If))
+                    and ast.unparse(node.iter) == "shell_cases(value)")
+        original_case = next(node for node in loop.body if isinstance(node, ast.Try))
+        branch = next(node for node in original_case.body if isinstance(node, ast.If)
+                      and ast.unparse(node.test) == "case == 'normal'")
         gate = next(index for index, node in enumerate(branch.orelse) if isinstance(node, ast.Assign)
                     and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "shell_result")
-        positive = branch.orelse[gate + 1]
-        self.assertIsInstance(positive, ast.If)
-        self.assertEqual(ast.unparse(positive.test), "case == 'positive'")
-        # The sole post-exit inventory is a direct, subsequent positive-branch
-        # assignment, not an exception/finally path after a failed gate.
+        positive = next(node for node in branch.orelse[gate + 1:] if isinstance(node, ast.If)
+                        and ast.unparse(node.test) == "case == 'positive'")
+        # The original post-exit capture remains a direct positive-branch
+        # assignment inside the original case's try/finally. Later rechecks
+        # reuse this fixture only after their completed case gates.
         self.assertTrue(any(isinstance(node, ast.Assign) and node.lineno <= inventories[0] <= node.end_lineno for node in positive.body))
+        names = ["_shell_project_inventory", "_shell_candidate_inventory", "_shell_paths_inventory"]
+        for index, (case, expected_calls) in enumerate((("workflow-apply", names),), 1):
+            later = next(node for node in branch.orelse[gate + 1:]
+                         if isinstance(node, ast.If) and ast.unparse(node.test) == "case == '" + case + "'")
+            rechecks = [node for node in later.body if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                        and isinstance(node.value.func, ast.Name) and node.value.func.id == "need"]
+            self.assertEqual(len(rechecks), 1)
+            self.assertLess(gated[0], inventories[index])
+            self.assertTrue(rechecks[0].lineno <= inventories[index] <= rechecks[0].end_lineno)
+            self.assertEqual([node.func.id for node in ast.walk(rechecks[0]) if isinstance(node, ast.Call)
+                              and isinstance(node.func, ast.Name) and node.func.id in {*names, "_shell_workflow_inventory"}],
+                             expected_calls)
 
 
 
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
 class ProjectPathLifecycleContracts(unittest.TestCase):
     def test_receipt_exact_size_every_leaf_and_closed_original_correspondence(self):
         receipt = project_path_receipt(); raw = L.canonical(receipt)
@@ -3014,13 +5085,12 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
                 L.shell_paths_fixture(value, L.canonical(left), L.canonical(right))
 
     def test_inventory_admits_all_parents_before_only_fixed_inert_reads_and_no_link_follow(self):
-        value, _, _, _ = closed_shell_data(); root = L.root_path(value)
+        value, _, _, _ = closed_shell_data(); namespace = fixture_namespace_data(value)
+        root = Path(namespace["root"]); binding = L.canonical(namespace)
         for changed in (False, True):
             expected = path_fixture_data(value, changed=changed)
             by_path = {root / row["path"]: row for row in expected["entries"]}
             def metadata(path):
-                if path == root:
-                    return SimpleNamespace(st_dev=1)
                 row = by_path[path]; n = row["identity"]
                 return SimpleNamespace(**dict(zip(("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"), n)))
             class Entries:
@@ -3030,29 +5100,4379 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
             def read_file(path, limit):
                 self.assertEqual(limit, 26); row = by_path[path]; self.assertEqual(row["kind"], "file")
                 return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
-            with patch.object(L, "_ROOT", root), patch.object(L, "directory"), patch.object(L, "_absent"), \
+            with patch.object(L, "_ROOT", L.root_path(value)), patch.object(L, "_absent"), \
+                 patch.object(L, "_shell_namespace_check", return_value=namespace) as namespace_check, \
                  patch.object(Path, "lstat", metadata), patch.object(L.os, "scandir", side_effect=Entries), \
                  patch.object(L.os, "readlink", return_value="link-original") as link, patch.object(L, "record", side_effect=read_file) as reads:
-                self.assertEqual(L._shell_paths_inventory(value, changed=changed), expected)
+                self.assertEqual(L._shell_paths_inventory(value, binding, changed=changed), expected)
+                self.assertEqual([call.args for call in namespace_check.call_args_list], [(value, binding)] * 2)
                 self.assertEqual(reads.call_count, 5)
                 self.assertEqual(link.call_count, int(changed))
                 reads.reset_mock(); by_path[root / "path-project"]["children"].append("unexpected")
                 with self.assertRaises(ValueError):
-                    L._shell_paths_inventory(value, changed=changed)
+                    L._shell_paths_inventory(value, binding, changed=changed)
                 reads.assert_not_called()
 
     def test_after_inventory_is_only_after_success_in_the_existing_original_case_branch(self):
         tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
         body = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "unit_start")
-        loop = next(n for n in ast.walk(body) if isinstance(n, ast.For) and isinstance(n.iter, ast.Name) and n.iter.id == "SHELL_CASES")
-        branch = next(n for n in loop.body if isinstance(n, ast.If))
+        loop = next(n for n in ast.walk(body) if isinstance(n, ast.For) and ast.unparse(n.iter) == "shell_cases(value)")
+        transaction = next(n for n in loop.body if isinstance(n, ast.Try))
+        branch = next(n for n in transaction.body if isinstance(n, ast.If) and ast.unparse(n.test) == "case == 'normal'")
         gate = next(i for i,n in enumerate(branch.orelse) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
                     and isinstance(n.value.func, ast.Name) and n.value.func.id == "shell_result")
         path_branch = next(n for n in branch.orelse[gate+1:] if isinstance(n, ast.If) and ast.unparse(n.test) == "case == 'project-paths'")
         calls = [n for n in ast.walk(path_branch) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_shell_paths_inventory"]
         self.assertEqual(len(calls), 1)
         self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in calls[0].keywords], [("changed", True)])
-        self.assertEqual(set(L.SHELL_CASES), {"normal", "positive", "quit-outstanding", "project-paths"})
+        workflow_branch = next(n for n in branch.orelse[gate+1:] if isinstance(n, ast.If) and ast.unparse(n.test) == "case == 'workflow-apply'")
+        workflow_calls = [n for n in ast.walk(workflow_branch) if isinstance(n, ast.Call)
+                          and isinstance(n.func, ast.Name) and n.func.id == "_shell_workflow_inventory"]
+        self.assertEqual(len(workflow_calls), 1)
+        self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in workflow_calls[0].keywords], [("installed", True)])
+        metadata_branch = next(n for n in branch.orelse[gate+1:] if isinstance(n, ast.If) and ast.unparse(n.test) == "case == 'metadata-save'")
+        metadata_calls = [n for n in ast.walk(metadata_branch) if isinstance(n, ast.Call)
+                          and isinstance(n.func, ast.Name) and n.func.id == "_shell_metadata_inventory"]
+        self.assertEqual(len(metadata_calls), 1)
+        self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in metadata_calls[0].keywords], [("saved", True)])
+        self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
+                                       "session-inputs", "session-refusals", "session-loss", "session-deadline", "session-ios-firebase", "metadata-save",
+                                       "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
+                                       "offline-drift", "offline-cancel", "offline-settlement", "settled-failure", "version-save",
+                                       "android-build", "android-build-failure", "android-build-cancel", "android-build-refusals"))
+
+
+
+class AndroidSameJobLifecycleContracts(unittest.TestCase):
+    """Inert private DATA/root-call ordering; never runs a service or native tool."""
+
+    def value(self, parent=Path("/inert")):
+        value = installed_handoff(); value.pop("installed")
+        value.update(attempt="1", taskRoot=str(parent / "mrk-desktop-ubuntu-publisher-10-1-observe"))
+        root = parent / "mrk-desktop-ubuntu-publisher-10-1-compile"
+        material = parent / "mrk-android-material-10-1"
+        pin = {"size": 12, "sha256": "c" * 64}
+        binaries = {role: {"path": value["taskRoot"] + "/work/admitted-shell/" + role, **pin} for role in ("normal", "observer")}
+        compiler = {"sourceSha": value["sourceSha"], "sourceTree": "b" * 40, "runId": "10", "attempt": "1",
+            "features": L.SHELL_FEATURES, "manifestSha256": L.M, "protocolSha256": L.Q, "exportedArtifacts": binaries,
+            "androidBuildMaterials": deepcopy(ANDROID_MATERIAL_DATA), "androidBuildPublication": deepcopy(ANDROID_PUBLICATION_DATA),
+            "androidBuildBindings": L.shell_android_compile_environment(ANDROID_MATERIAL_DATA),
+            "androidPreparation": {"path": str(material / "private/prepared.json"), **pin},
+            "androidOsContractInput": {"path": str(material / "os-contract.json"), **ANDROID_PUBLICATION_DATA["documents"]["osContract"]}}
+        context = {"sourceCommit": value["sourceSha"], "sourceTree": compiler["sourceTree"], "runId": "10", "runAttempt": "1",
+                   "job": "compile", "preparation": {"path": str(root / "preparation.json"), **pin}}
+        transport = {"schemaVersion": 1, "kind": "android-same-job-local-v1", "context": context,
+            **{key: {"path": str(path), "identity": [1, index, stat.S_IFDIR | 0o700, value["runnerUid"], value["runnerGid"]]}
+                for index, (key, path) in enumerate((("compilerRoot", root), ("compilerEvidence", root / "private-compiler"),
+                    ("materialRoot", material)), 1)},
+            "compilerRoster": {"path": str(root / "private-compiler/shell-roster.json"), **pin},
+            "materialRecord": deepcopy(compiler["androidPreparation"])}
+        value["shell"] = {"binaries": binaries, "compiler": compiler, "rosterSha256": pin["sha256"], "producerAttempt": "1",
+            "acceptedU": {"sourceSha": value["compilerRecords"]["sourceSha"], "runId": "5", "attempt": "1", "artifactId": "11"},
+            "loaderPolicy": {}, "androidPublication": L.shell_android_publication_request(value["taskRoot"],
+                ANDROID_MATERIAL_DATA, ANDROID_PUBLICATION_DATA),
+            "localTransport": {"path": str(root / "android-local-transport.json"), "record": transport}}
+        self.seal(value)
+        return value
+
+    def seal(self, value):
+        envelope = value["shell"]["localTransport"]
+        raw = L.canonical(envelope["record"])
+        envelope.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+
+    def test_local_handoff_is_pure_and_does_not_activate_material_or_revive_an_endpoint(self):
+        value = self.value()
+        value["compilerRecords"]["capacity"] = {"runtimeBytes": 1024, "installedBytes": {k: 2048 for k in L.VERSIONS},
+            "installedEntries": {k: 16 for k in L.VERSIONS}}
+        with patch.multiple(L, SHELL_ANDROID_MATERIALS=None, SHELL_ANDROID_PUBLICATION_DATA=None), \
+             patch.object(L, "read", side_effect=AssertionError("pure parser must not read preparation")), \
+             patch.object(L, "_android_material_engine", side_effect=AssertionError("pure parser must not import helper")), \
+             patch.object(L, "bind_shell_android_profile", side_effect=AssertionError("pure parser must not bind")), \
+             patch.object(L.os, "statvfs", return_value=SimpleNamespace(f_bavail=1 << 30, f_frsize=4096, f_favail=1 << 30)), \
+             patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)):
+            L.shell_handoff(value, [])
+            self.assertEqual(L._android_local_transport(value), value["shell"]["localTransport"]["record"])
+            self.assertEqual(L.shell_transport_provenance(value["shell"]), {"shellLocalTransport": value["shell"]["localTransport"]})
+            self.assertIsNone(L._capacity(value))
+            self.assertTrue(L._shell_android_roster(value, "android-build", True))
+            self.assertIsNone(L.SHELL_ANDROID_MATERIALS)
+
+    def test_local_handoff_refuses_mixed_artifact_and_changed_context_originals_or_profile(self):
+        for fault in ("source", "tree", "attempt", "job", "producer", "path", "owner", "material", "os", "artifact", "envelope"):
+            with self.subTest(fault=fault), patch.multiple(L, SHELL_ANDROID_MATERIALS=None, SHELL_ANDROID_PUBLICATION_DATA=None):
+                value = self.value(); shell = value["shell"]; transport = shell["localTransport"]["record"]
+                if fault == "source": transport["context"]["sourceCommit"] = "f" * 40
+                elif fault == "tree": transport["context"]["sourceTree"] = "f" * 40
+                elif fault == "attempt": transport["context"]["runAttempt"] = "2"
+                elif fault == "job": transport["context"]["job"] = "native"
+                elif fault == "producer": shell["producerAttempt"] = "2"
+                elif fault == "path": transport["compilerEvidence"]["path"] += "-other"
+                elif fault == "owner": transport["materialRoot"]["identity"][3] = True
+                elif fault == "material": shell["compiler"]["androidPreparation"]["sha256"] = "0" * 64
+                elif fault == "os": shell["compiler"]["androidOsContractInput"]["path"] = "/ambient/os.json"
+                elif fault == "artifact": shell["artifactId"] = "17"
+                self.seal(value)
+                if fault == "envelope": shell["localTransport"]["sha256"] = "0" * 64
+                with self.assertRaises(L.Refused): L.shell_handoff(value, [])
+                self.assertIsNone(L.SHELL_ANDROID_MATERIALS)
+
+    def root_documents(self, parent):
+        value = self.value(parent)
+        value.update(runnerUid=os.getuid(), runnerGid=os.getgid())
+        transport = value["shell"]["localTransport"]["record"]
+        for key in ("compilerRoot", "compilerEvidence", "materialRoot"):
+            path = Path(transport[key]["path"]); path.mkdir(mode=0o700)
+            transport[key]["identity"] = list(L.identity(path.lstat())[:5])
+        material = Path(transport["materialRoot"]["path"])
+        (material / "private").mkdir(mode=0o700)
+        def write(path, body, mode):
+            raw = L.canonical(body); path.write_bytes(raw); path.chmod(mode)
+            return {"path": str(path), "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        original = {"source": value["source"], "runnerUid": value["runnerUid"], "runnerGid": value["runnerGid"], "deadline": "0.5"}
+        transport["context"]["preparation"] = write(Path(transport["context"]["preparation"]["path"]), original, 0o600)
+        host = {"inert": "original private host DATA"}
+        host_pin = write(material / "private/host.json", host, 0o400)
+        prepared = {"materials": deepcopy(ANDROID_MATERIAL_DATA), "publication": deepcopy(ANDROID_PUBLICATION_DATA),
+            "materialRoot": str(material), "provenance": {"documents": {"host": {**host_pin, "path": "host.json"}}}}
+        transport["materialRecord"] = write(material / "private/prepared.json", prepared, 0o400)
+        compiler = value["shell"]["compiler"]
+        compiler["androidPreparation"] = deepcopy(transport["materialRecord"])
+        compiler_path = Path(transport["compilerEvidence"]["path"]) / "compiler.json"
+        compiler_pin = write(compiler_path, compiler, 0o600)
+        compiler["originalRecord"] = {**compiler_pin, "path": "compiler.json"}
+        roster = {key: compiler[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")}
+        roster["files"] = [deepcopy(compiler["originalRecord"])]
+        transport["compilerRoster"] = write(Path(transport["compilerRoster"]["path"]), roster, 0o600)
+        value["shell"]["rosterSha256"] = transport["compilerRoster"]["sha256"]
+        self.seal(value)
+        write(Path(value["shell"]["localTransport"]["path"]), transport, 0o400)
+        return value, prepared, host, write
+
+    def test_root_revalidates_exact_originals_with_native_deadline_before_binding(self):
+        for fault in (None, "validator", "profile", "roster", "replacement", "late"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+                value, prepared, host, write = self.root_documents(Path(temporary))
+                transport = value["shell"]["localTransport"]["record"]
+                now, events = [1.0], []
+                def validate(path, expected, *, context, host, deadline):
+                    events.append("validate")
+                    self.assertEqual(deadline, 10.0)  # Compiler's0.5 endpoint remains expired; no renewal.
+                    self.assertEqual(context, transport["context"])
+                    self.assertEqual(str(path), transport["materialRecord"]["path"])
+                    self.assertEqual(expected, {k: transport["materialRecord"][k] for k in ("size", "sha256")})
+                    if fault == "validator": raise L.Refused("inert host validation refusal")
+                    if fault == "profile": return {**prepared, "materials": {**prepared["materials"], "instance": "other"}}
+                    if fault == "replacement":
+                        path.rename(path.with_name("retained-original.json"))
+                        write(path, prepared, 0o400)
+                    if fault == "late": now[0] = 10.0
+                    return prepared
+                if fault == "roster":
+                    path = Path(transport["compilerRoster"]["path"])
+                    roster = L.decode(path.read_bytes()); roster["files"] = []
+                    transport["compilerRoster"] = write(path, roster, 0o600)
+                    value["shell"]["rosterSha256"] = transport["compilerRoster"]["sha256"]
+                    self.seal(value); write(Path(value["shell"]["localTransport"]["path"]), transport, 0o400)
+                engine = SimpleNamespace(read_record=Mock(side_effect=validate))
+                stack.enter_context(patch.multiple(L, _ROOT=L.root_path(value), _END=10.0, _FAILED=False,
+                                                 SHELL_ANDROID_MATERIALS=None, SHELL_ANDROID_PUBLICATION_DATA=None))
+                stack.enter_context(patch.object(L.time, "monotonic", side_effect=lambda: now[0]))
+                stack.enter_context(patch.object(L, "_android_material_engine", return_value=engine))
+                if fault:
+                    with self.assertRaises(L.Refused): L._android_original_preparation(value)
+                    self.assertIsNone(L.SHELL_ANDROID_MATERIALS)
+                else:
+                    L._android_original_preparation(value)
+                    self.assertEqual(L.SHELL_ANDROID_MATERIALS, prepared["materials"])
+                    self.assertEqual(L.SHELL_ANDROID_PUBLICATION_DATA, prepared["publication"])
+                self.assertEqual(events, ["validate"])
+                engine.read_record.assert_called_once()
+                self.assertEqual(engine.read_record.call_args.kwargs["host"], host)
+
+    def test_root_start_validates_before_any_publication_and_stoppost_is_cleanup_metadata_only(self):
+        value = self.value()
+        for fault in (False, True):
+            with self.subTest(refused=fault), ExitStack() as stack:
+                events = []
+                def validate(actual):
+                    events.append("validate")
+                    if fault: raise L.Refused("inert validation refusal")
+                def publish(actual):
+                    events.append("publication-boundary")
+                    raise L.Refused("stop inert test before any real publication")
+                stack.enter_context(patch.multiple(L, _ROOT=L.root_path(value), _D=SimpleNamespace(write=lambda *args: events.append("dpkg-log"))))
+                for name, replacement in (("_root_ids", Mock()), ("_context", Mock(return_value=(value, "a" * 64))),
+                        ("_android_original_preparation", validate), ("_namespaces", Mock(return_value={})),
+                        ("dpkg_policy", Mock(return_value={})), ("_domain", Mock(return_value={})),
+                        ("record", Mock(return_value={"sha256": "b" * 64})), ("_retain", Mock()),
+                        ("_publish_android", publish), ("command", Mock(side_effect=AssertionError("no command in this test")))):
+                    stack.enter_context(patch.object(L, name, replacement))
+                with self.assertRaises(L.Refused): L.unit_start()
+                self.assertEqual(events, ["validate"] if fault else ["validate", "dpkg-log", "publication-boundary"])
+        with ExitStack() as stack:
+            stack.enter_context(patch.multiple(L, _ROOT=L.root_path(value), _END=-1.0, _COMMANDS=[], _FILES=[]))
+            stack.enter_context(patch.object(L.time, "monotonic", return_value=1.0))
+            stack.enter_context(patch.dict(L.os.environ, {"SERVICE_RESULT": "success", "EXIT_CODE": "exited", "EXIT_STATUS": "0"}))
+            for name, replacement in (("_root_ids", Mock()), ("_context", Mock(return_value=(value, "a" * 64))),
+                    ("read", Mock(return_value=b"{}\n")), ("record", Mock(return_value={"sha256": "b" * 64})),
+                    ("_domain", Mock(return_value={})), ("_namespaces", Mock(return_value={})), ("_retain", Mock()),
+                    ("verify_finality", Mock())):
+                stack.enter_context(patch.object(L, name, replacement))
+            forbidden = [stack.enter_context(patch.object(L, name, side_effect=AssertionError("StopPost must not prepare or bind")))
+                for name in ("_android_original_preparation", "_android_material_engine", "_publish_android", "bind_shell_android_profile", "command")]
+            stack.enter_context(patch("sys.stdout", new=io.StringIO()))
+            L.unit_stop()
+            for action in forbidden: action.assert_not_called()
+            self.assertEqual(L._END, 10.0)
+
+    def test_root_copies_and_imports_only_exact_pinned_protected_helper_and_data(self):
+        value = self.value(); root = L.root_path(value)
+        names = {"desktop/tools/android_material_preparation.py", "desktop/tools/ci_ubuntu_publication.py",
+                 "desktop/tools/stock_trust_correspondence.py", "desktop/tools/ubuntu_stock_ca_policy.json",
+                 "desktop/tools/ci_foundation.py", *("desktop/tools/android_material_data/" + name
+                 for name in ("policy.json", "suppliers.json", "layout.json.gz", "archives.json.gz", "fonts.json", "providers.json"))}
+        pins = {name: (1, "c" * 64) for name in names}
+        for missing in ("fonts.json", "stock_trust_correspondence.py", "ubuntu_stock_ca_policy.json"):
+            missing_input = {name: pin for name, pin in pins.items() if not name.endswith("/" + missing)}
+            with self.subTest(missing=missing), patch.object(L, "ANDROID_PREPARATION_PINS", missing_input), self.assertRaises(L.Refused):
+                L._android_source_pins()
+        with ExitStack() as stack:
+            stack.enter_context(patch.multiple(L, __file__=str(root / "entry.py"), _ROOT=None, _END=None,
+                                             ANDROID_PREPARATION_PINS=pins))
+            stack.enter_context(patch.object(L.time, "monotonic", return_value=1.0))
+            stack.enter_context(patch.object(L, "directory"))
+            stack.enter_context(patch.object(L, "read", return_value=("a" * 64 + "\n" + "b" * 64 + "\n").encode()))
+            stack.enter_context(patch.object(L, "record", return_value={"sha256": "a" * 64}))
+            stack.enter_context(patch.object(L, "handoff", return_value=value))
+            stack.enter_context(patch.object(L, "_capacity"))
+            stack.enter_context(patch.object(Path, "iterdir", return_value=iter((root / "entry.py", root / "private"))))
+            mkdir = stack.enter_context(patch.object(Path, "mkdir"))
+            stack.enter_context(patch.object(Path, "lstat", return_value=SimpleNamespace(st_uid=value["runnerUid"], st_gid=value["runnerGid"])))
+            copy = stack.enter_context(patch.object(L, "copy_pinned"))
+            chmod = stack.enter_context(patch.object(L.os, "chmod"))
+            modules = stack.enter_context(patch.object(L, "_modules"))
+            self.assertEqual(L._context(copying=True), (value, "b" * 64))
+            copied = {call.args[1]: call.args[0] for call in copy.call_args_list}
+            for name in names:
+                self.assertEqual(copied[root / "source" / name], Path(value["source"]) / name)
+            self.assertIn(((root / "source/desktop/tools/android_material_data", 0o555), {}),
+                          [(call.args, call.kwargs) for call in chmod.call_args_list])
+            self.assertTrue(mkdir.called)
+            modules.assert_called_once_with(root, owner=True)
+        for writable in (False, True):
+            with self.subTest(writable=writable), patch.object(L, "ANDROID_PREPARATION_PINS", pins), \
+                 patch.object(L, "directory"), patch.object(L.os, "listxattr", return_value=[]), \
+                 patch.object(Path, "lstat", return_value=SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | (0o644 if writable else 0o444))), \
+                 patch.object(L, "record", side_effect=lambda path, size: {"path": str(path), "size": size, "sha256": "c" * 64}), \
+                 patch.object(L.importlib.util, "spec_from_file_location") as spec, \
+                 patch.object(L.importlib.util, "module_from_spec") as module:
+                if writable:
+                    with self.assertRaises(L.Refused): L._android_material_engine(root)
+                    spec.assert_not_called()
+                else:
+                    self.assertIs(L._android_material_engine(root), module.return_value)
+                    spec.assert_called_once_with("_root_android_material_preparation", root / "source/desktop/tools/android_material_preparation.py")
+                    spec.return_value.loader.exec_module.assert_called_once_with(module.return_value)
+                    self.assertEqual(module.return_value._PROVIDER_LOADER_DATA, {name: getattr(L, name) for name in (
+                        "loader_diagnostics", "loader_cache", "shell_loader_candidates", "loader_selected", "DEFAULT_LIBRARY_DIRS", "HWCAPS")})
+
+
+class AndroidPublicationContracts(unittest.TestCase):
+    """Synthetic DATA and mocked filesystem failures; never publish or run tools."""
+
+    def data(self, change=None):
+        bundletool = "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
+        def file(name, mode=0o444, sha="a" * 64):
+            return {"path": name, "size": 1, "sha256": sha, "mode": mode}
+        files = [file("bundletool/bundletool.jar", sha=bundletool), file("gradle/bin/gradle", 0o555),
+                 file("jdk/bin/java", 0o555), file("jdk/bin/javac", 0o555), file("sdk/package.xml")]
+        contract = {"schemaVersion": 1, "id": "inert-os", "closure": "python-jdk-sdk-gradle-shell-loader-v1",
+                    "files": [file("/usr/bin/" + name, 0o755) for name in ("dash", "sed", "uname", "xargs")],
+                    "aliases": [{"path": "/bin", "target": "usr/bin", "canonical": "/usr/bin"}]}
+        manifest = {"schemaVersion": 1, "profile": "android-local-linux-gnu-x86_64-v1", "target": "linux-gnu-x86_64",
+            "instance": "inert-android", "launchContract": "gradle-posix-private-jvm-v1",
+            "versions": {"jdkVendor": "OpenJDK", "jdkVersion": "17.0.15", "gradleVersion": "8.14.5", "agpVersion": "8.9.2",
+                         "sdkPlatform": "android-35", "sdkPlatformRevision": "2", "sdkBuildToolsVersion": "35.0.0"},
+            "gradleDistribution": {"url": "https://services.gradle.org/distributions/gradle-8.14.5-bin.zip", "sha256": "3" * 64},
+            "bundletool": {"version": "1.18.3", "sha256": bundletool},
+            "roles": {"java": "jdk/bin/java", "javac": "jdk/bin/javac", "gradle": "gradle/bin/gradle",
+                      "bundletool": "bundletool/bundletool.jar", "sdk": "sdk"}, "files": files,
+            "osProfile": {"id": contract["id"], "inventorySha256": "", "shell": "/usr/bin/dash", "executableDirectory": "/usr/bin",
+                          "helpers": ["sed", "uname", "xargs"], "files": deepcopy(contract["files"])}}
+        sources = {"schemaVersion": 1, "files": [{"path": row["path"], "source": row["path"]} for row in files]}
+        if change:
+            change(manifest, contract, sources)
+        os_raw = L.canonical(contract)
+        manifest["osProfile"]["inventorySha256"] = hashlib.sha256(os_raw).hexdigest()
+        raw = {"manifest": L.canonical(manifest), "osContract": os_raw, "sources": L.canonical(sources)}
+        pins = {key: {"size": len(body), "sha256": hashlib.sha256(body).hexdigest()} for key, body in raw.items()}
+        materials = {**ANDROID_MATERIAL_DATA, "manifestSha256": pins["manifest"]["sha256"], "osContractSha256": pins["osContract"]["sha256"]}
+        totals = {"toolFiles": 5, "toolDirectories": 6, "toolBytes": 5, "osFiles": 4, "osAliases": 1, "osBytes": 4}
+        return raw, materials, {"documents": pins, "totals": totals}
+
+    def test_closed_data_references_preserve_transport_and_profile_caps(self):
+        raw, materials, data = self.data()
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", materials), patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data):
+            plan = L._android_publication_plan(raw)
+            request = L.shell_android_publication_request(Path("/task"))
+            self.assertEqual(plan["totals"], data["totals"])
+            self.assertEqual(request["sourceRoot"], "/task/work/admitted-android/tools")
+            self.assertLess(len(L.canonical(request)), 4096)
+            self.assertTrue(all(set(row) == {"path", "size", "sha256"} for row in request["documents"].values()))
+            self.assertNotIn("files", request)
+            for key, number in (("toolFiles", 16385), ("toolDirectories", 32768), ("osFiles", 257),
+                                ("osAliases", 129), ("toolBytes", 1 << 30), ("toolFiles", True)):
+                invalid = deepcopy(data); invalid["totals"][key] = number
+                with patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", invalid), self.assertRaises(ValueError):
+                    L.shell_android_publication_request(Path("/task"))
+            with patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", None), patch.object(L.os, "open") as opened:
+                with self.assertRaisesRegex(ValueError, "publication DATA is pending"):
+                    L.shell_android_publication_request(Path("/task"))
+                opened.assert_not_called()
+
+    def test_pinned_data_still_requires_complete_paths_roles_os_and_source_mapping(self):
+        for change in (lambda m, o, s: m["files"][0].update(path="sdk/../../escape"),
+                       lambda m, o, s: m["roles"].update(java="jdk/bin/other"),
+                       lambda m, o, s: m["files"][1].update(mode=0o644),
+                       lambda m, o, s: m["osProfile"]["files"][0].update(size=2),
+                       lambda m, o, s: s["files"].pop(),
+                       lambda m, o, s: s["files"][1].update(source=s["files"][0]["source"]),
+                       lambda m, o, s: o["aliases"][0].update(canonical="/etc"),
+                       lambda m, o, s: o["aliases"][0].update(target="../../usr/bin"),
+                       lambda m, o, s: m["versions"].update(gradleVersion="8.11.1")):
+            raw, materials, data = self.data(change)
+            with patch.object(L, "SHELL_ANDROID_MATERIALS", materials), patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data):
+                with self.assertRaises(ValueError):
+                    L._android_publication_plan(raw)
+        for name in ("/usr/lib/" + "a" * 256, "/usr/lib/" + "a/" * 14 + "body.so", "/usr/lib/body."):
+            with self.subTest(path=name), self.assertRaises(ValueError):
+                L._android_native_path(name)
+        for name in ("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", "/var/cache/fontconfig/CACHEDIR.TAG",
+                     "/var/cache/fontconfig/" + "0a" * 16 + "-le64.cache-9"):
+            with self.subTest(font_input=name): self.assertTrue(L._android_native_path(name))
+        for name in ("/usr/share/fonts/truetype/noto/nested/Font.ttf", "/usr/share/fonts/truetype/noto/Font.otf",
+                     "/var/cache/fontconfig/" + "0A" * 16 + "-le64.cache-9",
+                     "/var/cache/fontconfig/" + "a" * 31 + "-le64.cache-9",
+                     "/var/cache/fontconfig/" + "a" * 32 + "-le64.cache-8",
+                     "/var/cache/fontconfig/nested/" + "a" * 32 + "-le64.cache-9",
+                     "/var/cache/fontconfig/cachedir.tag", "/var/cache/other/CACHEDIR.TAG"):
+            with self.subTest(unadmitted_font_input=name): self.assertFalse(L._android_native_path(name))
+        raw, materials, data = self.data()
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", materials), patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data):
+            raw["manifest"] += b" "
+            with self.assertRaisesRegex(ValueError, "document bytes differ"):
+                L._android_publication_plan(raw)
+
+    def test_resolver_contract_matches_material_and_rust_exact_file_alias(self):
+        canonical = "/run/systemd/resolve/stub-resolv.conf"
+        def documents(alias, include_file=True):
+            def change(manifest, contract, sources):
+                if include_file:
+                    contract["files"].insert(0, {"path": canonical, "size": 1, "sha256": "b" * 64, "mode": 0o644})
+                contract["aliases"].append(alias)
+                manifest["osProfile"]["files"] = deepcopy(contract["files"])
+            raw, materials, data = self.data(change)
+            data["totals"].update(osFiles=4 + int(include_file), osAliases=2, osBytes=4 + int(include_file))
+            return raw, materials, data
+        for target in (canonical, "../run/systemd/resolve/stub-resolv.conf"):
+            alias = {"path": "/etc/resolv.conf", "target": target, "canonical": canonical}
+            raw, materials, data = documents(alias)
+            with self.subTest(target=target), patch.object(L, "SHELL_ANDROID_MATERIALS", materials), \
+                 patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data):
+                self.assertIn(alias, L._android_publication_plan(raw)["aliases"])
+        for change, include_file in (({"target": "../run/systemd/resolve/other.conf"}, True),
+                                     ({"path": "/etc/other.conf"}, True),
+                                     ({"canonical": "/run/systemd/resolve", "target": "/run/systemd/resolve"}, True),
+                                     ({"target": "../run/systemd/resolve/../resolve/stub-resolv.conf"}, True),
+                                     ({}, False)):
+            alias = {"path": "/etc/resolv.conf", "target": canonical, "canonical": canonical, **change}
+            raw, materials, data = documents(alias, include_file)
+            with self.subTest(alias=alias, regular=include_file), patch.object(L, "SHELL_ANDROID_MATERIALS", materials), \
+                 patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data), self.assertRaisesRegex(ValueError, "alias escapes"):
+                L._android_publication_plan(raw)
+        self.assertTrue(L._android_native_path(canonical))
+        for name in ("/run/systemd/resolve/resolv.conf", canonical + ".bak", "/run/other.conf"):
+            with self.subTest(path=name):
+                self.assertFalse(L._android_native_path(name))
+
+    def test_target_node_checks_device_owner_links_mode_and_xattrs(self):
+        valid = inert_stat(9, stat.S_IFREG | 0o444, size=1)
+        with patch.object(L, "_END", 10.0), patch.object(L.time, "monotonic", return_value=0.0), patch.object(L, "_FAILED", False):
+            for field, wrong in (("st_dev", 2), ("st_uid", 1001), ("st_gid", 1001), ("st_nlink", 2), ("st_mode", stat.S_IFREG | 0o664)):
+                invalid = deepcopy(valid); setattr(invalid, field, wrong)
+                with patch.object(Path, "lstat", return_value=invalid), patch.object(L, "_xattrs"), self.assertRaises(ValueError):
+                    L._android_node(Path("/inert"), owner=(0, 0), device=1, is_directory=False, mode=0o444)
+            with patch.object(Path, "lstat", return_value=valid), patch.object(L, "_xattrs", side_effect=L.Refused("attribute present")) as attrs:
+                with self.assertRaisesRegex(ValueError, "attribute present"):
+                    L._android_node(Path("/inert"), owner=(0, 0), device=1, is_directory=False, mode=0o444)
+                attrs.assert_called_once_with(Path("/inert"), False)
+            unreadable = inert_stat(9, stat.S_IFDIR | 0o700)
+            with patch.object(Path, "lstat", return_value=unreadable), patch.object(L, "_xattrs"):
+                with self.assertRaisesRegex(ValueError, "not readable/searchable"):
+                    L._android_ancestors(Path("/inert"), 1)
+
+    def test_real_private_temp_modes_membership_hashes_and_original_refusals(self):
+        # Ordinary DATA only; never touches /opt or publishes/executes a tool.
+        with tempfile.TemporaryDirectory() as temporary, patch.object(L, "_FAILED", False), \
+             patch.object(L, "_END", 10.0), patch.object(L.time, "monotonic", return_value=0.0):
+            parent = Path(temporary); root = parent / "payload"; device = parent.stat().st_dev
+            owner = (os.geteuid(), os.getegid()); original_node = L._android_node
+            def task_node(path, **options):
+                self.assertEqual(options["owner"], (0, 0))
+                return original_node(path, **{**options, "owner": owner})
+            # Preserve real mkdir/open/fchmod/stat behavior under the entry's
+            # umask; only root ownership is adapted to this unprivileged fixture.
+            old_umask = os.umask(0o077)
+            try:
+                with patch.object(L, "_android_node", side_effect=task_node):
+                    created = L._android_mkdir(root, device)
+                    self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o755)
+                    with self.assertRaisesRegex(ValueError, "original directory changed"):
+                        L._android_directory_mode(root, (created[0], created[1] + 1), 0o555)
+                    self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o755)
+                    with self.assertRaises(FileExistsError): L._android_mkdir(root, device)
+            finally:
+                os.umask(old_umask)
+            folder = root / "sdk"; folder.mkdir(mode=0o700); body = folder / "body"
+            body.write_bytes(b"one"); body.chmod(0o444); folder.chmod(0o555); root.chmod(0o555)
+            files = [{"path": "sdk/body", "size": 3, "sha256": hashlib.sha256(b"one").hexdigest(), "mode": 0o444}]
+            def readback():
+                return L._android_tree(root, files, ["sdk"], owner=owner, device=device)
+            try:
+                self.assertEqual(set(readback()), {"", "sdk", "sdk/body"})
+                folder.chmod(0o700); (folder / "extra").write_bytes(b"extra"); folder.chmod(0o555)
+                with self.assertRaisesRegex(ValueError, "count exceeded|Extra or repeated"): readback()
+                folder.chmod(0o700); (folder / "extra").unlink(); body.unlink(); folder.chmod(0o555)
+                with self.assertRaisesRegex(ValueError, "membership incomplete"): readback()
+                folder.chmod(0o700); body.write_bytes(b"two"); body.chmod(0o444); folder.chmod(0o555)
+                with self.assertRaisesRegex(ValueError, "body differs"): readback()
+            finally:
+                root.chmod(0o700); folder.chmod(0o700)
+            original = {"/opt": (1, 2, stat.S_IFDIR | 0o755, 0, 0)}
+            with self.assertRaisesRegex(ValueError, "original ancestor binding changed"):
+                L._android_merge_originals(original, {"/opt": (1, 3, stat.S_IFDIR | 0o755, 0, 0)})
+            self.assertEqual(original["/opt"][1], 2)
+
+    def test_copy_os_and_manifest_failures_never_publish_or_claim_cleanup(self):
+        raw, materials, data = self.data()
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", materials), patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data):
+            plan = L._android_publication_plan(raw)
+            value = {"taskRoot": "/task", "runnerUid": 1001, "runnerGid": 1001,
+                     "shell": {"androidPublication": L.shell_android_publication_request(Path("/task"))}}
+            source = Path(value["shell"]["androidPublication"]["sourceRoot"])
+            source_specs = {str(source / row["path"]): row for row in plan["files"]}
+            def observed(path, *, owner=None, mode=None, is_directory=None, device=1):
+                path = Path(path)
+                spec = source_specs.get(str(path))
+                directory = spec is None if is_directory is None else is_directory
+                uid, gid = owner or ((1001, 1001) if path == source or source in path.parents else (0, 0))
+                mode = mode if mode is not None else (0o700 if directory else 0o500 if spec["mode"] & 0o111 else 0o400)
+                item = inert_stat(int(hashlib.sha256(str(path).encode()).hexdigest()[:12], 16),
+                                  (stat.S_IFDIR if directory else stat.S_IFREG) | mode, uid=uid, gid=gid, size=0 if directory else 1)
+                item.st_dev = device
+                return item
+            def tree(root, files, directories, **options):
+                specs = {row["path"]: row for row in files}
+                rows = {}
+                for name in ["", *directories, *specs]:
+                    directory = name == "" or name in directories
+                    mode = ((0o700 if options.get("source") else options.get("root_mode", 0o555) if not name else 0o555)
+                            if directory else (0o500 if specs[name]["mode"] & 0o111 else 0o400) if options.get("source") else specs[name]["mode"])
+                    rows[name] = L.identity(observed(root / name, owner=options["owner"], is_directory=directory, mode=mode))
+                if fault == "root-final" and options.get("manifest"):
+                    rows[""] = (rows[""][0], rows[""][1] + 1, *rows[""][2:])
+                return rows
+            for fault in ("collision", "copy", "os", "manifest", "root-final", "sync", "success"):
+                with self.subTest(fault=fault), ExitStack() as stack:
+                    for name, replacement in (("_ANDROID_PUBLICATION", None), ("_ANDROID_PUBLISHED", None), ("_FAILED", False), ("_END", 10.0)):
+                        stack.enter_context(patch.object(L, name, replacement))
+                    stack.enter_context(patch.object(L.time, "monotonic", return_value=0.0))
+                    stack.enter_context(patch.object(L, "_android_source_documents", return_value=(plan, {})))
+                    stack.enter_context(patch.object(L, "_android_tree", side_effect=tree))
+                    stack.enter_context(patch.object(L, "_android_node", side_effect=lambda path, **kw: L.identity(observed(path, **kw))))
+                    stack.enter_context(patch.object(L, "_android_ancestors", return_value={}))
+                    stack.enter_context(patch.object(L, "directory"))
+                    stack.enter_context(patch.object(L, "_absent", side_effect=L.Refused("instance exists") if fault == "collision" else None))
+                    stack.enter_context(patch.object(Path, "lstat", observed))
+                    stack.enter_context(patch.object(Path, "exists", return_value=True))
+                    mkdir = stack.enter_context(patch.object(L, "_android_mkdir", side_effect=lambda path, device:
+                        L.identity(observed(path, owner=(0, 0), is_directory=True, mode=0o755))))
+                    stack.enter_context(patch.object(L, "_android_directory_mode"))
+                    stack.enter_context(patch.object(Path, "mkdir", side_effect=AssertionError("no real publication directory")))
+                    descriptor = {}
+                    def open_directory(path, flags):
+                        descriptor["item"] = observed(path, owner=(0, 0), is_directory=True, mode=0o555)
+                        return 99  # Synthetic descriptor; never reaches the real OS.
+                    opened = stack.enter_context(patch.object(L.os, "open", side_effect=open_directory))
+                    stack.enter_context(patch.object(L.os, "fstat", side_effect=lambda fd: descriptor["item"]))
+                    stack.enter_context(patch.object(L.os, "fsync", side_effect=OSError("injected sync failure") if fault == "sync" else None))
+                    closed = stack.enter_context(patch.object(L.os, "close"))
+                    stack.enter_context(patch.object(L, "_android_os_check", side_effect=L.Refused("injected OS mismatch") if fault == "os" else None, return_value={}))
+                    calls = []
+                    def copy(source, target, expected, mode=0o444):
+                        calls.append(target.name)
+                        if fault == "copy" or fault == "manifest" and target.name == "android-toolchain.json":
+                            raise OSError("injected copy failure")
+                    stack.enter_context(patch.object(L, "copy_pinned", side_effect=copy))
+                    if fault == "success":
+                        receipt = L._publish_android(value)
+                        self.assertEqual(receipt["state"], "published")
+                        self.assertEqual(calls[-1], "android-toolchain.json")
+                        self.assertEqual(opened.call_count, len(plan["directories"]) + 1)
+                        self.assertEqual(closed.call_count, opened.call_count)
+                        with patch.object(L, "_android_tree", side_effect=L.Refused("post-consumer drift")):
+                            with self.assertRaisesRegex(ValueError, "post-consumer drift"):
+                                L._finish_android_publication(value)
+                        self.assertEqual(L._ANDROID_PUBLICATION["state"], "published")
+                        with patch.object(L, "_android_ancestors", return_value={"/opt": (1, 2, stat.S_IFDIR | 0o755, 0, 0)}):
+                            with self.assertRaisesRegex(ValueError, "publication prefix changed during consumers"):
+                                L._finish_android_publication(value)
+                        self.assertEqual(L._finish_android_publication(value)["state"], "verified-after-consumers")
+                        continue
+                    with self.assertRaises((L.Refused, OSError)):
+                        L._publish_android(value)
+                    self.assertIsNone(L._ANDROID_PUBLISHED)
+                    self.assertFalse(L._ANDROID_PUBLICATION["manifestPublished"])
+                    self.assertFalse(L._ANDROID_PUBLICATION["qualified"])
+                    self.assertFalse(L._ANDROID_PUBLICATION["cleanupClaimed"])
+                    self.assertEqual(L._ANDROID_PUBLICATION["verifiedFiles"], 0 if fault in {"collision", "copy"} else 5)
+                    self.assertEqual("android-toolchain.json" in calls, fault in {"manifest", "root-final", "sync"})
+                    if fault == "collision": mkdir.assert_not_called()
+                    if fault == "sync": closed.assert_called_once_with(99)
+                    else: opened.assert_not_called()
+
+    def test_publication_order_and_closed_result_require_original_consumers(self):
+        raw, materials, data = self.data()
+        source = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text()
+        body = source[source.index("def unit_start():"):source.index("def unit_stop():")]
+        self.assertLess(body.index("_context(copying=True)"), body.index("_publish_android(value)"))
+        self.assertLess(body.index("_publish_android(value)"), body.index("_shell_loader_start(value"))
+        finish = source[source.index("def _finish_body("):source.index("def unit_start():")]
+        self.assertLess(finish.index("_finish_android_publication(value)"), finish.index('_retain("unit-result.json"'))
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", materials), patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data):
+            value = {"taskRoot": "/task", "shell": {"androidPublication": L.shell_android_publication_request(Path("/task"))}}
+            receipt = {"state": "verified-after-consumers", "instance": materials["instance"], "materials": materials,
+                "documents": data["documents"], "totals": data["totals"], "createdDirectories": 7, "verifiedFiles": 5,
+                "verifiedBytes": 5, "manifestPublished": True, "uncertainEntry": None, "qualified": False, "cleanupClaimed": False}
+            self.assertEqual(L._android_closed_publication(value, receipt), receipt)
+            for key, changed in (("state", "published"), ("manifestPublished", False), ("uncertainEntry", "jdk/bin/java"),
+                                 ("qualified", True), ("verifiedFiles", 4), ("createdDirectories", 10)):
+                invalid = {**receipt, key: changed}
+                with self.assertRaises(ValueError):
+                    L._android_closed_publication(value, invalid)
+
+
+class AndroidBuildLifecycleContracts(unittest.TestCase):
+    def test_pending_material_refuses_before_fixture_creation_or_any_process(self):
+        self.assertIsNone(L.SHELL_ANDROID_MATERIALS)
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        with patch.object(Path, "mkdir") as mkdir, patch.object(L.subprocess, "Popen") as process:
+            for action in (L.shell_android_compile_environment,
+                           lambda: L._shell_android_files("android-build"),
+                           lambda: L._shell_fixtures_prepare(value)):
+                with self.assertRaisesRegex(ValueError, "material/OS-closure binding is pending"): action()
+            mkdir.assert_not_called(); process.assert_not_called()
+        for invalid in ({}, {**ANDROID_MATERIAL_DATA, "root": "/other"},
+                        {**ANDROID_MATERIAL_DATA, "instance": "../other"}, {**ANDROID_MATERIAL_DATA, "distributionSha256": True}):
+            with patch.object(L, "SHELL_ANDROID_MATERIALS", invalid):
+                with self.assertRaises(ValueError): L.shell_android_compile_environment()
+
+    def test_fixed_four_cases_keep_file_only_repository_and_real_build_boundary(self):
+        wrapper_prefix = (b"distributionUrl=https://services.gradle.org/distributions/gradle-8.14.5-bin.zip\n"
+                          b"distributionSha256Sum=")
+        observer = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        self.assertIn("const ANDROID_WRAPPER_PREFIX: &str = "
+                      + json.dumps(wrapper_prefix.decode("ascii")) + ";", observer)
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA):
+            self.assertEqual(L.shell_android_compile_environment(), {"MRK_ANDROID_TOOL_INSTANCE": "inert-android",
+                "MRK_ANDROID_TOOL_MANIFEST_SHA256": "1" * 64, "MRK_ANDROID_OS_CONTRACT_SHA256": "2" * 64})
+            for case in L.SHELL_ANDROID_CASES:
+                roster = L._shell_android_roster(installed_handoff(), case)
+                self.assertEqual((len(roster), sum(stat.S_ISDIR(row[1]) for row in roster)), (25, 15))
+                files = {name: raw for name, mode, _, raw in roster if stat.S_ISREG(mode)}
+                settings = files["project/settings.gradle"].decode()
+                self.assertTrue(settings.startswith("pluginManagement {"))
+                self.assertLess(settings.index("gradle.startParameter.offline = true"), settings.index("repositories"))
+                self.assertEqual(settings.count("uri('/opt/mobile-release-kit/android/inert-android/gradle/repository')"), 2)
+                for remote in ("mavenLocal", "google()", "mavenCentral", "gradlePluginPortal", "https://", "http://"):
+                    self.assertNotIn(remote, settings)
+                app = files["project/app/build.gradle"].decode()
+                for fragment in ("version '8.9.2'", "compileSdk 35", "buildToolsVersion '35.0.0'",
+                                 "MOBILE_RELEASE_BUILD_NUMBER", "MOBILE_RELEASE_VERSION_NAME", "preReleaseBuild",
+                                 "mrkNativeBoundary", "out.getFD().sync()"):
+                    self.assertIn(fragment, app)
+                self.assertEqual("Thread.sleep(20000)" in app, case == "android-build-cancel")
+                self.assertEqual("throw new GradleException" in app, case == "android-build-failure")
+                self.assertIn(b"exit 70", files["project/gradlew"])
+                self.assertEqual(files["project/gradle/wrapper/gradle-wrapper.properties"],
+                    wrapper_prefix + b"3" * 64 + b"\n")
+                self.assertEqual(files[L.SHELL_ANDROID_TRACE], b"")
+        self.assertEqual(L.SHELL_CASES[-4:], ("android-build", "android-build-failure", "android-build-cancel", "android-build-refusals"))
+        self.assertEqual(len(L.SHELL_CASES), 25)
+
+    def test_separate_receipts_preserve_actual_core_child_and_native_finality(self):
+        for case in L.SHELL_ANDROID_CASES:
+            with self.subTest(case=case):
+                receipt = android_receipt_data(L, case)
+                raw = L.canonical(receipt)
+                self.assertEqual(L.shell_android_receipt(raw, case), receipt)
+                stdout, stderr = android_capture(case)
+                result = L.shell_result(stdout, stderr, case, 0, map_data())
+                self.assertEqual(result["androidBuild"], receipt)
+                self.assertFalse(receipt["original"]["noChild"])
+                self.assertEqual(receipt["coreLifetime"]["profileCalls"], 0)
+                self.assertEqual(receipt["coreLifetime"]["commands"], 2 if case == "android-build" else 0 if case == "android-build-refusals" else 1)
+                self.assertTrue(all(value is False for value in receipt["limits"].values()))
+                with self.assertRaises(ValueError): L.shell_tools_offline_receipt(raw, "offline-pass")
+                with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(tools_offline_receipt("offline-pass")), case)
+                for broken in (stdout.replace(L.SHELL_ANDROID_MARKER, L.SHELL_TOOLS_OFFLINE_MARKER),
+                               stdout + b"MRK_INSTALLED_SHELL_ANDROID_BUILD={}\n",
+                               stdout.replace(b"MRK_INSTALLED_SHELL_ANDROID_BUILD=", b"MRK_EXTRA=\nMRK_INSTALLED_SHELL_ANDROID_BUILD=")):
+                    with self.assertRaises(ValueError): L.shell_result(broken, stderr, case, 0, map_data())
+                with self.assertRaises(ValueError): L.shell_result(stdout, b"MRK_extra\n", case, 0, map_data())
+                with self.assertRaises(ValueError): L.shell_result(stdout, stderr, case, 1, map_data())
+
+    def test_every_native_boolean_and_typed_lifetime_is_required_not_a_peer_grant(self):
+        for case in L.SHELL_ANDROID_CASES:
+            original = android_receipt_data(L, case)
+            paths = [(("original", key), not value) for key, value in original["original"].items() if type(value) is bool]
+            paths += [(("coreLifetime", key), not value) for key, value in original["coreLifetime"].items() if type(value) is bool]
+            paths += [(("limits", key), True) for key in original["limits"]]
+            paths += [(("normalSelection", key), not value) for key, value in original["normalSelection"].items()]
+            paths += [(("original", "domain"), "offline"), (("original", "domain"), "tools"),
+                (("original", "generation"), "c" * 32), (("nativeIntegrity",), False), (("toolsLedgerSettled",), False),
+                (("coreLifetime", "profileCalls"), 1), (("coreLifetime", "profileCalls"), False),
+                (("coreLifetime", "commands"), True), (("coreLifetime", "commands"), 3),
+                (("terminal", "context", "savedVersion", "sha256"), "0" * 64),
+                (("terminal", "context", "savedVersion", "build"), True), (("terminal", "context", "savedConfig", "bytes"), True),
+                (("terminal", "context", "draftRevision"), True), (("terminal", "intentUsable"), True),
+                (("requests", "androidStart"), True), (("requests", "androidPrepare"), 2), (("savedVersionObservation",), False)]
+            for path, value in paths:
+                with self.subTest(case=case, path=path, value=value):
+                    changed = deepcopy(original); target = changed
+                    for part in path[:-1]: target = target[part]
+                    target[path[-1]] = value
+                    with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(changed), case)
+            changed = deepcopy(original); changed["requests"]["offlineStart"] = 1
+            with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(changed), case)
+            with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(original)[:-1], case)
+
+    def test_android_selection_history_is_required_not_relabelled_or_live_authority(self):
+        for case in L.SHELL_ANDROID_CASES:
+            original = android_receipt_data(L, case)
+            for history in (None, {}, {"selectedBeforeObservation": True}, {"observerGranted": False},
+                            {"selectedBeforeObservation": 1, "observerGranted": False},
+                            {"selectedBeforeObservation": True, "observerGranted": 0},
+                            {"selectedBeforeObservation": True, "observerGranted": False, "liveEligible": True}):
+                with self.subTest(case=case, history=history):
+                    changed = deepcopy(original); changed["normalSelection"] = history
+                    with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(changed), case)
+            for schema in ("installed-android-build-v1", "installed-android-build-v2"):
+                changed = deepcopy(original); changed["schema"] = schema; del changed["normalSelection"]
+                with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(changed), case)
+            changed = deepcopy(original); changed["schema"] = "installed-android-build-v1"
+            with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(changed), case)
+
+    def test_local_aab_summary_is_typed_and_never_release_or_signer_authority(self):
+        for path, value in [
+            (("result", "artifacts", 0, "size"), True), (("result", "artifacts", 0, "size"), (1 << 30) + 1),
+            (("result", "artifacts", 0, "sha256"), "bad"), (("result", "artifacts", 0, "unknownAbi"), True),
+            (("result", "artifacts", 0, "architectures"), ["x86_64"]),
+            (("result", "assurances", "signer"), "passed"), (("result", "assurances", "sourceBinding"), "established"),
+            (("result", "limitations"), []), (("activity", "command", "exitCode"), True),
+            (("activity", "summary", "total"), True), (("activity", "summary", "omitted"), 1),
+            (("activity", "findings", 0, "ordinal"), True), (("activity", "summary", "counts", "PASS"), 1)]:
+            with self.subTest(path=path, value=value):
+                receipt = android_receipt_data(L, "android-build"); target = receipt["terminal"]
+                for part in path[:-1]: target = target[part]
+                target[path[-1]] = value
+                with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(receipt), "android-build")
+        receipt = android_receipt_data(L, "android-build")
+        for section in ("activity", "result"):
+            receipt["terminal"][section]["findings"][2]["status"] = "PASS"
+            receipt["terminal"][section]["summary"]["counts"].update(PASS=3, SKIP=0)
+        with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(receipt), "android-build")
+
+    def test_original_25_controls_and_explicit_output_exclusions_are_not_whole_tree_claims(self):
+        value = installed_handoff()
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA):
+            for case in L.SHELL_ANDROID_CASES:
+                before, after = (android_fixture_data(value, case, after=phase) for phase in (False, True))
+                receipt = L.shell_android_fixture(value, case, L.canonical(before), L.canonical(after))
+                self.assertEqual((receipt["beforeCount"], receipt["afterCount"]), (25, 25))
+                self.assertNotIn("noUnexpectedEntries", receipt); self.assertNotIn("noPendingState", receipt)
+                self.assertEqual(receipt["generatedScopesNotExported"], ["project/.mobile-release", "project/app/build", "project/build"])
+                for raw in (L.canonical(before), L.canonical(after)): self.assertLessEqual(len(raw), L.SHELL_ANDROID_INVENTORY_LIMIT)
+                for fault in ("inode", "mode", "float-ns", "extra-control", "output-scan", "hash", "namespace", "material", "replacement"):
+                    changed = deepcopy(after)
+                    if fault == "inode": changed["entries"][0]["identity"][1] += 1000
+                    elif fault == "mode": changed["entries"][0]["identity"][2] = stat.S_IFDIR | 0o755
+                    elif fault == "float-ns": changed["entries"][0]["identity"][7] = float(changed["entries"][0]["identity"][7])
+                    elif fault == "extra-control": changed["entries"].append(deepcopy(changed["entries"][0]))
+                    elif fault == "output-scan":
+                        row = next(row for row in changed["entries"] if row["path"] == "project/app/build")
+                        row["children"] = ["app-release.aab"]; row["contentsInspected"] = True
+                    elif fault == "hash": next(row for row in changed["entries"] if row["kind"] == "file")["sha256"] = "0" * 64
+                    elif fault == "namespace": changed["namespace"]["identity"][1] += 100
+                    elif fault == "material": changed["materials"]["distributionSha256"] = "0" * 64
+                    else:
+                        path = L.SHELL_ANDROID_VERSION_PATH if case == "android-build-refusals" else L.SHELL_ANDROID_TRACE
+                        next(row for row in changed["entries"] if row["path"] == path)["identity"][1] += 1000
+                    with self.subTest(case=case, fault=fault), self.assertRaises(ValueError):
+                        L.shell_android_fixture(value, case, L.canonical(before), L.canonical(changed))
+
+    def test_after_exit_inventory_never_enumerates_generated_output_bodies(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA):
+            case = "android-build"
+            expected = android_fixture_data(value, case, after=True)
+            root = L.shell_fixture_root(value) / case
+            rows = {root if row["path"] == "." else root / row["path"]: row for row in expected["entries"]}
+            rows[root / expected["generatedNamespace"]["path"]] = expected["generatedNamespace"]
+            fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+            scans = []
+            def metadata(path):
+                return SimpleNamespace(**dict(zip(fields, rows[path]["identity"])))
+            def scan(path):
+                self.assertTrue(rows[path]["contentsInspected"]); scans.append(path)
+                scope = Mock(); scope.__enter__ = Mock(return_value=iter(SimpleNamespace(name=name) for name in rows[path]["children"]))
+                scope.__exit__ = Mock(return_value=False); return scope
+            def file_record(path, limit):
+                row = rows[path]; self.assertEqual(limit, row["size"])
+                return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
+            with patch.object(L, "_ROOT", L.root_path(value)), \
+                 patch.object(L, "_shell_namespace_check", return_value=expected["namespace"]), \
+                 patch.object(Path, "lstat", autospec=True, side_effect=metadata), \
+                 patch.object(L, "directory"), patch.object(L, "_xattrs"), patch.object(L, "record", side_effect=file_record), \
+                 patch.object(L.os, "scandir", side_effect=scan), patch.object(L.os, "open") as opening:
+                observed = L._shell_android_inventory(value, b"inert original namespace", case, after=True)
+                self.assertEqual(observed, expected); opening.assert_not_called()
+                self.assertFalse(any(root / name in scans for name in L.SHELL_ANDROID_GENERATED))
+
+    def test_cancel_checks_post_ack_original_busy_before_snapshot_early_returns(self):
+        observer = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        predicate = observer.split("fn android_cancel_projection_valid(", 1)[1].split("\nfn android_terminal_dom", 1)[0]
+        for original in ('r.id.as_deref()==p["operationId"].as_str()',
+                         'r.generation.as_deref()==p["ownerGeneration"].as_str()',
+                         'r.context.as_ref()==p.get("context")'):
+            self.assertIn(original, predicate)
+        self.assertIn('(Some("busy"),Some("starting" | "running" | "stopping"))', predicate)
+        self.assertIn('(Some("available"),Some("terminal"))', predicate)
+        returned = observer.split("fn android_returned", 1)[1].split("fn android_terminal_valid", 1)[0]
+        self.assertIn("command==Command::AndroidCancel && !android_cancel_projection_valid(&r,&status)", returned)
+        tick = observer.split("fn android_tick", 1)[1].split("fn android_dom", 1)[0]
+        self.assertLess(tick.index("if r.android_replies[2]!=1"), tick.index("state.document.android_build_status()"))
+        wait = tick.split("Step::WaitFinal => {", 1)[1]
+        self.assertLess(wait.index("android_cancel_projection_valid"), wait.index("installed_observation_snapshot"))
+        self.assertIn("!self.original_matches(&r,&snapshot.facts,&snapshot.terminal)", wait)
+        self.assertIn("!snapshot.facts.retired_before_cutoff", wait)
+        self.assertIn("status.availability!=android::Availability::Busy { self.fail(); }", wait)
+        self.assertLess(wait.index("!snapshot.facts.retired_before_cutoff"), wait.index("self.android_terminal_valid(&r,&snapshot)"))
+        for case in ('("available","stopping",false)', '("available","terminal",true)',
+                     '("busy","terminal",false)', '("context",json!({"projectId":"foreign-context"}))'):
+            self.assertIn(case, observer)
+        self.assertNotIn("Duration::", predicate)
+
+    def test_android_ordinary_selection_precedes_observer_and_history_never_grants(self):
+        observer = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        owner = (SOURCE / "desktop/src-tauri/src/saved_command_owner.rs").read_text()
+        runtime = (SOURCE / "desktop/src-tauri/src/runtime.rs").read_text()
+        self.assertIn("android_document: OnceLock<Weak<()>>", observer)
+        self.assertIn("android_document: OnceLock::new()", observer)
+        self.assertNotIn("permits_android", observer + owner)
+        eligibility = owner.split("fn android_installed_selected(&self, identity: Option<&Arc<()>>) -> bool {", 1)[1].split("\n    }", 1)[0]
+        for forbidden in ("self.observation", "self.record", "self.registry", "self.lock()"):
+            self.assertNotIn(forbidden, eligibility)
+        self.assertIn("self.android_runtime_selected(identity)", eligibility)
+        self.assertIn("AndroidToolchainProfile::installed_candidate_matches_compiled", eligibility)
+        compiled = runtime.split("pub(crate) fn android_build_installed_runtime_available(&self) -> bool {", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR)", compiled)
+        for forbidden in ("passive_installed_profile()", "installed_session", "resolve", "VerifiedRuntime"):
+            self.assertNotIn(forbidden, compiled)
+        attach = observer.split("fn attach_android(", 1)[1].split("pub(super) fn android_version_request", 1)[0]
+        self.assertLess(attach.index("document.installed_android_normal_selected()"), attach.index("AndroidFixture::capture"))
+        self.assertLess(attach.index("if !selected_before_observation"), attach.index("self.record()"))
+        self.assertIn("original.is_some() || self.android_document.get().is_some()", attach)
+        self.assertEqual(observer.count("self.android_document.set("), 1)
+        self.assertEqual(observer.count("r.android_selected_before_observation = selected_before_observation;"), 1)
+        self.assertLess(attach.index("self.android_document.set(document_identity.clone())"),
+                        attach.index("AndroidFixture::capture"))
+        self.assertLess(attach.index("*original=Some(Arc::downgrade(q));"),
+                        attach.index("document.admit_installed_android"))
+        self.assertNotIn("r.android_document", observer)
+        finality = observer.split("fn android_complete(&self) -> bool {", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("self.android_document.get().is_some()", finality)
+        self.assertIn("r.android_selected_before_observation", finality)
+        self.assertNotIn("Weak::upgrade", finality)
+        self.assertNotIn("normal_selected", finality)
+        admission = owner.split("pub(crate) fn admit_installed_android_observation(", 1)[1].split("pub(crate) fn installed_android_snapshot", 1)[0]
+        self.assertLess(admission.index("!self.inner.android_installed_selected(Some(document))"), admission.index("*slot = Some(InstalledObservation"))
+
+    def test_source_preserves_original_native_domain_clock_and_no_grant_boundaries(self):
+        observer = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        owner = (SOURCE / "desktop/src-tauri/src/saved_command_owner.rs").read_text()
+        toolchain = (SOURCE / "desktop/src-tauri/src/android_toolchain.rs").read_text()
+        build = (SOURCE / "desktop/src-tauri/build.rs").read_text()
+        for domain in ("Tools", "Offline", "Android"): self.assertIn("Domain::" + domain, observer)
+        for text in ("struct AndroidAdmission", "Weak<()>", "required_mask", "installed_candidate_matches_compiled",
+                     "OS_CONTRACT_BYTES: Option<&[u8]> = None;"):
+            self.assertTrue(text in observer + owner + toolchain + build, text)
+        self.assertTrue('include!(concat!(env!("OUT_DIR"), "/mrk-android-compile-data.rs"));' in toolchain)
+        self.assertTrue('const ANDROID_INPUT: &str = "MRK_ANDROID_OS_CONTRACT_INPUT";' in build)
+        for flag in ("ANDROID_NATIVE_QUALIFIED", "ANDROID_RUNTIME_QUALIFIED", "ANDROID_TOOLCHAIN_QUALIFIED"):
+            self.assertIn("const " + flag + ": bool = false;", owner)
+        self.assertIn("life.profile_calls!=0", observer)
+        self.assertIn('Duration::from_secs(3000)', owner)
+        self.assertIn('Duration::from_secs(3010)', owner)
+        lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text()
+        caller = lifecycle.split("def _domain(value, label):", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn('_domain_events(_domain_admission(value, result.stdout))', caller)
+        domain = lifecycle.split("def _domain_admission(value, raw, *, stop_boundary=False):", 1)[1].split("\ndef ", 1)[0]
+        # Verify the observed service properties, not a nonexistent unit-argv
+        # literal. The real installed domain must retain all initial views.
+        self.assertIn('need(all(props[key] == "no" for key in ("PrivateMounts", "PrivateTmp", '
+                      '"PrivateUsers", "PrivateNetwork", "ProtectControlGroups")),', domain)
+        self.assertIn('"Service substitutes an initial namespace/view"', domain)
+
+
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
+class ToolsOfflineLifecycleContracts(unittest.TestCase):
+    def test_fixed_synthetic_roster_configs_and_existing_project_script_are_pinned(self):
+        # Shape/correspondence DATA only. Actual core configuration validation
+        # belongs to the separately admitted native Offline cases, not this test.
+        rust = (SOURCE / "desktop/src-tauri/src/offline_preflight_owner_tests.rs").read_text()
+        script = rust.split('const SCRIPT: &str = r#"', 1)[1].split('"#;', 1)[0].encode("ascii")
+        self.assertEqual(script, L.SHELL_TOOLS_OFFLINE_SCRIPT)
+        self.assertEqual((len(script), hashlib.sha256(script).hexdigest()),
+                         (829, "4ff4b3b59ea27f0761881c9ab56d9478c0ce1e6f74554105917d8fcd8ea0d9e1"))
+        pins = {"pass": (1045, "5e9bbc6ceb2d3a08ac8a78a393138ea74aa996954d744ac9f2fbdc28db6ef84d"),
+                "nonzero": (1174, "4081ee76f52e0c4f50c788a53856bd80c69b2462e2d5349318b32a4603737419"),
+                "active": (1173, "e59ce7cab9b7959e217bde3054bf87ac1576f1bd1a5fe2ef880963356e2509ec")}
+        value = installed_handoff()
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            with self.subTest(case=case):
+                roster = L._shell_tools_offline_roster(value, case)
+                self.assertEqual(len(roster), 21)
+                self.assertEqual(sum(stat.S_ISDIR(mode) for _, mode, _, _ in roster), 9)
+                self.assertEqual(sum(stat.S_ISREG(mode) for _, mode, _, _ in roster), 12)
+                self.assertTrue(all(owners == (value["runnerUid"], value["runnerGid"]) and stat.S_IMODE(mode) in (0o600, 0o700)
+                                    for _, mode, owners, _ in roster))
+                files = {name: data for name, mode, _, data in roster if stat.S_ISREG(mode)}
+                self.assertEqual(files["project/script.trace"], files["project/later.trace"])
+                self.assertEqual(files["project/script.trace"], b"")
+                self.assertEqual(files["project/gradlew"], b"#!/bin/sh\nexit 93\n")
+                config = files["project/release/mobile-release.json"]
+                document = json.loads(config)
+                mode = "nonzero" if case == "offline-negative" else "active" if case == "offline-cancel" else "pass"
+                self.assertEqual((len(config), hashlib.sha256(config).hexdigest()), pins[mode])
+                prefix = ["/usr/bin/python3.12", "-I", "-S", "-B", "check.py"]
+                self.assertEqual(document["projectChecks"], {"androidArtifact": [], "iosArtifact": [],
+                    "preflight": [prefix + [mode]] + ([prefix + ["later"]] if mode != "pass" else [])})
+        self.assertEqual(L.SHELL_TOOLS_OFFLINE_RECEIPT_LIMIT, 64 << 10)
+        self.assertEqual(L.SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT, 16 << 10)
+
+    def test_eight_receipts_require_original_transport_and_do_not_invent_child_maps(self):
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            receipt = tools_offline_receipt(case)
+            raw = L.canonical(receipt); self.assertLess(len(raw), 32 << 10)
+            self.assertEqual(L.shell_tools_offline_receipt(raw, case), receipt)
+            stdout, stderr = tools_offline_capture(case)
+            result = L.shell_result(stdout, stderr, case, 0, map_data())
+            self.assertEqual(result, {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                                      "maps": [], "toolsOffline": receipt})
+            lines = stdout.splitlines(keepends=True)
+            for bad_stdout, bad_stderr, code in ((b"".join(lines[:3] + lines[4:]), b"", 0),
+                    (b"".join(lines[:3] + [lines[3], lines[3]] + lines[4:]), b"", 0),
+                    (b"".join(lines[:2] + [lines[3], lines[2], lines[4]]), b"", 0),
+                    (stdout + b"MRK_INSTALLED_NATIVE_CHILD=[]\n", b"", 0), (stdout, b"MRK_PRIVATE=unknown\n", 0),
+                    (stdout, stderr, 1), (stdout, stderr, True), (stdout.rstrip(b"\n"), stderr, 0)):
+                with self.subTest(case=case, code=code, stdout=bad_stdout[:30]), self.assertRaises(ValueError):
+                    L.shell_result(bad_stdout, bad_stderr, case, code, map_data())
+            for bad in (raw + b" ", raw.rstrip(b"\n"), raw.replace(b'"case":', b'"case":"duplicate","case":', 1),
+                        b"x" * ((64 << 10) + 1), bytearray(raw)):
+                with self.subTest(case=case, framing=type(bad)), self.assertRaises(ValueError):
+                    L.shell_tools_offline_receipt(bad, case)
+
+    def test_receipts_reject_missing_fields_false_joins_and_forged_route_consent(self):
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            receipt = tools_offline_receipt(case)
+            mutations = [lambda d, key=key: d.pop(key) for key in receipt]
+            mutations += [lambda d, key=key: d["original"].__setitem__(key, not d["original"][key])
+                          for key, value in receipt["original"].items() if type(value) is bool]
+            mutations += [lambda d, key=key: d["requests"].__setitem__(key, bool(d["requests"][key])) for key in receipt["requests"]]
+            mutations += [lambda d: d.update(qualificationOnly=False), lambda d: d.update(builder="observer-only"),
+                lambda d: d["ui"].update(terminal=False), lambda d: d["ui"].update(consent=not d["ui"]["consent"]),
+                lambda d: d["initial"].update(toolsAvailable=False), lambda d: d["initial"].update(offlineAvailable=False),
+                lambda d: d["hold"].update(boundary="watchdog"), lambda d: d["hold"].update(released=not d["hold"]["released"]),
+                lambda d: d["original"].update(id="c" * 32), lambda d: d["original"].update(generation="c" * 32),
+                lambda d: d["terminal"]["context"].update(draftRevision=True), lambda d: d["terminal"]["context"].update(baselineGeneration=2 ** 32 - 1),
+                lambda d: d["terminal"]["context"].update(projectId="/private/path"), lambda d: d["fixture"].update(laterTrace="later\n"),
+                lambda d: d["fixture"].update(savedConfigChanged=not d["fixture"]["savedConfigChanged"])]
+            for mutate in mutations:
+                altered = deepcopy(receipt); mutate(altered)
+                with self.subTest(case=case, mutate=mutate), self.assertRaises(ValueError):
+                    L.shell_tools_offline_receipt(L.canonical(altered), case)
+
+    def test_tools_honest_lookup_refusal_is_not_positive_jdk_or_partial_readiness(self):
+        for attempted in (0, 1):
+            receipt = tools_offline_receipt("tools-observed")
+            core = receipt["terminal"]["result"]
+            for row in core["checks"][attempted:]:
+                row.update(state="not-run", reason="unsupported-installation", version=None, returnCode=None, assessment="not-assessed")
+            outcome = "complete" if attempted else "unavailable"
+            receipt["terminal"]["outcome"] = core["outcome"] = outcome
+            core["commandsAttempted"] = core["lifetime"]["commands"] = attempted
+            core["lifetime"]["commandDispatched"] = core["assurance"]["toolsAttempted"] = bool(attempted)
+            self.assertEqual(L.shell_tools_offline_receipt(L.canonical(receipt), "tools-observed"), receipt)
+        original = tools_offline_receipt("tools-observed")
+        for mutate in (lambda d: d["terminal"].update(finality="pending"), lambda d: d["terminal"].update(outcome="partial"),
+                       lambda d: d["terminal"]["result"].update(outcome="failed"),
+                       lambda d: d["terminal"]["result"].update(commandsAttempted=True),
+                       lambda d: d["terminal"]["result"]["lifetime"].update(complete=False),
+                       lambda d: d["terminal"]["result"]["assurance"].update(releaseReadiness="ready"),
+                       lambda d: d["terminal"]["result"]["assurance"].update(projectCodeExecuted=True),
+                       lambda d: d["terminal"]["result"]["checks"][1].update(assessment="match"),
+                       lambda d: d["terminal"]["result"]["checks"][1].update(help="raw\noutput"),
+                       lambda d: d["terminal"]["result"]["checks"][1].update(returnCode=True),
+                       lambda d: d["terminal"]["result"]["checks"].reverse()):
+            altered = deepcopy(original); mutate(altered)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                L.shell_tools_offline_receipt(L.canonical(altered), "tools-observed")
+
+    def test_offline_negative_drift_and_cancel_cannot_be_relabelled_pass_or_no_child(self):
+        for case in ("offline-pass", "offline-negative", "offline-drift", "offline-cancel", "offline-settlement"):
+            original = tools_offline_receipt(case)
+            mutations = [lambda d: d["terminal"].update(intentUsable=True), lambda d: d["original"].update(noChild=True),
+                         lambda d: d["terminal"]["context"]["savedConfig"].update(sha256="0" * 64),
+                         lambda d: d["terminal"].update(reason="none" if case in ("offline-drift", "offline-cancel") else "cancelled")]
+            if original["terminal"]["result"] is not None:
+                mutations += [lambda d: d["terminal"]["result"]["summary"].update(total=True),
+                    lambda d: d["terminal"]["result"]["findings"][1].update(projectCheckIndex=1),
+                    lambda d: d["terminal"]["result"]["findings"][1].update(status="PASS" if case == "offline-negative" else "FAIL"),
+                    lambda d: d["terminal"]["result"].update(limitations=[]), lambda d: d["terminal"]["result"].update(scope="release-ready")]
+            else:
+                mutations += [lambda d: d["terminal"].update(result={}), lambda d: d["terminal"].update(outcome="complete")]
+            for mutate in mutations:
+                altered = deepcopy(original); mutate(altered)
+                with self.subTest(case=case, mutate=mutate), self.assertRaises(ValueError):
+                    L.shell_tools_offline_receipt(L.canonical(altered), case)
+
+    def test_fixture_changes_are_exact_in_place_mutations_of_the_same_originals(self):
+        value = installed_handoff()
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            before, after = (tools_offline_fixture_data(value, case, after=phase) for phase in (False, True))
+            observed = L.shell_tools_offline_fixture(value, case, L.canonical(before), L.canonical(after))
+            self.assertEqual(observed["beforeCount"], observed["afterCount"])
+            self.assertEqual(observed["beforeCount"], 21)
+            self.assertEqual({key: observed[key] for key in ("scriptTrace", "laterTrace", "savedConfigChanged")},
+                             tools_offline_receipt(case)["fixture"])
+            for mutate in (lambda d: d["entries"][0]["identity"].__setitem__(1, 9000),
+                           lambda d: d["entries"][-1]["identity"].__setitem__(5, 2),
+                           lambda d: d["entries"][-1]["identity"].__setitem__(3, 0),
+                           lambda d: d["entries"][-1].update(kind="symlink"),
+                           lambda d: d["entries"][-1].update(size=True), lambda d: d["entries"][-1].update(sha256="0" * 64),
+                           lambda d: d["entries"][1]["children"].append(".mobile-release"),
+                           lambda d: d["entries"].append(deepcopy(d["entries"][-1])),
+                           lambda d: d["namespace"]["identity"].__setitem__(1, 9999), lambda d: d.update(changed=not d["changed"]),
+                           lambda d: d.update(absent=[])):
+                altered = deepcopy(after); mutate(altered)
+                with self.subTest(case=case, mutate=mutate), self.assertRaises(ValueError):
+                    L.shell_tools_offline_fixture(value, case, L.canonical(before), L.canonical(altered))
+            for name in observed["mutations"]:
+                altered = deepcopy(after)
+                row = next(row for row in altered["entries"] if row["path"] == name); row["identity"][1] += 5000
+                with self.subTest(case=case, replaced=name), self.assertRaisesRegex(ValueError, "replaced or chmodded"):
+                    L.shell_tools_offline_fixture(value, case, L.canonical(before), L.canonical(altered))
+
+    def test_inventory_admits_complete_parent_rosters_before_any_leaf_bytes(self):
+        value = installed_handoff(); namespace = fixture_namespace_data(value); binding = L.canonical(namespace)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            for after in (False, True):
+                document = tools_offline_fixture_data(value, case, after=after); base = Path(document["root"])
+                nodes = {base / row["path"]: row for row in document["entries"]}
+                def metadata(path): return SimpleNamespace(**dict(zip(fields, nodes[path]["identity"])))
+                def scan(path):
+                    context = Mock(); context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=n) for n in nodes[path]["children"]))
+                    context.__exit__ = Mock(return_value=False); return context
+                def record(path, limit):
+                    row = nodes[path]; self.assertEqual(limit, row["size"])
+                    return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
+                with self.subTest(case=case, after=after), patch.object(L, "_ROOT", L.root_path(value)), \
+                     patch.object(L, "_shell_namespace_check", return_value=namespace) as checking, patch.object(L, "directory"), \
+                     patch.object(Path, "lstat", metadata), patch.object(L.os, "scandir", side_effect=scan), \
+                     patch.object(L, "record", side_effect=record) as reading, patch.object(L, "_xattrs"), patch.object(L, "_absent") as absent, \
+                     patch.object(L.os, "readlink", side_effect=AssertionError("No aliases in a Tools/Offline fixture")):
+                    self.assertEqual(L._shell_tools_offline_inventory(value, binding, case, after=after), document)
+                    self.assertEqual(reading.call_count, 12)
+                    self.assertEqual([call.args for call in checking.call_args_list], [(value, binding)] * 2)
+                    self.assertEqual([call.args[0] for call in absent.call_args_list], [base / name for name in document["absent"]])
+                    reading.reset_mock()
+                    nodes[base / "project/release/store/android/en-US/changelogs"]["children"].append("unreviewed")
+                    with self.assertRaises(ValueError): L._shell_tools_offline_inventory(value, binding, case, after=after)
+                    reading.assert_not_called()
+
+    def test_new_postexit_capture_stays_after_the_existing_success_gate(self):
+        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
+        unit = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "unit_start")
+        loop = next(node for node in ast.walk(unit) if isinstance(node, ast.For) and ast.unparse(node.iter) == "shell_cases(value)")
+        transaction = next(node for node in loop.body if isinstance(node, ast.Try))
+        branch = next(node for node in transaction.body if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'normal'")
+        gate = next(i for i, node in enumerate(branch.orelse) if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name) and node.value.func.id == "shell_result")
+        added = next(node for node in branch.orelse[gate + 1:] if isinstance(node, ast.If) and ast.unparse(node.test) == "case in SHELL_TOOLS_OFFLINE_CASES")
+        inventories = [node for node in ast.walk(added) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                       and node.func.id == "_shell_tools_offline_inventory"]
+        self.assertEqual(len(inventories), 1)
+        self.assertEqual([(kw.arg, ast.literal_eval(kw.value)) for kw in inventories[0].keywords], [("after", True)])
+        self.assertFalse(any(isinstance(node, (ast.Try, ast.While)) for node in ast.walk(added)))
+        self.assertEqual([node.func.id for node in ast.walk(unit) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                          and node.func.id == "_shell_fixtures_prepare"], ["_shell_fixtures_prepare"])
+
+    def test_closed_result_rebinds_every_new_native_receipt_and_inventory(self):
+        value, outcome, files, expected = closed_shell_data()
+        with patch.object(L, "shell_closed_loader", return_value=expected):
+            observed = L.shell_closed_result(value, outcome, files)
+            self.assertEqual(set(observed["toolsOffline"]), set(L.SHELL_TOOLS_OFFLINE_CASES))
+            for case in L.SHELL_TOOLS_OFFLINE_CASES:
+                self.assertEqual(observed["toolsOffline"][case]["native"], tools_offline_receipt(case))
+                for fault in ("receipt", "inventory", "command"):
+                    altered, result = dict(files), deepcopy(outcome)
+                    if fault == "receipt":
+                        cases = L.decode(altered["shell-cases.json"]); cases[case]["toolsOffline"]["original"]["driverJoined"] = False
+                        altered["shell-cases.json"] = L.canonical(cases)
+                    elif fault == "inventory":
+                        name = "shell-" + case + "-after.json"; document = L.decode(altered[name])
+                        document["entries"][-1]["sha256"] = "0" * 64; altered[name] = L.canonical(document)
+                    else:
+                        next(row for row in result["commands"] if row["phase"] == "shell-" + case)["exitCode"] = 1
+                    with self.subTest(case=case, fault=fault), self.assertRaises(ValueError):
+                        L.shell_closed_result(value, result, altered)
+
+
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
+class SessionFixtureContracts(unittest.TestCase):
+    def test_private_fixture_actual_snapshot_matches_installed_session_contract(self):
+        self._assert_private_fixture_actual_snapshot(L.SHELL_SESSION_CONFIG, 608,
+            "ce38aeb0676d4221a3054744083162158e5a33afade4e77ca4dcf9e7c96d53c3")
+
+    def test_ios_private_fixture_actual_snapshot_matches_its_distinct_case(self):
+        self._assert_private_fixture_actual_snapshot(L.SHELL_SESSION_IOS_FIREBASE_CONFIG, 684,
+            "fa6e91784d45703c39ab22db99abea8957f5dc33efbdb8aa02cae3f493dabc02")
+
+    def _assert_private_fixture_actual_snapshot(self, fixture, count, digest):
+        from mobile_release.api._snapshot import project_snapshot
+
+        # Use the actual static reader, not only configuration validation or a
+        # fabricated bridge reply. Nothing here starts a tool or reads a secret.
+        with tempfile.TemporaryDirectory(prefix="mrk-session-snapshot-") as directory:
+            root = Path(directory) / "project"
+            root.mkdir(mode=0o700)
+            (root / "release").mkdir(mode=0o700)
+            files = {
+                "release/mobile-release.json": fixture,
+                "version.properties": L.SHELL_PROJECT_VERSION,
+            }
+            for name, data in files.items():
+                fd = os.open(root / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+
+            def identity(path):
+                value = path.lstat()
+                return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                        value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+            # Reads may update atime, but may not replace even identical input
+            # bytes or change the original file/directory identities.
+            originals = {path: identity(path) for path in (root, root / "release", *(root / name for name in files))}
+            actual = project_snapshot(str(root))
+            self.assertEqual({path: identity(path) for path in originals}, originals)
+            self.assertEqual(actual["root"], str(root))
+            self.assertEqual(actual["observationScope"], "single-request-non-atomic")
+            config = actual["config"]
+            self.assertEqual(config["path"], "release/mobile-release.json")
+            self.assertEqual(config["state"], "format-valid")
+            self.assertEqual(config["issues"], [])
+            self.assertEqual(config["data"], json.loads(fixture))
+            self.assertEqual(config["content"], {
+                "bytes": count,
+                "sha256": digest,
+            })
+            self.assertEqual(actual["issues"], [])
+            self.assertEqual(actual["discovery"]["state"], "unverified")
+            self.assertIs(actual["discovery"]["partial"], False)
+            self.assertEqual(actual["discovery"]["scan"], {
+                "sourceFiles": 2, "sourceBytes": count + 34, "entries": 3, "excludedEntries": 0,
+            })
+            self.assertEqual(actual["assurance"]["basis"], "static-text")
+            self.assertEqual(actual["assurance"]["releaseReadiness"], "unknown")
+            for field in ("projectCodeExecuted", "toolsProbed", "credentialsRead", "gitObserved",
+                          "storeContacted", "writesPerformed"):
+                self.assertIs(actual["assurance"][field], False)
+            for name, data in files.items():
+                self.assertEqual((root / name).read_bytes(), data)
+                self.assertEqual(stat.S_IMODE((root / name).stat().st_mode), 0o600)
+
+    def test_private_fixture_config_is_valid_shared_policy_without_build_commands(self):
+        from mobile_release.config import validate_config_data
+        draft = json.loads(L.SHELL_SESSION_CONFIG)
+        validate_config_data(draft)
+        self.assertEqual(draft["android"], {"applicationId": "org.assessment.fixture", "enabled": True, "identityStatus": "unverified"})
+        self.assertEqual(draft["ios"], {"enabled": False})
+        self.assertEqual(draft["projectChecks"], {"androidArtifact": [], "iosArtifact": [], "preflight": []})
+        self.assertEqual(draft["services"], {"androidFirebase": "required", "iosFirebase": "disabled"})
+        self.assertIs(draft["source"]["projectReadTokenRequired"], True)
+        self.assertEqual(draft["version"]["source"], "version.properties")
+
+    def test_ios_fixture_is_exact_private_credential_free_data_not_an_old_kind_relabel(self):
+        from mobile_release.config import validate_config_data
+        original = json.loads(L.SHELL_SESSION_CONFIG)
+        expected = deepcopy(original)
+        expected["ios"] = {"bundleId": "org.assessment.fixture", "enabled": True, "identityStatus": "unverified"}
+        expected["metadata"]["iosLocales"] = ["en-US"]
+        expected["services"]["iosFirebase"] = "required"
+        actual = json.loads(L.SHELL_SESSION_IOS_FIREBASE_CONFIG)
+        validate_config_data(actual)
+        self.assertEqual(actual, expected)
+        self.assertEqual(json.loads(L.SHELL_SESSION_CONFIG), original)
+        for raw, count, digest in (
+            (L.SHELL_SESSION_IOS_FIREBASE_CONFIG, 684, "fa6e91784d45703c39ab22db99abea8957f5dc33efbdb8aa02cae3f493dabc02"),
+            (L.SHELL_SESSION_IOS_FIREBASE, 141, "971fa5224444f8bfa2cdbfdf280196035c9d00b6f426472069aad4b09c19a516"),
+            (L.SHELL_SESSION_IOS_FIREBASE_MISMATCH, 139, "db6ae4ba7f56f7c230201e047a7b85b8379545bc025196cae6ca5a95670e41ad"),
+        ):
+            self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (count, digest))
+        self.assertEqual(L.SHELL_SESSION_IOS_FIREBASE_MISMATCH,
+                         L.SHELL_SESSION_IOS_FIREBASE.replace(b"org.assessment.fixture", b"org.assessment.other"))
+        nodes = L._shell_session_roster(installed_handoff(), "session-ios-firebase")
+        self.assertEqual([name for name, mode, _, _ in nodes if stat.S_ISDIR(mode)], [".", "project", "project/release", "sources"])
+        self.assertEqual([name for name, mode, _, _ in nodes if stat.S_ISREG(mode)],
+                         ["project/release/mobile-release.json", "project/version.properties", "sources/firebase-ios-mismatch.plist", "sources/firebase-ios.plist"])
+        self.assertEqual(len(nodes), 8)
+        self.assertTrue(all(stat.S_IMODE(mode) == (0o700 if stat.S_ISDIR(mode) else 0o600) for _, mode, _, _ in nodes))
+        value = installed_handoff(); before = session_fixture_data(value, "session-ios-firebase")
+        for mutate in (
+            lambda v: v.update(fixture="four-kind-session-v1"),
+            lambda v: next(r for r in v["entries"] if r["path"] == "sources/firebase-ios.plist").update(sha256="0" * 64),
+            lambda v: next(r for r in v["entries"] if r["path"] == "sources/firebase-ios-mismatch.plist").update(size=141),
+        ):
+            after = deepcopy(before); mutate(after)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                L.shell_session_fixture(value, "session-ios-firebase", L.canonical(before), L.canonical(after))
+
+    def test_ios_observer_recipe_preserves_old_actions_and_binds_exact_original_projections(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        for name, digest in (
+            ("SESSION_INPUTS", "f5866909363e146f2825bc99b5d4e1d4f2b4a5901cdba8ebfeb953b7ea7ffdde"),
+            ("SESSION_REFUSALS", "2465c781a85d55498b12f474ce60b45143e1df17fed1fd95b5bab575bf8f0938"),
+            ("SESSION_INTERRUPTION", "fde9a3a08ed6006a4d17f307cdeb3df8535b08b3c7a670be152802b1a128c8f6"),
+        ):
+            marker = "const " + name + ": &[SA] = &["
+            statement = marker + source.split(marker, 1)[1].split("\n];", 1)[0] + "\n];"
+            self.assertEqual(hashlib.sha256(statement.encode()).hexdigest(), digest)
+        recipe = source.split("const SESSION_IOS_FIREBASE: &[SA] = &[", 1)[1].split("];", 1)[0]
+        expected = '''SA::Open, SA::Platform("ios"), SA::Kind("ios-firebase"),
+            SA::Choose("firebase-ios.plist","ios-firebase",None), SA::Prepare("ios-firebase","save"), SA::Keep, SA::Assign,
+            SA::Choose("firebase-ios-mismatch.plist","ios-firebase",None), SA::Prepare("ios-firebase","mismatch"), SA::CancelOperation,
+            SA::Replacement(0), SA::Choose("","ios-firebase",Some("user-cancelled")), SA::Discard, SA::ConfirmDiscard, SA::Open,'''
+        self.assertEqual("".join(recipe.split()), "".join(expected.split()))
+        context = source.split("pub(super) fn session_context_input", 1)[1].split("pub(super) fn session_choose_input", 1)[0]
+        for guard in ('"ios" => Platform::Ios', 'r.session.draft.as_ref() != Some(args.draft)', 'args.platform != expected_platform'):
+            self.assertIn(guard, context)
+        prepare = source.split("pub(super) fn session_prepare_input", 1)[1].split("pub(super) fn session_confirmation_input", 1)[0]
+        self.assertIn('["android-keystore","android-firebase","ios-firebase"].contains(&kind)', prepare)
+        self.assertIn('before.status["operation"]["selectionToken"].as_str() == Some(*token)', prepare)
+        self.assertIn('before.status["context"]["revision"].as_u64() != Some(u64::from(args.context_revision))', prepare)
+        predicate = source.split("fn session_ios_file_assessment", 1)[1].split("fn assert_session_ios_assessment_contract", 1)[0]
+        for guard in ('"save" => ("format-valid", "match"', '"mismatch" => ("invalid", "mismatch"',
+                      '"identity-mismatch"', 'assessment["fields"] == serde_json::json!([{',
+                      '"MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64"', '"presence":"supplied"',
+                      '"scope":"plist-document","outcome":"asserted-pass"', '"scope":"firebase-shape","outcome":"passed"',
+                      '"scope":"application-identity","outcome":outcome'):
+            self.assertIn(guard, predicate)
+        self.assertIn('assert_session_ios_assessment_contract();', source)
+        self.assertIn('!session_ios_file_assessment(assessment,expected)', source)
+        self.assertIn('match file { "firebase-ios.plist" => 141, "firebase-ios-mismatch.plist" => 139, _ => return false }', source)
+        self.assertIn('&& s.ios_matched && s.mismatch && s.refused.is_empty() && s.cancel_preserved && s.cancel_revoked && s.reopened', source)
+        self.assertIn('"ios-firebase" => Some("iOS Firebase client document")', source)
+        self.assertIn("startsWith('Select the iOS GoogleService-Info.plist')", source)
+        native = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        observer = native.split("fn observed_session_file", 1)[1].split("pub(super) fn select_observed_session_file", 1)[0]
+        self.assertIn('"ios-firebase" => "Choose iOS Firebase XML plist"', observer)
+
+    def test_ios_receipt_requires_each_actual_behavior_without_widening_legacy_kinds(self):
+        case = "session-ios-firebase"
+        expected = L.SHELL_SESSION_RECEIPTS[case]
+        self.assertEqual(expected["profile"], "installed-linux-session-ios-firebase")
+        self.assertEqual(expected["behavior"], {
+            "kinds": ["ios-firebase"], "assessments": 2, "fileChoosers": 3, "capturedFiles": 2, "capturesClosed": 2,
+            "kept": 1, "assigned": 1, "xmlFormatAndBundleIdentityMatched": True, "firebaseMismatchRefused": True,
+            "cancelledReplacementPreservedBytes": True, "cancelledReplacementRevokedAssignment": True, "discardReopenEmpty": True,
+        })
+        self.assertLessEqual(len(L.canonical(expected)), 2048)
+        for key, value in expected["behavior"].items():
+            wrong = deepcopy(expected)
+            wrong["behavior"][key] = False if type(value) is bool else value + 1 if type(value) is int else ["android-firebase"]
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                L.shell_session_receipt(L.canonical(wrong), case)
+        self.assertEqual(L.SHELL_SESSION_RECEIPTS["session-inputs"]["behavior"]["kinds"],
+                         ["android-keystore", "android-firebase", "google-wif", "project-read-token"])
+        for old in L.SHELL_SESSION_CASES[:4]:
+            self.assertEqual(L.SHELL_SESSION_RECEIPTS[old]["profile"], "installed-linux-session-inputs")
+            with self.subTest(old=old), self.assertRaises(ValueError):
+                L.shell_session_receipt(L.canonical(expected), old)
+
+    def test_original_session_receipt_framing_profile_finality_and_redaction_are_closed(self):
+        for case in L.SHELL_SESSION_CASES:
+            mappings = map_data()
+            stdout, stderr = session_capture(case)
+            expected = deepcopy(L.SHELL_SESSION_RECEIPTS[case])
+            with self.subTest(case=case):
+                result = L.shell_result(stdout, stderr, case, 0, mappings)
+                self.assertEqual(result["sessionInputs"], expected)
+                self.assertEqual(len(result["maps"]), expected["behavior"]["assessments"])
+                self.assertTrue(all(len(rows) == 6 for rows in result["maps"]))
+                self.assertLessEqual(len(L.canonical(expected)), 4096)
+            mutations = [
+                lambda doc: doc.update(schemaVersion=True), lambda doc: doc.update(case="positive"),
+                lambda doc: doc.update(methods="twelve-passive"), lambda doc: doc.update(profile="development-runtime"),
+                lambda doc: doc["project"].update(snapshotMatched=1), lambda doc: doc.pop("behavior"),
+                lambda doc: doc.update(privateInput="fictional-private-input-must-not-be-exported"),
+                lambda doc: doc["safety"].update(signingVerified=True),
+                lambda doc: doc["behavior"].update(assessments=True),
+                lambda doc: doc["behavior"].update(assessments=17),
+            ]
+            for original in ("assetJoined", "sourceClosed", "r1Joined", "guiSettled", "relayJoined", "exit"):
+                altered = deepcopy(expected); altered["originals"][original] = False
+                with self.subTest(case=case, original=original), self.assertRaises(ValueError):
+                    L.shell_session_receipt(L.canonical(altered), case)
+            for mutate in mutations:
+                altered = deepcopy(expected); mutate(altered)
+                with self.subTest(case=case, mutate=mutate), self.assertRaises(ValueError):
+                    L.shell_result(*session_capture(case, altered), case, 0, mappings)
+            lines = stdout.splitlines(keepends=True)
+            for altered in (b"".join(lines[1:]), b"".join(reversed(lines)), stdout + lines[3], stdout.replace(b"\n", b"\r\n"),
+                            stdout.replace(case.encode() + b"-verified", b"positive-verified")):
+                with self.subTest(case=case, framing=altered[:48]), self.assertRaises(ValueError):
+                    L.shell_result(altered, b"", case, 0, mappings)
+            with self.assertRaises(ValueError): L.shell_result(stdout, stdout, case, 0, mappings)
+            with self.assertRaises(ValueError): L.shell_result(stdout, stderr, case, True, mappings)
+            with self.assertRaises(ValueError): L.shell_session_receipt(L.canonical(expected) + b" " * 4096, case)
+
+    def test_each_assessment_requires_its_original_six_loader_bound_roles(self):
+        mappings = map_data()
+        case = "session-inputs"
+        maps = L.shell_result(*session_capture(case), case, 0, mappings)["maps"]
+        mutations = (
+            lambda rows: rows.clear(), lambda rows: rows.pop(), lambda rows: rows.append(deepcopy(rows[0])),
+            lambda rows: rows[0].pop(), lambda rows: rows[0].reverse(),
+            lambda rows: rows[0][0].update(role="different"), lambda rows: rows[0][0].update(path="/unadmitted/object"),
+            lambda rows: rows[0][0].update(inode=9999), lambda rows: rows[0][0].update(deviceMajor=True),
+            lambda rows: rows[0][0].update(extra="not-a-map-field"),
+        )
+        for mutate in mutations:
+            changed = deepcopy(maps); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                L.shell_result(*session_capture(case, maps=changed), case, 0, mappings)
+        with self.assertRaises(ValueError):
+            L.shell_result(*session_capture(case, maps=[deepcopy(maps[0]) for _ in range(17)]), case, 0, mappings)
+        stdout, _ = session_capture(case)
+        lines = stdout.splitlines(keepends=True)
+        for altered in (b"".join(lines[:3] + lines[4:]), b"".join(lines[:3] + [lines[3].rstrip(b"\n")] + lines[4:]),
+                        b"".join(lines[:3] + [lines[3].replace(b"\n", b"\r\n")] + lines[4:])):
+            with self.assertRaises(ValueError): L.shell_result(altered, b"", case, 0, mappings)
+        with self.assertRaises(ValueError): L.shell_result(stdout, b"", case, 0, {})
+
+    def test_original_four_and_separate_ios_fixtures_only_original_leaf_rename_are_accounted(self):
+        value = installed_handoff(); value.update(runId="9" * 20, attempt="9" * 20)
+        self.assertEqual(L.SHELL_SESSION_CASES, ("session-inputs", "session-refusals", "session-loss", "session-deadline", "session-ios-firebase"))
+        self.assertEqual(sum(len(L._shell_session_roster(value, case)) for case in L.SHELL_SESSION_CASES), 50)
+        self.assertEqual(L.SHELL_SESSION_JKS, bytes.fromhex("feedfeed0000000200000000"))
+        self.assertEqual(L.SHELL_SESSION_REPLACEMENT_JKS, bytes.fromhex("feedfeed0000000100000000"))
+        for case in L.SHELL_SESSION_CASES:
+            before = L.canonical(session_fixture_data(value, case))
+            after = L.canonical(session_fixture_data(value, case, changed=case == "session-refusals"))
+            with self.subTest(case=case):
+                result = L.shell_session_fixture(value, case, before, after)
+                self.assertEqual((result["beforeCount"], result["afterCount"]), (15, 14) if case == "session-refusals" else (8, 8) if case == "session-ios-firebase" else (9, 9))
+                self.assertEqual(result["fixture"], "ios-firebase-session-v1" if case == "session-ios-firebase" else "four-kind-session-v1")
+                self.assertEqual(result["mutations"], ["changed-leaf-rename"] if case == "session-refusals" else [])
+                self.assertTrue(result["projectUnchanged"] and result["sourcesOutsideProject"] and result["originalsAccounted"])
+                self.assertEqual(result["before"] == result["after"], case != "session-refusals")
+                self.assertLessEqual(max(len(before), len(after)), 8192)
+                self.assertLess(len(L.canonical(session_fixture_data(value, case)["namespace"])), 1024)
+
+    def test_refuses_changed_private_originals_aliases_and_unaccounted_replacement(self):
+        value = installed_handoff()
+        for case in L.SHELL_SESSION_CASES:
+            before = session_fixture_data(value, case)
+            after = session_fixture_data(value, case, changed=case == "session-refusals")
+            source = "sources/firebase-ios.plist" if case == "session-ios-firebase" else "sources/input.jks"
+            mutations = [
+                lambda doc: doc.update(case="positive"), lambda doc: doc.update(changed=1),
+                lambda doc: doc.update(root=doc["root"] + "/project"), lambda doc: doc.update(schemaVersion=True),
+                lambda doc: doc["entries"].pop(), lambda doc: doc["entries"].reverse(),
+                lambda doc: doc["namespace"]["identity"].__setitem__(1, 90),
+                lambda doc: doc["entries"][0]["children"].append("unrelated"),
+                lambda doc: doc["entries"][1]["identity"].__setitem__(2, stat.S_IFDIR | 0o755),
+                lambda doc: doc["entries"][1]["identity"].__setitem__(1, doc["entries"][0]["identity"][1]),
+                lambda doc: next(row for row in doc["entries"] if row["path"] == source).update(size=True),
+                lambda doc: next(row for row in doc["entries"] if row["path"] == source)["identity"].__setitem__(2, stat.S_IFREG | 0o644),
+                lambda doc: next(row for row in doc["entries"] if row["path"] == "project/release/mobile-release.json").update(sha256="0" * 64),
+            ]
+            if case == "session-refusals":
+                mutations += [
+                    lambda doc: doc["absent"].remove("sources/changed-next.jks"),
+                    lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/changed.jks")["identity"].__setitem__(1, 999),
+                    lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/changed.jks")["identity"].__setitem__(7, 22),
+                    lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/link.jks").update(target="../project/overlap.jks"),
+                ]
+            for mutate in mutations:
+                altered = deepcopy(after); mutate(altered)
+                with self.subTest(case=case, mutate=mutate), self.assertRaises((ValueError, KeyError)):
+                    L.shell_session_fixture(value, case, L.canonical(before), L.canonical(altered))
+        # A coherent replacement DATA document is still not the old opened
+        # original. Reusing its own before/after inventory cannot hide a rename.
+        original = session_fixture_data(value, "session-refusals")
+        with self.assertRaises(ValueError):
+            L.shell_session_fixture(value, "session-refusals", L.canonical(original), L.canonical(original))
+
+    def test_inventory_admits_all_directory_names_before_source_reads_and_does_not_follow_links(self):
+        value = installed_handoff(); case = "session-refusals"
+        namespace = fixture_namespace_data(value); binding = L.canonical(namespace)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        for changed in (False, True):
+            document = session_fixture_data(value, case, changed=changed)
+            base = Path(document["root"])
+            nodes = {base if row["path"] == "." else base / row["path"]: row for row in document["entries"]}
+            def metadata(path):
+                return SimpleNamespace(**dict(zip(fields, nodes[path]["identity"])))
+            def scan(path):
+                context = Mock()
+                context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=name) for name in nodes[path]["children"]))
+                context.__exit__ = Mock(return_value=False)
+                return context
+            def file_record(path, limit):
+                row = nodes[path]
+                self.assertEqual(row["kind"], "file")
+                self.assertEqual(limit, row["size"])
+                return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
+            with self.subTest(changed=changed), patch.object(L, "_ROOT", L.root_path(value)), \
+                 patch.object(L, "_shell_namespace_check", return_value=namespace), patch.object(L, "directory"), \
+                 patch.object(Path, "lstat", metadata), patch.object(L.os, "scandir", side_effect=scan), \
+                 patch.object(L, "record", side_effect=file_record) as reading, patch.object(L, "_xattrs"), \
+                 patch.object(L.os, "readlink", return_value="input.jks") as linking, patch.object(L, "_absent") as absent:
+                self.assertEqual(L._shell_session_inventory(value, binding, case, changed=changed), document)
+                self.assertEqual(reading.call_count, 9 if changed else 10)
+                linking.assert_called_once_with(base / "sources/link.jks")
+                self.assertEqual([call.args[0] for call in absent.call_args_list], [base / name for name in document["absent"]])
+                reading.reset_mock(); linking.reset_mock()
+                nodes[base / "sources"]["children"].append("unreviewed-output")
+                with self.assertRaises(ValueError):
+                    L._shell_session_inventory(value, binding, case, changed=changed)
+                reading.assert_not_called(); linking.assert_not_called()
+
+    def test_final_metadata_cannot_replace_a_prior_session_inventory_or_its_own_saved_original(self):
+        # In-memory failure injection after the final saved-version return. Reuse the
+        # actual final comparison, never unit_start, a process or a live tree.
+        value, _, files, _ = closed_shell_data()
+        namespace = L.canonical(fixture_namespace_data(value))
+        sessions = {case: session_fixture_data(value, case, changed=case == "session-refusals") for case in L.SHELL_SESSION_CASES}
+        tools = {case: tools_offline_fixture_data(value, case, after=True) for case in L.SHELL_TOOLS_OFFLINE_CASES}
+        android = {case: android_fixture_data(value, case, after=True) for case in L.SHELL_ANDROID_CASES}
+        for changed in (None, *L.SHELL_SESSION_CASES, "metadata-save", "version-save", *L.SHELL_TOOLS_OFFLINE_CASES, *L.SHELL_ANDROID_CASES):
+            current = deepcopy(sessions)
+            current_tools = deepcopy(tools)
+            current_android = deepcopy(android)
+            metadata = metadata_fixture_data(value, saved=True)
+            version = version_fixture_data(value, saved=True)
+            if changed == "version-save":
+                version["entries"][0]["identity"][1] += 1000
+            elif changed == "metadata-save":
+                metadata["entries"][0]["identity"][1] += 1000
+            elif changed in L.SHELL_TOOLS_OFFLINE_CASES:
+                current_tools[changed]["entries"][0]["identity"][1] += 1000
+            elif changed in L.SHELL_ANDROID_CASES:
+                current_android[changed]["entries"][0]["identity"][1] += 1000
+            elif changed is not None:
+                # Identical fictional bytes can still belong to a different
+                # directory original. The already-retained capture must win.
+                current[changed]["entries"][0]["identity"][1] += 1000
+            def session_inventory(actual_value, actual_namespace, case, *, changed=False):
+                self.assertIs(actual_value, value); self.assertEqual(actual_namespace, namespace)
+                self.assertEqual(changed, case == "session-refusals")
+                return current[case]
+            def tools_inventory(actual_value, actual_namespace, case, *, after=False):
+                self.assertIs(actual_value, value); self.assertEqual(actual_namespace, namespace)
+                self.assertIs(after, True)
+                return current_tools[case]
+            def android_inventory(actual_value, actual_namespace, case, *, after=False):
+                self.assertIs(actual_value, value); self.assertEqual(actual_namespace, namespace)
+                self.assertIs(after, True)
+                return current_android[case]
+            def retained(path, limit):
+                self.assertEqual(path.parent, L.root_path(value) / "public")
+                raw = files[path.name]; self.assertLessEqual(len(raw), limit); return raw
+            with self.subTest(changed=changed), patch.object(L, "_ROOT", L.root_path(value)), \
+                 patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value, saved=True)), \
+                 patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)), \
+                 patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value, changed=True)), \
+                 patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value, installed=True)), \
+                  patch.object(L, "_shell_metadata_inventory", return_value=metadata), \
+                  patch.object(L, "_shell_version_inventory", return_value=version), \
+                  patch.object(L, "_shell_session_inventory", side_effect=session_inventory) as checking, \
+                  patch.object(L, "_shell_tools_offline_inventory", side_effect=tools_inventory) as checking_tools, \
+                   patch.object(L, "_shell_android_inventory", side_effect=android_inventory) as checking_android, \
+                 patch.object(L, "read", side_effect=retained), patch.object(L, "_retain") as replacement:
+                if changed is None:
+                    self.assertIsNone(L._shell_fixtures_final(value, namespace))
+                    self.assertEqual([call.args[2] for call in checking.call_args_list], list(L.SHELL_SESSION_CASES))
+                    self.assertEqual([call.args[2] for call in checking_tools.call_args_list], list(L.SHELL_TOOLS_OFFLINE_CASES))
+                    self.assertEqual([call.args[2] for call in checking_android.call_args_list], list(L.SHELL_ANDROID_CASES))
+                else:
+                    reason = ("another original fixture family" if changed in ("metadata-save", "version-save") else
+                              "earlier original Tools/Offline fixture" if changed in L.SHELL_TOOLS_OFFLINE_CASES else
+                              "earlier Android source controls" if changed in L.SHELL_ANDROID_CASES else "earlier original session fixture")
+                    with self.assertRaisesRegex(ValueError, reason):
+                        L._shell_fixtures_final(value, namespace)
+                replacement.assert_not_called()
+
+    def test_session_after_inventory_requires_original_case_gate_without_new_owner_or_deadline(self):
+        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
+        unit = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "unit_start")
+        loop = next(node for node in ast.walk(unit) if isinstance(node, ast.For)
+                    and ast.unparse(node.iter) == "shell_cases(value)")
+        transaction = next(node for node in loop.body if isinstance(node, ast.Try))
+        branch = next(node for node in transaction.body if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'normal'")
+        gate = next(node for node in branch.orelse if isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "shell_result")
+        session = next(node for node in branch.orelse if isinstance(node, ast.If) and ast.unparse(node.test) == "case in SHELL_SESSION_CASES")
+        self.assertLess(gate.end_lineno, session.lineno)
+        calls = [node for node in ast.walk(session) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
+        self.assertEqual([node.func.id for node in calls].count("_shell_session_inventory"), 1)
+        self.assertEqual([node.func.id for node in calls].count("shell_session_fixture"), 1)
+        command = next(node for node in ast.walk(branch) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == "command")
+        self.assertIn(("maximum", 60), [(arg.arg, ast.literal_eval(arg.value)) for arg in command.keywords if arg.arg == "maximum"])
+        self.assertFalse(any(isinstance(node, (ast.Try, ast.While)) for node in ast.walk(session)))
+
+
+
+class GitHubEntryFailureLabelContracts(unittest.TestCase):
+    def test_guidance_reload_labels_are_closed_and_never_entry_samples(self):
+        labels = (b"GitHubGuidanceReady", b"GitHubGuidanceReload")
+        expected = [b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + label + b"\n" for label in labels]
+        self.assertEqual([line for line in L.SHELL_FAILURE_STEPS if b"=GitHubGuidance" in line], expected)
+        for label, first in zip(labels, expected):
+            raw = first + b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+            self.assertEqual(L._shell_label_pair(raw), {
+                "step": label.decode("ascii"), "boundary": "dom", "bootstrapProgress": "advanced"})
+            for invalid in (raw[:-1], raw + b"\n", raw.replace(label, label + b"Extra"),
+                            self.frame().replace(b"GitHubEntry", label)):
+                self.assertIsNone(L._shell_label_pair(invalid))
+        self.assertEqual(L.SHELL_FAILURE_LABEL_LIMIT, 512)
+
+    @staticmethod
+    def frame(*, boundary=b"settlement", progress=b"advanced", **changes):
+        fields = {
+            "o": b"evaluation-budget", "eval": b"128", "ne": b"128", "ns": b"present",
+            "cap": b"1", "reason": b"none", "sess": b"0", "de": b"128", "dom": b"wait",
+            "sel": b"1", "form": b"1", "submit": b"1", "enabled": b"0", "help": b"na",
+            "repo": b"1", "guide": b"1",
+        }
+        fields.update(changes)
+        return (b"MRK_INSTALLED_SHELL_GITHUB_ENTRY_FAILURE=v1;"
+                + b";".join(key.encode("ascii") + b"=" + value for key, value in fields.items()) + b"\n"
+                + b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubEntry\n"
+                + b"MRK_INSTALLED_SHELL_FAILURE_PHASE=" + boundary + b"\n"
+                + b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=" + progress + b"\n")
+
+    def test_entry_roundtrip_closed_native_and_same_callback_dom_samples(self):
+        parsed = L._shell_label_pair(self.frame())
+        self.assertEqual(parsed, {"step": "GitHubEntry", "boundary": "settlement", "bootstrapProgress": "advanced",
+            "githubEntry": {"origin": "evaluation-budget", "evaluations": 128,
+                "native": {"sampleEvaluations": 128, "status": "present", "capabilityAvailable": True,
+                           "capabilityReason": "none", "sessionPresent": False},
+                "dom": {"sampleEvaluations": 128, "state": "wait", "pageSelected": True, "formPresent": True,
+                        "submitPresent": True, "submitEnabled": False, "helpPresent": None,
+                        "repositoryExpected": True, "helpContainerPresent": True}}})
+        reasons = (b"none", b"unqualified", b"runtime-unavailable", b"publisher-unconfigured", b"not-connected",
+                   b"invalid-input", b"busy", b"unauthorized", b"forbidden", b"not-found-or-inaccessible",
+                   b"target-changed", b"rate-limited", b"network-unavailable", b"tls-failed", b"response-invalid",
+                   b"response-limit", b"expired", b"stale", b"cancelled", b"cleanup-unknown")
+        for reason in reasons:
+            native = L._shell_label_pair(self.frame(reason=reason, cap=b"1" if reason == b"none" else b"0"))["githubEntry"]["native"]
+            self.assertEqual(native["capabilityReason"], reason.decode("ascii"))
+        for presence in (b"absent", b"not-observed"):
+            native = L._shell_label_pair(self.frame(ns=presence, ne=b"128" if presence == b"absent" else b"na",
+                                                    cap=b"na", reason=b"na", sess=b"na"))["githubEntry"]["native"]
+            self.assertEqual(native["status"], presence.decode("ascii"))
+            self.assertIsNone(native["capabilityAvailable"])
+            self.assertIsNone(native["sessionPresent"])
+        # Native and DOM stamps are independent global-counter samples, not a join.
+        earlier = L._shell_label_pair(self.frame(ne=b"17", de=b"93"))["githubEntry"]
+        self.assertEqual((earlier["native"]["sampleEvaluations"], earlier["dom"]["sampleEvaluations"]), (17, 93))
+        unavailable = dict(de=b"na", dom=b"not-observed", sel=b"na", form=b"na", submit=b"na",
+                           enabled=b"na", help=b"na", repo=b"na", guide=b"na")
+        for origin in (b"callback-shape", b"script-error"):
+            data = dict(unavailable, de=b"128", dom=b"error")
+            self.assertEqual(L._shell_label_pair(self.frame(o=origin, boundary=b"dom", **data))["githubEntry"]["origin"],
+                             origin.decode("ascii"))
+        refused = L._shell_label_pair(self.frame(o=b"ready-refused", boundary=b"dom", dom=b"ready",
+                                                enabled=b"1", help=b"0", repo=b"0", guide=b"0"))
+        self.assertFalse(refused["githubEntry"]["dom"]["repositoryExpected"])
+        self.assertFalse(refused["githubEntry"]["dom"]["helpPresent"])
+        deadline = L._shell_label_pair(self.frame(o=b"deadline", boundary=b"deadline", eval=b"127", ne=b"127", **unavailable))
+        self.assertEqual(deadline["githubEntry"]["evaluations"], 127)
+        generic = L._shell_label_pair(self.frame(o=b"not-recorded", eval=b"na", ne=b"na", ns=b"not-observed",
+                                                cap=b"na", reason=b"na", sess=b"na", **unavailable))["githubEntry"]
+        self.assertIsNone(generic["evaluations"])
+        self.assertEqual(generic["native"]["status"], "not-observed")
+        self.assertTrue(all(value is None for key, value in generic["dom"].items() if key != "state"))
+
+    def test_entry_rejects_every_prefix_extra_field_and_unbound_shape(self):
+        good = self.frame()
+        for end in range(len(good)):
+            for raw in (good[:end], good[:end] + b"\n"):
+                if raw != good:
+                    with self.subTest(prefix=end): self.assertIsNone(L._shell_label_pair(raw))
+        lines = good.splitlines(keepends=True)
+        for raw in (good + b"\n", good + b"x", b"".join(lines[1:]), b"".join(lines[1:] + lines[:1]),
+                    good.replace(b"\n", b"\r\n"), good.replace(b"=v1;", b"=v2;"),
+                    good.replace(b"GitHubEntry", b"GitHubToken"), good.replace(b"GitHubEntry", b"Bootstrap"),
+                    good.replace(b";eval=128", b";eval=128;eval=128"), good.replace(b";repo=1", b""),
+                    good.replace(b";guide=1\n", b";guide=1;extra=0\n"), good.replace(b";cap=1", b";cap=true"),
+                    good.replace(b";reason=none", b";reason=private-text"), good.decode("ascii")):
+            with self.subTest(malformed=repr(raw)[:100]): self.assertIsNone(L._shell_label_pair(raw))
+        for key in ("o", "eval", "ne", "ns", "cap", "reason", "sess", "de", "dom", "sel", "form", "submit",
+                    "enabled", "help", "repo", "guide"):
+            prefix = key.encode("ascii") + b"="
+            pieces = lines[0].split(b";")
+            raw = b";".join(piece for piece in pieces if not piece.startswith(prefix))
+            if not raw.endswith(b"\n"): raw += b"\n"
+            self.assertIsNone(L._shell_label_pair(raw + b"".join(lines[1:])))
+        for changes in (
+            {"eval": b"127"}, {"eval": b"129"}, {"eval": b"na"}, {"eval": b"0128"}, {"eval": b"-1"},
+            {"ne": b"129"}, {"ne": b"na"}, {"de": b"0"}, {"de": b"129"}, {"de": b"na"},
+            {"ns": b"absent"}, {"cap": b"0"}, {"reason": b"busy"}, {"sess": b"na"},
+            {"dom": b"not-observed"}, {"dom": b"error"}, {"dom": b"ready"}, {"sel": b"na"},
+            {"form": b"0"}, {"submit": b"0"}, {"enabled": b"na"}, {"enabled": b"1"},
+            {"help": b"1"}, {"guide": b"na"}, {"o": b"not-recorded"}, {"o": b"deadline"},
+            {"o": b"callback-shape"}, {"repo": b"owner/app"}, {"guide": b"false"},
+        ):
+            with self.subTest(changes=changes): self.assertIsNone(L._shell_label_pair(self.frame(**changes)))
+        for changes in ({"enabled": b"0", "help": b"0"}, {"enabled": b"1", "help": b"1"},
+                        {"enabled": b"1", "help": b"0", "de": b"127"}):
+            self.assertIsNone(L._shell_label_pair(self.frame(o=b"ready-refused", boundary=b"dom", dom=b"ready", **changes)))
+
+    def test_entry_maximum_legal_frame_fits_original_512_and_legacy_is_unchanged(self):
+        doms = (
+            dict(de=b"na", dom=b"not-observed", sel=b"na", form=b"na", submit=b"na", enabled=b"na", help=b"na", repo=b"na", guide=b"na"),
+            dict(de=b"128", dom=b"error", sel=b"na", form=b"na", submit=b"na", enabled=b"na", help=b"na", repo=b"na", guide=b"na"),
+            dict(de=b"128", dom=b"wait", sel=b"0", form=b"0", submit=b"0", enabled=b"na", help=b"na", repo=b"na", guide=b"na"),
+            dict(de=b"128", dom=b"ready", sel=b"1", form=b"1", submit=b"1", enabled=b"1", help=b"0", repo=b"na", guide=b"0"),
+        )
+        natives = (
+            dict(ne=b"na", ns=b"not-observed", cap=b"na", reason=b"na", sess=b"na"),
+            dict(ne=b"128", ns=b"absent", cap=b"na", reason=b"na", sess=b"na"),
+            dict(ne=b"128", ns=b"present", cap=b"0", reason=b"not-found-or-inaccessible", sess=b"0"),
+        )
+        # Maximal representatives: three-digit counts, longest reason, all
+        # legal nullable slots at na; 0 and 1 occupy the same one byte.
+        frames = []
+        for native in natives:
+            for dom in doms:
+                for origin, boundary in ((b"evaluation-budget", b"settlement"), (b"deadline", b"deadline"),
+                                         (b"callback-shape", b"dom"), (b"script-error", b"dom"), (b"ready-refused", b"dom")):
+                    frame = self.frame(o=origin, boundary=boundary, progress=b"app-info-returned-before-hold", **native, **dom)
+                    if L._shell_label_pair(frame) is not None: frames.append(frame)
+        self.assertEqual(max(map(len, frames)), 380)
+        self.assertEqual(L.SHELL_FAILURE_LABEL_LIMIT, 512)
+        self.assertLessEqual(max(map(len, frames)), L.SHELL_FAILURE_LABEL_LIMIT)
+        longest = max(frames, key=len)
+        self.assertIn(b";repo=na;guide=na\n", longest)
+        for step in (b"PrepareSave", b"PathSettlement", b"Bootstrap"):
+            old = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\n"
+                   b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+            self.assertEqual(L._shell_label_pair(old), {"step": step.decode("ascii"), "boundary": "settlement", "bootstrapProgress": "advanced"})
+        session = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                   b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+                   b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=29;evaluations=73;reject=native-readiness-invariant;wait=native-reply-pending\n")
+        self.assertNotIn("githubEntry", L._shell_label_pair(session))
+        path = (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=0;reject=gtk-initial-folder\n"
+                b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathActivate\nMRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\n"
+                b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        self.assertNotIn("githubEntry", L._shell_label_pair(path))
+        with patch.object(L, "SHELL_FAILURE_LABEL_LIMIT", len(longest) - 1):
+            self.assertIsNone(L._shell_label_pair(longest))
+
+
+class FailureLabelSinkContracts(unittest.TestCase):
+    @staticmethod
+    def metadata_open_frame(*, site=b"65535", origin=b"evaluation-budget", evaluations=b"128", index=b"1",
+                            sample=b"127", wait=b"heading-not-review", heading=b"protocol-unverified", boundary=b"settlement"):
+        return (b"MRK_INSTALLED_SHELL_METADATA_OPEN_FAILURE=v1;site=" + site + b";origin=" + origin
+                + b";eval=" + evaluations + b";index=" + index + b";sample=" + sample + b";wait=" + wait + b";heading=" + heading
+                + b"\nMRK_INSTALLED_SHELL_FAILURE_STEP=MetadataOpenText\nMRK_INSTALLED_SHELL_FAILURE_PHASE=" + boundary
+                + b"\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=app-info-returned-before-hold\n")
+
+    def test_metadata_open_failure_records_first_winner_and_explicit_unavailable_samples(self):
+        raw = self.metadata_open_frame()
+        self.assertLessEqual(len(raw), 384)
+        parsed = L._shell_label_pair(raw)
+        self.assertEqual(parsed, {"step": "MetadataOpenText", "boundary": "settlement", "bootstrapProgress": "app-info-returned-before-hold",
+                         "metadataOpenFailure": {"sourceLine": 65535, "origin": "evaluation-budget", "evaluations": 128,
+                         "reviewIndex": 1, "lastSampleEvaluation": 127, "wait": "heading-not-review", "heading": "protocol-unverified"}})
+        for index in (b"0", b"1"):
+            for heading in (b"empty", b"protocol-unverified", b"opening", b"preparing", b"other"):
+                sample = L._shell_label_pair(self.metadata_open_frame(index=index, sample=b"128", heading=heading))
+                self.assertEqual(sample["metadataOpenFailure"]["heading"], heading.decode("ascii"))
+                self.assertEqual(sample["metadataOpenFailure"]["lastSampleEvaluation"], 128)
+        missing = L._shell_label_pair(self.metadata_open_frame(wait=b"review-missing", heading=b"na"))
+        self.assertIsNone(missing["metadataOpenFailure"]["heading"])
+        for site in (b"na", b"1"):
+            unknown = L._shell_label_pair(self.metadata_open_frame(site=site, origin=b"not-recorded", evaluations=b"na",
+                                         sample=b"na", wait=b"na", heading=b"na", boundary=b"dom"))["metadataOpenFailure"]
+            self.assertIsNone(unknown["evaluations"])
+            self.assertIsNone(unknown["lastSampleEvaluation"])
+            self.assertIsNone(unknown["wait"])
+            self.assertIsNone(unknown["heading"])
+        for evaluations, sample in ((b"0", b"na"), (b"128", b"128")):
+            deadline = L._shell_label_pair(self.metadata_open_frame(site=b"na", origin=b"deadline", evaluations=evaluations,
+                                          sample=sample, wait=b"na" if sample == b"na" else b"review-missing", heading=b"na", boundary=b"deadline"))
+            self.assertIsNone(deadline["metadataOpenFailure"]["sourceLine"])
+            self.assertEqual(deadline["metadataOpenFailure"]["evaluations"], int(evaluations))
+        legacy = raw.split(b"\n", 1)[1]
+        self.assertEqual(L._shell_label_pair(legacy), {key: value for key, value in parsed.items() if key != "metadataOpenFailure"})
+        snapshot = (b"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE=v1;site=1;check=stage;error=none\n"
+                    + legacy.replace(b"PHASE=settlement", b"PHASE=result"))
+        self.assertEqual(L._shell_label_pair(snapshot)["snapshotFailure"]["check"], "stage")
+
+    def test_metadata_open_failure_rejects_truncation_unknowns_and_contradictory_stamps(self):
+        raw = self.metadata_open_frame()
+        for end in range(1, len(raw)):
+            self.assertIsNone(L._shell_label_pair(raw[:end]))
+        mutations = [dict(site=b"0"), dict(site=b"65536"), dict(site=b"01"), dict(site=b"na"), dict(index=b"2"), dict(index=b"01"),
+                     dict(evaluations=b"127"), dict(evaluations=b"129"), dict(sample=b"129"), dict(sample=b"0"),
+                     dict(wait=b"review-missing"), dict(heading=b"na"), dict(heading=b"private title"), dict(wait=b"other"),
+                     dict(sample=b"na"), dict(boundary=b"dom"), dict(origin=b"deadline"), dict(origin=b"not-recorded"),
+                     dict(origin=b"deadline", site=b"na", boundary=b"deadline", evaluations=b"126", sample=b"127"),
+                     dict(origin=b"not-recorded", evaluations=b"na", sample=b"na", wait=b"na"),
+                     dict(origin=b"deadline", site=b"na", boundary=b"deadline", evaluations=b"na")]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.assertIsNone(L._shell_label_pair(self.metadata_open_frame(**mutation)))
+        for bad in (raw + b"\n", raw.replace(b";eval=", b";extra=0;eval="), raw.replace(b";index=1;sample=127", b";sample=127;index=1"),
+                    raw.replace(b"MetadataOpenText", b"MetadataReadReview"), raw.replace(b"MetadataOpenText", b"SessionReview"),
+                    raw.replace(b"\n", b"\r\n"), raw.split(b"\n", 1)[1] + raw.split(b"\n", 1)[0] + b"\n",
+                    raw.decode("ascii"), bytearray(raw)):
+            self.assertIsNone(L._shell_label_pair(bad))
+
+    def test_metadata_open_diagnostic_wiring_retains_original_guards_and_first_winner(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        report = source.split("fn report_failure(&self)", 1)[1].split("fn report_failure_handoff", 1)[0]
+        self.assertLess(report.index("snapshot_failure_frame("), report.index("metadata_open_failure_frame("))
+        self.assertIn("session.is_none() && path.is_none() && evidence.is_none()", report)
+        self.assertIn("self.failed.site(), r.metadata.open_failure, r.github_entry)", report)
+        self.assertNotIn("r.metadata.open_sample", report)
+        self.assertEqual(report.count("rustix::io::write"), 1)
+        self.assertLess(report.index("Err(_) => return"), report.index("metadata_open_failure_frame("))
+        dom = source.split("fn metadata_dom(&self", 1)[1].split("fn ", 1)[0]
+        self.assertIn("MetadataOpenSample::parse(index, r.evaluations, value)", dom)
+        self.assertIn("if !self.failed.load(Ordering::SeqCst) { r.metadata.open_sample = Some(sample); }", dom)
+        self.assertNotIn("open_failure =", dom)
+        tick = source.split("pub(super) fn tick(", 1)[1].split("fn dom(", 1)[0]
+        deadline = tick.split("if Instant::now() >= self.end", 1)[1].split("self.failure_tick(app); return;", 1)[0]
+        self.assertLess(deadline.index("if latch_failure("), deadline.index("r.metadata.open_failure = metadata_diagnostic"))
+        budget = tick.split("if r.evaluations >= 128", 1)[1].split("r.evaluations += 1", 1)[0]
+        self.assertLess(budget.index("if self.failed.mark_caller()"), budget.index("r.metadata.open_failure ="))
+        self.assertIn("} else { self.fail(); }", budget)
+        self.assertIn("Duration::from_secs(45)", source)
+        native = tick.split("let native_pending = match r.step", 1)[1].split("Step::Workflow", 1)[0]
+        self.assertIn("s.prepare_returned && s.live_review()", native)
+        script = source.split("fn metadata_script(", 1)[1].split("fn ", 1)[0]
+        open_text = script.split("MetadataStep::OpenText(_) =>", 1)[1].split("MetadataStep::ReadReview(_) =>", 1)[0]
+        self.assertIn("reason:'review-missing',heading:'na'", open_text)
+        self.assertIn("const p=panel(),heading=text(p.querySelector('.section-heading h2'))", open_text)
+        self.assertIn("if (heading!=='Review text changes')", open_text)
+        self.assertIn("rows.length!==3 || document.querySelector('dialog')", open_text)
+        self.assertIn("if (!row.open) summary.click();", open_text)
+        self.assertEqual(open_text.count(".section-heading h2"), 1)
+        self.assertIn("if (!e || typeof e.textContent!=='string' || e.textContent.length>4096) throw 0", script)
+        self.assertIn("assert_metadata_open_diagnostic_contract();", source.split("pub(crate) fn main()", 1)[1])
+
+    def test_snapshot_first_origin_is_complete_closed_and_preserves_actual_wrong_stage(self):
+        def frame(site=b"65535", check=b"root", error=b"none", step=b"ReadSnapshot", boundary=b"result"):
+            return (b"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE=v1;site=" + site + b";check=" + check + b";error=" + error + b"\n"
+                    + b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\nMRK_INSTALLED_SHELL_FAILURE_PHASE=" + boundary
+                    + b"\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        raw = frame()
+        self.assertLessEqual(len(raw), L.SHELL_FAILURE_LABEL_LIMIT)
+        self.assertEqual(L._shell_label_pair(raw), {"step": "ReadSnapshot", "boundary": "result", "bootstrapProgress": "advanced",
+                         "snapshotFailure": {"sourceLine": 65535, "check": "root", "error": "none"}})
+        for check in L.SHELL_SNAPSHOT_CHECKS:
+            step = b"SessionQuitPreserved" if check == b"stage" else b"ReadSnapshot"
+            error = b"query-timeout" if check == b"bridge" else b"none"
+            parsed = L._shell_label_pair(frame(check=check, error=error, step=step))
+            self.assertEqual(parsed["snapshotFailure"]["check"], check.decode("ascii"))
+            self.assertEqual(set(parsed), {"step", "boundary", "bootstrapProgress", "snapshotFailure"})
+        for step in (b"SessionQuitPreserved", b"PathActivate", b"Close"):
+            # No invented legacy Session/Path record, even for a wrong stage.
+            self.assertEqual(L._shell_label_pair(frame(check=b"stage", step=step))["step"], step.decode("ascii"))
+            self.assertIsNotNone(L._shell_label_pair(frame(step=step)))
+        for error in L.SHELL_EVIDENCE_ERRORS:
+            if error != b"none":
+                self.assertEqual(L._shell_label_pair(frame(check=b"bridge", error=error))["snapshotFailure"]["error"], error.decode("ascii"))
+        for step in (b"Selected", b"ReadSnapshot"):
+            for boundary in (b"request", b"result", b"dom"):
+                self.assertIsNotNone(L._shell_label_pair(frame(site=b"1", check=b"other-callback", step=step, boundary=boundary)))
+        for value in (raw, frame(check=b"stage", step=b"SessionQuitPreserved"), frame(check=b"other-callback", boundary=b"dom")):
+            for end in range(len(value)):
+                self.assertIsNone(L._shell_label_pair(value[:end]))
+                if 0 < end < len(value) - 1 and not value[:end].endswith(b"\n"):
+                    self.assertIsNone(L._shell_label_pair(value[:end] + b"\n"))
+        for bad in (frame(site=b"0"), frame(site=b"01"), frame(site=b"65536"), frame(site=b"-1"), frame(site=b"unknown"),
+                    frame(check=b"unknown"), frame(error=b"private-message"), frame(check=b"bridge"),
+                    frame(error=b"other"), frame(boundary=b"dom"), frame(check=b"stage"), frame(step=b"Unknown"),
+                    frame(check=b"other-callback", step=b"Close"), frame(check=b"other-callback", error=b"other"),
+                    raw.replace(b"v1;", b"v2;"), raw.replace(b";check=root", b";site=12;check=root"),
+                    raw + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0\n", raw + raw,
+                    raw.replace(b"MRK_INSTALLED_SHELL_FAILURE_STEP=", b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=0\nMRK_INSTALLED_SHELL_FAILURE_STEP=")):
+            self.assertIsNone(L._shell_label_pair(bad))
+        with patch.object(L, "SHELL_FAILURE_LABEL_LIMIT", len(raw) - 1):
+            self.assertIsNone(L._shell_label_pair(raw))
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        tokens = source.split("impl SnapshotCheck {", 1)[1].split("struct SnapshotRejection", 1)[0]
+        import re
+        self.assertEqual(tuple(re.findall(rb'=> b"([a-z-]+)"', tokens.encode())), L.SHELL_SNAPSHOT_CHECKS)
+
+    def test_evidence_result_prefix_is_closed_complete_and_not_a_native_receipt(self):
+        def frame(callback=b"status", check=b"problem", phase=b"refused", problem=b"deadline", error=b"none",
+                  step=b"EvidenceObserved", boundary=b"result"):
+            return (b"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE=v1;callback=" + callback + b";check=" + check
+                    + b";phase=" + phase + b";problem=" + problem + b";error=" + error + b"\n"
+                    + b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\nMRK_INSTALLED_SHELL_FAILURE_PHASE=" + boundary
+                    + b"\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        raw = frame()
+        self.assertEqual(L._shell_label_pair(raw), {
+            "step": "EvidenceObserved", "boundary": "result", "bootstrapProgress": "advanced",
+            "evidence": {"callback": "status", "check": "problem", "phase": "refused", "problem": "deadline", "error": "none"}})
+        self.assertLessEqual(len(raw), L.SHELL_FAILURE_LABEL_LIMIT)
+        for end in range(len(raw)):
+            self.assertIsNone(L._shell_label_pair(raw[:end]), end)
+        legacy = raw.split(b"\n", 1)[1]
+        self.assertEqual(L._shell_label_pair(legacy), {"step": "EvidenceObserved", "boundary": "result", "bootstrapProgress": "advanced"})
+        for check in L.SHELL_EVIDENCE_CHECKS:
+            if check == b"bridge":
+                value = frame(check=check, phase=b"na", problem=b"na", error=b"other")
+            elif check == b"status-pending":
+                value = frame(check=check, phase=b"na", problem=b"na")
+            else:
+                value = frame(callback=b"observe-start", check=check)
+            self.assertEqual(L._shell_label_pair(value)["evidence"]["check"], check.decode("ascii"))
+        for error in L.SHELL_EVIDENCE_ERRORS[1:]:
+            self.assertEqual(L._shell_label_pair(frame(check=b"bridge", phase=b"na", problem=b"na", error=error))["evidence"]["error"], error.decode("ascii"))
+        for phase in L.SHELL_EVIDENCE_PHASES[1:]:
+            self.assertEqual(L._shell_label_pair(frame(phase=phase))["evidence"]["phase"], phase.decode("ascii"))
+        for problem in L.SHELL_EVIDENCE_PROBLEMS[1:]:
+            self.assertEqual(L._shell_label_pair(frame(problem=problem))["evidence"]["problem"], problem.decode("ascii"))
+        for bad in (
+            frame(callback=b"other"), frame(check=b"raw-error"), frame(phase=b"raw-error"), frame(problem=b"raw-error"),
+            frame(error=b"raw-error"), frame(check=b"bridge"), frame(check=b"bridge", phase=b"na", problem=b"na"),
+            frame(error=b"other"), frame(phase=b"na"), frame(problem=b"na"),
+            frame(callback=b"observe-start", step=b"ReadEvidenceObserved"), frame(callback=b"observe-start", check=b"status-pending", phase=b"na", problem=b"na"),
+            frame(check=b"observe-pending"), frame(check=b"observe-returned"), frame(check=b"case"),
+            frame(step=b"PathActivate"), frame(step=b"SessionReview"), frame(boundary=b"deadline"),
+            raw + raw, raw + b"\n", raw.replace(b"v1;", b"v2;"), b"x" * 513,
+            b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=0;reject=not-recorded\n" + raw,
+            raw + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0;eval=0;reject=not-recorded;wait=not-sampled\n",
+        ):
+            self.assertIsNone(L._shell_label_pair(bad), bad)
+
+    def test_lifecycle_stop_diagnostic_is_finite_stage_bound_and_never_a_success_receipt(self):
+        def frame(step=b"EvidenceStopped", callback=b"cancel-start", check=b"operation-stage", phase=b"stopping", problem=b"cancelled", error=b"none"):
+            return (b"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE=v1;callback=" + callback + b";check=" + check
+                    + b";phase=" + phase + b";problem=" + problem + b";error=" + error + b"\n"
+                    + b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\nMRK_INSTALLED_SHELL_FAILURE_PHASE=result\n"
+                    + b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        for step in (b"RequestEvidenceStop", b"EvidenceStopped"):
+            raw = frame(step)
+            parsed = L._shell_label_pair(raw)
+            self.assertEqual(parsed["step"], step.decode())
+            self.assertEqual(parsed["evidence"], {"callback": "cancel-start", "check": "operation-stage",
+                                                "phase": "stopping", "problem": "cancelled", "error": "none"})
+            self.assertEqual(set(parsed), {"step", "boundary", "bootstrapProgress", "evidence"})
+            self.assertLessEqual(len(raw), L.SHELL_FAILURE_LABEL_LIMIT)
+            for end in range(len(raw)):
+                self.assertIsNone(L._shell_label_pair(raw[:end]))
+            self.assertIsNotNone(L._shell_label_pair(frame(step, check=b"bridge", phase=b"na", problem=b"na", error=b"other")))
+            for check in (b"case", b"observe-pending", b"observe-returned", b"status-pending"):
+                self.assertIsNone(L._shell_label_pair(frame(step, check=check)))
+        for step in (b"InspectEvidence", b"EvidenceObserved", b"ReadEvidenceStale", b"ReadStaleRecovery", b"PathActivate", b"SessionReview", b"Close"):
+            self.assertIsNone(L._shell_label_pair(frame(step)))
+        for raw in (frame(callback=b"stop"), frame(check=b"actual-stage"), frame(phase=b"external-testing"), frame(error=b"private-message")):
+            self.assertIsNone(L._shell_label_pair(raw))
+
+    def test_path_v3_readiness_relations_are_closed_and_keep_original_callback_contract(self):
+        def frame(*, step=b"PathActivate", index=b"7", wait=b"selection-different", picker=b"4o"):
+            return (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v3;index=" + index
+                    + b";reject=not-recorded;start=18000;now=45000;rsv=m;in=m;out=m;cb=returned;wait="
+                    + wait + b";h=" + picker + b"\nMRK_INSTALLED_SHELL_FAILURE_STEP=" + step
+                    + b"\nMRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        good = frame()
+        self.assertEqual(L._shell_label_pair(good)["path"]["gtkPicker"],
+                         {"mapped": True, "folder": "target-parent", "selected": "other"})
+        for end in range(len(good)):
+            self.assertIsNone(L._shell_label_pair(good[:end]))
+        for state, (mapped, folder) in L.SHELL_SESSION_PICKER_FOLDERS.items():
+            for selected in (b"a", b"t", b"p", b"o"):
+                wait = b"selection-absent" if selected == b"a" else b"not-sampled" if selected == b"t" else b"selection-different"
+                parsed = L._shell_label_pair(frame(wait=wait, picker=state + selected))
+                self.assertEqual(parsed["path"]["gtkPicker"],
+                                 {"mapped": mapped, "folder": folder, "selected": L.SHELL_SESSION_PICKER_SELECTIONS[selected]})
+                set_wait = (b"unmapped" if not mapped else b"target-parent-absent" if folder == "absent"
+                            else b"target-parent-different" if folder == "other" else b"not-sampled")
+                self.assertIsNotNone(L._shell_label_pair(frame(step=b"PathSet", wait=set_wait, picker=state + selected)))
+        for index in (b"1", b"6", b"7", b"8"):
+            self.assertIsNotNone(L._shell_label_pair(frame(step=b"PathSet", index=index, wait=b"not-sampled", picker=b"4a")))
+        for index in (b"0", b"2", b"3", b"4", b"5", b"9", b"10"):
+            self.assertIsNone(L._shell_label_pair(frame(step=b"PathSet", index=index, wait=b"not-sampled", picker=b"4a")))
+        for index in (b"0", b"4"):
+            self.assertIsNone(L._shell_label_pair(frame(index=index)))
+            self.assertIsNotNone(L._shell_label_pair(frame(index=index, wait=b"response-insensitive", picker=b"na")))
+        for wait in (b"not-sampled", b"dialog-absent", b"initial-folder-absent"):
+            self.assertIsNone(L._shell_label_pair(frame(wait=wait)))
+            self.assertIsNotNone(L._shell_label_pair(frame(wait=wait, picker=b"na")))
+        bad = [
+            frame(wait=b"selection-different", picker=b"na"),
+            frame(step=b"PathSet", wait=b"unmapped", picker=b"na"),
+            frame(step=b"PathSet", wait=b"target-parent-different", picker=b"4o"),
+            frame(step=b"PathSet", wait=b"target-parent-absent", picker=b"0a"),
+            frame(step=b"PathSet", wait=b"not-sampled", picker=b"5o"),
+            frame(step=b"PathSet", wait=b"unmapped", picker=b"4o"),
+            frame(wait=b"unmapped", picker=b"0a"),
+            frame(step=b"PathBrowse", wait=b"not-sampled", picker=b"4t"),
+            frame(wait=b"response-insensitive", picker=b"na"),
+            frame(wait=b"selection-absent", picker=b"4t"),
+            frame(wait=b"response-insensitive", picker=b"4o"),
+            frame(wait=b"selection-different", picker=b"4a"),
+            frame(wait=b"not-sampled", picker=b"4p"),
+            frame(wait=b"selection-different", picker=b"4t"),
+        ]
+        ready = frame(wait=b"not-sampled", picker=b"4t")
+        bad += [ready.replace(b"rsv=m;in=m;out=m;cb=returned", callbacks) for callbacks in (
+            b"rsv=0;in=0;out=0;cb=idle", b"rsv=1;in=0;out=0;cb=reserved")]
+        bad += [good.replace(before, after) for before, after in (
+            (b";h=4o", b";h=4o;h=4o"), (b";h=4o", b""), (b"=v3;", b"=v2;"),
+            (b"=v3;", b"=v1;"), (b"=v3;", b"=v4;"))]
+        for raw in bad:
+            self.assertIsNone(L._shell_label_pair(raw))
+        for picker in (b"4f", b"0f", b"6t", b"4x", b"n", b"nat", b"/private/path", b"4o;h=4o"):
+            self.assertIsNone(L._shell_label_pair(frame(picker=picker)))
+        for raw in (good + b"\n", good + good, good.replace(b"\n", b"\r\n"), good.replace(b"now=45000", b"now=1")):
+            self.assertIsNone(L._shell_label_pair(raw))
+        largest = frame(step=b"PathSet", wait=b"target-parent-different", picker=b"5o").replace(
+            b"start=18000;now=45000", b"start=999999;now=999999").replace(b"reject=not-recorded", b"reject=gtk-fixture-transition")
+        self.assertIsNotNone(L._shell_label_pair(largest))
+        self.assertLessEqual(len(largest), L.SHELL_PATH_FAILURE_V3_FRAME_BOUND)
+        with patch.object(L, "SHELL_PATH_FAILURE_V3_FRAME_BOUND", len(good) - 1):
+            self.assertIsNone(L._shell_label_pair(good))
+
+    def test_path_v2_timing_callback_wait_preserves_closed_prefix_contract(self):
+        good = (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=8;reject=not-recorded;start=43000;now=45000;"
+                b"rsv=m;in=m;out=m;cb=returned;wait=selection-different\n"
+                b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathActivate\nMRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\n"
+                b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        sample = L._shell_label_pair(good)["path"]
+        self.assertEqual(sample, {"recipeIndex": 8, "rejection": "not-recorded", "stepEntryElapsedMs": 43000,
+                                 "sampleElapsedMs": 45000, "callbackReservations": "m", "callbackEntries": "m",
+                                 "callbackReturns": "m", "callbackPhase": "returned", "lastWait": "selection-different"})
+        for end in range(len(good)):
+            self.assertIsNone(L._shell_label_pair(good[:end]))
+        for before, after in ((b"start=43000;now=45000", b"start=over;now=over"),
+                              (b"now=45000", b"now=over"), (b"cb=returned", b"cb=entered"),
+                              (b"cb=returned", b"cb=reserved")):
+            self.assertIsNotNone(L._shell_label_pair(good.replace(before, after)))
+        idle = good.replace(b"rsv=m;in=m;out=m;cb=returned;wait=selection-different", b"rsv=0;in=0;out=0;cb=idle;wait=not-sampled")
+        self.assertIsNotNone(L._shell_label_pair(idle))
+        reserved = idle.replace(b"rsv=0;in=0;out=0;cb=idle", b"rsv=1;in=0;out=0;cb=reserved")
+        self.assertIsNotNone(L._shell_label_pair(reserved))
+        self.assertIsNotNone(L._shell_label_pair(reserved.replace(b"in=0;out=0;cb=reserved", b"in=1;out=0;cb=entered")))
+        navigation = idle.replace(b"index=8", b"index=none").replace(b"PathActivate", b"PathNavigation").replace(b"cb=idle", b"cb=na")
+        self.assertIsNotNone(L._shell_label_pair(navigation))
+        bad = [good.replace(before, after) for before, after in (
+            (b"start=43000", b"start=45001"), (b"start=43000", b"start=over"),
+            (b"now=45000", b"now=1000000"), (b"now=45000", b"now=045000"), (b"now=45000", b"now=-1"),
+            (b"rsv=m", b"rsv=1"), (b"in=m", b"in=0"), (b"out=m", b"out=1"),
+            (b"cb=returned", b"cb=idle"), (b"cb=returned", b"cb=na"), (b"cb=returned", b"cb=queued"),
+            (b"PathActivate", b"PathSet"), (b"wait=selection-different", b"wait=arbitrary"),
+            (b";now=", b";start=1;now="), (b"=v2;", b"=v3;"), (b"\n", b"\r\n"))]
+        bad += [good + b"x", good + b"\n", idle.replace(b"out=0", b"out=1"),
+                reserved.replace(b"rsv=1", b"rsv=m"), navigation.replace(b"cb=na", b"cb=idle")]
+        for raw in bad:
+            self.assertIsNone(L._shell_label_pair(raw))
+        with patch.object(L, "SHELL_PATH_FAILURE_V2_FRAME_BOUND", len(good) - 1):
+            self.assertIsNone(L._shell_label_pair(good))
+
+    def test_path_prefix_requires_complete_frame_closed_reason_and_recipe_shape(self):
+        def frame(step=b"PathActivate", index=b"0", rejection=b"gtk-initial-folder"):
+            return (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=" + index + b";reject=" + rejection + b"\n"
+                    b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\nMRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\n"
+                    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        good = frame()
+        self.assertEqual(L._shell_label_pair(good), {"step": "PathActivate", "boundary": "gtk", "bootstrapProgress": "advanced",
+            "path": {"recipeIndex": 0, "rejection": "gtk-initial-folder"}})
+        indexed = (b"PathBrowse", b"PathSet", b"PathActivate", b"PathSettlement", b"PathField")
+        unindexed = (b"PathDraft", b"PathPreview", b"PathNavigation")
+        for step in indexed:
+            for index in range(11):
+                self.assertEqual(L._shell_label_pair(frame(step, str(index).encode("ascii")))["path"]["recipeIndex"], index)
+            self.assertIsNone(L._shell_label_pair(frame(step, b"none")))
+        for step in unindexed:
+            self.assertEqual(L._shell_label_pair(frame(step, b"none"))["path"], {"recipeIndex": None, "rejection": "gtk-initial-folder"})
+            # Preview round0..2 never masquerades as a recipe identifier.
+            for index in (b"0", b"1", b"2"):
+                self.assertIsNone(L._shell_label_pair(frame(step, index)))
+        for rejection in L.SHELL_PATH_REJECTIONS:
+            self.assertEqual(L._shell_label_pair(frame(rejection=rejection))["path"]["rejection"], rejection.decode("ascii"))
+        longest = frame(b"PathNavigation", b"none", b"gtk-fixture-transition").replace(
+            b"=gtk\n", b"=settlement\n").replace(b"=advanced\n", b"=app-info-returned-before-hold\n")
+        self.assertIsNotNone(L._shell_label_pair(longest))
+        self.assertLessEqual(len(longest), L.SHELL_PATH_FAILURE_FRAME_BOUND)
+        self.assertEqual(L.SHELL_FAILURE_LABEL_LIMIT, 512)
+        # Including cuts exactly at line boundaries: the leading version record
+        # prevents a short new write from impersonating an old three-line frame.
+        for end in range(len(good)):
+            with self.subTest(prefix_bytes=end):
+                self.assertIsNone(L._shell_label_pair(good[:end]))
+        prefix, legacy = good.split(b"\n", 1)
+        prefix += b"\n"
+        for step in indexed + unindexed:
+            old = legacy.replace(b"PathActivate", step)
+            self.assertEqual(L._shell_label_pair(old), {"step": step.decode("ascii"), "boundary": "gtk", "bootstrapProgress": "advanced"})
+        bad = [good.replace(b"=v1;", b"=v2;"), good.replace(b"=v1;", b"=V1;"),
+               frame(index=b"11"), frame(index=b"255"), frame(index=b"00"), frame(index=b"01"),
+               frame(index=b"-1"), frame(index=b"+1"), frame(index=b"NONE"), frame(index=b"0 "),
+               frame(step=b"SessionActivateFile"), frame(step=b"PrepareSave"), frame(step=b"PathUnknown"),
+               frame(rejection=b"gtk-future"), frame(rejection=b"gtk_initial_folder"), frame(rejection=b"GTK-thread"),
+               frame(rejection=b"x" * 23), frame(rejection=b"gtk-thread;extra=1"), frame(rejection=b"gtk-thread\n/private/inert"),
+               good.replace(b";reject=", b";index=0;reject="), good.replace(b";reject=", b";extra=1;reject="),
+               good.replace(b"index=0;reject=gtk-initial-folder", b"reject=gtk-initial-folder;index=0"),
+               good.replace(b"\n", b"\r\n"), prefix + legacy + legacy, prefix + prefix + legacy, legacy + prefix,
+               good + b"\n", good + b"x" * 512, good.decode("ascii"), bytearray(good),
+               prefix + legacy.replace(b"PathActivate", b"SessionReview") +
+               b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0;evaluations=1;reject=not-recorded;wait=not-sampled\n"]
+        for raw in bad:
+            with self.subTest(kind=type(raw).__name__, length=len(raw)):
+                self.assertIsNone(L._shell_label_pair(raw))
+
+    def test_session_record_requires_exact_index_bounds_categories_and_complete_frame(self):
+        header = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                  b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"
+                  b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        detail = (b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=63;evaluations=128;"
+                  b"reject=evaluation-budget;wait=rendered-display-mismatch\n")
+        good = header + detail
+        self.assertEqual(L._shell_label_pair(good), {"step": "SessionReview", "boundary": "settlement", "bootstrapProgress": "advanced",
+            "session": {"recipeIndex": 63, "evaluations": 128, "rejection": "evaluation-budget", "lastWait": "rendered-display-mismatch"}})
+        gtk = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionActivateFile\n"
+               b"MRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+               b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=3;evaluations=16;"
+               b"reject=gtk-observer-endpoint;wait=gtk-action-insensitive\n")
+        self.assertEqual(L._shell_label_pair(gtk), {"step": "SessionActivateFile", "boundary": "gtk", "bootstrapProgress": "advanced",
+            "session": {"recipeIndex": 3, "evaluations": 16, "rejection": "gtk-observer-endpoint", "lastWait": "gtk-action-insensitive"}})
+        self.assertEqual(L._shell_label_pair(gtk.replace(b"gtk-action-insensitive", b"gtk-selection-pending"))["session"],
+            {"recipeIndex": 3, "evaluations": 16, "rejection": "gtk-observer-endpoint", "lastWait": "gtk-selection-pending"})
+        historical = header + (b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=29;evaluations=73;"
+                               b"reject=native-readiness-invariant;wait=native-reply-pending\n")
+        self.assertEqual(L._shell_label_pair(historical)["session"], {"recipeIndex": 29, "evaluations": 73,
+            "rejection": "native-readiness-invariant", "lastWait": "native-reply-pending"})
+        unavailable = [L._shell_label_pair(good.replace(b"evaluation-budget", token))["session"]["rejection"]
+                       for token in (b"reply-code-unavailable", b"reply-assessment-unavailable", b"capability-unavailable")]
+        self.assertEqual(unavailable, ["reply-code-unavailable", "reply-assessment-unavailable", "capability-unavailable"])
+        for rejection in L.SHELL_SESSION_REJECTIONS:
+            for wait in L.SHELL_SESSION_WAITS:
+                raw = header + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0;evaluations=128;reject=" + rejection + b";wait=" + wait + b"\n"
+                value = L._shell_label_pair(raw)
+                self.assertEqual(value["session"], {"recipeIndex": 0, "evaluations": 128,
+                    "rejection": rejection.decode("ascii"), "lastWait": wait.decode("ascii")})
+                self.assertLessEqual(len(raw), 512)
+        for number in (b"0", b"9", b"10", b"99", b"100", b"128"):
+            raw = good.replace(b"evaluations=128", b"evaluations=" + number).replace(b"evaluation-budget", b"not-recorded")
+            self.assertEqual(L._shell_label_pair(raw)["session"]["evaluations"], int(number))
+        for name in (b"SessionNavigate", b"SessionReload", b"SessionLoss", b"SessionDeadline", b"SessionQuitPreserved"):
+            raw = good.replace(b"SessionReview", name).replace(b"index=63", b"index=none")
+            self.assertIsNone(L._shell_label_pair(good.replace(b"SessionReview", name)))
+            self.assertIsNone(L._shell_label_pair(raw)["session"]["recipeIndex"])
+        for name in (b"SessionQuitCancel", b"SessionFinality"):
+            self.assertIsNotNone(L._shell_label_pair(good.replace(b"SessionReview", name)))
+            self.assertIsNotNone(L._shell_label_pair(good.replace(b"SessionReview", name).replace(b"index=63", b"index=none")))
+        bad = [header, header + detail[:-1], header + detail + detail, detail + header,
+            good.replace(b"SessionReview", b"PrepareSave"), good.replace(b"index=63", b"index=none"),
+            good.replace(b"index=63", b"index=64"), good.replace(b"index=63", b"index=063"),
+            good.replace(b"index=63", b"index=-1"), good.replace(b"evaluations=128", b"evaluations=129"),
+            good.replace(b"evaluations=128", b"evaluations=0128"), good.replace(b"evaluations=128", b"evaluations=127"),
+            good.replace(b"evaluation-budget", b"not-an-allowed-condition"), good.replace(b"rendered-display-mismatch", b"unknown"),
+            good.replace(b"evaluation-budget", b"asset_deadline"), good.replace(b"evaluation-budget", b"reply-future-code"),
+            good.replace(b"evaluation-budget", b"x" * 33),
+            good.replace(b"evaluation-budget", b"reply-code-unavailable;code=asset_deadline"),
+            good.replace(b"evaluation-budget", b"reply-code-unavailable\n/private/inert"),
+            good.replace(b"v1;", b"v2;"), good.replace(b";wait=", b";extra=1;wait="),
+            good.replace(b";reject=", b";index=63;reject="), good.replace(b"\n", b"\r\n"),
+            good + b"/private/inert\n", good + b"x" * 512]
+        for raw in bad:
+            with self.subTest(raw=raw[:80]): self.assertIsNone(L._shell_label_pair(raw))
+
+        # v1 stays distinguishable as lacking origin metadata. v2 never accepts
+        # an omitted field, guessed association or arbitrary original error.
+        self.assertNotIn("firstOrigin", L._shell_label_pair(historical)["session"])
+        def frame(origin=b"not-recorded", origin_detail=b"none", association=b"unassociated", query=b"na", worker=b"na"):
+            return (good[:-1].replace(b"=v1;", b"=v2;") + b";o=" + origin + b";d=" + origin_detail
+                    + b";a=" + association + b";q=" + query + b";w=" + worker + b"\n")
+        v2 = frame()
+        expected = deepcopy(L._shell_label_pair(good))
+        expected["session"]["firstOrigin"] = {"origin": "not-recorded", "detail": "none", "association": "unassociated", "query": "na", "worker": "na"}
+        self.assertEqual(L._shell_label_pair(v2), expected)
+        bound = frame(b"supervisor-disabled", b"none", b"bound", b"unavailable.spawn-other.xf", b"settle-unknown")
+        expected["session"]["firstOrigin"] = {"origin": "supervisor-disabled", "detail": "none", "association": "bound",
+                                               "query": "unavailable.spawn-other.xf", "worker": "settle-unknown"}
+        self.assertEqual(L._shell_label_pair(bound), expected)
+        self.assertLessEqual(len(bound), 412)
+        self.assertEqual(bound.count(b"\n"), 4)
+        self.assertTrue(bound.isascii())
+        for origin in L.SHELL_SESSION_ORIGINS:
+            origin_detail = b"other" if origin == b"op-cleanup" else b"failed" if origin == b"coord-join" else b"unavailable" if origin == b"staged-refusal" else b"none"
+            self.assertEqual(L._shell_label_pair(frame(origin, origin_detail))["session"]["firstOrigin"]["origin"], origin.decode("ascii"))
+        for origin, details in ((b"op-cleanup", (b"deadline", b"review-expired", b"context-stale", b"cleanup-unknown", b"user-cancelled", b"shutdown", b"document-lost", b"other")),
+                                (b"staged-refusal", (b"new", b"pending", b"returned", b"failed", b"unavailable"))):
+            for origin_detail in details:
+                self.assertEqual(L._shell_label_pair(frame(origin, origin_detail, b"bound", b"unregistered"))["session"]["firstOrigin"]["detail"], origin_detail.decode("ascii"))
+        for error in L.SHELL_SESSION_QUERY_ERRORS:
+            value = error + b".none.pr"
+            self.assertEqual(L._shell_label_pair(frame(b"registry", b"none", b"bound", value, b"none-recorded"))["session"]["firstOrigin"]["query"], value.decode("ascii"))
+        for cause in L.SHELL_SESSION_QUERY_CAUSES:
+            value = b"cleanup." + cause + b".cf"
+            self.assertEqual(L._shell_label_pair(frame(b"coord-join", b"failed", b"bound", value, b"acquire-f"))["session"]["firstOrigin"]["query"], value.decode("ascii"))
+        for join in L.SHELL_SESSION_MANAGEMENT_JOINS:
+            value = b"timeout.none." + bytes([join, join])
+            self.assertIsNotNone(L._shell_label_pair(frame(b"registry", b"none", b"bound", value, b"unavailable")))
+        for worker in L.SHELL_SESSION_WORKERS:
+            value = b"unregistered" if worker == b"na" else b"unavailable"
+            self.assertEqual(L._shell_label_pair(frame(b"registry", b"none", b"bound", value, worker))["session"]["firstOrigin"]["worker"], worker.decode("ascii"))
+        self.assertEqual((len(L.SHELL_SESSION_PUBLIC_MAP_WORKERS), L.SHELL_SESSION_PUBLIC_MAP_WORKERS[0], L.SHELL_SESSION_PUBLIC_MAP_WORKERS[-1]),
+                         (648, b"map-x-aa", b"map-x-yx"))
+        self.assertEqual(L.SHELL_SESSION_GENERIC_MAP_WORKERS, tuple(b"map-x-" + group + b"-" + tail
+                         for group in (b"v", b"l", b"c", b"h", b"m", b"o") for tail in (b"na", b"np", b"da", b"dp")))
+        self.assertEqual(len(set(L.SHELL_SESSION_GENERIC_MAP_WORKERS)), 24)
+        for worker in (b"maps-check", b"map-p-nl", b"map-p-order", b"map-x-file", b"map-m-owner-cr", b"map-dup-py",
+                       b"map-x-hist-py", b"map-x-hist-ss", b"map-x-hist-cr",
+                       *L.SHELL_SESSION_GENERIC_MAP_WORKERS, *L.SHELL_SESSION_PUBLIC_MAP_WORKERS):
+            raw = frame(b"supervisor-disabled", b"none", b"bound", b"cleanup.none.pp", worker)
+            self.assertEqual(L._shell_label_pair(raw)["session"]["firstOrigin"], {
+                "origin": "supervisor-disabled", "detail": "none", "association": "bound", "query": "cleanup.none.pp", "worker": worker.decode("ascii")})
+            self.assertLessEqual(len(raw), 412)
+            self.assertIsNone(L._shell_label_pair(raw.replace(b";a=bound", b";a=unassociated")))
+            self.assertIsNone(L._shell_label_pair(raw.replace(b";q=cleanup.none.pp", b";q=unregistered")))
+        for stage in L.SHELL_SESSION_WORKER_STAGES:
+            self.assertIsNotNone(L._shell_label_pair(frame(b"registry", b"none", b"bound", b"cleanup.none.pp", stage + b"-c")))
+        for suffix in L.SHELL_SESSION_WORKER_JOINS:
+            self.assertIsNotNone(L._shell_label_pair(frame(b"registry", b"none", b"bound", b"cleanup.none.pp", b"observe-" + bytes([suffix]))))
+        bad_v2 = [v2[:-1], v2 + b"\n", v2 + detail, bound.replace(b"=v2;", b"=v1;"), bound.replace(b"=v2;", b"=v3;"),
+            bound.replace(b";o=supervisor-disabled", b""), bound.replace(b";d=none", b""), bound.replace(b";a=bound", b""),
+            bound.replace(b";q=unavailable.spawn-other.xf", b""), bound.replace(b";w=settle-unknown", b""),
+            bound.replace(b";d=none", b";d=none;d=none"), bound.replace(b";a=bound", b";a=bound;a=unassociated"),
+            bound.replace(b";o=supervisor-disabled;d=none", b";d=none;o=supervisor-disabled"),
+            bound.replace(b";w=settle-unknown", b";w=settle-unknown;extra=1"), bound.replace(b"\n", b"\r\n"),
+            bound.replace(b"supervisor-disabled", b"supervisor-future"), bound.replace(b";d=none", b";d=failed"),
+            bound.replace(b";a=bound", b";a=unknown"), bound.replace(b";a=bound", b";a=unassociated"),
+            frame(b"not-recorded", b"none", b"bound", b"unavailable", b"unavailable"),
+            frame(b"op-cleanup", b"none"), frame(b"coord-join", b"none"), frame(b"staged-refusal", b"deadline"),
+            frame(b"registry", b"none", b"bound"), frame(b"registry", b"none", b"unassociated", b"unregistered"),
+            frame(b"registry", b"none", b"bound", b"unregistered", b"none-recorded"),
+            *(frame(b"registry", b"none", b"bound", query, b"unavailable") for query in (
+                b"none.spawn-other.pp", b"future.none.pp", b"cleanup.future.pp", b"cleanup.none.p", b"cleanup.none.ppp",
+                b"cleanup.none.pz", b"cleanup.none.pr.extra", b"cleanup..pr", b"cleanup_none_pr", b"cleanup.none.PR")),
+            *(frame(b"registry", b"none", b"bound", b"cleanup.none.pp", worker) for worker in (
+                b"inspect-r", b"inspect-c-extra", b"future-c", b"maps-future", b"settle-unknownx", b"\xff",
+                b"map-p-future", b"map-m-time-py", b"map-m-owner-zz", b"map-m-owner-pyx", b"map-x-file\n/private/inert",
+                b"map-x-yy", b"map-x-zz", b"map-x-a", b"map-x-aaa", b"map-x-AA", b"map-x-aa ",
+                 b"map-x-aa;extra=1", b"map-x-aa/path", b"map-x-aa\n/private/inert",
+                 b"map-x-hist-zz", b"map-x-hist-pyx", b"map-x-hist-ss ", b"map-x-hist-cr;extra=1",
+                 b"map-x-hist-py\n/private/inert", b"map-x-v-n", b"map-x-v-nax", b"map-x-z-na", b"map-x-l-aa",
+                 b"map-x-c-NP", b"map-x-h-na ", b"map-x-m-da;extra=1", b"map-x-o-dp/path", b"map-x-o-na\n/private/inert"))]
+        for raw in bad_v2:
+            with self.subTest(version="v2", raw=raw[:80]): self.assertIsNone(L._shell_label_pair(raw))
+
+    def test_finite_pair_refuses_partial_reordered_duplicate_or_injected_data(self):
+        step = b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareSave\n"
+        boundary = b"MRK_INSTALLED_SHELL_FAILURE_PHASE=request\n"
+        progress = b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+        good = step + boundary + progress
+        self.assertEqual(L._shell_label_pair(good), {"step": "PrepareSave", "boundary": "request", "bootstrapProgress": "advanced"})
+        self.assertEqual(L._shell_label_pair(b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathSettlement\n"
+                                           b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n" + progress),
+                         {"step": "PathSettlement", "boundary": "settlement", "bootstrapProgress": "advanced"})
+        for line in L.SHELL_BOOTSTRAP_PROGRESS:
+            parsed = L._shell_label_pair(step + boundary + line)
+            self.assertEqual(parsed["bootstrapProgress"], line.split(b"=", 1)[1][:-1].decode("ascii"))
+        for raw in (b"", good[:-1], step, step + boundary, boundary + step + progress, step + step + progress,
+                    step + progress + boundary, good + progress, good + boundary,
+                    b"prefix" + good, good.replace(b"PrepareSave", b"NotAnAllowedStep"),
+                    good.replace(b"request", b"unknown"), good.replace(b"\n", b"\r\n"),
+                    good.replace(b"advanced", b"unknown"), good.replace(b"advanced", b"\xff"),
+                    good + b"/private/injected\n", good + b"x" * 512, good.decode(), bytearray(good)):
+            with self.subTest(kind=type(raw).__name__, length=len(raw)):
+                self.assertIsNone(L._shell_label_pair(raw))
+        legacy = b"MRK_INSTALLED_SHELL_FAILURE_STEP=ToolsOffline\n" + boundary + progress
+        expected = {"step": "ToolsOffline", "boundary": "request", "bootstrapProgress": "advanced"}
+        self.assertEqual(L._shell_label_pair(legacy), expected)  # Old records do not invent new facts.
+        prefix = b"MRK_INSTALLED_SHELL_COMMANDS_FAILURE=v1;site="
+        for inner in L.SHELL_COMMAND_FAILURE_STEPS:
+            for site, line in ((b"na", None), (b"1", 1), (b"65535", 65535)):
+                frame = prefix + site + b";step=" + inner + b"\n" + legacy
+                self.assertEqual(L._shell_label_pair(frame), {**expected,
+                    "commandsFailure": {"sourceLine": line, "step": inner.decode("ascii")}})
+        frame = prefix + b"65535;step=ReadReciprocal\n" + legacy
+        self.assertLessEqual(len(frame), L.SHELL_FAILURE_LABEL_LIMIT)
+        for length in range(len(frame)):
+            with self.subTest(prefix=length):
+                self.assertIsNone(L._shell_label_pair(frame[:length]))
+        malformed = [frame.replace(b"65535", value) for value in
+            (b"0", b"01", b"65536", b"999999", b"-1", b"none", b"NA", b"")]
+        malformed += [frame.replace(b"ReadReciprocal", value) for value in
+            (b"readreciprocal", b"Unknown", b"Work;extra=1", b"Work/private", b"", b"Work\n")]
+        malformed += [frame.replace(b"ToolsOffline", b"PrepareSave"), frame.replace(b"v1;", b"v2;"),
+            frame + progress, legacy + frame.splitlines(keepends=True)[0],
+            frame.splitlines(keepends=True)[0] + frame, frame.replace(b"\n", b"\r\n")]
+        for raw in malformed:
+            with self.subTest(commands=raw[:100]):
+                self.assertIsNone(L._shell_label_pair(raw))
+
+    def test_session_v6_selection_and_callback_facts_are_closed_versioned_and_bounded(self):
+        def frame(step=b"SessionActivateFile", index=b"3", wait=b"gtk-selection-absent", callbacks=b"mp"):
+            return (b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\n"
+                    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\n"
+                    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+                    b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=" + index + b";eval=16;"
+                    b"reject=not-recorded;wait=" + wait
+                    + b";o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=" + callbacks + b"\n")
+        expected_tokens = (b"na", b"0i", b"0p", b"0w", b"1i", b"1p", b"1w", b"mi", b"mp", b"mw")
+        self.assertEqual(L.SHELL_SESSION_GTK_CALLBACKS, expected_tokens)
+        for returns, label in ((b"0", "none"), (b"1", "one"), (b"m", "multiple")):
+            for phase, observed in ((b"i", "idle"), (b"p", "pending"), (b"w", "wait-observed")):
+                callbacks = returns + phase
+                wait = b"not-sampled" if callbacks in (b"0i", b"0p") else b"gtk-selection-absent"
+                value = L._shell_label_pair(frame(wait=wait, callbacks=callbacks))
+                self.assertEqual(value["session"]["gtkCallbacks"], {"returns": label, "phase": observed})
+                self.assertEqual(value["session"]["evaluations"], 16)  # Remains DOM-only.
+                self.assertEqual(value["session"]["lastWait"], wait.decode("ascii"))
+        for wait in (b"gtk-selection-absent", b"gtk-selection-different"):
+            raw = frame(wait=wait)
+            self.assertEqual(L._shell_label_pair(raw)["session"]["lastWait"], wait.decode("ascii"))
+            self.assertLessEqual(len(raw), L.SHELL_SESSION_FAILURE_V6_FRAME_BOUND)
+            for end in range(len(raw)):
+                self.assertIsNone(L._shell_label_pair(raw[:end]))
+                if end < len(raw) - 1:
+                    self.assertIsNone(L._shell_label_pair(raw[:end] + b"\n"))
+            self.assertIsNone(L._shell_label_pair(frame(step=b"SessionSetFile", wait=wait)))
+        self.assertIsNotNone(L._shell_label_pair(frame(step=b"SessionSetFile", wait=b"gtk-dialog-absent")))
+        self.assertIsNone(L._shell_label_pair(frame(callbacks=b"na")))
+        review = frame(step=b"SessionReview", wait=b"native-reply-pending", callbacks=b"na")
+        self.assertIsNone(L._shell_label_pair(review)["session"]["gtkCallbacks"])
+        self.assertIsNone(L._shell_label_pair(frame(step=b"SessionReview", wait=b"native-reply-pending")))
+        raw = frame()
+        self.assertEqual(L.SHELL_SESSION_FAILURE_V6_FRAME_BOUND, 509 - 7 + 5)
+        self.assertEqual(L.SHELL_FAILURE_LABEL_LIMIT, 512)
+        with patch.object(L, "SHELL_SESSION_FAILURE_V6_FRAME_BOUND", len(raw) - 1):
+            self.assertIsNone(L._shell_label_pair(raw))
+        bad = [frame(index=b"none"), frame(index=b"64"), frame(index=b"03"), frame(wait=b"gtk-selection-pending"),
+               frame(callbacks=b"2p"), frame(callbacks=b"mP"), frame(callbacks=b"mm"), frame(callbacks=b"mw0"),
+               raw.replace(b";eval=16;", b";evaluations=16;"), raw.replace(b";eval=16;", b";eval=129;"),
+               raw.replace(b";eval=16;", b";eval=016;"), raw.replace(b";g=mp", b""),
+               raw.replace(b";g=mp", b";g=mp;g=mp"), raw.replace(b";g=mp", b";g=mp;extra=na"),
+               raw.replace(b";u=na;g=mp", b";g=mp;u=na"), raw.replace(b";g=mp", b";callbacks=mp"),
+               raw.replace(b"\n", b"\r\n"), raw + b"\n", raw + raw, raw + b"x" * 512]
+        for version in (b"v1", b"v2", b"v3", b"v4", b"v5", b"v7"):
+            bad.append(raw.replace(b"=v6;", b"=" + version + b";"))
+        for value in bad:
+            self.assertIsNone(L._shell_label_pair(value))
+        # Exact v5 still has no gtkCallbacks field; v6-only tokens cannot leak backward.
+        historical = review.replace(b"=v6;", b"=v5;").replace(b";eval=", b";evaluations=").replace(b";g=na", b"")
+        self.assertNotIn("gtkCallbacks", L._shell_label_pair(historical)["session"])
+        for wait in (b"gtk-selection-absent", b"gtk-selection-different"):
+            self.assertIsNone(L._shell_label_pair(historical.replace(b"native-reply-pending", wait)))
+
+    def test_session_v7_picker_relations_are_closed_and_do_not_certify_readiness(self):
+        def frame(picker=b"4f", step=b"SessionActivateFile", index=b"9",
+                  wait=b"gtk-selection-different", callbacks=b"mw"):
+            return (b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\n"
+                    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\n"
+                    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+                    b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v7;index=" + index + b";eval=30;"
+                    b"reject=not-recorded;wait=" + wait
+                    + b";o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g="
+                    + callbacks + b";h=" + picker + b"\n")
+        folders = {b"0": (False, "absent"), b"1": (False, "target-parent"), b"2": (False, "other"),
+                   b"3": (True, "absent"), b"4": (True, "target-parent"), b"5": (True, "other")}
+        selections = {b"a": "absent", b"t": "target", b"p": "target-parent", b"f": "firebase-peer", b"o": "other"}
+        self.assertEqual(L.SHELL_SESSION_PICKER_FOLDERS, folders)
+        self.assertEqual(L.SHELL_SESSION_PICKER_SELECTIONS, selections)
+        tokens = set()
+        for folder_token, (mapped, folder) in folders.items():
+            for selected_token, selected in selections.items():
+                token = folder_token + selected_token
+                tokens.add(token)
+                allowed = ((b"not-sampled", b"gtk-action-insensitive") if selected == "target"
+                           else (b"gtk-selection-absent",) if selected == "absent"
+                           else (b"gtk-selection-different",))
+                for wait in (b"not-sampled", b"gtk-dialog-absent", b"gtk-selection-absent",
+                             b"gtk-selection-different", b"gtk-action-insensitive"):
+                    with self.subTest(token=token, wait=wait):
+                        value = L._shell_label_pair(frame(picker=token, wait=wait))
+                        if wait not in allowed:
+                            self.assertIsNone(value)
+                        else:
+                            self.assertEqual(value["session"]["gtkPicker"],
+                                             {"mapped": mapped, "folder": folder, "selected": selected})
+                            self.assertEqual(value["session"]["recipeIndex"], 9)
+                            self.assertEqual(value["session"]["evaluations"], 30)  # Still DOM evaluations.
+                            self.assertEqual(value["session"]["gtkCallbacks"], {"returns": "multiple", "phase": "wait-observed"})
+                self.assertIsNone(L._shell_label_pair(frame(picker=token, step=b"SessionSetFile", wait=allowed[0])))
+        self.assertEqual(len(tokens), 30)
+        self.assertNotIn(b"na", tokens)
+        absent = L._shell_label_pair(frame(picker=b"0a", wait=b"gtk-selection-absent"))["session"]["gtkPicker"]
+        self.assertEqual(absent, {"mapped": False, "folder": "absent", "selected": "absent"})
+        self.assertIsNone(L._shell_label_pair(frame(picker=b"na"))["session"]["gtkPicker"])
+        for step, callbacks, wait in ((b"SessionSetFile", b"0p", b"gtk-dialog-absent"),
+                                      (b"SessionReview", b"na", b"native-reply-pending")):
+            self.assertIsNone(L._shell_label_pair(frame(picker=b"na", step=step, callbacks=callbacks, wait=wait))["session"]["gtkPicker"])
+            self.assertIsNone(L._shell_label_pair(frame(step=step, callbacks=callbacks, wait=wait)))
+        raw = frame()
+        self.assertEqual(raw.count(b"\n"), 4)
+        self.assertEqual(L.SHELL_SESSION_FAILURE_V7_FRAME_BOUND, L.SHELL_SESSION_FAILURE_V6_FRAME_BOUND + 5)
+        self.assertEqual(L.SHELL_SESSION_FAILURE_V7_FRAME_BOUND, L.SHELL_FAILURE_LABEL_LIMIT)
+        self.assertEqual(L.SHELL_FAILURE_LABEL_LIMIT, 512)
+        self.assertLessEqual(len(raw), L.SHELL_SESSION_FAILURE_V7_FRAME_BOUND)
+        with patch.object(L, "SHELL_SESSION_FAILURE_V7_FRAME_BOUND", len(raw) - 1):
+            self.assertIsNone(L._shell_label_pair(raw))
+        for end in range(len(raw)):
+            self.assertIsNone(L._shell_label_pair(raw[:end]))
+            if end < len(raw) - 1:
+                self.assertIsNone(L._shell_label_pair(raw[:end] + b"\n"))
+        bad = [frame(index=b"none"), frame(index=b"64"), frame(index=b"09"), frame(callbacks=b"na"),
+               raw.replace(b";h=4f", b""), raw.replace(b";h=4f", b";h=4f;h=4f"),
+               raw.replace(b";g=mw;h=4f", b";h=4f;g=mw"), raw.replace(b";h=4f", b";picker=4f"),
+               raw.replace(b";eval=30;", b";evaluations=30;"), raw + b"\n", raw + raw, raw + b"x" * 512,
+               raw.replace(b"\n", b"\r\n"), raw.replace(b";h=4f", b";h=4f;path=/private/inert.json")]
+        for token in (b"", b"n", b"n0", b"0", b"4", b"6f", b"4x", b"4F", b"44f", b"Na",
+                      b"4f/private/inert.json", b"file:///private/inert.json", b"4f\x00", b"4f\n"):
+            bad.append(frame(picker=token))
+        for version in (b"v1", b"v2", b"v3", b"v4", b"v5", b"v6", b"v8"):
+            bad.append(raw.replace(b"=v7;", b"=" + version + b";"))
+        for value in bad:
+            self.assertIsNone(L._shell_label_pair(value))
+        historical = raw.replace(b"=v7;", b"=v6;").replace(b";h=4f", b"")
+        self.assertNotIn("gtkPicker", L._shell_label_pair(historical)["session"])
+        self.assertEqual(L.SHELL_SESSION_FAILURE_V6_FRAME_BOUND, 507)
+        # Exact closed DATA projection, not a load-complete or native-finality receipt.
+
+    def test_preparation_exclusively_binds_original_fd_and_preserves_preparation_failure(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        root = L.root_path(value)
+        for fault in (None, "occupied", "owner", "acl", "hardlink", "parent"):
+            parent = needrestart_stat(stat.S_IFDIR | 0o711)
+            leaf = needrestart_stat(stat.S_IFREG | 0o620, ino=42); leaf.st_gid = value["runnerGid"]
+            if fault == "hardlink": leaf.st_nlink = 2
+            if fault == "parent": parent.st_mode = stat.S_IFDIR | 0o777
+            primary = OSError("inert preparation failure; must not be formatted")
+            with self.subTest(fault=fault), patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
+                 patch.object(L, "_xattrs"), patch.object(Path, "lstat", lambda path: parent if path == root else leaf), \
+                 patch.object(L.os, "open", return_value=41) as opening, patch.object(L.os, "fchown") as chown, \
+                 patch.object(L.os, "fchmod") as chmod, patch.object(L.os, "fstat", return_value=leaf), \
+                 patch.object(L.os, "listxattr", return_value=["system.posix_acl_access"] if fault == "acl" else []), \
+                 patch.object(L.os, "close") as closing, patch.object(L.os, "unlink") as unlinking:
+                if fault == "occupied": opening.side_effect = primary
+                if fault == "owner":
+                    chown.side_effect = primary
+                    closing.side_effect = OSError("inert ambiguous close")
+                if fault is None:
+                    self.assertEqual(L._shell_labels_prepare(value, "positive"), (41, L.identity(leaf)[:6]))
+                    opening.assert_called_once_with(root / "shell-positive-failure.labels",
+                        os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+                    chown.assert_called_once_with(41, 0, value["runnerGid"])
+                    chmod.assert_called_once_with(41, 0o620)
+                    closing.assert_not_called()  # The command, not preparation, now owns this original.
+                else:
+                    with self.assertRaises((OSError, ValueError)) as raised:
+                        L._shell_labels_prepare(value, "positive")
+                    if fault in ("occupied", "owner"): self.assertIs(raised.exception, primary)
+                    self.assertEqual(closing.call_count, int(fault not in ("occupied", "parent")))
+                    self.assertEqual(opening.call_count, int(fault != "parent"))
+                unlinking.assert_not_called()
+
+    def test_original_fd_read_is_single_bounded_and_rejects_binding_or_metadata_loss(self):
+        raw = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\nMRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n"
+               b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=not-sampled\n")
+        node = needrestart_stat(stat.S_IFREG | 0o620, size=len(raw)); node.st_gid = 1001
+        original = (41, L.identity(node)[:6])
+        for fault in (None, "inode", "link", "mode", "group", "oversized", "acl", "drift", "partial", "empty", "read-error"):
+            before, after = deepcopy(node), deepcopy(node)
+            for name, field, value in (("inode", "st_ino", 99), ("link", "st_nlink", 2),
+                    ("mode", "st_mode", stat.S_IFIFO | 0o620), ("group", "st_gid", 99),
+                    ("oversized", "st_size", 513)):
+                if fault == name: setattr(before, field, value)
+            if fault == "drift": after.st_ctime_ns += 1
+            if fault == "empty": before.st_size = after.st_size = 0
+            with self.subTest(fault=fault), patch.object(L.os, "fstat", side_effect=[before, after]), \
+                 patch.object(L.os, "listxattr", return_value=["user.inert"] if fault == "acl" else []), \
+                 patch.object(L.os, "read", return_value=b"" if fault == "empty" else raw[:-1] if fault == "partial" else raw) as reading, \
+                 patch.object(L.os, "open") as opening, patch.object(L, "read") as raw_read, \
+                 patch.object(L.os, "lseek") as seeking:
+                if fault == "read-error": reading.side_effect = InterruptedError("inert read interruption")
+                if fault in (None, "empty"):
+                    self.assertEqual(L._shell_labels_read(original), None if fault == "empty" else
+                                     {"step": "Bootstrap", "boundary": "bootstrap", "bootstrapProgress": "not-sampled"})
+                else:
+                    with self.assertRaises((ValueError, OSError)): L._shell_labels_read(original)
+                if fault in ("inode", "link", "mode", "group", "oversized", "acl"):
+                    reading.assert_not_called()
+                else:
+                    reading.assert_called_once_with(41, 513)
+                opening.assert_not_called(); raw_read.assert_not_called(); seeking.assert_not_called()
+
+        # The classifier gets the same bounded original read, not a second
+        # read/reopen for its raw frame after the diagnostic parser consumes it.
+        with patch.object(L.os, "fstat", side_effect=[node, node]), patch.object(L.os, "listxattr", return_value=[]), \
+             patch.object(L.os, "read", return_value=raw) as reading, patch.object(L.os, "open") as opening, \
+             patch.object(L, "read") as raw_read, patch.object(L.os, "lseek") as seeking:
+            self.assertEqual(L._shell_labels_read(original, with_raw=True),
+                             (raw, {"step": "Bootstrap", "boundary": "bootstrap", "bootstrapProgress": "not-sampled"}))
+            reading.assert_called_once_with(41, 513)
+            opening.assert_not_called(); raw_read.assert_not_called(); seeking.assert_not_called()
+
+    def test_returned_failure_requires_the_same_typed_bounded_result(self):
+        class Subclass(subprocess.CompletedProcess): pass
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        argv = L.shell_argv(value, "positive")
+        original = (41, "original-label-binding")
+        handoff = b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n"
+        failed = b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n"
+        payload = handoff + failed
+        limit = len(payload) + 32
+        good = subprocess.CompletedProcess(argv, 1, payload, b"")
+        call = {"timeoutSeconds": 60, "ownerReturned": True, "startMonotonic": 100.0, "endMonotonic": 101.0}
+        broken = {"timeoutSeconds": True, "ownerReturned": False, "startMonotonic": float("nan"), "endMonotonic": "101"}
+        labels = L._shell_label_pair(b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\nMRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n"
+                                    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=not-sampled\n")
+        candidates = [("original", good, call, True), ("missing-call", good, None, True), ("broken-call", good, broken, True),
+                      ("subclass", Subclass(argv, 1, payload, b""), call, False),
+                      ("lookalike", SimpleNamespace(args=argv, returncode=1, stdout=payload, stderr=b""), call, False),
+                      ("wrong-argv", subprocess.CompletedProcess(["/other/original"], 1, payload, b""), call, False),
+                      ("bool-code", subprocess.CompletedProcess(argv, True, payload, b""), call, False),
+                      ("stdout-text", subprocess.CompletedProcess(argv, 1, payload.decode("ascii"), b""), call, False),
+                      ("stderr-text", subprocess.CompletedProcess(argv, 1, payload, ""), call, False),
+                      ("mutable-stream", subprocess.CompletedProcess(argv, 1, bytearray(payload), b""), call, False),
+                      ("combined-bound", subprocess.CompletedProcess(argv, 1, payload, b"x" * 33), call, False)]
+        for name, result, observed_call, allowed in candidates:
+            with self.subTest(name=name), patch.object(L, "LIMIT", limit), \
+                 patch.object(L, "_shell_capture_summary", wraps=L._shell_capture_summary) as capture, \
+                 patch.object(L, "_shell_labels_read", return_value=labels) as reading, \
+                 patch.object(L, "_shell_call_finished") as finishing, patch.object(L, "_shell_diagnostic_time") as clock, \
+                 patch.object(L.os, "open") as opening, patch.object(L.os, "close") as closing, \
+                 patch.object(L.os, "lseek") as seeking, patch.object(L, "read") as raw_read, \
+                 patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                L._shell_command_failure(argv, result, "positive", None, None, original, observed_call)
+                capture.assert_called_once_with(result, argv, None)
+                self.assertIs(capture.call_args.args[0], result)
+                self.assertEqual(reading.call_args_list, [unittest.mock.call(original)] if allowed else [])
+                raw = stream.getvalue().encode("ascii")
+                self.assertLessEqual(len(raw), 32768)
+                data = json.loads(raw.split(b"=", 1)[1])
+                self.assertEqual(data["scope"], "original-shell-command-failure-diagnostic-only")
+                self.assertEqual(data["labels"], labels if allowed else None)
+                self.assertEqual(data["labelsReason"], None if allowed else "owner-finality-unavailable")
+                self.assertEqual(data["capture"] is not None, allowed)
+                self.assertEqual(data["failureHandoff"], "original-quit-relay-loop-returned" if allowed else None)
+                self.assertFalse(data["qualified"]); self.assertFalse(data["cleanupEstablished"])
+                if observed_call is None: self.assertIsNone(data["ownerCall"])
+                elif observed_call is broken:
+                    self.assertFalse(data["ownerCall"]["ownerReturned"])
+                    for key in ("timeoutSeconds", "startMonotonic", "endMonotonic", "ownerElapsedSeconds"):
+                        self.assertIsNone(data["ownerCall"][key])
+                else: self.assertTrue(data["ownerCall"]["ownerReturned"])
+                finishing.assert_not_called(); clock.assert_not_called()
+                opening.assert_not_called(); closing.assert_not_called(); seeking.assert_not_called(); raw_read.assert_not_called()
+
+        # Only two complete closed records from the original returned streams
+        # can project the witness; display logs and label presence cannot invent it.
+        records = [
+            ("stderr", 1, b"inert\n", payload, labels, None, True),
+            ("split", 1, handoff, failed, labels, None, True),
+            ("missing-labels", 1, payload, b"", None, None, False),
+            ("label-read-error", 1, payload, b"", labels, None, False),
+            ("zero", 0, payload, b"", labels, None, False),
+            ("other-code", 2, payload, b"", labels, None, False),
+            ("signal", -15, payload, b"", labels, None, False),
+            ("log-only", 1, failed, b"", labels, handoff, False),
+            ("missing-failed", 1, handoff, b"", labels, None, False),
+            ("duplicate-handoff", 1, payload, handoff, labels, None, False),
+            ("duplicate-failed", 1, payload, failed, labels, None, False),
+            ("unterminated", 1, failed, handoff[:-1], labels, None, False),
+            ("crlf", 1, payload.replace(b"\n", b"\r\n"), b"", labels, None, False),
+            ("prefixed", 1, b"inert " + payload, b"", labels, None, False),
+            ("bare-cr-prefix", 1, b"inert\r" + payload, b"", labels, None, False),
+            ("bare-cr-separator", 1, handoff[:-1] + b"\r" + failed, b"", labels, None, False),
+            ("prefixed-extra", 1, payload, b"inert\r" + handoff, labels, None, False),
+            ("malformed", 1, failed, b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=other\n", labels, None, False),
+            ("partial-extra", 1, payload, b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF", labels, None, False),
+            ("conflicting-verdict", 1, payload, b"MRK_INSTALLED_SHELL_OBSERVATION=route-refused\n", labels, None, False),
+            ("verified-verdict", 1, payload, b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n", labels, None, False),
+            ("verified-contract", 1, payload, b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n", labels, None, False),
+        ]
+        for name, code, stdout, stderr, first_labels, display, allowed in records:
+            result = subprocess.CompletedProcess(argv, code, stdout, stderr)
+            with self.subTest(records=name), \
+                 patch.object(L, "_shell_capture_summary", wraps=L._shell_capture_summary) as capture, \
+                 patch.object(L, "_shell_labels_read", return_value=first_labels) as reading, \
+                 patch.object(L, "_shell_call_finished") as finishing, patch.object(L, "_shell_diagnostic_time") as clock, \
+                 patch.object(L.os, "open") as opening, patch.object(L.os, "close") as closing, \
+                 patch.object(L.os, "lseek") as seeking, patch.object(L, "read") as raw_read, \
+                 patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                if name == "label-read-error": reading.side_effect = OSError("inert label read failure")
+                L._shell_command_failure(argv, result, "positive", display, None, original, None)
+                capture.assert_called_once_with(result, argv, display)
+                reading.assert_called_once_with(original)
+                raw = stream.getvalue().encode("ascii")
+                self.assertLessEqual(len(raw), 32768)
+                data = json.loads(raw.split(b"=", 1)[1])
+                self.assertEqual(data["failureHandoff"], "original-quit-relay-loop-returned" if allowed else None)
+                self.assertEqual(data["labels"], None if name == "label-read-error" else first_labels)
+                self.assertFalse(data["qualified"]); self.assertFalse(data["cleanupEstablished"])
+                self.assertIsNone(data["ownerCall"])
+                finishing.assert_not_called(); clock.assert_not_called()
+                opening.assert_not_called(); closing.assert_not_called(); seeking.assert_not_called(); raw_read.assert_not_called()
+
+    def test_owner_exception_requires_exact_stored_true_facts_and_same_original_is_reraised(self):
+        class ProcessError(RuntimeError):
+            def __init__(self, contained=True, cleanup=True):
+                super().__init__("/private/inert-secret must not be exposed")
+                self.__dict__.update(dispatched=True, contained=contained, cleanup_complete=cleanup)
+            def __str__(self):
+                raise AssertionError("error formatting is forbidden")
+        class ProcessCleanupError(ProcessError): pass
+        class ProcessOutcomeUnknown(ProcessError): pass
+        class Unknown(ProcessError):
+            @property
+            def contained(self): raise AssertionError("subclass properties are not evidence")
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        argv = L.shell_argv(value, "positive")
+        errors = [ProcessError(), ProcessError(False), ProcessError(True, False), ProcessError(1),
+                  ProcessError(True, "true"), ProcessCleanupError(), ProcessOutcomeUnknown(), Unknown(),
+                  KeyboardInterrupt(), SystemExit(), OSError("private generic error")]
+        missing = ProcessError(); del missing.__dict__["cleanup_complete"]; errors.append(missing)
+        for index, primary in enumerate(errors):
+            if index:
+                primary.__cause__ = ProcessError()  # Cause-chain facts grant no read authority.
+            owner = SimpleNamespace(run_owned=Mock(side_effect=primary), ProcessError=ProcessError,
+                                    ProcessCleanupError=ProcessCleanupError, ProcessOutcomeUnknown=ProcessOutcomeUnknown)
+            with self.subTest(index=index), patch.multiple(L, _ROOT=L.root_path(value), _END=1000.0,
+                    _FAILED=False, _COMMANDS=[], _OWNER=owner), patch.object(L, "_root_ids"), \
+                 patch.object(L.time, "monotonic", return_value=100.0), \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original")), \
+                 patch.object(L, "_shell_labels_read", return_value={"step": "PrepareSave", "boundary": "request", "bootstrapProgress": "advanced"}) as reading, \
+                 patch.object(L, "_shell_log_capture") as raw_log, patch.object(L, "_command_capture") as capture, \
+                 patch.object(L.os, "close") as closing, patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                with self.assertRaises(BaseException) as raised:
+                    L.command("shell-positive", argv, maximum=60, shell_log=(value, "positive", "original-log"))
+                self.assertIs(raised.exception, primary)
+                self.assertTrue(L._FAILED)
+                self.assertEqual(reading.call_count, int(index == 0))
+                raw_log.assert_not_called(); capture.assert_not_called(); closing.assert_called_once_with(41)
+                owner.run_owned.assert_called_once()
+                self.assertEqual(owner.run_owned.call_args.kwargs["timeout"], 60)
+                text = stream.getvalue()
+                self.assertLessEqual(len(text.encode("ascii")), 32768)
+                self.assertNotIn("inert-secret", text); self.assertNotIn("private generic", text)
+                data = json.loads(text.split("=", 1)[1])
+                self.assertEqual((data["case"], data["phase"]), ("positive", "owner-call"))
+                self.assertIsNone(data["capture"])
+                self.assertFalse(data["qualified"]); self.assertFalse(data["cleanupEstablished"])
+                self.assertEqual(data["labelsReason"], None if index == 0 else "owner-finality-unavailable")
+                self.assertEqual(data["labels"], {"step": "PrepareSave", "boundary": "request", "bootstrapProgress": "advanced"} if index == 0 else None)
+                self.assertFalse(data["ownerCall"]["ownerReturned"])
+
+    def test_bootstrap_catalog_and_first_failure_wiring_match_the_original_observer(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        block = source.split("impl BootstrapProgress {", 1)[1].split("enum OutstandingInfo", 1)[0]
+        actual = [ast.literal_eval(line.split("=>", 1)[1].strip().rstrip(","))
+                  for line in block.splitlines() if "=> b" in line]
+        self.assertEqual(tuple(actual), L.SHELL_BOOTSTRAP_PROGRESS)
+        self.assertEqual(len(set(actual)), 8)
+        callback = source.split("pub(super) fn app_info(&self", 1)[1].split("pub(super) fn unexpected", 1)[0]
+        outstanding = callback.split("let Some(methods)", 1)[0]
+        self.assertIn("self.record()", outstanding)
+        self.assertNotIn("record_at", outstanding)
+        self.assertIn("outstanding_info(r.step", outstanding)
+        self.assertIn("result != OutstandingInfo::ShutdownUnavailable", outstanding)
+        self.assertIn("latch_failure(&self.failed", outstanding)
+        self.assertNotIn("runtime.reason", outstanding)
+        self.assertNotIn("r.held", outstanding)
+        report = source.split("fn report_failure(&self)", 1)[1].split("pub(super) fn attach", 1)[0]
+        self.assertIn("Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic, r.evidence_diagnostic,", report)
+        self.assertIn("r.snapshot_diagnostic, self.failed.site(), r.metadata.open_failure, r.github_entry)", report)
+        self.assertIn("snapshot_failure_frame(trace, progress, site, snapshot)", report)
+        self.assertIn("commands_failure_frame(trace, progress, site)", report)
+        self.assertIn("failure_frame(trace, progress, session, path, evidence)", report)
+        self.assertEqual(report.count("rustix::io::write"), 1)
+        self.assertNotIn("retain_held_app_info", report)
+        tick = source.split("pub(super) fn tick(", 1)[1].split("pub(super) fn", 1)[0]
+        self.assertEqual(tick.count("retain_held_app_info()"), 1)
+        self.assertIn("(*step, Boundary::Deadline), progress", tick)
+        self.assertIn("Duration::from_secs(45)", source)
+        self.assertIn("assert_failure_pair_contract();", source)
+        for contract in ("assert_failure_latch_contract();", "assert_snapshot_rejection_contract();", "assert_snapshot_frame_contract();"):
+            self.assertIn(contract, source.split("pub(crate) fn main()", 1)[1])
+        commands = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        domain = tuple(part.strip().encode("ascii") for part in commands.split("pub(super) enum Step {", 1)[1].split("}", 1)[0].split(","))
+        tokens = commands.split("pub(super) fn failure_token(self)", 1)[1].split("} }", 1)[0]
+        actual_tokens = tuple(ast.literal_eval(line.split("=>", 1)[1].strip().rstrip(","))
+                              for line in tokens.splitlines() if "=> b" in line)
+        self.assertEqual(domain, actual_tokens)
+        self.assertEqual(actual_tokens, L.SHELL_COMMAND_FAILURE_STEPS)
+        self.assertEqual(len(set(domain)), 15)  # Current Android join adds ReadVersion.
+        self.assertTrue(commands.split("fn fail(&self)", 1)[0].rstrip().endswith("#[track_caller]"))
+        self.assertTrue(source.split("fn fail(&self)", 1)[0].rstrip().endswith("#[track_caller]"))
+        self.assertIn("if let Ok(q) = self.original() { q.fail(); }", commands)
+
+    def test_path_first_rejection_preserves_borrows_guard_order_and_first_winner(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        def body(text, name):
+            return text.split("fn " + name + "(", 1)[1].split("\n    }", 1)[0]
+        diagnostic = source.split("struct PathDiagnostic", 1)[1].split("#[derive(Clone, Copy)]", 1)[0]
+        self.assertIn("{ step: PathStep, rejection: PathRejection, step_entry_ms: u128, sample_ms: u128,", diagnostic)
+        self.assertIn("previous.filter(|old| old.step == step)", diagnostic)
+        self.assertIn("old.sample_ms = elapsed_ms; return Some(old);", diagnostic)
+        self.assertIn("step_entry_ms: elapsed_ms, sample_ms: elapsed_ms", diagnostic)
+        for forbidden in ("PathBuf", "String", "filename", "Instant", "snapshot"):
+            self.assertNotIn(forbidden, diagnostic)
+        cache = body(source, "record_at")
+        self.assertIn("self.path_sample(&mut r);", cache)
+        self.assertLess(cache.index("if !self.failed.load(Ordering::SeqCst)"), cache.index("self.path_sample("))
+        sampler = body(source, "path_sample")
+        self.assertLess(sampler.index("if !self.failed.load(Ordering::SeqCst)"), sampler.index("r.paths.diagnostic ="))
+        self.assertIn("PathDiagnostic::sample_trace(&mut r.trace,step,self.start.elapsed().as_millis(),previous)", sampler)
+        self.assertIn("if matches!(step,Step::Paths(_)) || matches!(trace.0,Step::Paths(_)) || previous.is_some() { trace.0 = step; }", diagnostic)
+        self.assertIn("} else { false }", sampler)
+        marker = body(source, "path_callback")
+        self.assertIn("if self.path_sample(&mut r) {\n            if let Some(diagnostic) = r.paths.diagnostic.as_mut() { diagnostic.mark(callback); }\n        }", marker)
+        self.assertIn("self.path_file_wait(wait,SessionPickerReadiness::NotSampled);", body(source, "path_wait"))
+        wait = body(source, "path_file_wait")
+        self.assertEqual(wait.count("self.record()"), 1)
+        self.assertLess(wait.index("self.failed.load"), wait.index("d.file_wait(wait,picker)"))
+        self.assertIn("self.path_sample(&mut r)", wait)
+        self.assertIn("self.wait = wait; self.gtk_picker = picker; true", diagnostic)
+        self.assertIn("if !picker.valid_path(self.step,wait) { return false; }", diagnostic)
+        latch = source.split("fn latch_path_diagnostic(", 1)[1].split("const PROJECT_SOURCE", 1)[0]
+        self.assertIn("if failed.mark_unknown() { *diagnostic = Some(next); }", latch)
+        helper = body(source, "path_fail")
+        self.assertIn("PathDiagnostic::sample(r.trace.0,self.start.elapsed().as_millis(),r.paths.diagnostic)", helper)
+        self.assertIn("latch_path_diagnostic(&self.failed,&mut r.paths.diagnostic,diagnostic)", helper)
+        self.assertNotIn("self.record", helper)
+        pure = source.split("fn assert_failure_pair_contract()", 1)[1].split("// Original destruction facts", 1)[0]
+        self.assertIn("for order in [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]]", pure)
+        self.assertIn("0 => { failed.mark_unknown(); }", pure)
+        self.assertIn("retained == Some(if order[0] == 1 { path_gtk } else { path_plain })", pure)
+        self.assertIn("step:PathStep::Activate(4),rejection:PathRejection::GtkReturnState", pure)
+
+        admitting = body(shell, "observed_path_dialog")
+        borrowed = admitting.split("let original = DIALOG.with(|book| {", 1)[1].split("        });", 1)[0]
+        self.assertIn("map_err(|_| R::GtkDialogBook)", borrowed)
+        self.assertIn("Err(R::GtkDialogOriginal)", borrowed)
+        self.assertNotIn("q.", borrowed); self.assertNotIn(".facts()", borrowed)
+        self.assertLess(admitting.index("        });"), admitting.index("Err(reason) => { q.path_failed(reason); return Err(()); }"))
+        guards = ["gtk::is_initialized_main_thread()", "DIALOG.with", "context.upgrade()", "call.upgrade()", "call.owner()",
+                  "owner.id != id", "owner.interrupted()", "let original_facts = call.facts()", "if !original_facts",
+                  "q.path_dialog(id,index)?", "app.get_webview_window(MAIN_WINDOW)", "dialog.title()", "if initial {", "dialog.current_folder()"]
+        self.assertEqual([admitting.index(guard) for guard in guards], sorted(admitting.index(guard) for guard in guards))
+        facts = admitting.split("let original_facts =", 1)[1].split("if !original_facts", 1)[0]
+        self.assertTrue(facts.rstrip().endswith("f.refusal.is_none());")); self.assertNotIn("q.", facts)
+        self.assertEqual(admitting.count("dialog.current_folder()"), 1)
+        self.assertIn("let Some(folder) = dialog.current_folder() else { q.path_wait(installed_observation::PathWait::InitialFolderAbsent); return Ok(None); };", admitting)
+        self.assertIn("if Some(folder.as_path()) != q.project_path() { q.path_failed(R::GtkInitialFolder); return Err(()); }", admitting)
+        selecting = body(shell, "select_observed_path"); activating = body(shell, "activate_observed_path")
+        self.assertNotIn("dialog.set_filename(", selecting)
+        self.assertEqual(selecting.count("dialog.set_current_folder(path)"), 1)
+        self.assertEqual(selecting.count("dialog.set_current_folder(parent)"), 1)
+        self.assertEqual(selecting.count("dialog.select_file(&target_file).is_err()"), 1)
+        self.assertIn('match dialog.property::<gtk::FileChooserAction>("action")', selecting)
+        folder, opened = selecting.split("gtk::FileChooserAction::Open =>", 1)
+        self.assertLess(folder.index("q.path_selection(id,index)?"), folder.index("dialog.set_current_folder(path)"))
+        navigation, passive = opened.split("let target_file =", 1)
+        self.assertIn("if !parent_navigation_reserved {", navigation)
+        self.assertLess(navigation.index("q.path_parent_navigation(id,index)?"), navigation.index("dialog.set_current_folder(parent)"))
+        self.assertIn("return Ok(false);", navigation)
+        self.assertNotIn("set_current_folder", passive)
+        guards = ["dialog.is_mapped()", "dialog.current_folder_file()", "dialog.file()", "if !mapped",
+                  "if current_folder.is_none() { q.path_file_wait", "if !parent_ready", "q.path_selection(id,index)?", "dialog.select_file(&target_file).is_err()"]
+        self.assertEqual([passive.index(guard) for guard in guards], sorted(passive.index(guard) for guard in guards))
+        self.assertIn("file.equal(&parent_file)", passive)
+        self.assertIn("_ => { q.path_failed(R::GtkDialogProperties); return Err(()); }", selecting)
+        self.assertEqual(selecting.count("q.path_failed(R::GtkSelectionSetter)"), 3)
+        self.assertLess(activating.index("if !button.is_sensitive() { q.path_file_wait(W::ResponseInsensitive,picker); return Ok(false); }"), activating.index("q.path_activation(id,index)?"))
+        self.assertEqual(activating.count("dialog.file()"), 1)
+        self.assertIn("q.path_file_wait(W::SelectionAbsent,picker); return Ok(false)", activating)
+        self.assertIn("q.path_file_wait(W::SelectionDifferent,picker); return Ok(false)", activating)
+        self.assertLess(activating.index("q.path_activation(id,index)?"), activating.index("button.emit_clicked()"))
+        self.assertEqual(activating.count("button.emit_clicked()"), 1)
+        for forbidden in (".filename(", ".response(", ".begin_response(", "Instant::", "sleep"):
+            self.assertNotIn(forbidden, admitting + selecting + activating)
+        self.assertNotIn("set_current_folder", admitting + activating)
+        self.assertNotIn("set_filename", activating)
+        self.assertEqual(shell.count("dialog.filename()"), 1)
+        for name in ("path_failed", "path_dialog", "path_parent_navigation", "path_selection", "path_activation", "path_filename", "path_response", "path_gtk_returned"):
+            callback = body(source, name)
+            self.assertEqual(callback.count("self.record_at(Boundary::Gtk)"), 1)
+            self.assertIn("self.path_fail(&mut r,", callback)
+            self.assertNotIn("self.path_failed(", callback); self.assertNotIn("self.record()", callback)
+        for name, guards in (("path_dialog", ("PATH_CASES.get", "self.failed.load", "Instant::now()", "self.case !=")),
+                             ("path_parent_navigation", ("PATH_CASES.get", "self.case !=", "Instant::now()", "self.failed.load", "id !=")),
+                             ("path_selection", ("PATH_CASES.get", "self.case !=", "Instant::now()", "self.failed.load", "id !=")),
+                             ("path_activation", ("PATH_CASES.get", "self.case !=", "Instant::now()", "self.failed.load", "id !="))):
+            callback = body(source, name)
+            self.assertEqual([callback.index(guard) for guard in guards], sorted(callback.index(guard) for guard in guards))
+            self.assertEqual(callback.count("Instant::now()"), 1)
+            self.assertIn("PathRejection::GtkObserverEndpoint", callback)
+        for name, reserve in (("path_parent_navigation", "reserve_parent_navigation(case)"), ("path_selection", "reserve_selection(case)")):
+            callback = body(source, name)
+            guards = ["PATH_CASES.get(index as usize)", "Instant::now() >= self.end", "self.failed.load",
+                      "id != u32::from(index)+3", "r.step != Step::Paths(PathStep::Set(index))",
+                      "r.pending != Some(Pending::Path(PathStep::Set(index)))", reserve]
+            self.assertEqual([callback.index(guard) for guard in guards], sorted(callback.index(guard) for guard in guards))
+            self.assertNotIn("self.end =", callback)
+            self.assertEqual(callback.count(reserve), 1)
+        operation = source.split("impl PathOperation {", 1)[1].split("struct Paths", 1)[0]
+        self.assertEqual(operation.count("self.parent_navigation_reserved = true"), 1)
+        self.assertIn("!self.requested || !self.picker.created", operation)
+        self.assertIn("self.parent_navigation_reserved == case.selects_open()", operation)
+        self.assertIn("|| self.picker.selected || self.picker.activated", operation)
+        self.assertIn("case.path.is_none()", operation)
+        self.assertIn("!self.navigation_matches(case)", operation)
+        self.assertIn("!op.picker.selected && !op.parent_navigation_reserved", body(source, "path_dialog"))
+        self.assertIn("!op.navigation_matches(case)", body(source, "path_activation"))
+        self.assertIn("op.navigation_matches(&PATH_CASES[i]) && op.picker.settled", source)
+        self.assertIn("assert_eq!(open,vec![1,6,7,8]);", source)
+        filename = body(source, "path_filename")
+        guards = ["id.checked_sub", "self.case !=", "self.failed.load", "Instant::now()", "PATH_CASES[index].field != field",
+                  "path.is_none()", "path != self.path_target", "!r.paths.operations[index].picker.activated", "fixture.transition(id)"]
+        self.assertEqual([filename.index(guard) for guard in guards], sorted(filename.index(guard) for guard in guards))
+        self.assertEqual(filename.count("fixture.transition(id)"), 1); self.assertEqual(filename.count("Instant::now()"), 2)
+        self.assertNotIn(".filename(", filename)
+        self.assertLess(filename.index("PathRejection::GtkFilenameAbsent"), filename.index("PathRejection::GtkFilenameDifferent"))
+        self.assertLess(filename.index("PathRejection::GtkFixtureTransition"), filename.rindex("PathRejection::GtkObserverEndpoint"))
+        self.assertLess(filename.rindex("PathRejection::GtkObserverEndpoint"), filename.index("picker.filename = true"))
+        returned = body(source, "path_gtk_returned")
+        self.assertIn("r.pending.take() != Some(Pending::Path(path)) || r.step != Step::Paths(path)", returned)
+        self.assertEqual(returned.count(".activation_returned(result)"), 1)
+        self.assertNotIn(".responded", returned); self.assertNotIn("self.failed.load", returned)
+        self.assertIn("self.path_fail(&mut r,PathRejection::GtkReturnState)", returned)
+        self.assertIn("self.path_sample(&mut r);", returned)
+        self.assertIn("self.path_sample(&mut r);", body(source, "path_dom"))
+        tick = body(source, "tick")
+        self.assertIn("if let Some(mut r) = self.record() { self.path_fail(&mut r,PathRejection::GtkDispatch); } else { self.fail(); }", tick)
+        dispatch = tick.split("let q = self.clone(); let app = app.clone();\n                // Reservation", 1)[1].split("Step::Cancel |", 1)[0]
+        markers = ["self.path_callback(path,PathCallback::Reserved)", "window.run_on_main_thread", "q.path_callback(path,PathCallback::Entered)",
+                   "let result =", "q.path_callback(path,PathCallback::Returned)", "q.path_gtk_returned(path,result)"]
+        self.assertEqual([dispatch.index(marker) for marker in markers], sorted(dispatch.index(marker) for marker in markers))
+        self.assertNotIn("return;", dispatch.split("}).is_err()", 1)[0])
+        for name, reason in (("native_destroyed", "GtkDestroyState"), ("native_released", "GtkReleaseState")):
+            path_branch = body(source, name).split("if self.case == Case::ProjectPaths", 1)[1].split("if self.case == Case::Positive", 1)[0]
+            self.assertIn("self.path_fail(&mut r,PathRejection::" + reason + ")", path_branch)
+        # Source contracts and the inert Rust checks are not native receipts.
+
+    def test_session_diagnostics_are_cached_same_step_and_first_failure_only(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        sample = source.split("impl SessionDiagnostic {", 1)[1].split("use SessionAction", 1)[0]
+        self.assertIn("old.step == step", sample)
+        self.assertIn("SessionWait::NotSampled", sample)
+        self.assertIn("SessionGtkCallbacks::initial(step)", sample)
+        self.assertIn("|old| old.gtk_callbacks", sample)
+        self.assertIn("gtk_picker: previous.filter(|old| old.step == step)", sample)
+        self.assertIn(".map_or(SessionPickerReadiness::NotSampled, |old| old.gtk_picker)", sample)
+        file_wait = sample.split("fn file_wait(", 1)[1].split("\n    }", 1)[0]
+        self.assertLess(file_wait.index("if !picker.valid(self.step,wait) { return false; }"),
+                        file_wait.index("self.wait = wait; self.gtk_picker = picker;"))
+        self.assertIn("if wait != SessionWait::NotSampled { self.gtk_callbacks.wait_observed(); }", file_wait)
+        generic_wait = source.split("fn session_wait(", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("diagnostic.wait = wait; diagnostic.gtk_picker = SessionPickerReadiness::NotSampled;", generic_wait)
+        self.assertLess(generic_wait.index("if !self.failed.load(Ordering::SeqCst)"), generic_wait.index("diagnostic.gtk_picker ="))
+        dispatch = source.split("if matches!(step,SessionStep::SetFile(_) | SessionStep::ActivateFile(_)) {", 1)[1].split("if step==SessionStep::QuitCancel", 1)[0]
+        ordered = ("if self.failed.load", "if r.pending.is_some()", "r.pending=Some", "diagnostic.gtk_callbacks.reserved()", "window.run_on_main_thread", "q.session_file_returned(step,result)")
+        self.assertEqual([dispatch.index(part) for part in ordered], sorted(dispatch.index(part) for part in ordered))
+        wait = source.split("pub(super) fn session_file_wait(", 1)[1].split("pub(super) fn session_file_created(", 1)[0]
+        self.assertLess(wait.index("session_file_wait_pending(r.step,r.pending,index,activating)"), wait.index("diagnostic.file_wait(wait,picker)"))
+        self.assertLess(wait.index("if !self.failed.load"), wait.index("diagnostic.file_wait(wait,picker)"))
+        returned = source.split("fn session_file_returned(", 1)[1].split("pub(super) fn quit_selects_ok(", 1)[0]
+        ordered = ("r.pending.take()!=Some(Pending::Dom(Step::Session(step))) || r.step!=Step::Session(step)",
+                   "let index=match step", "if !self.failed.load", "diagnostic.gtk_callbacks.returned()", "r.session.files.last_mut()", "match result")
+        self.assertEqual([returned.index(part) for part in ordered], sorted(returned.index(part) for part in ordered))
+        self.assertNotIn("self.failed.load", returned.split("r.pending.take()", 1)[0])
+        self.assertIn("if result!=Ok(false)", returned)  # Missing dialog still returns its original notification.
+        self.assertIn("file.picker.activation_returned(result)", returned)
+        callbacks = source.split("impl SessionGtkCallbacks {", 1)[1].split("// Map only cached public DATA", 1)[0]
+        for forbidden in ("Instant::", "std::thread", "run_on_main_thread", "fs::", "rustix::", "Command::", "fetch_add"):
+            self.assertNotIn(forbidden, callbacks)
+        cache = source.split("fn record_at(&self", 1)[1].split("fn report_failure(&self)", 1)[0]
+        self.assertIn("if !self.failed.load(Ordering::SeqCst)", cache)
+        self.assertIn("SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic)", cache)
+        latch = source.split("fn latch_session_diagnostic(", 1)[1].split("const PROJECT_SOURCE", 1)[0]
+        self.assertIn("if failed.mark_unknown()", latch)
+        report = source.split("fn report_failure(&self)", 1)[1].split("pub(super) fn attach", 1)[0]
+        self.assertNotIn("installed_session_snapshot", report)
+        self.assertNotIn("session_wait", report)
+        self.assertNotIn("session_fail", report)
+        self.assertNotIn("session_reply_rejection", report)
+        self.assertNotIn("session_capability_rejection", report)
+        encoder = source.split("fn failure_pair(", 1)[1].split("fn assert_failure_pair_contract", 1)[0]
+        self.assertIn("diagnostic.step == step", encoder)
+        self.assertIn("diagnostic.evaluations > 128", encoder)
+        self.assertIn("index >= 64", encoder)
+        self.assertIn("bytes.get_mut(*length..end)?", encoder)
+        self.assertNotIn("format!", encoder)
+        tick = source.split("fn session_tick(", 1)[1].split("fn session_dom(", 1)[0]
+        self.assertIn("if r.evaluations>=128", tick)
+        self.assertIn("SessionRejection::EvaluationBudget", tick)
+        self.assertIn("Ok(Some(wait))=>{self.session_wait(&mut r,wait);return;}", tick)
+        self.assertIn("match self.session_native_ready(&r,action,&snapshot)", tick)
+        self.assertIn("Err(refusal)=>{self.session_fail_with_assessment(&mut r,refusal);return;}", tick)
+        self.assertIn("r.evaluations+=1", tick)
+        # Exact source correspondence preserves priority, not executed Rust/native evidence.
+        ready = source.split("fn session_native_ready(", 1)[1].split("fn session_accept_action(", 1)[0]
+        self.assertEqual(ready.strip(), '''&self, r: &Record, action: SA, snapshot: &InstalledSessionSnapshot) -> Result<Option<SessionWait>,SessionRefusal> {
+        let s = &r.session;
+        if snapshot.unknown { return Err(SessionRejection::UnknownNativeSnapshot.into()); }
+        if snapshot.lost { return Err(SessionRejection::LostNativeSnapshot.into()); }
+        if !snapshot.bound { return Err(SessionRejection::UnboundNativeSnapshot.into()); }
+        if snapshot.status["capability"]["available"] != true {
+            return Err(session_capability_rejection(snapshot.status["capability"]["reason"].as_str()).into());
+        }
+        for index in 1..10 {
+            let extra_context = action == SA::Open && index == SessionCommand::Context.index();
+            let expected = session_action_command(action).is_some_and(|command| command.index() == index) || extra_context;
+            let stale = matches!(action,SA::Stale("save")) && index == SessionCommand::Commit.index()
+                || matches!(action,SA::Stale("bind")) && index == SessionCommand::Bind.index();
+            let delta = s.requests[index].checked_sub(s.base_requests[index]).ok_or(SessionRejection::RequestCounterUnderflow)?;
+            if delta > u8::from(expected || stale) { return Err(SessionRejection::RequestCounterSurplus.into()); }
+            if expected && delta == 0 { return Ok(Some(SessionWait::RequestNotSeen)); }
+            if s.returns[index] < s.requests[index] { return Ok(Some(SessionWait::ReplyPending)); }
+            if expected {
+                if let Some(refusal) = session_reply_refusal(index, s.requests[index], s.returns[index], s.base_requests[index], &s.replies[index]) { return Err(refusal); }
+            }
+            if stale && delta != 0 && !matches!(s.replies[index].error.as_deref(),Some("asset_invalid_request"|"assessment_context_stale")) { return Err(SessionRejection::StaleReplyContract.into()); }
+        }
+        if !snapshot.settled { return Ok(Some(SessionWait::OwnerUnsettled)); }
+        let op = &snapshot.status["operation"];
+        let stable = match action {
+            SA::Prepare(_,"save") | SA::Reassess(..) | SA::Keep | SA::ReviewRemoval(_) => op["phase"] == "preview" && op["settlement"] == "known",
+            SA::Prepare(_,"missing" | "mismatch") => op["phase"] == "selected" && op["settlement"] == "known",
+            SA::Choose(_,_,None) => op["phase"] == "selected" && op["settlement"] == "known",
+            SA::Choose(_,_,Some(_)) | SA::Assign | SA::Remove | SA::CancelOperation | SA::ConfirmDiscard | SA::Platform(_) | SA::Open => op["phase"] == "idle" && op["settlement"] == "known",
+            _ => true,
+        };
+        Ok((!stable).then_some(SessionWait::PhaseNotReady))
+    }''')
+
+    def test_session_gtk_first_rejection_waits_and_callbacks_preserve_original_custody(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        def body(text, name):
+            return text.split("fn " + name + "(", 1)[1].split("\n    }", 1)[0]
+        admitting = source.split("fn session_file_wait_pending(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("if activating { SessionStep::ActivateFile(index) } else { SessionStep::SetFile(index) }", admitting)
+        self.assertIn("actual == expected && pending == Some(Pending::Dom(expected))", admitting)
+        waiting = body(source, "session_file_wait")
+        self.assertIn("self.record()", waiting); self.assertNotIn("record_at", waiting)
+        gate = "if !session_file_wait_pending(r.step,r.pending,index,activating) || self.failed.load(Ordering::SeqCst) { return; }"
+        self.assertLess(waiting.index(gate), waiting.index("r.trace=(r.step,Boundary::Gtk)"))
+        self.assertLess(waiting.index(gate), waiting.index("diagnostic.file_wait(wait,picker)"))
+        helper = body(shell, "observed_session_file")
+        borrowed = helper.split("let original = DIALOG.with(|book| {", 1)[1].split("        });", 1)[0]
+        self.assertIn("map_err(|_| R::GtkDialogBook)", borrowed)
+        self.assertIn("Err(R::GtkDialogOriginal)", borrowed)
+        self.assertNotIn("q.", borrowed); self.assertNotIn(".facts()", borrowed)
+        self.assertLess(helper.index("        });"), helper.index("Err(reason) => { q.session_file_failed(reason); return Err(()); }"))
+        self.assertIn("q.session_file_wait(index, activating, W::GtkDialogAbsent, installed_observation::SessionPickerReadiness::NotSampled); return Ok(None);", helper)
+        guards = ["gtk::is_initialized_main_thread()", "DIALOG.with", "context.upgrade()", "call.upgrade()",
+                  "call.owner()", "owner.id != id", "owner.interrupted()", "let original_facts = call.facts()",
+                  "if !original_facts", "q.session_file_dialog(id, index)?", "app.get_webview_window(MAIN_WINDOW)", "dialog.title()"]
+        self.assertEqual([helper.index(guard) for guard in guards], sorted(helper.index(guard) for guard in guards))
+        facts = helper.split("let original_facts =", 1)[1].split("if !original_facts", 1)[0]
+        self.assertTrue(facts.rstrip().endswith("facts.refusal.is_none());"))
+        self.assertNotIn("q.", facts)
+        selecting = body(shell, "select_observed_session_file")
+        activating = body(shell, "activate_observed_session_file")
+        self.assertIn("observed_session_file(app, q, index, false)?", selecting)
+        self.assertIn("observed_session_file(app, q, index, true)?", activating)
+        self.assertNotIn("dialog.set_filename(", selecting)
+        self.assertEqual(selecting.count("dialog.set_current_folder(parent)"), 1)
+        self.assertEqual(selecting.count("dialog.select_file(&target_file).is_err()"), 1)
+        navigation, passive = selecting.split("let target_file =", 1)
+        self.assertIn("if !parent_navigation_reserved {", navigation)
+        self.assertLess(navigation.index("q.session_file_parent_navigation(id, index)?"), navigation.index("dialog.set_current_folder(parent)"))
+        self.assertIn("return Ok(false);", navigation)
+        self.assertNotIn("set_current_folder", passive + activating)
+        guards = ["dialog.is_mapped()", "dialog.current_folder_file()", "file.equal(&parent_file)",
+                  "if !mapped || !parent_ready", "q.session_file_selection(id, index)?", "dialog.select_file(&target_file)"]
+        self.assertEqual([passive.index(guard) for guard in guards], sorted(passive.index(guard) for guard in guards))
+        self.assertIn("if !dialog.set_current_folder(parent) { q.session_file_failed(R::GtkSelectionSetter); return Err(()); }", navigation)
+        self.assertIn("if dialog.select_file(&target_file).is_err() { q.session_file_failed(R::GtkSelectionSetter); return Err(()); }", passive)
+        self.assertIn("if !select { q.session_file_failed(R::GtkSelectionState); return Err(()); }", selecting)
+        self.assertLess(selecting.index("if !select"), selecting.index("q.session_file_parent_navigation("))
+        self.assertIn("q.session_file_wait(index, false, W::NotSampled, P::NotSampled);", selecting)
+        self.assertNotIn("P::Sampled", selecting)
+        for forbidden in ("Instant::", "sleep", "read_dir", "std::fs", ".response(", ".filename("):
+            self.assertNotIn(forbidden, selecting + activating)
+        insensitive = "if !button.is_sensitive() { q.session_file_wait(index, true, W::GtkActionInsensitive, picker); return Ok(false); }"
+        self.assertLess(activating.index(insensitive), activating.index("q.session_file_activation(id, index)?"))
+        self.assertLess(activating.index("q.session_file_activation(id, index)?"), activating.index("button.emit_clicked()"))
+        self.assertEqual(activating.count("button.emit_clicked()"), 1)
+        self.assertNotIn(".set_filename(", activating)
+        self.assertNotIn(".filename(", selecting + activating)
+        self.assertNotIn(".response(", selecting + activating); self.assertNotIn(".begin_response(", selecting + activating)
+        self.assertEqual(shell.count("dialog.filename()"), 1)
+        response = shell.split("entry.response = Some(dialog.connect_response(move |dialog, response| {", 1)[1].split("}));", 1)[0]
+        self.assertEqual(response.count("let path = native_path(dialog, &call);"), 1)
+        self.assertIn("q.session_file_filename(observed_id,path.as_ref().ok().map(PathBuf::as_path))", response)
+        self.assertLess(response.index("let path = native_path(dialog, &call);"), response.index("q.session_file_filename("))
+        self.assertLess(response.index("q.session_file_filename("), response.index("call.selected_path(path)"))
+        for name in ("session_file_failed", "session_file_dialog", "session_file_parent_navigation", "session_file_selection", "session_file_activation",
+                     "session_file_filename", "session_file_response", "session_file_returned", "native_destroyed", "native_released"):
+            callback = body(source, name)
+            self.assertEqual(callback.count("self.record_at(Boundary::Gtk)"), 1)
+            self.assertIn("self.session_fail(&mut r,", callback)
+            self.assertNotIn("self.session_file_failed(", callback); self.assertNotIn("self.record()", callback)
+        for name in ("session_file_dialog", "session_file_parent_navigation", "session_file_selection", "session_file_activation"):
+            callback = body(source, name)
+            self.assertLess(callback.index("self.failed.load(Ordering::SeqCst)"), callback.index("Instant::now()>=self.end"))
+            self.assertIn("if Instant::now()>=self.end { self.session_fail(&mut r,SessionRejection::GtkObserverEndpoint); return Err(()); }", callback)
+        for name, reserve in (("session_file_parent_navigation", "reserve_parent_navigation()"),
+                              ("session_file_selection", "reserve_selection()")):
+            callback = body(source, name)
+            guards = ["self.record_at(Boundary::Gtk)", "self.failed.load(Ordering::SeqCst)", "Instant::now()>=self.end",
+                      "session_file_wait_pending(r.step,r.pending,index,false)", "file.id==id && file.index==index", reserve]
+            self.assertEqual([callback.index(guard) for guard in guards], sorted(callback.index(guard) for guard in guards))
+            self.assertEqual(callback.count(reserve), 1)
+            self.assertNotIn("self.end =", callback)
+        operation = source.split("impl SessionFile {", 1)[1].split("struct SessionRecord {", 1)[0]
+        self.assertEqual(operation.count("self.parent_navigation_reserved = true"), 1)
+        self.assertNotIn("self.parent_navigation_reserved = false", operation)
+        self.assertEqual(operation.count("self.picker.selected = true"), 1)
+        self.assertIn("self.parent_navigation_reserved == self.select", operation)
+        for field in ("selected", "activated", "responded", "filename", "disposal", "destroyed", "released", "returned"):
+            self.assertIn("!self.picker." + field, operation)
+            self.assertIn("Picker { created:true," + field + ":true,..Picker::default() }", source)
+        self.assertIn("self.picker.created", operation)
+        self.assertEqual(operation.count("!self.select || !self.selection_pending()"), 2)
+        self.assertIn("|| self.parent_navigation_reserved { return false; }", operation)
+        self.assertIn("|| !self.parent_navigation_reserved { return false; }", operation)
+        self.assertIn("!file.navigation_matches()", body(source, "session_file_activation"))
+        self.assertIn("file.navigation_matches() && file.picker.settled(file.select)", source)
+        self.assertIn('SessionCase::Refusals.recipe().get(24)==Some(&SA::Choose("replacement.jks","android-keystore",None))', source)
+        for guard in ("selecting,Some(Pending::Dom(selecting)),index+1,false",
+                      "selecting,Some(Pending::Dom(activating)),index,false",
+                      "activating,Some(Pending::Dom(activating)),index,false",
+                      "selecting,None,index,false"):
+            self.assertIn("assert!(!session_file_wait_pending(" + guard + "));", source)
+        self.assertIn("assert!(!file.reserve_selection() && !file.picker.selected);", source)
+        self.assertIn("assert!(!file.reserve_parent_navigation() && !file.parent_navigation_reserved && file.navigation_matches());", source)
+        self.assertIn("assert!(!corrupt.navigation_matches() && !corrupt.reserve_parent_navigation() && !corrupt.reserve_selection());", source)
+        filename = body(source, "session_file_filename")
+        reasons = ["GtkFilenameState", "GtkFilenameAbsent", "GtkFilenameDifferent", "file.picker.filename=true"]
+        self.assertEqual([filename.index(reason) for reason in reasons], sorted(filename.index(reason) for reason in reasons))
+        returned = body(source, "session_file_returned")
+        self.assertIn("r.pending.take()!=Some(Pending::Dom(Step::Session(step))) || r.step!=Step::Session(step)", returned)
+        self.assertEqual(returned.count(".activation_returned(result)"), 1)
+        # First-failure diagnostics freeze, but original return/lifecycle bookkeeping
+        # must still run after a failure. Only this exact counter update is guarded.
+        diagnostic_only = """        if !self.failed.load(Ordering::SeqCst) {
+            if let Some(diagnostic) = r.session.diagnostic.as_mut() { diagnostic.gtk_callbacks.returned(); }
+        }
+"""
+        self.assertEqual(returned.count(diagnostic_only), 1)
+        before_diagnostic, lifecycle = returned.split(diagnostic_only)
+        self.assertNotIn("self.failed.load", before_diagnostic + lifecycle)
+        self.assertLess(before_diagnostic.index("r.pending.take()"), before_diagnostic.index("let index=match step"))
+        self.assertEqual(lifecycle, """        let Some(file)=r.session.files.last_mut().filter(|file| file.index==index) else {
+            if result!=Ok(false) { self.session_fail(&mut r,SessionRejection::GtkReturnState); } return;
+        };
+        if file.parent_navigation_reserved && !file.select { self.session_fail(&mut r,SessionRejection::GtkReturnState); return; }
+        match result {
+            Ok(false) if !file.picker.activated && (step!=SessionStep::SetFile(index) || !file.picker.selected)=>{},
+            Ok(true) if step==SessionStep::SetFile(index) && file.picker.selected && !file.picker.activated && file.navigation_matches()=>r.step=Step::Session(SessionStep::ActivateFile(index)),
+            Ok(true) if step==SessionStep::ActivateFile(index)=>{
+                if !file.picker.activation_returned(result) { self.session_fail(&mut r,SessionRejection::GtkReturnState); return; } r.step=Step::Session(SessionStep::Capture(index));
+            }, _=>self.session_fail(&mut r,SessionRejection::GtkReturnState),
+        }""")
+        self.assertNotIn(".responded", returned)
+        self.assertLess(returned.index("r.pending.take()"), returned.index(".activation_returned(result)"))
+        # Source ordering and parser contracts are not executed GTK/native finality.
+
+    def test_diagnostic_and_close_failures_cannot_replace_an_active_owner_exception(self):
+        class ProcessError(RuntimeError):
+            def __init__(self):
+                super().__init__("inert original")
+                self.__dict__.update(dispatched=True, contained=True, cleanup_complete=True)
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        argv = L.shell_argv(value, "project-paths")
+        for fault in ("read", "clock", "format", "write", "close", "diagnostic-dispatch"):
+            primary = ProcessError()
+            with self.subTest(fault=fault), patch.multiple(L, _ROOT=L.root_path(value), _END=1000.0, _FAILED=False,
+                    _COMMANDS=[], _OWNER=SimpleNamespace(ProcessError=ProcessError, run_owned=Mock(side_effect=primary))), \
+                 patch.object(L, "_root_ids"), patch.object(L.time, "monotonic", return_value=100.0), \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original")), \
+                 patch.object(L, "_shell_labels_read", return_value=None) as reading, \
+                 patch.object(L, "_shell_diagnostic_time", return_value=None) as clock, \
+                 patch.object(L, "canonical", wraps=L.canonical) as formatting, \
+                 patch.object(L, "_shell_owner_failure", wraps=L._shell_owner_failure) as diagnostic, \
+                 patch.object(L, "_shell_log_capture") as raw_log, patch.object(L.os, "close") as closing, \
+                 patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                failing = {"read": reading, "clock": clock, "format": formatting,
+                           "close": closing, "diagnostic-dispatch": diagnostic}
+                if fault == "write": stream.write = Mock(side_effect=OSError("inert diagnostic write"))
+                else: failing[fault].side_effect = OSError("inert diagnosis failure")
+                with self.assertRaises(ProcessError) as raised:
+                    L.command("shell-project-paths", argv, maximum=60, shell_log=(value, "project-paths", "log"))
+                self.assertIs(raised.exception, primary); self.assertTrue(L._FAILED)
+                closing.assert_called_once_with(41); raw_log.assert_not_called()
+                self.assertLessEqual(reading.call_count, 1)
+                if fault == "read":
+                    data = json.loads(stream.getvalue().split("=", 1)[1])
+                    self.assertIsNone(data["labels"]); self.assertEqual(data["labelsReason"], "unavailable")
+
+    def test_good_return_closes_once_and_close_loss_refuses_without_altering_capture(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        for synthetic, close_error in ((True, False), (True, True), (False, False)):
+            argv = L.shell_argv(value, "positive") if synthetic else ["/inert-fixed-command"]
+            result = subprocess.CompletedProcess(argv, 0, b"unchanged stdout", b"unchanged stderr")
+            with self.subTest(synthetic=synthetic, close_error=close_error), \
+                 patch.multiple(L, _ROOT=L.root_path(value), _END=1000.0, _FAILED=False,
+                    _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=Mock(return_value=result))), \
+                 patch.object(L, "_root_ids"), patch.object(L, "_retain") as retained, \
+                 patch.object(L.time, "monotonic", return_value=100.0), \
+                 patch.object(L, "_shell_call_finished", wraps=L._shell_call_finished) as finishing, \
+                 patch.object(L, "_shell_diagnostic_time", return_value=100.0) as clock, \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original")) as preparation, \
+                 patch.object(L, "_shell_labels_read") as reading, patch.object(L, "_shell_log_capture", return_value=b""), \
+                 patch.object(L.os, "close") as closing, patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                if close_error: closing.side_effect = OSError("inert close loss")
+                options = {"shell_log": (value, "positive", "log")} if synthetic else {}
+                if close_error:
+                    with self.assertRaises(OSError): L.command("shell-positive", argv, maximum=60, **options)
+                    self.assertTrue(L._FAILED)
+                else:
+                    label = "shell-positive" if synthetic else "inert-command"
+                    self.assertIs(L.command(label, argv, maximum=60, **options), result)
+                    self.assertFalse(L._FAILED)
+                self.assertEqual(preparation.call_count, int(synthetic))
+                self.assertEqual(finishing.call_count, int(synthetic))
+                self.assertEqual(clock.call_count, 2 if synthetic else 0)
+                self.assertEqual(closing.call_count, int(synthetic)); reading.assert_not_called()
+                self.assertEqual([call.args[1] for call in retained.call_args_list], [b"unchanged stdout", b"unchanged stderr"])
+                self.assertEqual(stream.getvalue(), "")
+
+
+
+# Deliberately fictional DATA below: no fixture construction, native execution,
+# listener, archive import or runtime observation is performed by these tests.
+GITHUB_FICTIONAL_CASES = {
+    "github-connect-refresh": ("G-connect-refresh", 8, "none"),
+    "github-real-ca-refusal": ("T2-root", 1, "tls-failed"),
+    "github-wrong-name": ("T2-name", 1, "tls-failed"),
+    "github-expired": ("T2-expired", 1, "tls-failed"),
+    "github-ragged": ("T3-ragged", 1, "tls-failed"),
+    "github-length": ("T3-length", 1, "response-invalid"),
+    "github-chunk": ("T3-chunk", 1, "response-invalid"),
+    "github-header-limit": ("T6-header", 1, "response-limit"),
+    "github-body-limit": ("T6-body", 1, "response-limit"),
+    "github-chunk-limit": ("T6-chunk-metadata", 1, "response-limit"),
+    "github-unauthorized": ("T6-unauthorized", 1, "unauthorized"),
+    "github-rate": ("T6-rate-expiry", 1, "response-invalid"),
+    "github-identity": ("T6-target", 4, "target-changed"),
+    "github-redirect": ("T6-redirect", 1, "response-invalid"),
+    "github-ambient-fixed": ("T4-ambient-fixed", 4, "none"),
+    "github-ambient-no-rescue": ("T4-ambient-no-rescue", 1, "tls-failed"),
+    "github-handshake-deadline": ("T5-handshake", 1, "query_timeout"),
+    "github-header-deadline": ("G-header-withhold", 1, "query_timeout"),
+    "github-body-deadline": ("T5-read", 1, "query_timeout"),
+    "github-cancel": ("T5-read", 1, "cancelled"),
+    "github-quit": ("T5-read", 1, "cancelled"),
+    "github-unknown": ("T5-read", 1, "cleanup_unknown"),
+}
+
+
+def github_handoff_data():
+    value = installed_handoff()
+    installed = value.pop("installed")
+    value["shell"] = {"githubReadOnly": L.shell_github_selection(),
+                      "rosterSha256": "d" * 64, "producerAttempt": "1", "artifactId": "17",
+                      "acceptedU": installed["acceptedU"]}
+    return value
+
+
+def github_map_data():
+    """Synthetic distinct private inodes, unchanged synthetic OS map aliases."""
+    maps = {}
+    roles = ("python", "libssl.so.3", "libcrypto.so.3", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6")
+    for profile_index, profile in enumerate(("N", "D-R", "D-S")):
+        maps[profile] = {}
+        for index, name in enumerate(roles):
+            private = name in roles[:3]
+            relative = "python/bin/python3" if name == "python" else "python/lib/" + name
+            paths = [str(L.PREFIX / L.SHELL_GITHUB_PAYLOADS[profile]["manifestSha256"] / relative)] if private else sorted(
+                [directory + "/" + name for directory in L.DEFAULT_LIBRARY_DIRS[:2]]
+                + (["/lib64/" + name] if name == "ld-linux-x86-64.so.2" else []))
+            maps[profile][name] = {"paths": paths, "deviceMajor": 8, "deviceMinor": 2,
+                                   "inode": 1000 + 100 * profile_index + index if private else 100 + index}
+    return maps
+
+
+def github_fixture_data(value):
+    namespace = fixture_namespace_data(value)
+    namespace["children"] = ["github-project"]
+    namespace["identity"][5] = 3
+    nodes = {}
+    for index, (name, mode, owners, body) in enumerate((
+        (".", stat.S_IFDIR | 0o700, (1001, 1001), None),
+        ("app", stat.S_IFDIR | 0o555, (0, 0), None),
+        ("app/build.gradle.kts", stat.S_IFREG | 0o444, (0, 0), L.SHELL_PROJECT_SOURCE),
+        ("version.properties", stat.S_IFREG | 0o600, (1001, 1001), L.SHELL_PROJECT_VERSION),
+    )):
+        nodes[name] = {"identity": [1, 30 + index, mode, *owners,
+                                   3 if name == "." else 2 if body is None else 1,
+                                   4096 if body is None else len(body), 11, 11]}
+        if body is not None:
+            nodes[name].update(size=len(body), sha256=hashlib.sha256(body).hexdigest())
+    return {"schema": "installed-github-project-v1", "sourceSha": value["sourceSha"],
+            "runId": value["runId"], "attempt": value["attempt"],
+            "project": str(L.shell_fixture_root(value) / "github-project"), "namespace": namespace, "nodes": nodes}
+
+
+def github_receipt_data(case, expected=None):
+    expected = github_map_data() if expected is None else expected
+    script, connections, reason = GITHUB_FICTIONAL_CASES[case]
+    role = "D-R" if case in ("github-real-ca-refusal", "github-ambient-no-rescue") else "D-S"
+    manifest = L.SHELL_GITHUB_PAYLOADS[role]["manifestSha256"]
+    active = case in ("github-cancel", "github-quit", "github-unknown")
+    deadline = case in ("github-handshake-deadline", "github-header-deadline", "github-body-deadline")
+    ambient = case in ("github-ambient-fixed", "github-ambient-no-rescue")
+    refused = case in ("github-real-ca-refusal", "github-wrong-name", "github-expired", "github-ambient-no-rescue")
+    handshake = case == "github-handshake-deadline"
+    requests = 0 if refused or handshake else connections
+    reads = 2 if case == "github-connect-refresh" else 1
+    streaming = {
+        "github-header-limit": [40630], "github-body-limit": [262215], "github-chunk-limit": [35803],
+        "github-unauthorized": [99], "github-rate": [175], "github-identity": [95, 222, 102, 222],
+        "github-redirect": [136],
+    }
+    reply = streaming.get(case, [0 if refused or handshake or case == "github-header-deadline" else 128] * connections)
+    notify = connections if case in streaming or case in (
+        "github-connect-refresh", "github-length", "github-chunk", "github-ambient-fixed") else 0
+    completion = {"bytes": 1, "eof": True, "closed": True, "primaryEmpty": True,
+                  "primaryUnexpected": 0, "primaryClosed": True}
+    terminal = {"schemaVersion": 1, "scope": "github-installed-tls-peer-v1", "case": script,
+        "installedCase": case, "ownerTag": "0123456789abcdef", "manifestSha256": manifest,
+        "peerSha256": L.SHELL_GITHUB_PEER_PINS["github_tls_peer.py"][1], "primaryPort": 18443,
+        "state": "finished", "status": "passed", "code": None, "connections": connections,
+        "handshakes": requests, "requests": requests, "decryptedBytes": requests * 180,
+        "authBytes": requests * len(b"Bearer INERT_NOT_A_CREDENTIAL"), "closeNotify": notify,
+        "tlsRefused": refused, "wireReadBytes": [512] * connections,
+        "wireWriteBytes": [0 if handshake else max(512, count) for count in reply],
+        "replyBytes": reply, "allSocketsClosed": True, "completion": completion}
+    if active or deadline or ambient:
+        terminal.update(sni=connections, phase="handshake" if handshake else "headers" if case == "github-header-deadline"
+                        else "read" if active or deadline else "finished", withheldWireBytes=512 if handshake else 0,
+                        bodyBytes=7 if case == "github-body-deadline" else 1 if active else 0,
+                        incompleteBody=active or case == "github-body-deadline",
+                        clientStop="tcp-eof" if active or deadline else None,
+                        progressCount=2 if active or deadline else 0, dnsQuestions=0, dnsA=0, dnsAAAA=0, dnsReplies=0)
+        completion.update(proxy={"empty": True, "unexpected": 0, "closed": True} if ambient else None,
+                          dnsEmpty=None, dnsClosed=None)
+    else:
+        terminal["replyStops"] = ["none"] * connections
+        completion["redirect"] = {"empty": True, "unexpected": 0, "closed": True} if case == "github-redirect" else None
+    peer = {key: True for key in ("acquisitionJoined", "spawned", "waited", "exitSuccess", "stdoutJoined", "stderrJoined",
+                                  "stdoutEof", "stderrEof", "ready", "settled", "withinEndpoint", "protocolChecked")}
+    peer.update({key: False for key in ("stopAttempted", "stdoutOverflow", "stderrOverflow")})
+    peer.update(exitCode=0, stdoutBytes=8192, stderrBytes=0, terminal=terminal,
+                control={**{key: True for key in ("acquired", "started", "joined", "writeComplete", "shutdownComplete",
+                                                  "productSettled", "withinEndpoint", "released")}, "failed": False})
+    outcomes = []
+    for index in range(0 if active else reads):
+        positive = reason == "none"
+        outcomes.append({"revision": index + 1, "sessionId": "github-session-1", "projectId": "fictional-project",
+            "target": "owner/app", "sessionState": "connected" if positive else "failed",
+            "kind": "connect" if index == 0 else "refresh", "phase": "settled",
+            "reason": "network-unavailable" if deadline else reason,
+            "facts": ["observed" if positive else "unavailable"] * 3, "accountId": "11" if positive else None,
+            "repositoryId": "22" if positive else None, "workflowRows": 4 if positive else 0})
+    rows = [{"role": name, "path": row["paths"][0],
+             **{key: row[key] for key in ("deviceMajor", "deviceMinor", "inode")}}
+            for name, row in sorted(expected[role].items())]
+    originals = [{"operationId": "github-read-" + str(index + 1), "manifestSha256": manifest,
+                  "receiptKind": "native-error" if active or deadline else "typed-outcome", "reason": reason,
+                  "terminal": True, "unknownLatched": case == "github-unknown",
+                  "firstError": reason if active or deadline else None, "originalObserverJoined": True,
+                  "nativeSettled": True, "environmentClear": True, "maps": deepcopy(rows),
+                  "cleanupWithinOriginalEndpoint": True, "elapsedMs": 10500 if deadline else 100}
+                 for index in range(reads)]
+    return {"schemaVersion": 1, "fixture": "github-readonly-installed-v1", "case": case, "sourceCommit": "a" * 40,
+            "normalManifestSha256": L.M, "productManifestSha256": manifest, "protocolSha256": L.Q,
+            "peerSha256": L.SHELL_GITHUB_PEER_PINS["github_tls_peer.py"][1],
+            "project": {"cancelSettled": True, "registered": True, "snapshot": True},
+            "nativeSession": {"connect": 1, "refresh": reads - 1,
+                "disconnect": 0 if case in ("github-quit", "github-unknown") else 1,
+                "retainedStatus": not active, "runningObserved": active, "outcomes": outcomes,
+                "cleared": case not in ("github-quit", "github-unknown"),
+                "unknownRetained": case == "github-unknown", "tokenFieldCleared": True},
+            "originals": originals, "peer": peer,
+            "quit": {"originalsFinal": True, "relayJoined": True, "gtkSettled": True, "exit": True},
+            "notProven": ["normal-resolver-withholding", "real-stalled-tcp-connect"]}
+
+
+def github_capture_data(case, receipt):
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + b"MRK_INSTALLED_SHELL_GITHUB_READONLY=" + L.canonical(receipt)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n")
+
+
+def github_data_set(value, path, replacement):
+    for name in path[:-1]:
+        value = value[name]
+    value[path[-1]] = replacement
+
+
+def github_closed_observation_data():
+    value, maps = github_handoff_data(), github_map_data()
+    cases = {case: {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                    "maps": [], "githubReadOnly": github_receipt_data(case, maps)} for case in GITHUB_FICTIONAL_CASES}
+    project = github_fixture_data(value)
+    def pin(raw):
+        return {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    # The CI parser consumes export pins after lifecycle finality, not material
+    # bytes. These fictional pins do not claim to pass the lifecycle producer.
+    material_pin, fixture_pin = pin(b"fictional material capture\n"), pin(L.canonical(project))
+    fixture = {"project": project["project"], "namespace": project["namespace"], "unchanged": True,
+               "sourceSha256": hashlib.sha256(L.SHELL_PROJECT_SOURCE).hexdigest(),
+               "versionSha256": hashlib.sha256(L.SHELL_PROJECT_VERSION).hexdigest(),
+               "releaseConfigCreated": False, "sourceSha": value["sourceSha"],
+               "before": fixture_pin, "after": deepcopy(fixture_pin)}
+    github = {"selection": L.shell_github_selection(), "expectedMaps": maps,
+              "materials": {"before": material_pin, "after": deepcopy(material_pin)}, "fixture": fixture,
+              "casesCapture": pin(L.canonical(cases)), "normalDestinationAction": False, "normalTransportPositive": False,
+              "remainingCoverage": ["normal-resolver-withholding", "real-stalled-tcp-connect",
+                                    "separately-approved-normal-destination-negative"]}
+    captures = {"shell-cases.json": github["casesCapture"]}
+    for phase in ("before", "after"):
+        captures["shell-github-materials-" + phase + ".json"] = material_pin
+        captures["shell-github-project-" + phase + ".json"] = fixture_pin
+    files = [{"path": "lifecycle-" + name, **captures.get(name, pin(b"fictional export\n"))}
+             for name in sorted(L.public_files(value) | {"client.stdout", "client.stderr"})]
+    return {"state": "installed-github-readonly-synthetic-observed", "productQualified": False,
+            "packageLifecycleQualified": False, "shellPackageBuilt": False, "sourceSha": value["sourceSha"],
+            "consumerAttempt": value["attempt"], "unit": L.root_path(value).name + ".service",
+            "githubReadOnly": github, "cases": cases, "files": files}
+
+
+class InstalledGitHubReadOnlyDataContracts(unittest.TestCase):
+    """Closed fictional records exercise parsers, not TLS/GTK/process finality."""
+
+    def test_handoff_keeps_github_and_android_custody_disjoint(self):
+        value = github_handoff_data()
+        binaries = {role: {"path": "/task/" + role, "size": 12, "sha256": "c" * 64}
+                    for role in ("normal", "observer")}
+        value["shell"].update(binaries=binaries, loaderPolicy={}, compiler={
+            "sourceSha": value["sourceSha"], "runId": value["runId"], "attempt": "1",
+            "features": L.SHELL_FEATURES, "manifestSha256": L.M, "protocolSha256": L.Q,
+            "exportedArtifacts": deepcopy(binaries), "androidBuildMaterials": None,
+            "androidBuildBindings": {}, "androidBuildPublication": None})
+        with patch.object(L, "shell_android_materials", side_effect=AssertionError("unrelated material read")):
+            self.assertIsNone(L.shell_handoff(value, []))
+            for field, data in (("androidBuildMaterials", ANDROID_MATERIAL_DATA),
+                                ("androidBuildBindings", {"MRK_ANDROID_TOOL_INSTANCE": "inert"}),
+                                ("androidBuildPublication", ANDROID_PUBLICATION_DATA)):
+                changed = deepcopy(value); changed["shell"]["compiler"][field] = data
+                with self.subTest(field=field), self.assertRaises(L.Refused):
+                    L.shell_handoff(changed, [])
+            changed = deepcopy(value)
+            changed["shell"].pop("artifactId"); changed["shell"]["localTransport"] = {}
+            with self.assertRaisesRegex(L.Refused, "Non-Android scope cannot adopt Android"):
+                L.shell_handoff(changed, [])
+            changed = deepcopy(value); changed["shell"]["androidPublication"] = {}
+            with self.assertRaisesRegex(L.Refused, "Fixed shell handoff fields differ"):
+                L.shell_handoff(changed, [])
+        changed = deepcopy(value)
+        changed["shell"].pop("githubReadOnly"); changed["shell"]["androidPublication"] = {}
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", None), \
+             self.assertRaisesRegex(L.Refused, "material/OS-closure binding is pending"):
+            L.shell_handoff(changed, [])
+
+    def test_exact_selection_keeps_legacy_twenty_and_normal_action_separate(self):
+        value = github_handoff_data()
+        self.assertEqual(L.shell_cases(value), tuple(GITHUB_FICTIONAL_CASES))
+        self.assertEqual(L.SHELL_GITHUB_CASE_DATA, GITHUB_FICTIONAL_CASES)
+        self.assertEqual(len(L.shell_cases(value)), 22)
+        self.assertEqual(L.shell_observers(value), L.shell_cases(value))
+        self.assertEqual({name for name in L.shell_cases(value) if L.shell_github_role(name) == "D-R"},
+                         {"github-real-ca-refusal", "github-ambient-no-rescue"})
+        legacy = deepcopy(value); legacy["shell"].pop("githubReadOnly")
+        self.assertEqual(L.shell_cases(legacy), L.SHELL_CASES)
+        self.assertEqual(len(L.shell_cases(legacy)), 25)
+        self.assertEqual(L.shell_public_limit(legacy), 190)
+        self.assertEqual(L.shell_fixture_children(value), ("github-project",))
+        for case in ("normal", "github-normal-negative", "github-other"):
+            with self.subTest(case=case), self.assertRaises(L.Refused):
+                L.shell_github_role(case)
+        changes = (
+            (("normalDestinationAction",), True), (("normalDestinationAction",), 0),
+            (("cases",), list(GITHUB_FICTIONAL_CASES) + ["github-normal-negative"]),
+            (("payloads", "D-S", "manifestSha256"), L.M),
+            (("peerSources", 0, "size"), True), (("profile",), "caller-profile"),
+            (("endpoint",), "https://example.invalid"),
+        )
+        for path, replacement in changes:
+            bad = deepcopy(value); github_data_set(bad["shell"]["githubReadOnly"], path, replacement)
+            with self.subTest(path=path), self.assertRaises(L.Refused):
+                L.shell_cases(bad)
+        first = L.shell_github_selection(); first["payloads"]["N"]["manifestSha256"] = "f" * 64
+        self.assertEqual(L.shell_github_selection()["payloads"]["N"]["manifestSha256"], L.M)
+
+    def test_public_roster_argv_and_only_two_ambient_decoy_environments(self):
+        value = github_handoff_data()
+        files = L.public_files(value)
+        self.assertEqual(len(files), 135)
+        self.assertEqual(L.shell_public_limit(value), 135)
+        self.assertEqual(len(files | {"client.stdout", "client.stderr"}), 137)
+        self.assertTrue({"shell-github-materials-before.json", "shell-github-materials-after.json",
+                         "shell-github-project-before.json", "shell-github-project-after.json",
+                         "shell-cases.json"} <= files)
+        self.assertNotIn("shell-normal-control.json", files)
+        self.assertFalse(any(name.startswith(("shell-positive", "shell-tools", "shell-offline")) for name in files))
+        self.assertEqual([phase for phase in L.root_phases(value) if phase.startswith("shell-")],
+                         ["shell-" + name for name in GITHUB_FICTIONAL_CASES])
+        proxy = {"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"}
+        trust = {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"}
+        decoys = proxy | trust | {"SSLKEYLOGFILE"}
+        baseline = L.shell_environment(value, "github-connect-refresh")
+        self.assertTrue(set(baseline).isdisjoint(decoys | {"GH_TOKEN", "GITHUB_TOKEN", "PYTHONPATH"}))
+        for case in GITHUB_FICTIONAL_CASES:
+            with self.subTest(case=case):
+                environment = L.shell_environment(value, case)
+                self.assertEqual(L.shell_argv(value, case)[-2:], [str(L.root_path(value) / "shell-observer"), case])
+                ambient = case in ("github-ambient-fixed", "github-ambient-no-rescue")
+                self.assertEqual(set(environment), set(baseline) | (decoys if ambient else set()))
+                if ambient:
+                    self.assertEqual({environment[key] for key in proxy}, {"http://127.0.0.1:18888"})
+                    self.assertEqual({environment[key] for key in trust},
+                                     {str(L.root_path(value) / "github-peer/github_tls/root-ca.pem")})
+                    self.assertEqual(environment["SSLKEYLOGFILE"], str(L.root_path(value) / ("shell-" + case + "-keylog.log")))
+        with self.assertRaises(L.Refused):
+            L.shell_argv(value, "github-normal-negative")
+
+    def test_fixture_closed_four_node_data_rejects_drift_aliases_and_release_outputs(self):
+        value = github_handoff_data()
+        data = github_fixture_data(value); raw = L.canonical(data)
+        result = L.shell_github_fixture(value, raw, raw)
+        self.assertTrue(result["unchanged"]); self.assertFalse(result["releaseConfigCreated"])
+        changes = (
+            (("sourceSha",), "b" * 40), (("namespace", "children"), ["github-project", "release"]),
+            (("nodes", ".", "identity", 3), 0), (("nodes", "app", "identity", 2), stat.S_IFLNK | 0o555),
+            (("nodes", "app", "identity", 1), data["namespace"]["identity"][1]),
+            (("nodes", "version.properties", "identity", 5), 2),
+            (("nodes", "version.properties", "identity", 6), True),
+            (("nodes", "version.properties", "size"), True),
+            (("nodes", "app/build.gradle.kts", "sha256"), "f" * 64),
+            (("nodes", "release-config.json"), {"identity": [1] * 9}),
+        )
+        for path, replacement in changes:
+            bad = deepcopy(data); github_data_set(bad, path, replacement); encoded = L.canonical(bad)
+            with self.subTest(path=path), self.assertRaises(L.Refused):
+                L.shell_github_fixture(value, encoded, encoded)
+        after = deepcopy(data); after["nodes"]["version.properties"]["identity"][8] += 1
+        for before_raw, after_raw in ((raw, L.canonical(after)), (raw, raw + b"\n"), (raw.decode(), raw)):
+            with self.subTest(after=type(after_raw)), self.assertRaises(L.Refused):
+                L.shell_github_fixture(value, before_raw, after_raw)
+
+    def test_three_map_roles_keep_n_d_originals_distinct_and_os_aliases_unchanged(self):
+        maps = github_map_data()
+        self.assertIs(L.shell_github_maps(maps), maps)
+        mutations = (
+            (("D-S", "python", "paths"), maps["N"]["python"]["paths"]),
+            (("D-S", "python", "inode"), maps["N"]["python"]["inode"]),
+            (("D-R", "libssl.so.3", "inode"), True),
+            (("D-R", "libc.so.6", "inode"), 999999),
+            (("N", "libm.so.6", "paths"), ["/caller/libm.so.6"]),
+        )
+        for path, replacement in mutations:
+            bad = deepcopy(maps); github_data_set(bad, path, replacement)
+            with self.subTest(path=path), self.assertRaises(L.Refused):
+                L.shell_github_maps(bad)
+        bad = deepcopy(maps); bad["normal"] = bad.pop("N")
+        with self.assertRaises(L.Refused):
+            L.shell_github_maps(bad)
+
+    def test_final_loader_correlates_full9_with_the_original_seven_field_layout(self):
+        material, final = {"payloads": {}}, {"bindings": {}, "entryObjects": ["libssl.so.3", "libcrypto.so.3", "libc.so.6"]}
+        for index, role in enumerate(("D-R", "D-S")):
+            root = L.PREFIX / L.SHELL_GITHUB_PAYLOADS[role]["manifestSha256"]
+            tree = {}
+            for offset, name in enumerate(("", "python", "python/bin", "python/lib")):
+                tree[name] = {"identity": [1, 100 + index * 100 + offset, stat.S_IFDIR | 0o555, 0, 0, 2, 4096, 17, 18]}
+            present = ("python/bin/python3", "python/lib/libssl.so.3", "python/lib/libcrypto.so.3")
+            absent = ("python/lib/glibc-hwcaps", "python/lib/libc.so.6",
+                      *(prefix + name for prefix in ("", "python/", "python/bin/")
+                        for name in ("pyvenv.cfg", "python3._pth", "pybuilddir.txt")))
+            for offset, name in enumerate(present):
+                tree[name] = {"identity": [1, 150 + index * 100 + offset, stat.S_IFREG | 0o444, 0, 0, 1, 16, 17, 18],
+                              "size": 16, "sha256": "b" * 64}
+            material["payloads"][role] = tree
+            for name in (*present, *absent):
+                path = str(root / name)
+                row = {"path": path, "selectedPath": path, "links": [],
+                       "ancestry": {str(root / ("" if str(parent) == "." else parent.as_posix())):
+                                    tree["" if str(parent) == "." else parent.as_posix()]["identity"][:5]
+                                    for parent in Path(name).parents}}
+                if name in present:
+                    row.update(identity=[tree[name]["identity"][position] for position in (0, 1, 2, 5, 6, 7, 8)],
+                               size=16, sha256="b" * 64)
+                else:
+                    row.update(absent=True, absentAt=path)
+                final["bindings"][path] = row
+        self.assertIsNone(L._shell_github_closed_loader(material, final))
+        path = str(L.PREFIX / L.SHELL_GITHUB_PAYLOADS["D-S"]["manifestSha256"] / "python/bin/python3")
+        for replacement in (material["payloads"]["D-S"]["python/bin/python3"]["identity"],
+                            [1, 999, stat.S_IFREG | 0o444, 1, 16, 17, 18]):
+            bad = deepcopy(final); bad["bindings"][path]["identity"] = replacement
+            with self.subTest(identity=replacement), self.assertRaises(L.Refused):
+                L._shell_github_closed_loader(material, bad)
+        bad = deepcopy(final); bad["bindings"][path]["links"] = [{"path": path, "target": "/replacement"}]
+        with self.assertRaises(L.Refused):
+            L._shell_github_closed_loader(material, bad)
+
+    def test_all_twenty_two_fictional_native_receipts_and_marker_records_parse(self):
+        maps = github_map_data()
+        for case in GITHUB_FICTIONAL_CASES:
+            with self.subTest(case=case):
+                receipt = github_receipt_data(case, maps)
+                self.assertEqual(L.shell_github_receipt(L.canonical(receipt), case, maps), receipt)
+                result = L.shell_github_result(github_capture_data(case, receipt), b"", case, 0, maps)
+                self.assertEqual(result["githubReadOnly"], receipt)
+                self.assertEqual(result["maps"], [])  # D maps stay nested under each original.
+                self.assertNotIn("qualified", result)
+
+    def test_native_receipt_rejects_relabelled_maps_errors_ui_and_unjoined_originals(self):
+        variants = (
+            ("github-connect-refresh", ("schemaVersion",), True),
+            ("github-connect-refresh", ("endpoint",), "https://example.invalid"),
+            ("github-connect-refresh", ("productManifestSha256",), L.M),
+            ("github-connect-refresh", ("protocolSha256",), "f" * 64),
+            ("github-connect-refresh", ("peerSha256",), "f" * 64),
+            ("github-connect-refresh", ("project", "registered"), False),
+            ("github-connect-refresh", ("quit", "relayJoined"), False),
+            ("github-connect-refresh", ("originals", 1, "operationId"), "github-read-1"),
+            ("github-connect-refresh", ("originals", 0, "operationId"), "github-read-18446744073709551616"),
+            ("github-connect-refresh", ("originals", 0, "originalObserverJoined"), False),
+            ("github-connect-refresh", ("originals", 0, "nativeSettled"), False),
+            ("github-connect-refresh", ("originals", 0, "environmentClear"), False),
+            ("github-connect-refresh", ("originals", 0, "firstError"), "cancelled"),
+            ("github-connect-refresh", ("originals", 0, "elapsedMs"), True),
+            ("github-connect-refresh", ("originals", 0, "maps", 0, "inode"), True),
+            ("github-connect-refresh", ("nativeSession", "outcomes", 1, "sessionId"), "github-session-2"),
+            ("github-connect-refresh", ("nativeSession", "outcomes", 1, "revision"), 1),
+            ("github-identity", ("nativeSession", "outcomes", 0, "facts"), ["observed", "unavailable", "unavailable"]),
+            ("github-identity", ("nativeSession", "outcomes", 0, "accountId"), "11"),
+            ("github-unknown", ("nativeSession", "unknownRetained"), False),
+            ("github-unknown", ("originals", 0, "unknownLatched"), False),
+            ("github-unknown", ("originals", 0, "reason"), "none"),
+            ("github-cancel", ("originals", 0, "receiptKind"), "typed-outcome"),
+            ("github-quit", ("originals", 0, "firstError"), None),
+            ("github-body-deadline", ("originals", 0, "cleanupWithinOriginalEndpoint"), False),
+        )
+        maps = github_map_data()
+        for case, path, replacement in variants:
+            bad = github_receipt_data(case, maps); github_data_set(bad, path, replacement)
+            with self.subTest(case=case, path=path), self.assertRaises(L.Refused):
+                L.shell_github_receipt(L.canonical(bad), case, maps)
+        receipt = github_receipt_data("github-real-ca-refusal", maps)
+        for row in receipt["originals"][0]["maps"]:
+            if row["role"] == "python":
+                normal = maps["N"]["python"]
+                row.update(path=normal["paths"][0], inode=normal["inode"])
+        with self.assertRaises(L.Refused):
+            L.shell_github_receipt(L.canonical(receipt), "github-real-ca-refusal", maps)
+
+    def test_original_deadline_is_ten_seconds_with_only_its_two_second_cleanup(self):
+        maps = github_map_data()
+        for case in ("github-handshake-deadline", "github-header-deadline", "github-body-deadline"):
+            for elapsed in (10000, 11999, 9999, 12000, True):
+                receipt = github_receipt_data(case, maps); receipt["originals"][0]["elapsedMs"] = elapsed
+                with self.subTest(case=case, elapsed=elapsed):
+                    if type(elapsed) is int and 10000 <= elapsed < 12000:
+                        L.shell_github_receipt(L.canonical(receipt), case, maps)
+                    else:
+                        with self.assertRaises(L.Refused):
+                            L.shell_github_receipt(L.canonical(receipt), case, maps)
+
+    def test_peer_requires_original_wait_eofs_control_and_real_case_counters(self):
+        variants = (
+            ("github-connect-refresh", ("waited",), False),
+            ("github-connect-refresh", ("stdoutEof",), False),
+            ("github-connect-refresh", ("stderrJoined",), False),
+            ("github-connect-refresh", ("withinEndpoint",), False),
+            ("github-connect-refresh", ("protocolChecked",), 1),
+            ("github-connect-refresh", ("stopAttempted",), True),
+            ("github-connect-refresh", ("stdoutBytes",), 8193),
+            ("github-connect-refresh", ("stderrBytes",), 1),
+            ("github-connect-refresh", ("control", "joined"), False),
+            ("github-connect-refresh", ("control", "productSettled"), False),
+            ("github-connect-refresh", ("control", "released"), False),
+            ("github-connect-refresh", ("control", "failed"), True),
+            ("github-connect-refresh", ("terminal", "authBytes"), 8 * 27),
+            ("github-connect-refresh", ("terminal", "requests"), True),
+            ("github-connect-refresh", ("terminal", "completion", "eof"), False),
+            ("github-real-ca-refusal", ("terminal", "authBytes"), 1),
+            ("github-redirect", ("terminal", "completion", "redirect", "unexpected"), 1),
+            ("github-ambient-fixed", ("terminal", "completion", "proxy", "empty"), False),
+            ("github-ambient-no-rescue", ("terminal", "dnsQuestions"), 1),
+            ("github-handshake-deadline", ("terminal", "wireWriteBytes"), [1]),
+            ("github-header-deadline", ("terminal", "phase"), "header"),
+            ("github-body-deadline", ("terminal", "bodyBytes"), 6),
+            ("github-cancel", ("terminal", "clientStop"), None),
+            ("github-quit", ("terminal", "progressCount"), 1),
+        )
+        for case, path, replacement in variants:
+            peer = github_receipt_data(case)["peer"]; github_data_set(peer, path, replacement)
+            with self.subTest(case=case, path=path), self.assertRaises(L.Refused):
+                L.shell_github_peer_receipt(peer, case)
+        peer = github_receipt_data("github-connect-refresh")["peer"]
+        peer["terminal"]["ownerTag"] = "fedcba9876543210"
+        self.assertIs(L.shell_github_peer_receipt(peer, "github-connect-refresh"), peer)
+        # A different valid correlation tag is not another authority or owner.
+
+    def test_streaming_stop_cannot_claim_a_response_boundary_it_did_not_reach(self):
+        for case, minimum in (("github-header-limit", 32768), ("github-chunk-limit", 33143),
+                              ("github-unauthorized", 80), ("github-rate", 156), ("github-redirect", 117)):
+            peer = github_receipt_data(case)["peer"]
+            peer["terminal"].update(replyStops=["reply:broken-pipe"], closeNotify=0,
+                                    replyBytes=[minimum], wireWriteBytes=[minimum])
+            self.assertIs(L.shell_github_peer_receipt(peer, case), peer)
+            peer["terminal"]["replyBytes"][0] -= 1
+            with self.subTest(case=case), self.assertRaises(L.Refused):
+                L.shell_github_peer_receipt(peer, case)
+        peer = github_receipt_data("github-identity")["peer"]
+        peer["terminal"]["replyStops"][0] = "notify:broken-pipe"
+        with self.assertRaises(L.Refused):
+            L.shell_github_peer_receipt(peer, "github-identity")
+
+    def test_stdout_requires_order_one_receipt_no_separate_d_maps_and_integer_exit(self):
+        case, maps = "github-connect-refresh", github_map_data()
+        raw = github_capture_data(case, github_receipt_data(case, maps))
+        lines = raw.splitlines(keepends=True)
+        self.assertEqual(len(lines), 7)
+        bad_outputs = (b"".join(lines[:5] + lines[6:]), raw + lines[5],
+                       b"".join([lines[1], lines[0], *lines[2:]]),
+                       b"".join([*lines[:2], lines[3], lines[2], *lines[4:]]),
+                       b"".join(lines[:2] + lines[4:]),  # stale pre-reload shape
+                       b"".join(lines[:4] + lines[2:]),  # second reload forbidden
+                       b"".join([*lines[:4], lines[5], lines[4], lines[6]]),
+                       b"".join(lines[:6] + [lines[6].replace(b"verified", b"failed")]),
+                       raw.rstrip(b"\n"), raw + b"MRK_INSTALLED_NATIVE_CHILD=[]\n",
+                       *(b"".join(lines[:index] + lines[index + 1:]) for index in range(4)))
+        for stdout, stderr, code in [(value, b"", 0) for value in bad_outputs] + [
+                (raw, b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n", 0), (raw, b"", False), (raw, b"", 1)]:
+            with self.subTest(code=code, length=len(stdout)), self.assertRaises(L.Refused):
+                L.shell_github_result(stdout, stderr, case, code, maps)
+        receipt = github_receipt_data(case, maps)
+        for encoded in (L.canonical(receipt) + b"\n", json.dumps(receipt, indent=2).encode(), b"{}"):
+            with self.subTest(raw=encoded[:20]), self.assertRaises(L.Refused):
+                L.shell_github_receipt(encoded, case, maps)
+
+
+class InstalledGitHubClosedExportDataContracts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Import at test execution only; no verifier, command or host observer is called.
+        spec = importlib.util.spec_from_file_location(
+            "github_closed_export_data", SOURCE / "desktop/tools/ci_ubuntu_publication.py")
+        cls.CI = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.CI)
+
+    def test_exact_137_fictional_export_records_bind_case_capture_and_fixture_pins(self):
+        observed = github_closed_observation_data()
+        self.assertEqual(len(observed["files"]), 137)
+        self.assertIs(self.CI.shell_github_observation(observed, L), observed["githubReadOnly"])
+        self.assertFalse(observed["productQualified"])
+        self.assertFalse(observed["githubReadOnly"]["normalDestinationAction"])
+        self.assertFalse(observed["githubReadOnly"]["normalTransportPositive"])
+
+    def test_missing_duplicate_changed_or_qualified_copies_refuse(self):
+        variants = (
+            (("state",), "qualified"), (("productQualified",), True),
+            (("packageLifecycleQualified",), True), (("shellPackageBuilt",), True),
+            (("sourceSha",), "b" * 40), (("consumerAttempt",), 2),
+            (("unit",), "mrk-ubuntu-native-10-3.service"),
+            (("githubReadOnly", "normalDestinationAction"), 0),
+            (("githubReadOnly", "normalTransportPositive"), True),
+            (("githubReadOnly", "remainingCoverage"), []),
+            (("githubReadOnly", "materials", "before", "sha256"), "f" * 64),
+            (("githubReadOnly", "fixture", "releaseConfigCreated"), True),
+            (("githubReadOnly", "fixture", "sourceSha256"), "f" * 64),
+            (("githubReadOnly", "fixture", "project"), "/unbound/github-project"),
+            (("githubReadOnly", "casesCapture", "sha256"), "f" * 64),
+            (("files", 0, "path"), "lifecycle-unrelated.json"),
+            (("files", 0, "size"), True),
+            (("cases", "github-normal-negative"), {}),
+            (("cases", "github-connect-refresh", "githubReadOnly", "sourceCommit"), "c" * 40),
+        )
+        for path, replacement in variants:
+            observed = github_closed_observation_data(); github_data_set(observed, path, replacement)
+            with self.subTest(path=path), self.assertRaises((L.Refused, self.CI.D.Refused)):
+                self.CI.shell_github_observation(observed, L)
+        for duplicate in (False, True):
+            observed = github_closed_observation_data()
+            if duplicate:
+                observed["files"][-1] = deepcopy(observed["files"][0])
+            else:
+                observed["files"].pop()
+            with self.subTest(duplicate=duplicate), self.assertRaises(self.CI.D.Refused):
+                self.CI.shell_github_observation(observed, L)
+
+    def test_canonical_case_copy_must_match_the_original_export_even_if_both_summary_pins_change(self):
+        observed = github_closed_observation_data()
+        capture = observed["githubReadOnly"]["casesCapture"]
+        capture["sha256"] = "f" * 64
+        row = next(row for row in observed["files"] if row["path"] == "lifecycle-shell-cases.json")
+        row["sha256"] = capture["sha256"]
+        with self.assertRaises(self.CI.D.Refused):
+            self.CI.shell_github_observation(observed, L)
+
+# Fictional DATA only. None of these helpers starts nft, a socket, a service,
+# a product Child, or a compiler; they are not hosted boundary evidence.
+GITHUB_BOUNDARY_FICTIONAL_CASES = ("github-dns-deadline", "github-connect-deadline")
+GITHUB_BOUNDARY_FICTIONAL_META = {"version": "fictional", "release_name": "fictional", "json_schema_version": 1}
+
+
+def github_boundary_handoff_data():
+    value = github_handoff_data()
+    value["shell"]["githubReadOnly"] = L.shell_github_selection("github-readonly-installed-normal-boundaries-v1")
+    return value
+
+
+def github_boundary_receipt_data(case, *, unconnected=False, ipv6=False):
+    assert case in GITHUB_BOUNDARY_FICTIONAL_CASES
+    maps, value = github_map_data(), github_boundary_handoff_data()
+    receipt = github_receipt_data("github-handshake-deadline", maps)
+    dns = case == "github-dns-deadline"
+    receipt.update(case=case, productManifestSha256=L.M,
+                   notProven=["real-stalled-tcp-connect"] if dns else ["normal-resolver-withholding"])
+    original = receipt["originals"][0]
+    original["manifestSha256"] = L.M
+    original["maps"] = [{"role": name, "path": row["paths"][0],
+                          **{key: row[key] for key in ("deviceMajor", "deviceMinor", "inode")}}
+                         for name, row in sorted(maps["N"].items())]
+    source = {"address": "127.0.0.2", "port": 40001, "questionId": 123, "questionType": 1}
+    original["boundary"] = {
+        "kind": "normal-dns" if dns else "normal-connect", "childPid": 42, "fd": 7,
+        "inode": "7001", "uid": value["runnerUid"], "family": "ipv6" if ipv6 else "ipv4",
+        "protocol": "udp" if dns else "tcp", "localAddress": source["address"] if dns else "10.0.0.2",
+        "localPort": source["port"] if dns else 40002,
+        "remoteAddress": ("0.0.0.0" if unconnected else "127.0.0.53") if dns else "140.82.112.3",
+        "remotePort": (0 if unconnected else 53) if dns else 443, "state": ("07" if unconnected else "01") if dns else "02",
+        "originalFdStable": True, "observedBeforeDeadline": True, "peerSource": deepcopy(source) if dns else None}
+    if ipv6:
+        original["boundary"].update(localAddress="2606:4700::1111", remoteAddress="2606:50c0:8000::154")
+    if dns:
+        terminal = receipt["peer"]["terminal"]
+        terminal.update(case="G-dns-withhold", installedCase=case, manifestSha256=L.M, primaryPort=18553,
+                        connections=0, handshakes=0, requests=0, decryptedBytes=0, authBytes=0, closeNotify=0,
+                        tlsRefused=False, wireReadBytes=[], wireWriteBytes=[], replyBytes=[], sni=0, phase="dns",
+                        withheldWireBytes=0, bodyBytes=0, incompleteBody=False, clientStop=None,
+                        progressCount=2, dnsQuestions=2, dnsA=1, dnsAAAA=1, dnsReplies=0, dnsSource=source)
+        terminal["completion"] = {"bytes": 1, "eof": True, "closed": True, "primaryEmpty": None, "primaryUnexpected": 0,
+                                  "primaryClosed": None, "proxy": None, "dnsEmpty": True, "dnsClosed": True}
+    else:
+        receipt.update(peer=None, peerSha256=None)
+    return receipt
+
+
+def github_boundary_objects_data(value, case, *, post=False):
+    """Independently specified fictional nft dialect/handles, never live output."""
+    dns = case == "github-dns-deadline"
+    table = "mrk_gnb_" + value["runId"] + "_" + value["attempt"] + ("_dns" if dns else "_connect")
+    unit = "system.slice/mrk-ubuntu-native-" + value["runId"] + "-" + value["attempt"] + ".service"
+    def equal(left, right):
+        return {"match": {"op": "==", "left": left, "right": right}}
+    def payload(protocol, field):
+        return {"payload": {"protocol": protocol, "field": field}}
+    scope = [equal({"meta": {"key": "skuid"}}, value["runnerUid"]),
+             equal({"socket": {"key": "cgroupv2", "level": 2}}, unit)]
+    rows = [{"table": {"family": "inet", "name": table}}]
+    for name in (("dns_queries", "https_syns") if dns else ("https_syns",)):
+        packets = 2 if post and (name == "dns_queries" or not dns) else 0
+        rows.append({"counter": {"family": "inet", "table": table, "name": name,
+                                  "packets": packets, "bytes": packets * (80 if dns else 60)}})
+    rows.append({"chain": {"family": "inet", "table": table, "name": "output", "type": "route",
+                           "hook": "output", "prio": -300, "policy": "accept"}})
+    if dns:
+        rows.append({"rule": {"family": "inet", "table": table, "chain": "output", "expr": deepcopy(scope) + [
+            equal({"meta": {"key": "nfproto"}}, "ipv4"), equal(payload("ip", "daddr"), "127.0.0.53"),
+            equal(payload("udp", "dport"), 53), {"counter": "dns_queries"},
+            {"mangle": {"key": payload("udp", "dport"), "value": 18553}}]}})
+    rows.append({"rule": {"family": "inet", "table": table, "chain": "output", "expr": deepcopy(scope) + [
+        equal({"meta": {"key": "l4proto"}}, "tcp"), equal(payload("tcp", "dport"), 443),
+        equal({"&": [payload("tcp", "flags"), ["fin", "syn", "rst", "ack"]]}, "syn"),
+        {"counter": "https_syns"}, {"drop": None}]}})
+    for handle, row in enumerate(rows, 1):
+        next(iter(row.values()))["handle"] = handle
+    return rows
+
+
+def github_boundary_policy_data_fixture(value, case):
+    receipt = github_boundary_receipt_data(case)
+    installed = L._github_boundary_policy_objects(value, case, github_boundary_objects_data(value, case))
+    post = L._github_boundary_policy_objects(value, case, github_boundary_objects_data(value, case, post=True))
+    prefix = "github-boundary-" + ("dns" if case == "github-dns-deadline" else "connect")
+    unit = L.root_path(value).name + ".service"
+    domain = {"sourceSha": value["sourceSha"], "runId": value["runId"], "attempt": value["attempt"],
+              "runnerUid": value["runnerUid"], "invocationId": "1" * 32, "unit": unit,
+              "cgroupPath": "/sys/fs/cgroup/system.slice/" + unit,
+              "cgroupIdentity": [1, 321, stat.S_IFDIR | 0o755, 0, 0, 2],
+              "namespaces": {name: [4, index] for index, name in enumerate(("user", "pid", "net", "mnt"), 1)},
+              "bootId": "11111111-2222-3333-4444-555555555555"}
+    def protected(suffix, inode):
+        return {"path": str(L.root_path(value) / "private" / (prefix + "-" + suffix)), "size": 1, "sha256": "e" * 64,
+                "identity": [1, inode, stat.S_IFREG | 0o400, 0, 0, 1, 1, 10, 10]}
+    absence = L._shell_github_pin(L.canonical({"nftables": [{"metainfo": GITHUB_BOUNDARY_FICTIONAL_META}]}))
+    return {"schema": "installed-github-normal-boundary-policy-v1", "case": case,
+            "profile": "github-readonly-installed-normal-boundaries-v1", "sourceSha": value["sourceSha"], "domain": domain,
+            "intent": protected("intent.json", 501), "owned": protected("owned.json", 502),
+            "installed": installed, "post": post,
+            "productCommand": {"phase": "shell-" + case, "argv": L.shell_argv(value, case), "exitCode": 0, "timeoutSeconds": 60},
+            "nativeBoundary": deepcopy(receipt["originals"][0]["boundary"]), "state": "removed-and-observed",
+            "productOriginalsFinal": True, "noPriorWorkers": True, "absence": absence,
+            "policySha256": hashlib.sha256(L.shell_github_boundary_policy(value, case)).hexdigest(),
+            "faultHeldThroughOriginalFinality": True, "normalHttpRequests": False}
+
+
+def github_boundary_closed_observation_data():
+    """Fictional CI export shape; DOES NOT pass the root host/admission producer."""
+    value, observed = github_boundary_handoff_data(), github_closed_observation_data()
+    cases = {case: {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [],
+                    "githubReadOnly": github_boundary_receipt_data(case)} for case in GITHUB_BOUNDARY_FICTIONAL_CASES}
+    github = observed["githubReadOnly"]
+    host = L._shell_github_pin(b"fictional host DATA, not admission\n")
+    policies = {}
+    captures = {"shell-cases.json": L._shell_github_pin(L.canonical(cases))}
+    for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+        proof = github_boundary_policy_data_fixture(value, case)
+        pin = L._shell_github_pin(L.canonical(proof))
+        policies[case] = {"capture": pin, "evidence": proof}
+        prefix = "github-boundary-" + ("dns" if case == "github-dns-deadline" else "connect")
+        captures[prefix + "-policy.json"] = pin
+        captures[prefix + "-absence.stdout"] = proof["absence"]
+    for phase in ("before", "after"):
+        captures["shell-github-materials-" + phase + ".json"] = github["materials"][phase]
+        captures["shell-github-project-" + phase + ".json"] = github["fixture"][phase]
+        captures["github-boundary-host-" + phase + ".json"] = host
+    github.update(selection=value["shell"]["githubReadOnly"], casesCapture=captures["shell-cases.json"],
+                  normalDestinationAction=True, normalNetworkScope="normal-dns-and-scoped-https-acquisition-syns-only",
+                  normalHttpRequests=False,
+                  remainingCoverage=["current-twenty-two-synthetic-regressions", "separately-approved-normal-destination-negative"],
+                  boundaries={"host": {"before": host, "after": deepcopy(host)}, "policies": policies,
+                              "normalResolverWithholdingObserved": True, "realStalledTcpConnectObserved": True,
+                              "rootUidAndCgroupScoped": True, "normalHttpRequests": False})
+    files = [{"path": "lifecycle-" + name, **captures.get(name, L._shell_github_pin(b"fictional export\n"))}
+             for name in sorted(L.public_files(value) | {"client.stdout", "client.stderr"})]
+    observed.update(state="installed-github-normal-boundaries-observed", invocationId="1" * 32, cases=cases, files=files)
+    return observed
+
+
+class InstalledGitHubNormalBoundaryDataContracts(unittest.TestCase):
+    """Fixed two-case inert DATA contracts, not native or kernel qualification."""
+
+    def test_pair_is_separate_and_never_silently_runs_twenty_two_or_normal_http(self):
+        value = github_boundary_handoff_data()
+        self.assertEqual(L.shell_cases(value), GITHUB_BOUNDARY_FICTIONAL_CASES)
+        self.assertEqual(L.shell_github_selection()["cases"], list(GITHUB_FICTIONAL_CASES))
+        self.assertEqual(L.SHELL_GITHUB_CASE_DATA, GITHUB_FICTIONAL_CASES)
+        self.assertTrue(value["shell"]["githubReadOnly"]["normalDestinationAction"])
+        self.assertFalse(value["shell"]["githubReadOnly"]["normalHttpRequests"])
+        for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+            self.assertEqual(L.shell_github_role(case), "N")
+            self.assertEqual(L.shell_argv(value, case)[-2:], [str(L.root_path(value) / "shell-observer"), case])
+        files = L.public_files(value)
+        self.assertLessEqual(len(files), 135)
+        self.assertFalse(any(name.startswith("shell-github-connect-refresh") for name in files))
+        for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+            prefix = L._github_boundary_prefix(case)
+            self.assertIn(prefix + "-policy.json", files)
+            self.assertIn(prefix + "-absence.stdout", files)
+            phases = L.root_phases(value)
+            self.assertLess(phases.index(prefix + "-installed"), phases.index("shell-" + case))
+            self.assertLess(phases.index("shell-" + case), phases.index(prefix + "-post"))
+            self.assertLess(phases.index(prefix + "-delete"), phases.index(prefix + "-absence"))
+        for case in ("github-normal-negative", "github-connect-refresh"):
+            bad = deepcopy(value)
+            bad["shell"]["githubReadOnly"]["cases"].append(case)
+            with self.subTest(case=case), self.assertRaises(L.Refused):
+                L.shell_cases(bad)
+
+    def test_real_boundary_shapes_require_n_maps_and_connected_or_unconnected_dns(self):
+        maps = github_map_data()
+        for case, options in (("github-dns-deadline", {}), ("github-dns-deadline", {"unconnected": True}),
+                              ("github-connect-deadline", {}), ("github-connect-deadline", {"ipv6": True})):
+            receipt = github_boundary_receipt_data(case, **options)
+            with self.subTest(case=case, options=options):
+                self.assertEqual(L.shell_github_receipt(L.canonical(receipt), case, maps), receipt)
+                result = L.shell_github_result(github_capture_data(case, receipt), b"", case, 0, maps)
+                self.assertEqual(result["githubReadOnly"], receipt)
+                self.assertEqual(result["maps"], [])
+                self.assertEqual(receipt["productManifestSha256"], L.M)
+                if case == "github-connect-deadline":
+                    self.assertIsNone(receipt["peer"])
+                    self.assertIsNone(receipt["peerSha256"])
+                bad = deepcopy(receipt)
+                bad["originals"][0]["maps"] = github_receipt_data("github-handshake-deadline")["originals"][0]["maps"]
+                with self.assertRaises(L.Refused):
+                    L.shell_github_receipt(L.canonical(bad), case, maps)
+
+    def test_boundary_refuses_wrong_socket_phase_source_timing_and_normal_http(self):
+        changes = [
+            ("github-dns-deadline", ("originals", 0, "boundary", key), replacement)
+            for key, replacement in (("childPid", 0), ("fd", -1), ("inode", 7001), ("inode", "07001"),
+                                     ("inode", "18446744073709551616"), ("uid", True), ("state", "02"),
+                                     ("localAddress", "0.0.0.0"), ("localAddress", "not-an-ip"),
+                                     ("remotePort", 18553), ("originalFdStable", False), ("observedBeforeDeadline", False))]
+        changes += [
+            ("github-dns-deadline", ("originals", 0, "boundary", "peerSource", "port"), 40003),
+            ("github-dns-deadline", ("peer", "terminal", "dnsSource", "questionId"), 999),
+            ("github-dns-deadline", ("peer", "terminal", "dnsQuestions"), 0),
+            ("github-dns-deadline", ("peer", "terminal", "dnsReplies"), 1),
+            ("github-dns-deadline", ("peer", "terminal", "requests"), 1),
+            ("github-dns-deadline", ("peer", "terminal", "authBytes"), 1),
+            ("github-dns-deadline", ("peer", "terminal", "completion", "dnsClosed"), False),
+            ("github-connect-deadline", ("originals", 0, "boundary", "state"), "01"),
+            ("github-connect-deadline", ("originals", 0, "boundary", "remoteAddress"), "127.0.0.1"),
+            ("github-connect-deadline", ("originals", 0, "boundary", "remoteAddress"), "10.0.0.1"),
+            ("github-connect-deadline", ("originals", 0, "boundary", "remotePort"), 18443),
+            ("github-connect-deadline", ("peer",), {}),
+            ("github-connect-deadline", ("peerSha256",), L.SHELL_GITHUB_PEER_PINS["github_tls_peer.py"][1]),
+        ]
+        for case, path, replacement in changes:
+            receipt = github_boundary_receipt_data(case)
+            github_data_set(receipt, path, replacement)
+            with self.subTest(case=case, path=path, replacement=replacement), self.assertRaises(L.Refused):
+                L.shell_github_receipt(L.canonical(receipt), case, github_map_data())
+        for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+            for elapsed in (9999, 12000, True):
+                receipt = github_boundary_receipt_data(case)
+                receipt["originals"][0]["elapsedMs"] = elapsed
+                with self.subTest(case=case, elapsed=elapsed), self.assertRaises(L.Refused):
+                    L.shell_github_receipt(L.canonical(receipt), case, github_map_data())
+
+    def test_no_runtime_host_tuple_self_admission_or_resolver_shortcut(self):
+        self.assertIsNone(L.SHELL_GITHUB_BOUNDARY_HOST_PROFILE)
+        with self.assertRaisesRegex(L.Refused, "not yet independently SOURCE-admitted"):
+            L._github_boundary_host_admit({"runtimeSelfAdmission": True})
+        nss, hosts = b"hosts: files dns\n", b"127.0.0.1 localhost\n"
+        resolver = b"nameserver 127.0.0.53\noptions timeout:7 attempts:2 ndots:1 edns0 trust-ad\n"
+        shape = L._github_boundary_resolver_shape(nss, hosts, resolver)
+        self.assertEqual((shape["timeoutSeconds"], shape["attempts"], shape["maximumQuestions"]), (7, 2, 4))
+        for changed in ((b"hosts: files resolve dns\n", hosts, resolver),
+                        (b"hosts: files [NOTFOUND=return] dns\n", hosts, resolver),
+                        (nss, b"127.0.0.1 API.GITHUB.COM.\n", resolver),
+                        (nss, hosts, b"nameserver 127.0.0.53\n"),
+                        (nss, hosts, resolver + b"nameserver 127.0.0.54\n"),
+                        (nss, hosts, resolver + b"options rotate\n"),
+                        (nss, hosts, resolver.replace(b"ndots:1", b"ndots:2"))):
+            with self.subTest(changed=changed), self.assertRaises(L.Refused):
+                L._github_boundary_resolver_shape(*changed)
+        body = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text().split(
+            "def shell_github_boundary_host_materials():", 1)[1].split("\ndef ", 1)[0]
+        for forbidden in (".run_owned(", "command(", "socket.socket(", "getaddrinfo(", ".write(", "Popen("):
+            self.assertNotIn(forbidden, body)
+
+    def test_policy_is_atomic_stateless_port_only_and_every_effect_has_uid_and_cgroup(self):
+        value = github_boundary_handoff_data()
+        for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+            raw = L.shell_github_boundary_policy(value, case)
+            lines = raw.decode("ascii").splitlines()
+            table = "mrk_gnb_" + value["runId"] + "_" + value["attempt"] + (
+                "_dns" if case == "github-dns-deadline" else "_connect")
+            self.assertEqual(lines[0], "create table inet " + table)
+            self.assertIn("add chain inet " + table + " output { type route hook output priority -300; policy accept; }", lines)
+            rules = [line for line in lines if line.startswith("add rule ")]
+            self.assertEqual(len(rules), 2 if case == "github-dns-deadline" else 1)
+            scope = 'meta skuid ' + str(value["runnerUid"]) + ' socket cgroupv2 level 2 "system.slice/' + L.root_path(value).name + '.service"'
+            self.assertTrue(all(scope in rule for rule in rules))
+            self.assertTrue(rules[-1].endswith(
+                "meta l4proto tcp tcp dport 443 tcp flags & (fin | syn | rst | ack) == syn counter name https_syns drop"))
+            if case == "github-dns-deadline":
+                self.assertTrue(rules[0].endswith(
+                    "meta nfproto ipv4 ip daddr 127.0.0.53 udp dport 53 counter name dns_queries udp dport set 18553"))
+            for forbidden in ("redirect", "dnat", "snat", "notrack", "flow", "offload", " mark ", "flush", "type nat", "ip daddr set"):
+                self.assertNotIn(forbidden, raw.decode())
+        for bad_uid in (0, True, -1):
+            bad = deepcopy(value); bad["runnerUid"] = bad_uid
+            with self.assertRaises(L.Refused):
+                L.shell_github_boundary_policy(bad, "github-dns-deadline")
+        with self.assertRaises(L.Refused):
+            L.shell_github_boundary_policy(github_handoff_data(), "github-dns-deadline")
+
+    def test_actual_object_parser_rejects_uid_only_wrong_handles_predicates_and_dialect(self):
+        value = github_boundary_handoff_data()
+        profile = {"materials": {}, "nftMetainfo": GITHUB_BOUNDARY_FICTIONAL_META}
+        with patch.object(L, "SHELL_GITHUB_BOUNDARY_HOST_PROFILE", profile):
+            for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+                objects = github_boundary_objects_data(value, case)
+                raw = L.canonical({"nftables": [{"metainfo": GITHUB_BOUNDARY_FICTIONAL_META}, *objects]})
+                observed = L.shell_github_boundary_policy_readback(value, case, raw)
+                self.assertEqual(L._github_boundary_policy_evidence(value, case, observed), observed)
+                variants = []
+                for key in ("uid-only", "wrong-uid", "wrong-cgroup", "wrong-hook", "wrong-handle", "extra", "wrong-effect"):
+                    bad = deepcopy(objects)
+                    rule = next(row["rule"] for row in bad if "rule" in row)
+                    chain = next(row["chain"] for row in bad if "chain" in row)
+                    if key == "uid-only": del rule["expr"][1]
+                    elif key == "wrong-uid": rule["expr"][0]["match"]["right"] += 1
+                    elif key == "wrong-cgroup": rule["expr"][1]["match"]["right"] += ".foreign"
+                    elif key == "wrong-hook": chain["hook"] = "input"
+                    elif key == "wrong-handle": bad[0]["table"]["handle"] = True
+                    elif key == "extra": bad.append(deepcopy(bad[-1]))
+                    else: rule["expr"][-1] = {"accept": None}
+                    variants.append((key, bad))
+                for key, bad in variants:
+                    changed = L.canonical({"nftables": [{"metainfo": GITHUB_BOUNDARY_FICTIONAL_META}, *bad]})
+                    with self.subTest(case=case, key=key), self.assertRaises(L.Refused):
+                        L.shell_github_boundary_policy_readback(value, case, changed)
+                bad_meta = {"nftables": [{"metainfo": {**GITHUB_BOUNDARY_FICTIONAL_META, "json_schema_version": 2}}, *objects]}
+                with self.assertRaises(L.Refused):
+                    L.shell_github_boundary_policy_readback(value, case, L.canonical(bad_meta))
+
+    def test_closed_policy_rejects_matching_but_unscoped_summaries_and_changed_finality(self):
+        value = github_boundary_handoff_data()
+        for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+            receipt = github_boundary_receipt_data(case)
+            proof = github_boundary_policy_data_fixture(value, case)
+            self.assertIs(L.shell_github_boundary_policy_data(value, case, proof, receipt), proof)
+            for path, replacement in ((("productOriginalsFinal",), False), (("faultHeldThroughOriginalFinality",), False),
+                                      (("noPriorWorkers",), False), (("normalHttpRequests",), True),
+                                      (("domain", "runnerUid"), value["runnerUid"] + 1),
+                                      (("domain", "cgroupIdentity", 3), value["runnerUid"]),
+                                      (("domain", "namespaces", "net"), [0, 1]),
+                                      (("productCommand", "exitCode"), 1), (("absence", "size"), True)):
+                bad = deepcopy(proof); github_data_set(bad, path, replacement)
+                with self.subTest(case=case, path=path), self.assertRaises(L.Refused):
+                    L.shell_github_boundary_policy_data(value, case, bad, receipt)
+            bad = deepcopy(proof)
+            for phase in ("installed", "post"):
+                rule = next(row["rule"] for row in bad[phase]["immutable"] if "rule" in row)
+                del rule["expr"][1]
+            with self.assertRaises(L.Refused):
+                L.shell_github_boundary_policy_data(value, case, bad, receipt)
+            bad = deepcopy(proof)
+            if case == "github-dns-deadline":
+                bad["post"]["counters"]["https_syns"] = {"packets": 1, "bytes": 60}
+            else:
+                bad["post"]["counters"]["https_syns"] = {"packets": 0, "bytes": 0}
+            with self.assertRaises(L.Refused):
+                L.shell_github_boundary_policy_data(value, case, bad, receipt)
+
+    def test_reservations_precede_create_and_uncertain_capture_burns_its_finite_slot(self):
+        case = "github-dns-deadline"
+        slots = {}
+        with patch.multiple(L, _GITHUB_BOUNDARY_SLOTS=slots, _TOTAL=0, _FILES=[], _ROOT=Path("/inert"),
+                            _D=SimpleNamespace(write=Mock(side_effect=OSError("uncertain write")))):
+            roster = L._github_boundary_reserve(case)
+            self.assertTrue(any(name.startswith("stop-") for name in roster))
+            self.assertTrue(set(roster) == set(slots))
+            with self.assertRaises(L.Refused):
+                L._github_boundary_reserve(case)
+            name = "github-boundary-dns-create.stdout"
+            with self.assertRaises(OSError):
+                L._retain(name, b"not a creation authority")
+            self.assertTrue(slots[name]["entered"])
+            self.assertFalse(slots[name]["retained"])
+            self.assertEqual(L._TOTAL, 0)
+            with self.assertRaises(L.Refused):
+                L._retain(name, b"retry")
+            L._D.write.assert_called_once()
+        with patch.multiple(L, _GITHUB_BOUNDARY_SLOTS={}, _TOTAL=L.TOTAL_LIMIT, _FILES=[]):
+            with self.assertRaises(L.Refused):
+                L._github_boundary_reserve(case)
+
+    def test_collision_or_unknown_create_never_obtains_delete_authority(self):
+        value, case = github_boundary_handoff_data(), "github-dns-deadline"
+        empty = L.canonical({"nftables": [{"metainfo": GITHUB_BOUNDARY_FICTIONAL_META}]})
+        for failure in (FileExistsError("collision"), RuntimeError("unknown creation owner")):
+            events, state = [], {"domain": {}, "cgroupFd": 123}
+            def reserve(*args, **kwargs):
+                events.append("reserve"); return {}
+            def private(which, suffix, raw):
+                events.append(suffix); return {"path": suffix}
+            def command(current, action):
+                events.append(action)
+                if action == "before":
+                    return subprocess.CompletedProcess([], 0, empty, b"")
+                raise failure
+            with patch.multiple(L, _FAILED=False, _GITHUB_BOUNDARY_COMMAND_FINAL=True,
+                                SHELL_GITHUB_BOUNDARY_HOST_PROFILE={"materials": {}, "nftMetainfo": GITHUB_BOUNDARY_FICTIONAL_META}), \
+                 patch.object(L, "_github_boundary_host_check"), patch.object(L, "_github_boundary_domain", return_value=state), \
+                 patch.object(L, "_github_boundary_reserve", side_effect=reserve), \
+                 patch.object(L, "_github_boundary_private_write", side_effect=private), \
+                 patch.object(L, "_github_boundary_body_command", side_effect=command), \
+                 patch.object(L, "_github_boundary_close_after") as close:
+                with self.assertRaises(type(failure)):
+                    L._github_boundary_prepare(value, case, {"namespaces": {}}, {})
+                close.assert_called_once_with(state)
+            self.assertLess(events.index("reserve"), events.index("create"))
+            self.assertLess(events.index("intent.json"), events.index("create"))
+            self.assertNotIn("owned.json", events)
+            self.assertNotIn("delete", events)
+
+    def test_stoppost_capture_failure_preserves_first_latch_but_unknown_owner_closes_next_launch(self):
+        value, case = github_boundary_handoff_data(), "github-connect-deadline"
+        proof = github_boundary_policy_data_fixture(value, case)
+        for unknown in (False, True):
+            def run(argv, **kwargs):
+                if unknown:
+                    raise RuntimeError("unknown original wait")
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            owner = SimpleNamespace(run_owned=Mock(side_effect=run))
+            state = {"value": value, "case": case, "owned": {"installed": proof["installed"]}, "ownedRecord": {},
+                     "owner": owner, "next": "delete"}
+            controller = {"owner": owner, "endpoint": 100.0, "launchesClosed": False, "errors": [], "context": None}
+            with patch.multiple(L, _OWNER=owner, _END=100.0, _FAILED=True, _PHASE="inert",
+                                _GITHUB_BOUNDARY_COMMAND_FINAL=True), \
+                 patch.object(L.time, "monotonic", return_value=90.0), patch.object(L, "_environment", return_value={}), \
+                 patch.object(L, "_github_boundary_owned_admit"), patch.object(L, "_github_boundary_domain_check"), \
+                 patch.object(L, "_command_capture", side_effect=OSError("capture refusal")):
+                result = L._github_boundary_dispose_command(controller, state, "delete")
+                self.assertTrue(L._FAILED)
+                self.assertEqual(L._END, 100.0)
+                self.assertEqual(controller["launchesClosed"], unknown)
+                self.assertEqual(L._GITHUB_BOUNDARY_COMMAND_FINAL, not unknown)
+                self.assertEqual(result is None, unknown)
+                self.assertEqual(len(controller["errors"]), 1)
+                self.assertTrue(controller["errors"][0]["stage"].endswith("-owner" if unknown else "-capture"))
+                kwargs = owner.run_owned.call_args.kwargs
+                self.assertIs(kwargs["cleanup"], False)
+                self.assertEqual(kwargs["timeout"], 2)
+                state["next"] = "absence"
+                if unknown:
+                    with self.assertRaises(L.Refused):
+                        L._github_boundary_dispose_command(controller, state, "absence")
+                    owner.run_owned.assert_called_once()
+                else:
+                    L._github_boundary_dispose_command(controller, state, "absence")
+                    self.assertEqual(owner.run_owned.call_count, 2)
+                    self.assertEqual(controller["errors"][0]["stage"], "stop-github-boundary-connect-delete-capture")
+                    self.assertTrue(L._FAILED)
+
+    def test_stoppost_disposition_is_before_completion_missing_result_and_denial_success_gates(self):
+        value = github_boundary_handoff_data()
+        for fault in ("completion", "missing-result", "denial"):
+            events = []
+            def disposition(current):
+                events.append("dispose")
+                return {}, {"errors": [], "allOwnedPoliciesAbsent": True, "laterLaunchesClosed": False, "cases": {}}
+            def record(path, *args):
+                events.append(path.name)
+                if fault == "missing-result":
+                    raise FileNotFoundError("unit-result is missing")
+                return {"size": 1, "sha256": "e" * 64}
+            def denial(observation):
+                events.append("denial"); raise L.Refused("resource denial")
+            env = {} if fault == "completion" else {"SERVICE_RESULT": "success", "EXIT_CODE": "exited", "EXIT_STATUS": "0"}
+            with patch.multiple(L, _ROOT=Path("/inert"), _END=0.0), patch.object(L.time, "monotonic", return_value=90.0), \
+                 patch.object(L, "_root_ids"), patch.object(L, "_context", return_value=(value, "e" * 64)), \
+                 patch.object(L, "_github_boundary_stop", side_effect=disposition), patch.dict(L.os.environ, env, clear=True), \
+                 patch.object(L, "read", return_value=b"{}\n"), patch.object(L, "record", side_effect=record), \
+                 patch.object(L, "_domain_events", side_effect=denial):
+                with self.assertRaises((L.Refused, FileNotFoundError)):
+                    L.unit_stop()
+                self.assertEqual(L._END, 99.0)
+            self.assertEqual(events[0], "dispose")
+            self.assertEqual("denial" in events, fault == "denial")
+
+    def test_same_cgroup_contains_only_retained_self_no_uid_or_root_worker_exemption(self):
+        value = github_boundary_handoff_data()
+        domain = github_boundary_policy_data_fixture(value, "github-connect-deadline")["domain"]
+        current = needrestart_stat(stat.S_IFDIR | 0o755, ino=321, nlink=2, size=4096)
+        owner, me = object(), {"pid": 42, "startTicks": 1}
+        state = {"value": value, "domain": domain, "cgroupFd": 123, "owner": owner, "endpoint": 100.0, "self": me}
+        for workers in ("42\n", "42\n99\n", "99\n", ""):
+            def kernel(path, cap=None):
+                path = str(path)
+                if path == "/proc/self/cgroup": return "0::/system.slice/" + domain["unit"] + "\n"
+                if path.endswith("/boot_id"): return domain["bootId"] + "\n"
+                if path.endswith("/cgroup.type"): return "domain\n"
+                if path.endswith(("/cgroup.procs", "/cgroup.threads")): return workers
+                raise AssertionError("unreviewed mock kernel path")
+            with patch.multiple(L, _OWNER=owner, _END=100.0), patch.object(L.time, "monotonic", return_value=90.0), \
+                 patch.object(L, "_root_ids"), patch.object(L, "_kernel", side_effect=kernel), \
+                 patch.object(L, "_github_boundary_namespaces", return_value=domain["namespaces"]), \
+                 patch.object(L, "_github_boundary_self", return_value=me), \
+                 patch.dict(L.os.environ, {"INVOCATION_ID": domain["invocationId"]}, clear=True), \
+                 patch.object(L.os, "fstat", return_value=current), patch.object(Path, "lstat", return_value=current), \
+                 patch.object(L.os, "listdir", return_value=["cgroup.procs", "cgroup.threads"]), \
+                 patch.object(L.os, "stat", return_value=needrestart_stat(stat.S_IFREG | 0o644)):
+                if workers == "42\n":
+                    self.assertIs(L._github_boundary_domain_check(state, no_workers=True), domain)
+                else:
+                    with self.subTest(workers=workers), self.assertRaises(L.Refused):
+                        L._github_boundary_domain_check(state, no_workers=True)
+
+    def test_original_close_error_does_not_replace_body_first_failure(self):
+        first = RuntimeError("first body failure")
+        with patch.multiple(L, _FAILED=False, _GITHUB_BOUNDARY_BODY_ERRORS=[]), \
+             patch.object(L, "_github_boundary_close_domain", side_effect=OSError("cgroup close")):
+            try:
+                try:
+                    raise first
+                finally:
+                    L._github_boundary_close_after({})
+            except RuntimeError as error:
+                self.assertIs(error, first)
+            self.assertTrue(L._FAILED)
+            self.assertEqual(L._GITHUB_BOUNDARY_BODY_ERRORS, [{"stage": "original-cgroup-close", "errorType": "OSError"}])
+
+
+class InstalledGitHubNormalBoundaryClosedExportDataContracts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "github_boundary_closed_export_data", SOURCE / "desktop/tools/ci_ubuntu_publication.py")
+        cls.CI = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.CI)
+
+    def validate(self, observed):
+        value = github_boundary_handoff_data()
+        return self.CI.shell_github_observation(observed, L, "github-readonly-installed-normal-boundaries-v1",
+                                               runner_uid=value["runnerUid"], runner_gid=value["runnerGid"])
+
+    def test_pair_has_distinct_root_policy_and_export_pins_not_just_native_flags(self):
+        observed = github_boundary_closed_observation_data()
+        self.assertIs(self.validate(observed), observed["githubReadOnly"])
+        self.assertEqual(set(observed["cases"]), set(GITHUB_BOUNDARY_FICTIONAL_CASES))
+        self.assertFalse(observed["githubReadOnly"]["normalHttpRequests"])
+        self.assertIn("current-twenty-two-synthetic-regressions", observed["githubReadOnly"]["remainingCoverage"])
+        with self.assertRaises(self.CI.D.Refused):
+            self.CI.shell_github_observation(observed, L)  # Legacy profile never adopts the new pair.
+        with self.assertRaises(self.CI.D.Refused):
+            self.CI.shell_github_observation(observed, L, "github-readonly-installed-normal-boundaries-v1")
+
+    def test_missing_or_forged_root_policy_uid_invocation_scope_and_capture_refuse(self):
+        root = ("githubReadOnly", "boundaries")
+        changes = [(("invocationId",), "2" * 32), (("githubReadOnly", "normalDestinationAction"), False),
+                   (("githubReadOnly", "normalHttpRequests"), True), (("githubReadOnly", "remainingCoverage"), []),
+                   (root + ("rootUidAndCgroupScoped",), False),
+                   (root + ("host", "after", "sha256"), "f" * 64),
+                   (root + ("policies", "github-connect-deadline", "capture", "sha256"), "f" * 64),
+                   (root + ("policies", "github-connect-deadline", "evidence", "domain", "runnerUid"), 555),
+                   (root + ("policies", "github-connect-deadline", "evidence", "faultHeldThroughOriginalFinality"), False)]
+        for path, replacement in changes:
+            observed = github_boundary_closed_observation_data(); github_data_set(observed, path, replacement)
+            with self.subTest(path=path), self.assertRaises((L.Refused, self.CI.D.Refused)):
+                self.validate(observed)
+        observed = github_boundary_closed_observation_data()
+        row = observed["githubReadOnly"]["boundaries"]["policies"]["github-dns-deadline"]
+        for phase in ("installed", "post"):
+            rule = next(item["rule"] for item in row["evidence"][phase]["immutable"] if "rule" in item)
+            del rule["expr"][1]
+        row["capture"] = L._shell_github_pin(L.canonical(row["evidence"]))
+        exported = next(item for item in observed["files"] if item["path"] == "lifecycle-github-boundary-dns-policy.json")
+        exported.update(row["capture"])
+        with self.assertRaises(L.Refused):
+            self.validate(observed)  # Matching altered pins cannot legitimize an unscoped policy.
+
+
+class CompositionRoutingRegressionContracts(unittest.TestCase):
+    def test_closed_github_result_retains_common_checks_without_android_admission(self):
+        # Exercise the real dispatcher with fictional already-closed records;
+        # neither profile may acquire material or start a service in this test.
+        for fixture in (github_handoff_data, github_boundary_handoff_data):
+            value = fixture()
+            shell = value["shell"]
+            outcome = {"shellRosterSha256": shell["rosterSha256"],
+                "shellProducerAttempt": shell["producerAttempt"], "acceptedU": shell["acceptedU"],
+                **L.shell_transport_provenance(shell), "consumerAttempt": value["attempt"],
+                "packageLifecycleQualified": False, "shellPackageBuilt": False}
+            raw, expected, result = {}, object(), object()
+            with patch.object(L, "shell_closed_loader", return_value=expected) as loader, \
+                 patch.object(L, "shell_github_closed_result", return_value=result) as github, \
+                 patch.object(L, "_android_closed_publication", side_effect=L.Refused("android-publication-boundary")) as android:
+                self.assertIs(L.shell_closed_result(value, outcome, raw), result)
+                loader.assert_called_once_with(value, raw)
+                github.assert_called_once_with(value, outcome, raw, expected)
+                android.assert_not_called()
+                loader.reset_mock(); github.reset_mock()
+                with self.assertRaises(L.Refused):
+                    L.shell_closed_result(value, {**outcome, "consumerAttempt": "wrong"}, raw)
+                loader.assert_not_called(); github.assert_not_called(); android.assert_not_called()
+                loader.side_effect = L.Refused("loader-finality-boundary")
+                with self.assertRaisesRegex(L.Refused, "loader-finality-boundary"):
+                    L.shell_closed_result(value, outcome, raw)
+                github.assert_not_called(); android.assert_not_called()
+                loader.side_effect = None
+                value["shell"].pop("githubReadOnly")
+                with self.assertRaisesRegex(L.Refused, "android-publication-boundary"):
+                    L.shell_closed_result(value, outcome, raw)
+                android.assert_called_once_with(value, None)
+                github.assert_not_called()
+
+    def test_root_failures_retain_both_original_diagnostics_without_context_lookup(self):
+        # main's exception path has no admitted handoff-local `value`. Its
+        # original cached diagnostics are inert even before any shell admission.
+        for role in ("unit-start", "unit-stop"):
+            for publication in (None, {"state": "preparing", "qualified": False, "cleanupClaimed": False}):
+                with patch.multiple(L, _ROOT=Path("/inert-root"), _D=object(), _FAILED=False,
+                        _PHASE="inert-first-failure", _COMMANDS=[], _FILES=[],
+                        _ANDROID_PUBLICATION=publication, _GITHUB_BOUNDARY_STOP={"original": "retained"},
+                        _GITHUB_BOUNDARY_BODY_ERRORS=["inert-cleanup-error"]), \
+                     patch.object(L.sys, "argv", ["lifecycle", role]), \
+                     patch.object(L.os, "umask"), patch.dict(L.os.environ, {}, clear=True), \
+                     patch.object(L, "unit_start", side_effect=L.Refused("original refusal")), \
+                     patch.object(L, "unit_stop", side_effect=L.Refused("original refusal")), \
+                     patch.object(L, "_retain") as retained, \
+                     patch.object(L.sys, "stderr", new=io.StringIO()) as stderr:
+                    with self.assertRaises(SystemExit) as exit_:
+                        L.main()
+                    self.assertEqual(exit_.exception.code, 1)
+                    self.assertTrue(L._FAILED)
+                    retained.assert_called_once()
+                    name, raw = retained.call_args.args
+                    self.assertEqual(name, role + "-error.json")
+                    record = L.decode(raw)
+                    self.assertEqual(record["reason"], "original refusal")
+                    self.assertEqual(record["errorType"], "Refused")
+                    self.assertEqual(record["androidPublication"], publication)
+                    self.assertEqual(record["normalBoundaryDisposition"], {"original": "retained"})
+                    self.assertEqual(record["normalBoundaryCleanupErrors"], ["inert-cleanup-error"])
+                    self.assertFalse(record["cleanupProven"])
+                    self.assertTrue(record["laterLaunchesClosed"])
+                    self.assertNotIn("evidence could not be closed", stderr.getvalue())
+
+
+class Ordinary21LifecycleContracts(unittest.TestCase):
+    """Inert SOURCE/DATA and mocked-filesystem tests, never a native owner."""
+    cases = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
+             "session-inputs", "session-refusals", "session-loss", "session-deadline", "session-ios-firebase", "metadata-save",
+             "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative", "offline-drift",
+             "offline-cancel", "offline-settlement", "settled-failure", "version-save")
+    remaining = ("android-build", "android-build-failure", "android-build-cancel", "android-build-refusals")
+
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.guards = [self.stack.enter_context(patch.object(L, name, side_effect=AssertionError("No Android/native work in ordinary21 DATA tests")))
+                       for name in ("command", "package_command", "_publish_android", "_finish_android_publication",
+                                    "_android_closed_publication", "_android_material_engine", "shell_android_materials",
+                                    "shell_android_compile_environment", "shell_android_publication_data",
+                                    "_shell_android_fixtures_prepare", "_shell_android_inventory", "_shell_android_roster")]
+        self.guards.append(self.stack.enter_context(patch.object(L.subprocess, "Popen", side_effect=AssertionError("No process launch"))))
+
+    def tearDown(self):
+        for guard in self.guards:
+            guard.assert_not_called()
+
+    def value(self):
+        value = installed_handoff()
+        value.pop("installed")
+        pin = {"size": 12, "sha256": "c" * 64}
+        binaries = {role: {"path": "/task/admitted-shell/" + role, **pin} for role in ("normal", "observer")}
+        compiler = {"sourceSha": value["sourceSha"], "sourceTree": "d" * 40, "runId": value["runId"], "attempt": "1",
+            "features": L.SHELL_FEATURES, "manifestSha256": L.M, "protocolSha256": L.Q, "exportedArtifacts": binaries,
+            "ordinary21": L.shell_ordinary_selection(), "androidBuildMaterials": None,
+            "androidBuildBindings": {}, "androidBuildPublication": None}
+        value["shell"] = {"binaries": binaries, "compiler": compiler, "rosterSha256": "e" * 64,
+            "producerAttempt": "1", "artifactId": "17", "loaderPolicy": {}, "ordinary21": L.shell_ordinary_selection(),
+            "acceptedU": {"sourceSha": value["compilerRecords"]["sourceSha"], "runId": "5", "attempt": "1", "artifactId": "11"}}
+        return value
+
+    def test_exact21_selection_preserves_historical25_github_and_existing_caps(self):
+        value = self.value()
+        self.assertEqual(L.shell_ordinary_selection(), {"profile": "ordinary21-v1", "cases": list(self.cases),
+            "remainingRequiredCases": list(self.remaining), "namespacePlaceholders": sorted(self.remaining),
+            "androidPreparation": False, "androidExecution": False})
+        self.assertEqual(L.shell_cases(value), self.cases)
+        self.assertEqual(L.shell_observers(value), self.cases[1:])
+        self.assertEqual(L.shell_android_cases(value), ())
+        self.assertFalse(L.shell_android(value))
+        self.assertEqual(L.result_state(value), "ordinary21-shell-installed-runtime-connection-observed")
+        historical = {"shell": {}}
+        self.assertEqual(L.shell_cases(historical), (*self.cases, *self.remaining))
+        self.assertEqual(L.SHELL_CASES, (*self.cases, *self.remaining))
+        self.assertTrue(L.shell_android(historical))
+        self.assertEqual(L.result_state(historical), "normal-shell-installed-runtime-connection-observed")
+        self.assertEqual((len(L.public_files(historical)), len(L.public_files(value))), (188, 170))
+        self.assertEqual((len(L.root_phases(historical)), len(L.root_phases(value))), (39, 35))
+        self.assertEqual(L.shell_public_limit(value), L.shell_public_limit(historical))
+        self.assertEqual((L.SHELL_PUBLIC_FILE_LIMIT, L.TOTAL_LIMIT, L.SHELL_FIXTURE_NAMESPACE_LIMIT), (190, 32 << 20, 2048))
+        self.assertEqual(L.shell_fixture_children(value), L.SHELL_FIXTURE_CHILDREN)
+        self.assertEqual(len(L.shell_fixture_children(value)), 24)
+        self.assertEqual({name for name in L.public_files(value) if name.startswith("shell-android-")}, set())
+        self.assertEqual({name for name in L.public_files(value) if "ordinary21-placeholders" in name},
+                         {"shell-ordinary21-placeholders-before.json", "shell-ordinary21-placeholders-after.json"})
+        for profile, cases in ((L.SHELL_GITHUB_PROFILE, L.SHELL_GITHUB_CASES),
+                               (L.SHELL_GITHUB_BOUNDARY_PROFILE, L.SHELL_GITHUB_BOUNDARY_CASES)):
+            github = {"shell": {"githubReadOnly": L.shell_github_selection(profile)}}
+            self.assertEqual(L.shell_cases(github), cases)
+            self.assertFalse(L.shell_ordinary(github)); self.assertFalse(L.shell_android(github))
+            self.assertFalse(any("ordinary21" in name for name in L.public_files(github)))
+
+    def test_selection_is_closed_and_cannot_mix_profiles_or_freeform_cases(self):
+        for fault in (None, {}, "ordinary21-v1", {**L.shell_ordinary_selection(), "profile": "ordinary20-v1"},
+                      {**L.shell_ordinary_selection(), "cases": list(self.cases[:-1])},
+                      {**L.shell_ordinary_selection(), "cases": [*self.cases, self.remaining[0]]},
+                      {**L.shell_ordinary_selection(), "cases": list(reversed(self.cases))},
+                      {**L.shell_ordinary_selection(), "remainingRequiredCases": []},
+                      {**L.shell_ordinary_selection(), "namespacePlaceholders": []},
+                      {**L.shell_ordinary_selection(), "androidPreparation": 0},
+                      {**L.shell_ordinary_selection(), "androidExecution": True},
+                      {**L.shell_ordinary_selection(), "extra": False}):
+            for reader in (L.shell_cases, L.public_files, L.result_state):
+                with self.subTest(fault=fault, reader=reader.__name__), self.assertRaises(L.Refused):
+                    reader({"shell": {"ordinary21": fault}})
+        for field in ("githubReadOnly", "androidPublication", "localTransport"):
+            with self.subTest(field=field), self.assertRaises(L.Refused):
+                L.shell_cases({"shell": {"ordinary21": L.shell_ordinary_selection(), field: {}}})
+
+    def test_original_handoff_requires_scope_correspondence_and_present_null_android_fields(self):
+        self.assertIsNone(L.shell_handoff(self.value(), []))
+        for target, field, replacement in (
+            ("shell", "ordinary21", None), ("compiler", "ordinary21", None),
+            ("compiler", "ordinary21", {**L.shell_ordinary_selection(), "cases": list(self.cases[:-1])}),
+            *(("compiler", key, "missing") for key in ("ordinary21", "androidBuildMaterials", "androidBuildBindings", "androidBuildPublication")),
+            ("compiler", "androidBuildMaterials", {}), ("compiler", "androidBuildBindings", {"MRK_ANDROID_TOOL_INSTANCE": "invented"}),
+            ("compiler", "androidBuildPublication", {}),
+            *(("compiler", key, {}) for key in ("androidPreparation", "androidOsContractInput", "githubReadOnly", "localTransport")),
+            *(("shell", key, {}) for key in ("androidPublication", "githubReadOnly", "localTransport")),
+        ):
+            value = self.value(); row = value["shell"] if target == "shell" else value["shell"]["compiler"]
+            if replacement == "missing": row.pop(field)
+            else: row[field] = replacement
+            with self.subTest(target=target, field=field, value=replacement), self.assertRaises(L.Refused):
+                L.shell_handoff(value, [])
+        value = self.value(); value["shell"].pop("ordinary21")
+        with self.assertRaises(L.Refused): L.shell_handoff(value, [])
+
+    def test_capacity_admits_selected21_without_android_material_or_fixture_rosters(self):
+        value = self.value()
+        value["compilerRecords"]["capacity"] = {"runtimeBytes": 1024,
+            "installedBytes": {key: 2048 for key in L.VERSIONS}, "installedEntries": {key: 16 for key in L.VERSIONS}}
+        with patch.object(L.os, "statvfs", return_value=SimpleNamespace(f_bavail=1 << 30, f_frsize=4096, f_favail=1 << 30)), \
+             patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)):
+            self.assertIsNone(L._capacity(value))
+
+    def test_placeholder_decoder_requires_exact_empty_originals_and_unchanged_capture(self):
+        value = self.value(); document = ordinary_placeholder_data(value); raw = L.canonical(document)
+        result = L.shell_ordinary_placeholders(value, raw, raw)
+        self.assertTrue(result["namespaceOnly"]); self.assertTrue(result["empty"])
+        self.assertEqual(result["names"], sorted(self.remaining)); self.assertEqual(result["before"], result["after"])
+        for fault in ("child", "mode", "owner", "symlink", "alias", "device", "missing", "extra", "schema", "scope", "replacement", "stamp"):
+            changed = deepcopy(document); row = changed["entries"][0]
+            if fault == "child": row["children"].append("unexpected")
+            elif fault == "mode": row["identity"][2] = stat.S_IFDIR | 0o755
+            elif fault == "owner": row["identity"][3] = 1001
+            elif fault == "symlink": row["kind"] = "symlink"
+            elif fault == "alias": row["identity"][1] = document["namespace"]["identity"][1]
+            elif fault == "device": row["identity"][0] = 2
+            elif fault == "missing": changed["entries"].pop()
+            elif fault == "extra": changed["entries"].append(deepcopy(row))
+            elif fault == "schema": changed["schemaVersion"] = True
+            elif fault == "scope": changed["ordinary21"]["androidExecution"] = True
+            elif fault == "replacement": row["identity"][1] += 100
+            else: row["identity"][8] += 1
+            with self.subTest(fault=fault), self.assertRaises(L.Refused):
+                L.shell_ordinary_placeholders(value, raw, L.canonical(changed))
+
+    def test_complete_mocked_preparation_creates_only_four_empty_root_owned_placeholders(self):
+        value = self.value(); root = L.shell_fixture_root(value)
+        namespace = fixture_namespace_data(value)
+        ancestry = {key: namespace[key] for key in ("control", "ancestors")}
+        nodes = {}; writes = []
+        def mkdir(path, *, mode):
+            if path in nodes: raise FileExistsError("inert exclusive creation conflict")
+            nodes[path] = inert_stat(2000 + len(nodes), stat.S_IFDIR | mode, size=4096, stamp=11)
+            if path.parent in nodes: nodes[path.parent].st_nlink += 1
+        def metadata(path):
+            if path not in nodes: raise FileNotFoundError("inert absent name")
+            return deepcopy(nodes[path])
+        def write(path, raw, mode):
+            self.assertNotIn(path, nodes); writes.append(path)
+            nodes[path] = inert_stat(2000 + len(nodes), stat.S_IFREG | mode, size=len(raw), stamp=11)
+        def chmod(path, mode): nodes[path].st_mode = stat.S_IFMT(nodes[path].st_mode) | mode
+        def chown(path, uid, gid, **kwargs): nodes[path].st_uid, nodes[path].st_gid = uid, gid
+        def symlink(target, path): nodes[path] = inert_stat(2000 + len(nodes), stat.S_IFLNK | 0o777, size=len(target), stamp=11)
+        def scan(path):
+            context = Mock(); context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=p.name) for p in nodes if p.parent == path))
+            context.__exit__ = Mock(return_value=False); return context
+        with patch.object(L, "_ROOT", L.root_path(value)), patch.object(L, "_shell_fixture_ancestry", return_value=ancestry), \
+             patch.object(Path, "mkdir", autospec=True, side_effect=mkdir), patch.object(Path, "lstat", autospec=True, side_effect=metadata), \
+             patch.object(L, "_D", SimpleNamespace(write=write)), patch.object(L, "_xattrs"), \
+             patch.object(L.os, "chown", side_effect=chown), patch.object(L.os, "chmod", side_effect=chmod), \
+             patch.object(L.os, "symlink", side_effect=symlink), patch.object(L.os, "scandir", side_effect=scan), \
+             patch.object(L, "_retain") as retained:
+            binding = L._shell_fixtures_prepare(value)
+            self.assertEqual(L.decode(binding)["children"], list(L.SHELL_FIXTURE_CHILDREN))
+            retained.assert_called_once()
+            name, before = retained.call_args.args
+            self.assertEqual(name, "shell-ordinary21-placeholders-before.json")
+            after = L.canonical(L._shell_ordinary_placeholders_inventory(value, binding))
+            self.assertTrue(L.shell_ordinary_placeholders(value, before, after)["empty"])
+            placeholders = {root / name for name in self.remaining}
+            self.assertEqual({p for p in nodes if any(p == q or p.is_relative_to(q) for q in placeholders)}, placeholders)
+            self.assertFalse(any(p == q or p.is_relative_to(q) for p in writes for q in placeholders))
+            for path in placeholders:
+                self.assertEqual((nodes[path].st_mode, nodes[path].st_uid, nodes[path].st_gid), (stat.S_IFDIR | 0o700, 0, 0))
+            # Existing namespace occupants cannot be adopted on a repeated call.
+            with self.assertRaises(FileExistsError): L._shell_ordinary_placeholders_prepare(value, root)
+            nodes[root / self.remaining[0] / "unexpected"] = inert_stat(9999, stat.S_IFREG | 0o600)
+            with self.assertRaises(L.Refused): L._shell_ordinary_placeholders_inventory(value, binding)
+
+    def test_closed_decoder_validates_all21_original_receipts_and_placeholder_proof_without_android(self):
+        value, outcome, files, expected = closed_shell_data(ordinary=True)
+        with patch.object(L, "shell_closed_loader", return_value=expected):
+            result = L.shell_closed_result(value, outcome, files)
+        self.assertEqual(set(result["cases"]), set(self.cases))
+        self.assertEqual(result["cases"]["settled-failure"]["exitCode"], 1)
+        self.assertFalse({"androidBuild", "androidPublication", "githubReadOnly"} & set(result))
+        self.assertEqual(result["ordinary21"]["remainingRequiredCases"], list(self.remaining))
+        self.assertTrue(result["namespacePlaceholders"]["empty"])
+
+    def test_closed_decoder_refuses_scope_downgrade_mixed_results_and_partial_or_extra_rosters(self):
+        value, outcome, files, expected = closed_shell_data(ordinary=True)
+        for fault in ("handoff-scope", "outcome-scope", "null-scope", "android-result", "github-result", "file-missing", "file-extra",
+                      *self.cases, *self.remaining, "github-synthetic"):
+            current, result, raw = deepcopy(value), deepcopy(outcome), dict(files)
+            if fault == "handoff-scope": current["shell"].pop("ordinary21")
+            elif fault == "outcome-scope": result.pop("ordinary21")
+            elif fault == "null-scope": result["ordinary21"] = None
+            elif fault == "android-result": result["androidPublication"] = {}
+            elif fault == "github-result": result["githubReadOnly"] = {}
+            elif fault == "file-missing": raw.pop("shell-positive.stdout")
+            elif fault == "file-extra": raw["shell-android-build.stdout"] = b""
+            else:
+                cases = L.decode(raw["shell-cases.json"])
+                if fault in self.cases: cases.pop(fault)
+                else: cases[fault] = {"case": fault, "exitCode": 0}
+                raw["shell-cases.json"] = L.canonical(cases)
+            with self.subTest(fault=fault), patch.object(L, "shell_closed_loader", return_value=expected), self.assertRaises(L.Refused):
+                L.shell_closed_result(current, result, raw)
 
 
 if __name__ == "__main__":

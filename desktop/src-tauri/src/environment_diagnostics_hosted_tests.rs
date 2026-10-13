@@ -544,8 +544,18 @@ impl Run {
         loop {
             let status = self.document.environment_diagnostics_status().map_err(|_| "fixture_status_lost")?;
             if let Some(last) = status.last_terminal { if last.run_id == s.id && last.owner_generation == s.generation { return Ok(last); } }
-            if self.permit.case == Case::L7 && s.watchdog_return.lock().map_err(|_| "fixture_join_record")?.is_some() {
-                return status.active.ok_or("fixture_negative_original_lost");
+            if matches!(self.permit.case, Case::L5 | Case::L6a | Case::L6b | Case::L6c | Case::L7)
+                && s.watchdog_return.lock().map_err(|_| "fixture_join_record")?.is_some() {
+                // Actual final Ready was consumed once, but finality veto keeps
+                // this same original active. An Unknown projection alone is
+                // not permission to skip the original management joins.
+                let r = self.bridge.diagnostics.inner.lock();
+                require(original_session(&r, &s) && r.active.as_ref().is_some_and(|a| a.final_join_seen && a.unknown),
+                    "fixture_negative_original_lost")?;
+                let active = status.active.ok_or("fixture_negative_original_lost")?;
+                require(active.run_id == s.id && active.owner_generation == s.generation && active.context == s.context
+                    && active.finality == Finality::Unknown, "fixture_negative_original_lost")?;
+                return Ok(active);
             }
             tokio::time::timeout_at(tokio::time::Instant::from_std(s.clocks.finality + Duration::from_secs(20)), changes.changed()).await
                 .map_err(|_| "fixture_originals_not_settled")?.map_err(|_| "fixture_settlement_wake_lost")?;
@@ -626,6 +636,7 @@ fn join_kind<T>(record: &Mutex<Option<Result<T, tokio::task::JoinError>>>, okay:
 }
 async fn receipt(run: &Run) -> Check<Value> {
     let owner = run.original()?; let negative = run.permit.case == Case::L7;
+    let late = matches!(run.permit.case, Case::L5 | Case::L6a | Case::L6b | Case::L6c);
     let book = owner.resources.lock().await;
     let startup = owner.startup.lock().map_err(|_| "fixture_startup_record")?;
     let input = owner.input.lock().await; let output = owner.output.lock().await; let error = owner.error.lock().await;
@@ -638,6 +649,7 @@ async fn receipt(run: &Run) -> Check<Value> {
     let watchdog_retained = owner.watchdog.try_lock().map_err(|_| "fixture_watchdog_slot_busy")?.is_some();
     require(manager == "ok-unit" && !manager_retained
         && if negative { driver == "panic" && driver_retained && observer == "ok-false" && observer_retained && watchdog == "ok-false" && watchdog_retained }
+            else if late { driver == "ok-unit" && !driver_retained && observer == "ok-true" && observer_retained && watchdog == "ok-false" && watchdog_retained }
             else { driver == "ok-unit" && !driver_retained && observer == "ok-true" && !observer_retained && watchdog == "ok-true" && !watchdog_retained }, "fixture_original_task_receipts")?;
     require(book.inspection.is_none() && book.acquisition.is_none() && !book.inspection_failed && !book.acquisition_failed && !startup.failed
         && startup.child.is_none() && book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none()
@@ -661,7 +673,8 @@ async fn receipt(run: &Run) -> Check<Value> {
     let disabled = run.bridge.diagnostics.disabled();
     // Do not take can_exit while holding a registry guard.
     let can_exit = run.bridge.diagnostics.can_exit();
-    require(active_retained == negative && can_exit != negative, "fixture_normal_exit_gate")?;
+    require(active_retained == (late || negative) && can_exit != (late || negative)
+        && owner.resource_unknown.load(Ordering::SeqCst) == (late || negative), "fixture_normal_exit_gate")?;
     Ok(json!({"startup":{"attempted":startup.attempted,"returned":startup.returned,"failed":startup.failed},
         "inspection":{"joined":book.inspection_joined,"failed":book.inspection_failed,"retained":book.inspection.is_some()},
         "acquisition":{"joined":book.acquisition_joined,"failed":book.acquisition_failed,"retained":book.acquisition.is_some()},

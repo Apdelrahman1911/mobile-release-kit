@@ -28,7 +28,7 @@ from mobile_release import github_workflow_edit as edit
 from mobile_release import init_transaction as transaction
 from mobile_release.api import _github_setup as setup
 from mobile_release.api.contracts import ApiError
-from mobile_release.workflow_payloads import GITHUB_WORKFLOWS, render_workflow_caller
+from mobile_release.workflow_payloads import GITHUB_WORKFLOWS, canonical_workflow_reference, render_workflow_caller
 
 _PROFILE = transaction.TypedEditProfile.GITHUB_WORKFLOWS
 _PATHS = tuple(path for _, path in GITHUB_WORKFLOWS)
@@ -123,13 +123,14 @@ class InertWorkspace:
             raise InertFailure(InertOutcome("not_started", "not_created", "settled", "filesystem_error"))
         return self.lease.originals[index]
 
-    def apply_workflows_typed(self, changes):
+    def apply_workflows_typed(self, changes, *, resource_sha256=None):
         assert self.phase == 2 and self.lease.active and self.lease.profile is _PROFILE
         assert type(changes) is list and len(changes) == 4
         assert tuple(item.path for item, _ in changes) == _PATHS
+        assert resource_sha256 == hashlib.sha256(resource_bytes()).hexdigest()
         for item, payload in changes:
             assert type(item) is transaction.ObservedFile
-            assert payload is None or item.before is None and type(payload) is bytes and len(payload) <= 16 * 1024
+            assert payload is None or type(payload) is bytes and 0 < len(payload) <= 16 * 1024
         self.lease.applies.append(changes)
         if self.lease.on_apply is not None:
             self.lease.on_apply()
@@ -314,7 +315,7 @@ class GitHubWorkflowEditTests(unittest.TestCase):
                 lease, object.__new__(shared.PreparedConfigEdit)).reason, "invalid_params")
 
     def test_successful_review_and_apply_use_shared_generation_once_and_four_fixed_slots(self):
-        with inert_native() as token, patch.object(setup, "propose_github_setup", wraps=setup.propose_github_setup) as proposed:
+        with inert_native() as token, patch.object(setup, "_propose_with_templates", wraps=setup._propose_with_templates) as proposed:
             expected = expected_payloads()
             value = draft()
             value["projectChecks"]["preflight"] = [["private-draft-command", "private-draft-argument"]]
@@ -339,7 +340,7 @@ class GitHubWorkflowEditTests(unittest.TestCase):
             self.assertIsNot(proposed.call_args.args[0], value)
             self.assertIsNot(proposed.call_args.args[0]["projectChecks"], value["projectChecks"])
             self.assertIsNone(proposed.call_args.args[3])
-            with patch.object(setup, "propose_github_setup", side_effect=AssertionError("Apply must not regenerate")):
+            with patch.object(setup, "_propose_with_templates", side_effect=AssertionError("Apply must not regenerate")):
                 result = edit.apply_github_workflow_edit(lease, plan)
             self.assertEqual(result, shared.CoreEditOutcome("committed", "clean", "settled", "none"))
             self.assertEqual([payload for _, payload in lease.applies[0]], list(expected))
@@ -414,6 +415,56 @@ class GitHubWorkflowEditTests(unittest.TestCase):
             _, all_conflict = prepare(InertLease((b"different",) * 4))
             self.assertEqual([row["id"] for row in all_conflict.view["conflicts"]], list(_IDS))
             self.assertLess(len(json.dumps(all_conflict.view).encode()), 4096)
+
+    def test_canonical_matcher_requires_literal_shape_and_consistent_repeated_markers(self):
+        template = (b"# literal [.] ${expression}\n__MOBILE_RELEASE_KIT_REPOSITORY__@__MOBILE_RELEASE_KIT_SHA__\n"
+                    b"again: __MOBILE_RELEASE_KIT_REPOSITORY__@__MOBILE_RELEASE_KIT_SHA__\n")
+        with ExitStack() as stack:
+            no_io(stack)
+            old = render_workflow_caller(template, "Other/toolkit", "b" * 40)
+            self.assertEqual(canonical_workflow_reference(template, old), ("Other/toolkit", "b" * 40))
+            for changed in (old + b"# customized\n", old.replace(b"\n", b"\r\n"), old[:-1],
+                            old.replace(b"literal [.]", b"literal x"), old.replace(b"b" * 40, b"c" * 40, 1),
+                            old.replace(b"Other/toolkit", b"Other/changed", 1), old.replace(b"Other/toolkit", b"../unsafe"),
+                            old.replace(b"b" * 40, b"B" * 40), b"\xff", b"x" * (16 * 1024 + 1)):
+                self.assertIsNone(canonical_workflow_reference(template, changed))
+            self.assertIsNone(canonical_workflow_reference(b"missing markers", old))
+
+    def test_mixed_canonical_updates_freeze_complete_previous_bytes_and_resource(self):
+        with inert_native():
+            templates = json.loads(resource_bytes())["workflows"]
+            old = tuple(render_workflow_caller(templates[identity].encode(), "Previous/toolkit", "b" * 40)
+                        for identity in _IDS)
+            generated = expected_payloads()
+            lease = InertLease((old[0], None, generated[2], old[3]))
+            _, plan = prepare(lease)
+            view = plan.view
+            self.assertEqual([row["action"] for row in view["files"]], ["update", "create", "preserve", "update"])
+            self.assertEqual(view["createDirectories"], [])
+            for index in (0, 3):
+                row = view["files"][index]
+                self.assertEqual(row["previous"], {"content": old[index].decode(), "byteLength": len(old[index]),
+                                                    "sha256": hashlib.sha256(old[index]).hexdigest()})
+                self.assertEqual(row["observed"], {"state": "present", **{key: row["previous"][key]
+                                                                          for key in ("byteLength", "sha256")}})
+            self.assertTrue(all("previous" not in view["files"][i] for i in (1, 2)))
+            view["files"][0]["previous"]["content"] = "not authority"
+            self.assertEqual(plan.view["files"][0]["previous"]["content"], old[0].decode())
+            with self.assertRaises(AttributeError):
+                plan._resource_sha256 = "f" * 64
+            self.assertEqual(edit.apply_github_workflow_edit(lease, plan),
+                             shared.CoreEditOutcome("committed", "clean", "settled", "none"))
+            self.assertEqual([payload for _, payload in lease.applies[0]], [generated[0], generated[1], None, generated[3]])
+            self.assertEqual(lease.applies[0][0][0].data, old[0])
+            self.assertEqual(edit.apply_github_workflow_edit(lease, plan).reason, "invalid_params")
+            self.assertEqual(len(lease.applies), 1)
+            conflict_lease = InertLease((old[0], None, generated[2] + b"# local change\n", old[3]))
+            _, conflict = prepare(conflict_lease)
+            self.assertEqual(conflict.kind, "conflict")
+            self.assertFalse(hasattr(conflict, "token"))
+            self.assertEqual([row["id"] for row in conflict.view["conflicts"]], [_IDS[2]])
+            self.assertNotIn("content", json.dumps(conflict.view))
+            self.assertEqual(conflict_lease.applies, [])
 
     def test_observation_or_conflict_recheck_failure_never_publishes_partial_rows(self):
         with inert_native() as token:
@@ -496,7 +547,7 @@ class GitHubWorkflowEditTests(unittest.TestCase):
             def items(self):
                 raise AssertionError("caller code must not execute")
 
-        with inert_native(), patch.object(setup, "propose_github_setup", side_effect=AssertionError("before service")):
+        with inert_native(), patch.object(setup, "_propose_with_templates", side_effect=AssertionError("before service")):
             for value in (None, [], NotJson(draft()), cyclic, deep, oversized, nodes, nonfinite, surrogate):
                 lease = InertLease()
                 checkout = edit.capture_github_workflow_edit(lease)
@@ -512,14 +563,14 @@ class GitHubWorkflowEditTests(unittest.TestCase):
             for code in ("invalid_params", "resource_unavailable", "proposal_output_limit", "private-error-code"):
                 lease = InertLease()
                 checkout = edit.capture_github_workflow_edit(lease)
-                with patch.object(setup, "propose_github_setup", side_effect=ApiError(code, "private-error-value")):
+                with patch.object(setup, "_propose_with_templates", side_effect=ApiError(code, "private-error-value")):
                     self.assert_refused("invalid_params" if code == "invalid_params" else "filesystem_error",
                                         lambda: edit.prepare_github_workflow_edit(
                                             lease, checkout, checkout.revision, draft(), _REPOSITORY, _SHA))
                 self.assertEqual(lease.scopes, [None])
             lease = InertLease()
             checkout = edit.capture_github_workflow_edit(lease)
-            with patch.object(setup, "propose_github_setup", side_effect=KeyboardInterrupt):
+            with patch.object(setup, "_propose_with_templates", side_effect=KeyboardInterrupt):
                 self.assert_refused("cancelled", lambda: edit.prepare_github_workflow_edit(
                     lease, checkout, checkout.revision, draft(), _REPOSITORY, _SHA))
 
@@ -561,7 +612,7 @@ class GitHubWorkflowEditTests(unittest.TestCase):
                     result["templateSet"]["resourceVersion"] = True
                 lease = InertLease()
                 checkout = edit.capture_github_workflow_edit(lease)
-                with self.subTest(change=change), patch.object(setup, "propose_github_setup", return_value=result):
+                with self.subTest(change=change), patch.object(setup, "_propose_with_templates", return_value=(result, {identity: text.encode() for identity, text in json.loads(resource_bytes())["workflows"].items()})):
                     self.assert_refused("filesystem_error", lambda: edit.prepare_github_workflow_edit(
                         lease, checkout, checkout.revision, draft(), _REPOSITORY, _SHA))
                 self.assertEqual(lease.scopes, [None])
@@ -571,14 +622,14 @@ class GitHubWorkflowEditTests(unittest.TestCase):
         with inert_native() as token:
             lease = InertLease()
             checkout = edit.capture_github_workflow_edit(lease)
-            original = setup.propose_github_setup
+            original = setup._propose_with_templates
 
             def reentered(*args):
                 self.assert_refused("invalid_params", lambda: edit.prepare_github_workflow_edit(
                     lease, checkout, checkout.revision, draft(), _REPOSITORY, _SHA))
                 return original(*args)
 
-            with patch.object(setup, "propose_github_setup", side_effect=reentered):
+            with patch.object(setup, "_propose_with_templates", side_effect=reentered):
                 plan = edit.prepare_github_workflow_edit(lease, checkout, checkout.revision, draft(), _REPOSITORY, _SHA)
             self.assertIs(type(plan), edit.PreparedWorkflowEdit)
             self.assertEqual(len(lease.scopes), 2)

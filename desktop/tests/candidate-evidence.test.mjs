@@ -812,30 +812,14 @@ test('evidence help is complete optional guidance about documents, not provenanc
   assert.match(evidenceHelp.digests.failure, /does not authenticate.*forged set can still be locally consistent/);
 });
 
-test('Artifacts UI SOURCE keeps folder/project/draft boundaries, closed actions and document-only stale disclaimers', () => {
-  // SOURCE integration guards only: no React, native dialog, WebView or DOM is executed.
-  const source = readFileSync(new URL('../src/pages/Artifacts.tsx', import.meta.url), 'utf8');
+test('v1 facade stays strict while the App shares the lifecycle controller instead of a second polling owner', () => {
+  const source = readFileSync(new URL('../src/candidateEvidence.ts', import.meta.url), 'utf8');
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  for (const text of ['Source project:', 'Evidence folder:', 'unchanged by evidence selection',
-    'Separate from the source project. No files need to be copied or renamed.',
-    'Choose evidence folder', 'Inspect documents', 'Check operation status', 'Request stop',
-    'No artifact bytes, signing, GitHub authenticity, Store state, release readiness or recovery safety are established here.',
-    'Previous observation · stale',
-    'Historical display only. It is not the current selection or observation and cannot authorize any action.',
-    'An empty view does not mean a candidate was never released or that recovery is safe.',
-    'These are unauthenticated declarations, not live workflow status.',
-    'These are self-integrity digests, not raw-file hashes or signatures.']) assert.equal(source.includes(text), true, text);
-  assert.match(source, /const current = !state\.pending && !state\.uncertain && !state\.integrityFailed \? status\?\.result : null/);
-  assert.deepEqual([...source.matchAll(/\bcontroller\.([A-Za-z]+)\(/g)].map((m) => m[1]).sort(),
-    ['cancel', 'check', 'choose', 'observe', 'startReason']);
-  assert.doesNotMatch(source, /\bhref\s*=|\bwindow\.open\s*\(|\b(?:onSave|onDiscard|onProject|draft|projectId)\s*[:=]|\b(?:chooseProject|saveDraft|discardDraft|writeFile|fetch)\s*\(/);
-  for (const key of Object.keys(evidenceHelp)) assert.equal(source.includes(`evidenceHelp.${key}`), true);
-  assert.match(source, /\['authorizedBy', 'executedBy', 'producedBy'\]/);
-  // The callback only shares the existing busy fence, not project/draft authority.
-  assert.deepEqual([...app.matchAll(/new CandidateEvidenceController\(([^)]*)\)/g)].map((m) => m[1]), ['savedCommandBusy']);
-  assert.match(app, /candidateEvidence\.beginConnection\(\)/);
-  assert.match(app, /candidateEvidence\.connect\(connection\)/);
-  assert.match(app, /candidateEvidence\.dispose\(\)/);
-  assert.deepEqual((app.match(/<Artifacts\b[^>]*\/>/g) ?? []).map((m) => m.replace(/\s+/g, ' ')),
-    ['<Artifacts state={evidenceState} controller={candidateEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />']);
+  assert.match(source, /class CandidateEvidenceController extends EvidenceController<EvidenceStatus>/);
+  assert.match(source, /super\(otherOperationReason, 'candidate', parseEvidenceStatus\)/);
+  assert.doesNotMatch(app, /new CandidateEvidenceController/);
+  assert.deepEqual([...app.matchAll(/new LifecycleEvidenceController\(([^)]*)\)/g)].map((m) => m[1]), ['savedCommandBusy']);
+  assert.match(app, /releaseEvidence\.beginConnection\(\)/);
+  assert.match(app, /releaseEvidence\.connect\(connection\)/);
+  assert.match(app, /releaseEvidence\.dispose\(\)/);
 });

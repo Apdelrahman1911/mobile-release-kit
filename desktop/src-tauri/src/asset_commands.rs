@@ -1,4 +1,4 @@
-//! Closed, borrowed-value admission for the session-only native credential lane.
+//! Closed, borrowed-value admission for the native credential lane.
 //! Tauri has already materialized Json bodies. These are admitted-payload limits,
 //! not a pre-IPC allocation/RSS guarantee. No parser observation or path enters.
 use std::{io, sync::Arc};
@@ -26,11 +26,16 @@ impl Kind {
         }
     }
     pub(crate) fn enabled(self) -> bool {
-        matches!(self, Self::AndroidKeystore | Self::AndroidFirebase | Self::GoogleWif | Self::ProjectReadToken)
+        matches!(self, Self::AndroidKeystore | Self::AndroidFirebase | Self::IosFirebase | Self::GoogleWif | Self::ProjectReadToken)
+            || (cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+                all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))) && self == Self::AscP8)
+            || (cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && matches!(self, Self::AppleP12 | Self::AppleProfile))
     }
     pub(crate) fn file(self) -> Option<crate::credential_format::FileKind> {
         use crate::credential_format::FileKind;
-        match self { Self::AndroidKeystore => Some(FileKind::AndroidKeystore), Self::AndroidFirebase => Some(FileKind::AndroidFirebase), _ => None }
+        match self { Self::AndroidKeystore => Some(FileKind::AndroidKeystore), Self::AndroidFirebase => Some(FileKind::AndroidFirebase),
+            Self::IosFirebase => Some(FileKind::IosFirebase), Self::AppleP12 => Some(FileKind::AppleP12),
+            Self::AppleProfile => Some(FileKind::AppleProfile), Self::AscP8 => Some(FileKind::AscP8), _ => None }
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -51,7 +56,9 @@ pub(crate) enum Reason {
     UnsupportedFormat, InvalidRequest, Busy, SourceRefused, SourceChanged,
     MaterialLimit, ParserLimit, ProjectOverlap, ExclusionUnconfirmed, Capacity,
     ContextStale, UserCancelled, ReviewExpired, Deadline, DocumentLost, Shutdown,
-    CleanupUnknown,
+    CleanupUnknown, VaultUninitialized, VaultKeyMissing, VaultKeyringLocked,
+    VaultKeyringDenied, VaultKeyringUnavailable, VaultProviderUnsupported,
+    VaultCorrupt, VaultInterrupted, VaultDurabilityUnknown,
 }
 #[derive(Clone, Copy, Serialize)]
 pub(crate) struct AssetError {
@@ -72,6 +79,11 @@ impl AssetError {
             Reason::UserCancelled => "asset_user_cancelled", Reason::ReviewExpired => "asset_review_expired",
             Reason::Deadline => "asset_deadline", Reason::DocumentLost => "asset_document_lost",
             Reason::Shutdown => "asset_shutdown", Reason::CleanupUnknown => "asset_cleanup_unknown",
+            Reason::VaultUninitialized => "vault_uninitialized", Reason::VaultKeyMissing => "vault_key_missing",
+            Reason::VaultKeyringLocked => "vault_keyring_locked", Reason::VaultKeyringDenied => "vault_keyring_denied",
+            Reason::VaultKeyringUnavailable => "vault_keyring_unavailable", Reason::VaultProviderUnsupported => "vault_provider_unsupported",
+            Reason::VaultCorrupt => "vault_corrupt", Reason::VaultInterrupted => "vault_interrupted",
+            Reason::VaultDurabilityUnknown => "vault_durability_unknown",
         };
         Self { code, message: if reason == Reason::ContextStale { "Assessment context changed; prepare again." }
             else { "This session action was not completed. See its status reason." }, retryable: false, reason }
@@ -85,6 +97,15 @@ enum Failure { Native(AssetError), Assessment(crate::credential_assessment::Asse
 // an original owner/result. No serde `rc` feature or R1 DTO change is needed.
 #[derive(Clone)]
 pub(crate) struct CommandError(Arc<Failure>);
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl CommandError {
+    pub(crate) fn installed_assessment_failure(&self) -> crate::credential_assessment::InstalledAssessmentFailure {
+        match self.0.as_ref() {
+            Failure::Assessment(error) => error.installed_failure(),
+            Failure::Native(_) => crate::credential_assessment::InstalledAssessmentFailure::none(),
+        }
+    }
+}
 impl Serialize for CommandError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { self.0.serialize(serializer) }
 }
@@ -102,7 +123,13 @@ pub(crate) struct Choose<'a> { pub(crate) context_revision: u32, pub(crate) kind
 pub(crate) enum Source<'a> {
     Selection(&'a str), Record(RecordRef<'a>), Scalar { kind: Kind, replacement: Option<RecordRef<'a>> },
 }
-pub(crate) struct Prepare<'a> { pub(crate) context_revision: u32, pub(crate) source: Source<'a>, pub(crate) fields: Option<&'a Value> }
+pub(crate) struct Prepare<'a> {
+    pub(crate) context_revision: u32, pub(crate) source: Source<'a>, pub(crate) fields: Option<&'a Value>,
+    // Outer Option distinguishes omitted (session/record) from explicit null.
+    pub(crate) label: Option<Option<&'a str>>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenMode { Session, Encrypted }
 
 // A separate DATA-only purpose in the existing native owner. These four field
 // names grant neither credential capture nor arbitrary pathname authority.
@@ -155,7 +182,10 @@ pub(crate) fn project_path_result(project_id: &str, field: ProjectPathField, rel
 pub(crate) fn project_path_error(reason: Reason) -> crate::error::BridgeError {
     let (code, message) = match reason {
         Reason::None | Reason::InvalidRequest => ("project_path_invalid", "The project-path request has an unsupported shape or size."),
-        Reason::Closed | Reason::Unqualified | Reason::UnsupportedPlatform | Reason::UnsupportedFilesystem =>
+        Reason::Closed | Reason::Unqualified | Reason::UnsupportedPlatform | Reason::UnsupportedFilesystem
+            | Reason::VaultUninitialized | Reason::VaultKeyMissing | Reason::VaultKeyringLocked | Reason::VaultKeyringDenied
+            | Reason::VaultKeyringUnavailable | Reason::VaultProviderUnsupported | Reason::VaultCorrupt
+            | Reason::VaultInterrupted | Reason::VaultDurabilityUnknown =>
             ("project_path_unavailable", "Browsing existing project paths is unavailable in this desktop runtime profile."),
         Reason::Busy => ("project_path_busy", "Finish the original native operation before browsing a project path."),
         Reason::ContextStale | Reason::DocumentLost | Reason::Shutdown | Reason::UserCancelled =>
@@ -174,15 +204,58 @@ pub(crate) fn project_path_error(reason: Reason) -> crate::error::BridgeError {
 // No Debug/Deserialize or renderer readback. Immutable record backing is shared
 // by Arc in the owner, rather than cloning these write-only strings for leases.
 pub(crate) struct Fields { kind: Kind, values: Vec<Option<String>> }
+// The target-selected durable codec reuses these exact scalar semantics. Wipe the strings
+// actually owned here on retirement, including copies made during bounded
+// authenticated decoding. This does not claim erasure of renderer/OS copies.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+impl Drop for Fields {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        for value in self.values.iter_mut().flatten() { value.zeroize(); }
+    }
+}
 impl Fields {
     pub(crate) fn empty_firebase() -> Self { Self { kind: Kind::AndroidFirebase, values: Vec::new() } }
     pub(crate) fn byte_count(&self) -> usize { self.values.iter().flatten().map(String::capacity).sum() }
+    // The original signed consumer borrows this immutable field from its retained
+    // Payload. No clone, serializer, renderer projection or independent custody.
+    pub(crate) fn borrow_value(&self, name: &str) -> Option<&str> {
+        let index = field_names(self.kind).iter().position(|field| *field == name)?;
+        self.values.get(index)?.as_deref()
+    }
+    // Lookup admission counts retained allocation capacity, including empty
+    // value cells. Keep the independent committed-record charge unchanged.
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        let cells = self.values.capacity().checked_mul(std::mem::size_of::<Option<String>>())?;
+        self.values.iter().flatten().try_fold(cells, |bytes, value| bytes.checked_add(value.capacity()))
+    }
     pub(crate) fn into_value(&self) -> Value {
         let mut object = Map::new();
         for (name, value) in field_names(self.kind).iter().zip(&self.values) {
             object.insert((*name).into(), value.as_ref().map_or(Value::Null, |value| Value::String(value.clone())));
         }
         Value::Object(object)
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    pub(crate) fn vault_kind(&self) -> Kind { self.kind }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    pub(crate) fn vault_presence(&self) -> Vec<bool> { self.values.iter().map(Option::is_some).collect() }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    pub(crate) fn write_vault_scalars(&self, writer: impl io::Write) -> Result<(), serde_json::Error> {
+        // Borrow original field strings; do not allocate another secret Value
+        // tree merely to serialize the fixed scalar map.
+        struct BorrowedFields<'a>(&'a Fields);
+        impl Serialize for BorrowedFields<'_> {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(self.0.values.len()))?;
+                for (name, value) in field_names(self.0.kind).iter().zip(&self.0.values) {
+                    map.serialize_entry(name, value)?;
+                }
+                map.end()
+            }
+        }
+        serde_json::to_writer(writer, &BorrowedFields(self))
     }
 }
 
@@ -215,7 +288,7 @@ fn token(value: &Value) -> Result<&str, AssetError> {
     if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) { return Err(AssetError::invalid()); }
     Ok(value)
 }
-fn kind(value: &Value) -> Result<Kind, AssetError> {
+pub(crate) fn kind(value: &Value) -> Result<Kind, AssetError> {
     match text(value)? {
         "android-keystore" => Ok(Kind::AndroidKeystore), "android-firebase" => Ok(Kind::AndroidFirebase),
         "apple-p12" => Ok(Kind::AppleP12), "apple-profile" => Ok(Kind::AppleProfile), "asc-p8" => Ok(Kind::AscP8),
@@ -230,11 +303,12 @@ fn record(value: &Value) -> Result<RecordRef<'_>, AssetError> {
 fn replacement(value: &Value) -> Result<Option<RecordRef<'_>>, AssetError> {
     if value.is_null() { Ok(None) } else { record(value).map(Some) }
 }
-fn field_names(kind: Kind) -> &'static [&'static str] {
+pub(crate) fn field_names(kind: Kind) -> &'static [&'static str] {
     match kind {
         Kind::AndroidKeystore => &["storePassword", "keyAlias", "keyPassword"],
-        Kind::AndroidFirebase => &[], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
-        _ => &[],
+        Kind::AndroidFirebase | Kind::IosFirebase | Kind::AppleProfile => &[],
+        Kind::AppleP12 => &["password"], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
+        Kind::AscP8 => &["keyId", "issuerId"],
     }
 }
 pub(crate) fn validate_fields(kind: Kind, value: &Value) -> Result<(), AssetError> {
@@ -282,9 +356,9 @@ pub(crate) fn draft_bytes(value: &Value) -> Result<Vec<u8>, AssetError> {
 }
 
 pub(crate) fn status(body: &Value) -> Result<(), AssetError> { bounded(body, SMALL_LIMIT)?; exact(body, &[])?; Ok(()) }
-pub(crate) fn open(body: &Value) -> Result<(), AssetError> {
+pub(crate) fn open(body: &Value) -> Result<OpenMode, AssetError> {
     bounded(body, SMALL_LIMIT)?; let object = exact(body, &["mode"])?;
-    if text(&object["mode"])? != "session" { return Err(AssetError::invalid()); } Ok(())
+    match text(&object["mode"])? { "session" => Ok(OpenMode::Session), "encrypted" => Ok(OpenMode::Encrypted), _ => Err(AssetError::invalid()) }
 }
 pub(crate) fn context(body: &Value) -> Result<Context<'_>, AssetError> {
     bounded(body, protocol::REQUEST_LIMIT)?;
@@ -306,9 +380,14 @@ pub(crate) fn prepare(body: &Value) -> Result<Prepare<'_>, AssetError> {
     let root = body.as_object().ok_or_else(AssetError::invalid)?;
     let source = root.get("source").and_then(Value::as_object).ok_or_else(AssetError::invalid)?;
     let tag = source.get("type").ok_or_else(AssetError::invalid)?;
+    let label = root.get("label").map(|value| match value {
+        Value::Null => Ok(None), Value::String(value) if !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control) => Ok(Some(value.as_str())),
+        _ => Err(AssetError::invalid()),
+    }).transpose()?;
+    let new_keys: &[&str] = if label.is_some() { &["contextRevision", "source", "fields", "label"] } else { &["contextRevision", "source", "fields"] };
     let (source, fields) = match text(tag)? {
         "selection" => {
-            exact(body, &["contextRevision", "source", "fields"])?;
+            exact(body, new_keys)?;
             let object = exact(&root["source"], &["type", "selectionToken"])?;
             (Source::Selection(token(&object["selectionToken"])?), Some(&root["fields"]))
         }
@@ -318,7 +397,7 @@ pub(crate) fn prepare(body: &Value) -> Result<Prepare<'_>, AssetError> {
             (Source::Record(RecordRef { record_id: token(&object["recordId"])?, expected_revision: number(&object["expectedRevision"])? }), None)
         }
         "scalar" => {
-            exact(body, &["contextRevision", "source", "fields"])?;
+            exact(body, new_keys)?;
             let object = exact(&root["source"], &["type", "kind", "replacement"])?;
             let kind = kind(&object["kind"])?;
             if !matches!(kind, Kind::GoogleWif | Kind::ProjectReadToken) { return Err(AssetError::invalid()); }
@@ -327,7 +406,7 @@ pub(crate) fn prepare(body: &Value) -> Result<Prepare<'_>, AssetError> {
         }
         _ => return Err(AssetError::invalid()),
     };
-    Ok(Prepare { context_revision: number(root.get("contextRevision").ok_or_else(AssetError::invalid)?)?, source, fields })
+    Ok(Prepare { context_revision: number(root.get("contextRevision").ok_or_else(AssetError::invalid)?)?, source, fields, label })
 }
 pub(crate) fn delete(body: &Value) -> Result<RecordRef<'_>, AssetError> { bounded(body, SMALL_LIMIT)?; record(body) }
 pub(crate) fn preview_token(body: &Value) -> Result<&str, AssetError> {
@@ -419,7 +498,7 @@ pub(crate) fn assert_project_path_wiring_contract() {
         source.split_once(start).expect("source start").1.split_once(end).expect("source end").0
     }
     let commands = section(include_str!("../build.rs"), "const COMMANDS: &[&str] = &[", "];");
-    let handlers = section(include_str!("shell.rs"), ".invoke_handler(tauri::generate_handler![", "])");
+    let handlers = section(include_str!("shell.rs"), "tauri::generate_handler![", "];");
     let capability: Value = serde_json::from_str(include_str!("../capabilities/main.json")).expect("fixed main capability DATA");
     assert_eq!(commands.matches("\"choose_project_path\"").count(), 1);
     assert_eq!(handlers.split(',').filter(|name| name.trim() == "choose_project_path").count(), 1);
@@ -438,6 +517,68 @@ pub(crate) fn assert_project_path_wiring_contract() {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn durable_commands_keep_modes_labels_and_stored_revision_requests_closed() {
+        assert!(matches!(open(&json!({"mode":"session"})), Ok(OpenMode::Session)));
+        assert!(matches!(open(&json!({"mode":"encrypted"})), Ok(OpenMode::Encrypted)));
+        for body in [json!({}), json!({"mode":"encrypted","path":"/inert"}), json!({"mode":" encrypted"}),
+            json!({"mode":null}), json!({"mode":"persistent"}), json!({"mode":"encrypted","key":null})] {
+            assert!(open(&body).is_err());
+        }
+        // Initialize/Unlock share the exact empty-body admission, never a path,
+        // key/provider choice, operation receipt or initialization identity.
+        for field in ["path", "key", "provider", "identity", "operationId", "reset"] {
+            assert!(status(&json!({field:null})).is_err());
+        }
+        let selection = json!({"contextRevision":1,"source":{"type":"selection","selectionToken":"a".repeat(32)},"fields":{}});
+        assert!(prepare(&selection).ok().expect("selection DATA").label.is_none());
+        let mut labeled = selection.clone(); labeled["label"] = Value::Null;
+        assert_eq!(prepare(&labeled).ok().expect("null-label DATA").label, Some(None));
+        labeled["label"] = json!("Local signing");
+        assert_eq!(prepare(&labeled).ok().expect("label DATA").label, Some(Some("Local signing")));
+        labeled["label"] = json!("é".repeat(64));
+        assert!(prepare(&labeled).is_ok()); // UTF-8 bytes, not128 characters.
+        for label in [json!(""), json!("a".repeat(129)), json!("é".repeat(65)), json!("line\nlabel"), json!("a\u{007f}b"), json!(false)] {
+            labeled["label"] = label; assert!(prepare(&labeled).is_err());
+        }
+        let scalar = json!({"contextRevision":1,"source":{"type":"scalar","kind":"google-wif","replacement":null},
+            "fields":{"provider":null,"serviceAccount":null},"label":null});
+        assert_eq!(prepare(&scalar).ok().expect("scalar DATA").label, Some(None));
+        let record = json!({"contextRevision":1,"source":{"type":"record","recordId":"a".repeat(32),"expectedRevision":1}});
+        assert!(prepare(&record).is_ok());
+        for (field, value) in [("label", Value::Null), ("fields", json!({})), ("payloadState", json!("assessed")), ("path", json!("/inert"))] {
+            let mut bad = record.clone(); bad[field] = value; assert!(prepare(&bad).is_err());
+        }
+    }
+    #[test]
+    fn vault_handlers_manifest_and_local_acl_agree_without_filesystem_grants() {
+        let manifest = include_str!("../build.rs").split_once("const COMMANDS: &[&str] = &[").unwrap().1.split_once("];").unwrap().0;
+        let handlers = include_str!("shell.rs").split_once("tauri::generate_handler![").unwrap().1.split_once("];").unwrap().0;
+        let capability: Value = serde_json::from_str(include_str!("../capabilities/main.json")).unwrap();
+        let permissions = capability["permissions"].as_array().unwrap();
+        for command in ["vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "vault_prepare_delete",
+            "vault_commit", "vault_bind", "vault_discard", "vault_lock"] {
+            assert_eq!(manifest.matches(&format!("\"{command}\"")).count(), 1);
+            assert_eq!(handlers.split(',').filter(|value| value.trim() == command).count(), 1);
+            let permission = format!("allow-{}", command.replace('_', "-"));
+            assert_eq!(permissions.iter().filter(|value| value.as_str() == Some(permission.as_str())).count(), 1);
+        }
+        assert_eq!(capability["local"], true);
+        assert_eq!(capability["windows"], json!(["main"]));
+        assert!(capability.get("remote").is_none());
+        assert!(permissions.iter().all(|value| value.as_str().is_some_and(|name|
+            name.starts_with("allow-") || ["core:event:allow-listen", "core:event:allow-unlisten"].contains(&name))));
+    }
+    #[test]
+    fn lookup_fields_charge_keeps_empty_cells_and_string_capacity() {
+        let mut value = String::with_capacity(79); value.push_str("data"); value.truncate(1);
+        let mut values = Vec::with_capacity(7); values.push(Some(value)); values.push(None);
+        let fields = Fields { kind: Kind::GoogleWif, values };
+        let cells = fields.values.capacity() * std::mem::size_of::<Option<String>>();
+        assert_eq!(fields.retained_bytes(), Some(cells + fields.byte_count()));
+        assert!(cells > 0 && fields.byte_count() > 1);
+        assert_eq!(Fields::empty_firebase().retained_bytes(), Some(0));
+    }
     #[test]
     fn project_path_command_is_registered_once_for_the_fixed_main_local_capability() { assert_project_path_wiring_contract(); }
     #[test]
@@ -469,11 +610,129 @@ mod tests {
         assert!(validate_fields(Kind::AndroidFirebase, &json!({})).is_ok());
     }
     #[test]
+    fn ios_firebase_is_one_file_kind_with_no_companion_or_renderer_observation() {
+        let body = json!({"contextRevision":1,"kind":"ios-firebase","replacement":null});
+        let chosen = choose(&body).ok().expect("closed iOS file choice");
+        assert!(chosen.kind == Kind::IosFirebase && chosen.kind.enabled());
+        assert!(chosen.kind.file() == Some(crate::credential_format::FileKind::IosFirebase));
+        let fields = own_fields(chosen.kind, &json!({})).ok().expect("empty iOS companions");
+        assert_eq!(fields.into_value(), json!({}));
+        assert_eq!(fields.retained_bytes(), Some(0));
+        for extra in ["path", "filename", "bytes", "observation", "encoding", "bundleId"] {
+            let mut input = body.clone(); input[extra] = json!("private-canary");
+            assert!(choose(&input).is_err());
+            let mut companion = json!({}); companion[extra] = json!("private-canary");
+            assert!(validate_fields(chosen.kind, &companion).is_err());
+        }
+        assert!(validate_fields(chosen.kind, &json!({"storePassword":null,"keyAlias":null,"keyPassword":null})).is_err());
+        assert!(prepare(&json!({"contextRevision":1,"source":{"type":"scalar","kind":"ios-firebase","replacement":null},"fields":{}})).is_err());
+        assert!(Kind::AscP8.file() == Some(crate::credential_format::FileKind::AscP8));
+        for kind in [Kind::AppleP12, Kind::AppleProfile] {
+            assert_eq!(kind.enabled(), cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))));
+            assert!(kind.file().is_some());
+        }
+    }
+    #[test]
+    fn apple_fields_are_exact_write_only_companions_with_platform_admission_separate() {
+        assert_eq!(field_names(Kind::AppleP12), &["password"]);
+        assert!(field_names(Kind::AppleProfile).is_empty());
+        assert!(Kind::AppleP12.file() == Some(crate::credential_format::FileKind::AppleP12));
+        assert!(Kind::AppleProfile.file() == Some(crate::credential_format::FileKind::AppleProfile));
+        let values = [json!({"password":null}), json!({"password":" \0 private-canary "})];
+        for input in &values {
+            let fields = own_fields(Kind::AppleP12, input);
+            if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) {
+                let fields = fields.ok().unwrap();
+                assert_eq!(fields.into_value(), *input);
+                assert_eq!(fields.borrow_value("password"), input["password"].as_str());
+                assert!(fields.borrow_value("storePassword").is_none());
+                assert!(fields.borrow_value("private-canary").is_none());
+            } else { assert!(fields.is_err()); }
+        }
+        assert_eq!(own_fields(Kind::AppleProfile, &json!({})).is_ok(), cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))));
+        for input in [json!({}), json!({"password":false}), json!({"password":"x".repeat(4097)}),
+            json!({"password":null,"path":"private-canary"}), json!({"storePassword":null})] {
+            assert!(validate_fields(Kind::AppleP12, &input).is_err());
+        }
+        assert!(validate_fields(Kind::AppleProfile, &json!({"password":null})).is_err());
+        assert_eq!(Kind::AscP8.enabled(), cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))));
+    }
+    #[test]
+    fn asc_uses_the_original_file_selection_and_exact_write_only_identifiers() {
+        assert!(Kind::AscP8.file() == Some(crate::credential_format::FileKind::AscP8));
+        assert_eq!(field_names(Kind::AscP8), &["keyId", "issuerId"]);
+        let choice = json!({"contextRevision":1,"kind":"asc-p8","replacement":null});
+        assert!(choose(&choice).is_ok());
+        // Core owns identifier syntax and requiredness. Native admission must
+        // preserve every byte, including malformed spelling, NUL and Unicode.
+        for input in [json!({"keyId":null,"issuerId":null}),
+            json!({"keyId":"A1B2C3C4D5","issuerId":"12345678-1234-1234-1234-123456789abc"}),
+            json!({"keyId":" \0 KEY-CANARY ","issuerId":"é-\0-ISSUER-CANARY"}),
+            json!({"keyId":"","issuerId":" ".repeat(4096)})] {
+            let fields = own_fields(Kind::AscP8, &input);
+            if Kind::AscP8.enabled() {
+                let fields = fields.ok().unwrap();
+                assert_eq!(fields.into_value(), input);
+                assert_eq!(fields.borrow_value("keyId"), input["keyId"].as_str());
+                assert_eq!(fields.borrow_value("issuerId"), input["issuerId"].as_str());
+                assert!(fields.borrow_value("file").is_none());
+            } else { assert!(fields.is_err()); }
+        }
+        for input in [json!({}), json!({"keyId":null}), json!({"keyId":false,"issuerId":null}),
+            json!({"keyId":"x".repeat(4097),"issuerId":null}),
+            json!({"keyId":null,"issuerId":"é".repeat(2049)}),
+            json!({"keyId":null,"issuerId":null,"password":null})] {
+            assert!(validate_fields(Kind::AscP8, &input).is_err());
+        }
+        for extra in ["path", "filename", "bytes", "base64", "observation", "algorithm", "curve"] {
+            let mut input = choice.clone(); input[extra] = json!("PRIVATE-CANARY");
+            assert!(choose(&input).is_err());
+            let mut companion = json!({"keyId":null,"issuerId":null}); companion[extra] = json!("PRIVATE-CANARY");
+            assert!(validate_fields(Kind::AscP8, &companion).is_err());
+        }
+        assert!(prepare(&json!({"contextRevision":1,"source":{"type":"scalar","kind":"asc-p8","replacement":null},
+            "fields":{"keyId":null,"issuerId":null}})).is_err());
+    }
+    #[test]
+    fn consumer_field_borrow_uses_original_backing_without_normalization_or_unknown_names() {
+        // Inert private DATA; this creates no platform/session/consumer permit.
+        let mut value = String::with_capacity(64); value.push_str(" \0 private-canary ");
+        let fields = Fields { kind: Kind::AppleP12, values: vec![Some(value)] };
+        let borrowed = fields.borrow_value("password").unwrap();
+        assert_eq!(borrowed, " \0 private-canary ");
+        assert_eq!(borrowed.as_ptr(), fields.values[0].as_ref().unwrap().as_ptr());
+        assert!(fields.borrow_value("Password").is_none() && fields.borrow_value("token").is_none());
+        let missing = Fields { kind: Kind::AppleP12, values: vec![None] };
+        assert!(missing.borrow_value("password").is_none());
+    }
+    #[test]
     fn stale_and_native_refusals_have_only_fixed_public_text() {
         let stale = AssetError::new(Reason::ContextStale);
         assert_eq!(stale.code, "assessment_context_stale");
         assert_eq!(stale.message, "Assessment context changed; prepare again.");
         let refused = AssetError::new(Reason::SourceRefused);
         assert_eq!(refused.code, "asset_source_refused"); assert!(!refused.retryable);
+    }
+}
+
+// Read-only retained DATA capacities for the document installation census.
+// Inline structs are charged by their owner. No clone, serializer, authority,
+// credential copy, allocation, native call or settlement transition occurs here.
+impl ProjectPathResult {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        self.project_id.capacity().checked_add(self.relative_path.capacity())
+    }
+}
+
+#[cfg(test)]
+mod installation_memory_capacity_tests {
+    use super::*;
+    #[test]
+    fn project_path_result_counts_empty_spare_string_allocations() {
+        let value = ProjectPathResult { project_id: String::with_capacity(103), field: ProjectPathField::VersionSource,
+            relative_path: String::with_capacity(4103) };
+        assert_eq!(value.retained_heap_bytes(), value.project_id.capacity().checked_add(value.relative_path.capacity()));
+        assert!(value.project_id.is_empty() && value.relative_path.is_empty());
     }
 }

@@ -23,24 +23,58 @@ capabilities/help, native project selection, a static project snapshot, and
 in-memory configuration suggestion, validation and redacted review, plus
 draft-based Environment prerequisites and read-only GitHub workflow proposals,
 saved release-version reads, public locale-text observation/validation, and a
-separate candidate-document inspector.
+separate stage-bound local release-document inspector.
 Prerequisites do not inspect tools; proposals do not read or write repository
 files, verify remote refs or contact GitHub. The installed-shell and
 project/draft/guidance native checks are still pending; this is not general Linux
 or production qualification. A separate configuration-only installed Save route
 now uses the existing edit owner, full two-file review, explicit confirmation and
 original runtime settlement. Its installed native check is also pending.
+A separately sealed workflow profile now connects the existing GitHub review
+and confirmation UI to that same installed edit owner. It can create absent
+callers or preserve exact originals, never save the configuration draft. This
+is **prepared source, not installed workflow qualification**; the installed
+check and independent original-finality review are still required.
+A third sealed profile connects public locale-text Review/Save to the same
+installed owner. It requires the registered project root, a complete file
+preview, acknowledgment and typed `SAVE`; it never saves the configuration
+draft. Its new sixth installed `metadata-save` case and independent integration
+verification are still pending. This is prepared implementation, not a native
+or production-readiness claim.
 Credentials, tools, network and Store actions remain unavailable on that path. Trusted development builds
 remain a separate explicit mode, never a fallback. Android still needs a compatible JDK/Android SDK and
 project Gradle wrapper. iOS native work requires macOS/Xcode locally or on a
 protected hosted macOS runner. The desktop does not make these SDK requirements
 disappear. No complete installer or clean-machine qualification is claimed here.
 
+## Initialize a project on macOS
+
+The new initialization flow is implemented and independently source-reviewed;
+installed Mac verification is still pending. Use the Dashboard initialization
+controls after selecting a project and preparing its configuration draft. Supply
+the toolkit repository and an immutable commit pin, then review all proposed
+configuration, workflow, ignore-file and metadata changes before confirming Apply.
+The core owns the layout and performs one transaction; the UI does not run CLI
+commands or independently save each file.
+
+Existing metadata is preserved. Existing configuration and workflow files must
+already match the proposed bytes or the whole plan is refused; initialization is
+not an overwrite or workflow-upgrade tool. Only required ignore-file additions
+are appended while preserving the existing content and file mode. A changed
+original invalidates the reviewed plan instead of overwriting the later edit.
+
+After success, refresh the actual saved configuration. The in-memory draft is
+not silently promoted to a saved baseline or discarded. Interrupted initialization
+can be inspected and recovered using the original journal's complete descriptor;
+unknown, incomplete or unrelated journals remain attention-required rather than
+being guessed or automatically removed. Cancellation is not proof that files
+were unchanged: wait for the original outcome and recovery guidance.
+
 ## Foundation capabilities
 
 This table describes implemented surfaces, not a grant to execute them. The
 installed path above admits its twelve passive core methods, separate
-project/evidence-folder pickers and configuration-only edit profile; the UI shows an explicit
+project/evidence-folder pickers and separately sealed configuration/workflow/metadata edit profiles; the UI shows an explicit
 reason for unavailable actions.
 Choosing a project does not enable the credential/asset session. Draft changes
 stay in memory until a separately reviewed and confirmed native Save.
@@ -51,17 +85,38 @@ stay in memory until a separately reviewed and confirmed native Save.
 | Static snapshot | Bounded recognized text-file hints and configuration observations on supported POSIX filesystems | An atomic snapshot, Git source authority, successful build, signing or Store state |
 | Saved release version | Explicit Dashboard read of the saved configuration's version file, using the same parser and version/build policy as core builds | A version from an unsaved draft, Git commit proof, artifact comparison, full preflight or release readiness |
 | Configuration | Guided in-memory drafts with core-owned schema/policy validation and contextual help | Saving a file, checking path existence, approving an app identity or release readiness |
-| Configuration save implementation (installed verification pending) | Existing separate native owner, fixed Linux installed profile, exact two-file preview/apply contract, guided confirmation and original-outcome handling | General packaged/native qualification, project initialization, workflow or metadata Save, or Windows file transactions |
+| Project initialization implementation (Mac native acceptance separate) | One core transaction previews configuration, ignore-file additions, four pinned workflow callers and the metadata skeleton; preserves exact existing files and supports descriptor-bound interrupted-transaction recovery | Installed Mac qualification, overwrite/pin upgrades, remote GitHub administration or release readiness |
+| Configuration save implementation (native acceptance separate) | Existing separate native owner, fixed Linux and normal Mac installed profiles, exact two-file preview/apply contract, guided confirmation and original-outcome handling | General packaged/native qualification, project initialization, other edit domains, or Windows file transactions |
 | GitHub setup proposal | Guided toolkit pin inputs, core-generated read-only workflow previews, contextual help and environment/credential-name checklist | GitHub login/contact, repository observation, compatibility verification, file writes, secret provisioning or workflow dispatch |
+| Local workflow Apply implementation (native acceptance separate) | Normal Mac and fixed Linux selection for the existing four-caller review, complete text, separate confirmation and one-use Apply through the original shared edit owner; create absent or preserve exact bytes | Configuration Save, overwrite/pin upgrades, remote setup, Windows workflow writes, or completed installed qualification |
 | Public locale text | Saved-config-derived named observations, in-memory drafts, shared core validation and contextual help | Private review/TestFlight access, whole-metadata validation, translation, Store acceptance or writes |
-| Public locale text save implementation (disabled) | Separate metadata domain, complete one-locale file review and original one-use typed Save | Enabled saving, native transaction/process qualification, screenshot editing, locale deletion or packaged-runtime readiness |
+| Public locale text save implementation (native acceptance separate) | Separate normal Mac/fixed Linux metadata profiles, complete one-locale file review and original one-use typed Save; close retains the draft | Completed installed qualification, Windows writes, screenshot editing, locale deletion or packaged-runtime readiness |
+| Saved-version and public-image edit implementation (Mac profiles selected) | Separate installed version/image selectors and shared edit-owner domains; image selection uses the same fixed gate as image edits | Other write permissions, completed saves, native UI acceptance or release readiness |
 | Pure credential assessment (internal only) | Core policy over explicitly supplied scalars and finite file observations, with a private result-sanitizing adapter | Renderer secret entry, file acquisition/parser qualification, password verification, native custody, storage or assignment |
 | Environment requirements | Current-draft prerequisites, fixed baseline guidance and missing-feature explanations | Observing installed tools, running doctor or native admission |
-| Build-tool diagnostics implementation (disabled) | Explicit, cancellable version observations through a separate native owner and the ordinary core command owner | Enabled diagnostics, complete SDK checks, native document/runtime qualification or release readiness |
-| Saved Android offline checks implementation (disabled) | Saved-input consent, the existing shared offline core policy and original cancellation/finality ownership; core builds disabled | Enabled execution, a sandbox, no-network/no-write behavior, native/runtime qualification or release readiness |
-| Saved Android build implementation (disabled) | Guided saved-input review, one explicit app/variant, build progress/cancellation and captured AAB observations through the existing core | Enabled execution, fresh-source provenance, verified signing, a release candidate, qualified tools or Store approval |
-| Candidate evidence inspector (installed verification pending) | Separate evidence-folder picker, three fixed candidate documents, core-owned format/self-digest/binding checks and a guided documents-only summary | Artifact-byte inspection, authenticated provenance, source-project comparison, Store state, release readiness or safe recovery |
-| Credentials, releases, recovery | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
+| Build-tool diagnostics implementation (Mac profile selected) | Explicit, cancellable version observations through a separate native owner, normal Mac installed selector and ordinary core command owner | Successful or complete SDK checks, native document/runtime qualification or release readiness |
+| Saved Android offline checks implementation (Mac profile selected) | Saved-input consent, separate installed selector, shared offline core policy and original cancellation/finality ownership; no build authority | A sandbox, no-network/no-write behavior, native/runtime qualification or release readiness |
+| Saved Android build implementation (Mac runtime profile selected) | Guided saved-input review, one explicit app/variant, original runtime/tool admission, build progress/cancellation and captured AAB observations through the existing core | Fresh-source provenance, verified signing, a release candidate, qualified tools or Store approval |
+| Local release evidence (native acceptance separate) | Normal Mac/fixed Linux stage-bound evidence-folder selection, fixed candidate/external/production documents, core-owned consistency checks, recorded stages and documents-only recovery guidance shared by Releases, Artifacts and Recovery | Artifact-byte inspection, authenticated/global history, source-project comparison, live Store state, release readiness or retry authority |
+| Mac credentials and project recovery implementation | Ordinary session/persistence selection with original Supervisor/document and pinned-helper gates; a separate installed project-recovery selector | Stored-credential or recovery success, application-restart/upgrade continuity, authenticated evidence, Store authority or “no recovery needed” |
+
+Normal Mac profile selection is implemented, but does not replace per-operation
+runtime/input/owner admission or the still-required native acceptance. The
+undelivered candidate selects the separate project-field Browse profile for
+`version.source`, `ios.project`, `ios.workspace`, and `metadata.root`. It chooses
+existing project descendants into the draft only: no copying, saving or automatic
+removal of the other Xcode field. Manual text entry remains available. Exact-source
+AppKit/refusal and ordinary-app UI acceptance are still required before delivery.
+This profile does not stand in for project-folder, signing-file, evidence-folder or
+image-selection profiles. The separate undelivered Android source-folder candidate
+enables ordinary Browse for JDK, Android SDK and Gradle directories. Its Status
+uses the same cached native selector as Choose, without promoting an existing
+denial or restricting original Cancel. The ordinary two-case UI batch must also
+show all three roles, Cancel retaining the selected JDK, a distinct JDK reselection,
+and a genuine native Open followed by backend source refusal retaining the prior
+selections. This is directory-selection-only evidence, not supplier inspection,
+protected copying, a build, or link/wrong-kind coverage. Exact enabled-source native
+acceptance remains required before delivery. See the [normal Mac surface](../desktop/packaging/macos-installed.md#deliberately-small-product-surface).
 
 Windows can use the portable passive services. Its original-parent static reader
 is staged in source but **disabled pending independent ABI/native W1–W6
@@ -82,7 +137,7 @@ separate closed gates; this reader does not implement or enable them.
 The UI distinguishes *configured*, *format-valid*, *observed hint*, *unknown*,
 *partial*, *stale*, *unavailable*, *native-verified*, and *service-verified*.
 
-Recovery also lists the three file-edit controllers' retained per-project alerts
+Recovery also lists the four file-edit controllers' retained per-project alerts
 from the current app session, including alerts older than the latest result.
 This is not persistent history, journal inspection or a recovery action. Loaded
 projects can be opened through ordinary navigation without discarding drafts;
@@ -144,6 +199,13 @@ methods are:
   requests contain only the opaque selection ID. Reuses the existing provenance
   validators for document consistency, without opening artifact payloads,
   following document-directed paths, contacting services or changing files.
+- `release.evidence.observe`, `{root, expectedRoot, stage}` — separate closed
+  local-evidence contract for `candidate`, `external-testing` or
+  `production-submit`. It reads only the fixed JSON projection of that final
+  evidence folder: respectively 3, 5 or 10 documents, including nested
+  predecessor copies. Native binds the stage to its selected folder, operation
+  and result; renderer requests cannot provide paths or reclassify an old ID.
+  The legacy candidate method and wire shape remain distinct and strict.
 - `credentials.assess`, `{schemaVersion, policyVersion, context, input}` — pure
   assessment of supplied scalars and closed mechanical observations, not a
   credential reader. This does not add a renderer command or enable the vault.
@@ -160,16 +222,50 @@ gate are documented in [saved offline checks (Android)](desktop-offline-prefligh
 The separate build flow and its artifact/safety limits are documented in
 [saved Android build and inspection](desktop-android-build.md).
 
-The Artifacts screen always labels its result **“Local document consistency;
-provenance and artifact bytes unverified.”** Choosing evidence never replaces the
-source project, discards a draft or changes GitHub context. The separate original
-operation ID permits exact cancellation and status recovery after a lost reply;
-“Stopping” is not proof of settlement, and cleanup-unknown remains blocking.
-Earlier observations are shown only as stale. The inspector now has a separate
-fixed installed Linux profile, without granting private-asset authority. Its
-installed native verification is pending; preview/development builds and older
-native fixtures cannot run it. macOS/Windows evidence adapters and general
-production runtime admission remain outstanding.
+### Inspect local release evidence
+
+Releases and Artifacts share one **Choose evidence folder → Inspect documents**
+controller; Recovery displays guidance from that same observation without
+automatically choosing or reading anything. Choose a stage, then select the
+extracted **final evidence folder** from the protected release workflow, not a
+project folder, ZIP or standalone intent artifact. Keep its nested folders
+unchanged. Changing stage requires a new native choice; an existing folder ID
+cannot be reclassified.
+
+Results are labeled **“Saved documents only, not live Store status or retry
+approval.”** A complete consistent chain may show the recorded outcomes, readback
+states and authorization/execution/production runs. These are untrusted saved
+declarations, not verified operations or a global timeline. The existing core
+external-to-production predicate supplies the limited guidance; no new renderer
+release-policy evaluator, Store query, recovery journal scan or retry is added.
+Invalid, missing or inconsistent evidence withholds both summary and history.
+Missing evidence is not proof that no Store mutation occurred. Project recovery
+remains unassessed, separately from retained file-edit alerts.
+
+Reads are limited to 2 MiB per document and 6 MiB accepted bytes in total,
+including repeated predecessor copies; structural bounds are 20,000 decoded
+values per document and 60,000 total. Exact byte limits require actual EOF.
+Production's repeated selected candidate documents must agree byte-for-byte,
+but this does **not** authenticate the complete bundle inventory. Artifact
+payloads, proof documents, raw Store readbacks, ZIPs and document-directed paths
+are not opened. Artifact bytes, workflow provenance, source-project association,
+current configuration, Store state and recovery safety all remain unverified.
+
+Choosing evidence never replaces the source project, discards a draft or changes
+GitHub context. One native evidence registry and the existing original-work and
+query owners serve both strict wire families. Exact original IDs govern Stop;
+status/lost-reply reconciliation never repeats inspection. **Stopping** is not
+settlement, and unknown cleanup blocks new evidence and saved-command work.
+Earlier observations are shown only as stale.
+
+Availability intersects the installed Linux project-selection profile with the
+new exact passive method, without granting private-asset authority. macOS,
+Windows, preview/development and old fixture profiles do not gain this route.
+Pure tests and source/compiler inventory updates do not qualify the new native
+picker/route/UI path; the old candidate-only native witness is not lifecycle
+evidence. A separately reviewed source-bound installed observation remains
+required. Previous conventional payload hash admissions deliberately reject
+these changed core bytes until the final reviewed package freeze.
 
 Typed saving does **not** expand this passive method list. Configuration's separate
 finite owner and core transaction contract are documented in
@@ -189,6 +285,20 @@ walking them. It uses anchored no-follow descriptor reads with traversal/read
 budgets and explicit partial/error results. It does not infer an enclosing
 repository above the selected directory or read arbitrary file contents for the
 renderer.
+
+### Edit or create saved version values (separately gated)
+
+Dashboard has an app-managed **Open → edit name/build strings → review complete
+original/after bytes → confirm Save** implementation, with explicit **Create
+version file** only for a source observed absent. It does not apply unsaved
+Settings, rewrite unrelated bytes or perform an automatic version bump. This
+new writer's independent gate is false and its installed source binding is None;
+no native/platform/recovery/shipping qualification is claimed. Browser preview
+never fabricates a load or Save. A new source-bound runtime and distinct Linux
+original-owner verification are required, not another edit domain's old payload.
+See [saved-version VALUE editing](desktop-release-version-edit.md) for the
+ordinary UI flow, ten-rule ignore prerequisite, lifecycle and uncertainty rules.
+The existing Read action below stays a separate, unchanged read-only service.
 
 ### Read the saved release version
 
@@ -593,6 +703,26 @@ preview is an explicit `VITE_MRK_BROWSER_PREVIEW=1` development build, prominent
 labelled with inert example data. A bridge error must never activate preview.
 
 ## Verification and resource rules
+
+The prepared installed workflow route is limited to the normal
+`desktop-shell` profile on Linux x86_64 GNU, with the existing A runtime and
+exact Ubuntu/platform/custody checks, including kernel `6.17.0-1022-azure`.
+It does not enable a global edit flag or a development/publisher fallback.
+The existing installed-shell observer has a separate fifth `workflow-apply`
+case: mixed preserve/create, a changed-pin conflict without a token, explicit
+unchanged confirmation, and native Quit with a pending review. Its original
+45-second, 128-evaluation and 2048-byte receipt limits remain unchanged.
+Source, compilation or prior headless checks do not establish that this path
+works in an installed window. The full Desktop remains incomplete.
+
+The separate sixth `metadata-save` case uses the actual editor and two explicit
+Reviews: close the first without applying, retain the text, then reopen and
+acknowledge/type `SAVE` for one Apply. It requires genuine original session,
+plan, revision, runtime/child/stream finality and fresh Load correspondence.
+Independent post-exit inventories require one replacement, one new text file,
+and preservation of the title, unrelated sentinel, configuration and inputs.
+The same 45-second/128-evaluation/2048-byte receipt limits apply. This case is
+source-authored and awaiting installed verification; no Store is contacted.
 
 Read [repository verification](verification.md) first. The historical native/
 process suites and CI controller must not run on a shared VPS. Desktop filenames

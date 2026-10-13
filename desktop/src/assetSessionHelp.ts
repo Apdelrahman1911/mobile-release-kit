@@ -8,17 +8,48 @@ const privateValueFormat = 'Enter the original value, at most 4,096 UTF-8 bytes.
 const noRestore = 'Starting a replacement or removal makes affected assignments unavailable. Failure or Cancel may preserve old record bytes, but never restores assignment automatically. Prepare and assign again explicitly; unknown cleanup prevents further use.';
 const fieldHelp: Record<string, Partial<CredentialGuideField>> = {
   'android-keystore/file': {
-    where: 'Obtain the existing upload-key keystore from its authorized signing-key owner. Select the private original outside registered project folders. The app will not change its contents or permissions, move it, or generate a replacement key.',
+    where: 'Obtain the existing upload-key keystore from its authorized signing-key owner. On an admitted Linux or Apple-silicon Mac session, select the private original outside registered project folders. The app will not change its contents or permissions, move it, or generate a replacement key.',
     format: 'An original .jks or .keystore file, at most 32 MiB. This importer recognizes only the JKS header; .p12/.pfx are not supported. A filename is not proof of format or key identity.',
     failure: 'A changed, overlapping, unsupported, oversized or insufficiently private source is refused without changing the original. A recognized JKS header does not verify a password, private-key entry, digest or signing identity.',
     suffixes: ['.jks', '.keystore'],
   },
-  'android-keystore/storePassword': { format: privateValueFormat, failure: 'A missing value is a missing companion field, not a failed password test. This session accepts the write-only value for assessment and optional in-memory retention; it does not unlock the keystore.' },
+  'android-keystore/storePassword': { format: privateValueFormat, failure: 'A missing value is a missing companion field, not a failed password test. The private-input flow accepts the write-only value for assessment and separately confirmed storage; it does not unlock the keystore.' },
   'android-keystore/keyPassword': { format: privateValueFormat, failure: 'Missing input is not a password failure. This session does not test the password or perform signing. No value is displayed back to you.' },
+  'apple-p12/file': {
+    where: 'Ask the authorized Apple Distribution signing-key owner for a P12 export containing the existing certificate and private key, with its password. On a separately admitted Apple-silicon Mac, select the private original outside registered project folders. Do not generate or replace a signing identity just to satisfy this screen.',
+    format: 'An original .p12 or .pfx file, at most 32 MiB, with a supported PKCS#12 version-3 envelope. Signed-data authSafe variants have a separate 4 MiB parser ceiling. These are mechanical observations, not password or trust checks.',
+    failure: 'A format refusal never changes the original. A recognized envelope does not prove the password, private key, certificate expiry or approved distribution identity. Actual validation belongs to the separately admitted signed export.',
+    suffixes: ['.p12', '.pfx'],
+  },
+  'apple-p12/password': {
+    where: 'Use the original password set by the authorized owner when this P12 was exported. Ask that owner if it is unknown; do not paste it into project settings or logs.',
+    format: privateValueFormat,
+    failure: 'A missing value prevents a usable signing input. Supplied means retained for assessment, not that the P12 was unlocked. Password correctness is checked only by the core signed-export flow.',
+  },
+  'apple-profile/file': {
+    where: 'Obtain the Apple-issued App Store provisioning profile from the authorized developer-account owner. It must cover the saved team, explicit bundle ID and reviewed Apple Distribution certificate. Select its private original outside registered projects on the separately admitted Mac.',
+    format: 'An original .mobileprovision file, at most 4 MiB, containing a complete supported DER CMS SignedData envelope. No password is entered for this file. One primary profile is supported; extension/profile mismatches are not guessed.',
+    failure: 'CMS format is not proof of Apple authenticity, valid dates, entitlements or team/bundle/signer correspondence. Those checks belong to core signing validation; session assessment cannot authorize a release.',
+    suffixes: ['.mobileprovision'],
+  },
+  'asc-p8/file': {
+    where: 'Obtain the original downloaded API private key from its authorized App Store Connect account owner. On an admitted Linux or Apple-silicon Mac session, select the private original outside registered projects; the app does not move, rename, change permissions or generate keys.',
+    format: 'An original .p8 file, at most 4 MiB: one unencrypted PRIVATE KEY PEM block with strict 64-column wrapping, or complete DER PKCS#8 version 0. Envelope and named EC/P-256 identifiers only. Encrypted, SEC1-only, version-1, attributes and explicit-curve variants are unsupported.',
+    failure: 'A recognized envelope and identifiers do not prove mathematical private-key validity, account ownership, revocation or App Store Connect permissions. No key derivation, signing or Store request occurs. Keep/Save and Assign remain separate reviews.',
+    suffixes: ['.p8'],
+  },
+  'asc-p8/keyId': { format: 'Exactly 10 uppercase ASCII letters or digits, as judged by the core. ' + privateValueFormat },
+  'asc-p8/issuerId': { format: 'UUID spelling: 8-4-4-4-12 hexadecimal characters with hyphens, as judged by the core. ' + privateValueFormat },
   'android-firebase/file': {
-    where: 'In Firebase Console, open Project settings, choose the intended Android app under Your apps, and download google-services.json. Select that private original outside registered project folders. Do not use an exported service-account private key.',
+    where: 'In Firebase Console, open Project settings, choose the intended Android app under Your apps, and download google-services.json. On an admitted Linux or Apple-silicon Mac session, select that private original outside registered project folders. Do not use an exported service-account private key.',
     format: 'An original UTF-8 .json file, at most 4 MiB, within this importer’s document/complexity limits. Decoded duplicate names are refused. The core checks every supported client structure and the configured application ID; CLI parsing rules are unchanged.',
     failure: 'Malformed clients or an application-ID mismatch prevent a usable review. A parser-limit refusal is not proof that the original is malformed. No Firebase service is contacted and the original is never changed.',
+  },
+  'ios-firebase/file': {
+    where: 'In Firebase Console, open Project settings, choose the intended iOS app under Your apps, and download GoogleService-Info.plist. Select that private original outside registered project folders. Do not use an exported service-account private key.',
+    format: 'An original UTF-8 XML 1.0 .plist file, at most 4 MiB. Binary plist is not supported. This importer bounds depth to 32 and applies scalar, key and document-complexity limits; decoded duplicate keys are refused. The core checks the root dictionary and BUNDLE_ID against the submitted iOS bundle ID.',
+    failure: 'Malformed XML, missing or nonstring BUNDLE_ID, or a bundle-ID mismatch prevent a usable review. Unsupported variants and parser-limit refusals do not prove the original is malformed. XML format and bundle-ID match do not verify a Firebase account or service. No service is contacted and the original is never changed.',
+    suffixes: ['.plist'],
   },
   'google-wif/provider': { failure: 'Identifier syntax does not prove provider existence, repository binding or token exchange. This session does not log in, request an identity token or import Google ADC.' },
   'google-wif/serviceAccount': { failure: 'An email with the expected format is not proof of impersonation or Google Play permissions. No account or service is contacted.' },
@@ -53,16 +84,41 @@ const controls: Record<string, Partial<HelpContent>> = {
     format: 'The existing core selects the actual requirements for full, signing or store. Choosing a purpose does not run those operations.',
   },
   mode: {
-    requiredWhen: 'Explicit consent is required before the app keeps any private session input.',
-    what: 'Keep bounded private inputs only in this running application, without persistence.',
-    where: 'Use Start session. Only an independently qualified native profile can enable collection.',
-    format: 'Session-only memory, at most 32 retained records / 64 MiB. There is no persistent-vault, keyring or plaintext-disk fallback.',
-    failure: 'An unavailable importer does not collect input. Quitting or discarding revokes assignments and releases copies only after original work settles; perfect memory erasure is not promised.',
+    requiredWhen: 'Explicit consent is required before the app keeps any private input.',
+    what: 'Choose memory-only inputs for this launch, or an available authenticated encrypted vault for later launches.',
+    why: 'Saving, unlocking and assigning are separate decisions. Neither storage mode authorizes a build or release.',
+    where: 'Choose Start session or Open encrypted vault in this panel. Each mode shows its own native availability; an unavailable vault does not disable an available memory-only session.',
+    format: 'Memory-only: 32 records / 64 MiB. Encrypted: 128 descriptors / 1 GiB on disk, with bounded private memory and a separately qualified OS keyring. No vault-password field, plaintext disk or silent mode fallback.',
+    failure: 'Use only a trusted operating system and desktop account: the original Secret Service session on Linux, or the existing login Keychain on macOS. Profile checks detect observed changes; they are not atomic process protection or protection from a compromised account. Unavailable or denied access fails closed, without replacing a key or weakening OS permissions. Perfect memory/disk erasure is not promised.',
+  },
+  label: {
+    label: 'Optional vault label', requiredness: 'optional', requiredWhen: 'Only when saving a new or replacement encrypted record.',
+    what: 'A short nonsecret name to help you recognize this encrypted record.',
+    why: 'A chosen label is easier to recognize, but it never proves which account, file or signing identity the record contains.',
+    where: 'Choose your own description, such as Android upload key. Leave it empty to use the input kind and item number. No filename is copied automatically.',
+    format: 'Optional nonempty text up to 128 UTF-8 bytes, without control characters. It is encrypted on disk and displayed only while its descriptor is unlocked. Unicode may use several bytes per character.',
+    failure: 'Overlong or unsupported text prevents preparation. Never put passwords, tokens or private identifiers in labels; a label does not rename or change the original file.',
+  },
+  initialize: {
+    label: 'Initialize encrypted vault', requiredness: 'conditional', requiredWhen: 'Only for a confirmed absent vault, after a separate explicit review.',
+    what: 'Create the application’s encrypted private-input vault and its new protected key.',
+    why: 'Persistence needs a new, uniquely bound vault and OS keyring entry before the app can save inputs.',
+    where: 'Use Review vault initialization, then confirm the original review. The app manages its private location outside registered projects; no folder copying is needed.',
+    format: 'Available only when the native service positively reports an uninitialized vault. This creates storage, not a credential, assignment or release.',
+    failure: 'Existing, inaccessible or conflicting state is never overwritten or adopted. A partial or uncertain result stays explicit; do not repeat initialization to repair it.',
+  },
+  unlock: {
+    label: 'Unlock encrypted vault', requiredness: 'conditional', requiredWhen: 'Before preparing, saving, removing or assigning encrypted inputs.',
+    what: 'Explicitly ask the qualified OS keyring for the existing vault key.',
+    why: 'Locked storage cannot expose labels or supply credentials. Unlock authenticates the bounded descriptor listing; it does not assess every stored payload.',
+    where: 'Use Unlock vault. If a failed unlock closed the vault session, wait for known original cleanup, choose Open encrypted vault, then explicitly choose Unlock vault. On macOS the existing login Keychain must already be unlocked: if needed, open Keychain Access yourself and unlock your login keychain there. Never enter the desktop or Keychain password into this app’s credential fields.',
+    format: 'On macOS this retrieves the exact existing key without asking for a Keychain prompt, creating or unlocking a Keychain, or replacing a key. There is no plaintext fallback. Saved records still need an explicit Assess and assign step for the current draft.',
+    failure: 'Locked, denied, missing and unavailable access have distinct reasons. Pending, unknown or late-known cleanup does not authorize another attempt. Reopening is not initialization or repair, and does not read or assign a stored credential. Use the operating system’s own keyring controls when necessary; the app does not repair access or replay interrupted storage. Interrupted storage may permit read-only labels only, with no mutation or assignment.',
   },
   choose: {
     requiredWhen: 'For a supported file input after submitting the current context.',
     where: 'Click Select file and use the native picker. No manual registration, internal directory copying, path entry or renaming is required.',
-    format: 'One private original outside all registered projects on the qualified local filesystem. This first increment supports JKS headers and Android Firebase JSON only.',
+    format: 'One private original outside all registered projects on the separately admitted local filesystem. Supported observations are JKS headers, Android Firebase JSON, iOS Firebase XML plist, unencrypted P8 PKCS#8 envelopes, and macOS-only P12 / DER CMS profile envelopes; native availability is a separate gate. P8 envelope/EC-P256 identifiers are not mathematical key, ownership, revocation or Store-access validation. Apple authenticity and password correctness are not format observations. Binary plist is not enabled.',
   },
   prepare: {
     requiredWhen: 'After file selection and companion entry, or when reviewing a scalar or retained record.',
@@ -106,15 +162,55 @@ const controls: Record<string, Partial<HelpContent>> = {
   lock: { requiredWhen: 'When you want this entire session to become unavailable.', what: 'Revoke all assignments and discard session copies after original pending work settles.', where: 'Use Discard session and confirm the stated data loss.', format: 'No record is saved for a later launch. No credential or signing identity is reset or revoked.', failure: 'Unknown cleanup stays explicit. Keep the original application owner available for late settlement; do not assume its buffers have been erased. Once the original work has settled and this session is closed, Close can ask for quit confirmation without reopening credential use.' },
 };
 
-export function sessionControlHelp(guide: CredentialGuide | null, id: string): HelpContent | null {
-  const original = guide?.controls.find((item) => item.id === id);
+const encryptedControls: Record<string, Partial<HelpContent>> = {
+  prepare: {
+    where: 'Use Prepare private review for new input, or Assess and assign on an existing unlocked encrypted record.',
+    format: 'Existing records are freshly read, authenticated and assessed against the submitted draft. Unlocking a label or saving a source snapshot does not perform that step.',
+  },
+  save: {
+    what: 'Save the captured input and supplied fields as one authenticated encrypted record outside your projects.',
+    where: 'Use Save encrypted copy in the original review. Then explicitly use Assess and assign on the saved revision.',
+    format: 'Saving has separate effect, durability and cleanup results. Saved means not assigned; the stored payload has not yet been checked for use in this session. No source-inherited assignment review follows.',
+  },
+  assign: {
+    where: 'Use Assess and assign on the exact unlocked saved record. Review the fresh assessment, then confirm Assign to this context.',
+    format: 'Preparation reads and authenticates the actual stored revision, then the core reassesses it for this draft. Assignment is a separate single-use confirmation; no account check, build or release starts.',
+  },
+  replace: {
+    requiredWhen: 'Only when you explicitly want to replace an existing same-kind encrypted record.',
+    what: 'Prepare a replacement for the exact selected encrypted record revision.',
+    where: 'Choose the existing kind, item number and revision under New or replacement copy. An optional nonsecret label helps recognition, not identity proof.',
+  },
+  delete: {
+    requiredWhen: 'Only when you explicitly want to remove one encrypted stored copy.',
+    what: 'Remove the exact stored record, never its original selected file or OS keyring key.',
+    where: 'Choose Review removal on the exact unlocked record and confirm the original review.',
+  },
+  discard: {
+    requiredWhen: 'When abandoning the original operation or unused review.',
+    where: 'Use Discard review or Request cancel. Use Lock vault separately to make the whole vault unavailable.',
+    format: 'Cancellation is not rollback: an effect may already have happened. Observe effect, durability and cleanup independently; no automatic retry, repair or plaintext fallback occurs.',
+  },
+  lock: {
+    requiredWhen: 'When you want all decrypted vault inputs and assignments to become unavailable.',
+    what: 'Revoke assignments and release owned decrypted copies after their original operations settle; preserve encrypted records on disk.',
+    where: 'Use Lock vault and confirm. Unlock and reassess stored revisions explicitly before assigning again.',
+    format: 'This does not remove the encrypted vault or reset, replace, revoke or export its key. Lock is not a guarantee of perfect memory or disk erasure.',
+    failure: 'A pending or unknown original owner stays visible. A storage effect is never relabeled as successful merely because Lock or Cancel was requested.',
+  },
+};
+
+export function sessionControlHelp(guide: CredentialGuide | null, id: string, storage: 'session' | 'encrypted' = 'session'): HelpContent | null {
+  const original = guide?.controls.find((item) => item.id === (id === 'initialize' || id === 'unlock' ? 'mode' : id));
   const correction = controls[id];
-  return original && correction ? { ...original, ...correction } : null;
+  return original && correction ? { ...original, ...correction, ...(storage === 'encrypted' ? encryptedControls[id] : {}) } : null;
 }
 
-export function sessionTargetLabel(guide: CredentialGuide | null, subject: AssetPreviewSubject, records: AssetStatus['records']): string | null {
-  const label = guide?.kinds.find((kind) => kind.id === subject.kind)?.label ?? 'Session input';
-  if (subject.change === 'new') return `New ${label.toLocaleLowerCase()} session record`;
+export function sessionTargetLabel(guide: CredentialGuide | null, subject: AssetPreviewSubject, records: AssetStatus['records'], storage: 'session' | 'encrypted' = 'session'): string | null {
+  if (subject.type === 'vault') return 'New encrypted private-input vault';
+  const label = guide?.kinds.find((kind) => kind.id === subject.kind)?.label ?? 'Private input';
+  if (subject.change === 'new') return `New ${label.toLocaleLowerCase()} ${storage} record`;
   const index = records.findIndex((record) => record.recordId === subject.recordId && record.kind === subject.kind);
-  return index >= 0 && subject.recordRevision !== null ? `${label} · item ${index + 1} · revision ${subject.recordRevision}` : null;
+  const record = records[index];
+  return record && record.revision === subject.recordRevision ? `${label}${record.label ? ` · ${record.label}` : ''} · item ${index + 1} · revision ${subject.recordRevision}` : null;
 }

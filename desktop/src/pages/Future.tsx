@@ -1,32 +1,35 @@
 import type { ReactNode } from 'react';
-import type { AppInfo, HelpContent } from '../types.ts';
+import type { HelpContent } from '../types.ts';
 import type { RetainedEditAttention } from '../drafts.ts';
-import { futureReason } from '../certainty.ts';
-import { Badge, DisabledAction, EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
+import { EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
 
-export function Releases({ info, offlineChecks, androidBuild }: { info: AppInfo | null; offlineChecks: ReactNode; androidBuild: ReactNode }) {
+export function Releases({ offlineChecks, androidBuild, iosArchive, evidence, protectedWorkflows, onOpenGitHub }: { offlineChecks: ReactNode; androidBuild: ReactNode; iosArchive: ReactNode; evidence: ReactNode; protectedWorkflows?: ReactNode; onOpenGitHub: () => void }) {
   return <>
-    <PageHeading eyebrow="RELEASES" title="One candidate. A traceable journey." description="Review saved checks and Android build inputs separately. Local output is not an authenticated release candidate; protected promotion remains a future stage." />
+    <PageHeading eyebrow="RELEASES" title="One candidate. A traceable journey." description="Inspect saved release documents, review local checks, and separately prepare a protected release workflow when its installed runtime is qualified." />
+    {protectedWorkflows}
+    {evidence}
     {offlineChecks}
     {androidBuild}
-    <section className="card"><SectionHeading title="Release lifecycle" description="Planned stages, not a completed timeline. No runs or authenticated release evidence have been loaded."><Badge>Not implemented</Badge></SectionHeading><div className="lifecycle">{[{ name: 'Candidate', description: 'Build, sign, validate, and retain immutable evidence.' }, { name: 'Internal testing', description: 'Distribute the same verified candidate to internal testers.' }, { name: 'External testing', description: 'Use protected promotion and authentic predecessor evidence.' }, { name: 'Production preparation', description: 'Prepare a reviewed submission. Never auto-publish publicly.' }].map((stage, index) => <div className="lifecycle-stage" key={stage.name}><div className="lifecycle-node">{index + 1}</div><strong>{stage.name}</strong><p>{stage.description}</p><Badge>Planned · unavailable</Badge></div>)}</div></section>
-    <section className="card"><EmptyState icon="rocket" title="No release history loaded" description="This app has not retrieved or authenticated release records. An empty view does not mean the project has never released."><DisabledAction label="Create release candidate" icon="rocket" reason={futureReason(info?.capabilities, 'release.candidate', 'Native builds, signed artifacts, GitHub dispatch, and release evidence are not implemented.')} /></EmptyState></section>
+    {iosArchive}
+    <section className="card"><EmptyState icon="github" title="Read authenticated release history in GitHub" description="Open GitHub to connect the original project and choose one exact run, attempt, stage and platform. An authenticated read requires a qualified native runtime and a separate explicit Start. Missing evidence does not prove that no release happened; retained workflow evidence is not current Store state."><button type="button" className="button secondary" onClick={onOpenGitHub}>Open authenticated History in GitHub</button></EmptyState></section>
   </>;
 }
 
 const editAttentionHelp: HelpContent = {
   label: 'Retained file-edit alerts', requiredness: 'conditional',
-  what: 'A settings, workflow, or public-text save previously reported that its file transaction needs recovery.',
+  what: 'A settings, workflow, public-text, or saved-version save previously reported that its file transaction needs recovery.',
   why: 'Keeping this alert visible prevents a later operation or project switch from hiding that earlier problem.',
   where: 'These alerts come from edit results already observed in this app session. No journal or remote service is inspected by this list.',
-  format: 'Nothing to enter. A loaded project can be opened in its usual editor; this does not reopen the original result or repair files.',
+  format: 'Nothing to enter here. A loaded project can be opened in its usual editor; text/version editors offer a separate explicit Inspect recovery and frozen confirmation. Navigation itself neither inspects nor repairs files.',
   requiredWhen: 'When an earlier file edit reported recovery was required. Keep the original files and evidence; use the original status controls for an active operation.',
-  failure: 'An empty list, changing projects, or restarting the app does not prove that files are clean or a retry is safe. Recovery assessment is not implemented.',
+  failure: 'An empty list, changing projects, or restarting the app does not prove that files are clean or a retry is safe. These file-edit alerts are not assessed by project build-input recovery.',
 };
 
-export function Recovery({ info, attention, choosingProject, onOpenProject, onHelp }: {
-  info: AppInfo | null;
+export function Recovery({ projectRecovery, attention, choosingProject, onOpenProject, onHelp, evidenceGuidance, onOpenReleases }: {
+  projectRecovery: ReactNode;
+  evidenceGuidance: ReactNode;
+  onOpenReleases?: () => void;
   attention: readonly RetainedEditAttention[];
   choosingProject: boolean;
   onOpenProject: (attention: RetainedEditAttention) => void;
@@ -34,9 +37,12 @@ export function Recovery({ info, attention, choosingProject, onOpenProject, onHe
 }) {
   return <>
     <PageHeading eyebrow="RECOVERY" title="An interruption shouldn’t leave you guessing." description="Recovery must know what really happened, preserve original ownership, and never mistake partial success for a clean restart." />
-    <div className="notice notice-warning"><Icon name="shield" /><div><strong>Recovery has not been assessed</strong><p>The retained alerts below are earlier file-edit observations, not a fresh journal inspection or an assessment of current local or remote operations. This screen does not establish that a project is clean or an operation can safely be retried.</p></div></div>
+    {evidenceGuidance}
+    {projectRecovery}
+    {onOpenReleases && <section className="card"><SectionHeading title="Protected workflow request recovery" description="Reconcile an exact release request or prepare the core’s existing evidence-based same-step recovery. This is separate from local project recovery and does not prove Store state." /><button type="button" className="button secondary" onClick={onOpenReleases}>Open original release requests</button></section>}
+    <div className="notice notice-warning"><Icon name="shield" /><div><strong>Other recovery remains unassessed</strong><p>The build-input action above does not recover file edits, signing accounts or Store operations. The retained alerts below are earlier file-edit observations, not a fresh journal inspection or an assessment of current local or remote operations. Use the public-text or saved-version editor’s explicit Inspect recovery only after original native settlement; complete matching journals may then offer one separately confirmed action. This screen does not establish that a project is clean or an operation can safely be retried.</p></div></div>
     <section className="card">
-      <SectionHeading title="File-edit alerts from this session" description="Earlier alerts stay visible even after another edit replaces the latest result. Original active or uncertain operations keep their existing status controls.">
+      <SectionHeading title="File-edit alerts from this session" description="Earlier alerts stay visible after unrelated edits. Only a matching successful same-domain recovery can clear that domain’s alert; original active or uncertain operations keep their status controls.">
         <HelpButton content={editAttentionHelp} onHelp={onHelp} />
       </SectionHeading>
       {attention.length === 0
@@ -52,12 +58,12 @@ export function Recovery({ info, attention, choosingProject, onOpenProject, onHe
             <p id={`edit-attention-${index}`}>{item.projectName === null
               ? 'Navigation is unavailable because the original project is not loaded here. Its alert remains retained.'
               : choosingProject ? 'Finish choosing a project before navigating.'
-                : 'Opens the existing editor without discarding drafts. It does not recover files or reopen the original outcome.'}</p>
+                : 'Opens the existing editor without discarding drafts. Text/version recovery requires a separate explicit inspection and confirmation; navigation never recovers files.'}</p>
           </div>
         </li>)}</ul>}
     </section>
-    <section className="card"><EmptyState icon="recovery" title="Recovery assessment is not implemented" description="A future reviewed core flow will supply session-bound recovery challenges and distinguish interrupted, partially completed, and settled operations."><DisabledAction label="Assess recovery state" icon="recovery" reason={futureReason(info?.capabilities, 'recovery.assess', 'Owned-operation recovery, authenticated journals, and session-bound decisions are not implemented.')} /></EmptyState></section>
-    <p className="review-caution">Cancelling saved checks or an Android build cannot undo effects already performed by project code. A retained work folder is not a successful artifact or a safe retry. Project admission refusal does not establish a recoverable signing session or distinguish busy ownership from recovery need. Keep the original operation and its status; this page cannot inspect, clean or reset it.</p>
-    <section className="card"><SectionHeading title="Until recovery is available" /><ul className="plain-list"><li><Icon name="shield" size={17} /><span>Do not infer a safe retry from a missing desktop record.</span></li><li><Icon name="box" size={17} /><span>Keep original files, artifacts, and existing release evidence intact.</span></li><li><Icon name="github" size={17} /><span>Check the actual protected workflow or Store operation before considering another mutation.</span></li></ul></section>
+    <p className="review-caution">Text/version recovery cannot infer missing original context from legacy or incomplete journals. Keep public files, private journal names/contents, original operation details and unsaved drafts. Do not delete or rename controls, force an edit, use generic init --recover, or repeatedly retry a conflict; obtain manual reconciliation assistance.</p>
+    <p className="review-caution">Cancelling saved checks or an Android build cannot undo effects already performed by project code. A retained work folder is not a successful artifact or a safe retry. Project admission refusal does not establish a recoverable signing session or distinguish busy ownership from recovery need. Keep the original operation and its status. The build-input flow does not inspect or clean retained artifact folders or signing accounts.</p>
+    <section className="card"><SectionHeading title="For other interrupted operations" /><ul className="plain-list"><li><Icon name="shield" size={17} /><span>Do not infer a safe retry from a missing desktop record.</span></li><li><Icon name="box" size={17} /><span>Keep original files, artifacts, and existing release evidence intact.</span></li><li><Icon name="github" size={17} /><span>Check the actual protected workflow or Store operation before considering another mutation.</span></li></ul></section>
   </>;
 }

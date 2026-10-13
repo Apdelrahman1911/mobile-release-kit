@@ -15,20 +15,29 @@ from typing import Any
 
 from .config import ANDROID_ID_RE, MAX_CONFIG_BYTES, MAX_VERSION_BYTES
 
-PROTOCOL = "mrk-android-build/1"
-CONSENT = "saved-android-build-inspect-v1"
+PROTOCOL = "mrk-android-build/3"
+CONSENT = "saved-android-build-inspect-v3"
+SIGNED_CONSENT = "saved-android-local-sign-v1"
 SCOPE = "local-post-build-artifact-observation"
 TOOLCHAIN_PROFILE = "android-local-linux-gnu-x86_64-v1"
-# A closed source contract, NOT a runtime/native qualification flag.
-PROFILES = {"linux-gnu-x86_64": ("linux", "x86_64")}
+MAC_TOOLCHAIN_PROFILE = "android-registered-macos-arm64-v1"
+MAC_X64_TOOLCHAIN_PROFILE = "android-registered-macos-x86_64-v1"
+MAC_TOOLCHAIN_PROFILES = {"macos-arm64": MAC_TOOLCHAIN_PROFILE, "macos-x86_64": MAC_X64_TOOLCHAIN_PROFILE}
+MAC_TOOLCHAIN_PREFIX = "/Library/Application Support/MobileReleaseKit/android"
+# Closed source contracts, NOT runtime/native qualification flags.
+PROFILES = {"linux-gnu-x86_64": ("linux", "x86_64"), "macos-arm64": ("macos", "arm64"),
+            "macos-x86_64": ("macos", "x86_64")}
 RENDERER_REQUEST_LIMIT, REQUEST_LIMIT, RESPONSE_LIMIT = 8 * 1024, 32 * 1024, 64 * 1024
 INTENT_SECONDS, WORK_SECONDS, FINALITY_SECONDS = 300, 3000, 3010
 MAX_FRAMES, MAX_FINDINGS, MAX_ARTIFACTS = 8, 128, 1
 MAX_AAB_BYTES = 1024 * 1024 * 1024
 STAGES = ("inputs-bound", "building", "capturing", "inspecting", "disposing-work")
+SIGNED_STAGES = ("inputs-bound", "validating-signing", "building", "capturing", "signing",
+                 "restoring-inputs", "inspecting", "disposing-work")
+SIGNED_CLOSE_FIELDS = ("buildInputsClosed", "materialRetired")
 STATUSES = ("PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE")
 CHECKS = ("aab-structure", "aab-manifest", "application-id", "build-number", "version-name",
-          "release-flags", "signer", "core-lifecycle", "other-core-finding")
+          "release-flags", "signature", "signer", "core-lifecycle", "other-core-finding")
 ABIS = ("arm64-v8a", "armeabi", "armeabi-v7a", "mips", "mips64", "x86", "x86_64")
 LIMITATIONS = ("saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated",
                "post-run-bytes-may-be-incremental-reused-or-stale", "source-binding-not-established",
@@ -45,7 +54,8 @@ REASONS = frozenset(("none", "cancelled", "context-changed", "document-lost", "s
     "platform-disabled", "module-required", "toolchain-unavailable", "toolchain-mismatch",
     "project-admission-refused", "command-failed", "command-incomplete", "artifact-missing",
     "artifact-ambiguous", "artifact-unsafe", "artifact-changed", "input-limit", "result-limit",
-    "work-retained", "cleanup-unknown"))
+    "work-retained", "cleanup-unknown", "signing-input-missing", "signing-input-invalid",
+    "signing-validation-failed", "signing-command-failed", "build-inputs-unrestored"))
 _TOKEN = re.compile(r"[0-9a-f]{32}\Z")
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _PROJECT = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
@@ -54,7 +64,7 @@ _VERSION_TEXT = re.compile(r"[0-9A-Za-z.+-]{1,64}\Z")
 _MODULE_TEXT = re.compile(r":[0-9A-Za-z_.:-]{0,511}\Z")
 _VARIANT_TEXT = re.compile(r"[0-9A-Za-z_-]{1,128}\Z")
 _TASK_TEXT = re.compile(r":[0-9A-Za-z_.:-]{1,647}\Z")
-_PREPARE_FIELDS = {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion"}
+_PREPARE_FIELDS = {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion", "artifactValidation"}
 _FAILURES = frozenset(("FAIL", "MISSING", "BLOCKED", "INVALID"))
 _MANIFEST_CHECKS = frozenset(("aab-manifest", "application-id", "build-number", "version-name", "release-flags"))
 _CLOSE_FIELDS = ("inputClosed", "handlersRestored", "invocationClosed", "artifactsClosed", "toolsClosed", "namespaceClosed")
@@ -165,11 +175,61 @@ def saved_version(value: object) -> dict:
     return {"source": value["source"], **compared, "name": value["name"], "build": value["build"]}
 
 
+def artifact_validation(value: object) -> dict:
+    value = _keys(value, {"mode", "uploadCertificateSha256"})
+    require(_enum(value["mode"], ("structure-and-version", "upload-signature")))
+    fingerprint = value["uploadCertificateSha256"]
+    # Public comparison transport only. Exact saved config policy/normalization
+    # remains in core, and equality is checked before Gradle/tool acquisition.
+    require(fingerprint is None if value["mode"] == "structure-and-version" else
+            type(fingerprint) is str and re.fullmatch(r"[0-9A-Fa-f:]{1,95}", fingerprint) is not None)
+    return dict(value)
+
+
+def is_signed(value: dict) -> bool:
+    return value.get("operation") == "android-build-sign" or "signing" in value
+
+
+def stages(value: dict) -> tuple[str, ...]:
+    return SIGNED_STAGES if is_signed(value) else STAGES
+
+
+def maximum_frames(value: dict) -> int:
+    return len(SIGNED_STAGES) + 2 if is_signed(value) else MAX_FRAMES
+
+
+def signing_selection(value: object) -> dict:
+    value = _keys(value, {"mode", "assignments"})
+    require(value["mode"] == "local-upload-key" and type(value["assignments"]) is list
+            and 1 <= len(value["assignments"]) <= 2)
+    rows = []
+    for index, row in enumerate(value["assignments"]):
+        row = _keys(row, {"kind", "recordId", "recordRevision", "contextRevision"})
+        require(row["kind"] == ("android-keystore", "android-firebase")[index]
+                and _text(row["recordId"], _TOKEN) and integer(row["recordRevision"], 2**32 - 2, 1)
+                and integer(row["contextRevision"], 2**32 - 2, 1))
+        rows.append(dict(row))
+    require(len({row["recordId"] for row in rows}) == len(rows)
+            and len({row["contextRevision"] for row in rows}) == 1)
+    return {"mode": "local-upload-key", "assignments": rows}
+
+
+def _limitations(validation: dict, *, signed: bool = False) -> list[str]:
+    return ["local-signing-not-store-enrollment" if signed and item == "toolkit-signing-not-requested" else
+            "upload-signature-check-not-store-enrollment" if item == "artifact-signer-not-inspected"
+            and validation["mode"] == "upload-signature" else item for item in LIMITATIONS]
+
+
 def prepare(value: object) -> dict:
-    value = _keys(value, _PREPARE_FIELDS)
+    signed = type(value) is dict and "signing" in value
+    value = _keys(value, _PREPARE_FIELDS | ({"signing"} if signed else set()))
     require(_text(value["projectId"], _PROJECT) and integer(value["draftRevision"], 2**32 - 2)
             and integer(value["baselineGeneration"], 2**32 - 2))
-    result = {**value, "savedConfig": content(value["savedConfig"]), "savedVersion": saved_version(value["savedVersion"])}
+    result = {**value, "savedConfig": content(value["savedConfig"]), "savedVersion": saved_version(value["savedVersion"]),
+              "artifactValidation": artifact_validation(value["artifactValidation"])}
+    if signed:
+        require(result["artifactValidation"]["mode"] == "upload-signature")
+        result["signing"] = signing_selection(value["signing"])
     require(len(_encode(result)) <= RENDERER_REQUEST_LIMIT)
     return result
 
@@ -180,10 +240,12 @@ def parse_prepare(raw: bytes) -> dict:
 
 
 def context(value: object) -> dict:
-    value = _keys(value, _PREPARE_FIELDS | {"platform", "operation"})
-    require(value["platform"] == "android" and value["operation"] == "android-build-inspect")
-    return {**prepare({key: value[key] for key in _PREPARE_FIELDS}),
-            "platform": "android", "operation": "android-build-inspect"}
+    signed = type(value) is dict and "signing" in value
+    fields = _PREPARE_FIELDS | ({"signing"} if signed else set())
+    value = _keys(value, fields | {"platform", "operation"})
+    operation = "android-build-sign" if signed else "android-build-inspect"
+    require(value["platform"] == "android" and value["operation"] == operation)
+    return {**prepare({key: value[key] for key in fields}), "platform": "android", "operation": operation}
 
 
 def _path(value: object) -> str:
@@ -207,15 +269,36 @@ def _identity(value: object) -> dict:
     return dict(value)
 
 
-def _native(value: object) -> dict:
-    value = _keys(value, {"profile", "projectRoot", "rootIdentity", "cwd", "toolchain"})
+def mac_toolchain_selection(value: object) -> dict:
+    """Closed comparison data. Native catalog/custody still owns admission."""
+    value = _keys(value, {"instance", "ownerUid", "catalogGeneration", "recordSha256", "inventorySha256", "osProviderSha256"})
+    require(_text(value["instance"], _TOKEN) and integer(value["ownerUid"], 2**32 - 2, 1)
+            and integer(value["catalogGeneration"], 2**32 - 2, 1)
+            and all(_text(value[key], _SHA) for key in ("recordSha256", "inventorySha256", "osProviderSha256")))
+    return dict(value)
+
+
+def _native(value: object, *, signed: bool = False) -> dict:
+    value = _keys(value, {"profile", "projectRoot", "rootIdentity", "cwd", "toolchain"} | ({"signingContext"} if signed else set()))
     require(_enum(value["profile"], PROFILES))
-    toolchain = _keys(value["toolchain"], {"schemaVersion", "profile", "root", "rootIdentity", "inventorySha256"})
-    require(type(toolchain["schemaVersion"]) is int and toolchain["schemaVersion"] == 1
-            and toolchain["profile"] == TOOLCHAIN_PROFILE and _text(toolchain["inventorySha256"], _SHA))
+    mac = value["profile"] in MAC_TOOLCHAIN_PROFILES
+    require(not signed or mac)
+    toolchain = _keys(value["toolchain"], {"schemaVersion", "profile", "root", "rootIdentity", "inventorySha256",
+                                         *({"selection"} if mac else set())})
+    require(type(toolchain["schemaVersion"]) is int and toolchain["schemaVersion"] == (2 if mac else 1)
+            and toolchain["profile"] == (MAC_TOOLCHAIN_PROFILES[value["profile"]] if mac else TOOLCHAIN_PROFILE)
+            and _text(toolchain["inventorySha256"], _SHA))
+    original = _identity(toolchain["rootIdentity"])
+    root = _path(toolchain["root"])
+    if mac:
+        selected = mac_toolchain_selection(toolchain["selection"])
+        require(selected["inventorySha256"] == toolchain["inventorySha256"]
+                and root == f'{MAC_TOOLCHAIN_PREFIX}/{selected["ownerUid"]}/{selected["instance"]}'
+                and original["uid"] == original["gid"] == 0 and stat.S_IMODE(original["mode"]) == 0o555)
     return {"profile": value["profile"], "projectRoot": _path(value["projectRoot"]),
             "rootIdentity": _identity(value["rootIdentity"]), "cwd": _path(value["cwd"]),
-            "toolchain": {**toolchain, "root": _path(toolchain["root"]), "rootIdentity": _identity(toolchain["rootIdentity"])}}
+            "toolchain": {**toolchain, "root": root, "rootIdentity": original},
+            **({"signingContext": content(value["signingContext"])} if signed else {})}
 
 
 @dataclass(frozen=True)
@@ -229,13 +312,15 @@ class AndroidBuildRequest:
 def parse_request(raw: bytes) -> AndroidBuildRequest:
     value = _keys(_decode(raw, REQUEST_LIMIT, framed=True), {"protocol", "operationId", "ownerGeneration", "context", "native"})
     require(value["protocol"] == PROTOCOL and _text(value["operationId"], _TOKEN) and _text(value["ownerGeneration"], _TOKEN))
-    return AndroidBuildRequest(value["operationId"], value["ownerGeneration"], context(value["context"]), _native(value["native"]))
+    selected = context(value["context"])
+    return AndroidBuildRequest(value["operationId"], value["ownerGeneration"], selected,
+                               _native(value["native"], signed=is_signed(selected)))
 
 
 def _request_binding(request: AndroidBuildRequest) -> dict:
     require(type(request) is AndroidBuildRequest and _text(request.operation_id, _TOKEN) and _text(request.owner_generation, _TOKEN))
     return {"operationId": request.operation_id, "ownerGeneration": request.owner_generation,
-            "context": context(request.context), "native": _native(request.native)}
+            "context": context(request.context), "native": _native(request.native, signed=is_signed(request.context))}
 
 
 def _selection(value: object) -> dict:
@@ -259,7 +344,7 @@ def project_finding(code: str) -> str:
     return {"android.aab.structure": "aab-structure", "android.aab.manifest": "aab-manifest",
             "android.aab.package": "application-id", "android.aab.versionCode": "build-number",
             "android.aab.versionName": "version-name", "android.aab.release-flags": "release-flags",
-            "android.aab.signer": "signer", "android.build.process-lifetime": "core-lifecycle",
+            "android.aab.signature": "signature", "android.aab.signer": "signer", "android.build.process-lifetime": "core-lifecycle",
             "android.build.input-ownership": "core-lifecycle"}.get(code, "other-core-finding")
 
 
@@ -276,8 +361,7 @@ def _inspection(value: object) -> dict:
     for ordinal, row in enumerate(value["findings"]):
         row = _keys(row, {"ordinal", "check", "status"})
         require(type(row["ordinal"]) is int and row["ordinal"] == ordinal
-                and _enum(row["check"], CHECKS) and _enum(row["status"], STATUSES)
-                and (row["check"] != "signer" or row["status"] == "SKIP"))
+                and _enum(row["check"], CHECKS) and _enum(row["status"], STATUSES))
         rows.append(dict(row))
         observed[row["status"]] += 1
     require(observed == counts)
@@ -286,15 +370,15 @@ def _inspection(value: object) -> dict:
 
 def _activity(value: object) -> dict:
     value = _keys(value, {"stage", "selection", "command", *_INSPECTION_FIELDS})
-    require(_enum(value["stage"], ("accepted", *STAGES)))
+    require(_enum(value["stage"], ("accepted", *SIGNED_STAGES)))
     selected = None if value["selection"] is None else _selection(value["selection"])
     command = _command(value["command"])
-    if value["stage"] in {"inputs-bound", "building", "capturing", "inspecting"}:
+    if value["stage"] in {"inputs-bound", "validating-signing", "building", "capturing", "signing", "restoring-inputs", "inspecting"}:
         require(selected is not None)
-    if value["stage"] in {"capturing", "inspecting"}:
+    if value["stage"] in {"capturing", "signing", "restoring-inputs", "inspecting"}:
         require(command == {"outcome": "exited", "exitCode": 0})
     if command["outcome"] != "not-dispatched":
-        require(selected is not None and value["stage"] in {"building", "capturing", "inspecting", "disposing-work"})
+        require(selected is not None and value["stage"] in {"validating-signing", "building", "capturing", "signing", "restoring-inputs", "inspecting", "disposing-work"})
     inspection = _inspection({key: value[key] for key in _INSPECTION_FIELDS})
     if any(row["check"] not in {"core-lifecycle", "other-core-finding"} for row in inspection["findings"]):
         # Failed/cancelled command paths cannot scan for a substitute AAB. Keep
@@ -310,10 +394,8 @@ def project_activity(report, *, stage: str, selection: dict | None, command: dic
     rows, counts = [], {status: 0 for status in STATUSES}
     if report is not None:
         for ordinal, finding in enumerate(report.findings):
-            require(type(finding) is Finding and type(finding.code) is str and len(finding.code) <= 256 and type(finding.status) is Status
-                    and finding.code != "android.aab.signature")
+            require(type(finding) is Finding and type(finding.code) is str and len(finding.code) <= 256 and type(finding.status) is Status)
             check = project_finding(finding.code)
-            require(check != "signer" or finding.status is Status.SKIP)
             rows.append({"ordinal": ordinal, "check": check, "status": finding.status.value})
             counts[finding.status.value] += 1
     return _activity({"stage": stage, "selection": selection, "command": command, "findings": rows,
@@ -336,7 +418,7 @@ def project_artifact(record: object, *, unknown_abi: bool) -> dict:
     return _artifact({**record, "unknownAbi": unknown_abi, "freshness": "not-established"})
 
 
-def _assurances(rows: list[dict]) -> dict:
+def _assurances(rows: list[dict], validation: dict, *, signed: bool = False) -> dict:
     structures = [row["status"] for row in rows if row["check"] == "aab-structure"]
     structure = ("passed" if structures == ["PASS"] else "failed" if any(item in _FAILURES for item in structures)
                  else "not-checked")
@@ -345,33 +427,97 @@ def _assurances(rows: list[dict]) -> dict:
     native = ("passed" if structure == "passed" and not unsupported and len(manifest) == 1
               and manifest[0]["check"] == "aab-manifest" and manifest[0]["status"] == "PASS"
               else "failed" if any(row["status"] in _FAILURES for row in manifest) else "not-checked")
+    signatures = [row["status"] for row in rows if row["check"] == "signature"]
+    signers = [row["status"] for row in rows if row["check"] == "signer"]
+    signature = signer = "not-inspected"
+    if validation["mode"] == "upload-signature":
+        signature = ("passed" if structure == "passed" and not unsupported and signatures == ["PASS"] else
+                     "failed" if any(item in _FAILURES for item in signatures) else "not-checked")
+        signer = ("matches-saved-upload-certificate" if signature == "passed" and signers == ["PASS"] else
+                  "failed" if any(item in _FAILURES for item in signers) else "not-checked")
     return {"structure": structure, "nativeManifest": native,
             "applicationVersion": "native-checked" if native == "passed" else "not-established",
-            "signer": "not-inspected", "toolkitSigning": "not-requested", "storeOperation": "not-requested",
+            "signature": signature, "signer": signer,
+            "toolkitSigning": "local-upload-key-verified" if signed else "not-requested", "storeOperation": "not-requested",
             "sourceBinding": "not-established", "releaseReadiness": "not-assessed"}
 
 
+def _inspection_mode(rows: list[dict], validation: dict) -> None:
+    signatures = [row["status"] for row in rows if row["check"] == "signature"]
+    signers = [row["status"] for row in rows if row["check"] == "signer"]
+    if validation["mode"] == "structure-and-version":
+        require(not signatures and all(status == "SKIP" for status in signers))
+    else:
+        require(signatures in ([], ["PASS"], ["FAIL"]))
+        require(not signers or signatures == ["PASS"] and
+                (signers == ["PASS"] or all(status == "FAIL" for status in signers)))
+
+
+def _inspection_commands(rows: list[dict], validation: dict) -> int:
+    """Exact reachable completed inspection prefixes, not an open call budget.
+
+    One: structure rejection. Two: basic manifest. Three: signature rejection.
+    Four: accepted signature followed by leaf inspection (which may fail).
+    Manifest failures are nonfatal policy DATA and do not skip signature work.
+    """
+    _inspection_mode(rows, validation)
+    structures = [row["status"] for row in rows if row["check"] == "aab-structure"]
+    manifest = [row for row in rows if row["check"] in _MANIFEST_CHECKS]
+    signatures = [row["status"] for row in rows if row["check"] == "signature"]
+    signers = [row["status"] for row in rows if row["check"] == "signer"]
+    if structures == ["FAIL"]:
+        require(not manifest and not signatures and not signers)
+        return 1
+    require(structures == ["PASS"] and bool(manifest))
+    if validation["mode"] == "structure-and-version":
+        require(signers == ["SKIP"])
+        return 2
+    if signatures == ["FAIL"]:
+        require(not signers)
+        return 3
+    require(signatures == ["PASS"] and bool(signers))
+    return 4
+
+
 def project_result(activity: object, artifact: object, *, used_config: object,
-                   used_version: object, toolchain_profile: str) -> dict:
+                   used_version: object, toolchain_profile: str, validation: object,
+                   toolchain_selection: object = None, signed: bool = False) -> dict:
     observed = _activity(activity)
+    validation = artifact_validation(validation)
     require(observed["stage"] == "disposing-work")
     result = {"schemaVersion": 1, "scope": SCOPE, "usedConfig": content(used_config),
-              "usedVersion": saved_version(used_version), "selection": observed["selection"],
+              "usedVersion": saved_version(used_version), "artifactValidation": validation, "selection": observed["selection"],
               "toolchainProfile": toolchain_profile, "command": observed["command"],
               "findings": observed["findings"], "summary": observed["summary"],
-              "artifacts": [_artifact(artifact)], "assurances": _assurances(observed["findings"]),
-              "limitations": list(LIMITATIONS)}
+              "artifacts": [_artifact(artifact)], "assurances": _assurances(observed["findings"], validation, signed=signed),
+              "limitations": _limitations(validation, signed=signed)}
+    require(type(signed) is bool)
+    if signed:
+        result["signing"] = "local-upload-key"
+    if toolchain_profile in MAC_TOOLCHAIN_PROFILES.values():
+        result["schemaVersion"] = 2
+        result["toolchainSelection"] = mac_toolchain_selection(toolchain_selection)
+    else:
+        require(toolchain_selection is None)
     validate_result(result)
     return result
 
 
 def validate_result(value: object) -> None:
     _structure(value)
+    require(type(value) is dict)
+    mac = value.get("toolchainProfile") in MAC_TOOLCHAIN_PROFILES.values()
+    signed = "signing" in value
+    require(not signed or mac and value["signing"] == "local-upload-key")
     value = _keys(value, {"schemaVersion", "scope", "usedConfig", "usedVersion", "selection", "toolchainProfile",
-                          "command", "findings", "summary", "artifacts", "assurances", "limitations"})
-    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["scope"] == SCOPE
-            and value["toolchainProfile"] == TOOLCHAIN_PROFILE and type(value["limitations"]) is list
-            and value["limitations"] == list(LIMITATIONS))
+                          "command", "findings", "summary", "artifacts", "assurances", "limitations", "artifactValidation",
+                          *({"toolchainSelection"} if mac else set()), *({"signing"} if signed else set())})
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == (2 if mac else 1) and value["scope"] == SCOPE
+            and _enum(value["toolchainProfile"], (TOOLCHAIN_PROFILE, *MAC_TOOLCHAIN_PROFILES.values()))
+            and type(value["limitations"]) is list
+            and value["limitations"] == _limitations(artifact_validation(value["artifactValidation"]), signed=signed))
+    if mac:
+        mac_toolchain_selection(value["toolchainSelection"])
     content(value["usedConfig"])
     saved_version(value["usedVersion"])
     _selection(value["selection"])
@@ -381,8 +527,16 @@ def validate_result(value: object) -> None:
             and all(row["check"] != "core-lifecycle" for row in inspection["findings"]))
     require(type(value["artifacts"]) is list and len(value["artifacts"]) == MAX_ARTIFACTS)
     _artifact(value["artifacts"][0])
-    assurance = _keys(value["assurances"], set(_assurances(inspection["findings"])))
-    require(assurance == _assurances(inspection["findings"]) and len(_encode(value)) <= RESPONSE_LIMIT)
+    validation = artifact_validation(value["artifactValidation"])
+    _inspection_commands(inspection["findings"], validation)
+    expected = _assurances(inspection["findings"], validation, signed=signed)
+    assurance = _keys(value["assurances"], set(expected))
+    require(assurance == expected and len(_encode(value)) <= RESPONSE_LIMIT)
+    if signed:
+        require(validation["mode"] == "upload-signature" and expected["structure"] == "passed"
+                and expected["nativeManifest"] == "passed" and expected["signature"] == "passed"
+                and expected["signer"] == "matches-saved-upload-certificate"
+                and all(row["status"] in {"PASS", "NOT_APPLICABLE"} for row in inspection["findings"]))
 
 
 def _disposition(value: object) -> dict:
@@ -392,11 +546,12 @@ def _disposition(value: object) -> dict:
     return dict(value)
 
 
-def _lifetime(value: object) -> dict:
-    value = _keys(value, {"complete", "fatal", "contained", "commandDispatched", "commands", "profileCalls", "stopObserved", *_CLOSE_FIELDS})
-    require(all(type(value[key]) is bool for key in ("complete", "fatal", "contained", *_CLOSE_FIELDS))
+def _lifetime(value: object, *, signed: bool = False) -> dict:
+    closes = (*_CLOSE_FIELDS, *(SIGNED_CLOSE_FIELDS if signed else ()))
+    value = _keys(value, {"complete", "fatal", "contained", "commandDispatched", "commands", "profileCalls", "stopObserved", *closes})
+    require(all(type(value[key]) is bool for key in ("complete", "fatal", "contained", *closes))
             and (value["commandDispatched"] is None or type(value["commandDispatched"]) is bool)
-            and integer(value["commands"], 2) and type(value["profileCalls"]) is int and value["profileCalls"] == 0
+            and integer(value["commands"], 6 if signed else 4) and type(value["profileCalls"]) is int and value["profileCalls"] == 0
             and _enum(value["stopObserved"], ("none", "cancelled", "timed-out")))
     return dict(value)
 
@@ -408,8 +563,23 @@ def validate_terminal(value: object, request: AndroidBuildRequest) -> None:
     require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
             and context(value["context"]) == request.context and _enum(value["outcome"], OUTCOMES)
             and _enum(value["reason"], REASONS))
-    activity, disposition, life = _activity(value["activity"]), _disposition(value["disposition"]), _lifetime(value["lifetime"])
-    settled = (life["complete"] and not life["fatal"] and life["contained"] and all(life[key] for key in _CLOSE_FIELDS)
+    signed = is_signed(request.context)
+    closes = (*_CLOSE_FIELDS, *(SIGNED_CLOSE_FIELDS if signed else ()))
+    activity, disposition, life = _activity(value["activity"]), _disposition(value["disposition"]), _lifetime(value["lifetime"], signed=signed)
+    require(activity["stage"] in ("accepted", *stages(request.context)))
+    validation = request.context["artifactValidation"]
+    _inspection_mode(activity["findings"], validation)
+    offset = 2 if signed else 0
+    require(life["commands"] <= (6 if signed else 4 if validation["mode"] == "upload-signature" else 2))
+    if activity["command"] != {"outcome": "exited", "exitCode": 0}:
+        require(life["commands"] <= (2 if signed else 1))
+    if life["commands"] > (3 if signed else 1):
+        require(activity["stage"] in {"inspecting", "disposing-work"})
+    if signed and life["commands"] == 3:
+        require(activity["stage"] in {"signing", "restoring-inputs", "inspecting", "disposing-work"})
+    if any(row["check"] not in {"core-lifecycle", "other-core-finding"} for row in activity["findings"]):
+        require(life["commands"] == _inspection_commands(activity["findings"], validation) + offset)
+    settled = (life["complete"] and not life["fatal"] and life["contained"] and all(life[key] for key in closes)
                and life["commandDispatched"] is not None and "unknown" not in disposition.values())
     if activity["command"]["outcome"] == "not-dispatched":
         require(life["commandDispatched"] is False and life["commands"] <= 1)
@@ -422,10 +592,12 @@ def validate_terminal(value: object, request: AndroidBuildRequest) -> None:
         validate_result(value["result"])
         result = value["result"]
         require(result["usedConfig"] == request.context["savedConfig"] and result["usedVersion"] == request.context["savedVersion"]
+                and (result.get("signing") == "local-upload-key") is signed
+                and result["artifactValidation"] == validation
                 and result["toolchainProfile"] == request.native["toolchain"]["profile"]
+                and result.get("toolchainSelection") == request.native["toolchain"].get("selection")
                 and all(result[key] == activity[key] for key in ("selection", "command", "findings", "summary")))
-        if result["assurances"]["nativeManifest"] == "passed":
-            require(life["commands"] == 2)
+        require(life["commands"] == _inspection_commands(result["findings"], validation) + offset)
     else:
         require(value["result"] is None and value["reason"] != "none" and disposition["artifacts"] != "retained-local-result")
         require(settled or value["outcome"] == "unknown")
@@ -448,7 +620,7 @@ def validate_terminal(value: object, request: AndroidBuildRequest) -> None:
             # never an admission refusal or a failed-build substitute.
             require(value["outcome"] == "failed" and activity["selection"] is not None
                     and activity["command"] == {"outcome": "exited", "exitCode": 0}
-                    and activity["stage"] in {"capturing", "inspecting", "disposing-work"})
+                    and activity["stage"] in {"capturing", "signing", "restoring-inputs", "inspecting", "disposing-work"})
         if value["reason"] in {"cancelled", "context-changed", "document-lost", "shutdown"}:
             require(life["stopObserved"] == "cancelled")
         if value["reason"] == "timed-out":
@@ -463,15 +635,16 @@ def validate_terminal(value: object, request: AndroidBuildRequest) -> None:
 def response(request: AndroidBuildRequest, kind: str, payload: dict, *, sequence: int) -> bytes:
     """One frame only; the original AndroidBuildFrames enforces stream finality."""
     _request_binding(request)
-    require(_enum(kind, ("accepted", "progress", "terminal")) and integer(sequence, MAX_FRAMES - 1))
+    selected_stages = stages(request.context)
+    require(_enum(kind, ("accepted", "progress", "terminal")) and integer(sequence, maximum_frames(request.context) - 1))
     if kind == "accepted":
         _keys(payload, {"schemaVersion", "context"})
         require(sequence == 0 and type(payload["schemaVersion"]) is int and payload["schemaVersion"] == 1
                 and context(payload["context"]) == request.context)
     elif kind == "progress":
         _keys(payload, {"schemaVersion", "stage"})
-        require(1 <= sequence <= len(STAGES) and type(payload["schemaVersion"]) is int and payload["schemaVersion"] == 1
-                and _enum(payload["stage"], STAGES))
+        require(1 <= sequence <= len(selected_stages) and type(payload["schemaVersion"]) is int and payload["schemaVersion"] == 1
+                and _enum(payload["stage"], selected_stages))
     else:
         require(sequence >= 1)
         validate_terminal(payload, request)
@@ -493,7 +666,7 @@ class AndroidBuildFrames:
 
     def response(self, kind: str, payload: dict) -> bytes:
         try:
-            require(not self._failed and not self._terminal and self._frames < MAX_FRAMES
+            require(not self._failed and not self._terminal and self._frames < maximum_frames(self._request.context)
                     and _request_binding(self._request) == self._binding)
             if self._frames == 0:
                 require(kind == "accepted")
@@ -502,13 +675,13 @@ class AndroidBuildFrames:
             stage = self._stage
             if kind == "progress":
                 _keys(payload, {"schemaVersion", "stage"})
-                require(_enum(payload["stage"], STAGES))
-                stage = STAGES.index(payload["stage"])
+                require(_enum(payload["stage"], stages(self._request.context)))
+                stage = stages(self._request.context).index(payload["stage"])
                 require(stage > self._stage)
             raw = response(self._request, kind, payload, sequence=self._frames)
             if kind == "terminal":
                 reached = payload["activity"]["stage"]
-                require((-1 if reached == "accepted" else STAGES.index(reached)) >= self._stage)
+                require((-1 if reached == "accepted" else stages(self._request.context).index(reached)) >= self._stage)
             require(self._bytes + len(raw) <= RESPONSE_LIMIT)
             # Commit before handing bytes to the original engine. Partial or
             # failed writes never authorize encoder replay or a second terminal.
@@ -553,5 +726,10 @@ def reason_guidance(reason: str) -> str:
         "input-limit": "The saved input or task-owned processing limit was reached. Reduce the applicable input or use a separately supported profile; no limit is raised automatically.",
         "result-limit": "The bounded result could not be represented safely. Check original status and cleanup; raw tool output is not a substitute report.",
         "work-retained": "Original task work is known to remain. Review its disposition; this result offers no automatic rerun, blanket deletion or global daemon stop.",
+        "signing-input-missing": "Assign the current upload keystore, passwords, alias and required Firebase file in Credentials, then review again.",
+        "signing-input-invalid": "The selected signing input or saved upload-certificate policy is invalid. Correct the current assignment; no replacement key is generated automatically.",
+        "signing-validation-failed": "The selected key or final AAB did not satisfy upload-certificate, expiry or signature validation. Nothing was uploaded.",
+        "signing-command-failed": "The original signing tool could not sign the private AAB copy. Check the selected keystore passwords and alias after cleanup settles.",
+        "build-inputs-unrestored": "Original build inputs were not restored completely. Inspect Project recovery; do not delete the retained journal or start another build.",
         "cleanup-unknown": "Original cleanup is unconfirmed and the owner remains retained. Use original Status or Cancel; further execution stays blocked. Do not adopt or delete files from a new session.",
     }[reason]

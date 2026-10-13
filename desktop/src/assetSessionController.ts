@@ -2,8 +2,8 @@
 // invoke or view. This controller never claims to cancel by dropping a Promise.
 import type { ProjectSession } from './drafts.ts';
 import type { DesktopApi } from './types.ts';
-import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOperationName, AssetRecordRef, AssetScope, AssetStatus, CredentialPrepareRequest, KeystoreFields, TokenFields, WifFields } from './assetSessionTypes.ts';
-import { ASSET_REASON_HELP, assetError, assetRequestFits, parseAssetStatus } from './assetSessionProtocol.ts';
+import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOperationName, AssetPreviewAction, AssetRecordIntent, AssetRecordRef, AssetScope, AssetStatus, CredentialPrepareRequest, KeystoreFields, P12Fields, AscP8Fields, TokenFields, WifFields } from './assetSessionTypes.ts';
+import { ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetRequestFits, assetStorageWritable, parseAssetStatus } from './assetSessionProtocol.ts';
 
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -41,7 +41,7 @@ interface IntentPhase {
   previousOperationId: number | null;
   afterStatusRevision: number;
   operation: AssetOperationName;
-  expectedPreview: 'save' | 'bind' | 'delete' | null;
+  expectedPreview: AssetPreviewAction | null;
   afterSave: boolean;
   existingRecordIds: readonly string[];
   operationId: number | null;
@@ -57,10 +57,26 @@ export function assetIntentPending(state: AssetDisplayState): boolean {
     (!!operation && !(operation.phase === 'idle' && operation.settlement === 'known')));
 }
 
+// Image selection shares this native slot, but never credential authority or
+// cancellation. The image controller observes and stops its original owner.
+export function assetImageOperationPending(status: AssetStatus | null | undefined): boolean {
+  const operation = status?.operation;
+  return operation?.operation === 'choose-images' && !(operation.phase === 'idle' && operation.settlement === 'known');
+}
+
+export function assetInstallationOperationPending(status: AssetStatus | null | undefined): boolean {
+  const operation = status?.operation;
+  return operation?.operation === 'inspect-installation' && !(operation.phase === 'idle' && operation.settlement === 'known');
+}
+
 export function assetCancellationReason(state: AssetDisplayState): string | null {
   const operation = state.status?.operation;
+  if (assetImageOperationPending(state.status))
+    return 'This is an image selection, not a credential operation. Stop belongs to the original image operation in Metadata; credential discard cannot cancel it.';
   if (operation?.operation === 'choose-project-path' && !(operation.phase === 'idle' && operation.settlement === 'known'))
     return 'This is a project-path selection, not a credential operation. Cancel belongs to its original native picker; credential discard cannot cancel it.';
+  if (operation?.operation === 'inspect-installation')
+    return 'This is an installation check, not a credential operation. Cancel belongs to the exact original check in Environment; credential discard cannot cancel it.';
   if (state.originPending) return 'The new action has not supplied a usable acknowledgement of its original operation. Wait for its reply or check status; no cancellation has been sent for it. Cancelling the previous step would not cancel this action.';
   if (cancellationPending(state)) return 'Cancellation has already been requested for the original operation. Wait for its cleanup status.';
   return null;
@@ -70,14 +86,28 @@ export function assetSessionReason(state: AssetDisplayState): string | null {
   if (state.mode !== 'native') return 'Open the native application. Browser previews cannot collect private input.';
   if (state.blocked) return 'This original session is no longer usable. Check its cleanup status; do not start another operation.';
   if (state.observationFailed || !state.status) return 'A current native session status is required. Check status before continuing.';
+  if (assetImageOperationPending(state.status)) return 'The original image selection still owns this native slot. Observe or stop it in Metadata; private-input actions must wait for idle and known settlement.';
+  if (state.status.operation?.operation === 'inspect-installation' && !(state.status.operation.phase === 'idle' && state.status.operation.settlement === 'known')) return 'The original installation check still owns this native slot. Observe or cancel it in Environment; credential actions must wait for known cleanup.';
   if (!state.status.capability.available) return ASSET_REASON_HELP[state.status.capability.reason];
   if (cancellationPending(state)) return 'Cancellation was requested for this original operation. Its old selection and review cannot be used; wait for cleanup status.';
   if (state.busy || state.updatingContext) return 'The original action or context update is still pending.';
   return null;
 }
 export function assetContextReason(state: AssetDisplayState): string | null {
-  return assetSessionReason(state) ?? (state.status?.mode !== 'session' ? 'Start a session first. Nothing is stored persistently.' :
+  return assetSessionReason(state) ?? assetStorageReason(state) ?? (
     !state.contextCurrent ? 'Choose a project, prepare a draft, and submit this release context before importing or assigning an item.' : null);
+}
+export function assetStorageReason(state: AssetDisplayState): string | null {
+  if (assetStorageWritable(state.status)) return null;
+  const status = state.status;
+  if (status && status.mode !== 'closed' && !status.modes[status.mode].available) return ASSET_REASON_HELP[status.modes[status.mode].reason];
+  const persistence = state.status?.persistence;
+  if (persistence) return persistence.reason !== 'none' ? ASSET_REASON_HELP[persistence.reason] :
+    persistence.state === 'mutating' || persistence.state === 'initializing' ? 'The original vault operation is still pending. Wait for its effect, durability and cleanup status before another action.' :
+    persistence.keyAccess === 'read-only' || persistence.state === 'interrupted' ? ASSET_REASON_HELP['vault-interrupted'] :
+      persistence.state === 'uninitialized' ? ASSET_REASON_HELP['vault-uninitialized'] :
+        'Unlock the encrypted vault explicitly before preparing, saving, removing or assigning an input. Wait for the original operation to settle.';
+  return 'Choose memory-only storage or open an available encrypted vault first.';
 }
 
 export class AssetSessionController {
@@ -118,9 +148,9 @@ export class AssetSessionController {
   }
   private current(status = this.state.status): boolean {
     const project = this.selectedProject();
-    return !!project?.draft && sameRevision(project, this.projectBinding) && !!status?.context && !!this.contextAcknowledged &&
+    return !assetImageOperationPending(status) && !assetInstallationOperationPending(status) && !!project?.draft && sameRevision(project, this.projectBinding) && !!status?.context && !!this.contextAcknowledged &&
       this.contextAcknowledged.localRevision === this.localRevision && this.contextAcknowledged.nativeRevision === status.context.revision &&
-      status.context.projectId === project.project.id && sameScope(status.context, this.state.scope) && status.mode === 'session';
+      status.context.projectId === project.project.id && sameScope(status.context, this.state.scope) && assetStorageWritable(status);
   }
   private fail(error: unknown, protocol = false): void {
     this.failureRevision += 1;
@@ -133,9 +163,17 @@ export class AssetSessionController {
     const phase = this.intentPhase;
     const operation = status?.operation;
     const preview = operation?.preview;
-    if (!phase || phase.uncertain || phase.localRevision !== this.localRevision || !operation || !preview || status?.mode !== 'session' ||
+    if (!phase || phase.uncertain || phase.localRevision !== this.localRevision || !operation || !preview || !status || status.mode === 'closed' ||
         phase.operationId !== operation.operationId || operation.operationId === this.cancelling || preview.action !== phase.expectedPreview || observationFailed || blocked) return false;
     const subject = preview.subject;
+    if (phase.intent.type === 'vault') {
+      if (phase.intent.change !== 'initialize' || preview.action !== 'initialize' || subject.type !== 'vault' ||
+          status.mode !== 'encrypted' || status.persistence?.state !== 'uninitialized' || status.persistence.keyAccess !== 'locked') return false;
+      const binding = JSON.stringify([preview.token, preview.action, subject.type, subject.change]);
+      if (phase.reviewBinding === null) phase.reviewBinding = binding;
+      return phase.reviewBinding === binding;
+    }
+    if (subject.type !== 'record' || !assetStorageWritable(status)) return false;
     if (subject.kind !== phase.intent.kind || (preview.action !== 'delete' && (!this.current(status) || status.context?.revision !== phase.contextRevision))) return false;
     let matches: boolean;
     if (phase.afterSave) {
@@ -164,9 +202,9 @@ export class AssetSessionController {
       operation, expectedPreview, afterSave, existingRecordIds: previous?.existingRecordIds ?? this.state.status?.records.map((record) => record.recordId) ?? [],
       operationId: null, reviewBinding: null, uncertain: false };
   }
-  private recordIntent(record: AssetRecordRef, change: 'assign' | 'delete'): AssetIntent | null {
+  private recordIntent(record: AssetRecordRef, change: 'assign' | 'delete'): AssetRecordIntent | null {
     const actual = this.state.status?.records.find((entry) => entry.recordId === record.recordId && entry.revision === record.expectedRevision && entry.availability !== 'mutation-pending');
-    return actual ? { kind: actual.kind, change, record: { ...record } } : null;
+    return actual ? { type: 'record', kind: actual.kind, change, record: { ...record } } : null;
   }
   private receive(value: unknown, originatingPhase?: IntentPhase): AssetStatus | null {
     if (this.disposed) return null;
@@ -208,6 +246,10 @@ export class AssetSessionController {
       status.operation?.phase === 'unknown' || status.operation?.settlement === 'unknown' || status.operation?.settlement === 'late-known';
     this.update({ status, previewDeadline, blocked, originPending, reviewReady: this.reviewMatches(status, this.state.observationFailed, blocked), contextCurrent: !blocked && !this.state.observationFailed && !cancellationPending({ ...this.state, status }) && this.current(status),
       entryGeneration: blocked && !this.state.blocked ? this.state.entryGeneration + 1 : this.state.entryGeneration });
+    // A delayed unlock/initialize completion may arrive after its invoke has
+    // returned pending. Submit only the already-requested current context, not
+    // an automatic credential read, keyring prompt or assignment.
+    if (old?.mode === 'encrypted' && !assetImageOperationPending(old) && !assetInstallationOperationPending(old) && !assetStorageWritable(old) && assetStorageWritable(status) && this.contextDirty) this.submitContext();
     return status;
   }
   async connect(api: DesktopApi): Promise<void> {
@@ -251,7 +293,7 @@ export class AssetSessionController {
     this.invalidateContext();
   }
   setScope(scope: AssetScope): void {
-    if (this.disposed || sameScope(scope, this.state.scope)) return;
+    if (this.disposed || (assetImageOperationPending(this.state.status) || assetInstallationOperationPending(this.state.status)) || sameScope(scope, this.state.scope)) return;
     this.invalidateContext({ ...scope });
   }
   private invalidateContext(scope = this.state.scope): void {
@@ -264,8 +306,8 @@ export class AssetSessionController {
   }
   submitContext(): void {
     const project = this.selectedProject();
-    if (this.disposed || !this.api || this.contextTask || this.otherOperationReason() || this.api.mode !== 'native' || this.state.blocked || this.state.observationFailed ||
-        this.state.status?.mode !== 'session' || !this.state.status.capability.available || !project?.draft) return;
+    if (this.disposed || !this.api || this.contextTask || (assetImageOperationPending(this.state.status) || assetInstallationOperationPending(this.state.status)) || this.otherOperationReason() || this.api.mode !== 'native' || this.state.blocked || this.state.observationFailed ||
+        !assetStorageWritable(this.state.status) || !this.state.status?.capability.available || !project?.draft) return;
     // One in-flight context submission; keystrokes coalesce into the latest
     // context, not a queued list of draft copies. No failed request is retried.
     this.contextDirty = false;
@@ -276,7 +318,7 @@ export class AssetSessionController {
     const input = structuredClone(proposed);
     const work = Promise.resolve().then(async () => {
       try {
-        if (this.otherOperationReason()) { this.contextDirty = true; return; }
+        if ((assetImageOperationPending(this.state.status) || assetInstallationOperationPending(this.state.status)) || this.otherOperationReason()) { this.contextDirty = true; return; }
         const reply = this.receive(await api.setAssetContext(input));
         if (!this.disposed && reply?.context && localRevision === this.localRevision && reply.context.projectId === input.projectId && sameScope(reply.context, input)) {
           this.contextAcknowledged = { localRevision, nativeRevision: reply.context.revision };
@@ -293,7 +335,7 @@ export class AssetSessionController {
     });
   }
   private run(action: NonNullable<AssetDisplayState['busy']>, invoke: () => Promise<AssetStatus>, phase?: IntentPhase): boolean {
-    if (this.disposed || this.state.busy || action !== 'lock' && this.otherOperationReason()) return false;
+    if (this.disposed || this.state.busy || (assetImageOperationPending(this.state.status) || assetInstallationOperationPending(this.state.status)) || action !== 'lock' && this.otherOperationReason()) return false;
     if (phase) this.intentPhase = phase;
     this.update({ busy: action, error: null, originPending: phase ? true : this.state.originPending, reviewReady: false, intent: phase?.intent ?? this.state.intent, entryGeneration: this.state.entryGeneration + 1 });
     void (async () => {
@@ -301,14 +343,27 @@ export class AssetSessionController {
       catch (error) { if (phase) phase.uncertain = true; this.fail(error); }
       finally {
         this.update({ busy: null });
-        if (action === 'open') this.submitContext();
+        if (action === 'open' || action === 'open-vault' || action === 'unlock' || action === 'initialize') this.submitContext();
       }
     })();
     return true;
   }
-  open(): boolean {
-    if (!this.api || assetSessionReason(this.state) || this.state.status?.mode !== 'closed') return false;
-    return this.run('open', () => this.api!.openAssetSession());
+  open(mode: 'session' | 'encrypted' = 'session'): boolean {
+    if (!this.api || assetSessionReason(this.state) || this.state.status?.mode !== 'closed' || !this.state.status.modes[mode].available || !this.idle()) return false;
+    if (mode === 'session') return this.run('open', () => this.api!.openAssetSession());
+    return this.run('open-vault', () => this.api!.openAssetSession('encrypted'), this.phase({ type: 'vault', change: 'open' }, 'open-vault', null));
+  }
+  prepareInitialize(): boolean {
+    if (!this.api || assetSessionReason(this.state) || this.state.status?.mode !== 'encrypted' || !this.state.status.modes.encrypted.available ||
+        this.state.status.persistence?.state !== 'uninitialized' || this.state.status.persistence.keyAccess !== 'locked' || !this.idle()) return false;
+    this.reviewCeiling = null;
+    return this.run('prepare-initialize', () => this.api!.prepareVaultInitialize(), this.phase({ type: 'vault', change: 'initialize' }, 'prepare-initialize', 'initialize'));
+  }
+  unlock(): boolean {
+    const persistence = this.state.status?.persistence;
+    if (!this.api || assetSessionReason(this.state) || this.state.status?.mode !== 'encrypted' || !this.state.status.modes.encrypted.available || persistence?.keyAccess !== 'locked' ||
+        !['locked', 'interrupted'].includes(persistence.state) || !this.idle()) return false;
+    return this.run('unlock', () => this.api!.unlockVault(), this.phase({ type: 'vault', change: 'unlock' }, 'unlock', null));
   }
   private contextReady(): boolean { this.syncProject(); return !!this.api && !this.otherOperationReason() && !assetContextReason(this.state) && this.current(); }
   private idle(): boolean { const op = this.state.status?.operation; return !op || (op.phase === 'idle' && op.settlement === 'known'); }
@@ -318,27 +373,35 @@ export class AssetSessionController {
     if (replacement && this.replacement(kind, replacement.recordId)?.expectedRevision !== replacement.expectedRevision) return false;
     this.reviewCeiling = null;
     this.update({ selectionKind: kind });
-    return this.run('choose-file', () => this.api!.chooseAsset(request), this.phase({ kind, change: replacement ? 'replace' : 'new', record: replacement }, 'choose-file', null));
+    return this.run('choose-file', () => this.api!.chooseAsset(request), this.phase({ type: 'record', kind, change: replacement ? 'replace' : 'new', record: replacement }, 'choose-file', null));
   }
-  prepareSelection(fields: KeystoreFields | Record<string, never>): boolean {
+  prepareSelection(fields: KeystoreFields | P12Fields | AscP8Fields | Record<string, never>, label: string | null = null): boolean {
     const operation = this.state.status?.operation;
     const phase = this.intentPhase;
     if (!this.contextReady() || !operation?.selectionToken || operation.selectionToken === this.spentSelection || !this.state.selectionKind ||
-        !phase || phase.uncertain || phase.operationId !== operation.operationId || phase.localRevision !== this.localRevision || phase.intent.kind !== this.state.selectionKind) return false;
-    const request: CredentialPrepareRequest = { contextRevision: this.state.status!.context!.revision, source: { type: 'selection', selectionToken: operation.selectionToken }, fields };
-    if (!assetRequestFits('credential_prepare', request)) { this.update({ error: assetError({ code: 'asset_invalid_request' }) }); return false; }
+        !phase || phase.uncertain || phase.operationId !== operation.operationId || phase.localRevision !== this.localRevision || phase.intent.type !== 'record' || phase.intent.kind !== this.state.selectionKind) return false;
+    const request: CredentialPrepareRequest = { contextRevision: this.state.status!.context!.revision, source: { type: 'selection', selectionToken: operation.selectionToken }, fields,
+      ...(this.state.status!.mode === 'encrypted' ? { label } : {}) };
+    // The selection token has no renderer kind field. Keep its companions tied
+    // to the original choice; native ownership independently enforces this too.
+    const expected = SESSION_FIELDS[this.state.selectionKind];
+    if (!assetRequestFits('credential_prepare', request) || Object.keys(fields).length !== expected.length ||
+        !expected.every((name) => Object.hasOwn(fields, name))) {
+      this.update({ error: assetError({ code: 'asset_invalid_request' }) }); return false;
+    }
     this.spentSelection = operation.selectionToken;
     return this.run('prepare', () => this.api!.prepareCredential(request), this.phase(phase.intent, 'prepare', 'save', phase));
   }
-  prepareScalar(kind: 'google-wif', fields: WifFields, replacement?: AssetRecordRef | null): boolean;
-  prepareScalar(kind: 'project-read-token', fields: TokenFields, replacement?: AssetRecordRef | null): boolean;
-  prepareScalar(kind: 'google-wif' | 'project-read-token', fields: WifFields | TokenFields, replacement: AssetRecordRef | null = null): boolean {
+  prepareScalar(kind: 'google-wif', fields: WifFields, replacement?: AssetRecordRef | null, label?: string | null): boolean;
+  prepareScalar(kind: 'project-read-token', fields: TokenFields, replacement?: AssetRecordRef | null, label?: string | null): boolean;
+  prepareScalar(kind: 'google-wif' | 'project-read-token', fields: WifFields | TokenFields, replacement: AssetRecordRef | null = null, label: string | null = null): boolean {
     if (!this.contextReady() || !this.idle()) return false;
-    const request = { contextRevision: this.state.status!.context!.revision, source: { type: 'scalar', kind, replacement }, fields } as CredentialPrepareRequest;
+    const request = { contextRevision: this.state.status!.context!.revision, source: { type: 'scalar', kind, replacement }, fields,
+      ...(this.state.status!.mode === 'encrypted' ? { label } : {}) } as CredentialPrepareRequest;
     if (!assetRequestFits('credential_prepare', request)) { this.update({ error: assetError({ code: 'asset_invalid_request' }) }); return false; }
     if (replacement && this.replacement(kind, replacement.recordId)?.expectedRevision !== replacement.expectedRevision) return false;
     this.reviewCeiling = null;
-    return this.run('prepare', () => this.api!.prepareCredential(request), this.phase({ kind, change: replacement ? 'replace' : 'new', record: replacement }, 'prepare', 'save'));
+    return this.run('prepare', () => this.api!.prepareCredential(request), this.phase({ type: 'record', kind, change: replacement ? 'replace' : 'new', record: replacement }, 'prepare', 'save'));
   }
   prepareRecord(record: AssetRecordRef): boolean {
     if (!this.contextReady() || !this.idle()) return false;
@@ -349,26 +412,30 @@ export class AssetSessionController {
     return this.run('prepare', () => this.api!.prepareCredential(request), this.phase(intent, 'prepare', 'bind'));
   }
   prepareDelete(record: AssetRecordRef): boolean {
-    if (!this.api || assetSessionReason(this.state) || this.state.status?.mode !== 'session' || !this.idle()) return false;
+    if (!this.api || assetSessionReason(this.state) || !assetStorageWritable(this.state.status) || !this.idle()) return false;
     const intent = this.recordIntent(record, 'delete');
     if (!intent) return false;
     this.reviewCeiling = null;
     return this.run('prepare-delete', () => this.api!.prepareAssetDelete(record), this.phase(intent, 'prepare-delete', 'delete'));
   }
-  confirmPreview(expectedToken: string, expectedAction: 'save' | 'bind' | 'delete'): boolean {
+  confirmPreview(expectedToken: string, expectedAction: AssetPreviewAction): boolean {
     this.syncProject();
     const preview = this.state.status?.operation?.preview;
     if (!this.api || assetSessionReason(this.state) || !preview || preview.token !== expectedToken || preview.action !== expectedAction ||
         !this.intentPhase || !this.reviewMatches(this.state.status) || this.spentPreview === expectedToken || this.state.previewDeadline === null || this.now() >= this.state.previewDeadline ||
-        (expectedAction !== 'delete' && !this.current())) return false;
+        (['save', 'bind'].includes(expectedAction) && !this.current())) return false;
     this.spentPreview = expectedToken; // Single-use locally before any invoke.
-    const next = this.phase(this.intentPhase.intent, expectedAction === 'bind' ? 'bind' : 'commit', expectedAction === 'save' ? 'bind' : null, this.intentPhase, expectedAction === 'save');
-    return this.run(expectedAction === 'bind' ? 'bind' : 'commit', () => expectedAction === 'bind' ? this.api!.bindAsset(expectedToken) : this.api!.commitAsset(expectedToken), next);
+    const operation = expectedAction === 'initialize' ? 'initialize' : expectedAction === 'bind' ? 'bind' : 'commit';
+    const sessionSave = expectedAction === 'save' && this.state.status?.mode === 'session';
+    // A persistent save never inherits the selected-source bind preview. Only
+    // a new explicit prepareRecord can read/authenticate/reassess stored bytes.
+    const next = this.phase(this.intentPhase.intent, operation, sessionSave ? 'bind' : null, this.intentPhase, sessionSave);
+    return this.run(operation, () => expectedAction === 'bind' ? this.api!.bindAsset(expectedToken) : this.api!.commitAsset(expectedToken), next);
   }
   discard(): boolean {
     const operation = this.state.status?.operation;
     if (!this.api || this.state.mode !== 'native' || !operation || (operation.phase === 'idle' && operation.settlement === 'known') || this.cancelling === operation.operationId || this.disposed) return false;
-    if (operation.operation === 'choose-project-path' || operation.operation === 'choose-evidence-folder' || operation.operation === 'inspect-evidence') return false;
+    if (operation.operation === 'inspect-installation' || operation.operation === 'choose-images' || operation.operation === 'choose-project-path' || operation.operation === 'choose-evidence-folder' || operation.operation === 'inspect-evidence') return false;
     // Each explicit phase has a fresh native ID. A prior selected/preview
     // status cannot identify a new in-flight operation, even if an event has
     // overtaken its originating acknowledgement. Never fake accepting Cancel.
@@ -380,7 +447,9 @@ export class AssetSessionController {
     return true;
   }
   lock(): boolean {
-    if (!this.api || this.state.mode !== 'native' || this.state.busy || this.disposed || this.state.status?.mode !== 'session' || this.state.status.operation?.operation === 'choose-project-path' && !this.idle()) return false;
+    if (!this.api || this.state.mode !== 'native' || this.state.busy || this.disposed || !this.state.status || this.state.status.mode === 'closed' ||
+        this.state.status.operation?.operation === 'choose-images' && (this.state.blocked || !this.idle()) ||
+        (this.state.status.operation?.operation === 'choose-project-path' || this.state.status.operation?.operation === 'inspect-installation') && !this.idle()) return false;
     this.contextAcknowledged = null;
     this.intentPhase = null;
     this.update({ contextCurrent: false, reviewReady: false, originPending: false, intent: null, selectionKind: null, previewDeadline: null });

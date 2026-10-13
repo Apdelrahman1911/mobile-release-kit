@@ -1,8 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import { savedTextRecoveryActionLabel, savedTextRecoveryGuidance, savedTextRecoveryPreservationGuidance } from '../savedTextRecovery.ts';
+import type { SavedTextRecoveryApplyBinding, SavedTextRecoveryAttempt, SavedTextRecoveryDomain, SavedTextRecoveryView } from '../savedTextRecovery.ts';
 import { metadataCacheBytes, metadataLineEndings, metadataNoOp, metadataTextDirty, metadataTextSavedFresh } from '../metadataText.ts';
-import type { MetadataActionId, MetadataPreparedFile, MetadataTextEditProjection, PreparedMetadataTextView } from '../metadataText.ts';
+import type { MetadataActionId, MetadataPreparedFile, MetadataRetainedDraftChange, MetadataTextEditProjection, PreparedMetadataTextView } from '../metadataText.ts';
 import { currentMetadataApplyBinding } from '../metadataTextEditController.ts';
-import type { MetadataApplyBinding, MetadataDiscardBinding, MetadataTextEditController, MetadataTextState } from '../metadataTextEditController.ts';
+import type { MetadataApplyBinding, MetadataDiscardBinding, MetadataRetainedDraftReview, MetadataTextEditController, MetadataTextState } from '../metadataTextEditController.ts';
 import { normalMetadataTextResult } from '../metadataTextProtocol.ts';
 import type { ProjectSession } from '../drafts.ts';
 import type { HelpContent } from '../types.ts';
@@ -50,14 +52,87 @@ function SaveConfirmation({ view, allowed, onCancel, onConfirm }: { view: Prepar
     <div className="button-row"><button autoFocus type="button" className="button secondary" onClick={onCancel}>Keep reviewing</button><button type="button" className="button primary" disabled={!allowed || !reviewed || confirmation !== 'SAVE'} onClick={onConfirm}>{metadataNoOp(view) ? 'Confirm unchanged text' : 'Save text'}</button></div>
   </div></dialog>;
 }
+// Pure presentation shared by the two existing editors. The supplied binding
+// is a frozen original review; this panel never manufactures an Apply request.
+function RecoveryFileFacts({ view }: { view: SavedTextRecoveryView }) {
+  return <div className="review-table-wrap"><table className="review-table"><caption>Inspected journal files — not your current draft</caption>
+    <thead><tr><th scope="col">Exact selected path</th><th scope="col">Authorized effect</th><th scope="col">Original file</th><th scope="col">Interrupted save’s file</th></tr></thead>
+    <tbody>{view.files.map((file) => <tr key={file.path}><th scope="row"><code>{file.path}</code></th><td>{file.effect.replaceAll('_', ' ')}</td>
+      {(['before', 'after'] as const).map((side) => { const facts = file[side]; return <td key={side}>{facts ? <>{facts.byteLength} bytes · mode {facts.mode.toString(8).padStart(4, '0')}
+        <br /><code className="metadata-digest">SHA256 {facts.sha256}</code></> : 'Not recorded / absent for this side'}</td>; })}</tr>)}</tbody>
+  </table></div>;
+}
+function RecoveryConfirmation<D extends SavedTextRecoveryDomain>({ binding, allowed, onCancel, onConfirm }: {
+  binding: SavedTextRecoveryApplyBinding<D>; allowed: boolean; onCancel: () => void; onConfirm: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null), mounted = useRef(false), titleId = useId(), inputId = useId();
+  const [reviewed, setReviewed] = useState(false), [confirmation, setConfirmation] = useState('');
+  useEffect(() => { mounted.current = true; const element = dialog.current; element?.showModal(); return () => { mounted.current = false; if (element?.open) element.close(); }; }, []);
+  return <dialog ref={dialog} className="confirm-dialog saved-text-recovery-confirm" aria-labelledby={titleId} onCancel={onCancel}><div className="dialog-content">
+    <h2 id={titleId}>{savedTextRecoveryActionLabel[binding.action]}?</h2>
+    <p>Project <code>{binding.projectId}</code> · {binding.domain === 'metadata_text' ? 'Public-text' : 'Saved-version'} journal <code>{binding.transactionId}</code>.</p>
+    <RecoveryFileFacts view={binding.view} />
+    <p>Private cleanup: {binding.view.privateCleanup.fileCount} inspected owned files and {binding.view.privateCleanup.directoryCount} directories only.
+      {' '}Readonly configuration and ignore dependencies must still match. No current draft is saved or replaced.</p>
+    <label className="save-confirm-check"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />I reviewed the action, exact file effects, both byte/digest/mode summaries and private cleanup scope.</label>
+    <label htmlFor={inputId}>Type <strong>RECOVER</strong> to confirm this one original plan</label>
+    <input id={inputId} value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" spellCheck={false} />
+    <p>A submitted recovery may already have effects when cancellation is requested. There is no continue-save, force, replacement plan or automatic retry.</p>
+    {!allowed && <p className="review-caution" role="alert">This exact review is no longer eligible. Close the dialog and inspect the original operation’s status; your draft is kept.</p>}
+    <div className="button-row"><button autoFocus type="button" className="button secondary" onClick={onCancel}>Keep reviewing</button>
+      <button type="button" className="button primary" disabled={!allowed || !reviewed || confirmation !== 'RECOVER'} onClick={() => {
+        if (mounted.current && dialog.current?.isConnected && dialog.current.open && allowed && reviewed && confirmation === 'RECOVER') onConfirm();
+      }}>Confirm recovery action</button></div>
+  </div></dialog>;
+}
+export function SavedTextRecoveryPanel<D extends SavedTextRecoveryDomain>({ domain, projectId, attempt, inspectReason, remainingMs, readPending, current,
+  onInspect, onClose, onStatus, canApply, onApply }: {
+  domain: D; projectId: string | null; attempt: SavedTextRecoveryAttempt<D> | null; inspectReason: string | null;
+  remainingMs: number; readPending: boolean; current: SavedTextRecoveryApplyBinding<D> | null;
+  onInspect: () => void; onClose: () => void; onStatus: () => void;
+  canApply: (binding: SavedTextRecoveryApplyBinding<D>) => boolean; onApply: (binding: SavedTextRecoveryApplyBinding<D>) => boolean;
+}) {
+  const [confirmation, setConfirmation] = useState<SavedTextRecoveryApplyBinding<D> | null>(null);
+  const owner = attempt?.projection, view = owner?.recovery.prepared?.view ?? owner?.recovery.checkout?.view;
+  const terminal = owner?.phase === 'final' || owner?.phase === 'unknown';
+  return <section className="card saved-text-recovery" aria-label={domain === 'metadata_text' ? 'Public-text recovery inspection' : 'Saved-version recovery inspection'}>
+    <SectionHeading title="Inspect an interrupted saved-file edit" description="A separate, explicit inspection of this editor’s persisted journal. No normal checkout or current draft is used as recovery authority." />
+    <p>Selected project: <code>{projectId ?? 'None'}</code>. Close any original live review and wait for settlement before inspecting. Unknown cleanup cannot be reset here.</p>
+    <div className="button-row"><button type="button" className="button secondary" disabled={inspectReason !== null} title={inspectReason ?? undefined} onClick={onInspect}>Inspect recovery</button>
+      <button type="button" className="button small secondary" disabled={readPending} onClick={onStatus}>Check original recovery status</button>
+      {attempt && !attempt.handled && !attempt.closeClaimed && !terminal && <button type="button" className="button secondary" onClick={onClose}>{attempt.applyClaimed ? 'Request recovery cancellation' : 'Close inspection, keep drafts'}</button>}</div>
+    {inspectReason && <p className="save-note">{inspectReason}</p>}
+    {attempt && <p>Original recovery project: <code>{attempt.binding.projectId}</code>. {owner ? `Original phase: ${owner.phase}.` : 'Waiting for the original inspection; no result is assumed.'}</p>}
+    {view && <><p className={view.state === 'conflict' ? 'review-caution' : 'save-note'} role={view.state === 'conflict' ? 'alert' : 'status'}>{savedTextRecoveryGuidance(view)}</p>
+      {view.state === 'conflict' && <p>Conflict category: <code>{view.reason}</code>.</p>}
+      {view.selection && <dl className="save-outcome-facts">{Object.entries(view.selection).map(([key, value]) => <div key={key}><dt>{key}</dt><dd><code>{String(value)}</code></dd></div>)}</dl>}
+      {view.action && <><h3>{savedTextRecoveryActionLabel[view.action]}</h3><RecoveryFileFacts view={view} />
+        <p>Private cleanup is limited to {view.privateCleanup.fileCount} inspected owned files and {view.privateCleanup.directoryCount} directories. No other domain, current draft, Store state or build-input recovery is included.</p></>}
+    </>}
+    {attempt?.succeeded && <div className="notice notice-info" role="status"><p><strong>Original recovery action completed; current draft kept.</strong>
+      {' '}This clears only this editor’s own journal attention. An earlier committed cleanup is not a new Save. Explicitly Load/Refresh and reconcile public text, or Reload saved version values with its discard confirmation, before another normal save or build consent.</p></div>}
+    {owner?.coreOutcome && <p>Original effect: {owner.coreOutcome.effect}; journal: {owner.coreOutcome.journal}; core resources: {owner.coreOutcome.resources}; core reason: {owner.coreOutcome.reason}.
+      {' '}Native: {owner.nativeFinality}; reason: {owner.nativeReason}{owner.lateSettled ? '; late settlement (not success)' : ''}.</p>}
+    {terminal && !attempt?.succeeded && <p className="review-caution" role="alert">No successful recovery is confirmed. Idle/conflict inspection, discard, failure and late settlement do not clear earlier attention or mark drafts Saved.</p>}
+    {attempt?.invalidated && !terminal && <p className="review-caution">Project, navigation or service context changed. The original review is closing; no replacement plan or automatic retry is used.</p>}
+    {current && <><p>Original review expires in about {Math.ceil(remainingMs / 1000)} seconds; the native deadline remains authoritative.</p>
+      <button type="button" className="button primary" disabled={!canApply(current)} onClick={() => { if (canApply(current)) setConfirmation(current); }}>Review recovery confirmation…</button></>}
+    <p className="subtle-note">{savedTextRecoveryPreservationGuidance}</p>
+    {confirmation && <RecoveryConfirmation key={confirmation.planToken} binding={confirmation} allowed={canApply(confirmation)} onCancel={() => setConfirmation(null)}
+      onConfirm={() => { if (canApply(confirmation) && onApply(confirmation)) setConfirmation(null); }} />}
+  </section>;
+}
+
 function operationNotice(owner: MetadataTextEditProjection): { title: string; detail: string; technical?: string; danger: boolean } {
   const core = owner.coreOutcome;
+  if (owner.recovery) return { title: 'Original recovery inspection / action', danger: owner.phase === 'unknown' || core?.journal === 'recovery_required',
+    detail: 'This is not a normal Save. Open the editor’s recovery inspection to review its exact original action and finality; current drafts remain separate.' };
   if (owner.phase === 'unknown' || owner.nativeFinality === 'unknown') return { title: core?.effect === 'committed' ? 'Text written; completion not confirmed' : 'Text save or cleanup is unconfirmed', danger: true,
     detail: `${core?.effect === 'committed' ? 'The reviewed text was written, but cleanup is not confirmed.' : owner.applySubmitted ? 'The save may already have happened.' : 'No save request is recorded, but cleanup is not confirmed.'} Keep recovery files and operation details. Do not save again, delete journals or assume changes were undone.`,
     technical: 'Known original outcome evidence is retained. Late native settlement does not clear earlier uncertainty or authorize another edit.' };
   if (core?.journal === 'recovery_required') return { title: core.effect === 'committed' ? 'Text written; recovery needs attention' : 'Text recovery needs attention', danger: true,
-    detail: 'Keep the recovery files and any outside changes. Automatic recovery after closing or crashing is not available. Saving through another editor cannot bypass this block.',
-    technical: 'Only the original in-session recovery attempt was available. Persisted/crash recovery is not implemented; the recovery_required journal remains protected across edit domains.' };
+    detail: 'Keep the recovery files and any outside changes. After known original settlement, use this editor’s explicit Inspect recovery action. Saving through another editor cannot bypass this block.',
+    technical: 'Only complete journals with matching original recovery context can be inspected and separately confirmed. Legacy, incomplete or changed evidence remains a protected conflict, not permission to delete state.' };
   const normal = normalMetadataTextResult(owner);
   if (normal) return { title: normal === 'saved' ? 'Text saved' : 'Text checked; no changes needed', danger: false,
     detail: normal === 'saved' ? 'The reviewed text was saved and cleanup completed. Any newer draft and your configuration are unchanged.' : 'All reviewed files were rechecked and left unchanged.',
@@ -87,16 +162,25 @@ export function MetadataTextSave({ state, controller, detailed, onShowProject, o
   const terminal = owner?.phase === 'final' || owner?.phase === 'unknown';
   const showReview = detailed && state.projectId === owner?.projectId && owner?.prepared;
   const notice = owner ? operationNotice(owner) : null;
+  const clockOwner = edit.recovery && !edit.recovery.handled ? edit.recovery.projection : owner;
   useEffect(() => {
-    if (owner?.phase !== 'reviewing') return;
+    if (!clockOwner || !['editing', 'preparing', 'reviewing'].includes(clockOwner.phase)) return;
     // UI estimate only. Samples can shorten this deadline, never renew it;
     // native admission independently checks the original absolute lifetime.
-    const timer = setInterval(() => refreshClock((value) => value + 1), 1000);
+    const timer = setInterval(() => { controller.recoveryTick(); refreshClock((value) => value + 1); }, 1000);
     return () => clearInterval(timer);
-  }, [owner?.phase, owner?.sessionId]);
+  }, [clockOwner?.phase, clockOwner?.sessionId, controller]);
   useEffect(() => { if (confirmation && (!detailed || !controller.canApply(confirmation))) setConfirmation(null); }, [confirmation, detailed, state, controller]);
-  if (!notice && !attempt && !edit.observationIssue && !edit.nativeBlocked) return null;
-  return <section className="card metadata-save-panel" aria-label="Original metadata file-save operation">
+  if (!detailed && !notice && !attempt && !edit.recovery && !edit.observationIssue && !edit.nativeBlocked) return null;
+  return <>
+    {detailed && <SavedTextRecoveryPanel domain="metadata_text" projectId={state.projectId} attempt={edit.recovery} inspectReason={controller.inspectRecoveryReason()}
+      remainingMs={controller.remainingRecoveryReviewMs()} readPending={edit.readPending} current={controller.currentRecoveryApplyBinding()}
+      onInspect={() => { controller.inspectRecovery(); }} onClose={() => controller.requestRecoveryClose()} onStatus={() => void controller.checkStatus()}
+      canApply={(value) => controller.canApplyRecovery(value)} onApply={(value) => controller.applyRecovery(value)} />}
+    {!detailed && edit.recovery && <section className="card" aria-label="Retained metadata recovery"><p>Original metadata recovery: {edit.recovery.projection?.phase ?? 'opening'}; drafts kept.
+      {' '}{edit.recovery.succeeded ? 'Matching recovery completed, not a new Save.' : 'No recovery success is assumed.'}</p>
+      <button type="button" className="button small secondary" onClick={() => onShowProject(edit.recovery!.binding.projectId)}>View original recovery</button></section>}
+    {(notice || attempt || edit.observationIssue || edit.nativeBlocked) && <section className="card metadata-save-panel" aria-label="Original metadata file-save operation">
     <SectionHeading title={edit.integrityFailed ? 'Text status could not be verified' : notice?.title ?? 'Waiting for text review…'} description="Local text files only. This operation does not change configuration or Store listings.">
       <ActionHelp state={state} id="save" onHelp={onHelp} />
     </SectionHeading>
@@ -121,7 +205,8 @@ export function MetadataTextSave({ state, controller, detailed, onShowProject, o
     </div>
     {owned && owner?.phase === 'reviewing' && <p className="save-note">Review expires in about {Math.ceil(controller.remainingReviewMs() / 1000)} seconds. Changing the selection, configuration or text before saving closes this review and keeps your drafts.</p>}
     {confirmation && owner?.prepared && <SaveConfirmation key={confirmation.planToken} view={owner.prepared.view} allowed={detailed && controller.canApply(confirmation)} onCancel={() => setConfirmation(null)} onConfirm={() => { controller.apply(confirmation); setConfirmation(null); }} />}
-  </section>;
+  </section>}
+  </>;
 }
 
 function DiscardConfirmation({ label, blocked, onCancel, onConfirm }: { label: string; blocked: string | null; onCancel: () => void; onConfirm: () => void }) {
@@ -131,12 +216,48 @@ function DiscardConfirmation({ label, blocked, onCancel, onConfirm }: { label: s
     <p>Only this in-memory public-text bundle is affected. Configuration, other locale drafts and files on disk are unchanged. No native review is closed and no text is saved by discard.</p>
     {blocked && <p className="review-caution" role="alert">{blocked}</p>}<div className="button-row"><button autoFocus type="button" className="button secondary" onClick={onCancel}>Keep draft</button><button type="button" className="button danger" disabled={blocked !== null} onClick={onConfirm}>{label}</button></div></div></dialog>;
 }
+function RetainedDraftText({ change, side }: { change: MetadataRetainedDraftChange; side: 'before' | 'after' }) {
+  const text = side === 'before' ? change.before : change.after;
+  const label = side === 'before' ? 'Current observed comparison' : 'Retained unsaved replacement';
+  return <section className="metadata-raw"><h4>{label}</h4>{text === null ? <p>Observed absent. Using this draft does not create a file.</p> : <>
+    <p>{new TextEncoder().encode(text).byteLength.toLocaleString()} UTF-8 bytes · {metadataLineEndings(text)} · {text.endsWith('\n') || text.endsWith('\r') ? 'Final line ending present' : 'No final line ending'}</p>
+    <pre tabIndex={0} aria-label={`${label} for ${change.path}`}><code>{text}</code></pre>
+  </>}</section>;
+}
+function RetainedDraftConfirmation({ review, blocked, onCancel, onConfirm }: {
+  review: MetadataRetainedDraftReview; blocked: string | null; onCancel: () => void; onConfirm: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null); const mounted = useRef(false); const titleId = useId();
+  const [reviewed, setReviewed] = useState(false);
+  useEffect(() => {
+    mounted.current = true; const element = dialog.current; element?.showModal();
+    return () => { mounted.current = false; if (element?.open) element.close(); };
+  }, []);
+  return <dialog ref={dialog} className="confirm-dialog metadata-confirm-dialog" aria-labelledby={titleId} onCancel={onCancel}><div className="dialog-content">
+    <h2 id={titleId}>Review retained draft for current settings</h2>
+    <p><strong>{review.projectName}</strong> · project <code>{review.target.projectId}</code> · {review.target.platform} / {review.target.locale} · <code>{review.target.metadataRoot}</code></p>
+    <p>Reuse {review.changes.length} edited public-text {review.changes.length === 1 ? 'field' : 'fields'} from configuration baseline {review.source.configBaselineGeneration} in the selected current baseline {review.target.configBaselineGeneration}. Every edited field still matches its original path and exact text or absence. Newly observed, untouched fields stay as they are.</p>
+    {review.changes.map((change) => <section className="metadata-file-review" key={change.id}><h3><code>{change.path}</code></h3>
+      <div className="metadata-raw-grid"><RetainedDraftText change={change} side="before" /><RetainedDraftText change={change} side="after" /></div>
+    </section>)}
+    <p>Complete text is shown without trimming, newline conversion or BOM removal. Byte and line-ending descriptions are local previews, not a native save plan. The original retained bundle and both comparison baselines are kept.</p>
+    <label className="save-confirm-check"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />I reviewed every shown destination and the complete before/after text.</label>
+    <p>Use as unsaved draft only. Nothing is read, saved, validated, copied to the clipboard or sent to a Store. Validate text and separately review and confirm Save afterward. Closing the app still loses in-memory drafts.</p>
+    {blocked && <p className="review-caution" role="alert">{blocked}</p>}
+    <div className="button-row"><button autoFocus type="button" className="button secondary" onClick={onCancel}>Keep both drafts</button>
+      <button type="button" className="button primary" disabled={blocked !== null || !reviewed} onClick={() => {
+        if (mounted.current && dialog.current?.isConnected && dialog.current.open && reviewed && blocked === null) onConfirm();
+      }}>Use as unsaved draft</button></div>
+  </div></dialog>;
+}
 export function MetadataTextEditor({ state, controller, session, onShowProject, onHelp }: {
   state: MetadataTextState; controller: MetadataTextEditController; session: ProjectSession | null;
   onShowProject: (projectId: string, key?: string) => void; onHelp: (help: HelpContent) => void;
 }) {
   const id = useId(); const entry = controller.selectedEntry();
   const [discard, setDiscard] = useState<{ binding: MetadataDiscardBinding; action: 'reset' | 'latest' | 'forget'; label: string } | null>(null);
+  const [retainedReview, setRetainedReview] = useState<MetadataRetainedDraftReview | null>(null);
+  const [retainedNotice, setRetainedNotice] = useState<string | null>(null);
   const retained = Object.values(state.entries);
   const oldContexts = retained.filter((item) => item.context.projectId === state.projectId && !state.choices.some((choice) => choice.key === item.context.key));
   const loadReason = controller.loadReason(); const validateReason = controller.validateReason(); const reviewReason = controller.startReason();
@@ -155,11 +276,12 @@ export function MetadataTextEditor({ state, controller, session, onShowProject, 
       </select><button type="button" className="button secondary" disabled={loadReason !== null} aria-describedby={`${id}-load-reason`} onClick={() => void controller.load()}><Icon name="refresh" size={16} />{entry?.loadRequest ? 'Loading text…' : entry?.baseline ? 'Refresh text' : 'Load public text'}</button><ActionHelp state={state} id="load" onHelp={onHelp} /></div>
       <p id={`${id}-load-reason`} className="save-note">{loadReason ?? 'Read only this locale’s required public text. Refresh shows a separate observation; it never replaces your draft or its original comparison copy.'}</p>
       {!state.help && <p className="review-caution">The packaged text-field guide is unavailable. No fallback limits, validation, observation or save result has been invented.</p>}
+      {retainedNotice && <p className="save-note" role="status">{retainedNotice}</p>}
       {state.cacheError && <ErrorNotice error={state.cacheError} title="Text cache full; existing drafts kept" />}
       {entry?.loadError && <ErrorNotice error={entry.loadError} title="Text could not be loaded; earlier draft kept" />}
       {entry?.editError && <ErrorNotice error={entry.editError} title="The previous text draft was kept" />}
       {entry?.stale && <p className="review-caution">The observed text/configuration no longer matches this original baseline, or its observation failed. Review the newer observation below and explicitly reconcile. No automatic rebase, blank fallback or overwrite permission was granted.</p>}
-      {entry?.observationPredatesSave && <p className="save-note">The passive observation predates the original settled save check. Saved facts come from that exact native plan, not a fabricated fresh file read.</p>}
+      {entry?.observationPredatesSave && <p className="save-note">This passive observation predates the latest original save/recovery boundary. Refresh explicitly; retained facts are not a fabricated fresh file read.</p>}
       {entry?.lastSave && !metadataTextSavedFresh(entry) && <p className="review-caution">An earlier submitted text revision was {entry.lastSave.result}. Your newer draft and baseline were kept and were not marked saved. Refresh and reconcile explicitly.</p>}
       {entry?.fields && entry.baseline ? <div className="metadata-text-fields">{entry.fields.map((field, index) => {
         const guide = state.help?.fields.find((row) => row.platform === entry.context.platform && row.id === field.id);
@@ -190,11 +312,26 @@ export function MetadataTextEditor({ state, controller, session, onShowProject, 
     </section>
     <MetadataTextSave state={state} controller={controller} detailed onShowProject={onShowProject} onHelp={onHelp} />
     {retained.length > 0 && <details className="card metadata-retained"><summary>Retained locale text · {retained.length} / 32 bundles · {(metadataCacheBytes(state.entries) / 1024 / 1024).toFixed(2)} / 8 MiB</summary>
-      <p>Refresh, project switches and locale removal never evict these drafts or move their text. Old contexts must be reconciled explicitly. Closing the app loses all in-memory text; no automatic persistence or cache eviction is used.</p>
-      <ul>{retained.map((item) => <li key={item.context.key}><div><strong>{item.projectName} · {item.context.platform} / {item.context.locale}</strong><code>{item.context.metadataRoot} · configuration baseline {item.context.configBaselineGeneration}</code><Badge tone={metadataTextDirty(item) ? 'warning' : 'neutral'}>{metadataTextDirty(item) ? 'Unsaved text' : 'Retained in memory'}</Badge></div>
-        <button type="button" className="button small secondary" onClick={() => onShowProject(item.context.projectId, item.context.key)}>View original context</button><button type="button" className="text-button" disabled={controller.discardReason(item.context.key) !== null} onClick={() => askDiscard(item.context.key, 'forget', 'Forget this retained text bundle')}>Forget bundle…</button></li>)}</ul>
+      <p>Refresh, project switches and locale removal never evict these drafts or move their text. To reuse an earlier draft, first select and load its same project, metadata root, platform and locale under the current saved configuration above. Then review its retained changes below; conflicting fields are never merged or forced.</p>
+      <p>Using a retained draft is not a save or transaction recovery. Closing the app loses all in-memory text; no automatic persistence or cache eviction is used.</p>
+      <ul>{retained.map((item, index) => {
+        const earlierDraft = item.context.projectId === state.projectId && item.context.configBaselineGeneration < (session?.baselineGeneration ?? 0) && metadataTextDirty(item);
+        const reason = earlierDraft ? controller.retainedDraftReason(item.context.key) : null;
+        return <li key={item.context.key}><div><strong>{item.projectName} · {item.context.platform} / {item.context.locale}</strong><code>{item.context.metadataRoot} · configuration baseline {item.context.configBaselineGeneration}</code><Badge tone={metadataTextDirty(item) ? 'warning' : 'neutral'}>{metadataTextDirty(item) ? 'Unsaved text' : 'Retained in memory'}</Badge></div>
+          <button type="button" className="button small secondary" onClick={() => onShowProject(item.context.projectId, item.context.key)}>View original context</button>
+          {earlierDraft && <div><button type="button" className="button small secondary" disabled={reason !== null} aria-describedby={`${id}-retained-${index}`} onClick={() => {
+            const review = controller.reviewRetainedDraft(item.context.key); if (review) { setRetainedNotice(null); setRetainedReview(review); }
+          }}>Review retained draft for current settings</button><p id={`${id}-retained-${index}`} className="save-note">{reason ?? 'Review matching edited fields before using them as an unsaved draft. The original bundle is kept.'}</p></div>}
+          <button type="button" className="text-button" disabled={controller.discardReason(item.context.key) !== null} onClick={() => askDiscard(item.context.key, 'forget', 'Forget this retained text bundle')}>Forget bundle…</button></li>;
+      })}</ul>
       <ActionHelp state={state} id="discard" onHelp={onHelp} />
     </details>}
+    {retainedReview && <RetainedDraftConfirmation key={JSON.stringify(retainedReview.binding)} review={retainedReview} blocked={controller.retainedDraftReviewReason(retainedReview)}
+      onCancel={() => setRetainedReview(null)} onConfirm={() => {
+        const accepted = controller.adoptRetainedDraft(retainedReview); setRetainedReview(null);
+        setRetainedNotice(accepted ? 'Retained changes are now an unsaved draft in the selected current locale. The original bundle is kept. Validate text, then separately review and confirm Save.' :
+          'The retained draft could not be reused. Both bundles were kept; inspect the current context and any cache limit before reviewing again.');
+      }} />}
     {discard && <DiscardConfirmation label={discard.label} blocked={controller.discardReason(discard.binding.key) ?? (JSON.stringify(controller.discardBinding(discard.binding.key)) !== JSON.stringify(discard.binding) ? 'The draft changed while confirmation was open. Cancel and inspect its current contents.' : null)}
       onCancel={() => setDiscard(null)} onConfirm={() => { controller.discard(discard.binding, discard.action); setDiscard(null); }} />}
   </>;

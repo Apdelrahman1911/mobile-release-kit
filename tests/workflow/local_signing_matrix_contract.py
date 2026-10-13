@@ -1106,35 +1106,62 @@ def _semantic_healthy(value, source):
 
 
 def _semantic_native_prefix(cut, source, name, token):
-    payload = source.NATIVE_PREFIX_CONTENT[name]
-    proof = cut.get("physicalWrite")
-    _object(proof, ("name", "bytes", "intendedBytes", "sha256", "intendedSha256", "facts", "properPrefix", "revisionAtCut"),
-            "native prefix observation")
-    filename = source.NATIVE_PREFIXES[name].operation.removeprefix("native-effect/write/")
+    creating = name == "lock"
+    require(("physicalWrite" if creating else "physicalCreate") not in cut, "native physical edge shape differs")
+    proof = cut.get("physicalCreate" if creating else "physicalWrite")
+    filename = source.NATIVE_PREFIXES[name].operation.rsplit("/", 1)[1]
     revision, ordinal = (1, 4) if name == "transaction-stage" else (0, 3)
-    require(proof["name"] == filename and type(proof["bytes"]) is int and 0 < proof["bytes"] < len(payload)
-            and type(proof["intendedBytes"]) is int and proof["intendedBytes"] == len(payload)
-            and proof["properPrefix"] is True and type(proof["revisionAtCut"]) is int and proof["revisionAtCut"] == revision
-            and proof["sha256"] == hashlib.sha256(payload[:proof["bytes"]]).hexdigest()
-            and proof["intendedSha256"] == hashlib.sha256(payload).hexdigest(), "native actual source prefix differs")
+    if creating:
+        require(cut["event"].get("succeeded") is True and "error" not in cut["event"],
+                "native lock creation did not complete its actual effect")
+        _object(proof, ("name", "bytes", "sha256", "facts", "createdBeforeDatabase", "revisionAtCut"),
+                "native lock creation observation")
+        require(proof["name"] == source.LOCK_NAME and type(proof["bytes"]) is int and proof["bytes"] == 0
+                and proof["sha256"] == hashlib.sha256(b"").hexdigest() and proof["createdBeforeDatabase"] is True
+                and type(proof["revisionAtCut"]) is int and proof["revisionAtCut"] == 0,
+                "native empty readonly lock creation differs")
+    else:
+        payload = source.NATIVE_PREFIX_CONTENT[name]
+        _object(proof, ("name", "bytes", "intendedBytes", "sha256", "intendedSha256", "facts", "properPrefix", "revisionAtCut"),
+                "native prefix observation")
+        require(proof["name"] == filename and type(proof["bytes"]) is int and 0 < proof["bytes"] < len(payload)
+                and type(proof["intendedBytes"]) is int and proof["intendedBytes"] == len(payload)
+                and proof["properPrefix"] is True and type(proof["revisionAtCut"]) is int and proof["revisionAtCut"] == revision
+                and proof["sha256"] == hashlib.sha256(payload[:proof["bytes"]]).hexdigest()
+                and proof["intendedSha256"] == hashlib.sha256(payload).hexdigest(), "native actual source prefix differs")
     facts = proof["facts"]
-    _object(facts, ("device", "inode", "mode", "size", "sha256"), "native prefix file facts")
+    _object(facts, ("device", "inode", "mode", "size", "sha256"), "native physical effect file facts")
     require(type(facts["device"]) is int and facts["device"] >= 0 and type(facts["inode"]) is int and facts["inode"] > 0
-            and type(facts["mode"]) is int and facts["mode"] == 0o600
+            and type(facts["mode"]) is int and facts["mode"] == (0o400 if creating else 0o600)
             and type(facts["size"]) is int and facts["size"] == proof["bytes"] and facts["sha256"] == proof["sha256"],
-            "native actual prefix file differs")
+            "native actual physical effect file differs")
     snapshot = cut.get("snapshot")
-    relative = source.KEYCHAIN.removeprefix("<ROOT>/").replace("<TOKEN>", token) + "/" + filename
+    directory = source.KEYCHAIN.removeprefix("<ROOT>/").replace("<TOKEN>", token)
+    relative = directory + "/" + filename
     require(type(snapshot) is dict and snapshot.get("session") == token and type(snapshot.get("native")) is dict
             and canonical(snapshot["native"].get(relative)) == canonical(facts)
-            and cut["context"].get("recoveryAttempt") is False, "native prefix snapshot is not its original file")
+            and cut["context"].get("recoveryAttempt") is False, "native physical effect snapshot is not its original file")
+    if creating:
+        require(set(snapshot["native"]) == {relative} and type(snapshot.get("ownedRemaining")) is dict
+                and directory + "/" + source.DB_NAME not in snapshot["ownedRemaining"]
+                and canonical(snapshot["ownedRemaining"].get(relative)) == canonical(facts)
+                and type(snapshot.get("original")) is dict
+                and canonical(snapshot.get("preferences")) == canonical(snapshot["original"]),
+                "native lock creation lacks its lock-only original/oracle snapshot")
+        controls = snapshot.get("controls")
+        require(type(controls) is dict and type(controls.get("state.json")) is dict,
+                "native lock creation state observation missing")
+        state = controls["state.json"].get("value")
+        require(type(state) is dict and type(state.get("native")) is dict and not state["native"]
+                and canonical(state.get("preferences")) == canonical(snapshot["original"]),
+                "native lock creation preceded or changed recorded ownership")
     command = "set-keychain-settings" if ordinal == 4 else "create-keychain"
     require(canonical(cut.get("originalCommand")) == canonical({"command": command, "ordinal": ordinal,
         "keychain": source.KEYCHAIN + "/" + source.DB_NAME, "revisionBefore": 0}), "native original command binding differs")
     calls = snapshot.get("nativeCalls")
     require(type(calls) is list and len(calls) == ordinal and type(calls[-1]) is dict
             and canonical(calls[-1]) == canonical({"command": command, "mutation": True, "recovery": False}),
-            "native prefix original model call missing")
+            "native physical effect original model call missing")
 
 
 def _semantic_record(item, observation, evidence, parts):
