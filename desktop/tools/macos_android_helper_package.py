@@ -69,7 +69,7 @@ PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.op
 # Intel alone uses this fixed shared-package release optimization.
 # Runtime dependencies retain release3; generic code instantiated here inherits release2.
 RESIDENT_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=2"
-HELPER_SOURCE_BYTES = 561596
+HELPER_SOURCE_BYTES = 566884
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -1308,6 +1308,7 @@ DISTRIBUTION_STAGER_REASONS = frozenset(('distribution-attach-original', 'distri
 # Closed passive input guards only; these labels never confer native or finality authority.
 
 # Fixed first-failing post-staple facts only; never native/finality authority.
+FINAL_IMAGE_UNLINK_FLAGS = ('retainedPreIdentityExpected', 'retainedPreLinkUnlinked', 'namedExists', 'namedSameDevice', 'namedRegular', 'namedModeExpected', 'namedOwnerExpected', 'namedGroupExpected', 'namedSingleLink', 'namedSizeBounded', 'namedGrowthBounded', 'namedInodeDifferent', 'heldNameIdentityDifferent', 'parentStable', 'censusStable', 'retainedPreBytesUnchanged', 'namedPostStable')
 FINAL_IMAGE_STAPLE_STAGES = ('final-image-staple-clock', 'final-image-staple-parent', 'final-image-staple-held-stat', 'final-image-staple-held-device', 'final-image-staple-held-inode', 'final-image-staple-held-mode', 'final-image-staple-held-links', 'final-image-staple-held-links-unlinked', 'final-image-staple-held-links-other', 'final-image-staple-held-uid', 'final-image-staple-held-gid', 'final-image-staple-size', 'final-image-staple-growth', 'final-image-staple-name-stat', 'final-image-staple-binding', 'final-image-staple-xattr-query', 'final-image-staple-xattrs-present', 'final-image-staple-stream', 'final-image-staple-post')
 FINAL_IMAGE_STAPLE_REASONS = frozenset(('final-image-stapled-original', 'file-extended-attributes-query', 'file-extended-attributes', 'notary-monotonic-clock', 'directory-original-unavailable', 'directory-parent-changed', 'directory-original-unbound', 'directory-original-changed', 'notary-zip-original', 'notary-zip-short-read', 'notary-zip-post', 'final-image-directory-census', 'final-image-input-changed', 'final-image-output-changed', 'final-image-target-census'))
 
@@ -4116,6 +4117,66 @@ class Operation:
         self.stage = "final-image-staple-stream"
         self.final_image_sha = self.notary_stream(entry)
         self.notary_mutation_pending = False  # Same original only; native integrity/mount gates still required.
+    def final_image_observe_unlinked(self, primary, role, entry, before, before_sha):
+        """Read-only same-call facts; named stats are NOT returned-output custody."""
+        if (self.phase != "finalize-image" or role != "final-image-staple"
+                or self.stage != "final-image-staple-held-links-unlinked" or type(primary) is not Refused):
+            return
+        args = BaseException.args.__get__(primary)
+        if type(args) is not tuple or len(args) != 1 or type(args[0]) is not str or args[0] != "final-image-stapled-original":
+            return
+        if (type(entry) is not dict or entry is not self.final_image_output
+                or self.entry_registry.get(id(entry)) is not entry or entry.get("kind") != "file"
+                or entry.get("role") != "final-image-copy" or entry.get("name") != self.image_filename
+                or type(entry.get("fd")) is not int or entry.get("closed") is not False
+                or type(before) is not tuple or len(before) != 9 or entry.get("identity") != before
+                or type(before_sha) is not str or re.fullmatch(r"[0-9a-f]{64}", before_sha) is None
+                or before_sha != self.final_image_sha or not self.notary_mutation_pending
+                or len(self.calls) != 6 or type(self.calls[-1]) is not dict
+                or self.calls[-1].get("role") != role or self.calls[-1].get("returned") is not True
+                or self.calls[-1].get("capturesSettled") is not True
+                or type(self.calls[-1].get("returncode")) is not int or self.calls[-1]["returncode"] != 0):
+            return
+        parent = entry.get("parent_entry")
+        if (type(parent) is not dict or parent is not self.final_image_output_root
+                or self.entry_registry.get(id(parent)) is not parent or parent.get("kind") != "directory"
+                or type(parent.get("fd")) is not int or parent.get("closed") is not False
+                or entry.get("parent") != parent["fd"]):
+            return
+        observation = {name: None for name in FINAL_IMAGE_UNLINK_FLAGS}
+        observation.update(state="refused", outputAdopted=False, transitionComplete=False)
+        self.receipt["finalImageUnlinkObservation"] = observation
+        try:
+            self.notary_clock()
+            self.recheck_directory(parent)
+            after = signature(os.fstat(entry["fd"]))
+            observation["retainedPreIdentityExpected"] = after[:3] == before[:3] and after[4:8] == before[4:8]
+            observation["retainedPreLinkUnlinked"] = after[3] == 0
+            need(observation["retainedPreIdentityExpected"] and observation["retainedPreLinkUnlinked"], "final-image-unlink-observation")
+            named = signature(os.stat(entry["name"], dir_fd=parent["fd"], follow_symlinks=False))
+            observation.update(namedExists=True, namedSameDevice=named[0] == before[0],
+                namedRegular=stat.S_ISREG(named[2]), namedModeExpected=named[2] == before[2],
+                namedOwnerExpected=named[4] == before[4], namedGroupExpected=named[5] == before[5],
+                namedSingleLink=named[3] == 1, namedSizeBounded=0 < named[6] <= self.stager.MAX_BYTES,
+                namedGrowthBounded=abs(named[6] - before[6]) <= 1024 * 1024,
+                namedInodeDifferent=named[1] != before[1], heldNameIdentityDifferent=after != named)
+            need(set(os.listdir(parent["fd"])) == {entry["name"]}, "final-image-unlink-observation")
+            # Explicit record: no package book assignment, output acquisition,
+            # prefix assumption, name-bound PRE reopen or mutation completion.
+            self.stager.package_staple_preimage_post(self, need, record=(entry, after, before_sha))
+            observation["retainedPreBytesUnchanged"] = True
+            self.recheck_directory(parent)
+            observation["parentStable"] = True
+            observation["censusStable"] = set(os.listdir(parent["fd"])) == {entry["name"]}
+            observation["namedPostStable"] = signature(os.stat(entry["name"], dir_fd=parent["fd"], follow_symlinks=False)) == named
+            need(observation["censusStable"] and observation["namedPostStable"], "final-image-unlink-observation")
+            self.notary_clock()
+            observation["state"] = "observed"
+        except BaseException:
+            # Diagnostic failure has no cleanup/acceptance authority. Never
+            # replace or render the SAME primary, nor change its first stage.
+            return
+
     def final_image_call(self, role, argv, *, maximum=30, limit=65536, developer=False):
         need(self.phase in FINAL_IMAGE_PHASES and self.final_image_known() and not self.notary_retiring
              and len(self.calls) < len(FINAL_IMAGE_ROLES) and role == FINAL_IMAGE_ROLES[len(self.calls)], "final-image-fixed-role-order")
@@ -4134,7 +4195,9 @@ class Operation:
             environment["DEVELOPER_DIR"] = str(NOTARY_XCODE)
         self.stage = role
         changing = role == "final-image-staple"
-        before = self.final_image_output["identity"] if changing else None
+        before_entry = self.final_image_output if changing else None
+        before = before_entry["identity"] if changing else None
+        before_sha = self.final_image_sha if changing else None
         self.notary_mutation_pending = changing
         try:
             result = self.call(role, argv, environment, cwd=self.work, timeout=timeout, limit=limit)
@@ -4148,7 +4211,12 @@ class Operation:
             if changing:
                 self.stage = role
             return result
-        except BaseException:
+        except BaseException as primary:
+            if changing:
+                try:
+                    self.final_image_observe_unlinked(primary, role, before_entry, before, before_sha)
+                except BaseException:
+                    pass  # Even diagnostic allocation/output failure preserves the original failure.
             if self.final_image_known():
                 try:
                     self.notary_post()

@@ -103,6 +103,7 @@ FAILURE_TYPES = frozenset(("Refused", "OSError", "ValueError", "TypeError", "Run
     "ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown", "Incomplete"))
 
 # Fixed first-failing post-staple facts only; never native/finality authority.
+FINAL_IMAGE_UNLINK_FLAGS = ('retainedPreIdentityExpected', 'retainedPreLinkUnlinked', 'namedExists', 'namedSameDevice', 'namedRegular', 'namedModeExpected', 'namedOwnerExpected', 'namedGroupExpected', 'namedSingleLink', 'namedSizeBounded', 'namedGrowthBounded', 'namedInodeDifferent', 'heldNameIdentityDifferent', 'parentStable', 'censusStable', 'retainedPreBytesUnchanged', 'namedPostStable')
 FINAL_IMAGE_STAPLE_STAGES = ('final-image-staple-clock', 'final-image-staple-parent', 'final-image-staple-held-stat', 'final-image-staple-held-device', 'final-image-staple-held-inode', 'final-image-staple-held-mode', 'final-image-staple-held-links', 'final-image-staple-held-links-unlinked', 'final-image-staple-held-links-other', 'final-image-staple-held-uid', 'final-image-staple-held-gid', 'final-image-staple-size', 'final-image-staple-growth', 'final-image-staple-name-stat', 'final-image-staple-binding', 'final-image-staple-xattr-query', 'final-image-staple-xattrs-present', 'final-image-staple-stream', 'final-image-staple-post')
 FINAL_IMAGE_STAPLE_REASONS = frozenset(('final-image-stapled-original', 'file-extended-attributes-query', 'file-extended-attributes', 'notary-monotonic-clock', 'directory-original-unavailable', 'directory-parent-changed', 'directory-original-unbound', 'directory-original-changed', 'notary-zip-original', 'notary-zip-short-read', 'notary-zip-post', 'final-image-directory-census', 'final-image-input-changed', 'final-image-output-changed', 'final-image-target-census'))
 
@@ -1527,6 +1528,18 @@ def project_package_staple(value):
 
 
 
+def project_final_image_unlink(value):
+    need(type(value) is dict and set(value) == set(FINAL_IMAGE_UNLINK_FLAGS) | {"state", "outputAdopted", "transitionComplete"}
+         and type(value["state"]) is str and value["state"] in ("observed", "refused")
+         and value["outputAdopted"] is False and value["transitionComplete"] is False
+         and all(value[name] is None or type(value[name]) is bool for name in FINAL_IMAGE_UNLINK_FLAGS))
+    if value["state"] == "observed":
+        need(all(type(value[name]) is bool for name in FINAL_IMAGE_UNLINK_FLAGS)
+             and all(value[name] is True for name in ("retainedPreIdentityExpected", "retainedPreLinkUnlinked",
+                 "namedExists", "parentStable", "censusStable", "retainedPreBytesUnchanged", "namedPostStable")))
+    return dict(value)
+
+
 def project_receipt(value, context, phase):
     need(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1)
     for name in ("source", "workflowSource", "runId", "runAttempt", "target"):
@@ -1599,6 +1612,22 @@ def project_receipt(value, context, phase):
     else:
         need(value.get("updateBaseline") is None and value.get("positiveUpdate") is None)
     result["failure"] = project_failure(value.get("failure"))
+    result["finalImageUnlinkObservation"] = None
+    if "finalImageUnlinkObservation" in value:
+        failure = result["failure"]
+        calls = value.get("originalCalls")
+        need(phase == "finalize-image" and value["passed"] is False
+             and result["originalClosesKnown"] is False and result["targetRetired"] is False
+             and result["finalImage"] is None and type(failure) is dict
+             and failure["type"] == "Refused" and failure["reason"] == "final-image-stapled-original"
+             and failure["stage"] == "final-image-staple-held-links-unlinked"
+             and result["notarySubmission"] is not None and result["notarySubmission"]["status"] == "Accepted"
+             and type(calls) is list and len(calls) == 6
+             and all(type(row) is dict and row.get("returned") is True and row.get("capturesSettled") is True
+                 and type(row.get("returncode")) is int and row["returncode"] == 0 for row in calls)
+             and tuple(row.get("role") for row in calls) == ("final-image-resolve-notarytool", "final-image-resolve-stapler",
+                 "final-image-signature-before", "final-image-submit", "final-image-log", "final-image-staple"))
+        result["finalImageUnlinkObservation"] = project_final_image_unlink(value["finalImageUnlinkObservation"])
     removal = value.get("removalFixture")
     need(removal is None or phase == "package-removal-fixture")
     if phase == "package-removal-fixture":

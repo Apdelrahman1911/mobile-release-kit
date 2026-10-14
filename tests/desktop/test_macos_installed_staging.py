@@ -2862,7 +2862,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
         helper_body = (Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py").read_bytes()
         self.assertEqual(len(helper_body), module.HELPER_SOURCE_BYTES)
-        self.assertEqual(module.HELPER_SOURCE_BYTES, 561596)
+        self.assertEqual(module.HELPER_SOURCE_BYTES, 566884)
         helper_tree = ast.parse(helper_body)
         constants = [node.value for node in helper_tree.body
                      if isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -2870,7 +2870,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(len(constants), 1)
         source_cap = ast.literal_eval(constants[0])
         self.assertIs(type(source_cap), int)
-        self.assertEqual(source_cap, 561596)
+        self.assertEqual(source_cap, 566884)
         operation = next(node for node in helper_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
         caps = []
         for method in operation.body:
@@ -3135,6 +3135,102 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         self.assertEqual(len(selected.errors), 1 if fault == "post" else 0)
                     self.assertFalse(selected.notary_complete)
                     self.assertEqual(len(selected.calls), 5)  # Inert call port did not fabricate a receipt.
+
+        # Same-call unlink observer: ordinary tiny originals, no native tools.
+        # A named stat is not output custody; the original failure always remains.
+        for fault in (None, "mode", "missing", "extra", "pre-bytes", "pre-metadata", "short-read", "extra-byte",
+                      "xattrs", "deadline", "name-race", "parent-race", "close-unknown", "foreign-primary"):
+            with self.subTest(unlinkObservation=fault), tempfile.TemporaryDirectory(prefix="mrk-unlink-observe-") as directory:
+                root = Path(directory); root.chmod(0o700)
+                path = root / "MobileReleaseKit.dmg"; payload = b"retained-PRE-data"; path.write_bytes(payload); path.chmod(0o600)
+                selected = module.Operation(SimpleNamespace(), root, root, "finalize-image", synthetic_receipt, TOOL)
+                parent = selected.register(os.open(root, module.READ_FLAGS | os.O_DIRECTORY), "unlink-parent", "directory")
+                parent["identity"] = module.directory_identity(os.fstat(parent["fd"]))
+                selected.work_entry = selected.final_image_output_root = parent
+                entry = selected.register(os.open(path, os.O_RDWR | os.O_NOFOLLOW), "final-image-copy", "file", parent["fd"], path.name)
+                entry.update(parent_entry=parent, identity=module.signature(os.fstat(entry["fd"])))
+                selected.final_image_output = entry; selected.final_image_sha = module.digest(payload)
+                selected.notary_started = selected.notary_observed = module.time.monotonic_ns()
+                selected.calls = [{"role": role, "returned": True, "capturesSettled": True, "returncode": 0}
+                                  for role in module.FINAL_IMAGE_ROLES[:5]]
+                original_identity, original_sha = entry["identity"], selected.final_image_sha
+                actual_pread, actual_mutated, actual_close = module.os.pread, selected.final_image_mutated, selected.close
+                primaries, reads, closes = [], [], []
+                def native_data(role, argv, environment, **kwargs):
+                    self.assertEqual(role, "final-image-staple")
+                    self.assertEqual((entry["identity"], selected.final_image_sha), (original_identity, original_sha))
+                    other = root / "replacement"; other.write_bytes(b"returned-name-data"); other.chmod(0o600); other.replace(path)
+                    if fault == "mode": path.chmod(0o644)
+                    if fault == "missing": path.unlink()
+                    if fault == "extra": (root / "extra").write_bytes(b"x")
+                    if fault in ("pre-bytes", "pre-metadata"):
+                        if fault == "pre-bytes": os.pwrite(entry["fd"], b"X" * len(payload), 0)
+                        else: os.fchmod(entry["fd"], 0o644)
+                        os.utime(entry["fd"], ns=(os.fstat(entry["fd"]).st_atime_ns, original_identity[7]))
+                    selected.calls.append({"role": role, "returned": True, "capturesSettled": True, "returncode": 0})
+                    return CompletedProcess(argv, 0, b"", b"")
+                def mutate(before):
+                    if fault == "foreign-primary":
+                        error = ForeignXattrs("final-image-stapled-original")
+                        selected.stage = "final-image-staple-held-links-unlinked"; primaries.append(error); raise error
+                    try: return actual_mutated(before)
+                    except BaseException as error: primaries.append(error); raise
+                def read(number, size, offset):
+                    if number == entry["fd"]:
+                        reads.append(number)
+                        if fault == "short-read" and offset == 0: return b""
+                        if fault == "extra-byte" and offset == len(payload): return b"!"
+                        result = actual_pread(number, size, offset)
+                        if offset == 0:
+                            if fault == "deadline": selected.notary_started -= 1740_000_000_000
+                            if fault == "name-race":
+                                replacement = root / "replacement"; replacement.write_bytes(b"other-name-data"); replacement.chmod(0o600); replacement.replace(path)
+                            if fault == "parent-race": root.chmod(0o750)
+                        return result
+                    return actual_pread(number, size, offset)
+                try:
+                    with contextlib.ExitStack() as ports:
+                        ports.enter_context(mock.patch.object(selected, "notary_post", return_value=None))
+                        ports.enter_context(mock.patch.object(selected, "native_environment", return_value={}))
+                        ports.enter_context(mock.patch.object(selected, "call", side_effect=native_data))
+                        ports.enter_context(mock.patch.object(selected, "final_image_mutated", side_effect=mutate))
+                        ports.enter_context(mock.patch.object(module.os, "pread", side_effect=read))
+                        if fault == "xattrs": ports.enter_context(mock.patch.object(TOOL, "no_xattrs", side_effect=TOOL.Refused("inert-xattr-data")))
+                        with self.assertRaises(BaseException) as caught: selected.final_image_call("final-image-staple", [])
+                        self.assertIs(caught.exception, primaries[0])
+                    observation = selected.receipt.get("finalImageUnlinkObservation")
+                    if fault in ("pre-metadata", "foreign-primary"):
+                        self.assertIsNone(observation)
+                    else:
+                        self.assertIsInstance(observation, dict)
+                        self.assertEqual(observation["state"], "observed" if fault in (None, "mode", "close-unknown") else "refused")
+                        self.assertFalse(observation["outputAdopted"] or observation["transitionComplete"])
+                        if fault == "mode": self.assertFalse(observation["namedModeExpected"])
+                        if fault is None: self.assertTrue(all(observation[name] for name in module.FINAL_IMAGE_UNLINK_FLAGS))
+                    if fault not in ("pre-metadata", "foreign-primary"):
+                        self.assertEqual(selected.stage, "final-image-staple-held-links-unlinked")
+                    self.assertTrue(selected.notary_mutation_pending)
+                    self.assertFalse(selected.notary_unknown or selected.notary_complete or selected.final_image_complete)
+                    self.assertEqual((entry["identity"], selected.final_image_sha), (original_identity, original_sha))
+                    self.assertIsNone(selected.final_package_preimage)
+                    self.assertEqual(len(selected.entries), 2)  # No diagnostic descriptor/adoption.
+                    self.assertEqual(len(selected.calls), 6)
+                    self.assertEqual(selected.errors, [])
+                finally:
+                    root.chmod(0o700)
+                    for original in reversed(selected.entries):
+                        number = original["fd"]; closes.append(number)
+                        if fault == "close-unknown" and original is entry:
+                            real_close = os.close
+                            def uncertain(number): real_close(number); raise OSError("inert consumed-close uncertainty")
+                            with mock.patch.object(module.os, "close", side_effect=uncertain): actual_close(original)
+                        else: actual_close(original)
+                    for original in selected.entries: selected.close(original)
+                    self.assertEqual(len(closes), len(set(closes)))
+                    self.assertTrue(all(row["fd"] is None for row in selected.entries))
+                    self.assertEqual(len(selected.errors), int(fault == "close-unknown"))
+                    self.assertFalse(selected.final_image_known())
+                    if fault != "missing": self.assertTrue(path.exists())
 
     def notary_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None):
         """Actual copy/FD/parser code, inert app/runtime/key and native doubles.
@@ -16536,9 +16632,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # This exact helper is already in the readonly SOURCE closure. Inspect
         # its real caller without importing or invoking any operation owner.
         with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
-            helper_raw = original.read(561596 + 1)
+            helper_raw = original.read(566884 + 1)
             self.assertEqual(original.read(1), b"")
-        self.assertEqual(len(helper_raw), 561596)
+        self.assertEqual(len(helper_raw), 566884)
         helper_source = helper_raw.decode("utf-8", "strict")
         helper_tree = ast.parse(helper_source)
         helper_caps = [node.value for node in helper_tree.body

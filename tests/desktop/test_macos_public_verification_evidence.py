@@ -1620,6 +1620,47 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         changed = copy.deepcopy(package); changed["phase"] = "finalize-image"
         with self.assertRaises(DATA.Refused): DATA.project_receipt(changed, CONTEXT, "finalize-image")
 
+        # Same-call unlink diagnostics are strictly finite and still failed.
+        image = receipt(); image.update(passed=False, targetRetired=False, originalClosesKnown=False)
+        del image["finalImage"]
+        image["failure"] = {"type": "Refused", "stage": "final-image-staple-held-links-unlinked", "reason": "final-image-stapled-original"}
+        image["originalCalls"] = [{"role": role, "entered": True, "returned": True, "capturesSettled": True, "returncode": 0}
+            for role in ("final-image-resolve-notarytool", "final-image-resolve-stapler", "final-image-signature-before",
+                         "final-image-submit", "final-image-log", "final-image-staple")]
+        self.assertIsNone(DATA.project_receipt(image, CONTEXT, "finalize-image")["finalImageUnlinkObservation"])
+        unlink = {name: True for name in DATA.FINAL_IMAGE_UNLINK_FLAGS}
+        unlink.update(state="observed", outputAdopted=False, transitionComplete=False)
+        image["finalImageUnlinkObservation"] = unlink
+        result = DATA.project_receipt(image, CONTEXT, "finalize-image")
+        self.assertEqual(result["finalImageUnlinkObservation"], unlink)
+        self.assertFalse(result["recordedPassed"] or result["originalClosesKnown"] or result["targetRetired"])
+        unlink["namedModeExpected"] = False  # An observed unsafe name is NOT admitted output.
+        self.assertFalse(DATA.project_receipt(image, CONTEXT, "finalize-image")["finalImageUnlinkObservation"]["namedModeExpected"])
+        for state in ("refused", "observed"):
+            unlink["state"] = state
+            for key in unlink:
+                for bad in (SENTINEL, [], 1):
+                    changed = copy.deepcopy(image); changed["finalImageUnlinkObservation"][key] = bad
+                    with self.assertRaises(DATA.Refused): DATA.project_receipt(changed, CONTEXT, "finalize-image")
+                changed = copy.deepcopy(image); del changed["finalImageUnlinkObservation"][key]
+                with self.assertRaises(DATA.Refused): DATA.project_receipt(changed, CONTEXT, "finalize-image")
+        for bad in (None, {}, dict(unlink, extra=SENTINEL), dict(unlink, outputAdopted=True), dict(unlink, transitionComplete=True),
+                    dict(unlink, retainedPreBytesUnchanged=None), dict(unlink, namedPostStable=False)):
+            changed = copy.deepcopy(image); changed["finalImageUnlinkObservation"] = bad
+            with self.assertRaises(DATA.Refused): DATA.project_receipt(changed, CONTEXT, "finalize-image")
+        partial = copy.deepcopy(image); partial["finalImageUnlinkObservation"].update(state="refused", namedPostStable=None)
+        self.assertEqual(DATA.project_receipt(partial, CONTEXT, "finalize-image")["finalImageUnlinkObservation"]["state"], "refused")
+        for key, bad in (("passed", True), ("originalClosesKnown", True), ("targetRetired", True), ("phase", "finalize-package")):
+            changed = copy.deepcopy(image); changed[key] = bad
+            with self.assertRaises(DATA.Refused): DATA.project_receipt(changed, CONTEXT, changed["phase"])
+        for key, bad in (("stage", "final-image-staple-binding"), ("reason", "unclassified"), ("type", "OSError")):
+            changed = copy.deepcopy(image); changed["failure"][key] = bad
+            with self.assertRaises(DATA.Refused): DATA.project_receipt(changed, CONTEXT, "finalize-image")
+        for key, bad in (("returned", False), ("capturesSettled", False), ("returncode", 1), ("returncode", True), ("role", "final-image-log")):
+            changed = copy.deepcopy(image); changed["originalCalls"][-1][key] = bad
+            with self.assertRaises(DATA.Refused): DATA.project_receipt(changed, CONTEXT, "finalize-image")
+        self.assertNotIn(SENTINEL, json.dumps(result))
+
     def test_entire_exact_correlation_tuple_is_required(self):
         for field in ("source", "workflowSource", "runId", "runAttempt", "target", "phase"):
             for change in ("wrong", 1, True, None, ["wrong"]):
