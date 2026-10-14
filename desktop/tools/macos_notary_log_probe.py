@@ -109,6 +109,19 @@ def classify_log(body, helper_body):
     tree = ast.parse(helper_body)
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "notary_log_data")
     original_ast = ast.dump(function, include_attributes=False)
+    ticket_sites = [node for node in ast.walk(function) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == "need" and len(node.args) == 2
+                    and isinstance(node.args[1], ast.Constant) and node.args[1].value == "notary-log-ticket-shape"]
+    expected_architecture = ("row.get('arch') in ('arm64', 'x86_64', 'i386') or (archive_name in "
+        "('MobileReleaseKit.pkg', 'MobileReleaseKit.dmg', 'Remove.pkg', 'MobileReleaseKit-Remove.dmg') "
+        "and row['path'] == archive_name and (row.get('arch') is None))")
+    need(len(ticket_sites) == 1 and isinstance(ticket_sites[0].args[0], ast.BoolOp)
+         and isinstance(ticket_sites[0].args[0].op, ast.And) and len(ticket_sites[0].args[0].values) == 7
+         and ast.unparse(ticket_sites[0].args[0].values[-1]) == expected_architecture, "projection-site")
+    shape_function = ast.parse("def _diagnostic_non_architecture_ticket_shape(row):\n    return True\n").body[0]
+    shape_function.body[0].value = ast.BoolOp(op=ast.And(), values=ticket_sites[0].args[0].values[:-1])
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[shape_function], type_ignores=[])),
+                 "<exact-ticket-shape-diagnostic>", "exec"), namespace)
     sites = [node for node in ast.walk(function) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
              and node.func.id == "need" and len(node.args) == 2 and isinstance(node.args[1], ast.Constant)
              and node.args[1].value == "notary-log-upload-sha256"]
@@ -135,6 +148,8 @@ def classify_log(body, helper_body):
         "parserAstSha256": digest(original_ast.encode()), "knownKeyPresenceMask": 0,
         "knownKeyTypeMasks": {name: 0 for name in ("null", "boolean", "integer", "string", "list", "object", "other")},
         "unknownKeyCount": None, "ticketRowCount": None, "issueRowCount": None,
+        "exactNestedPackageAbsentArchRows": 0, "exactNestedPackageNullArchRows": 0,
+        "malformedNonArchitectureTicketRows": None,
         "architectureClasses": {name: 0 for name in ("arm64", "x86_64", "i386", "absent", "null", "other-string", "wrong-type")},
         "ticketPathClasses": {name: 0 for name in ("exact-archive", "exact-nested-Install.pkg", "under-Install.pkg", "other-relative", "other-invalid")}}
     try:
@@ -155,7 +170,16 @@ def classify_log(body, helper_body):
             rows = value.get(field)
             result[output] = 0 if rows is None else len(rows) if type(rows) is list and len(rows) <= 2048 else None
         rows = value.get("ticketContents")
+        if rows is None or type(rows) is list and len(rows) <= 2048:
+            result["malformedNonArchitectureTicketRows"] = 0
         for row in rows if type(rows) is list and len(rows) <= 2048 else ():
+            if not namespace["_diagnostic_non_architecture_ticket_shape"](row):
+                result["malformedNonArchitectureTicketRows"] += 1
+            if type(row) is dict and row.get("path") == ARCHIVE + "/Install.pkg":
+                if "arch" not in row:
+                    result["exactNestedPackageAbsentArchRows"] += 1
+                elif row["arch"] is None:
+                    result["exactNestedPackageNullArchRows"] += 1
             if type(row) is not dict:
                 result["architectureClasses"]["wrong-type"] += 1
                 result["ticketPathClasses"]["other-invalid"] += 1

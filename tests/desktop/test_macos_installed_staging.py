@@ -8882,6 +8882,34 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(observed["architectureClasses"]["null"], 1)
         omitted = dict(nested["ticketContents"][0]); del omitted["arch"]
         self.assertEqual(classify(dict(log, ticketContents=[omitted]))["architectureClasses"]["absent"], 1)
+        self.assertEqual(observed["exactNestedPackageNullArchRows"], 1)
+        self.assertEqual(observed["exactNestedPackageAbsentArchRows"], 0)
+        self.assertEqual(observed["malformedNonArchitectureTicketRows"], 0)
+        omitted_observed = classify(dict(log, ticketContents=[omitted]))
+        self.assertEqual(omitted_observed["exactNestedPackageAbsentArchRows"], 1)
+        self.assertEqual(omitted_observed["exactNestedPackageNullArchRows"], 0)
+        # Equal architecture/path marginals do not establish which row owns null.
+        misleading = [dict(nested["ticketContents"][0], arch="arm64"),
+                      dict(log["ticketContents"][0], path="SYNTHETIC/code", arch=None)]
+        misleading_observed = classify(dict(log, ticketContents=misleading))
+        self.assertEqual(misleading_observed["architectureClasses"]["null"], 1)
+        self.assertEqual(misleading_observed["ticketPathClasses"]["exact-nested-Install.pkg"], 1)
+        self.assertEqual(misleading_observed["exactNestedPackageAbsentArchRows"], 0)
+        self.assertEqual(misleading_observed["exactNestedPackageNullArchRows"], 0)
+        self.assertEqual(misleading_observed["malformedNonArchitectureTicketRows"], 0)
+        valid = nested["ticketContents"][0]
+        malformed_rows = [None, dict(valid, cdhash=marker), dict(valid, digestAlgorithm="MD5"),
+                          dict(valid, extra=marker), dict(valid, path=marker + "\n"),
+                          {key: value for key, value in valid.items() if key != "cdhash"}]
+        malformed_observed = classify(dict(log, ticketContents=malformed_rows))
+        self.assertEqual(malformed_observed["malformedNonArchitectureTicketRows"], len(malformed_rows))
+        self.assertNotIn(marker, json.dumps(malformed_observed))
+        for invalid_rows in ({}, [valid] * 2049):
+            invalid_observed = classify(dict(log, ticketContents=invalid_rows))
+            self.assertIsNone(invalid_observed["malformedNonArchitectureTicketRows"])
+            self.assertEqual(invalid_observed["exactNestedPackageAbsentArchRows"], 0)
+            self.assertEqual(invalid_observed["exactNestedPackageNullArchRows"], 0)
+        self.assertEqual(classify(dict(log, ticketContents=None))["malformedNonArchitectureTicketRows"], 0)
         for changes in ({"jobId": "99999999-1111-2222-3333-444444444444"}, {"status": "Invalid"},
                         {"archiveFilename": "Other.dmg"}, {"logFormatVersion": True}, {marker: marker}):
             with self.subTest(binding=tuple(changes)):

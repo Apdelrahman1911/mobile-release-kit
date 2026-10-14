@@ -39,7 +39,7 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_MACOS_NOTARY_API_KEY_BASE64: ${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64 }}
-          MRK_NOTARY_LOG_PROBE_SHA256: 87cd8ba6977d7fc3e571d1e3425b8d148c95ff68c26c98d8f60aad65249db76f
+          MRK_NOTARY_LOG_PROBE_SHA256: 58ae27fbe2a22afe4dc9921735f2f4d91fa444113d2f416d9fb30b62e62f1e3e
         run: |
           set +x
           set +a
