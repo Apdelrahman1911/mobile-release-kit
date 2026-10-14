@@ -1846,7 +1846,32 @@ def without_primary_owner_runtime_source_pin(source):
     return source
 
 
+# Exact installed-only carrier export/retention/retirement bundle. Historical
+# assertions still consume their entire byte-identical predecessor, while the
+# normal-preview route test first inspects all new raw SOURCE safety contracts.
+P0_CARRIER_WORKFLOW_BUNDLE = '      - name: Stage only the finalized ordinary image as an unqualified P0 carrier input\n        id: p0_carrier_stage\n        if: github.ref == \'refs/heads/verify/desktop-macos-installed\' && steps.package_install.outcome == \'success\' && steps.finalize_image.outcome == \'success\' && env.MRK_MACOS_PACKAGE_ROLE == \'ordinary-image\' && env.MRK_MACOS_REMOVAL_CASE == \'disabled\'\n        timeout-minutes: 3\n        shell: bash\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1\n          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || exit 1\n          [[ "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image && "$MRK_MACOS_REMOVAL_CASE" == disabled ]] || exit 1\n          case "$MRK_MACOS_TARGET" in aarch64-apple-darwin|x86_64-apple-darwin) ;; *) exit 1 ;; esac\n          [[ ! -e "$MRK_MACOS_WORK/p0-carrier-input" && ! -L "$MRK_MACOS_WORK/p0-carrier-input" ]] || exit 1\n          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \\\n            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py preview --target "$MRK_MACOS_TARGET" \\\n            --work "$MRK_MACOS_WORK" --expected-source "$MRK_EXPECTED_SHA" \\\n            --output "$MRK_MACOS_WORK/p0-carrier-input" > "$MRK_MACOS_WORK/p0-carrier-result.json"\n          # Existing finality/export gate; no Remove operation or qualified-P0 claim.\n      - name: Retain one finalized DMG and its finite descriptor for later independent P0 qualification\n        id: p0_carrier_upload\n        if: github.ref == \'refs/heads/verify/desktop-macos-installed\' && steps.p0_carrier_stage.outcome == \'success\'\n        timeout-minutes: 3\n        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n        with:\n          name: mobile-release-kit-macos26-${{ matrix.target }}-p0-carrier-input-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}\n          path: |\n            ${{ steps.work.outputs.root }}/p0-carrier-input/MobileReleaseKit.dmg\n            ${{ steps.work.outputs.root }}/p0-carrier-input/PREVIEW.json\n          if-no-files-found: error\n          retention-days: 14\n          compression-level: 0\n      - name: Retire only the known uploaded carrier export copy without touching image originals\n        id: p0_carrier_retire\n        if: github.ref == \'refs/heads/verify/desktop-macos-installed\' && steps.p0_carrier_upload.outcome == \'success\'\n        timeout-minutes: 1\n        shell: bash\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          umask 077\n          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1\n          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || exit 1\n          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \\\n            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_RUN_ID=$GITHUB_RUN_ID" \\\n            "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \\\n            "$MRK_PYTHON" -I -S -B - <<\'PY_P0_CARRIER_RETIRE\'\n          import hashlib, json, os, stat, sys\n          \n          \n          def carrier_need(value):\n              if not value:\n                  raise RuntimeError("owned-carrier-export-retirement-refused")\n          \n          \n          def carrier_identity(info):\n              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,\n                      info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)\n          \n          \n          def carrier_parent_identity(info):\n              # Own child retirement legitimately changes parent size/nlink/times.\n              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)\n          \n          \n          def retire_carrier(work, source, run_id, attempt, target):\n              # One known export only. No scan, recursive delete, image-original rewrite,\n              # process stop, signing input or protected installation is permitted here.\n              carrier_need(os.getuid() != 0 and os.getuid() == os.geteuid()\n                           and type(work) is str and os.path.isabs(work)\n                           and target in ("aarch64-apple-darwin", "x86_64-apple-darwin"))\n              flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC\n              parent = output = None\n              opened = []\n              try:\n                  parent = os.open(work, flags | os.O_DIRECTORY)\n                  pinfo = os.fstat(parent)\n                  carrier_need(stat.S_ISDIR(pinfo.st_mode) and stat.S_IMODE(pinfo.st_mode) == 0o700\n                               and (pinfo.st_uid, pinfo.st_gid) == (os.getuid(), os.getgid())\n                               and carrier_identity(os.stat(work, follow_symlinks=False)) == carrier_identity(pinfo))\n                  output = os.open("p0-carrier-input", flags | os.O_DIRECTORY, dir_fd=parent)\n                  oinfo = os.fstat(output)\n                  carrier_need(stat.S_ISDIR(oinfo.st_mode) and stat.S_IMODE(oinfo.st_mode) == 0o555\n                               and oinfo.st_nlink == 2 and (oinfo.st_uid, oinfo.st_gid) == (pinfo.st_uid, pinfo.st_gid)\n                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(oinfo))\n                  limits = {"MobileReleaseKit.dmg": 512 * 1024 * 1024, "README.md": 32768, "PREVIEW.json": 16384}\n                  carrier_need(set(os.listdir(output)) == set(limits))\n                  observations = {}\n                  for name, limit in sorted(limits.items()):\n                      fd = os.open(name, flags, dir_fd=output)\n                      opened.append(fd)\n                      info = os.fstat(fd)\n                      carrier_need(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o444\n                                   and info.st_nlink == 1 and (info.st_uid, info.st_gid) == (pinfo.st_uid, pinfo.st_gid)\n                                   and 0 < info.st_size <= limit\n                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))\n                      count, digest, small = 0, hashlib.sha256(), bytearray()\n                      while True:\n                          piece = os.read(fd, min(1024 * 1024, limit + 1 - count))\n                          if not piece:\n                              break\n                          count += len(piece)\n                          carrier_need(count <= limit)\n                          digest.update(piece)\n                          if name == "PREVIEW.json":\n                              small.extend(piece)\n                      carrier_need(count == info.st_size and carrier_identity(os.fstat(fd)) == carrier_identity(info)\n                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))\n                      observations[name] = (fd, info, count, digest.hexdigest(), bytes(small))\n                  carrier_need(sum(row[2] for row in observations.values()) <= 512 * 1024 * 1024)\n                  def pairs(rows):\n                      value = {}\n                      for key, item in rows:\n                          carrier_need(key not in value)\n                          value[key] = item\n                      return value\n                  def constant(_):\n                      carrier_need(False)\n                  summary = json.loads(observations["PREVIEW.json"][4], object_pairs_hook=pairs, parse_constant=constant)\n                  platform = "macOS26-arm64" if target == "aarch64-apple-darwin" else "macOS26-x86_64"\n                  carrier_need(type(summary) is dict and type(summary.get("schemaVersion")) is int and summary["schemaVersion"] == 2\n                               and summary.get("scope") == "normal-macos-early-preview"\n                               and summary.get("workflow") == ".github/workflows/desktop-macos-installed.yml"\n                               and summary.get("sourceCommit") == source and summary.get("runId") == run_id\n                               and summary.get("runAttempt") == attempt and summary.get("platform") == platform\n                               and summary.get("packageRole") == "ordinary-image" and summary.get("instrumented") is False\n                               and summary.get("fullUIQualified") is False and summary.get("distributionQualified") is False\n                               and summary.get("productReady") is False and type(summary.get("distributionBytes")) is int\n                               and summary["distributionBytes"] == observations["MobileReleaseKit.dmg"][2]\n                               and summary.get("distributionSha256") == observations["MobileReleaseKit.dmg"][3])\n                  carrier_need(carrier_parent_identity(os.fstat(parent)) == carrier_parent_identity(pinfo)\n                               == carrier_parent_identity(os.stat(work, follow_symlinks=False))\n                               and set(os.listdir(output)) == set(limits)\n                               and carrier_identity(os.fstat(output)) == carrier_identity(oinfo)\n                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(oinfo))\n                  for name, (fd, info, _, _, _) in observations.items():\n                      carrier_need(carrier_identity(os.fstat(fd)) == carrier_identity(info)\n                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))\n                  # Only after the complete known roster/hash/POST is admitted may this\n                  # synchronous task-owned duplicate be removed. Partial failure is failure.\n                  os.fchmod(output, 0o700)\n                  for name, (fd, info, _, _, _) in observations.items():\n                      carrier_need(carrier_identity(os.fstat(fd)) == carrier_identity(info)\n                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))\n                      os.unlink(name, dir_fd=output)\n                      carrier_need(os.fstat(fd).st_nlink == 0)\n                  carrier_need(os.listdir(output) == [])\n                  os.fsync(output)\n                  final = os.fstat(output)\n                  carrier_need((final.st_dev, final.st_ino, final.st_uid, final.st_gid)\n                               == (oinfo.st_dev, oinfo.st_ino, oinfo.st_uid, oinfo.st_gid)\n                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(final))\n                  os.rmdir("p0-carrier-input", dir_fd=parent)\n                  os.fsync(parent)\n                  carrier_need(carrier_parent_identity(os.fstat(parent)) == carrier_parent_identity(pinfo)\n                               == carrier_parent_identity(os.stat(work, follow_symlinks=False)))\n              finally:\n                  # Never retry a close: an unknown consuming close fails this step.\n                  primary = sys.exc_info()[1]\n                  errors = []\n                  originals = ([parent] if parent is not None else []) + ([output] if output is not None else []) + opened\n                  for fd in reversed(originals):\n                      try:\n                          os.close(fd)\n                      except OSError as exc:\n                          errors.append(exc)\n                  if errors:\n                      if primary is None:\n                          raise errors[0]\n                      primary.add_note("owned-carrier-export-close-errors:" + str(len(errors)))\n          \n          \n          if __name__ == "__main__":\n              retire_carrier(os.environ["MRK_MACOS_WORK"], os.environ["GITHUB_SHA"],\n                             os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"], os.environ["MRK_MACOS_TARGET"])\n          PY_P0_CARRIER_RETIRE\n'
+P0_CARRIER_WORKFLOW_NOTE = '    # Installed-only carrier retention adds7 nominal minutes; unchanged350min cap still prevails.\n'
+
+
+def without_installed_p0_carrier_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("installed P0 carrier SOURCE bound differs")
+    ids = ("p0_carrier_stage", "p0_carrier_upload", "p0_carrier_retire")
+    markers = tuple("        id: " + name + "\n" for name in ids)
+    if not any(marker in source for marker in markers) and P0_CARRIER_WORKFLOW_NOTE not in source:
+        return source
+    if (source.count(P0_CARRIER_WORKFLOW_BUNDLE) != 1 or source.count(P0_CARRIER_WORKFLOW_NOTE) != 1
+            or any(source.count(marker) != 1 for marker in markers)
+            or source.count(P0_CARRIER_WORKFLOW_BUNDLE + '      - name: Fixed nonshipping app-absence app-absence-restore; no credentials or user artifact\n') != 1):
+        raise AssertionError("installed P0 carrier complete SOURCE bundle differs")
+    before = source.split(P0_CARRIER_WORKFLOW_BUNDLE, 1)[0]
+    if not before.endswith('          # actual original0. Preview has no fallback to the old image.\n'):
+        raise AssertionError("installed P0 carrier original final-image ordering differs")
+    return source.replace(P0_CARRIER_WORKFLOW_BUNDLE, "", 1).replace(P0_CARRIER_WORKFLOW_NOTE, "", 1)
+
+
 def without_installed_final_carrier_workflow(source):
+    source = without_installed_p0_carrier_workflow(source)
     # Pure SOURCE normalization: one complete unchanged-workload step only.
     # Historical whole-source guards remain responsible for unrelated regions.
     if type(source) is not str or len(source.encode()) > 512 * 1024:
@@ -2820,7 +2845,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
         helper_body = (Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py").read_bytes()
         self.assertEqual(len(helper_body), module.HELPER_SOURCE_BYTES)
-        self.assertEqual(module.HELPER_SOURCE_BYTES, 551896)
+        self.assertEqual(module.HELPER_SOURCE_BYTES, 558617)
         helper_tree = ast.parse(helper_body)
         constants = [node.value for node in helper_tree.body
                      if isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -2828,7 +2853,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(len(constants), 1)
         source_cap = ast.literal_eval(constants[0])
         self.assertIs(type(source_cap), int)
-        self.assertEqual(source_cap, 551896)
+        self.assertEqual(source_cap, 558617)
         operation = next(node for node in helper_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
         caps = []
         for method in operation.body:
@@ -2863,6 +2888,117 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     for entry in reversed(port.entries): port.close(entry)
                 self.assertFalse(port.errors)
                 self.assertTrue(all(entry["closed"] and entry["fd"] is None for entry in port.entries))
+
+        # Actual package-image/original/custody/close methods; only native tool
+        # returns and Darwin metadata syscalls are synthetic DATA on Linux.
+        # These cannot qualify a native image, signing identity or installation.
+        for case in ("zero", "finder", "unknown", "extra", "malformed", "bad-value", "query-error",
+                     "list-changed", "remove-error", "post-attribute", "same-size-bytes", "named-replaced",
+                     "mode-changed", "deadline", "short-read", "extra-byte", "close-error", "primary-and-close"):
+            with self.subTest(createdImage=case), tempfile.TemporaryDirectory(prefix="mrk-created-image-") as temporary:
+                root = Path(temporary); root.chmod(0o700)
+                port = module.Operation(SimpleNamespace(), root, root, "package-install",
+                    {"GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40,
+                     "GITHUB_WORKFLOW_REF": "inert-created-image", "GITHUB_RUN_ID": "123",
+                     "GITHUB_RUN_ATTEMPT": "1", "MRK_MACOS_PACKAGE_ROLE": "ordinary-image"}, TOOL)
+                port.work_entry = port.register(os.open(root, module.READ_FLAGS | os.O_DIRECTORY), "work", "directory")
+                port.work_entry["identity"] = module.directory_identity(os.fstat(port.work_entry["fd"]))
+                port.package_started = port.package_observed = module.time.monotonic_ns()
+                port.package_endpoint = port.package_started + 10_000_000_000
+                (root / "distribution").mkdir(mode=0o700)
+                port.distribution_entry = port.directory(port.work_entry, "distribution", "image-parent")
+                path = root / "distribution/MobileReleaseKit.dmg"
+                payload, signed, removed, original_fds = b"INERT_UDIF_IMAGE_DATA", [], [], []
+                metadata = [b"" if case == "zero" else b"com.apple.FinderInfo\0"]
+                if case in ("unknown", "primary-and-close"): metadata[0] = b"com.apple.Quarantine\0"
+                if case == "extra": metadata[0] += b"com.apple.ResourceFork\0"
+                if case == "malformed": metadata[0] = b"com.apple.FinderInfo"
+                class MetadataData:
+                    def names(self, fd):
+                        original_fds.append(fd)
+                        if case == "query-error": raise module.Refused("created-image-query-data")
+                        if case == "deadline": port.package_endpoint = port.package_started
+                        return metadata[0]
+                    def finder_info(self, fd):
+                        if case == "list-changed": metadata[0] = b"com.apple.ResourceFork\0"
+                        return b"F" * (31 if case == "bad-value" else 32)
+                    def remove_finder_info(self, fd):
+                        removed.append(fd)
+                        if case == "remove-error": raise module.Refused("created-image-remove-data")
+                        metadata[0] = b"unexpected\0" if case == "post-attribute" else b""
+                        if case == "same-size-bytes":
+                            before = os.fstat(fd)
+                            writing = os.open(path, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                            try:
+                                self_test.assertEqual(os.pwrite(writing, b"Y" * len(payload), 0), len(payload))
+                                os.utime(writing, ns=(before.st_atime_ns, before.st_mtime_ns))
+                            finally: os.close(writing)
+                        if case == "named-replaced":
+                            path.rename(path.with_suffix(".retained")); path.write_bytes(payload)
+                        if case == "mode-changed": os.fchmod(fd, 0o600)
+                self_test = self
+                metadata_api = MetadataData()
+                actual_policy, actual_close, actual_pread = TOOL.no_xattrs, port.close, os.pread
+                def policy(fd):
+                    actual_policy(fd)
+                    module.need(metadata[0] == b"", "created-image-post-policy-data")
+                def native_return(role, argv, **kwargs):
+                    if role == "distribution-create":
+                        self.assertFalse(path.exists()); path.write_bytes(payload); path.chmod(0o644)
+                    if role == "distribution-sign":
+                        signed.append(role)
+                        normalization = [entry for entry in port.entries if entry["role"] == "distribution-created-image"]
+                        self.assertEqual(len(normalization), 1)
+                        self.assertTrue(normalization[0]["closed"] and normalization[0]["fd"] is None)
+                        self.assertEqual(path.read_bytes(), payload); self.assertEqual(metadata[0], b"")
+                    port.calls.append({"role": role, "returned": True, "capturesSettled": True})
+                    return CompletedProcess(argv, 0, b"", b"")
+                def consume(entry):
+                    if entry["role"] == "distribution-created-image" and case in ("close-error", "primary-and-close"):
+                        real = os.close
+                        def close_error(fd):
+                            real(fd)
+                            raise OSError("inert closed-original uncertainty")
+                        with mock.patch.object(module.os, "close", new=close_error): actual_close(entry)
+                    else: actual_close(entry)
+                def read(fd, size, offset):
+                    if original_fds and fd == original_fds[0]:
+                        if case == "short-read" and offset == 0: return b""
+                        if case == "extra-byte" and offset == len(payload): return b"!"
+                    return actual_pread(fd, size, offset)
+                port.signing = ("TEST000001", "a" * 40)
+                try:
+                    with (mock.patch.object(module, "_CreatedDmgXattrs", return_value=metadata_api),
+                          mock.patch.object(TOOL, "no_xattrs", new=policy),
+                          mock.patch.object(port, "package_call", new=native_return),
+                          mock.patch.object(port, "credential_scope", return_value=contextlib.nullcontext()),
+                          mock.patch.object(port, "close", new=consume),
+                          mock.patch.object(module.os, "pread", new=read)):
+                        if case in ("zero", "finder"):
+                            value, output = port.package_image({"name": "inert-input"}, "distribution")
+                            self.assertEqual(output, path); self.assertEqual(value["sha256"], module.digest(payload))
+                        else:
+                            expected_reason = {"same-size-bytes": "created-image-normalization-bytes",
+                                "primary-and-close": "created-image-only-finder-info",
+                                "close-error": "created-image-close-unknown"}.get(case)
+                            with self.assertRaises(module.Refused) as raised:
+                                port.package_image({"name": "inert-input"}, "distribution")
+                            if expected_reason: self.assertEqual(str(raised.exception), expected_reason)
+                    self.assertEqual(bool(signed), case in ("zero", "finder"))
+                    self.assertLessEqual(len(removed), 1)
+                    self.assertTrue(all(fd == original_fds[0] for fd in original_fds))
+                    if case in ("unknown", "extra", "malformed", "bad-value", "query-error", "list-changed",
+                                "deadline", "short-read", "extra-byte", "primary-and-close"):
+                        self.assertEqual(removed, [])
+                    normalized = [entry for entry in port.entries if entry["role"] == "distribution-created-image"]
+                    self.assertEqual(len(normalized), 1)
+                    self.assertIsNone(normalized[0]["fd"])
+                    self.assertEqual(normalized[0]["closed"], case not in ("close-error", "primary-and-close"))
+                    self.assertEqual(len(port.errors), int(case in ("close-error", "primary-and-close")))
+                    self.assertNotIn(normalized[0], [entry for entry, _ in port.package_outputs])
+                finally:
+                    for entry in reversed(port.entries): port.close(entry)
+                self.assertTrue(all(entry["fd"] is None for entry in port.entries))
 
     def notary_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None):
         """Actual copy/FD/parser code, inert app/runtime/key and native doubles.
@@ -9695,7 +9831,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         for ui_id in ("normal_android_ui_test", "normal_ios_ui_test", "normal_ios_pending_ui_test", "normal_ui_test"):
             self.assertLess(budget_current.index("        id: package_install\n"), budget_current.index("        id: finalize_image\n"))
             self.assertLess(budget_current.index("        id: finalize_image\n"), budget_current.index("        id: " + ui_id + "\n"))
-        self.assertEqual(hashlib.sha256(without_installed_final_carrier_workflow(budget_current).encode()).hexdigest(),
+        self.assertEqual(hashlib.sha256(without_ios_unsigned_reselection_workflow(budget_current).encode()).hexdigest(),
                          '076dfc18029bb3e2f728e5ec81542cffcc07fe4b134c3162129bb534727ad662')
         for damaged in (final_step + final_step, final_step.replace("timeout-minutes: 32", "timeout-minutes: 33", 1),
                         final_step.replace("set -o noclobber", "set +o noclobber", 1),
@@ -16211,9 +16347,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # This exact helper is already in the readonly SOURCE closure. Inspect
         # its real caller without importing or invoking any operation owner.
         with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
-            helper_raw = original.read(551896 + 1)
+            helper_raw = original.read(558617 + 1)
             self.assertEqual(original.read(1), b"")
-        self.assertEqual(len(helper_raw), 551896)
+        self.assertEqual(len(helper_raw), 558617)
         helper_source = helper_raw.decode("utf-8", "strict")
         helper_tree = ast.parse(helper_source)
         helper_caps = [node.value for node in helper_tree.body
@@ -18467,12 +18603,127 @@ class MacNormalPreviewData(unittest.TestCase):
 
     def test_preview_route_targets_only_unrelated_groups_and_retains_package_gates(self):
         root = Path(__file__).absolute().parents[2]
-        workflow = without_remove_output_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
+        raw_workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        stage_name = "Stage only the finalized ordinary image as an unqualified P0 carrier input"
+        upload_name = "Retain one finalized DMG and its finite descriptor for later independent P0 qualification"
+        retire_name = "Retire only the known uploaded carrier export copy without touching image originals"
+        stage, upload, retire = (workflow_step(raw_workflow, name) for name in (stage_name, upload_name, retire_name))
+        self.assertEqual(raw_workflow.count(P0_CARRIER_WORKFLOW_BUNDLE), 1)
+        self.assertEqual(hashlib.sha256(without_installed_p0_carrier_workflow(raw_workflow).encode()).hexdigest(),
+                         "3d4670e8acf2e3bcc7d6246679065357406da8402b7bfd4da9d8adba20bdcccb")
+        self.assertLess(raw_workflow.index("        id: finalize_image\n"), raw_workflow.index("        id: p0_carrier_stage\n"))
+        self.assertLess(raw_workflow.index("        id: p0_carrier_stage\n"), raw_workflow.index("        id: p0_carrier_upload\n"))
+        self.assertLess(raw_workflow.index("        id: p0_carrier_upload\n"), raw_workflow.index("        id: p0_carrier_retire\n"))
+        self.assertLess(raw_workflow.index("        id: p0_carrier_retire\n"), raw_workflow.index("        id: normal_ios_ui_test\n"))
+        self.assertIn("steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success'", stage)
+        self.assertIn("env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled'", stage)
+        self.assertIn('--output "$MRK_MACOS_WORK/p0-carrier-input"', stage)
+        self.assertIn('/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC', stage)
+        self.assertIn("steps.p0_carrier_stage.outcome == 'success'", upload)
+        self.assertIn("steps.p0_carrier_upload.outcome == 'success'", retire)
+        for block in (stage, upload, retire):
+            self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-installed'", block)
+            for forbidden in ("always()", "continue-on-error", "secrets.", "remove-preview", "sudo ", "--deep", "**"):
+                self.assertNotIn(forbidden, block)
+        self.assertIn("mobile-release-kit-macos26-${{ matrix.target }}-p0-carrier-input-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}", upload)
+        paths = upload.split("          path: |\n", 1)[1].split("          if-no-files-found:", 1)[0].splitlines()
+        self.assertEqual(paths, ["            ${{ steps.work.outputs.root }}/p0-carrier-input/MobileReleaseKit.dmg",
+                                 "            ${{ steps.work.outputs.root }}/p0-carrier-input/PREVIEW.json"])
+        self.assertIn("if-no-files-found: error", upload)
+        self.assertIn("retention-days: 14", upload)
+        self.assertIn("compression-level: 0", upload)
+        for damage in (P0_CARRIER_WORKFLOW_BUNDLE + P0_CARRIER_WORKFLOW_BUNDLE,
+                       P0_CARRIER_WORKFLOW_BUNDLE.replace("steps.finalize_image.outcome == 'success'", "always()", 1),
+                       P0_CARRIER_WORKFLOW_BUNDLE.replace("p0-carrier-input/PREVIEW.json", "p0-carrier-input/README.md", 1),
+                       P0_CARRIER_WORKFLOW_BUNDLE.replace("timeout-minutes: 3", "timeout-minutes: 4", 1),
+                       P0_CARRIER_WORKFLOW_BUNDLE.replace("os.O_NOFOLLOW", "0", 1)):
+            with self.assertRaises(AssertionError):
+                without_installed_p0_carrier_workflow(raw_workflow.replace(P0_CARRIER_WORKFLOW_BUNDLE, damage, 1))
+        for name in (stage_name, upload_name, retire_name):
+            block = "      - name: " + name + "\n" + workflow_step(raw_workflow, name)
+            with self.assertRaises(AssertionError):
+                without_installed_p0_carrier_workflow(raw_workflow.replace(block, "", 1))
+        # Exercise the exact fixed cleanup definitions with real small owned
+        # files. No Mac/native action or fake product acceptance is executed.
+        program = retire.split("<<'PY_P0_CARRIER_RETIRE'\n", 1)[1].split("          PY_P0_CARRIER_RETIRE", 1)[0]
+        program = "\n".join(line[10:] for line in program.splitlines()) + "\n"
+        namespace = {"__name__": "_mrk_p0_carrier_retire_source_test"}
+        exec(compile(program, "<fixed-p0-carrier-retirement>", "exec"), namespace)
+        for target in TOOL.MAC_TARGETS:
+            for fault in (None, "extra", "symlink", "hardlink", "hash", "mode", "context", "extra-close", "work-binding"):
+                with self.subTest(target=target, carrier_retirement=fault), tempfile.TemporaryDirectory() as directory:
+                    container = Path(directory); container.chmod(0o700)
+                    work = container / "work"; work.mkdir(mode=0o700)
+                    output = work / "p0-carrier-input"; output.mkdir(mode=0o700)
+                    image = b"INERT one-DMG carrier-copy fixture"
+                    summary = {"schemaVersion": 2, "scope": "normal-macos-early-preview",
+                        "workflow": ".github/workflows/desktop-macos-installed.yml", "sourceCommit": "a" * 40,
+                        "runId": "123", "runAttempt": "1", "platform": "macOS26-arm64" if target == TOOL.ARM_TARGET else "macOS26-x86_64",
+                        "packageRole": "ordinary-image", "instrumented": False, "fullUIQualified": False,
+                        "distributionQualified": False, "productReady": False, "distributionBytes": len(image),
+                        "distributionSha256": hashlib.sha256(image).hexdigest()}
+                    if fault == "context": summary["runAttempt"] = "2"
+                    files = {"MobileReleaseKit.dmg": image, "README.md": b"INERT guide", "PREVIEW.json": TOOL.canonical(summary)}
+                    for name, body in files.items():
+                        (output / name).write_bytes(body); (output / name).chmod(0o444)
+                    if fault in ("extra", "extra-close"): (output / "unexpected").write_bytes(b"INERT retained")
+                    elif fault == "symlink":
+                        (output / "MobileReleaseKit.dmg").unlink(); (output / "MobileReleaseKit.dmg").symlink_to("README.md")
+                    elif fault == "hardlink": os.link(output / "MobileReleaseKit.dmg", work / "unrelated-owned-fixture")
+                    elif fault == "hash":
+                        (output / "MobileReleaseKit.dmg").chmod(0o644); (output / "MobileReleaseKit.dmg").write_bytes(b"X" * len(image)); (output / "MobileReleaseKit.dmg").chmod(0o444)
+                    elif fault == "mode": (output / "README.md").chmod(0o644)
+                    before = {name: (os.lstat(output / name), os.readlink(output / name) if (output / name).is_symlink() else (output / name).read_bytes())
+                              for name in os.listdir(output)}
+                    output.chmod(0o555)
+                    try:
+                        if fault is None:
+                            namespace["retire_carrier"](str(work), "a" * 40, "123", "1", target)
+                            self.assertFalse(output.exists())
+                        else:
+                            if fault == "work-binding":
+                                real_open, swapped = os.open, []
+                                def replace_named_work(path, *args, **kwargs):
+                                    fd = real_open(path, *args, **kwargs)
+                                    if path == str(work) and not swapped:
+                                        work.rename(container / "moved-work"); work.mkdir(mode=0o700)
+                                        swapped.append(True)
+                                    return fd
+                                with mock.patch.object(namespace["os"], "open", side_effect=replace_named_work), self.assertRaises(RuntimeError):
+                                    namespace["retire_carrier"](str(work), "a" * 40, "123", "1", target)
+                                self.assertEqual(os.listdir(work), [])
+                                output = container / "moved-work/p0-carrier-input"
+                            elif fault == "extra-close":
+                                real_close, calls = os.close, []
+                                def consumed_close(fd):
+                                    real_close(fd); calls.append(fd)
+                                    if len(calls) == 1: raise OSError(5, "INERT consumed-close diagnostic")
+                                with mock.patch.object(namespace["os"], "close", side_effect=consumed_close), self.assertRaises(RuntimeError) as refused:
+                                    namespace["retire_carrier"](str(work), "a" * 40, "123", "1", target)
+                                self.assertIs(type(refused.exception), RuntimeError)
+                                self.assertEqual(refused.exception.__notes__, ["owned-carrier-export-close-errors:1"])
+                                self.assertEqual(len(calls), len(set(calls)))
+                            else:
+                                with self.assertRaises((RuntimeError, OSError)):
+                                    namespace["retire_carrier"](str(work), "a" * 40, "123", "1", target)
+                            self.assertEqual(set(os.listdir(output)), set(before))
+                            for name, (info, body) in before.items():
+                                actual = os.lstat(output / name)
+                                self.assertEqual(namespace["carrier_identity"](actual), namespace["carrier_identity"](info))
+                                self.assertEqual(os.readlink(output / name) if (output / name).is_symlink() else (output / name).read_bytes(), body)
+                    finally:
+                        if output.is_dir(): output.chmod(0o700)  # Only this test-created fixture.
+        workflow = without_remove_output_workflow(raw_workflow)
         selected = {block.splitlines()[0].strip() for block in workflow.split("      - name: ")[1:]
                     if "if: github.ref == 'refs/heads/verify/desktop-macos-installed'" in block}
         self.assertEqual(selected, {
             "Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive",
-            "Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)"})
+            "Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)",
+            "Prepare fresh private Android UI suppliers and disposable key inputs",
+            "Exercise one ordinary signed Android build with current private inputs",
+            "Bind the single Android journey to current installed originals only",
+            "Exercise one ordinary unsigned iOS archive and normal Quit",
+            "Observe the single unsigned iOS XCTest summary under the same source"})
         self.assertIn("      - verify/desktop-macos-preview\n", workflow)
         self.assertIn("--message-format=json", workflow)
         self.assertIn('--desktop-image-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl"', workflow)

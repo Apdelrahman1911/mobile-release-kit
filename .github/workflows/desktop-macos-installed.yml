@@ -29,6 +29,7 @@ jobs:
     # Remaining-three additionally requires ordinary saved-checks2; both cohorts are independent.
     # Adds28 singleton minutes plus17 saved-checks minutes; no350min fit is claimed.
     # The unchanged350min job cap is containing authority, never renewed per case.
+    # Installed-only carrier retention adds7 nominal minutes; unchanged350min cap still prevails.
     # Historical pre-Remove baselines: preview345 / recovery339 / installed210, plus5 overhead.
     # Remove preview adds90 nominal step maxima; Intel app-build adds24 to the old allocation.
     # Dormant Android272 / iOS248 include5 overhead; historical baselines, not fit proofs.
@@ -2061,6 +2062,185 @@ jobs:
           [[ "$image_status_saved" == 0 ]] || exit "$image_status_saved"
           # Neither a provisional file nor its receipt substitutes for this
           # actual original0. Preview has no fallback to the old image.
+      - name: Stage only the finalized ordinary image as an unqualified P0 carrier input
+        id: p0_carrier_stage
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled'
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1
+          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}$ ]] || exit 1
+          [[ "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image && "$MRK_MACOS_REMOVAL_CASE" == disabled ]] || exit 1
+          case "$MRK_MACOS_TARGET" in aarch64-apple-darwin|x86_64-apple-darwin) ;; *) exit 1 ;; esac
+          [[ ! -e "$MRK_MACOS_WORK/p0-carrier-input" && ! -L "$MRK_MACOS_WORK/p0-carrier-input" ]] || exit 1
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py preview --target "$MRK_MACOS_TARGET" \
+            --work "$MRK_MACOS_WORK" --expected-source "$MRK_EXPECTED_SHA" \
+            --output "$MRK_MACOS_WORK/p0-carrier-input" > "$MRK_MACOS_WORK/p0-carrier-result.json"
+          # Existing finality/export gate; no Remove operation or qualified-P0 claim.
+      - name: Retain one finalized DMG and its finite descriptor for later independent P0 qualification
+        id: p0_carrier_upload
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && steps.p0_carrier_stage.outcome == 'success'
+        timeout-minutes: 3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-release-kit-macos26-${{ matrix.target }}-p0-carrier-input-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/p0-carrier-input/MobileReleaseKit.dmg
+            ${{ steps.work.outputs.root }}/p0-carrier-input/PREVIEW.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Retire only the known uploaded carrier export copy without touching image originals
+        id: p0_carrier_retire
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && steps.p0_carrier_upload.outcome == 'success'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          umask 077
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1
+          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}$ ]] || exit 1
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_RUN_ID=$GITHUB_RUN_ID" \
+            "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \
+            "$MRK_PYTHON" -I -S -B - <<'PY_P0_CARRIER_RETIRE'
+          import hashlib, json, os, stat, sys
+          
+          
+          def carrier_need(value):
+              if not value:
+                  raise RuntimeError("owned-carrier-export-retirement-refused")
+          
+          
+          def carrier_identity(info):
+              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                      info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+          
+          
+          def carrier_parent_identity(info):
+              # Own child retirement legitimately changes parent size/nlink/times.
+              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+          
+          
+          def retire_carrier(work, source, run_id, attempt, target):
+              # One known export only. No scan, recursive delete, image-original rewrite,
+              # process stop, signing input or protected installation is permitted here.
+              carrier_need(os.getuid() != 0 and os.getuid() == os.geteuid()
+                           and type(work) is str and os.path.isabs(work)
+                           and target in ("aarch64-apple-darwin", "x86_64-apple-darwin"))
+              flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+              parent = output = None
+              opened = []
+              try:
+                  parent = os.open(work, flags | os.O_DIRECTORY)
+                  pinfo = os.fstat(parent)
+                  carrier_need(stat.S_ISDIR(pinfo.st_mode) and stat.S_IMODE(pinfo.st_mode) == 0o700
+                               and (pinfo.st_uid, pinfo.st_gid) == (os.getuid(), os.getgid())
+                               and carrier_identity(os.stat(work, follow_symlinks=False)) == carrier_identity(pinfo))
+                  output = os.open("p0-carrier-input", flags | os.O_DIRECTORY, dir_fd=parent)
+                  oinfo = os.fstat(output)
+                  carrier_need(stat.S_ISDIR(oinfo.st_mode) and stat.S_IMODE(oinfo.st_mode) == 0o555
+                               and oinfo.st_nlink == 2 and (oinfo.st_uid, oinfo.st_gid) == (pinfo.st_uid, pinfo.st_gid)
+                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(oinfo))
+                  limits = {"MobileReleaseKit.dmg": 512 * 1024 * 1024, "README.md": 32768, "PREVIEW.json": 16384}
+                  carrier_need(set(os.listdir(output)) == set(limits))
+                  observations = {}
+                  for name, limit in sorted(limits.items()):
+                      fd = os.open(name, flags, dir_fd=output)
+                      opened.append(fd)
+                      info = os.fstat(fd)
+                      carrier_need(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o444
+                                   and info.st_nlink == 1 and (info.st_uid, info.st_gid) == (pinfo.st_uid, pinfo.st_gid)
+                                   and 0 < info.st_size <= limit
+                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))
+                      count, digest, small = 0, hashlib.sha256(), bytearray()
+                      while True:
+                          piece = os.read(fd, min(1024 * 1024, limit + 1 - count))
+                          if not piece:
+                              break
+                          count += len(piece)
+                          carrier_need(count <= limit)
+                          digest.update(piece)
+                          if name == "PREVIEW.json":
+                              small.extend(piece)
+                      carrier_need(count == info.st_size and carrier_identity(os.fstat(fd)) == carrier_identity(info)
+                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))
+                      observations[name] = (fd, info, count, digest.hexdigest(), bytes(small))
+                  carrier_need(sum(row[2] for row in observations.values()) <= 512 * 1024 * 1024)
+                  def pairs(rows):
+                      value = {}
+                      for key, item in rows:
+                          carrier_need(key not in value)
+                          value[key] = item
+                      return value
+                  def constant(_):
+                      carrier_need(False)
+                  summary = json.loads(observations["PREVIEW.json"][4], object_pairs_hook=pairs, parse_constant=constant)
+                  platform = "macOS26-arm64" if target == "aarch64-apple-darwin" else "macOS26-x86_64"
+                  carrier_need(type(summary) is dict and type(summary.get("schemaVersion")) is int and summary["schemaVersion"] == 2
+                               and summary.get("scope") == "normal-macos-early-preview"
+                               and summary.get("workflow") == ".github/workflows/desktop-macos-installed.yml"
+                               and summary.get("sourceCommit") == source and summary.get("runId") == run_id
+                               and summary.get("runAttempt") == attempt and summary.get("platform") == platform
+                               and summary.get("packageRole") == "ordinary-image" and summary.get("instrumented") is False
+                               and summary.get("fullUIQualified") is False and summary.get("distributionQualified") is False
+                               and summary.get("productReady") is False and type(summary.get("distributionBytes")) is int
+                               and summary["distributionBytes"] == observations["MobileReleaseKit.dmg"][2]
+                               and summary.get("distributionSha256") == observations["MobileReleaseKit.dmg"][3])
+                  carrier_need(carrier_parent_identity(os.fstat(parent)) == carrier_parent_identity(pinfo)
+                               == carrier_parent_identity(os.stat(work, follow_symlinks=False))
+                               and set(os.listdir(output)) == set(limits)
+                               and carrier_identity(os.fstat(output)) == carrier_identity(oinfo)
+                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(oinfo))
+                  for name, (fd, info, _, _, _) in observations.items():
+                      carrier_need(carrier_identity(os.fstat(fd)) == carrier_identity(info)
+                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))
+                  # Only after the complete known roster/hash/POST is admitted may this
+                  # synchronous task-owned duplicate be removed. Partial failure is failure.
+                  os.fchmod(output, 0o700)
+                  for name, (fd, info, _, _, _) in observations.items():
+                      carrier_need(carrier_identity(os.fstat(fd)) == carrier_identity(info)
+                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))
+                      os.unlink(name, dir_fd=output)
+                      carrier_need(os.fstat(fd).st_nlink == 0)
+                  carrier_need(os.listdir(output) == [])
+                  os.fsync(output)
+                  final = os.fstat(output)
+                  carrier_need((final.st_dev, final.st_ino, final.st_uid, final.st_gid)
+                               == (oinfo.st_dev, oinfo.st_ino, oinfo.st_uid, oinfo.st_gid)
+                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(final))
+                  os.rmdir("p0-carrier-input", dir_fd=parent)
+                  os.fsync(parent)
+                  carrier_need(carrier_parent_identity(os.fstat(parent)) == carrier_parent_identity(pinfo)
+                               == carrier_parent_identity(os.stat(work, follow_symlinks=False)))
+              finally:
+                  # Never retry a close: an unknown consuming close fails this step.
+                  primary = sys.exc_info()[1]
+                  errors = []
+                  originals = ([parent] if parent is not None else []) + ([output] if output is not None else []) + opened
+                  for fd in reversed(originals):
+                      try:
+                          os.close(fd)
+                      except OSError as exc:
+                          errors.append(exc)
+                  if errors:
+                      if primary is None:
+                          raise errors[0]
+                      primary.add_note("owned-carrier-export-close-errors:" + str(len(errors)))
+          
+          
+          if __name__ == "__main__":
+              retire_carrier(os.environ["MRK_MACOS_WORK"], os.environ["GITHUB_SHA"],
+                             os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"], os.environ["MRK_MACOS_TARGET"])
+          PY_P0_CARRIER_RETIRE
       - name: Fixed nonshipping app-absence app-absence-restore; no credentials or user artifact
         id: app_absence_restore
         if: github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture'

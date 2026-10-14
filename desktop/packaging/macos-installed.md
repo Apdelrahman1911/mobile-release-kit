@@ -1158,3 +1158,18 @@ unchanged. Only the closed final-P receipt and original status join the existing
 explicit artifact list. Actual Developer ID keys, Apple submission results,
 writer compatibility and native installed validation remain external/runtime
 obligations; local DATA tests do not supply them.
+
+
+### Installed-verification carrier retention (not qualified P0)
+
+On `verify/desktop-macos-installed`, the existing complete passive export gate
+may retain the already-finalized ordinary Install DMG with its finite
+`PREVIEW.json` in `mobile-release-kit-macos26-<target>-p0-carrier-input-<source>-<run-id>-<run-attempt>`.
+This is one flat artifact with one DMG and one finite binding, retained for14days;
+it contains no Remove carrier, raw native evidence or signing inputs. The export
+copy is retired only after successful upload; original image/package/evidence
+and installed state remain untouched. Upload does not qualify a predecessor,
+launch/quit, downloaded installation, update, Gatekeeper or production readiness.
+Independent actual source/job/run/attempt/target/artifact/member/producer and
+closed native evidence must qualify P0 before any producer-history enrollment.
+Missing or expired artifacts/evidence are not a pass and do not permit fallback.

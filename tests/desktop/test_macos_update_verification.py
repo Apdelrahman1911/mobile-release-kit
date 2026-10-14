@@ -78,6 +78,23 @@ class UpdateDataTests(unittest.TestCase):
         bad = copy.deepcopy(source); bad["targets"][DATA.TARGETS[0]]["members"] *= 2
         with self.assertRaises(ValueError): DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
         self.assertEqual(DATA.REPOSITORY, "Apdelrahman1911/mobile-release-kit")
+        # Installed-only carrier retention keeps one binary image and one
+        # finite binding in the existing flat contract; neither qualifies P0.
+        flat = nomination()
+        for row in flat["targets"].values():
+            row["members"].append({"name": "PREVIEW.json", "bytes": 128, "sha256": "9" * 64})
+            row["artifactBytes"] = 400
+            row["resources"] = {"reviewed": True, **DATA.resource_quote_data(row)}
+        for target in DATA.TARGETS:
+            self.assertEqual(DATA.nomination_data(flat, target, STAGER), flat["targets"][target])
+        for fault in ("duplicate", "traversal", "aggregate", "hash"):
+            bad = copy.deepcopy(flat); row = bad["targets"][DATA.TARGETS[0]]
+            if fault == "duplicate": row["members"].append(dict(row["members"][1]))
+            elif fault == "traversal": row["members"][1]["name"] = "../PREVIEW.json"
+            elif fault == "aggregate": row["members"][1]["bytes"] = DATA.LIMIT
+            else: row["members"][1]["sha256"] = "0" * 64
+            with self.subTest(flat_carrier=fault), self.assertRaises((ValueError, STAGER.Refused)):
+                DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
         source = nested_nomination()
         for target in DATA.TARGETS:
             self.assertEqual(DATA.nomination_data(source, target, STAGER), source["targets"][target])
