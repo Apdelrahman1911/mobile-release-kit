@@ -164,7 +164,15 @@ FINAL_IMAGE_INPUT_STAGER_REASONS = frozenset((
     'source-service-profile',
 ))
 
-STAGES = frozenset((*FINAL_IMAGE_STAPLE_STAGES, *PHASES, *NATIVE_ROLES, *FINAL_IMAGE_INPUT_STAGES, "owned-directory-admission", "source-image-binding",
+# Closed first-failed metadata attribution; no dynamic role/path rendering.
+FINAL_IMAGE_VERIFY_FIELDS = ("device", "inode", "mode", "links", "uid", "gid", "size", "mtime", "ctime")
+FINAL_IMAGE_VERIFY_OBJECTS = ("output", *("input-%02d" % index for index in range(14)))
+FINAL_IMAGE_VERIFY_STAGES = frozenset(
+    "final-image-verify-%s-%s-%s" % (object_label, boundary, field)
+    for object_label in FINAL_IMAGE_VERIFY_OBJECTS for boundary in ("held", "named")
+    for field in FINAL_IMAGE_VERIFY_FIELDS)
+
+STAGES = frozenset((*FINAL_IMAGE_VERIFY_STAGES, "final-image-readonly-seal", *FINAL_IMAGE_STAPLE_STAGES, *PHASES, *NATIVE_ROLES, *FINAL_IMAGE_INPUT_STAGES, "owned-directory-admission", "source-image-binding",
     "resident-dependency-fetch", "separate-resident-image-compiler", "compiler-original-copy", "resident-image-source-selected-signing",
     "fixed-installed-entry-compiler", "desktop-facade-compiler", "resident-facade-compiler",
     "helper-source-selected-signing", "notary-preflight-input", "notary-known-private-retirement", "final-image-owned-publication",

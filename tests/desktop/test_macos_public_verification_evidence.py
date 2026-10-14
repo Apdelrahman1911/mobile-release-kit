@@ -2552,6 +2552,28 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         for reason in DATA.FINAL_IMAGE_STAPLE_REASONS:
             self.assertEqual(DATA.project_failure({"reason": reason})["reason"], reason)
         self.assertEqual(DATA.project_failure({"stage": SENTINEL, "reason": "file-extended-attributes-" + SENTINEL})["reason"], "unclassified")
+        expected = frozenset("final-image-verify-%s-%s-%s" % (label, boundary, field)
+            for label in ("output", *("input-%02d" % index for index in range(14))) for boundary in ("held", "named")
+            for field in ("device", "inode", "mode", "links", "uid", "gid", "size", "mtime", "ctime"))
+        self.assertEqual(DATA.FINAL_IMAGE_VERIFY_STAGES, expected)
+        self.assertEqual(len(expected), 270)
+        self.assertEqual(max(map(len, expected)), 40)
+        for stage in (*sorted(expected), "final-image-readonly-seal"):
+            projected = DATA.project_failure({"stage": stage, "type": "Refused", "reason": "notary-zip-original"})
+            self.assertEqual(projected, {"stage": stage, "type": "Refused", "reason": "notary-zip-original", "errno": None})
+            self.assertNotIn(SENTINEL, json.dumps(projected))
+            self.assertEqual(DATA.project_failure({"stage": stage + "-" + SENTINEL})["stage"], "unclassified")
+        for stage in ("final-image-verify-input-14-held-ctime", "final-image-verify-output-path-ctime",
+                      "final-image-verify-output-held-private", "final-image-verify-" + SENTINEL):
+            self.assertEqual(DATA.project_failure({"stage": stage, "reason": SENTINEL})["stage"], "unclassified")
+        # Identical closed declarations, not an open prefix renderer or raw role.
+        helper_tree = ast.parse((ROOT / "desktop/tools/macos_android_helper_package.py").read_text(encoding="utf-8"))
+        public_tree = ast.parse((ROOT / "desktop/tools/macos_public_verification_evidence.py").read_text(encoding="utf-8"))
+        for name in ("FINAL_IMAGE_VERIFY_FIELDS", "FINAL_IMAGE_VERIFY_OBJECTS", "FINAL_IMAGE_VERIFY_STAGES"):
+            def declaration(tree):
+                return next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == name for target in node.targets))
+            self.assertEqual(ast.dump(declaration(helper_tree)), ast.dump(declaration(public_tree)))
 
     def test_successful_normalized_receipt_and_original_zero_survive_file_projection(self):
         with tempfile.TemporaryDirectory() as directory:

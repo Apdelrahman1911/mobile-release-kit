@@ -2936,7 +2936,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
         helper_body = (Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py").read_bytes()
         self.assertEqual(len(helper_body), module.HELPER_SOURCE_BYTES)
-        self.assertEqual(module.HELPER_SOURCE_BYTES, 571244)
+        self.assertEqual(module.HELPER_SOURCE_BYTES, 575167)
         helper_tree = ast.parse(helper_body)
         constants = [node.value for node in helper_tree.body
                      if isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -2944,7 +2944,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(len(constants), 1)
         source_cap = ast.literal_eval(constants[0])
         self.assertIs(type(source_cap), int)
-        self.assertEqual(source_cap, 571244)
+        self.assertEqual(source_cap, 575167)
         operation = next(node for node in helper_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
         caps = []
         for method in operation.body:
@@ -7213,6 +7213,63 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         with self.assertRaises(module.Refused):
                             module.final_package_receipt(b'{"schemaVersion":1,' + record_body[1:], *arguments)
 
+        def verify_identity_probes(operation):
+            entry = operation.final_image_output
+            old_stage, old_phase = operation.stage, operation.phase
+            actual_fstat, actual_stat = module.os.fstat, module.os.stat
+            def changed(info, fields):
+                values = {name: getattr(info, name) for name in ("st_dev", "st_ino", "st_mode", "st_nlink",
+                    "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")}
+                for name in fields: values[name] += 1
+                return SimpleNamespace(**values)
+            try:
+                cases = (("output", "held", ("st_ctime_ns",), "ctime"),
+                         ("output", "held", ("st_ino", "st_ctime_ns"), "inode"),
+                         ("output", "named", ("st_ino",), "inode"),
+                         ("input-13", "named", ("st_mode",), "mode"))
+                for label, boundary, fields, first in cases:
+                    selected = entry if label == "output" else operation.final_image_inputs[13][0]
+                    named_reads = []
+                    def held(number):
+                        info = actual_fstat(number)
+                        return changed(info, fields) if number == selected["fd"] and boundary == "held" else info
+                    def named(name, **kwargs):
+                        info = actual_stat(name, **kwargs)
+                        if name == selected["name"] and kwargs.get("dir_fd") == selected["parent"]:
+                            named_reads.append(name)
+                            if boundary == "named": return changed(info, fields)
+                        return info
+                    operation.stage = "final-image-verify"
+                    with (self.subTest(identityObject=label, boundary=boundary, field=first),
+                          mock.patch.object(module.os, "fstat", side_effect=held),
+                          mock.patch.object(module.os, "stat", side_effect=named), self.assertRaises(module.Refused) as caught):
+                        operation.notary_stream(selected)
+                    self.assertEqual(caught.exception.args, ("notary-zip-original",))
+                    self.assertEqual(operation.stage, "final-image-verify-%s-%s-%s" % (label, boundary, first))
+                    self.assertEqual(len(named_reads), 0 if boundary == "held" else 1)
+                    # A cleanup POST cannot overwrite the first attributed stage.
+                    operation.final_image_verify_identity_stage(selected, tuple(value + 1 for value in selected["identity"]), "held")
+                    self.assertEqual(operation.stage, "final-image-verify-%s-%s-%s" % (label, boundary, first))
+                class ForeignTuple(tuple): pass
+                for unknown in ("tuple-subclass", "unregistered-entry", "removal-ordinals"):
+                    before = entry["identity"]
+                    selected = dict(entry) if unknown == "unregistered-entry" else entry
+                    operation.stage, operation.phase = "final-image-verify", "finalize-remove-image" if unknown == "removal-ordinals" else "finalize-image"
+                    if unknown == "tuple-subclass": entry["identity"] = ForeignTuple(before)
+                    def unknown_held(number):
+                        info = actual_fstat(number)
+                        return changed(info, ("st_ctime_ns",)) if number == selected["fd"] else info
+                    try:
+                        with mock.patch.object(module.os, "fstat", side_effect=unknown_held), self.assertRaises(module.Refused) as refused:
+                            operation.notary_stream(selected)
+                        self.assertEqual(refused.exception.args, ("notary-zip-original",))
+                        self.assertEqual(operation.stage, "final-image-verify")
+                    finally:
+                        entry["identity"] = before
+                self.assertEqual(len(module.FINAL_IMAGE_VERIFY_STAGES), 270)
+            finally:
+                operation.stage, operation.phase = old_stage, old_phase
+
         # S4 copies ONLY the old signed carrier. Both same-inode mutation and
         # the same settled call's returned name retain all preceding originals.
         # Tools/device status are DATA doubles, never native qualification.
@@ -7238,8 +7295,33 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     finally:
                         if entry["closed"] and entry["fd"] is None:
                             active.pop(id(entry), None)
-                committed, pre_checks = [], []
+                committed, pre_checks, seals, native_modes = [], [], [], []
                 actual_post, actual_pre_post = operation.final_image_post, operation.final_image_preimage_post
+                actual_seal, actual_command = operation.final_image_readonly_seal, operation.owner.run_owned
+                def readonly_seal():
+                    current = operation.final_image_output
+                    before, number = current["identity"], current["fd"]
+                    self.assertEqual(stat.S_IMODE(os.fstat(number).st_mode), 0o600)
+                    self.assertIs(operation.entry_registry[id(current)], current)
+                    value = actual_seal()
+                    self.assertIs(operation.final_image_output, current)
+                    self.assertEqual(current["fd"], number)
+                    self.assertEqual(stat.S_IMODE(os.fstat(number).st_mode), 0o444)
+                    self.assertEqual(current["identity"][:2] + current["identity"][3:8], before[:2] + before[3:8])
+                    self.assertEqual((os.pread(number, len(state.final_image) + 1, 0), operation.final_image_sha),
+                                     (state.final_image, TOOL.digest(state.final_image)))
+                    seals.append((id(current), number, operation.stage))
+                    if target == TOOL.MAC_TARGETS[0] and final_ref.endswith("desktop-macos-preview") and replacement:
+                        verify_identity_probes(operation)
+                    return value
+                def native_readonly(argv, **options):
+                    role = operation.calls[-1]["role"]
+                    if role in ("final-image-staple", "final-image-validate", "final-image-signature-after", "final-image-verify",
+                                "final-image-attach", "final-image-policy-status", "final-image-policy-assess"):
+                        mode = stat.S_IMODE(os.fstat(operation.final_image_output["fd"]).st_mode)
+                        native_modes.append((role, mode))
+                        self.assertEqual(mode, 0o600 if role in ("final-image-staple", "final-image-validate", "final-image-signature-after") else 0o444)
+                    return actual_command(argv, **options)
                 def pre_post(**kwargs):
                     value = actual_pre_post(**kwargs)
                     record = kwargs.get("record", operation.final_image_preimage)
@@ -7264,8 +7346,13 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     return value
                 with (self.final_image_fixture_call(state), mock.patch.object(operation, "register", new=register),
                       mock.patch.object(operation, "close", new=close), mock.patch.object(operation, "final_image_post", new=post),
-                      mock.patch.object(operation, "final_image_preimage_post", new=pre_post)):
+                      mock.patch.object(operation, "final_image_preimage_post", new=pre_post),
+                      mock.patch.object(operation, "final_image_readonly_seal", new=readonly_seal),
+                      mock.patch.object(operation.owner, "run_owned", new=native_readonly)):
                     returned = operation.execute()
+                self.assertEqual(seals, [(id(operation.final_image_output), seals[0][1], "final-image-readonly-seal")])
+                self.assertEqual([row[0] for row in native_modes], ["final-image-staple", "final-image-validate", "final-image-signature-after",
+                    "final-image-verify", "final-image-attach", "final-image-policy-status", "final-image-policy-assess"])
                 path = state.work / "distribution-final/MobileReleaseKit.dmg"
                 self.assertEqual((path.read_bytes(), stat.S_IMODE(path.stat().st_mode)), (state.final_image, 0o444))
                 if replacement:
@@ -7386,6 +7473,75 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertNotIn(secret, receipt_body.decode())
                 with self.assertRaises(module.Refused):
                     operation.final_image_call("final-image-submit", ["never", "execute"], maximum=1200)
+
+        # Failed same-owned seals never admit native verify/mount or a carrier.
+        # Metadata/content fault ports are explicitly DATA; all real originals,
+        # fchmod/fsync (where not the failing primitive), POSTs and closes execute.
+        for fault in ("pre-identity", "fchmod", "fsync", "transition", "bytes", "pre-post"):
+            with self.subTest(readonlySealFailure=fault), tempfile.TemporaryDirectory() as directory:
+                state = self.final_image_fixture(Path(directory), failure="ticket-replaced")
+                operation, caught_originals, chmod_calls = state.operation, [], []
+                actual_seal = operation.final_image_readonly_seal
+                actual_fchmod, actual_fsync, actual_fstat, actual_pread = module.os.fchmod, module.os.fsync, module.os.fstat, module.os.pread
+                actual_pre_post = operation.final_image_preimage_post
+                def failed_seal():
+                    entry, before = operation.final_image_output, operation.final_image_output["identity"]
+                    def fchmod(number, mode):
+                        if number == entry["fd"]:
+                            chmod_calls.append((number, mode))
+                            if fault == "fchmod": raise state.primary
+                        return actual_fchmod(number, mode)
+                    def fsync(number):
+                        if number == entry["fd"] and fault == "fsync": raise state.primary
+                        return actual_fsync(number)
+                    def fstat(number):
+                        info = actual_fstat(number)
+                        if number == entry["fd"] and (fault == "pre-identity" or fault == "transition" and chmod_calls):
+                            values = {name: getattr(info, name) for name in ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")}
+                            values["st_ctime_ns" if fault == "pre-identity" else "st_uid"] += 1
+                            return SimpleNamespace(**values)
+                        return info
+                    def pread(number, size, offset):
+                        body = actual_pread(number, size, offset)
+                        if number == entry["fd"] and fault == "bytes" and offset == 0 and body:
+                            return bytes([body[0] ^ 1]) + body[1:]
+                        return body
+                    pre_posts = []
+                    def pre_post(**kwargs):
+                        value = actual_pre_post(**kwargs)
+                        pre_posts.append(operation.final_image_preimage)
+                        if fault == "pre-post" and len(pre_posts) == 2: raise state.primary
+                        return value
+                    try:
+                        with (mock.patch.object(module.os, "fchmod", side_effect=fchmod),
+                              mock.patch.object(module.os, "fsync", side_effect=fsync),
+                              mock.patch.object(module.os, "fstat", side_effect=fstat),
+                              mock.patch.object(module.os, "pread", side_effect=pread),
+                              mock.patch.object(operation, "final_image_preimage_post", new=pre_post)):
+                            return actual_seal()
+                    except BaseException as error:
+                        caught_originals.append(error)
+                        raise
+                with (self.final_image_fixture_call(state), mock.patch.object(operation, "final_image_readonly_seal", new=failed_seal),
+                      self.assertRaises(module.Refused) as terminal):
+                    operation.execute()
+                self.assertEqual(terminal.exception.args, ("helper-package-incomplete",))
+                self.assertEqual(len(caught_originals), 1)
+                if fault in ("fchmod", "fsync", "pre-post"):
+                    self.assertIs(caught_originals[0], state.primary)
+                    self.assertEqual(operation.receipt["failure"]["type"], "RuntimeError")
+                else:
+                    self.assertIs(type(caught_originals[0]), module.Refused)
+                    self.assertEqual(caught_originals[0].args, ("final-image-mode-bytes" if fault == "bytes" else "final-image-owned-mode-transition",))
+                    self.assertEqual(operation.receipt["failure"]["reason"], caught_originals[0].args[0])
+                self.assertEqual(len(chmod_calls), 0 if fault == "pre-identity" else 1)
+                self.assertEqual(tuple(row[0] for row in state.observations), module.FINAL_IMAGE_ROLES[:8])
+                self.assertEqual(operation.receipt["failure"]["stage"], "final-image-readonly-seal")
+                self.assertEqual(operation.stager_io_pending, "final-image-readonly-seal")
+                self.assertFalse(operation.receipt["passed"] or operation.receipt["originalClosesKnown"] or operation.receipt["targetRetired"])
+                self.assertFalse((state.work / "distribution-final").exists())
+                self.assertTrue(all(row["fd"] is None for row in operation.entries))
+                self.assertTrue(operation.final_image_preimage is not None)
 
 
 
@@ -17074,9 +17230,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # This exact helper is already in the readonly SOURCE closure. Inspect
         # its real caller without importing or invoking any operation owner.
         with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
-            helper_raw = original.read(571244 + 1)
+            helper_raw = original.read(575167 + 1)
             self.assertEqual(original.read(1), b"")
-        self.assertEqual(len(helper_raw), 571244)
+        self.assertEqual(len(helper_raw), 575167)
         helper_source = helper_raw.decode("utf-8", "strict")
         helper_tree = ast.parse(helper_source)
         helper_caps = [node.value for node in helper_tree.body

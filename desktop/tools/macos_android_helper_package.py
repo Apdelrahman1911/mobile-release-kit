@@ -69,7 +69,14 @@ PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.op
 # Intel alone uses this fixed shared-package release optimization.
 # Runtime dependencies retain release3; generic code instantiated here inherits release2.
 RESIDENT_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=2"
-HELPER_SOURCE_BYTES = 571244
+HELPER_SOURCE_BYTES = 575167
+# Closed first-failed metadata attribution; no dynamic role/path rendering.
+FINAL_IMAGE_VERIFY_FIELDS = ("device", "inode", "mode", "links", "uid", "gid", "size", "mtime", "ctime")
+FINAL_IMAGE_VERIFY_OBJECTS = ("output", *("input-%02d" % index for index in range(14)))
+FINAL_IMAGE_VERIFY_STAGES = frozenset(
+    "final-image-verify-%s-%s-%s" % (object_label, boundary, field)
+    for object_label in FINAL_IMAGE_VERIFY_OBJECTS for boundary in ("held", "named")
+    for field in FINAL_IMAGE_VERIFY_FIELDS)
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -3334,11 +3341,53 @@ class Operation:
         self.notary_clock(work=work)
         return result
 
+    def final_image_verify_identity_stage(self, entry, observed, boundary):
+        # Removal has a different fourteen-input schema; only ordinary finalization
+        # may use these fixed ordinals. Every check here is diagnostic-only.
+        if self.phase != "finalize-image" or self.stage != "final-image-verify":
+            return
+        if (type(entry) is not dict or self.entry_registry.get(id(entry)) is not entry
+                or entry.get("closed") is not False or type(entry.get("fd")) is not int
+                or type(boundary) is not str or boundary not in ("held", "named")):
+            return
+        before = entry.get("identity")
+        if (type(before) is not tuple or type(observed) is not tuple
+                or len(before) != 9 or len(observed) != 9
+                or any(type(value) is not int for value in (*before, *observed))):
+            return
+        inputs = self.final_image_inputs
+        if (type(inputs) is not list or len(inputs) != 14
+                or any(type(row) is not tuple or len(row) != 2 or type(row[0]) is not dict
+                       or self.entry_registry.get(id(row[0])) is not row[0] for row in inputs)):
+            return
+        object_label = "output" if entry is self.final_image_output else None
+        if object_label is None:
+            matches = [index for index, row in enumerate(inputs) if row[0] is entry]
+            if len(matches) != 1:
+                return
+            object_label = FINAL_IMAGE_VERIFY_OBJECTS[matches[0] + 1]
+        for index, field in enumerate(FINAL_IMAGE_VERIFY_FIELDS):
+            if before[index] != observed[index]:
+                self.stage = "final-image-verify-%s-%s-%s" % (object_label, boundary, field)
+                return
+
     def notary_stream(self, entry, *, work=True):
         self.notary_clock(work=work)
         self.recheck_directory(entry["parent_entry"])
-        need(signature(os.fstat(entry["fd"])) == entry["identity"]
-             == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)), "notary-zip-original")
+        held = signature(os.fstat(entry["fd"]))
+        if not held == entry["identity"]:
+            try:
+                self.final_image_verify_identity_stage(entry, held, "held")
+            except BaseException:
+                pass  # Attribution never replaces this original identity refusal.
+            need(False, "notary-zip-original")
+        named = signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False))
+        if not entry["identity"] == named:
+            try:
+                self.final_image_verify_identity_stage(entry, named, "named")
+            except BaseException:
+                pass  # No raw values and no fallible diagnostic replaces the original.
+            need(False, "notary-zip-original")
         self.stager.no_xattrs(entry["fd"])
         digestor, count = hashlib.sha256(), 0
         while count < entry["identity"][6]:
@@ -4280,6 +4329,24 @@ class Operation:
                     self.errors.append({"stage": "final-image-failed-original-post", "type": type(error).__name__})
             raise
 
+    def final_image_readonly_seal(self):
+        # Same registered copy/returned FD and access flags, before native verify.
+        entry, old_parent = self.final_image_output, self.final_image_output_root
+        before, sha = entry["identity"], self.final_image_sha
+        self.final_image_preimage_post()
+        self.recheck_directory(old_parent)
+        need(signature(os.fstat(entry["fd"])) == before
+             == signature(os.stat(entry["name"], dir_fd=old_parent["fd"], follow_symlinks=False)), "final-image-owned-mode-transition")
+        os.fchmod(entry["fd"], 0o444)
+        os.fsync(entry["fd"])
+        after = signature(os.fstat(entry["fd"]))
+        need(after[:2] == before[:2] and after[2] == stat.S_IFREG | 0o444 and after[3:8] == before[3:8]
+             and signature(os.stat(entry["name"], dir_fd=old_parent["fd"], follow_symlinks=False)) == after, "final-image-owned-mode-transition")
+        entry["identity"] = after
+        self.final_image_preimage_post()
+        need(self.notary_stream(entry) == sha, "final-image-mode-bytes")
+        self.final_image_preimage_post()
+
     def final_image_publish(self):
         need(self.final_image_known() and self.notary_key is None and self.mount_known and self.mount_detached
              and self.final_image_mount_verified, "final-image-publication-unknown")
@@ -4288,12 +4355,9 @@ class Operation:
         entry, old_parent = self.final_image_output, self.final_image_output_root
         before, sha = entry["identity"], self.final_image_sha
         self.final_image_preimage_post()
-        os.fchmod(entry["fd"], 0o444)
-        os.fsync(entry["fd"])
-        after = signature(os.fstat(entry["fd"]))
-        need(after[:2] == before[:2] and after[2] == stat.S_IFREG | 0o444 and after[3:8] == before[3:8]
-             and signature(os.stat(entry["name"], dir_fd=old_parent["fd"], follow_symlinks=False)) == after, "final-image-owned-mode-transition")
-        entry["identity"] = after
+        need(before[2] == stat.S_IFREG | 0o444 and signature(os.fstat(entry["fd"])) == before
+             == signature(os.stat(entry["name"], dir_fd=old_parent["fd"], follow_symlinks=False)), "final-image-owned-mode-transition")
+        after = before  # Sealed before verify; publication never refreshes later metadata.
         self.final_image_preimage_post()
         need(self.notary_stream(entry) == sha, "final-image-mode-bytes")
         self.final_image_preimage_post()
@@ -4373,6 +4437,7 @@ class Operation:
         self.final_image_call("final-image-staple", [tool, "staple", str(path)], developer=True)
         self.final_image_call("final-image-validate", [tool, "validate", str(path)], developer=True)
         self.final_image_call("final-image-signature-after", ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", requirement, str(path)])
+        self.final_image_io("final-image-readonly-seal", self.final_image_readonly_seal)
         self.final_image_call("final-image-verify", ["/usr/bin/hdiutil", "verify", str(path)], maximum=120)
         self.package_name = "Remove.pkg" if self.removal else "Install.pkg"  # Actual mounted_post fixed roster, never the observation request alias.
         self.mount_placeholder = self.final_image_io("final-image-mount-placeholder", self.package_directory, "package-mount")
