@@ -3679,6 +3679,7 @@ class NormalPhaseDataTests(unittest.TestCase):
                         del sys.modules[name]
 
     def test_admission_exception_projection_is_closed_and_preserves_main_failure(self):
+        import ast
         private = "private-synthetic-credential-or-path"
         try:
             MODULE.need(False, private)
@@ -3695,6 +3696,50 @@ class NormalPhaseDataTests(unittest.TestCase):
             co_filename="/private/macos_normal_ui_runner.py")), tb_lineno=12, tb_next=None)
         fake_error = SimpleNamespace(__traceback__=foreign_frame)
         self.assertEqual(MODULE.normal_admission_failure("loader", fake_error, None, [])["sourceFrames"], [])
+        # The original owner wait callsite used to disappear from the bounded
+        # first+last3 traceback. Preserve only its exact SOURCE/qualname, not locals.
+        command_source = ROOT / "src/mobile_release/_command_process.py"
+        command_tree = ast.parse(command_source.read_bytes())
+        outer = next(node for node in command_tree.body if isinstance(node, ast.ClassDef) and node.name == "_Outer")
+        body = next(node for node in outer.body if isinstance(node, ast.FunctionDef) and node.name == "body")
+        waits = [node for node in ast.walk(body) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                 and node.func.value.id == "self" and node.func.attr == "_until"]
+        self.assertEqual([node.lineno for node in waits], [3307, 3314, 3331, 3336])
+        normal_source = str(ROOT / "desktop/tools/macos_normal_ui_runner.py")
+        def trace(specs):
+            following = None
+            for filename, line, qualname in reversed(specs):
+                code = SimpleNamespace(co_filename=filename)
+                if qualname is not None: code.co_qualname = qualname
+                following = SimpleNamespace(tb_frame=SimpleNamespace(f_code=code), tb_lineno=line, tb_next=following)
+            return SimpleNamespace(__traceback__=following)
+        core_source = str(command_source)
+        rows = [(normal_source, 1, "main"), (core_source, 3307, "_Outer.body"),
+                (core_source, 100, "other"), (core_source, 3264, "_Outer._until"),
+                (core_source, 1162, "Context.check"), (core_source, 52, "_require")]
+        kept = MODULE.normal_admission_failure("execute", trace(rows), None, [])
+        self.assertEqual(kept["sourceFrames"], [{"source": "macos_normal_ui_runner.py", "line": 1},
+            {"source": "_command_process.py", "line": 3307}, {"source": "_command_process.py", "line": 1162},
+            {"source": "_command_process.py", "line": 52}])
+        self.assertTrue(kept["sourceFramesTruncated"])
+        self.assertEqual(MODULE.classify_normal_admission_failure(MODULE.encoded(kept))["sourceFrames"], kept["sourceFrames"])
+        for qualname in (None, "_Other.body", "private-" + private):
+            fallback = list(rows); fallback[1] = (core_source, 3307, qualname)
+            ordinary = MODULE.normal_admission_failure("execute", trace(fallback), None, [])
+            self.assertEqual([row["line"] for row in ordinary["sourceFrames"]], [1, 3264, 1162, 52])
+            self.assertNotIn(private.encode(), MODULE.encoded(ordinary))
+        foreign = list(rows); foreign[1] = ("/private/_command_process.py", 3307, "_Outer.body")
+        self.assertEqual([row["line"] for row in MODULE.normal_admission_failure("execute", trace(foreign), None, [])["sourceFrames"]],
+                         [1, 3264, 1162, 52])
+        for short in (rows[:2], rows[:3], rows[:4], rows[1:2]):
+            self.assertEqual([row["line"] for row in MODULE.normal_admission_failure("execute", trace(short), None, [])["sourceFrames"]],
+                             [row[1] for row in short])  # Keep all <=4 without duplicate owner/caller.
+        long = [(core_source, index + 1, "other") for index in range(70)]
+        long[66] = (core_source, 3307, "_Outer.body")
+        limited = MODULE.normal_admission_failure("execute", trace(long), None, [])
+        self.assertEqual([row["line"] for row in limited["sourceFrames"]], [1, 62, 63, 64])
+        self.assertTrue(limited["sourceFramesTruncated"])
         command = {"role": "normal-ui-build", "returncode": 65, "timeoutSeconds": 120, "roleCapSeconds": 240,
             "outputLimitBytes": 1048576, "stdoutBytes": 32, "stderrBytes": 12,
             "argvSha256": "a" * 64, "stdoutSha256": "b" * 64, "stderrSha256": "c" * 64}

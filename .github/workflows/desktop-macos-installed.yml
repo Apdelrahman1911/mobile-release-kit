@@ -2079,7 +2079,10 @@ jobs:
           case "$MRK_MACOS_TARGET" in aarch64-apple-darwin|x86_64-apple-darwin) ;; *) exit 1 ;; esac
           [[ ! -e "$MRK_MACOS_WORK/p0-carrier-input" && ! -L "$MRK_MACOS_WORK/p0-carrier-input" ]] || exit 1
           /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
-            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py preview --target "$MRK_MACOS_TARGET" \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_REF=$GITHUB_REF" "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \
+            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py preview --installed-passive-carrier --target "$MRK_MACOS_TARGET" \
             --work "$MRK_MACOS_WORK" --expected-source "$MRK_EXPECTED_SHA" \
             --output "$MRK_MACOS_WORK/p0-carrier-input" > "$MRK_MACOS_WORK/p0-carrier-result.json"
           # Existing finality/export gate; no Remove operation or qualified-P0 claim.
@@ -2150,7 +2153,7 @@ jobs:
                   carrier_need(stat.S_ISDIR(oinfo.st_mode) and stat.S_IMODE(oinfo.st_mode) == 0o555
                                and oinfo.st_nlink == 2 and (oinfo.st_uid, oinfo.st_gid) == (pinfo.st_uid, pinfo.st_gid)
                                and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(oinfo))
-                  limits = {"MobileReleaseKit.dmg": 512 * 1024 * 1024, "README.md": 32768, "PREVIEW.json": 16384}
+                  limits = {"MobileReleaseKit.dmg": 512 * 1024 * 1024, "PREVIEW.json": 16384}
                   carrier_need(set(os.listdir(output)) == set(limits))
                   observations = {}
                   for name, limit in sorted(limits.items()):

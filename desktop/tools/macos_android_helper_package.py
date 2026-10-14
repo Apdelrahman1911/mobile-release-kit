@@ -69,7 +69,7 @@ PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.op
 # Intel alone uses this fixed shared-package release optimization.
 # Runtime dependencies retain release3; generic code instantiated here inherits release2.
 RESIDENT_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=2"
-HELPER_SOURCE_BYTES = 558617
+HELPER_SOURCE_BYTES = 558790
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -485,7 +485,8 @@ def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP
     need(tickets is None or type(tickets) is list and len(tickets) <= 2048, "notary-log-tickets-bound")
     # Finite Apple ticket annotations include nested signed i386 slices;
     # they never grant native execution, target or provenance authority.
-    # An absent or null carrier architecture is diagnostic metadata only,
+    # An absent or null root/embedded Install.pkg container architecture is
+    # diagnostic metadata only,
     # not a native slice, certificate, ticket or current-package authority.
     for row in tickets or ():
         need(type(row) is dict and {"path", "digestAlgorithm", "cdhash"} <= set(row)
@@ -493,7 +494,9 @@ def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP
              and notary_text(row["path"], 4096) and row["digestAlgorithm"] in ("SHA-1", "SHA-256")
              and type(row["cdhash"]) is str and re.fullmatch(r"[0-9a-fA-F]{40}", row["cdhash"])
              and (row.get("arch") in ("arm64", "x86_64", "i386") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg")
-                  and row["path"] == archive_name and row.get("arch") is None), "notary-log-ticket-shape")
+                  and (row["path"] == archive_name
+                       or archive_name == "MobileReleaseKit.dmg" and row["path"] == "MobileReleaseKit.dmg/Install.pkg")
+                  and row.get("arch") is None), "notary-log-ticket-shape")
     need(submission["status"] != "Accepted" or errors == 0, "notary-log-success-with-errors")
     return {"sha256Compared": "sha256" in value, "errorCount": errors, "warningCount": warnings,
             "ticketRowCount": len(tickets or ()), "logSha256": digest(body)}

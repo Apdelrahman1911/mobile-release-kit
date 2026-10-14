@@ -1414,6 +1414,17 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         owner = SimpleNamespace(ProcessError=OwnerError, ProcessInterrupted=KeyboardInterrupt,
             ProcessCleanupError=type("CleanupError", (OwnerError,), {}),
             ProcessOutcomeUnknown=type("OutcomeUnknown", (OwnerError,), {}))
+        deadline = normal["normal_admission_failure"]("execute",
+            OwnerError("owned command exceeded its original deadline"), owner, [])
+        finite_deadline = normal["classify_normal_admission_failure"](normal["encoded"](deadline))
+        deadline_row = DATA.project_ui_diagnostic(finite_deadline, "admission", {"receiptState": "observed", "returncode": 1})
+        self.assertEqual(deadline_row["ownerDiagnostic"], {"reason": "original-deadline", "failureMask": 63})
+        self.assertFalse(deadline_row["nativeSuccessInferred"] or deadline_row["productReady"])
+        class StringSubclass(str): pass
+        for message in (SENTINEL, StringSubclass("owned command exceeded its original deadline")):
+            refused = normal["normal_admission_failure"]("execute", OwnerError(message), owner, [])
+            self.assertEqual(refused["ownerDiagnostic"]["reason"], "unknown")
+            self.assertNotIn(SENTINEL, json.dumps(refused))
         raw = normal["normal_admission_failure"]("execute",
             OwnerError("owned command produced incomplete output"), owner, [])
         raw["sourceFrames"] = [{"source": "_command_process.py", "line": 1000000}]

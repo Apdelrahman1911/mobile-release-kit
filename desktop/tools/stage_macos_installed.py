@@ -1874,15 +1874,23 @@ def removal_package_receipt_data(body, *, selection, binding, package, descripto
     return distribution
 
 
+_PREVIEW_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview'
+_INSTALLED_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed'
+
+
 def final_image_receipt_data(body, *, selection, binding, request, package, descriptor, signed,
-                             original_image, package_owner, final_package, release_body, profiles, remove=False):
+                             original_image, package_owner, final_package, release_body, profiles, remove=False,
+                             expected_workflow=_PREVIEW_FINAL_IMAGE_WORKFLOW):
     """Correspondence with original0/status inputs, not new native authority.
 
     The fixed phase consumed the actual S3 parser/signing chain and final P.
     Preserve its raw receipt hash here; never hash a reserialized substitute.
     Existing preview checks still bind Installer/readback/current producer DATA.
     """
-    need(type(remove) is bool, "final-image-receipt-purpose")
+    need(type(remove) is bool and type(expected_workflow) is str
+         and expected_workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _INSTALLED_FINAL_IMAGE_WORKFLOW)
+         and (not remove or expected_workflow == _PREVIEW_FINAL_IMAGE_WORKFLOW),
+         "final-image-receipt-purpose")
     selection = selected_build(selection)
     release = build_release_data(release_body, target=selection.target)
     need((release["packageVersion"], release["release"]) == (selection.package_version, selection.release)
@@ -1897,7 +1905,7 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
         "androidBuildQualified", "developerIdOrNotarizationQualified", "distributionQualified", "productReady", "notaryAuthentication",
         "notarySubmission", "finalImage", "finalImageMount", "finalPackageReceiptSha256", "directStagerIOPending", "cleanupErrors",
         "imageSourceCommit", "imageReleaseId", "imageReleaseSourceSha256"), "final-image-receipt-fields")
-    workflow = "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview"
+    workflow = expected_workflow
     need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["phase"] == ("finalize-remove-image" if remove else "finalize-image")
          and value["target"] == selection.target and value["source"] == value["workflowSource"] == binding["source"]
          and maintenance_hex(value["source"], 40) and value["workflow"] == workflow
@@ -1977,6 +1985,9 @@ def preview_command(args):
     selection = source_build_selection(command_target(args))
     need(type(args.expected_source) is str and re.fullmatch(r"[0-9a-f]{40}", args.expected_source),
          "preview-source")
+    installed = getattr(args, "installed_passive_carrier", False)
+    need(type(installed) is bool, "preview-purpose")
+    workflow = _INSTALLED_FINAL_IMAGE_WORKFLOW if installed else _PREVIEW_FINAL_IMAGE_WORKFLOW
     work = Path(args.work)
     need(work.is_absolute(), "preview-work-absolute")
     binding = decode(read(work / "source-binding.json", 65536))
@@ -1991,6 +2002,17 @@ def preview_command(args):
          "preview-source-binding")
     need(all(type(binding.get(k)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", binding[k])
              for k in ("runId", "runAttempt")), "preview-run-binding")
+    if installed:
+        # Finite explicit CI context only; never ambient credential/native authority.
+        expected_environment = {
+            "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
+            "GITHUB_REF": "refs/heads/verify/desktop-macos-installed",
+            "GITHUB_WORKFLOW_REF": _INSTALLED_FINAL_IMAGE_WORKFLOW,
+            "GITHUB_SHA": args.expected_source, "GITHUB_WORKFLOW_SHA": args.expected_source,
+            "GITHUB_RUN_ID": binding["runId"], "GITHUB_RUN_ATTEMPT": binding["runAttempt"],
+        }
+        need(all(os.environ.get(key) == expected for key, expected in expected_environment.items()),
+             "installed-carrier-ci-context")
     need(read(work / "normal-build.status", 4) == b"0\n"
          and read(work / "installer-output.status", 4) == b"0\n"
          and read(work / "package-install.status", 4) == b"0\n", "preview-original-statuses")
@@ -2094,7 +2116,8 @@ def preview_command(args):
     final = final_image_receipt_data(receipt_body, selection=selection, binding=binding, request=request_id,
         package=package, descriptor=descriptor, signed=signed, original_image=original_image,
         package_owner=owner_body, final_package=final_package_body, release_body=read(release_path, BUILD_RELEASE_LIMIT),
-        profiles=(read(PRODUCER_PROFILE, 1024), read(SERVICE_PROFILE, 1024), read(DESKTOP / "packaging/macos-notary-service.json", 1024)))
+        profiles=(read(PRODUCER_PROFILE, 1024), read(SERVICE_PROFILE, 1024), read(DESKTOP / "packaging/macos-notary-service.json", 1024)),
+        expected_workflow=workflow)
     image = read(work / "distribution-final/MobileReleaseKit.dmg")
     need(len(image) == final["imageBytes"] and digest(image) == final["imageSha256"], "preview-finalized-image-bytes")
     summary = {"schemaVersion": 2, "scope": "normal-macos-early-preview", "sourceCommit": args.expected_source,
@@ -2121,11 +2144,14 @@ def preview_command(args):
         "automaticWindowOpen": "unexecuted", "normalQuit": "unexecuted", "manualUIAcceptance": "pending",
         "unexecutedReason": "original-normal-app-quit-custody-not-established",
         "fullUIQualified": False, "distributionQualified": False, "productReady": False}
-    guide = read(DESKTOP / "packaging/macos-preview.md", 32768)
-    write_tree(args.output, {"MobileReleaseKit.dmg": (image, 0o444), "README.md": (guide, 0o444),
-                            "PREVIEW.json": (canonical(summary) + b"\n", 0o444)})
+    files = {"MobileReleaseKit.dmg": (image, 0o444), "PREVIEW.json": (canonical(summary) + b"\n", 0o444)}
+    if not installed:
+        files["README.md"] = (read(DESKTOP / "packaging/macos-preview.md", 32768), 0o444)
+    write_tree(args.output, files)
     return {"schemaVersion": 2, "sourceCommit": args.expected_source, "packageSha256": digest(package),
-            "distributionSha256": digest(image), "fileCount": 3, "qualification": "normal-early-preview-not-launched-or-product-qualified"}
+            "distributionSha256": digest(image), "fileCount": len(files),
+            "qualification": "installed-passive-carrier-not-consumer-or-product-qualified" if installed else
+                             "normal-early-preview-not-launched-or-product-qualified"}
 
 def remove_preview_command(args):
     """Stage only the separately completed Remove carrier; never execute removal."""
@@ -5553,6 +5579,8 @@ def main(argv=None):
     support.add_argument("--aapt2-archive", required=True, type=Path)
     support.add_argument("--android-support-signed-receipt", required=True, type=Path)
     preview = commands.add_parser("preview")
+    preview.add_argument("--installed-passive-carrier", action="store_true",
+                         help="Only closed installed-verification image+descriptor; not preview/removal/publication authority")
     preview.add_argument("--work", required=True, type=Path)
     preview.add_argument("--expected-source", required=True)
     preview.add_argument("--output", required=True, type=Path)

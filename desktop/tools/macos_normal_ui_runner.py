@@ -32,7 +32,7 @@ ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
 PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
-LOADER_SHA = "437a511006207712756ad6a69c1ba84370cb0029cb20341b2f1dcbcc74b410a3"
+LOADER_SHA = '20c768cd390afeec123578324de37d729ccbf595665a907ba83c34a95ac3cd5c'
 LOADER_MODULE = "mrk_normal_ui_owner_loader"
 TARGET = "MRKNormalAppUITests"
 CLASS = TARGET + "/NormalAppUITests/"
@@ -3338,6 +3338,7 @@ ADMISSION_SOURCE_FILES = ("desktop/tools/macos_normal_ui_runner.py", LOADER,
 # Exact existing owner labels only, never an exception message or capture export.
 ADMISSION_OWNER_REASONS = {
     "owned command produced incomplete output": "incomplete-output",
+    "owned command exceeded its original deadline": "original-deadline",
     "owned command output exceeds its bound": "output-bound",
     "owned command protocol or original ownership is incomplete": "protocol-or-ownership",
     "owned command failed, timed out, or produced incomplete output": "command-failed-or-incomplete",
@@ -3376,17 +3377,30 @@ def normal_admission_failure(stage, error, owner, records):
     root = Path(__file__).absolute().parents[2]
     allowed = {str(root / name): Path(name).name for name in ADMISSION_SOURCE_FILES}
     frames, omitted = [], False
+    owner_frame, ordinal = None, 0
     current = error.__traceback__
     for _ in range(64):
         if current is None:
             break
         filename, line = current.tb_frame.f_code.co_filename, current.tb_lineno
         if filename in allowed and type(line) is int and 1 <= line <= 1_000_000:
+            observed = (ordinal, {"source": allowed[filename], "line": line})
+            ordinal += 1
+            qualname = getattr(current.tb_frame.f_code, "co_qualname", None)
+            if (owner_frame is None and type(filename) is str
+                    and filename == str(root / "src/mobile_release/_command_process.py")
+                    and type(qualname) is str and qualname == "_Outer.body"):
+                owner_frame = observed  # Fixed original callsite only; no frame locals or cause claim.
             if len(frames) == 4:
-                del frames[1]  # First caller plus last three observed fixed-source frames.
+                del frames[1]  # Preserve the original first+last3 fallback and fixed ceiling.
                 omitted = True
-            frames.append({"source": allowed[filename], "line": line})
+            frames.append(observed)
         current = current.tb_next
+    if owner_frame is not None and all(index != owner_frame[0] for index, _ in frames):
+        # Only a previously dropped original owner callsite replaces the third
+        # tail frame; chronological indexes prevent duplicate or reordered rows.
+        frames = sorted((frames[0], owner_frame, *frames[-2:]), key=lambda row: row[0])
+    frames = [frame for _, frame in frames]
     result = {"schemaVersion": 1, "scope": "generated-ui-runner-refused", "productReady": False,
         "error": "runner-admission-or-owner-error", "stage": stage, "exceptionClass": label,
         "sourceFrames": frames, "sourceFramesTruncated": omitted or current is not None,

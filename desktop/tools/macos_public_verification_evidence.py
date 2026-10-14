@@ -342,7 +342,7 @@ UI_ADMISSION_EXCEPTIONS = frozenset(("Refused", "AttributeError", "TypeError", "
     "AssertionError", "KeyboardInterrupt", "SystemExit", "ProcessError", "ProcessInterrupted", "other"))
 UI_ADMISSION_SOURCES = frozenset(("macos_normal_ui_runner.py", "macos_aqua_qualification.py", "owned_process.py",
                                    "_command_process.py"))
-UI_OWNER_REASONS = frozenset(("incomplete-output", "output-bound", "protocol-or-ownership",
+UI_OWNER_REASONS = frozenset(("incomplete-output", "original-deadline", "output-bound", "protocol-or-ownership",
     "command-failed-or-incomplete", "cleanup-unconfirmed", "exec-rejected", "stopped-before-exec",
     "parent-ended", "observer-ended", "fence-collision", "unknown"))
 UI_ADMISSION_ROLES = frozenset(("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary", "normal-build-settings",

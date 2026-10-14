@@ -1173,3 +1173,7 @@ launch/quit, downloaded installation, update, Gatekeeper or production readiness
 Independent actual source/job/run/attempt/target/artifact/member/producer and
 closed native evidence must qualify P0 before any producer-history enrollment.
 Missing or expired artifacts/evidence are not a pass and do not permit fallback.
+
+### Installed passive carrier context
+
+The installed-verification retention step explicitly selects `preview --installed-passive-carrier` and passes only its finite, nonsecret source/run/workflow context through `env -i`. It accepts only a closed image receipt from the exact installed workflow/ref and exports two readonly leaves: `MobileReleaseKit.dmg` and `PREVIEW.json`. Normal preview remains three leaves including `README.md`; Remove retains its separate preview-only purpose. The flag grants no publication, consumer Gatekeeper, update, removal or production-readiness qualification. Failed or incomplete finalization has no export fallback.
