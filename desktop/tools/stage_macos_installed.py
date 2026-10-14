@@ -203,6 +203,246 @@ PACKAGE_REFUSALS = {
 }
 
 
+# Diagnostic-only closed SOURCE vocabulary; never acceptance or cleanup authority.
+CARRIER_REFUSAL_GROUPS = frozenset({
+    'source-selection',
+    'source-binding',
+    'build-products',
+    'package-owner',
+    'installation-readback',
+    'installed-roster',
+    'package-producer',
+    'original-image',
+    'final-image-receipt',
+    'final-image-copy',
+    'output-write',
+})
+CARRIER_REFUSAL_REASONS = frozenset({
+    'absolute-path-required',
+    'ancestor-changed',
+    'ancestor-close-unknown',
+    'ancestor-type',
+    'android-service-input-pair',
+    'build-release-identity',
+    'build-release-shape',
+    'build-release-size',
+    'build-release-version',
+    'build-selection',
+    'build-target',
+    'builder-must-be-nonroot',
+    'complete-output-readback',
+    'conflicting-tree-owner',
+    'current-directory-mode-owner',
+    'current-file-owner',
+    'current-output-policy',
+    'current-tree-policy',
+    'directory-count',
+    'directory-entry-bound',
+    'duplicate-json-key',
+    'entry-library-command',
+    'entry-library-offset',
+    'entry-library-padding',
+    'entry-library-termination',
+    'entry-libsystem-only',
+    'entry-loader-command',
+    'entry-main-command',
+    'entry-native-initializer',
+    'entry-pie-no-executable-stack',
+    'entry-segment-command',
+    'entry-segment-sections',
+    'file-directory-collision',
+    'file-extended-attributes',
+    'file-extended-attributes-query',
+    'file-open-changed',
+    'file-read-changed',
+    'final-image-carrier-binding',
+    'final-image-current-binding',
+    'final-image-current-bytes',
+    'final-image-fields',
+    'final-image-key-finality',
+    'final-image-mount-fields',
+    'final-image-mount-finality',
+    'final-image-notary-observation',
+    'final-image-original-count',
+    'final-image-original-fields',
+    'final-image-original-result',
+    'final-image-original-shape',
+    'final-image-package-predecessor',
+    'final-image-raw-predecessors',
+    'final-image-receipt-fields',
+    'final-image-receipt-finality',
+    'final-image-receipt-purpose',
+    'final-image-receipt-source',
+    'final-image-scoped-observation',
+    'final-image-source-inputs',
+    'final-image-source-signing',
+    'github-seal-notice-pair',
+    'helper-absolute-apple-system-dependency',
+    'helper-dyld-command',
+    'helper-dyld-offset',
+    'helper-dyld-terminated',
+    'helper-dylib-command',
+    'helper-dylib-name-offset',
+    'helper-dylib-terminated',
+    'helper-loader-override-refused',
+    'helper-system-dyld-only',
+    'image-absolute-apple-system-dependency',
+    'image-build-version',
+    'image-cargo-absolute-path',
+    'image-cargo-after-finish',
+    'image-cargo-cdylib-source',
+    'image-cargo-exact-features',
+    'image-cargo-fresh-field',
+    'image-cargo-messages-bound',
+    'image-cargo-no-executable-role',
+    'image-cargo-not-successful',
+    'image-cargo-one-library',
+    'image-cargo-profile',
+    'image-cargo-record-count',
+    'image-cargo-record-kind',
+    'image-cargo-release-output',
+    'image-cargo-role',
+    'image-cargo-source-library',
+    'image-cargo-target-shape',
+    'image-cargo-terminal-success',
+    'image-cargo-unique-cdylib',
+    'image-command',
+    'image-dylib-target',
+    'image-fixed-install-name-and-system-closure',
+    'image-library-command',
+    'image-library-offset',
+    'image-library-padding',
+    'image-library-termination',
+    'image-loader-command',
+    'image-role-header',
+    'image-segment-command',
+    'image-segment-sections',
+    'installed-carrier-ci-context',
+    'installed-directory-mode-owner',
+    'installed-file-owner',
+    'installer-export-byte-bound',
+    'json-byte-bound',
+    'json-constant',
+    'json-shape-bound',
+    'macho-build-version',
+    'macho-command',
+    'macho-command-bound',
+    'macho-header',
+    'macho-minimum-macos26',
+    'macho-target',
+    'maintenance-export-action',
+    'maintenance-export-binding',
+    'maintenance-export-shape',
+    'maintenance-policy-binding',
+    'maintenance-policy-digest-or-order',
+    'maintenance-policy-membership',
+    'maintenance-policy-row',
+    'maintenance-policy-shape',
+    'maintenance-predecessor-order',
+    'maintenance-producer-binding',
+    'maintenance-producer-shape',
+    'maintenance-record-byte-bound',
+    'maintenance-record-encoding-or-shape',
+    'maintenance-record-map',
+    'maintenance-release-binding',
+    'maintenance-release-set-bound',
+    'maintenance-release-set-shape',
+    'maintenance-release-shape',
+    'maintenance-request-id',
+    'maintenance-reused-release-identity',
+    'maintenance-signing-policies-bound',
+    'maintenance-write-accounting',
+    'observation-inventory-anchor',
+    'observation-inventory-bytes',
+    'observation-inventory-required',
+    'observation-inventory-row',
+    'observation-inventory-shape',
+    'ordinary-file-bound',
+    'original-close-unknown',
+    'output-bound',
+    'output-mode',
+    'output-readback',
+    'output-write-zero',
+    'packager-directory-mode-owner',
+    'packager-file-mode-owner',
+    'packager-identity',
+    'path-alias-or-type-collision',
+    'path-spelling',
+    'preview-current-invocation',
+    'preview-emitted-current-correspondence',
+    'preview-emitted-package-bytes',
+    'preview-finalization-original-statuses',
+    'preview-finalized-image-bytes',
+    'preview-installation-readback',
+    'preview-maintenance-gate-readback',
+    'preview-normal-app-binding',
+    'preview-original-audited-package',
+    'preview-original-distribution',
+    'preview-original-distribution-image',
+    'preview-original-package-calls',
+    'preview-original-package-owner',
+    'preview-original-request',
+    'preview-original-statuses',
+    'preview-purpose',
+    'preview-readback-roster',
+    'preview-registration-reservation-readback',
+    'preview-run-binding',
+    'preview-source',
+    'preview-source-binding',
+    'preview-v2-metadata-readback',
+    'preview-work-absolute',
+    'producer-emitter-original',
+    'producer-emitter-package-binding',
+    'producer-emitter-summary',
+    'registration-reservation-creation-incomplete',
+    'registration-reservation-not-predecessor-creation',
+    'registration-reservation-parent-not-settled',
+    'registration-reservation-result',
+    'registration-reservation-reuse-not-observed',
+    'registration-reservation-unentered',
+    'source-producer-correspondence',
+    'source-producer-profile',
+    'source-producer-unconfigured',
+    'source-service-profile',
+    'tree-byte-bound',
+    'tree-depth',
+    'tree-directory-changed',
+    'tree-file-bound',
+    'tree-path-bound',
+    'tree-root-changed',
+    'tree-root-name-changed',
+    'tree-root-type',
+    'tree-unlisted-or-empty-directory',
+    'unsupported-data-host',
+})
+
+
+def carrier_refusal_annotation(args, error):
+    """Best-effort finite CI diagnostic; retain the same original failure."""
+    if type(args) is not argparse.Namespace:
+        return
+    fields = vars(args)
+    if type(fields.get("command")) is not str or fields["command"] != "preview" \
+            or fields.get("installed_passive_carrier") is not True:
+        return
+    group = fields.get("_carrier_validation_group")
+    reason = "other"
+    if type(group) is not str or len(group) > 32 or group not in CARRIER_REFUSAL_GROUPS:
+        group = "entry"
+    elif type(error) is Refused:
+        arguments = BaseException.args.__get__(error)
+        if type(arguments) is tuple and len(arguments) == 1 and type(arguments[0]) is str \
+                and len(arguments[0]) <= 49 and arguments[0] in CARRIER_REFUSAL_REASONS:
+            reason = arguments[0]
+    # Both interpolated values are sealed literals; no exception or path is rendered.
+    try:
+        print("::error title=MRK carrier refused::group=" + group + ";reason=" + reason,
+              file=sys.stderr)
+    except Exception:
+        # Ordinary diagnostic sink failures must not replace the original primary.
+        pass
+
+
 def package_refusal_message(error):
     # Select only a predeclared literal. Never stringify/reflect an exception.
     if type(error) is Refused and len(error.args) == 1 and type(error.args[0]) is str:
@@ -1984,6 +2224,7 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
 
 def preview_command(args):
     """Copy only an audited, normally built and read-back package to fresh output."""
+    args._carrier_validation_group = 'source-selection'
     selection = source_build_selection(command_target(args))
     need(type(args.expected_source) is str and re.fullmatch(r"[0-9a-f]{40}", args.expected_source),
          "preview-source")
@@ -1992,6 +2233,7 @@ def preview_command(args):
     workflow = _INSTALLED_FINAL_IMAGE_WORKFLOW if installed else _PREVIEW_FINAL_IMAGE_WORKFLOW
     work = Path(args.work)
     need(work.is_absolute(), "preview-work-absolute")
+    args._carrier_validation_group = 'source-binding'
     binding = decode(read(work / "source-binding.json", 65536))
     source = decode(read(work / "source-inventory.json", 1024 * 1024))
     need(type(binding) is dict and type(source) is dict
@@ -2015,6 +2257,7 @@ def preview_command(args):
         }
         need(all(os.environ.get(key) == expected for key, expected in expected_environment.items()),
              "installed-carrier-ci-context")
+    args._carrier_validation_group = 'build-products'
     need(read(work / "normal-build.status", 4) == b"0\n"
          and read(work / "installer-output.status", 4) == b"0\n"
          and read(work / "package-install.status", 4) == b"0\n", "preview-original-statuses")
@@ -2033,7 +2276,9 @@ def preview_command(args):
          and sha(app.get("entryBinarySha256BeforeSigning"))
          and app.get("entryBundleIdentifier") == ENTRY_BUNDLE_ID
          and app.get("payloadBundleIdentifier") == BUNDLE_ID, "preview-normal-app-binding")
+    args._carrier_validation_group = 'installation-readback'
     observed = decode(read(work / "installation-observation.json", INSTALLER_RESULT_BYTES))
+    args._carrier_validation_group = 'package-owner'
     owner_body = read(work / "android-helper-package-install.json", 16384)
     owner = decode(owner_body)
     need(type(owner) is dict and owner.get("phase") == "package-install" and owner.get("target") == selection.target
@@ -2057,6 +2302,7 @@ def preview_command(args):
     request_id = distribution.get("requestId")
     need(maintenance_hex(request_id, 32) and read(work / "package-request-id.txt", 33) == (request_id + "\n").encode("ascii"),
          "preview-original-request")
+    args._carrier_validation_group = 'installation-readback'
     need(type(observed) is dict and observed.get("schemaVersion") == 2
          and observed.get("sourceCommit") == args.expected_source and observed.get("release") == selection.release
          and observed.get("requestId") == request_id and observed.get("originalInstallerReturnedZero") is True
@@ -2077,6 +2323,7 @@ def preview_command(args):
     need(observed.get("registrationReservation") == {
         "state": "protected-permanent-reservation-data-correspondence", "bytes": len(REGISTRATION_GATE_BYTES),
         "exclusionObserved": False, "workerFinalityEstablished": False}, "preview-registration-reservation-readback")
+    args._carrier_validation_group = 'installed-roster'
     expected = observation_inventory(argparse.Namespace(input=work / "input",
         expected_inventory=observed["inventorySha256"], expected_manifest=observed["runtimeManifestSha256"], target=selection.target), selection=selection)
     need(observed.get("nonrootReadbackFileCount") == len(expected)
@@ -2084,6 +2331,7 @@ def preview_command(args):
                      ANDROID_SERVICE_PLIST, DESKTOP_IMAGE, RESIDENT_IMAGE))
          and expected["app/" + RESIDENT_IMAGE]["sha256"] == app["residentImageSha256"]
          and expected["app/" + ANDROID_HELPER]["sha256"] == app["androidHelperSha256"], "preview-readback-roster")
+    args._carrier_validation_group = 'package-producer'
     audit = decode(read(work / "package-audit.json", 16384))
     package = read(work / "package-final/MobileReleaseKit.pkg")
     need(type(audit) is dict and audit.get("packageSha256") == digest(package)
@@ -2104,11 +2352,13 @@ def preview_command(args):
          and current["runtimeManifestSha256"] == observed["runtimeManifestSha256"]
          and (distribution.get("packageSha256"), distribution.get("descriptorSha256"), distribution.get("signatureSha256"))
              == (digest(package), digest(descriptor), digest(signed)), "preview-emitted-current-correspondence")
+    args._carrier_validation_group = 'original-image'
     image = read(work / "distribution/MobileReleaseKit.dmg")
     need(distribution.get("userImage") == {"file": "MobileReleaseKit.dmg", "bytes": len(image), "sha256": digest(image)},
          "preview-original-distribution-image")
     original_image = dict(distribution["userImage"])
     del image  # Never retain a second whole DMG buffer or rewrite the recorded original.
+    args._carrier_validation_group = 'final-image-receipt'
     need(read(work / "image-finalization.status", 4) == b"0\n"
          and read(work / "package-finalization.status", 4) == b"0\n", "preview-finalization-original-statuses")
     receipt_body = read(work / "android-helper-finalize-image.json", 16384)
@@ -2120,6 +2370,7 @@ def preview_command(args):
         package_owner=owner_body, final_package=final_package_body, release_body=read(release_path, BUILD_RELEASE_LIMIT),
         profiles=(read(PRODUCER_PROFILE, 1024), read(SERVICE_PROFILE, 1024), read(DESKTOP / "packaging/macos-notary-service.json", 1024)),
         expected_workflow=workflow)
+    args._carrier_validation_group = 'final-image-copy'
     image = read(work / "distribution-final/MobileReleaseKit.dmg")
     need(len(image) == final["imageBytes"] and digest(image) == final["imageSha256"], "preview-finalized-image-bytes")
     summary = {"schemaVersion": 2, "scope": "normal-macos-early-preview", "sourceCommit": args.expected_source,
@@ -2146,6 +2397,7 @@ def preview_command(args):
         "automaticWindowOpen": "unexecuted", "normalQuit": "unexecuted", "manualUIAcceptance": "pending",
         "unexecutedReason": "original-normal-app-quit-custody-not-established",
         "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+    args._carrier_validation_group = 'output-write'
     files = {"MobileReleaseKit.dmg": (image, 0o444), "PREVIEW.json": (canonical(summary) + b"\n", 0o444)}
     if not installed:
         files["README.md"] = (read(DESKTOP / "packaging/macos-preview.md", 32768), 0o444)
@@ -5704,9 +5956,13 @@ def main(argv=None):
     try:
         result = action(args)
     except Refused as error:
+        carrier_refusal_annotation(args, error)
         if args.command in ("app", "android-support", "input", "package-format-input", "prepare-package", "audit-package"):
             print(package_refusal_message(error), file=sys.stderr)
             raise SystemExit(1)
+        raise
+    except (OSError, ValueError, KeyError, TypeError, RecursionError, OverflowError, zipfile.BadZipFile, tarfile.TarError, ET.ParseError) as error:
+        carrier_refusal_annotation(args, error)
         raise
     print(canonical(result).decode("utf-8"))
 

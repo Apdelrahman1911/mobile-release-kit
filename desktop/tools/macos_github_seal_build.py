@@ -54,7 +54,7 @@ TARGETS = {
     "x86_64-apple-darwin": ("x86_64", "X64", "1.98.0", 0x01000007, 3),
 }
 # These are the existing callable owners/parsers, not a new source-build owner.
-REUSE_PINS = {'macos_cpython_source_build.py': (91622, '0fbd3ebd30322689705dc65a6bb0ad5013627c832f302eb9da70e1f149b2dcf0'), 'macos_cpython_orchestrator.py': (105771, '963555122a18aa1a123b033becbb53a67e44b55c8f2d26f0554f79c29b07f296'), 'macos_cpython_source_probe.py': (28617, '721b3adebde7925dbb6ee6e7c39ad4ae9aebe8f6c99f11b880378792595088c4'), 'macos_aqua_qualification.py': (463990, '303a19fb94ccbdd0326ce2cf23d1ddf9d51c7f484cf5801a7517f13ddd1b3ee1')}
+REUSE_PINS = {'macos_cpython_source_build.py': (91622, '0fbd3ebd30322689705dc65a6bb0ad5013627c832f302eb9da70e1f149b2dcf0'), 'macos_cpython_orchestrator.py': (105771, '963555122a18aa1a123b033becbb53a67e44b55c8f2d26f0554f79c29b07f296'), 'macos_cpython_source_probe.py': (28617, '721b3adebde7925dbb6ee6e7c39ad4ae9aebe8f6c99f11b880378792595088c4'), 'macos_aqua_qualification.py': (463990, 'a85547ae42fa2663cf2fc5b48c116f1186bc47708a334a2b3ac172bf1c5c1f02')}
 HELPER_PINS = {
     'Cargo.lock': (141, 'bed5621628fafce21707d508559b97d4563a3b464af0e1a8054877a0b75ff0a3'),
     'Cargo.toml': (476, '7917d02fe12b37f2c5ea502bdf1315d7ce6aa6df04a69431aaf71df3c6c3c2fe'),

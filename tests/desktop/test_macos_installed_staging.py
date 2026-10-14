@@ -12768,15 +12768,87 @@ class MacInstalledData(unittest.TestCase):
             stderr = io.StringIO()
             with self.subTest(reason=reason), mock.patch.object(TOOL, "app_command", side_effect=TOOL.Refused(reason)) as action, \
                     contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as stopped:
-                TOOL.main(["app", "--binary", "/inert/app", "--entry-binary", "/inert/entry",
+                TOOL.main(["app", "--package-role", "ordinary-image", "--binary", "/inert/app",
+                           "--expected-app-binary", "c" * 64, "--resident-image", "/inert/resident",
+                           "--expected-resident-image", "d" * 64, "--entry-binary", "/inert/entry",
                            "--expected-entry", "b" * 64, "--vault-helper", "/inert/helper",
                            "--expected-vault-helper", "a" * 64, "--output", "/inert/output",
-                           "--bundletool-archive", "/inert/bundletool", "--aapt2-archive", "/inert/aapt2"])
+                           "--bundletool-archive", "/inert/bundletool", "--aapt2-archive", "/inert/aapt2",
+                           "--android-helper", "/inert/android", "--expected-android-helper", "e" * 64,
+                           "--remover", "/inert/remover", "--expected-remover", "f" * 64,
+                           "--remover-cargo-messages", "/inert/remover.jsonl",
+                           "--remover-cargo-target-dir", "/inert/remover-target",
+                           "--android-support-signed-receipt", "/inert/support.json"])
             action.assert_called_once()
             args = action.call_args.args[0]
             self.assertEqual((args.entry_binary, args.expected_entry), (Path("/inert/entry"), "b" * 64))
             self.assertEqual(stopped.exception.code, 1)
             self.assertEqual(stderr.getvalue(), expected + "\n")
+
+        # Same CLI action/primary; diagnostic tokens are finite and never reflected.
+        class RefusedSubclass(TOOL.Refused):
+            @property
+            def args(self):
+                raise AssertionError("exception subclass must not be inspected")
+        class StringSubclass(str):
+            def __len__(self):
+                raise AssertionError("string subclass must not be inspected")
+            def __hash__(self):
+                raise AssertionError("string subclass must not be hashed")
+        self.assertEqual(len(TOOL.CARRIER_REFUSAL_REASONS), 196)
+        self.assertTrue(all(re.fullmatch(r"[a-z0-9-]{1,49}", x) for x in TOOL.CARRIER_REFUSAL_REASONS))
+        cli = ["preview", "--installed-passive-carrier", "--work", "/inert/work",
+               "--expected-source", "a" * 40, "--output", "/inert/carrier"]
+        for primary, group, token in (
+                (TOOL.Refused("final-image-receipt-fields"), "final-image-receipt", "final-image-receipt-fields"),
+                (TOOL.Refused("/private/credential=value\n::error::private"), "final-image-copy", "other"),
+                (TOOL.Refused("x" * 10000), "final-image-copy", "other"),
+                (TOOL.Refused(NoReflection()), "package-owner", "other"),
+                (TOOL.Refused(StringSubclass("final-image-fields")), "final-image-receipt", "other"),
+                (RefusedSubclass("final-image-fields"), "final-image-receipt", "other"),
+                (TOOL.Refused("final-image-fields", NoReflection()), "final-image-receipt", "other"),
+                (OSError("/private/native-output"), "final-image-copy", "other"),
+                (ValueError(NoReflection()), "source-binding", "other"),
+                (TOOL.Refused("final-image-fields"), NoReflection(), "other")):
+            def fail(args):
+                args._carrier_validation_group = group
+                raise primary
+            stderr = io.StringIO()
+            with mock.patch.object(TOOL, "preview_command", side_effect=fail) as action, \
+                    contextlib.redirect_stderr(stderr), self.assertRaises(type(primary)) as stopped:
+                TOOL.main(cli)
+            self.assertIs(stopped.exception, primary)
+            action.assert_called_once()
+            expected_group = group if type(group) is str else "entry"
+            annotation = "::error title=MRK carrier refused::group=" + expected_group + ";reason=" + token + "\n"
+            self.assertEqual(stderr.getvalue(), annotation)
+            self.assertTrue(annotation.isascii())
+            self.assertLessEqual(len(annotation), 256)
+        primary = TOOL.Refused("final-image-fields")
+        for installed in (False, 1, StringSubclass("yes")):
+            namespace = TOOL.argparse.Namespace(command="preview", installed_passive_carrier=installed,
+                                               _carrier_validation_group="final-image-receipt")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr): TOOL.carrier_refusal_annotation(namespace, primary)
+            self.assertEqual(stderr.getvalue(), "")
+        stderr = io.StringIO()
+        with mock.patch.object(TOOL, "preview_command", side_effect=primary), \
+                contextlib.redirect_stderr(stderr), self.assertRaises(TOOL.Refused) as stopped:
+            TOOL.main([value for value in cli if value != "--installed-passive-carrier"])
+        self.assertIs(stopped.exception, primary)
+        self.assertEqual(stderr.getvalue(), "")
+        with mock.patch.object(TOOL, "preview_command", side_effect=primary), \
+                mock.patch("builtins.print", side_effect=OSError("inert diagnostic sink")) as sink, \
+                self.assertRaises(TOOL.Refused) as stopped:
+            TOOL.main(cli)
+        self.assertIs(stopped.exception, primary)
+        sink.assert_called_once()  # No retry; primary remains the same object.
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(TOOL, "preview_command", return_value={"unchanged": True}), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            TOOL.main(cli)
+        self.assertEqual(stdout.getvalue(), '{"unchanged":true}\n')
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_postinstall_accepts_only_fixed_entry_and_preserves_exec_boundary(self):
         root = Path(__file__).absolute().parents[2]
@@ -19320,7 +19392,7 @@ class MacNormalPreviewData(unittest.TestCase):
         # none of these receipts are native qualification.
         for target in TOOL.MAC_TARGETS:
             for fault in (None, "missing-flag", "missing-context", "wrong-ref", "wrong-source",
-                          "wrong-run", "receipt-context", "unknown-close", "collision"):
+                          "wrong-run", "receipt-context", "unknown-close", "receipt-read", "copy-read", "collision"):
                 with self.subTest(installed_carrier=target, fault=fault), tempfile.TemporaryDirectory() as directory:
                     old_work, values, documents, expected, selection = self.preview_fixture(target)
                     work = Path(directory) / "work"; work.mkdir(mode=0o700)
@@ -19355,11 +19427,13 @@ class MacNormalPreviewData(unittest.TestCase):
                     if fault == "wrong-run": env["GITHUB_RUN_ATTEMPT"] = "2"
                     output = work / "p0-carrier-input"
                     if fault == "collision": output.mkdir(mode=0o700); (output / "unrelated").write_bytes(b"preserve")
+                    if fault == "receipt-read": (work / "android-helper-finalize-image.json").unlink()
+                    if fault == "copy-read": (work / "distribution-final/MobileReleaseKit.dmg").unlink()
                     originals = {p: (p.read_bytes(), os.lstat(p)) for p in work.rglob("*") if p.is_file()}
                     read = TOOL.read
                     def source_port(path, *args):
                         return source_values[path] if path in source_values else read(path, *args)
-                    args = SimpleNamespace(work=work, output=output, target=target, expected_source="a" * 40,
+                    args = TOOL.argparse.Namespace(command="preview", work=work, output=output, target=target, expected_source="a" * 40,
                                            installed_passive_carrier=fault != "missing-flag")
                     with (mock.patch.dict(os.environ, env, clear=True), mock.patch.object(TOOL, "read", side_effect=source_port),
                           mock.patch.object(TOOL, "source_build_selection", return_value=selection),
@@ -19376,7 +19450,17 @@ class MacNormalPreviewData(unittest.TestCase):
                             self.assertFalse(summary["productReady"] or summary["distributionQualified"] or summary["fullUIQualified"])
                             output.chmod(0o700)  # Only this test-owned regeneration output.
                         else:
-                            with self.assertRaises((TOOL.Refused, OSError)): TOOL.preview_command(args)
+                            with self.assertRaises((TOOL.Refused, OSError)) as failed: TOOL.preview_command(args)
+                            diagnostic = io.StringIO()
+                            with contextlib.redirect_stderr(diagnostic): TOOL.carrier_refusal_annotation(args, failed.exception)
+                            if fault == "missing-flag": self.assertEqual(diagnostic.getvalue(), "")
+                            else:
+                                group = ("source-binding" if fault in ("missing-context", "wrong-ref", "wrong-source", "wrong-run")
+                                         else "output-write" if fault == "collision" else "final-image-copy" if fault == "copy-read"
+                                         else "final-image-receipt")
+                                self.assertEqual(args._carrier_validation_group, group)
+                                reason = (failed.exception.args[0] if type(failed.exception) is TOOL.Refused else "other")
+                                self.assertEqual(diagnostic.getvalue(), "::error title=MRK carrier refused::group=" + group + ";reason=" + reason + "\n")
                             if fault == "collision": self.assertEqual((output / "unrelated").read_bytes(), b"preserve")
                             else: self.assertFalse(output.exists())
                     for p, (contents, info) in originals.items():
