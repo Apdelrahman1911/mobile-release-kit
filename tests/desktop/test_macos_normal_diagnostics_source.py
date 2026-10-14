@@ -666,6 +666,16 @@ def without_shipping_source_extraction_workflow(source):
     """Exact tracked-script front view; never arbitrary YAML normalization."""
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError('shipping SOURCE workflow bound differs')
+    # Exact current installed admission only; all historical inverse stacks stay intact.
+    if (len(source.encode()) == 470734 and hashlib.sha256(source.encode()).hexdigest()
+            == "93881e2e1848a3f621b1c7a4b1d7fa6894d988e535e9eb79ce3d67ba460b461f"):
+        delta = '          if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-installed":\n              # Source-admission facts for the ordinary, separately built app;\n              # never a completed launch, UI, distribution or consumer verdict.\n              value.update(instrumented=False, applicationLaunched=False,\n                           fullUIQualified=False, distributionQualified=False)\n'
+        if source.count(delta) != 1:
+            raise AssertionError("installed carrier exact admission delta differs")
+        source = source.replace(delta, "", 1)
+        if (len(source.encode()) != 470336 or hashlib.sha256(source.encode()).hexdigest()
+                != "53d6301342c526c281e6dbcdb7819a2ff154e8488738d4083cb3c955d33a541c"):
+            raise AssertionError("installed carrier exact admission predecessor differs")
     marker = 'MRK_SHIPPING_SOURCE_BODY'
     if marker not in source:
         return source
@@ -5689,8 +5699,8 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
     def test_normal_diagnostics_workflow_has_one_bounded_original_result(self):
         actual_source = (Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text()
         self.assertLess(len(actual_source.encode()), 500000)
-        self.assertEqual(len(actual_source.encode()), SHIPPING_SOURCE_WORKFLOW_BYTES)
-        self.assertEqual(hashlib.sha256(actual_source.encode()).hexdigest(), SHIPPING_SOURCE_WORKFLOW_SHA256)
+        self.assertEqual(len(actual_source.encode()), 470734)  # Current afterimage, not historical predecessor.
+        self.assertEqual(hashlib.sha256(actual_source.encode()).hexdigest(), "93881e2e1848a3f621b1c7a4b1d7fa6894d988e535e9eb79ce3d67ba460b461f")
         self.assertEqual(actual_source.count(SHIPPING_SOURCE_WRAPPER), 1)
         restored_source = without_shipping_source_extraction_workflow(actual_source)
         self.assertEqual(hashlib.sha256(restored_source.encode()).hexdigest(), SHIPPING_SOURCE_ORIGINAL_SHA256)

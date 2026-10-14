@@ -352,6 +352,11 @@ jobs:
               value.update(scope="whole-app-signature-only", fixedFixtureCases=0, aclPrimitiveCases=0,
                   selectedRegressionGroups=[], instrumented=False, applicationLaunched=False,
                   fullUIQualified=False, distributionQualified=False, actualAquaSaveGate="not-selected")
+          if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-installed":
+              # Source-admission facts for the ordinary, separately built app;
+              # never a completed launch, UI, distribution or consumer verdict.
+              value.update(instrumented=False, applicationLaunched=False,
+                           fullUIQualified=False, distributionQualified=False)
           if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-preview":
               value.update({"scope": "normal-macos-early-preview", "fixedFixtureCases": 8, "aclPrimitiveCases": 0,
                             "selectedRegressionGroups": [], "instrumented": False, "applicationLaunched": False,

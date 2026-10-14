@@ -1833,6 +1833,16 @@ def without_shipping_source_extraction_workflow(source):
     """Exact tracked-script front view; never arbitrary YAML normalization."""
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError('shipping SOURCE workflow bound differs')
+    # Exact current installed admission only; all historical inverse stacks stay intact.
+    if (len(source.encode()) == 470734 and hashlib.sha256(source.encode()).hexdigest()
+            == "93881e2e1848a3f621b1c7a4b1d7fa6894d988e535e9eb79ce3d67ba460b461f"):
+        delta = '          if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-installed":\n              # Source-admission facts for the ordinary, separately built app;\n              # never a completed launch, UI, distribution or consumer verdict.\n              value.update(instrumented=False, applicationLaunched=False,\n                           fullUIQualified=False, distributionQualified=False)\n'
+        if source.count(delta) != 1:
+            raise AssertionError("installed carrier exact admission delta differs")
+        source = source.replace(delta, "", 1)
+        if (len(source.encode()) != 470336 or hashlib.sha256(source.encode()).hexdigest()
+                != "53d6301342c526c281e6dbcdb7819a2ff154e8488738d4083cb3c955d33a541c"):
+            raise AssertionError("installed carrier exact admission predecessor differs")
     marker = 'MRK_SHIPPING_SOURCE_BODY'
     if marker not in source:
         return source
@@ -6033,7 +6043,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             with mock.patch.object(TOOL, "DESKTOP", checkout / "desktop"):
                 self.assertEqual(TOOL.image_cargo_artifact(self.encoded(paired), binary, target, body,
                                                          "resident", target=selected)["target"], selected)
-                for index, wrong in ((0, "2"), (1, "3" if selected == module.INTEL_TARGET else "2"), (2, "2")):
+                for index, wrong in ((0, "2"), (1, "2"), (1, "3" if selected == module.INTEL_TARGET else "1"), (2, "2")):
                     changed = copy.deepcopy(paired); changed[index]["profile"]["opt_level"] = wrong
                     with self.subTest(target=selected, profileRow=index), self.assertRaises(module.Refused):
                         module.artifact(self.encoded(changed), checkout, target, build_target=selected)
@@ -6602,9 +6612,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual(build_argv.count("--config"), build_index)
                 if build_index:
                     self.assertEqual(build_argv[build_argv.index("--config") + 1],
-                                     "profile.release.package.mobile-release-kit-desktop.opt-level=2")
+                                     "profile.release.package.mobile-release-kit-desktop.opt-level=1")
                     self.assertEqual(module.RESIDENT_CARGO_OVERRIDE,
-                                     "profile.release.package.mobile-release-kit-desktop.opt-level=2")
+                                     "profile.release.package.mobile-release-kit-desktop.opt-level=1")
                 self.assertEqual([arg for arg in build_argv if arg.startswith("--message-format=")],
                                  ["--message-format=json-render-diagnostics"])
                 self.assertEqual((build_options["timeout"], build_options["capture"],
@@ -18107,7 +18117,7 @@ def normal_cargo_fixture(target=None, *, role="desktop", checkout=None, build_ta
             "manifest_path": str(directory / "Cargo.toml"), "features": features,
             "target": {"name": name, "kind": ["lib"], "crate_types": ["lib"],
                        "src_path": str(directory / "src/lib.rs"), "edition": "2021"},
-            "profile": dict(profile, opt_level="2" if role == "resident" and build_target == "x86_64-apple-darwin"
+            "profile": dict(profile, opt_level="1" if role == "resident" and build_target == "x86_64-apple-darwin"
                             and package == "mobile-release-kit-desktop" else "3"),
             "filenames": [str(binary.parent / "deps" / ("lib" + name + "-0123456789abcdef.rlib"))],
             "executable": None, "fresh": False})
@@ -19340,9 +19350,57 @@ class MacNormalPreviewData(unittest.TestCase):
         values.update({work / name: TOOL.canonical(value) for name, value in documents.items()})
         return work, values, documents, expected, selection
 
+    def actual_workflow_binding(self, target, *, installed):
+        """Run only the actual passive producer nodes with synthetic public observations."""
+        workflow = (Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text()
+        marker = '"$MRK_PYTHON" -I -S -B - "$root/source-binding.json" <<\'PY\'\n'
+        self.assertEqual(workflow.count(marker), 1)
+        block = workflow.split(marker, 1)[1].split("          PY\n", 1)[0]
+        self.assertTrue(all(not line or line.startswith("          ") for line in block.splitlines()))
+        parsed = ast.parse("\n".join(line[10:] for line in block.splitlines()))
+        assignments = {node.targets[0].id: node for node in parsed.body
+                       if isinstance(node, ast.Assign) and len(node.targets) == 1
+                       and isinstance(node.targets[0], ast.Name)}
+        refs = {"refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview"}
+        selected = [node for node in parsed.body if isinstance(node, ast.If)
+                    and isinstance(node.test, ast.Compare) and len(node.test.ops) == 1
+                    and isinstance(node.test.ops[0], ast.Eq) and len(node.test.comparators) == 1
+                    and isinstance(node.test.comparators[0], ast.Constant) and node.test.comparators[0].value in refs]
+        self.assertEqual(len(selected), 2)
+        self.assertTrue(all(ast.unparse(node.test.left) == "os.environ['GITHUB_REF']" for node in selected))
+        program = ast.Module(body=[assignments["value"], *selected], type_ignores=[])
+        # Admission producer calls are only local dict updates: never execute tools/Git/native owners.
+        for node in ast.walk(program):
+            if isinstance(node, ast.Call):
+                self.assertTrue(isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                                and node.func.value.id == "value" and node.func.attr == "update")
+        keys = {node.slice.value for node in ast.walk(program) if isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Attribute) and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == "os" and node.value.attr == "environ"
+                and isinstance(node.slice, ast.Constant) and type(node.slice.value) is str}
+        self.assertLessEqual(len(keys), 64)
+        self.assertFalse(any(any(sensitive in key for sensitive in ("PASSWORD", "BASE64", "TOKEN")) for key in keys))
+        env = {key: "c" * 64 for key in keys}
+        env.update(GITHUB_REF="refs/heads/verify/desktop-macos-installed" if installed else "refs/heads/verify/desktop-macos-preview",
+                   GITHUB_SHA="a" * 40, GITHUB_WORKFLOW_SHA="a" * 40, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1",
+                   MRK_MACOS_PACKAGE_ROLE="ordinary-image", MRK_MACOS_TARGET=target, DEVELOPER_DIR="/synthetic-sdk")
+        namespace = {"os": os, "build_target": target, "tools": {}, "source_tree": "b" * 40,
+                     "work_info": SimpleNamespace(st_dev=1, st_ino=2, st_uid=os.getuid()),
+                     "supplier_routes": ast.literal_eval(assignments["supplier_routes"].value)}
+        with mock.patch.dict(os.environ, env, clear=True):
+            exec(compile(program, "actual-passive-workflow-binding", "exec"), namespace)
+        binding = namespace["value"]
+        self.assertIs(binding["instrumented"], False)
+        self.assertEqual(binding["scope"], "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only"
+                         if installed else "normal-macos-early-preview")
+        self.assertFalse(binding["applicationLaunched"] or binding["fullUIQualified"] or binding["distributionQualified"])
+        return binding
+
     def test_preview_roster_has_no_raw_evidence_and_keeps_open_and_quit_unexecuted(self):
         for target in TOOL.MAC_TARGETS:
             work, values, documents, expected, selection = self.preview_fixture(target)
+            documents["source-binding.json"] = self.actual_workflow_binding(target, installed=False)
+            values[work / "source-binding.json"] = TOOL.canonical(documents["source-binding.json"])
             args = SimpleNamespace(work=work, output=work / "preview", expected_source="a" * 40)
             if target != TOOL.ARM_TARGET:
                 args.target = target  # The original ARM default still runs.
@@ -19387,14 +19445,37 @@ class MacNormalPreviewData(unittest.TestCase):
             self.assertEqual(summary["originalDistributionSha256"], TOOL.digest(values[work / "distribution/MobileReleaseKit.dmg"]))
             self.assertNotEqual(summary["originalDistributionSha256"], TOOL.digest(files["MobileReleaseKit.dmg"][0]))
 
+            good_binding = copy.deepcopy(documents["source-binding.json"])
+            for key, wrong in (("scope", "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only"),
+                               ("instrumented", None), ("instrumented", 0), ("instrumented", True)):
+                binding = copy.deepcopy(good_binding)
+                if wrong is None: binding.pop(key)
+                else: binding[key] = wrong
+                values[work / "source-binding.json"] = TOOL.canonical(binding)
+                with (mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]),
+                      mock.patch.object(TOOL, "source_build_selection", return_value=selection),
+                      mock.patch.object(TOOL, "write_tree") as refused_output):
+                    with self.subTest(preview_binding=target, key=key, wrong=wrong), self.assertRaisesRegex(TOOL.Refused, "^preview-source-binding$"):
+                        TOOL.preview_command(args)
+                    refused_output.assert_not_called()
+            values[work / "source-binding.json"] = TOOL.canonical(good_binding)
+
         # Actual nonroot work-tree read and output write, not a mocked exporter.
         # The synthetic SOURCE profile/inventory ports remain explicit DATA;
         # none of these receipts are native qualification.
         for target in TOOL.MAC_TARGETS:
-            for fault in (None, "missing-flag", "missing-context", "wrong-ref", "wrong-source",
-                          "wrong-run", "receipt-context", "unknown-close", "receipt-read", "copy-read", "collision"):
+            for fault in (None, "missing-flag", "wrong-scope", "missing-instrumented", "nonbool-instrumented", "instrumented",
+                          "missing-context", "wrong-ref", "wrong-source", "wrong-run", "receipt-context",
+                          "unknown-close", "receipt-read", "copy-read", "collision"):
                 with self.subTest(installed_carrier=target, fault=fault), tempfile.TemporaryDirectory() as directory:
                     old_work, values, documents, expected, selection = self.preview_fixture(target)
+                    binding = self.actual_workflow_binding(target, installed=True)
+                    if fault == "wrong-scope": binding["scope"] = "normal-macos-early-preview"
+                    if fault == "missing-instrumented": binding.pop("instrumented")
+                    if fault == "nonbool-instrumented": binding["instrumented"] = 0
+                    if fault == "instrumented": binding["instrumented"] = True
+                    documents["source-binding.json"] = binding
+                    values[old_work / "source-binding.json"] = TOOL.canonical(binding)
                     work = Path(directory) / "work"; work.mkdir(mode=0o700)
                     receipt = documents["android-helper-finalize-image.json"]
                     receipt["workflow"] = TOOL._INSTALLED_FINAL_IMAGE_WORKFLOW
@@ -19455,7 +19536,8 @@ class MacNormalPreviewData(unittest.TestCase):
                             with contextlib.redirect_stderr(diagnostic): TOOL.carrier_refusal_annotation(args, failed.exception)
                             if fault == "missing-flag": self.assertEqual(diagnostic.getvalue(), "")
                             else:
-                                group = ("source-binding" if fault in ("missing-context", "wrong-ref", "wrong-source", "wrong-run")
+                                group = ("source-binding" if fault in ("wrong-scope", "missing-instrumented", "nonbool-instrumented", "instrumented",
+                                                                     "missing-context", "wrong-ref", "wrong-source", "wrong-run")
                                          else "output-write" if fault == "collision" else "final-image-copy" if fault == "copy-read"
                                          else "final-image-receipt")
                                 self.assertEqual(args._carrier_validation_group, group)
@@ -19648,8 +19730,8 @@ class MacNormalPreviewData(unittest.TestCase):
     def test_preview_route_targets_only_unrelated_groups_and_retains_package_gates(self):
         actual_source = (Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text()
         self.assertLess(len(actual_source.encode()), 500000)
-        self.assertEqual(len(actual_source.encode()), SHIPPING_SOURCE_WORKFLOW_BYTES)
-        self.assertEqual(hashlib.sha256(actual_source.encode()).hexdigest(), SHIPPING_SOURCE_WORKFLOW_SHA256)
+        self.assertEqual(len(actual_source.encode()), 470734)  # Current afterimage, not historical predecessor.
+        self.assertEqual(hashlib.sha256(actual_source.encode()).hexdigest(), "93881e2e1848a3f621b1c7a4b1d7fa6894d988e535e9eb79ce3d67ba460b461f")
         self.assertEqual(actual_source.count(SHIPPING_SOURCE_WRAPPER), 1)
         restored_source = without_shipping_source_extraction_workflow(actual_source)
         self.assertEqual(hashlib.sha256(restored_source.encode()).hexdigest(), SHIPPING_SOURCE_ORIGINAL_SHA256)

@@ -1938,7 +1938,7 @@ def image_cargo_artifact(messages, binary, target_dir, body, role, *, target=ARM
                        else ["android-registration-helper", "default", "resident-image"])
     cargo_library(records, DESKTOP / "src-tauri", "mobile-release-kit-desktop",
                   "mobile_release_desktop", app_features, test=False,
-                  opt_level="2" if role == "resident" and target == INTEL_TARGET else "3")
+                  opt_level="1" if role == "resident" and target == INTEL_TARGET else "3")
     cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
                   "mrk_macos_installed_native", native_features, test=False)
     need(not any(item["target"].get("kind") in (["bin"], ["test"], ["example"], ["bench"])
@@ -2236,12 +2236,14 @@ def preview_command(args):
     args._carrier_validation_group = 'source-binding'
     binding = decode(read(work / "source-binding.json", 65536))
     source = decode(read(work / "source-inventory.json", 1024 * 1024))
+    expected_scope = ("engineering-acl-probe-five-regressions-fixed-fixture-package-install-only"
+                      if installed else "normal-macos-early-preview")
     need(type(binding) is dict and type(source) is dict
          and source.get("source") == binding.get("source") == args.expected_source
          and binding.get("workflowSource") == args.expected_source
          and source.get("tree") == binding.get("tree") and type(source.get("tree")) is str
          and re.fullmatch(r"[0-9a-f]{40}", source["tree"])
-         and binding.get("scope") == "normal-macos-early-preview" and binding.get("instrumented") is False
+         and binding.get("scope") == expected_scope and binding.get("instrumented") is False
          and binding.get("packageRole") == "ordinary-image",
          "preview-source-binding")
     need(all(type(binding.get(k)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", binding[k])

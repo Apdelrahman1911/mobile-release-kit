@@ -67,8 +67,8 @@ MAX_HELPER = 32 * 1024 * 1024
 # Only nonshipping producer graphs use this opt0 override.
 PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=0"
 # Intel alone uses this fixed shared-package release optimization.
-# Runtime dependencies retain release3; generic code instantiated here inherits release2.
-RESIDENT_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=2"
+# Runtime dependencies retain release3; generic code instantiated here inherits release1.
+RESIDENT_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=1"
 HELPER_SOURCE_BYTES = 575167
 # Closed first-failed metadata attribution; no dynamic role/path rendering.
 FINAL_IMAGE_VERIFY_FIELDS = ("device", "inode", "mode", "links", "uid", "gid", "size", "mtime", "ctime")
@@ -1200,7 +1200,7 @@ def artifact(messages, checkout, target, *, build_target=ARM_TARGET):
              and "executable" in library and library["executable"] is None, "helper-separate-library-features")
         selected_rows.append(library)
     for selected in selected_rows:
-        expected_opt = "2" if build_target == INTEL_TARGET and selected is selected_rows[1] else "3"
+        expected_opt = "1" if build_target == INTEL_TARGET and selected is selected_rows[1] else "3"
         profile = selected.get("profile")
         need(type(profile) is dict and profile.get("test") is False and profile.get("debug_assertions") is False
              and profile.get("opt_level") == expected_opt and type(selected.get("fresh")) is bool, "helper-release-profile")
