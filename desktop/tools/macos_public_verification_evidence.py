@@ -263,6 +263,9 @@ SUMMARY_BOOLS = ("originalInstallerReturnedZero", "originalPackageGroupReturnedZ
     "installedAppLaunchedByRemovalRoute", "distributionQualified", "productReady")
 IOS_UNSIGNED_DIAGNOSTIC = "normal-ui/ios-unsigned-archive-test.failure-diagnostics.json"
 IOS_UNSIGNED_SELECTION = "ios-unsigned-archive-test.xcresult"
+IOS_PENDING_DIAGNOSTIC = "normal-ui/ios-pending-recovery-test.failure-diagnostics.json"
+IOS_PENDING_SELECTION = "ios-pending-recovery-test.xcresult"
+IOS_PENDING_METHOD = "testInstalledIOSPendingAccountRecoveryThroughUI"
 IOS_UNSIGNED_METHOD = "testSyntheticProjectUnsignedIOSArchive"
 IOS_UNSIGNED_STAGES = ("ios-unsigned-fixture", "ios-unsigned-launch", "ios-unsigned-project",
     "ios-unsigned-review", "ios-unsigned-original-result", "ios-unsigned-close")
@@ -544,13 +547,15 @@ def project_ios_unsigned_stages(value):
 
 
 def project_ui_failure(value, phase):
-    """Existing build/query or the one fixed unsigned test; no general test reader."""
+    """Existing build/query or two exact nonzero iOS cases; no general test reader."""
     fields = {"schemaVersion", "scope", "phase", "selection", "originalReturncode", "stdoutBytes", "stdoutSha256",
         "stderrBytes", "stderrSha256", "status", "findingsTruncated", "errorCodes", "sourceFailures",
         "queryObservations", "requireObservations", "dashboardReadiness", "markers"}
     unsigned = phase == "test"
     build_fields = {"compilerDiagnostics"} if phase == "build" else set()
-    if unsigned and "iosUnsignedStages" in value: build_fields.add("iosUnsignedStages")
+    if unsigned and "iosUnsignedStages" in value:
+        need(value.get("selection") == IOS_UNSIGNED_SELECTION)
+        build_fields.add("iosUnsignedStages")
     if phase == "build" and "buildFailureReasons" in value:
         build_fields.add("buildFailureReasons")  # Backward-compatible absence remains unproven, not empty.
     if phase == "build" and "destinationTable" in value:
@@ -559,7 +564,7 @@ def project_ui_failure(value, phase):
          and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
          and value["scope"] == "normal-macos-ui-failure-diagnostic-only" and value["phase"] == phase
           and ((not unsigned and value["selection"] is None) or (unsigned and type(value["selection"]) is str
-               and value["selection"] == IOS_UNSIGNED_SELECTION))
+               and value["selection"] in (IOS_UNSIGNED_SELECTION, IOS_PENDING_SELECTION)))
           and value["status"] in ("unavailable", "classified", "unclassified"))
     integer(value["originalReturncode"], 255, 1)
     cap = 4096 if phase == "query" else 1024 * 1024
@@ -569,15 +574,22 @@ def project_ui_failure(value, phase):
     boolean(value["findingsTruncated"])
     failures = value["sourceFailures"]
     need(type(failures) is list and (len(failures) <= 4 if unsigned else failures == [])
-         and value["requireObservations"] == [] and type(value["requireObservations"]) is list
+         and type(value["requireObservations"]) is list
+         and (len(value["requireObservations"]) <= 1 if unsigned else value["requireObservations"] == [])
          and value["dashboardReadiness"] is None)
     if unsigned:
+        selected_method = IOS_UNSIGNED_METHOD if value["selection"] == IOS_UNSIGNED_SELECTION else IOS_PENDING_METHOD
+        for row in value["requireObservations"]:
+            need(type(row) is dict and set(row) == {"source", "line", "check"}
+                 and type(row["source"]) is str and row["source"] == "NormalAppUITests.swift"
+                 and type(row["check"]) is str and row["check"] in ("condition", "singleton", "actionable"))
+            integer(row["line"], 65535, 1)
         sites = []
         for row in failures:
             need(type(row) is dict and set(row) == {"stream", "source", "method", "line", "column"}
                  and type(row["stream"]) is str and row["stream"] in ("stdout", "stderr")
                  and type(row["source"]) is str and row["source"] == "NormalAppUITests.swift"
-                 and type(row["method"]) is str and row["method"] == IOS_UNSIGNED_METHOD)
+                 and type(row["method"]) is str and row["method"] == selected_method)
             integer(row["line"], 65535, 1)
             if row["column"] is not None: integer(row["column"], 4096, 1)
             sites.append((row["stream"], row["source"], row["method"], row["line"], row["column"]))
@@ -721,23 +733,24 @@ def project_ui_admission(value):
 
 
 def project_ui_diagnostic(value, role, caller_status):
-    need(type(value) is dict and role in ("build", "toolchain", "admission", "ios-unsigned-test")
+    need(type(value) is dict and role in ("build", "toolchain", "admission", "ios-unsigned-test", "ios-pending-test")
          and type(caller_status) is dict and caller_status.get("receiptState") == "observed")
     status = integer(caller_status.get("returncode"), 255, 1)
     # Writers have no embedded source/run tuple. This is only parent-context
     # attribution from the fixed fresh work root, never independent attestation.
     try:
-        if role == "ios-unsigned-test":
+        if role in ("ios-unsigned-test", "ios-pending-test"):
             if value.get("scope") == "normal-macos-ui-admission-diagnostic-only":
                 row = project_ui_admission(value)
                 row["originalCallerReturncode"] = status  # Scalar attribution, not a native-command outcome.
             else:
                 row = project_ui_failure(value, "test")
+                need(row["selection"] == (IOS_UNSIGNED_SELECTION if role == "ios-unsigned-test" else IOS_PENDING_SELECTION))
         else:
             row = project_ui_admission(value) if role == "admission" else project_ui_failure(value, "build" if role == "build" else "query")
     except KeyError:
         raise Refused("public-evidence-refused") from None
-    if role != "admission" and not (role == "ios-unsigned-test" and value.get("scope") == "normal-macos-ui-admission-diagnostic-only"):
+    if role != "admission" and not (role in ("ios-unsigned-test", "ios-pending-test") and value.get("scope") == "normal-macos-ui-admission-diagnostic-only"):
         need(row["originalReturncode"] == status)
     return {**row, "receiptState": "observed", "binding": "same-work-root-parent-context-only", "nativeSuccessInferred": False}
 
@@ -2694,6 +2707,10 @@ def positive_ui_observations(root, context, statuses, phases, inventory, budget,
     ios_failed = (type(ios_status) is dict and ios_status.get("receiptState") == "observed"
         and type(ios_status.get("returncode")) is int and 1 <= ios_status["returncode"] <= 255)
     ios_failure = None
+    recovery_status = statuses.get("normal-ui/ios-pending-recovery-test.status", {})
+    recovery_failed = (type(recovery_status) is dict and recovery_status.get("receiptState") == "observed"
+        and type(recovery_status.get("returncode")) is int and 1 <= recovery_status["returncode"] <= 255)
+    recovery_failure = None
     for key, path, limit, admission in POSITIVE_UI_INPUTS:
         if key == "iosFacts" and ios_failed:
             try:
@@ -2703,6 +2720,16 @@ def positive_ui_observations(root, context, statuses, phases, inventory, budget,
                 ios_failure = {"receiptState": "absent"}
             except Refused:
                 ios_failure = {"receiptState": "refused"}
+            inputs[key] = ("absent", None)  # One alternative attempt, never a fallback facts read.
+            continue
+        if key == "iosRecoveryFacts" and recovery_failed:
+            try:
+                recovery_failure = project_ui_diagnostic(decode(read_input(root, IOS_PENDING_DIAGNOSTIC, 4096, budget), budget),
+                    "ios-pending-test", recovery_status)
+            except FileNotFoundError:
+                recovery_failure = {"receiptState": "absent"}
+            except Refused:
+                recovery_failure = {"receiptState": "refused"}
             inputs[key] = ("absent", None)  # One alternative attempt, never a fallback facts read.
             continue
         try:
@@ -2729,6 +2756,8 @@ def positive_ui_observations(root, context, statuses, phases, inventory, budget,
             result[name] = {"receiptState": "refused"}
     if ios_failed:
         result["iosUnsignedArchive"] = {"receiptState": "refused", "failureDiagnostic": ios_failure}
+    if recovery_failed:
+        result["iosPendingRecovery"] = {"receiptState": "refused", "failureDiagnostic": recovery_failure}
     result["ordinary"] = ordinary_ui_observations(root, context, statuses, phases, inventory,
         (deliveries or {}).get("preview", {}), budget)
     size = len(json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=True))

@@ -66,7 +66,7 @@ INTEL_TARGET = "x86_64-apple-darwin"
 MAX_HELPER = 32 * 1024 * 1024
 # Only nonshipping producer graphs; packaged programs keep release3.
 PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=0"
-HELPER_SOURCE_BYTES = 548475
+HELPER_SOURCE_BYTES = 548830
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -3989,7 +3989,9 @@ class Operation:
 
     def finalize_image(self):
         need(self.phase in FINAL_IMAGE_PHASES and self.signing is not None
-             and self.environment.get("GITHUB_REF") == "refs/heads/verify/desktop-macos-preview"
+             and (self.environment.get("GITHUB_REF") == "refs/heads/verify/desktop-macos-preview"
+                  or (self.phase == "finalize-image"
+                      and self.environment.get("GITHUB_REF") == "refs/heads/verify/desktop-macos-installed"))
              and not any(name in self.environment for name in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES),
              "final-image-configured-purpose")
         self.notary_space(reserve=True)
@@ -7630,7 +7632,10 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
         need(phase not in PYTHON_PHASES and phase not in FINAL_IMAGE_PHASES, "removal-only-existing-purpose-route")
     elif phase in REMOVAL_OWNER_PHASES:
         raise Refused("removal-fixture-fixed-ref-only")
-    if (phase in FINAL_IMAGE_PHASES or phase in REMOVE_PHASES) and ref != REMOVAL_REF:
+    if phase == "finalize-image":
+        need(ref in ("refs/heads/verify/desktop-macos-preview", "refs/heads/verify/desktop-macos-installed"),
+             "final-image-preview-ref-only")
+    elif (phase in FINAL_IMAGE_PHASES or phase in REMOVE_PHASES) and ref != REMOVAL_REF:
         need(ref == "refs/heads/verify/desktop-macos-preview", "final-image-preview-ref-only")
     support_phase = phase in SUPPORT_PHASES
     if support_phase or ref == SUPPORT_REF:

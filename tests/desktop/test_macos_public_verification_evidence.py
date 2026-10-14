@@ -136,7 +136,7 @@ def normal_diagnostic_data(*, removal=False, positive=False):
     names = {"Refused", "need", "sha", "pairs", "document", "encoded", "failure_base",
         "normal_failure_diagnostics", "normal_admission_failure", "classify_normal_admission_failure", "ADMISSION_OWNER_REASONS",
         "NORMAL_SELECTIONS", "OUTPUT_DATA_RESULT",
-        "IOS_UNSIGNED_RESULT", "IOS_UNSIGNED_METHOD", "IOS_UNSIGNED_STAGES", "ios_unsigned_stage_diagnostics", "LOADER", "TOOLCHAIN_QUERIES", "ADMISSION_STAGES",
+        "IOS_PENDING_RESULT", "IOS_PENDING_METHOD", "IOS_UNSIGNED_RESULT", "IOS_UNSIGNED_METHOD", "IOS_UNSIGNED_STAGES", "ios_unsigned_stage_diagnostics", "LOADER", "TOOLCHAIN_QUERIES", "ADMISSION_STAGES",
         "ADMISSION_EXCEPTION_TYPES", "ADMISSION_EXCEPTION_LABELS", "ADMISSION_SOURCE_FILES", "ADMISSION_COMMAND_ROLES",
         "TARGET", "PROJECT", "INTEL_TARGET", "PhaseClock", "NormalPhase", "original_command",
         "normal_build_settings_arguments", "normal_build_settings_data", "publish_normal_build_settings",
@@ -1147,6 +1147,8 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 if fault is None:
                     self.assertEqual(value["iosPendingRecovery"]["receiptState"], "observed")
                     self.assertTrue(value["iosPendingRecovery"]["account"]["baselinePreferencesMatched"])
+                elif fault == "failed-status":
+                    self.assertEqual(value["iosPendingRecovery"], {"receiptState": "refused", "failureDiagnostic": {"receiptState": "absent"}})
                 else: self.assertEqual(value["iosPendingRecovery"], {"receiptState": "refused"})
                 self.assertEqual(value["iosUnsignedArchive"], {"receiptState": "absent"})
                 self.assertEqual(value["androidSignedBuild"], {"receiptState": "absent"})
@@ -1628,6 +1630,47 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             DATA.decode(json.dumps(value).encode(), budget(), inventory=True)
 
     def test_finite_failure_roles_keep_original_classification_not_messages(self):
+        # Genuine producer -> public consumer; no raw logs or positive facts salvage.
+        normal = normal_diagnostic_data()
+        marker = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=3942;check=singleton\n"
+        for role, selection, method, sidecar, status_file, positive_name, facts_key in (
+            ("ios-unsigned-test", DATA.IOS_UNSIGNED_SELECTION, DATA.IOS_UNSIGNED_METHOD, DATA.IOS_UNSIGNED_DIAGNOSTIC,
+                "normal-ui/ios-unsigned-archive-test.status", "iosUnsignedArchive", "iosFacts"),
+            ("ios-pending-test", DATA.IOS_PENDING_SELECTION, DATA.IOS_PENDING_METHOD, DATA.IOS_PENDING_DIAGNOSTIC,
+                "normal-ui/ios-pending-recovery-test.status", "iosPendingRecovery", "iosRecoveryFacts"),
+        ):
+            original = CompletedProcess([], 65, marker + SENTINEL.encode() + b"\n", b"")
+            value = normal["normal_failure_diagnostics"]("test", selection, original)
+            row = DATA.project_ui_diagnostic(value, role, {"receiptState": "observed", "returncode": 65})
+            self.assertEqual(row["requireObservations"], [{"source": "NormalAppUITests.swift", "line": 3942, "check": "singleton"}])
+            self.assertIs(row["nativeSuccessInferred"], False)
+            self.assertIsNone(row["dashboardReadiness"])
+            self.assertNotIn(SENTINEL, json.dumps(row))
+            wrong_role = "ios-pending-test" if role == "ios-unsigned-test" else "ios-unsigned-test"
+            with self.assertRaises(DATA.Refused): DATA.project_ui_diagnostic(value, wrong_role, {"receiptState": "observed", "returncode": 65})
+            for key, replacement in (("line", True), ("line", 0), ("line", 65536), ("line", "3942"),
+                    ("source", SENTINEL), ("check", SENTINEL)):
+                bad = copy.deepcopy(value); bad["requireObservations"][0][key] = replacement
+                with self.assertRaises(DATA.Refused): DATA.project_ui_diagnostic(bad, role, {"receiptState": "observed", "returncode": 65})
+            bad = copy.deepcopy(value); bad["requireObservations"] *= 2
+            with self.assertRaises(DATA.Refused): DATA.project_ui_diagnostic(bad, role, {"receiptState": "observed", "returncode": 65})
+            for code in (0, True, -1, 256, 64):
+                with self.assertRaises(DATA.Refused): DATA.project_ui_diagnostic(value, role, {"receiptState": "observed", "returncode": code})
+            if role == "ios-pending-test":
+                bad = copy.deepcopy(value); bad["iosUnsignedStages"] = {"state": "absent", "events": []}
+                with self.assertRaises(DATA.Refused): DATA.project_ui_diagnostic(bad, role, {"receiptState": "observed", "returncode": 65})
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write(root, status_file, b"65\n")
+                output = write(root, sidecar, value)
+                facts_path = next(path for key, path, _, _ in DATA.POSITIVE_UI_INPUTS if key == facts_key)
+                facts = write(root, facts_path, {"private": SENTINEL})
+                before = output.read_bytes(), facts.read_bytes()
+                result = project(root)["positiveUiObservations"][positive_name]
+                self.assertEqual(result["receiptState"], "refused")
+                self.assertEqual(result["failureDiagnostic"]["requireObservations"], row["requireObservations"])
+                self.assertEqual((output.read_bytes(), facts.read_bytes()), before)
+                self.assertNotIn(SENTINEL, (root / DATA.OUTPUT).read_text())
         from unittest import mock
         # One fixed failed unsigned test: original65 is attribution, not positive or native authority.
         _ios_normal = normal_diagnostic_data()

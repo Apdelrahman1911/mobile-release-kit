@@ -2559,7 +2559,7 @@ def failure_base(phase, selection, original, *, engineering=False):
     # Diagnostic dispatch only: native/ordinary selection admission is unchanged.
     need(type(engineering) is bool and phase in ("build", "test", "summary", "query")
          and (selection is None if phase in ("build", "query") else
-              selection == "engineering-test.xcresult" if engineering else selection in NORMAL_SELECTIONS or selection in (OUTPUT_DATA_RESULT, IOS_UNSIGNED_RESULT)),
+              selection == "engineering-test.xcresult" if engineering else selection in NORMAL_SELECTIONS or selection in (OUTPUT_DATA_RESULT, IOS_UNSIGNED_RESULT, IOS_PENDING_RESULT)),
          "normal-diagnostic-selection")
     cap = 4096 if phase == "query" else 262144 if phase == "summary" else 1024 * 1024
     need(type(original) is subprocess.CompletedProcess and type(original.returncode) is int
@@ -2651,6 +2651,7 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     methods = (("testEngineeringMainCatalogueAndQuit",) if engineering else
                ("testPositiveAndroidOutputCustodyData",) if selection == OUTPUT_DATA_RESULT else
                (IOS_UNSIGNED_METHOD,) if selection == IOS_UNSIGNED_RESULT else
+               (IOS_PENDING_METHOD,) if selection == IOS_PENDING_RESULT else
                NORMAL_SELECTIONS[selection][0]) if selection is not None else ()
     method_pattern = b"|".join(re.escape(m.encode("ascii")) for m in methods)
     case = rb"-\[MRKNormalAppUITests\.NormalAppUITests (?:" + method_pattern + rb")\]"
@@ -2706,12 +2707,16 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
              rb"(initial|identifier|title|label|value|placeholderValue|containingSameStaticText)"
              rb";matches=([0-5]);exceedsFour=([01]);nonAtomic=1")
 
-    # Ordinary basic-case grammar stays separate from engineering diagnostics.
+    # Fixed ordinary source-site diagnostics only; dashboard remains basic-only.
     # The packaged-entry route has separate admission and is not added here.
     require_invalid = False
-    if phase == "test" and selection == "test.xcresult" and methods == ("testLaunchCancelAndQuit",):
+    require_eligible = (phase == "test" and not engineering and (
+        (selection == "test.xcresult" and methods == ("testLaunchCancelAndQuit",))
+        or (selection == IOS_UNSIGNED_RESULT and methods == (IOS_UNSIGNED_METHOD,))
+        or (selection == IOS_PENDING_RESULT and methods == (IOS_PENDING_METHOD,))))
+    if require_eligible:
         prefix = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE"
-        attempted = original.stdout.count(prefix)
+        attempted = original.stdout.count(prefix) + original.stderr.count(prefix)
         if attempted:
             pattern = (rb"(?m)^MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=([1-9][0-9]{0,4});"
                        rb"check=(condition|singleton|actionable)\r?\n")

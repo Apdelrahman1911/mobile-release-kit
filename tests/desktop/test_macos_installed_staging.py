@@ -1846,7 +1846,35 @@ def without_primary_owner_runtime_source_pin(source):
     return source
 
 
+def without_installed_final_carrier_workflow(source):
+    # Pure SOURCE normalization: one complete unchanged-workload step only.
+    # Historical whole-source guards remain responsible for unrelated regions.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("installed final carrier SOURCE bound differs")
+    prefix = '      - name: Notarize, staple and verify only the final user image\n'
+    old_if, new_if = "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview')\n", "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-installed') && steps.package_install.outcome == 'success'\n"
+    old_anchor, new_anchor = '      - name: Observe one ordinary finalized-carrier same-package no-op\n', '      - name: Fixed nonshipping app-absence app-absence-restore; no credentials or user artifact\n'
+    relocated = (prefix in source and new_anchor in source
+                 and source.index(prefix) < source.index(new_anchor))
+    if new_if not in source and not relocated:
+        return source
+    if (not source.startswith("name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n")
+            or source.count(prefix) != 1 or source.count("        id: finalize_image\n") != 1
+            or source.count(old_anchor) != 1 or source.count(new_anchor) != 1):
+        raise AssertionError("installed final carrier unique SOURCE route differs")
+    step = prefix + source.split(prefix, 1)[1].split("      - name: ", 1)[0]
+    if (hashlib.sha256(step.encode()).hexdigest() != 'd6983030aa7df37ea1ce802a8bf60299095d4ad4cb37a1f15a5b2d0f1ef015b9'
+            or source.count(step + new_anchor) != 1
+            or source.count("        id: package_install\n") != 1
+            or source.index("        id: package_install\n") >= source.index(prefix)):
+        raise AssertionError("installed final carrier complete body or ordering differs")
+    old_step = step.replace(new_if, old_if, 1)
+    source = source.replace(step + new_anchor, new_anchor, 1)
+    return source.replace(old_anchor, old_step + old_anchor, 1)
+
+
 def without_ordinary_app_assembly_budget_workflow(source):
+    source = without_installed_final_carrier_workflow(source)
     # Three fixed SOURCE regions only; before every other historical inverse.
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("ordinary app assembly SOURCE bound differs")
@@ -1917,6 +1945,7 @@ IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE = ("      # SOURCE-owned: pending iOS 
 
 
 def without_ios_unsigned_reselection_workflow(source):
+    source = without_installed_final_carrier_workflow(source)
     # Fixed selector serialization only; earlier unmarked callers keep whole guards.
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("unsigned iOS reselection workflow SOURCE bound differs")
@@ -2791,7 +2820,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
         helper_body = (Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py").read_bytes()
         self.assertEqual(len(helper_body), module.HELPER_SOURCE_BYTES)
-        self.assertEqual(module.HELPER_SOURCE_BYTES, 548475)
+        self.assertEqual(module.HELPER_SOURCE_BYTES, 548830)
         helper_tree = ast.parse(helper_body)
         constants = [node.value for node in helper_tree.body
                      if isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -2799,7 +2828,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(len(constants), 1)
         source_cap = ast.literal_eval(constants[0])
         self.assertIs(type(source_cap), int)
-        self.assertEqual(source_cap, 548475)
+        self.assertEqual(source_cap, 548830)
         operation = next(node for node in helper_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
         caps = []
         for method in operation.body:
@@ -4582,7 +4611,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     if leaf_fd is not None: os.close(leaf_fd)
                     os.close(parent_fd)
 
-    def final_image_fixture(self, root, *, target="aarch64-apple-darwin", failure=None, inventory_body=None):
+    def final_image_fixture(self, root, *, target="aarch64-apple-darwin", failure=None, inventory_body=None,
+                            ref="refs/heads/verify/desktop-macos-preview"):
         """Same real S3 handoff/book and S4 files; no tool or mount executes.
 
         Preceding Installer/producer/mount observations below are explicitly
@@ -4592,8 +4622,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         module = ANDROID_HELPER
         inventory_sha = "d" * 64 if inventory_body is None else TOOL.digest(inventory_body)
         state = self.final_package_fixture(root, target=target)
-        state.environment.update(GITHUB_REF="refs/heads/verify/desktop-macos-preview",
-            GITHUB_WORKFLOW_REF="Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview",
+        state.environment.update(GITHUB_REF=ref,
+            GITHUB_WORKFLOW_REF="Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@" + ref,
             MRK_MACOS_INSTALL_INVENTORY_SHA256=inventory_sha, MRK_BUNDLED_RUNTIME_MANIFEST_SHA256="c" * 64)
         state.operation.receipt["workflow"] = state.environment["GITHUB_WORKFLOW_REF"]  # Before any S3 dispatch.
         with self.final_package_fixture_call(state):
@@ -6591,9 +6621,11 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         # S4 copies ONLY the old signed carrier, mutates that same inode, and
         # keeps the previous Installer/S3/raw producer originals unchanged.
         # The native tools/device status are DATA doubles, never qualification.
-        for target in TOOL.MAC_TARGETS:
-            with self.subTest(finalImageTarget=target), tempfile.TemporaryDirectory() as directory:
-                state = self.final_image_fixture(Path(directory), target=target)
+        for target, final_ref in ((target, ref) for target in TOOL.MAC_TARGETS for ref in
+                                 ("refs/heads/verify/desktop-macos-preview", "refs/heads/verify/desktop-macos-installed")):
+            with self.subTest(finalImageTarget=target, ref=final_ref), tempfile.TemporaryDirectory() as directory:
+                # The ref is chosen BEFORE preceding S3 originals are generated.
+                state = self.final_image_fixture(Path(directory), target=target, ref=final_ref)
                 operation, peaks, consumed = state.operation, [0], {}
                 active = {id(row): row for row in operation.entries if not row["closed"]}
                 original_register, original_close = operation.register, operation.close
@@ -6644,6 +6676,27 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual(receipt["finalImageMount"], {"attachEntered": True, "originalKnown": True, "detached": True,
                     "retained": False, "installerEntered": False, "systemServiceExitClaimed": False})
                 release_body = (state.checkout / operation.release_input).read_bytes()
+                self.assertEqual(receipt["workflow"],
+                    "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@" + final_ref)
+                self.assertEqual((receipt["phase"], receipt["source"], receipt["workflowSource"],
+                                  receipt["runId"], receipt["runAttempt"]),
+                                 ("finalize-image", "a" * 40, "a" * 40, "123", "1"))
+                if final_ref == "refs/heads/verify/desktop-macos-installed":
+                    # Actual installed-purpose Operation completed and closed;
+                    # the preview-only delivery parser must STILL refuse it.
+                    with self.assertRaises(TOOL.Refused):
+                        TOOL.final_image_receipt_data(receipt_body, selection=state.selected,
+                            binding={"source": "a" * 40, "runId": "123", "runAttempt": "1"}, request=state.request,
+                            package=state.package, descriptor=state.descriptor, signed=state.producer_signature,
+                            original_image=state.package_owner["distribution"]["userImage"],
+                            package_owner=state.prior_files["android-helper-package-install.json"][0],
+                            final_package=state.final_package_body, release_body=release_body,
+                            profiles=(state.credentials.producer, state.credentials.service,
+                                      (state.checkout / module.NOTARY_PROFILE).read_bytes()))
+                    self.assertLessEqual(len(receipt_body), 16384)
+                    self.assertEqual(receipt["finalImage"]["assurance"],
+                        "final-carrier-observation-not-downloaded-install-or-gatekeeper-authority")
+                    continue
                 facts = TOOL.final_image_receipt_data(receipt_body, selection=state.selected,
                     binding={"source": "a" * 40, "runId": "123", "runAttempt": "1"}, request=state.request,
                     package=state.package, descriptor=state.descriptor, signed=state.producer_signature,
@@ -9194,7 +9247,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                      ["inert", "finalize-image", "--path", "/other.dmg"], ["inert", "finalize-image-fallback"]):
             with self.assertRaises(module.Refused): module.entrypoint(argv)
         for failed_input in ("original-status", "installer-status", "final-P-status", "owner-source", "owner-credentials",
-                             "unconfigured", "wrong-ref", "p12-present"):
+                             "unconfigured", "wrong-ref", "p12-present", "installer-p12-present"):
             with self.subTest(finalImageAdmission=failed_input), tempfile.TemporaryDirectory() as directory:
                 state = self.final_image_fixture(Path(directory)); operation = state.operation
                 if failed_input in ("original-status", "installer-status", "final-P-status"):
@@ -9209,7 +9262,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 elif failed_input == "unconfigured":
                     (state.checkout / module.PRODUCER_PROFILE).write_bytes(b"schema=1\nstate=unconfigured\n")
                     (state.checkout / module.PROFILE).write_bytes(module.UNCONFIGURED_PROFILE)
-                elif failed_input == "wrong-ref": operation.environment["GITHUB_REF"] = "refs/heads/verify/desktop-macos-installed"
+                elif failed_input == "wrong-ref": operation.environment["GITHUB_REF"] = module.APP_SIGNATURE_REF
+                elif failed_input == "installer-p12-present": operation.environment[module.INSTALLER_CREDENTIAL_VARIABLES[0]] = "INERT must not be inherited"
                 else: operation.environment[module.CREDENTIAL_VARIABLES[0]] = "INERT must not be inherited"
                 with self.final_image_fixture_call(state), self.assertRaises(module.Refused): operation.execute()
                 self.assertEqual(state.observations, [])
@@ -9241,6 +9295,24 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     getgid=mock.Mock(return_value=20),getegid=mock.Mock(return_value=20))):
                 for phase in expected:
                     self.assertEqual(module.admit(selected,target=target,phase=phase),Path(selected["MRK_MACOS_WORK"]))
+                for final_ref in ("refs/heads/verify/desktop-macos-preview", "refs/heads/verify/desktop-macos-installed"):
+                    final_env = dict(selected, GITHUB_REF=final_ref,
+                        GITHUB_WORKFLOW_REF="Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@" + final_ref)
+                    self.assertEqual(module.admit(final_env,target=target,phase="finalize-image"),
+                                     Path(final_env["MRK_MACOS_WORK"]))
+                    if final_ref.endswith("desktop-macos-installed"):
+                        with self.assertRaisesRegex(module.Refused, "^final-image-preview-ref-only$"):
+                            module.admit(final_env,target=target,phase="finalize-remove-image")
+                        with self.assertRaisesRegex(module.Refused, "^same-package-fixed-purpose$"):
+                            module.admit(final_env,target=target,phase="same-package-noop")
+                    else:
+                        self.assertEqual(module.admit(final_env,target=target,phase="finalize-remove-image"),
+                                         Path(final_env["MRK_MACOS_WORK"]))
+                    for changed in (dict(final_env, GITHUB_REF="refs/heads/unrelated"),
+                                    dict(final_env, GITHUB_WORKFLOW_SHA="b" * 40),
+                                    dict(final_env, GITHUB_WORKFLOW_REF=final_env["GITHUB_WORKFLOW_REF"] + "-foreign")):
+                        with self.assertRaises(module.Refused):
+                            module.admit(changed,target=target,phase="finalize-image")
                 phase_refusals = {
                     "same-package-noop": "same-package-fixed-purpose",
                     "update-baseline": "update-fixed-credential-free-baseline",
@@ -9535,6 +9607,29 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
     def test_both_workflows_use_one_digest_and_owned_nested_checks_around_app_signing(self):
         # Current ordinary aggregate watchdog contains four unchanged240s scopes.
         budget_current = (Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text()
+        final_prefix = '      - name: Notarize, staple and verify only the final user image\n'
+        final_step = final_prefix + budget_current.split(final_prefix, 1)[1].split("      - name: ", 1)[0]
+        self.assertEqual(hashlib.sha256(final_step.encode()).hexdigest(), 'd6983030aa7df37ea1ce802a8bf60299095d4ad4cb37a1f15a5b2d0f1ef015b9')
+        self.assertEqual(budget_current.count(final_prefix), 1)
+        self.assertEqual(budget_current.count("        id: finalize_image\n"), 1)
+        self.assertIn("steps.package_install.outcome == 'success'", final_step)
+        self.assertNotIn("always()", final_step)
+        self.assertNotIn("steps.normal_", final_step)
+        for ui_id in ("normal_android_ui_test", "normal_ios_ui_test", "normal_ios_pending_ui_test", "normal_ui_test"):
+            self.assertLess(budget_current.index("        id: package_install\n"), budget_current.index("        id: finalize_image\n"))
+            self.assertLess(budget_current.index("        id: finalize_image\n"), budget_current.index("        id: " + ui_id + "\n"))
+        self.assertEqual(hashlib.sha256(without_installed_final_carrier_workflow(budget_current).encode()).hexdigest(),
+                         '076dfc18029bb3e2f728e5ec81542cffcc07fe4b134c3162129bb534727ad662')
+        for damaged in (final_step + final_step, final_step.replace("timeout-minutes: 32", "timeout-minutes: 33", 1),
+                        final_step.replace("set -o noclobber", "set +o noclobber", 1),
+                        final_step.replace("steps.package_install.outcome == 'success'", "always()", 1),
+                        final_step.replace("finalize-image --target", "finalize-remove-image --target", 1)):
+            with self.assertRaises(AssertionError):
+                without_installed_final_carrier_workflow(budget_current.replace(final_step, damaged, 1))
+        relocated = budget_current.replace(final_step, "", 1)
+        relocated = relocated.replace('      - name: Observe one ordinary finalized-carrier same-package no-op\n', final_step + '      - name: Observe one ordinary finalized-carrier same-package no-op\n', 1)
+        with self.assertRaises(AssertionError):
+            without_installed_final_carrier_workflow(relocated)
         assembly_prefix = '      - name: Assemble the ordinary image app and sign code inside-out (never --deep)\n'
         assembly_step = assembly_prefix + budget_current.split(assembly_prefix, 1)[1].split("      - name: ", 1)[0]
         self.assertIn("        id: app_assemble\n        timeout-minutes: 20\n", assembly_step)
@@ -10359,6 +10454,15 @@ class MacInstalledData(unittest.TestCase):
     def test_intel_android_ui_target_join_precedes_historical_projection(self):
         root = Path(__file__).absolute().parents[2]
         raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        # Authenticate the new full candidate before any historical projection.
+        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '9d1216591c34b5c05a70d61b9e88008061c7bf2fb4c1e38247f80b4622a0695b')
+        pending_selected = without_installed_final_carrier_workflow(raw)
+        self.assertEqual(hashlib.sha256(pending_selected.encode()).hexdigest(), '076dfc18029bb3e2f728e5ec81542cffcc07fe4b134c3162129bb534727ad662')
+        self.assertEqual(pending_selected.count(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[0]), 1)
+        self.assertNotIn(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[1], pending_selected)
+        # Preserve the complete original unsigned and pending/activation tail.
+        raw = pending_selected.replace(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[0],
+                                       IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[1], 1)
         # Actual current unsigned selector before all original pending/activation guards.
         self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '2c33be79764a763804c94ea0fbaa74bd4dba92ac1b0022a50f84ef378bbd9748')
         previous, current = IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE
@@ -16031,9 +16135,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # This exact helper is already in the readonly SOURCE closure. Inspect
         # its real caller without importing or invoking any operation owner.
         with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
-            helper_raw = original.read(548475 + 1)
+            helper_raw = original.read(548830 + 1)
             self.assertEqual(original.read(1), b"")
-        self.assertEqual(len(helper_raw), 548475)
+        self.assertEqual(len(helper_raw), 548830)
         helper_source = helper_raw.decode("utf-8", "strict")
         helper_tree = ast.parse(helper_source)
         helper_caps = [node.value for node in helper_tree.body

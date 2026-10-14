@@ -3818,19 +3818,19 @@ final class NormalAppUITests: XCTestCase {
         let result = XCTWaiter.wait(for: [expected], timeout: try remaining(timeout))
         if failed.count > 0 {
             diagnostic(root)
-            if engineeringRequireDiagnosticActive {
+            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive {
                 try require(false, "terminal UI refusal in " + journeyStage, line: line)
             }
             throw Refusal.condition("terminal UI refusal in " + journeyStage)
         }
         if result != .completed || query.count != 1 {
             diagnostic(root)
-            if engineeringRequireDiagnosticActive {
+            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive {
                 try require(false, "missing or ambiguous expected control in " + journeyStage, line: line)
             }
             throw Refusal.condition("missing or ambiguous expected control in " + journeyStage)
         }
-        try require(first.exists && (!enabled || first.isEnabled), "expected UI condition disappeared")
+        try require(first.exists && (!enabled || first.isEnabled), "expected UI condition disappeared", line: line)
         return first
     }
     @MainActor private func waitGone(_ element: XCUIElement, timeout: TimeInterval = 5) throws {
@@ -3920,10 +3920,14 @@ final class NormalAppUITests: XCTestCase {
         try reveal(ready, in: renderer); ready.click() // Exactly one Apply.
         try waitGone(dialog)
     }
-    @MainActor private func nativeSheet(_ window: XCUIElement, title: String) throws -> XCUIElement {
-        let sheet = try waitElement(window.sheets, in: window)
+    @MainActor private func nativeSheet(_ window: XCUIElement, title: String,
+                                        line: UInt = #line) throws -> XCUIElement {
+        let sheet = try waitElement(window.sheets, in: window, line: line)
         if sheet.label != title && sheet.staticTexts.matching(identifier: title).count != 1 {
             diagnostic(sheet)
+            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive {
+                try require(false, "unexpected original native sheet title in " + journeyStage, line: line)
+            }
             throw Refusal.condition("unexpected original native sheet title in " + journeyStage)
         }
         return sheet
@@ -3980,15 +3984,22 @@ final class NormalAppUITests: XCTestCase {
         try require(app.windows.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "ordinary app has no visible main window")
         let window = try unique(app.windows, "ordinary main window is ambiguous")
         try require(window.isHittable, "ordinary main window is not usable")
-        // Fixed renderer singleton diagnostic; no additional query or wait.
+        // Shared journey bounded renderer readiness; ambiguity remains terminal.
         let rendererQuery = window.webViews
         let rendererCount = rendererQuery.count
         if rendererCount != 1 {
             print("MRK_MACOS_NORMAL_RENDERER_QUERY=observation=initial;matches=\(min(rendererCount, 5));exceedsFour=\(rendererCount > 4 ? 1 : 0);nonAtomic=1")
         }
-        try require(rendererCount == 1, "ordinary first-party renderer is missing or ambiguous")
+        try require(rendererCount <= 1, "ordinary first-party renderer is ambiguous")
+        var observedReadyCount = rendererCount
+        if rendererCount == 0 {
+            try require(rendererQuery.element(boundBy: 0).waitForExistence(timeout: try remaining(5)),
+                        "ordinary first-party renderer did not appear")
+            observedReadyCount = rendererQuery.count
+        }
+        try require(observedReadyCount == 1, "ordinary first-party renderer is missing or ambiguous")
         let renderer = rendererQuery.element(boundBy: 0)
-        // End fixed renderer singleton diagnostic.
+        // End shared journey bounded renderer readiness.
         try dashboard(renderer)
         return (app, window, renderer)
     }
@@ -5729,6 +5740,8 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor func testSyntheticProjectUnsignedIOSArchive() throws {
+        packagedRequireDiagnosticActive = true
+        defer { packagedRequireDiagnosticActive = false }
         continueAfterFailure = false
         executionTimeAllowance = 900
         try beginCase(seconds: 900, iosUnsigned: true)
@@ -5891,6 +5904,8 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor func testInstalledIOSPendingAccountRecoveryThroughUI() throws {
+        packagedRequireDiagnosticActive = true
+        defer { packagedRequireDiagnosticActive = false }
         continueAfterFailure = false
         executionTimeAllowance = 525
         try beginCase(seconds: 525, iosRecovery: true)
