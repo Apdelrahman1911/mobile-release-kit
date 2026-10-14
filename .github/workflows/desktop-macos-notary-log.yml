@@ -1,0 +1,69 @@
+name: Fixed read-only Apple notary log diagnostic
+
+on:
+  push:
+    branches:
+      - verify/desktop-macos-notary-log
+    paths:
+      - .github/workflows/desktop-macos-notary-log.yml
+      - desktop/tools/macos_notary_log_probe.py
+      - tests/desktop/test_macos_installed_staging.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-notary-log-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-notary-log'
+    runs-on: macos-26
+    timeout-minutes: 8
+    environment: macos-developer-id
+    steps:
+      - name: Read the exact diagnostic verification source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Provide the ordinary hosted Python runtime without project dependencies
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.14.7'
+      - name: Query only the fixed Accepted log and publish finite private-free diagnostics
+        timeout-minutes: 5
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_NOTARY_API_KEY_BASE64: ${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64 }}
+          MRK_NOTARY_LOG_PROBE_SHA256: 87cd8ba6977d7fc3e571d1e3425b8d148c95ff68c26c98d8f60aad65249db76f
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-notary-log && "$GITHUB_JOB" == diagnose ]] || exit 1
+          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+          [[ -x "$pythonLocation/bin/python3" ]] || exit 1
+          set +e
+          MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
+            "$pythonLocation/bin/python3" -I -S -B desktop/tools/macos_notary_log_probe.py
+          query_status=$?
+          unset MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -e
+          exit "$query_status"
+      - name: Retain only the bounded finite diagnostic JSON, never raw log or credential
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: macos-notary-log-diagnostic-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: macos-notary-log-diagnostic.json
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0

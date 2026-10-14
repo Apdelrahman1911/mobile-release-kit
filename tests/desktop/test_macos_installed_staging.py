@@ -8847,6 +8847,115 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(application.leaf_sha1, "5effa7d19bbe005b19c1617833cbe22186c2af96")
         self.assertNotEqual(selection["leafSha1"], application.leaf_sha1)
 
+    def test_fixed_notary_log_probe_keeps_hash_unknown_and_key_lifecycle_private(self):
+        # SOURCE/DATA only: inert PEM shape is not a real Apple authentication.
+        root = Path(__file__).absolute().parents[2]
+        path = root / "desktop/tools/macos_notary_log_probe.py"
+        spec = importlib.util.spec_from_file_location("_inert_fixed_notary_probe", path)
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        helper_body = (root / "desktop/tools/macos_android_helper_package.py").read_bytes()
+        helper = probe.helper_namespace(helper_body)
+        marker = "DO_NOT_EXPORT_PRIVATE_PATH_MESSAGE_OR_KEY"
+        log = {"logFormatVersion": 1, "jobId": probe.SUBMISSION, "status": "Accepted",
+               "archiveFilename": probe.ARCHIVE, "sha256": "d" * 64, "issues": None,
+               "ticketContents": [{"path": probe.ARCHIVE, "digestAlgorithm": "SHA-1", "cdhash": "c" * 40, "arch": None}]}
+        def classify(value):
+            return probe.classify_log(TOOL.canonical(value), helper_body)
+        observed = classify(log)
+        self.assertEqual(observed["submittedImageShaComparison"], "unknown-expected")
+        self.assertTrue(observed["hashPredicateReached"])
+        self.assertIsNone(observed["firstKnownFailure"])
+        self.assertFalse(observed["originalParserPassInferred"] or observed["nativeSuccessInferred"] or observed["productReady"])
+        self.assertEqual(observed["exactOriginalFirstFailure"], "unresolved")
+        self.assertEqual(observed["knownKeyTypeMasks"]["integer"], 1 << probe.KEYS.index("logFormatVersion"))
+        self.assertEqual(observed["knownKeyTypeMasks"]["null"], 1 << probe.KEYS.index("issues"))
+        self.assertEqual(observed["knownKeyTypeMasks"]["list"], 1 << probe.KEYS.index("ticketContents"))
+        # No self-comparison: changing the unavailable expected SHA never grants authority.
+        self.assertEqual(classify(dict(log, sha256="e" * 64))["submittedImageShaComparison"], "unknown-expected")
+        nested = dict(log, ticketContents=[dict(log["ticketContents"][0], path=probe.ARCHIVE + "/Install.pkg")])
+        observed = classify(nested)
+        self.assertEqual(observed["firstKnownFailure"], "notary-log-ticket-shape")
+        self.assertEqual(observed["firstKnownFailurePosition"], "after-unknown-hash")
+        self.assertEqual(observed["exactOriginalFirstFailure"], "unresolved")
+        self.assertEqual(observed["ticketPathClasses"]["exact-nested-Install.pkg"], 1)
+        self.assertEqual(observed["architectureClasses"]["null"], 1)
+        omitted = dict(nested["ticketContents"][0]); del omitted["arch"]
+        self.assertEqual(classify(dict(log, ticketContents=[omitted]))["architectureClasses"]["absent"], 1)
+        for changes in ({"jobId": "99999999-1111-2222-3333-444444444444"}, {"status": "Invalid"},
+                        {"archiveFilename": "Other.dmg"}, {"logFormatVersion": True}, {marker: marker}):
+            with self.subTest(binding=tuple(changes)):
+                item = classify(dict(log, **changes))
+                self.assertEqual(item["firstKnownFailure"], "notary-log-binding")
+                self.assertEqual(item["firstKnownFailurePosition"], "before-unknown-hash")
+                self.assertNotIn(marker, json.dumps(item))
+        unknown = classify(dict(log, ticketContents=[dict(log["ticketContents"][0], path=marker, arch=marker)],
+                                issues=[{"path": marker, "message": marker, "severity": "warning"}]))
+        self.assertNotIn(marker, json.dumps(unknown))
+        self.assertEqual(unknown["architectureClasses"]["other-string"], 1)
+        self.assertEqual(probe.classify_log(b'{"logFormatVersion":1,"logFormatVersion":1}', helper_body)["firstKnownFailure"], "notary-json-format")
+        pem = b"-----BEGIN PRIVATE KEY-----\nSU5FUlQ=\n-----END PRIVATE KEY-----\n"
+        self.assertEqual(helper["notary_key_data"]({probe.KEY_VARIABLE: probe.base64.b64encode(pem).decode()}), pem)
+        donor = probe.passive_namespace((root / "desktop/tools/macos_e2_native_fixture.py").read_bytes(),
+                                        {"Originals", "Refused", "need", "signature"})
+        xattrs = probe.passive_namespace((root / "desktop/tools/stage_macos_installed.py").read_bytes(),
+                                         {"no_xattrs", "need", "Refused"})
+        xattrs["_DARWIN_XATTRS"] = None
+        resolver = {"role": "resolve-notarytool", "entered": True, "returned": True,
+                    "capturesSettled": True, "returncode": 0}
+        for mode in ("success", "primary", "unknown", "cleanup"):
+            with self.subTest(keyLifecycle=mode), tempfile.TemporaryDirectory() as temporary:
+                work = Path(temporary)
+                book = donor["Originals"](); admission = probe.Admission(book)
+                entry = admission.directory(work); states = []; primary = RuntimeError("INERT original failure")
+                def clock(*, work=True):
+                    return 0  # Passive clock port, not elapsed/native evidence.
+                def settled():
+                    return mode != "unknown"
+                # Admission really requires a settled resolver; model unknown only after yield.
+                known = [True]
+                def child_known():
+                    return known[0]
+                close = book.close
+                def close_port(original):
+                    close(original)  # Consume actual task-owned FD once before failure DATA.
+                    if mode == "cleanup" and original["kind"] == "file":
+                        original["closed"] = False; book.errors.append("original-close-unknown")
+                book.close = close_port
+                try:
+                    with probe.private_key(admission, entry, pem, clock, child_known, xattrs["no_xattrs"], [dict(resolver)]) as (key_path, state):
+                        states.append(state)
+                        info = os.stat(key_path, follow_symlinks=False)
+                        self.assertEqual(stat.S_IMODE(info.st_mode), 0o400)
+                        self.assertEqual(Path(key_path).read_bytes(), pem)
+                        if mode == "unknown": known[0] = False
+                        if mode in ("primary", "cleanup"): raise primary
+                except BaseException as error:
+                    if mode in ("primary", "cleanup"): self.assertIs(error, primary)
+                    elif mode == "unknown": self.assertIs(type(error), probe.Refused)
+                    else: raise
+                self.assertEqual(len(states), 1)
+                if mode in ("success", "primary"):
+                    self.assertEqual(states[0], {"created": True, "closed": True, "retired": True})
+                    self.assertFalse((work / "notary-key").exists())
+                else:
+                    self.assertFalse(states[0]["retired"])
+                    self.assertTrue((work / "notary-key").is_dir())
+                    # No worker/native call was started in this DATA fixture. Retire only these
+                    # proven task-owned inert leaves after closing actual originals once.
+                    book.close = close; book.finish()
+                    key = work / "notary-key" / ("AuthKey_" + probe.PROFILE["keyId"] + ".p8")
+                    key.unlink(); (work / "notary-key").rmdir()
+                book.close = close; book.finish()
+        # The global quotation rejects before any original API is called.
+        empty = SimpleNamespace(directories={}, entries=[])
+        bounded = probe.Admission(empty); bounded.reserved = 96
+        with self.assertRaises(probe.Refused): bounded.directory(Path("/unopened"))
+        # Fresh child creation must reserve before mkdir, not just before directory.open.
+        with mock.patch.object(probe.os, "mkdir", side_effect=AssertionError("unquoted mkdir")) as mkdir:
+            with self.assertRaises(probe.Refused): bounded.fresh_directory({}, "tmp")
+        mkdir.assert_not_called()
+
     def test_notary_ticket_architecture_annotations_preserve_strict_log_contract(self):
         # Synthetic closed DATA reflecting the authenticated 27/3/1 census,
         # not Apple's private paths/cdhashes and not native target eligibility.
