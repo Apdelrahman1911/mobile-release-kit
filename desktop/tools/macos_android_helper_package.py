@@ -69,7 +69,7 @@ PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.op
 # Intel alone uses this fixed shared-package release optimization.
 # Runtime dependencies retain release3; generic code instantiated here inherits release2.
 RESIDENT_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=2"
-HELPER_SOURCE_BYTES = 551896
+HELPER_SOURCE_BYTES = 558617
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -980,6 +980,106 @@ def digest(value):
 def signature(info):
     return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
             info.st_uid, info.st_gid, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+class _CreatedDmgXattrs:
+    """Fixed Darwin FD APIs for our fresh, unsigned hdiutil output only."""
+
+    def __init__(self):
+        need(sys.platform == "darwin", "created-image-native-host")
+        import ctypes
+        self.ctypes = ctypes
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        self.list = library.flistxattr
+        self.list.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+        self.list.restype = ctypes.c_ssize_t
+        self.get = library.fgetxattr
+        self.get.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p,
+                            ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+        self.get.restype = ctypes.c_ssize_t
+        self.remove = library.fremovexattr
+        self.remove.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+        self.remove.restype = ctypes.c_int
+
+    def names(self, fd):
+        size = self.list(fd, None, 0, 0)
+        need(size in (0, len(b"com.apple.FinderInfo\0")), "created-image-attribute-list")
+        if size == 0:
+            return b""
+        buffer = self.ctypes.create_string_buffer(size)
+        need(self.list(fd, buffer, size, 0) == size, "created-image-attribute-list-read")
+        return buffer.raw
+
+    def finder_info(self, fd):
+        # Apple ATTR_CMN_FNDRINFO is exactly FileInfo + ExtendedFileInfo (32B).
+        need(self.get(fd, b"com.apple.FinderInfo", None, 0, 0, 0) == 32,
+             "created-image-finder-info-size")
+        buffer = self.ctypes.create_string_buffer(32)
+        need(self.get(fd, b"com.apple.FinderInfo", buffer, 32, 0, 0) == 32,
+             "created-image-finder-info-read")
+        return buffer.raw
+
+    def remove_finder_info(self, fd):
+        need(self.remove(fd, b"com.apple.FinderInfo", 0) == 0,
+             "created-image-finder-info-remove")
+
+
+def _normalize_created_dmg_finder_info(fd, recheck, no_xattrs, *, api=None):
+    """Normalize one tool-generated attribute BEFORE signing, never user assets.
+
+    The caller authorizes the fresh original and retains FD/parent custody and
+    its existing deadline. Recheck returns the current named/held identity.
+    Only the single removal's ctime transition is authorized; strict stager
+    policy and complete image bytes are unchanged. An injected API is DATA
+    test plumbing, not a production platform fallback.
+    """
+    need(type(fd) is int and fd >= 0, "created-image-original-fd")
+    before = recheck()
+    need(type(before) is tuple and len(before) == 9 and before == signature(os.fstat(fd))
+         and stat.S_ISREG(before[2]) and stat.S_IMODE(before[2]) in (0o600, 0o644, 0o444)
+         and before[3] == 1 and before[4] == os.getuid() and before[5] == os.getgid()
+         and 0 < before[6] <= 512 * 1024 * 1024, "created-image-original-shape")
+
+    def checked(expected):
+        need(recheck() == expected == signature(os.fstat(fd)), "created-image-original-changed")
+
+    def stream(expected):
+        sha, offset = hashlib.sha256(), 0
+        while offset < expected[6]:
+            checked(expected)
+            block = os.pread(fd, min(1024 * 1024, expected[6] - offset), offset)
+            need(bool(block), "created-image-original-short-read")
+            sha.update(block); offset += len(block)
+        need(os.pread(fd, 1, offset) == b"", "created-image-original-eof")
+        checked(expected)
+        return sha.digest()
+
+    api = _CreatedDmgXattrs() if api is None else api
+    checked(before)
+    names = api.names(fd)
+    checked(before)
+    need(type(names) is bytes and names in (b"", b"com.apple.FinderInfo\0"),
+         "created-image-only-finder-info")
+    if not names:
+        no_xattrs(fd)
+        checked(before)
+        return before
+    value = api.finder_info(fd)
+    checked(before)
+    need(type(value) is bytes and len(value) == 32, "created-image-finder-info-value")
+    sha = stream(before)
+    # Re-admit the exact metadata immediately before the one permitted change.
+    need(api.names(fd) == names, "created-image-attribute-list-changed")
+    checked(before)
+    api.remove_finder_info(fd)
+    after = recheck()
+    need(type(after) is tuple and len(after) == 9 and after[:8] == before[:8]
+         and after == signature(os.fstat(fd)), "created-image-metadata-transition")
+    no_xattrs(fd)  # Unchanged strict production policy, not an allowlist.
+    checked(after)
+    need(stream(after) == sha, "created-image-normalization-bytes")
+    checked(after)
+    return after
 
 
 def cleanup_mount_device_data(body, stderr, code, mountpoint):
@@ -6626,6 +6726,41 @@ class Operation:
             need(self.read(entry) == body, "package-source-post")
         self.package_clock()
 
+    def package_normalize_created_image(self, path, label):
+        # Reachable only immediately after the fixed create original settled.
+        expected = self.work / self.image_directory / (
+            self.image_filename if label == "distribution" else "MobileReleaseKit-Observation.dmg")
+        need(label in ("distribution", "observation") and (not self.removal or label == "distribution")
+             and path == expected and self.package_settled() and self.calls
+             and self.calls[-1]["role"] == label + "-create", "created-image-fixed-admission")
+        parent = self.distribution_entry
+        self.recheck_directory(parent)
+        need(parent["parent_entry"] is self.work_entry and parent["name"] == self.image_directory,
+             "created-image-fixed-parent")
+        self.package_clock()
+        entry = self.original(parent, path.name, label + "-created-image", self.stager.MAX_BYTES,
+                              (0o600, 0o644, 0o444))
+        try:
+            def recheck():
+                self.package_clock()
+                self.recheck_directory(parent)
+                need(self.entry_registry.get(id(entry)) is entry and not entry["closed"]
+                     and type(entry["fd"]) is int and entry["parent_entry"] is parent
+                     and entry["parent"] == parent["fd"], "created-image-original-unavailable")
+                held = signature(os.fstat(entry["fd"]))
+                need(held == signature(os.stat(path.name, dir_fd=parent["fd"], follow_symlinks=False)),
+                     "created-image-named-original-changed")
+                self.recheck_directory(parent)
+                return held
+            need(recheck() == entry["identity"], "created-image-original-admission")
+            entry["identity"] = _normalize_created_dmg_finder_info(
+                entry["fd"], recheck, self.stager.no_xattrs)
+            self.package_clock()
+        finally:
+            self.close(entry)  # Existing owner consumes once, collects close errors.
+        need(entry["closed"] and entry["fd"] is None and self.package_settled(),
+             "created-image-close-unknown")  # No signing after uncertain close.
+
     def package_image(self, root, label):
         need(label in ("distribution", "observation") and (not self.removal or label == "distribution"), "package-image-fixed-label")
         path = self.work / self.image_directory / (self.image_filename if label == "distribution" else "MobileReleaseKit-Observation.dmg")
@@ -6633,6 +6768,7 @@ class Operation:
         self.package_call(label + "-create", ["/usr/bin/hdiutil", "create", "-srcfolder", str(self.work / root["name"]),
             "-fs", "HFS+", "-format", "UDZO", "-volname", "MobileReleaseKit", str(path)], timeout=180)
         self.package_post()
+        self.package_normalize_created_image(path, label)
         # Only this fresh task-owned image is signed. SOURCE selects the exact
         # identity; missing credentials never fall back to an ad-hoc identity.
         with self.credential_scope(label + "-image"):

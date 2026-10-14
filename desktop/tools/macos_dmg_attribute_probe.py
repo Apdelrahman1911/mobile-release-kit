@@ -30,6 +30,8 @@ KNOWN_NAMES = {
     b"com.apple.cs.CodeSignature": "code-signature",
 }
 STAGER_SHA256 = "da4cb87ca73f7086ac00ded23359faaf5a305e0ab934136f3cfb3da0586788bf"
+HELPER_SHA256 = 'f2b5e3fdc2ec67b593f8fd5876c5ec7181dd6cb30eb3687ecc84d518b1cb98e0'
+NORMALIZER_DEFINITIONS = {'Refused': (36, '8d1b0a8d6eaba43f24d5acf93b9f1ed6cdb48dbfd330c7f8863b99d92d71b182'), 'need': (71, '38bc3a9fcb4c984e63aa91eb0c770c1da2ab64b666ea43bf753abfc6bb270d3c'), 'signature': (176, '95d4ffa9abaa5793605eff4ab7556e8a44628d2af6e966a2585703318ebe73ae'), '_CreatedDmgXattrs': (1854, '38fa7be4533f44b46050bc8ac8d54b75a67d2185e1a5b82a74a83674c23b755e'), '_normalize_created_dmg_finder_info': (2630, '9b158033cb11f23e23b6217902a3a5030d2af25720f741fc03addd6f6ecca23d')}
 
 
 class Refused(Exception):
@@ -85,6 +87,32 @@ def production_policy(root):
     need(len(selected) == 3, "policy-source-definitions")
     space = {"sys": sys, "os": os, "_DARWIN_XATTRS": None}
     exec(compile(ast.Module(body=selected, type_ignores=[]), "<pinned-original-policy>", "exec"), space)
+    return space
+
+
+def production_normalizer(root):
+    """Execute only five exact reviewed passive definitions, not helper import."""
+    raw = (root / "desktop/tools/macos_android_helper_package.py").read_bytes()
+    need(len(raw) == 558617 and hashlib.sha256(raw).hexdigest() == HELPER_SHA256,
+         "normalizer-source-pin")
+    tree = ast.parse(raw)
+    lines = raw.splitlines(keepends=True)
+    selected = [node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+                and node.name in NORMALIZER_DEFINITIONS]
+    need(len(selected) == 5 and {node.name for node in selected} == set(NORMALIZER_DEFINITIONS),
+         "normalizer-source-definitions")
+    for node in selected:
+        body = b"".join(lines[node.lineno - 1:node.end_lineno])
+        need((len(body), hashlib.sha256(body).hexdigest()) == NORMALIZER_DEFINITIONS[node.name],
+             "normalizer-definition-pin")
+    imports = [node for node in tree.body if isinstance(node, ast.Import)
+               and len(node.names) == 1 and node.names[0].asname is None
+               and node.names[0].name in ("hashlib", "os", "stat", "sys")]
+    need(len(imports) == 4 and {node.names[0].name for node in imports} == {"hashlib", "os", "stat", "sys"},
+         "normalizer-passive-imports")
+    space = {}
+    exec(compile(ast.Module(body=imports + selected, type_ignores=[]),
+                 "<pinned-actual-normalizer>", "exec"), space)
     return space
 
 
@@ -151,11 +179,20 @@ def native_run():
               "comparisonBase": BASE, "source": os.environ.get("GITHUB_SHA"),
               "run": os.environ.get("GITHUB_RUN_ID"), "attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
               "platform": "macos-26", "machine": platform.machine(), "boundaries": [], "calls": [],
+              "normalization": {"helperSha256": HELPER_SHA256,
+                                "function": "_normalize_created_dmg_finder_info",
+                                "functionSha256": NORMALIZER_DEFINITIONS["_normalize_created_dmg_finder_info"][1],
+                                "entered": False, "returned": False, "bytesUnchanged": False,
+                                "identityExceptCtimeUnchanged": False, "zeroPolicyAccepted": False,
+                                "originalCloseKnown": False},
               "experimentPassed": False, "taskOutputsRetired": False,
               "developerIdQualified": False, "notarizationQualified": False, "productReady": False,
               "systemServiceExitClaimed": False, "rawNamesOrValuesEmitted": False}
     scratch = None
     held = None
+    unsigned = None
+    parent = None
+    original_close_failure = False
     original_calls_closed = True
     synchronous_workload_known = True
     deadline = time.monotonic() + 400
@@ -189,11 +226,29 @@ def native_run():
             synchronous_workload_known = False
         need(code == 0, "native-operation-nonzero")
 
+    def consume_close(fd):
+        nonlocal original_close_failure
+        try:
+            os.close(fd)
+        except Exception:
+            original_close_failure = True
+            raise Refused("original-fd-close-unknown")
+
+    def require_readonly_identity(row):
+        need(row["ctimeChangedSincePriorBoundary"] is False
+             and row["productionFullIdentityWouldAccept"] is True,
+             "readonly-original-identity-changed")
+
+    def require_zero(row):
+        need(row["xattrs"] == {"outcome": "none", "errno": None}
+             and row["existingZeroAttributePolicy"] == "accepted", "normalized-zero-policy")
+
     try:
         need(sys.platform == "darwin" and platform.machine() == "arm64"
              and os.environ.get("GITHUB_ACTIONS") == "true"
              and os.environ.get("GITHUB_REF") == BRANCH, "native-fixture-context")
         policy = production_policy(root)
+        normalizer = production_normalizer(root)
         library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
         call = library.flistxattr
         call.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
@@ -208,17 +263,69 @@ def native_run():
         image = scratch / "MobileReleaseKit.dmg"
         run("create", ["/usr/bin/hdiutil", "create", "-srcfolder", str(folder), "-fs", "HFS+",
                        "-format", "UDZO", "-volname", "MobileReleaseKit", str(image)], 180)
-        fd = original(image)
+        # Retain the same fresh unsigned FD and exact scratch parent throughout
+        # the actual production normalization; no mock API or duplicate policy.
+        parent = os.open(scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        parent_identity = identity(os.fstat(parent))
+        need(parent_identity == identity(os.stat(scratch, follow_symlinks=False))
+             and parent_identity[:2] == root_identity[:2]
+             and stat.S_IMODE(parent_identity[2]) == 0o700
+             and parent_identity[3:5] == (os.getuid(), os.getgid()), "normalizer-parent-original")
+        unsigned = original(image)
+        row, created_identity = sample(unsigned, image, call, policy, "created")
+        report["boundaries"].append(row)
+        created_info = os.fstat(unsigned)
+        need(identity(created_info) == created_identity, "normalizer-created-admission")
+        created_signature = normalizer["signature"](created_info)
+        initial_recheck = True
+
+        def recheck():
+            nonlocal initial_recheck
+            need(time.monotonic() < deadline, "experiment-deadline")
+            need(parent_identity == identity(os.fstat(parent))
+                 == identity(os.stat(scratch, follow_symlinks=False)), "normalizer-parent-changed")
+            current = os.fstat(unsigned)
+            need(identity(current) == identity(os.stat(image, follow_symlinks=False)),
+                 "normalizer-image-original-binding")
+            # Genuine production order: dev,ino,mode,nlink,uid,gid,size,mtime,ctime.
+            current_signature = normalizer["signature"](current)
+            if initial_recheck:
+                need(current_signature == created_signature, "normalizer-created-original-changed")
+                initial_recheck = False
+            return current_signature
+
+        facts = report["normalization"]
+        facts["entered"] = True
         try:
-            row, _ = sample(fd, image, call, policy, "created")
-            report["boundaries"].append(row)
-        finally:
-            os.close(fd)
+            refreshed = normalizer["_normalize_created_dmg_finder_info"](
+                unsigned, recheck, policy["no_xattrs"])
+        except normalizer["Refused"]:
+            raise Refused("actual-normalization-refused") from None
+        except policy["Refused"]:
+            raise Refused("actual-normalization-zero-policy-refused") from None
+        facts["returned"] = True
+        need(type(refreshed) is tuple and refreshed == recheck()
+             and refreshed[:8] == created_signature[:8], "normalizer-refreshed-original")
+        row, normalized_identity = sample(unsigned, image, call, policy, "normalized", created_identity)
+        facts["bytesUnchanged"] = row["sha256"] == report["boundaries"][0]["sha256"]
+        facts["identityExceptCtimeUnchanged"] = normalized_identity[:8] == created_identity[:8]
+        need(facts["bytesUnchanged"] and facts["identityExceptCtimeUnchanged"],
+             "normalizer-original-preservation")
+        require_zero(row)
+        facts["zeroPolicyAccepted"] = True
+        report["boundaries"].append(row)
+        # Consuming closes happen before signing. Never retry an uncertain FD.
+        closing, unsigned = unsigned, None
+        consume_close(closing)
+        closing, parent = parent, None
+        consume_close(closing)
+        facts["originalCloseKnown"] = True
         run("sign-ad-hoc", ["/usr/bin/codesign", "--sign", "-", "--timestamp=none",
                             "--identifier", IDENTIFIER, str(image)], 60)
         # As in production: acquire original only after authorized signing.
         held = original(image)
         row, before = sample(held, image, call, policy, "signed")
+        require_zero(row)
         report["boundaries"].append(row)
         os.fchmod(held, 0o444)
         os.fsync(held)
@@ -226,27 +333,47 @@ def native_run():
         need(after[:2] == before[:2] and after[3:8] == before[3:8]
              and after[2] == stat.S_IFREG | 0o444, "mode-transition")
         row, expected = sample(held, image, call, policy, "readonly", after)
+        require_zero(row)
+        require_readonly_identity(row)
         need(row["sha256"] == report["boundaries"][-1]["sha256"], "mode-transition-bytes")
         report["boundaries"].append(row)
         run("verify-signature", ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement",
                                  '=identifier "' + IDENTIFIER + '"', str(image)], 60)
         row, _ = sample(held, image, call, policy, "signature-verified", expected)
+        require_zero(row)
+        require_readonly_identity(row)
         report["boundaries"].append(row)
         run("verify-image", ["/usr/bin/hdiutil", "verify", str(image)], 120)
         row, _ = sample(held, image, call, policy, "image-verified", expected)
+        require_zero(row)
+        require_readonly_identity(row)
         report["boundaries"].append(row)
-        report["experimentPassed"] = True  # An observed policy refusal is a valid experiment, not a product pass.
+        need([row["boundary"] for row in report["boundaries"]]
+             == ["created", "normalized", "signed", "readonly", "signature-verified", "image-verified"],
+             "normalizer-boundary-completeness")
+        report["experimentPassed"] = True  # Actual normalization/tool behavior only, never product qualification.
     except Refused as exc:
         report["failure"] = {"type": "Refused", "reason": exc.args[0]}
     except Exception as exc:
         report["failure"] = {"type": "other", "reason": "unexpected-experiment-error"}
     finally:
-        if held is not None:
-            os.close(held)
+        # Close every task-owned original once, even if another close failed.
+        for fd in (held, unsigned, parent):
+            if fd is not None:
+                try:
+                    consume_close(fd)
+                except Refused:
+                    report["experimentPassed"] = False
+                    report.setdefault("failure", {"type": "Refused", "reason": "original-fd-close-unknown"})
+        held = unsigned = parent = None
+        report["originalFilesClosed"] = not original_close_failure
         report["originalCallsClosed"] = original_calls_closed
         report["synchronousWorkloadKnown"] = synchronous_workload_known
         report["taskOutputsRetainedAfterUnknownWorkload"] = scratch is not None and not synchronous_workload_known
-        if scratch is not None and original_calls_closed and synchronous_workload_known:
+        report["taskOutputsRetainedAfterUnknownCustody"] = scratch is not None and original_close_failure
+        if not original_calls_closed or not synchronous_workload_known or original_close_failure:
+            report["experimentPassed"] = False
+        if scratch is not None and original_calls_closed and synchronous_workload_known and not original_close_failure:
             try:
                 retire(scratch, root_identity)
                 report["taskOutputsRetired"] = True
@@ -288,7 +415,14 @@ def self_test():
     assert xattrs(0, present) == {"outcome": "attributes-present", "errno": None,
                                 "knownCategories": ["finder-info"], "unknownCount": 0,
                                 "nameCount": 1, "listState": "observed"}
-    print("PASS: bounded finite-name parser and zero/error/positive query classification; no native operation executed")
+    actual = production_normalizer(Path(__file__).resolve().parents[2])
+    assert set(actual) == {"__builtins__", "hashlib", "os", "stat", "sys"} | set(NORMALIZER_DEFINITIONS)
+    assert callable(actual["_normalize_created_dmg_finder_info"])
+    assert actual["signature"](os.stat(__file__)) == (
+        os.stat(__file__).st_dev, os.stat(__file__).st_ino, os.stat(__file__).st_mode,
+        os.stat(__file__).st_nlink, os.stat(__file__).st_uid, os.stat(__file__).st_gid,
+        os.stat(__file__).st_size, os.stat(__file__).st_mtime_ns, os.stat(__file__).st_ctime_ns)
+    print("PASS: bounded finite-name/query classes and exact passive actual-normalizer selection; no native operation executed")
     return 0
 
 
