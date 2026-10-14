@@ -1,5 +1,4 @@
 name: Desktop Mac normal package and limited early preview (Aqua gate separate)
-run-name: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ARM-only final-image diagnostic - not combined qualification' || github.workflow }}
 
 on:
   push:
@@ -26,11 +25,14 @@ jobs:
     environment: macos-developer-id
     name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}
     runs-on: ${{ matrix.runner }}
-    # Raw timed-step union602min (ARM) /642min (Intel) includes the retained42min alternative.
+    # Historical pre-installed-UI raw timed-step union602min (ARM) /642min (Intel) includes the retained42min alternative.
+    # Late installed-only DATA adds mutually exclusive28 nominal minutes; no current-route fit is claimed.
     # Remaining-three additionally requires ordinary saved-checks2; both cohorts are independent.
     # Adds28 singleton minutes plus17 saved-checks minutes; no350min fit is claimed.
     # The unchanged350min job cap is containing authority, never renewed per case.
     # Installed-only carrier retention adds7 nominal minutes; unchanged350min cap still prevails.
+    # Installed normal10 uses the same app/runner and single retained passive carrier.
+    # All scheduled originals/results and public evidence precede export retirement; no350min fit is claimed.
     # Historical pre-Remove baselines: preview345 / recovery339 / installed210, plus5 overhead.
     # Remove preview adds90 nominal step maxima; Intel app-build adds24 to the old allocation.
     # Dormant Android272 / iOS248 include5 overhead; historical baselines, not fit proofs.
@@ -44,7 +46,7 @@ jobs:
       fail-fast: false
       matrix:
         # Only this fixed ref selects two fresh ARM machines; no cross-product or Intel removal case.
-        include: ${{ fromJSON(github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"ordinary"},{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"abrupt"}]' || github.ref == 'refs/heads/verify/desktop-macos-installed' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635"}]') }}
+        include: ${{ fromJSON(github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"ordinary"},{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"abrupt"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635"}]') }}
     env:
       RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target] }}
       MRK_MACOS_TARGET: ${{ matrix.target }}
@@ -2100,151 +2102,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
-      - name: Retire only the known uploaded carrier export copy without touching image originals
-        id: p0_carrier_retire
-        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && steps.p0_carrier_upload.outcome == 'success'
-        timeout-minutes: 1
-        shell: bash
-        run: |
-          set +x
-          set +a
-          set -euo pipefail
-          umask 077
-          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1
-          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}$ ]] || exit 1
-          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
-            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_RUN_ID=$GITHUB_RUN_ID" \
-            "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \
-            "$MRK_PYTHON" -I -S -B - <<'PY_P0_CARRIER_RETIRE'
-          import hashlib, json, os, stat, sys
-          
-          
-          def carrier_need(value):
-              if not value:
-                  raise RuntimeError("owned-carrier-export-retirement-refused")
-          
-          
-          def carrier_identity(info):
-              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
-                      info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-          
-          
-          def carrier_parent_identity(info):
-              # Own child retirement legitimately changes parent size/nlink/times.
-              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
-          
-          
-          def retire_carrier(work, source, run_id, attempt, target):
-              # One known export only. No scan, recursive delete, image-original rewrite,
-              # process stop, signing input or protected installation is permitted here.
-              carrier_need(os.getuid() != 0 and os.getuid() == os.geteuid()
-                           and type(work) is str and os.path.isabs(work)
-                           and target in ("aarch64-apple-darwin", "x86_64-apple-darwin"))
-              flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-              parent = output = None
-              opened = []
-              try:
-                  parent = os.open(work, flags | os.O_DIRECTORY)
-                  pinfo = os.fstat(parent)
-                  carrier_need(stat.S_ISDIR(pinfo.st_mode) and stat.S_IMODE(pinfo.st_mode) == 0o700
-                               and (pinfo.st_uid, pinfo.st_gid) == (os.getuid(), os.getgid())
-                               and carrier_identity(os.stat(work, follow_symlinks=False)) == carrier_identity(pinfo))
-                  output = os.open("p0-carrier-input", flags | os.O_DIRECTORY, dir_fd=parent)
-                  oinfo = os.fstat(output)
-                  carrier_need(stat.S_ISDIR(oinfo.st_mode) and stat.S_IMODE(oinfo.st_mode) == 0o555
-                               and oinfo.st_nlink == 2 and (oinfo.st_uid, oinfo.st_gid) == (pinfo.st_uid, pinfo.st_gid)
-                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(oinfo))
-                  limits = {"MobileReleaseKit.dmg": 512 * 1024 * 1024, "PREVIEW.json": 16384}
-                  carrier_need(set(os.listdir(output)) == set(limits))
-                  observations = {}
-                  for name, limit in sorted(limits.items()):
-                      fd = os.open(name, flags, dir_fd=output)
-                      opened.append(fd)
-                      info = os.fstat(fd)
-                      carrier_need(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o444
-                                   and info.st_nlink == 1 and (info.st_uid, info.st_gid) == (pinfo.st_uid, pinfo.st_gid)
-                                   and 0 < info.st_size <= limit
-                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))
-                      count, digest, small = 0, hashlib.sha256(), bytearray()
-                      while True:
-                          piece = os.read(fd, min(1024 * 1024, limit + 1 - count))
-                          if not piece:
-                              break
-                          count += len(piece)
-                          carrier_need(count <= limit)
-                          digest.update(piece)
-                          if name == "PREVIEW.json":
-                              small.extend(piece)
-                      carrier_need(count == info.st_size and carrier_identity(os.fstat(fd)) == carrier_identity(info)
-                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))
-                      observations[name] = (fd, info, count, digest.hexdigest(), bytes(small))
-                  carrier_need(sum(row[2] for row in observations.values()) <= 512 * 1024 * 1024)
-                  def pairs(rows):
-                      value = {}
-                      for key, item in rows:
-                          carrier_need(key not in value)
-                          value[key] = item
-                      return value
-                  def constant(_):
-                      carrier_need(False)
-                  summary = json.loads(observations["PREVIEW.json"][4], object_pairs_hook=pairs, parse_constant=constant)
-                  platform = "macOS26-arm64" if target == "aarch64-apple-darwin" else "macOS26-x86_64"
-                  carrier_need(type(summary) is dict and type(summary.get("schemaVersion")) is int and summary["schemaVersion"] == 2
-                               and summary.get("scope") == "normal-macos-early-preview"
-                               and summary.get("workflow") == ".github/workflows/desktop-macos-installed.yml"
-                               and summary.get("sourceCommit") == source and summary.get("runId") == run_id
-                               and summary.get("runAttempt") == attempt and summary.get("platform") == platform
-                               and summary.get("packageRole") == "ordinary-image" and summary.get("instrumented") is False
-                               and summary.get("fullUIQualified") is False and summary.get("distributionQualified") is False
-                               and summary.get("productReady") is False and type(summary.get("distributionBytes")) is int
-                               and summary["distributionBytes"] == observations["MobileReleaseKit.dmg"][2]
-                               and summary.get("distributionSha256") == observations["MobileReleaseKit.dmg"][3])
-                  carrier_need(carrier_parent_identity(os.fstat(parent)) == carrier_parent_identity(pinfo)
-                               == carrier_parent_identity(os.stat(work, follow_symlinks=False))
-                               and set(os.listdir(output)) == set(limits)
-                               and carrier_identity(os.fstat(output)) == carrier_identity(oinfo)
-                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(oinfo))
-                  for name, (fd, info, _, _, _) in observations.items():
-                      carrier_need(carrier_identity(os.fstat(fd)) == carrier_identity(info)
-                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))
-                  # Only after the complete known roster/hash/POST is admitted may this
-                  # synchronous task-owned duplicate be removed. Partial failure is failure.
-                  os.fchmod(output, 0o700)
-                  for name, (fd, info, _, _, _) in observations.items():
-                      carrier_need(carrier_identity(os.fstat(fd)) == carrier_identity(info)
-                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))
-                      os.unlink(name, dir_fd=output)
-                      carrier_need(os.fstat(fd).st_nlink == 0)
-                  carrier_need(os.listdir(output) == [])
-                  os.fsync(output)
-                  final = os.fstat(output)
-                  carrier_need((final.st_dev, final.st_ino, final.st_uid, final.st_gid)
-                               == (oinfo.st_dev, oinfo.st_ino, oinfo.st_uid, oinfo.st_gid)
-                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(final))
-                  os.rmdir("p0-carrier-input", dir_fd=parent)
-                  os.fsync(parent)
-                  carrier_need(carrier_parent_identity(os.fstat(parent)) == carrier_parent_identity(pinfo)
-                               == carrier_parent_identity(os.stat(work, follow_symlinks=False)))
-              finally:
-                  # Never retry a close: an unknown consuming close fails this step.
-                  primary = sys.exc_info()[1]
-                  errors = []
-                  originals = ([parent] if parent is not None else []) + ([output] if output is not None else []) + opened
-                  for fd in reversed(originals):
-                      try:
-                          os.close(fd)
-                      except OSError as exc:
-                          errors.append(exc)
-                  if errors:
-                      if primary is None:
-                          raise errors[0]
-                      primary.add_note("owned-carrier-export-close-errors:" + str(len(errors)))
-          
-          
-          if __name__ == "__main__":
-              retire_carrier(os.environ["MRK_MACOS_WORK"], os.environ["GITHUB_SHA"],
-                             os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"], os.environ["MRK_MACOS_TARGET"])
-          PY_P0_CARRIER_RETIRE
       - name: Fixed nonshipping app-absence app-absence-restore; no credentials or user artifact
         id: app_absence_restore
         if: github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture'
@@ -2271,7 +2128,7 @@ jobs:
 
       - name: Prepare fresh private Android UI suppliers and disposable key inputs
         id: normal_android_inputs
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')) && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success'
         timeout-minutes: 22
         shell: bash
         env:
@@ -2315,7 +2172,7 @@ jobs:
 
       - name: Exercise one ordinary signed Android build with current private inputs
         id: normal_android_ui_test
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_inputs.outcome == 'success' && steps.package_install.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_inputs.outcome == 'success' && steps.package_install.outcome == 'success')) && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success'
         timeout-minutes: 23
         shell: bash
         env:
@@ -2356,7 +2213,7 @@ jobs:
 
       - name: Bind the single Android journey to current installed originals only
         id: normal_android_ui_result
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_ui_test.outcome == 'success' && steps.package_install.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_ui_test.outcome == 'success' && steps.package_install.outcome == 'success')) && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success'
         timeout-minutes: 3
         shell: bash
         env:
@@ -2683,7 +2540,7 @@ jobs:
 
       - name: Exercise one ordinary unsigned iOS archive and normal Quit
         id: normal_ios_ui_test
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')) && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success'
         timeout-minutes: 22
         shell: bash
         env:
@@ -2721,7 +2578,7 @@ jobs:
 
       - name: Observe the single unsigned iOS XCTest summary under the same source
         id: normal_ios_ui_summary
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')) && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success'
         timeout-minutes: 2
         shell: bash
         env:
@@ -2759,7 +2616,7 @@ jobs:
 
       - name: Recover one genuine pending iOS account session through the ordinary app
         id: normal_ios_pending_ui_test
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')) && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success'
         timeout-minutes: 19
         shell: bash
         env:
@@ -2803,7 +2660,7 @@ jobs:
 
       - name: Observe the one pending iOS recovery XCTest summary under the same source
         id: normal_ios_pending_ui_summary
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_pending_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_pending_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')) && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success'
         timeout-minutes: 2
         shell: bash
         env:
@@ -3126,7 +2983,7 @@ jobs:
           compression-level: 0
       - name: Launch the exact ordinary app, Cancel its real Quit sheet, then Quit normally
         id: normal_ui_test
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success' && steps.preview_upload.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success' && steps.preview_upload.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success')
         timeout-minutes: 7
         shell: bash
         env:
@@ -3199,7 +3056,7 @@ jobs:
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Preserve original XCTest counts and a closed UI-only result, never a clean-exit claim
         id: normal_ui_result
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_test.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_test.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_ui_test.outcome == 'success')
         timeout-minutes: 3
         shell: bash
         env:
@@ -3222,7 +3079,12 @@ jobs:
           set -e
           printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/summary.status"
           [[ "$summary_status" == 0 ]] || exit "$summary_status"
-          "$MRK_PYTHON" -I -S -B - <<'PY_UI_RESULT'
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \
+            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \
+            "$MRK_PYTHON" -I -S -B - <<'PY_UI_RESULT'
           import hashlib, json, os, re, stat
           from pathlib import Path
           root = Path(os.environ["MRK_MACOS_WORK"])
@@ -3251,7 +3113,14 @@ jobs:
           build_target = os.environ["MRK_MACOS_TARGET"]
           platforms = {"aarch64-apple-darwin": "macOS26-arm64", "x86_64-apple-darwin": "macOS26-x86_64"}
           if build_target not in platforms: raise ValueError("normal-result-target")
-          preview = document(root / "preview/PREVIEW.json", 65536)
+          def normal_ui_descriptor_path(workflow_ref):
+              # Two exact trusted contexts, never an inherited arbitrary path/ref.
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed":
+                  return "p0-carrier-input/PREVIEW.json"
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview":
+                  return "preview/PREVIEW.json"
+              raise ValueError("normal-ui-descriptor-workflow-ref")
+          preview = document(root / normal_ui_descriptor_path(os.environ.get("GITHUB_WORKFLOW_REF")), 65536)
           if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != os.environ["GITHUB_SHA"]
                   or preview["sourceCommit"] != os.environ["GITHUB_WORKFLOW_SHA"]
                   or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
@@ -3374,7 +3243,7 @@ jobs:
           PY_UI_RESULT
       - name: Exercise normal project edits, images and four draft-only Browse fields
         id: normal_project_ui_test
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_ui_result.outcome == 'success')
         timeout-minutes: 16
         shell: bash
         env:
@@ -3448,7 +3317,7 @@ jobs:
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Verify both selected project journeys against their original XCTest result
         id: normal_project_ui_result
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_project_ui_test.outcome == 'success')
         timeout-minutes: 3
         shell: bash
         env:
@@ -3471,7 +3340,12 @@ jobs:
           set -e
           printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/project-summary.status"
           [[ "$summary_status" == 0 ]] || exit "$summary_status"
-          "$MRK_PYTHON" -I -S -B - <<'PY_UI_RESULT'
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \
+            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \
+            "$MRK_PYTHON" -I -S -B - <<'PY_UI_RESULT'
           import hashlib, json, os, re, stat
           from pathlib import Path
           root = Path(os.environ["MRK_MACOS_WORK"])
@@ -3500,7 +3374,14 @@ jobs:
           build_target = os.environ["MRK_MACOS_TARGET"]
           platforms = {"aarch64-apple-darwin": "macOS26-arm64", "x86_64-apple-darwin": "macOS26-x86_64"}
           if build_target not in platforms: raise ValueError("normal-result-target")
-          preview = document(root / "preview/PREVIEW.json", 65536)
+          def normal_ui_descriptor_path(workflow_ref):
+              # Two exact trusted contexts, never an inherited arbitrary path/ref.
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed":
+                  return "p0-carrier-input/PREVIEW.json"
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview":
+                  return "preview/PREVIEW.json"
+              raise ValueError("normal-ui-descriptor-workflow-ref")
+          preview = document(root / normal_ui_descriptor_path(os.environ.get("GITHUB_WORKFLOW_REF")), 65536)
           if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != os.environ["GITHUB_SHA"]
                   or preview["sourceCommit"] != os.environ["GITHUB_WORKFLOW_SHA"]
                   or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
@@ -3632,7 +3513,7 @@ jobs:
           PY_UI_RESULT
       - name: Exercise synthetic encrypted credentials through the ordinary Mac UI
         id: normal_persistence_ui_test
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success')
         timeout-minutes: 11
         shell: bash
         env:
@@ -3751,7 +3632,7 @@ jobs:
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Bind the single persistence journey to original XCTest and app-helper evidence
         id: normal_persistence_ui_result
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_persistence_ui_test.outcome == 'success')
         timeout-minutes: 3
         shell: bash
         env:
@@ -3774,7 +3655,13 @@ jobs:
           set -e
           printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/persistence-summary.status"
           [[ "$summary_status" == 0 ]] || exit "$summary_status"
-          "$MRK_PYTHON" -I -S -B - <<'PY_PERSISTENCE_RESULT'
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \
+            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "MRK_MACOS_VAULT_HELPER_BYTES=$MRK_MACOS_VAULT_HELPER_BYTES" "MRK_MACOS_VAULT_HELPER_SHA256=$MRK_MACOS_VAULT_HELPER_SHA256" \
+            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \
+            "$MRK_PYTHON" -I -S -B - <<'PY_PERSISTENCE_RESULT'
           import hashlib, json, os, re, stat
           from pathlib import Path
           root = Path(os.environ["MRK_MACOS_WORK"])
@@ -3804,7 +3691,14 @@ jobs:
           build_target = os.environ["MRK_MACOS_TARGET"]
           platforms = {"aarch64-apple-darwin": "macOS26-arm64", "x86_64-apple-darwin": "macOS26-x86_64"}
           if build_target not in platforms: raise ValueError("normal-result-target")
-          preview = document("preview/PREVIEW.json")
+          def normal_ui_descriptor_path(workflow_ref):
+              # Two exact trusted contexts, never an inherited arbitrary path/ref.
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed":
+                  return "p0-carrier-input/PREVIEW.json"
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview":
+                  return "preview/PREVIEW.json"
+              raise ValueError("normal-ui-descriptor-workflow-ref")
+          preview = document(normal_ui_descriptor_path(os.environ.get("GITHUB_WORKFLOW_REF")))
           if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != os.environ["GITHUB_SHA"]
                   or preview["sourceCommit"] != os.environ["GITHUB_WORKFLOW_SHA"]
                   or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
@@ -3964,7 +3858,7 @@ jobs:
           PY_PERSISTENCE_RESULT
       - name: Observe one original build-tool diagnostics report through the ordinary Mac UI
         id: normal_diagnostics_ui_test
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success')
         timeout-minutes: 11
         shell: bash
         env:
@@ -4082,7 +3976,7 @@ jobs:
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Bind the single diagnostics journey to original XCTest and the same ordinary package
         id: normal_diagnostics_ui_result
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_test.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_test.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_diagnostics_ui_test.outcome == 'success')
         timeout-minutes: 3
         shell: bash
         env:
@@ -4105,7 +3999,12 @@ jobs:
           set -e
           printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/diagnostics-summary.status"
           [[ "$summary_status" == 0 ]] || exit "$summary_status"
-          "$MRK_PYTHON" -I -S -B - <<'PY_DIAGNOSTICS_RESULT'
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \
+            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "MRK_EXPECTED_SHA=$MRK_EXPECTED_SHA" "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \
+            "$MRK_PYTHON" -I -S -B - <<'PY_DIAGNOSTICS_RESULT'
           import hashlib, json, os, re, stat
           from pathlib import Path
           root = Path(os.environ["MRK_MACOS_WORK"])
@@ -4138,7 +4037,14 @@ jobs:
           build_target = os.environ["MRK_MACOS_TARGET"]
           platforms = {"aarch64-apple-darwin": "macOS26-arm64", "x86_64-apple-darwin": "macOS26-x86_64"}
           if build_target not in platforms: raise ValueError("normal-result-target")
-          preview = document("preview/PREVIEW.json")
+          def normal_ui_descriptor_path(workflow_ref):
+              # Two exact trusted contexts, never an inherited arbitrary path/ref.
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed":
+                  return "p0-carrier-input/PREVIEW.json"
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview":
+                  return "preview/PREVIEW.json"
+              raise ValueError("normal-ui-descriptor-workflow-ref")
+          preview = document(normal_ui_descriptor_path(os.environ.get("GITHUB_WORKFLOW_REF")))
           if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != source
                   or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
                   or preview["platform"] != platforms[build_target] or preview["instrumented"] is not False
@@ -4296,7 +4202,7 @@ jobs:
 
       - name: Observe saved offline checks and empty build-input inspection through the ordinary Mac UI
         id: normal_saved_checks_ui_test
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three'))
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three'))) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success')
         timeout-minutes: 17
         shell: bash
         env:
@@ -4418,7 +4324,7 @@ jobs:
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Bind both saved-check journeys to original XCTest and the same ordinary package
         id: normal_saved_checks_ui_result
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_checks_ui_test.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_checks_ui_test.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_saved_checks_ui_test.outcome == 'success')
         timeout-minutes: 3
         shell: bash
         env:
@@ -4441,7 +4347,12 @@ jobs:
           set -e
           printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/saved-checks-summary.status"
           [[ "$summary_status" == 0 ]] || exit "$summary_status"
-          "$MRK_PYTHON" -I -S -B - <<'PY_SAVED_CHECKS_RESULT'
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \
+            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "MRK_EXPECTED_SHA=$MRK_EXPECTED_SHA" "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \
+            "$MRK_PYTHON" -I -S -B - <<'PY_SAVED_CHECKS_RESULT'
           import hashlib, json, os, re, stat
           from pathlib import Path
           root = Path(os.environ["MRK_MACOS_WORK"])
@@ -4474,7 +4385,14 @@ jobs:
           build_target = os.environ["MRK_MACOS_TARGET"]
           platforms = {"aarch64-apple-darwin": "macOS26-arm64", "x86_64-apple-darwin": "macOS26-x86_64"}
           if build_target not in platforms: raise ValueError("normal-result-target")
-          preview = document("preview/PREVIEW.json")
+          def normal_ui_descriptor_path(workflow_ref):
+              # Two exact trusted contexts, never an inherited arbitrary path/ref.
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed":
+                  return "p0-carrier-input/PREVIEW.json"
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview":
+                  return "preview/PREVIEW.json"
+              raise ValueError("normal-ui-descriptor-workflow-ref")
+          preview = document(normal_ui_descriptor_path(os.environ.get("GITHUB_WORKFLOW_REF")))
           if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != source
                   or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
                   or preview["platform"] != platforms[build_target] or preview["instrumented"] is not False
@@ -4734,7 +4652,13 @@ jobs:
           set -e
           printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/${singleton}-summary.status"
           [[ "$summary_status" == 0 ]] || exit "$summary_status"
-          "$MRK_PYTHON" -I -S -B - <<'PY_SAVED_VERSION_RECOVERY_RESULT'
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \
+            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "MRK_EXPECTED_SHA=$MRK_EXPECTED_SHA" "MRK_BUNDLED_RUNTIME_SOURCE_SHA256=$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" \
+            "MRK_MACOS_SAVED_FILE_UI_SCOPE=$MRK_MACOS_SAVED_FILE_UI_SCOPE" "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \
+            "$MRK_PYTHON" -I -S -B - <<'PY_SAVED_VERSION_RECOVERY_RESULT'
           import hashlib, json, os, re, stat
           from pathlib import Path
           root = Path(os.environ["MRK_MACOS_WORK"])
@@ -4773,7 +4697,14 @@ jobs:
               return value
           def digest(body): return hashlib.sha256(body).hexdigest()
           def hex64(value): return type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
-          preview = decode(read("preview/PREVIEW.json", 65536))
+          def normal_ui_descriptor_path(workflow_ref):
+              # Two exact trusted contexts, never an inherited arbitrary path/ref.
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed":
+                  return "p0-carrier-input/PREVIEW.json"
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview":
+                  return "preview/PREVIEW.json"
+              raise ValueError("normal-ui-descriptor-workflow-ref")
+          preview = decode(read(normal_ui_descriptor_path(os.environ.get("GITHUB_WORKFLOW_REF")), 65536))
           platforms = {"aarch64-apple-darwin": "macOS26-arm64", "x86_64-apple-darwin": "macOS26-x86_64"}
           need(target in platforms and preview.get("platform") == platforms[target]
                and preview.get("scope") == "normal-macos-early-preview" and preview.get("instrumented") is False
@@ -4915,7 +4846,7 @@ jobs:
           PY_SAVED_VERSION_RECOVERY_RESULT
       - name: Exercise and bind each remaining saved-file journey once in fixed order
         id: normal_remaining_saved_file_ui
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success')
         timeout-minutes: 42
         shell: bash
         env:
@@ -4989,7 +4920,13 @@ jobs:
           set -e
           printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/${singleton}-summary.status"
           [[ "$summary_status" == 0 ]] || exit "$summary_status"
-          "$MRK_PYTHON" -I -S -B - <<'PY_SAVED_VERSION_RECOVERY_RESULT'
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \
+            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "MRK_EXPECTED_SHA=$MRK_EXPECTED_SHA" "MRK_BUNDLED_RUNTIME_SOURCE_SHA256=$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" \
+            "MRK_MACOS_SAVED_FILE_UI_SCOPE=$MRK_MACOS_SAVED_FILE_UI_SCOPE" "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \
+            "$MRK_PYTHON" -I -S -B - <<'PY_SAVED_VERSION_RECOVERY_RESULT'
           import hashlib, json, os, re, stat
           from pathlib import Path
           root = Path(os.environ["MRK_MACOS_WORK"])
@@ -5028,7 +4965,14 @@ jobs:
               return value
           def digest(body): return hashlib.sha256(body).hexdigest()
           def hex64(value): return type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
-          preview = decode(read("preview/PREVIEW.json", 65536))
+          def normal_ui_descriptor_path(workflow_ref):
+              # Two exact trusted contexts, never an inherited arbitrary path/ref.
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed":
+                  return "p0-carrier-input/PREVIEW.json"
+              if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview":
+                  return "preview/PREVIEW.json"
+              raise ValueError("normal-ui-descriptor-workflow-ref")
+          preview = decode(read(normal_ui_descriptor_path(os.environ.get("GITHUB_WORKFLOW_REF")), 65536))
           platforms = {"aarch64-apple-darwin": "macOS26-arm64", "x86_64-apple-darwin": "macOS26-x86_64"}
           need(target in platforms and preview.get("platform") == platforms[target]
                and preview.get("scope") == "normal-macos-early-preview" and preview.get("instrumented") is False
@@ -5169,6 +5113,13 @@ jobs:
                 "One preview-packaged GitHub local bundle refusal observed; remote GitHub, promotion, default-seven and independent all-worker finality remain unproved.")
           PY_SAVED_VERSION_RECOVERY_RESULT
           done
+      - name: Verify the same fixed DATA contracts only after the installed normal10 originals close
+        id: installed_normal_data_contracts
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_ui_test.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_project_ui_test.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_persistence_ui_test.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_test.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_test.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success'
+        timeout-minutes: 28
+        shell: bash
+        run: |
+          builtin source ./desktop/tools/macos_installed_data_contracts.sh
       - name: Project closed public verification facts without raw originals
         id: public_evidence
         if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.work.outputs.root != '')
@@ -5197,8 +5148,227 @@ jobs:
       # publication of a release, Store workflow, or synthetic GUI success here.
       # The focused real Aqua/Save procedure and separate command/result gates
       # are in desktop/packaging/macos-installed.md.
+      - name: Retire only the known uploaded carrier export copy without touching image originals
+        id: p0_carrier_retire
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.public_evidence.outcome == 'success' && steps.evidence.outcome == 'success' && ((github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_test.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_project_ui_test.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_persistence_ui_test.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_test.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_test.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.installed_normal_data_contracts.outcome == 'success') || (env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && env.MRK_MACOS_IOS_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_android_inputs.outcome == 'success' && steps.normal_android_ui_test.outcome == 'success' && steps.normal_android_ui_result.outcome == 'success') || (env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_pending_ui_test.outcome == 'success' && steps.normal_ios_pending_ui_summary.outcome == 'success'))
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          umask 077
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1
+          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}$ ]] || exit 1
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_RUN_ID=$GITHUB_RUN_ID" \
+            "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \
+            "MRK_MACOS_IOS_UI_SCOPE=$MRK_MACOS_IOS_UI_SCOPE" \
+            "$MRK_PYTHON" -I -S -B - <<'PY_P0_CARRIER_RETIRE'
+          import hashlib, json, os, stat, sys
+          
+          
+          def carrier_need(value):
+              if not value:
+                  raise RuntimeError("owned-carrier-export-retirement-refused")
+          
+          
+          def carrier_identity(info):
+              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                      info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+          
+          
+          def carrier_parent_identity(info):
+              # Own child retirement legitimately changes parent size/nlink/times.
+              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+          
+          
+          def carrier_pending_projection(value, source, run_id, attempt, target):
+              # The existing public projector already joins the private originals.
+              # This readback cannot create a pending result or infer native success.
+              fixed = {"schemaVersion": 1, "kind": "mrk-public-verification-evidence-v1",
+                       "profile": "installed", "source": source, "workflowSource": source,
+                       "runId": run_id, "runAttempt": attempt, "target": target,
+                       "expectedRemovalCase": "disabled", "diagnosticOnly": True, "productReady": False}
+              carrier_need(type(value) is dict and all(type(value.get(key)) is type(item) and value[key] == item
+                                                      for key, item in fixed.items()))
+              statuses = value.get("statuses")
+              carrier_need(type(statuses) is dict)
+              for name in ("normal-ui/ios-pending-recovery-test.status", "normal-ui/ios-pending-recovery-summary.status"):
+                  row = statuses.get(name)
+                  carrier_need(type(row) is dict and row.get("receiptState") == "observed"
+                               and type(row.get("returncode")) is int and row["returncode"] == 0)
+              positive = value.get("positiveUiObservations")
+              carrier_need(type(positive) is dict)
+              observed = positive.get("iosPendingRecovery")
+              carrier_need(type(observed) is dict and observed.get("receiptState") == "observed"
+                           and observed.get("binding") == "same-work-root-parent-context-only"
+                           and observed.get("nativeSuccessInferred") is False
+                           and all(observed.get(key) is True for key in
+                               ("sourceAndTargetMatched", "runContextMatched", "callerStatusesMatched", "recordedRunnerOriginalsClosed")))
+              counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+              carrier_need(type(observed.get("testCounts")) is dict and set(observed["testCounts"]) == set(counts)
+                           and all(type(observed["testCounts"][key]) is int and observed["testCounts"][key] == item
+                                   for key, item in counts.items()))
+              observation = observed.get("observation")
+              carrier_need(type(observation) is dict and all(type(observation.get(key)) is type(item) and observation[key] == item
+                  for key, item in {"sourceCommit": source, "runId": run_id, "runAttempt": attempt, "target": target,
+                                    "ordinaryQuit": True}.items()))
+              for name, account_status in (("inspect", "pending"), ("recover", "recovered")):
+                  row = observation.get(name)
+                  carrier_need(type(row) is dict and all(row.get(key) == item for key, item in
+                      {"phase": "terminal", "outcome": "complete", "reason": "none", "accountStatus": account_status}.items()))
+              account = observed.get("account")
+              carrier_need(type(account) is dict and all(account.get(key) is True for key in
+                  ("exactPendingSessionRecovered", "originalOwnedNativeAndControlsRemoved", "persistentOriginalLeaseRetained",
+                   "baselineIdentitiesMatched", "baselinePreferencesMatched", "projectMarkerUnchanged")))
+              for name in ("producer", "nativeReadback"):
+                  row = account.get(name)
+                  carrier_need(type(row) is dict and all(row.get(key) is True for key in
+                      ("commandFinalities", "leaseClosed", "sessionClosed", "handlersRestored", "fixtureDescriptorsClosed", "originalDeadlineMet")))
+              return True
+          
+          
+          def retire_carrier(work, source, run_id, attempt, target, ios_scope="ios-unsigned-archive"):
+              # One known export only. No scan, recursive delete, image-original rewrite,
+              # process stop, signing input or protected installation is permitted here.
+              carrier_need(os.getuid() != 0 and os.getuid() == os.geteuid()
+                           and type(work) is str and os.path.isabs(work)
+                           and target in ("aarch64-apple-darwin", "x86_64-apple-darwin")
+                           and ios_scope in ("disabled", "ios-unsigned-archive", "ios-pending-recovery"))
+              flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+              parent = output = None
+              opened = []
+              try:
+                  parent = os.open(work, flags | os.O_DIRECTORY)
+                  pinfo = os.fstat(parent)
+                  carrier_need(stat.S_ISDIR(pinfo.st_mode) and stat.S_IMODE(pinfo.st_mode) == 0o700
+                               and (pinfo.st_uid, pinfo.st_gid) == (os.getuid(), os.getgid())
+                               and carrier_identity(os.stat(work, follow_symlinks=False)) == carrier_identity(pinfo))
+                  output = os.open("p0-carrier-input", flags | os.O_DIRECTORY, dir_fd=parent)
+                  oinfo = os.fstat(output)
+                  carrier_need(stat.S_ISDIR(oinfo.st_mode) and stat.S_IMODE(oinfo.st_mode) == 0o555
+                               and oinfo.st_nlink == 2 and (oinfo.st_uid, oinfo.st_gid) == (pinfo.st_uid, pinfo.st_gid)
+                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(oinfo))
+                  limits = {"MobileReleaseKit.dmg": 512 * 1024 * 1024, "PREVIEW.json": 16384}
+                  carrier_need(set(os.listdir(output)) == set(limits))
+                  observations = {}
+                  for name, limit in sorted(limits.items()):
+                      fd = os.open(name, flags, dir_fd=output)
+                      opened.append(fd)
+                      info = os.fstat(fd)
+                      carrier_need(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o444
+                                   and info.st_nlink == 1 and (info.st_uid, info.st_gid) == (pinfo.st_uid, pinfo.st_gid)
+                                   and 0 < info.st_size <= limit
+                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))
+                      count, digest, small = 0, hashlib.sha256(), bytearray()
+                      while True:
+                          piece = os.read(fd, min(1024 * 1024, limit + 1 - count))
+                          if not piece:
+                              break
+                          count += len(piece)
+                          carrier_need(count <= limit)
+                          digest.update(piece)
+                          if name == "PREVIEW.json":
+                              small.extend(piece)
+                      carrier_need(count == info.st_size and carrier_identity(os.fstat(fd)) == carrier_identity(info)
+                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))
+                      observations[name] = (fd, info, count, digest.hexdigest(), bytes(small))
+                  carrier_need(sum(row[2] for row in observations.values()) <= 512 * 1024 * 1024)
+                  def pairs(rows):
+                      value = {}
+                      for key, item in rows:
+                          carrier_need(key not in value)
+                          value[key] = item
+                      return value
+                  def constant(_):
+                      carrier_need(False)
+                  summary = json.loads(observations["PREVIEW.json"][4], object_pairs_hook=pairs, parse_constant=constant)
+                  platform = "macOS26-arm64" if target == "aarch64-apple-darwin" else "macOS26-x86_64"
+                  carrier_need(type(summary) is dict and type(summary.get("schemaVersion")) is int and summary["schemaVersion"] == 2
+                               and summary.get("scope") == "normal-macos-early-preview"
+                               and summary.get("workflow") == ".github/workflows/desktop-macos-installed.yml"
+                               and summary.get("sourceCommit") == source and summary.get("runId") == run_id
+                               and summary.get("runAttempt") == attempt and summary.get("platform") == platform
+                               and summary.get("packageRole") == "ordinary-image" and summary.get("instrumented") is False
+                               and summary.get("fullUIQualified") is False and summary.get("distributionQualified") is False
+                               and summary.get("productReady") is False and type(summary.get("distributionBytes")) is int
+                               and summary["distributionBytes"] == observations["MobileReleaseKit.dmg"][2]
+                               and summary.get("distributionSha256") == observations["MobileReleaseKit.dmg"][3])
+                  pending = None
+                  if ios_scope == "ios-pending-recovery":
+                      pending_fd = os.open("public-verification-evidence.json", flags, dir_fd=parent)
+                      opened.append(pending_fd)
+                      pending_info = os.fstat(pending_fd)
+                      carrier_need(stat.S_ISREG(pending_info.st_mode) and stat.S_IMODE(pending_info.st_mode) == 0o600
+                                   and pending_info.st_nlink == 1 and (pending_info.st_uid, pending_info.st_gid) == (pinfo.st_uid, pinfo.st_gid)
+                                   and 0 < pending_info.st_size <= 128 * 1024
+                                   and carrier_identity(os.stat("public-verification-evidence.json", dir_fd=parent, follow_symlinks=False)) == carrier_identity(pending_info))
+                      pending_body = bytearray()
+                      while True:
+                          piece = os.read(pending_fd, min(65536, 128 * 1024 + 1 - len(pending_body)))
+                          if not piece: break
+                          pending_body.extend(piece)
+                          carrier_need(len(pending_body) <= 128 * 1024)
+                      carrier_need(len(pending_body) == pending_info.st_size
+                                   and carrier_identity(os.fstat(pending_fd)) == carrier_identity(pending_info)
+                                   == carrier_identity(os.stat("public-verification-evidence.json", dir_fd=parent, follow_symlinks=False)))
+                      carrier_pending_projection(json.loads(pending_body, object_pairs_hook=pairs, parse_constant=constant),
+                                                 source, run_id, attempt, target)
+                      pending = (pending_fd, pending_info)
+                  carrier_need(carrier_parent_identity(os.fstat(parent)) == carrier_parent_identity(pinfo)
+                               == carrier_parent_identity(os.stat(work, follow_symlinks=False))
+                               and set(os.listdir(output)) == set(limits)
+                               and carrier_identity(os.fstat(output)) == carrier_identity(oinfo)
+                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(oinfo))
+                  for name, (fd, info, _, _, _) in observations.items():
+                      carrier_need(carrier_identity(os.fstat(fd)) == carrier_identity(info)
+                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))
+                  # Only after the complete known roster/hash/POST is admitted may this
+                  # synchronous task-owned duplicate be removed. Partial failure is failure.
+                  if pending is not None:
+                      pending_fd, pending_info = pending
+                      carrier_need(carrier_identity(os.fstat(pending_fd)) == carrier_identity(pending_info)
+                                   == carrier_identity(os.stat("public-verification-evidence.json", dir_fd=parent, follow_symlinks=False)))
+                  os.fchmod(output, 0o700)
+                  for name, (fd, info, _, _, _) in observations.items():
+                      carrier_need(carrier_identity(os.fstat(fd)) == carrier_identity(info)
+                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))
+                      os.unlink(name, dir_fd=output)
+                      carrier_need(os.fstat(fd).st_nlink == 0)
+                  carrier_need(os.listdir(output) == [])
+                  os.fsync(output)
+                  final = os.fstat(output)
+                  carrier_need((final.st_dev, final.st_ino, final.st_uid, final.st_gid)
+                               == (oinfo.st_dev, oinfo.st_ino, oinfo.st_uid, oinfo.st_gid)
+                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(final))
+                  os.rmdir("p0-carrier-input", dir_fd=parent)
+                  os.fsync(parent)
+                  carrier_need(carrier_parent_identity(os.fstat(parent)) == carrier_parent_identity(pinfo)
+                               == carrier_parent_identity(os.stat(work, follow_symlinks=False)))
+              finally:
+                  # Never retry a close: an unknown consuming close fails this step.
+                  primary = sys.exc_info()[1]
+                  errors = []
+                  originals = ([parent] if parent is not None else []) + ([output] if output is not None else []) + opened
+                  for fd in reversed(originals):
+                      try:
+                          os.close(fd)
+                      except OSError as exc:
+                          errors.append(exc)
+                  if errors:
+                      if primary is None:
+                          raise errors[0]
+                      primary.add_note("owned-carrier-export-close-errors:" + str(len(errors)))
+          
+          
+          if __name__ == "__main__":
+              retire_carrier(os.environ["MRK_MACOS_WORK"], os.environ["GITHUB_SHA"],
+                             os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"], os.environ["MRK_MACOS_TARGET"],
+                             os.environ["MRK_MACOS_IOS_UI_SCOPE"])
+          PY_P0_CARRIER_RETIRE
       - name: Remove only this completed preview build's disposable compiler outputs
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_ui_test.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_project_ui_test.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_persistence_ui_test.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_test.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_test.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.p0_carrier_retire.outcome == 'success' && steps.public_evidence.outcome == 'success' && steps.evidence.outcome == 'success' && steps.installed_normal_data_contracts.outcome == 'success' && env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled')
         timeout-minutes: 3
         shell: bash
         run: |
@@ -5234,7 +5404,10 @@ jobs:
           scope = os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"]
           if scope not in ("ordinary-seven", "saved-version-recovery", "workflow-refusal", "release-evidence", "remaining-three"):
               raise ValueError("task cleanup SOURCE scope refused")
-          stems = (("saved-checks", "saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else
+          installed_normal = (os.environ.get("GITHUB_REF") == "refs/heads/verify/desktop-macos-installed"
+                              and os.environ.get("MRK_MACOS_ANDROID_UI_SCOPE") == "disabled"
+                              and os.environ.get("MRK_MACOS_IOS_UI_SCOPE") == "ios-unsigned-archive" and scope == "ordinary-seven")
+          stems = (("saved-checks", "saved-version-recovery", "workflow-refusal", "release-evidence") if installed_normal or scope == "remaining-three" else
                    ({"ordinary-seven": "saved-checks", "saved-version-recovery": "saved-version-recovery",
                      "workflow-refusal": "workflow-refusal", "release-evidence": "release-evidence"}[scope],))
           # The skipped cohort supplies no finality or cleanup authority.

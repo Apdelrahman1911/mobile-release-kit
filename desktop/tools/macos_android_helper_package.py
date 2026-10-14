@@ -69,7 +69,7 @@ PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.op
 # Intel alone uses this fixed shared-package release optimization.
 # Runtime dependencies retain release3; generic code instantiated here inherits release2.
 RESIDENT_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=2"
-HELPER_SOURCE_BYTES = 566884
+HELPER_SOURCE_BYTES = 571244
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -1309,8 +1309,8 @@ DISTRIBUTION_STAGER_REASONS = frozenset(('distribution-attach-original', 'distri
 
 # Fixed first-failing post-staple facts only; never native/finality authority.
 FINAL_IMAGE_UNLINK_FLAGS = ('retainedPreIdentityExpected', 'retainedPreLinkUnlinked', 'namedExists', 'namedSameDevice', 'namedRegular', 'namedModeExpected', 'namedOwnerExpected', 'namedGroupExpected', 'namedSingleLink', 'namedSizeBounded', 'namedGrowthBounded', 'namedInodeDifferent', 'heldNameIdentityDifferent', 'parentStable', 'censusStable', 'retainedPreBytesUnchanged', 'namedPostStable')
-FINAL_IMAGE_STAPLE_STAGES = ('final-image-staple-clock', 'final-image-staple-parent', 'final-image-staple-held-stat', 'final-image-staple-held-device', 'final-image-staple-held-inode', 'final-image-staple-held-mode', 'final-image-staple-held-links', 'final-image-staple-held-links-unlinked', 'final-image-staple-held-links-other', 'final-image-staple-held-uid', 'final-image-staple-held-gid', 'final-image-staple-size', 'final-image-staple-growth', 'final-image-staple-name-stat', 'final-image-staple-binding', 'final-image-staple-xattr-query', 'final-image-staple-xattrs-present', 'final-image-staple-stream', 'final-image-staple-post')
-FINAL_IMAGE_STAPLE_REASONS = frozenset(('final-image-stapled-original', 'file-extended-attributes-query', 'file-extended-attributes', 'notary-monotonic-clock', 'directory-original-unavailable', 'directory-parent-changed', 'directory-original-unbound', 'directory-original-changed', 'notary-zip-original', 'notary-zip-short-read', 'notary-zip-post', 'final-image-directory-census', 'final-image-input-changed', 'final-image-output-changed', 'final-image-target-census'))
+FINAL_IMAGE_STAPLE_STAGES = ('final-image-staple-clock', 'final-image-staple-parent', 'final-image-staple-held-stat', 'final-image-staple-held-device', 'final-image-staple-held-inode', 'final-image-staple-held-mode', 'final-image-staple-held-links', 'final-image-staple-held-links-unlinked', 'final-image-staple-held-links-other', 'final-image-staple-held-uid', 'final-image-staple-held-gid', 'final-image-staple-size', 'final-image-staple-growth', 'final-image-staple-name-stat', 'final-image-staple-binding', 'final-image-staple-xattr-query', 'final-image-staple-xattrs-present', 'final-image-staple-stream', 'final-image-staple-post', 'final-image-staple-returned-input', 'final-image-staple-returned-preimage', 'final-image-staple-returned-name', 'final-image-staple-returned-acquire', 'final-image-staple-returned-stream', 'final-image-staple-returned-commit')
+FINAL_IMAGE_STAPLE_REASONS = frozenset(('final-image-stapled-original', 'file-extended-attributes-query', 'file-extended-attributes', 'notary-monotonic-clock', 'directory-original-unavailable', 'directory-parent-changed', 'directory-original-unbound', 'directory-original-changed', 'notary-zip-original', 'notary-zip-short-read', 'notary-zip-post', 'final-image-directory-census', 'final-image-input-changed', 'final-image-output-changed', 'final-image-target-census', 'final-package-preimage-unavailable', 'final-package-preimage-metadata', 'final-package-preimage-short-read', 'final-package-preimage-content', 'final-package-preimage-post'))
 
 FINAL_IMAGE_INPUT_STAGES = (
     'final-image-original-inputs',
@@ -2114,6 +2114,7 @@ class Operation:
         self.install_component_inputs = None
         self.final_image_roots, self.final_image_inputs = [], []
         self.final_image_original = self.final_image_output_root = self.final_image_output = self.final_image_sha = None
+        self.final_image_preimage = None  # Held unlinked PRE, separate from name-bound inputs.
         self.final_image_complete = self.final_image_mount_verified = False
         self.directories = {}
         self.work_entry = self.target_entry = None
@@ -3828,8 +3829,15 @@ class Operation:
         self.stager_io_pending = None  # Only a returned original clears this latch.
         return value
 
+    def final_image_preimage_post(self, *, work=True, record=None):
+        if record is None:
+            record = self.final_image_preimage
+        if record is not None:
+            self.stager.package_staple_preimage_post(self, need, work=work, record=record)
+
     def final_image_post(self, *, work=True):
         self.notary_clock(work=work)
+        self.final_image_preimage_post(work=work)
         for root, names in self.final_image_roots:
             self.recheck_directory(root)
             need(set(os.listdir(root["fd"])) == names, "final-image-directory-census")
@@ -4080,7 +4088,51 @@ class Operation:
         need(self.final_image_sha == original_sha, "final-image-copy-digest")
         self.final_image_roots.append((root, {self.image_filename}))
 
-    def final_image_mutated(self, before):
+    def final_image_returned(self, entry, before, after, before_entry, before_sha):
+        # SAME settled staple call: preserve the submitted PRE by its FD and
+        # register the returned name before any fallible use of its new FD.
+        self.stage = "final-image-staple-returned-input"
+        need(self.notary_mutation_pending and self.final_image_preimage is None
+             and before_entry is entry and entry is self.final_image_output
+             and self.entry_registry.get(id(entry)) is entry and entry["kind"] == "file"
+             and entry["role"] == "final-image-copy" and type(entry["fd"]) is int and not entry["closed"]
+             and entry["identity"] == before and before_sha == self.final_image_sha
+             and type(before_sha) is str and re.fullmatch(r"[0-9a-f]{64}", before_sha) is not None,
+             "final-image-stapled-original")
+        need(after[:3] == before[:3] and after[3] == 0 and after[4:8] == before[4:8],
+             "final-image-stapled-original")
+        parent = entry["parent_entry"]
+        need(parent is self.final_image_output_root and entry["name"] == self.image_filename
+             and set(os.listdir(parent["fd"])) == {entry["name"]}, "final-image-directory-census")
+        record = (entry, after, before_sha)
+        self.stage = "final-image-staple-returned-preimage"
+        self.final_image_preimage_post(record=record)
+        self.stage = "final-image-staple-returned-name"
+        named = signature(os.stat(entry["name"], dir_fd=parent["fd"], follow_symlinks=False))
+        need(named[0] == before[0] and named[1] != before[1] and named[2] == before[2]
+             and stat.S_ISREG(named[2]) and named[3] == 1 and named[4:6] == before[4:6]
+             and 0 < named[6] <= self.stager.MAX_BYTES
+             and abs(named[6] - before[6]) <= 1024 * 1024, "final-image-stapled-original")
+        self.stage = "final-image-staple-returned-acquire"
+        returned = self.original(parent, entry["name"], "final-image-stapled-output",
+                                 self.stager.MAX_BYTES, (stat.S_IMODE(before[2]),))
+        need(returned["identity"] == named
+             == signature(os.stat(entry["name"], dir_fd=parent["fd"], follow_symlinks=False)),
+             "final-image-stapled-original")
+        self.final_image_preimage_post(record=record)
+        self.recheck_directory(parent)
+        need(set(os.listdir(parent["fd"])) == {entry["name"]}, "final-image-directory-census")
+        self.stage = "final-image-staple-returned-stream"
+        sha = self.notary_stream(returned)
+        self.final_image_preimage_post(record=record)
+        self.recheck_directory(parent)
+        need(set(os.listdir(parent["fd"])) == {entry["name"]}, "final-image-directory-census")
+        self.stage = "final-image-staple-returned-commit"
+        self.final_image_preimage, self.final_image_output, self.final_image_sha = record, returned, sha
+        self.final_image_post()  # First committed PRE/output POST while still pending.
+        self.notary_mutation_pending = False
+
+    def final_image_mutated(self, before, *, before_entry=None, before_sha=None):
         # Apple rewrites SuperBlob/UDIF, not a PKG prefix. All original guards
         # and short-circuit reads remain; these finite stages only locate refusal.
         entry = self.final_image_output
@@ -4088,6 +4140,9 @@ class Operation:
         self.recheck_directory(entry["parent_entry"])
         self.stage = "final-image-staple-held-stat"
         after = signature(os.fstat(entry["fd"]))
+        if after[3] == 0 and before_entry is not None:
+            self.final_image_returned(entry, before, after, before_entry, before_sha)
+            return
         for index, label in enumerate(("device", "inode", "mode", "links", "uid", "gid")):
             self.stage = "final-image-staple-held-" + label
             if index == 3 and after[index] != before[index]:
@@ -4205,7 +4260,7 @@ class Operation:
                 self.stage = "final-image-staple-clock"
             self.notary_clock()
             if changing:
-                self.final_image_mutated(before)
+                self.final_image_mutated(before, before_entry=before_entry, before_sha=before_sha)
                 self.stage = "final-image-staple-post"
             self.notary_post()
             if changing:
@@ -4232,19 +4287,23 @@ class Operation:
         self.stage = self.stager_io_pending = "final-image-owned-publication"
         entry, old_parent = self.final_image_output, self.final_image_output_root
         before, sha = entry["identity"], self.final_image_sha
+        self.final_image_preimage_post()
         os.fchmod(entry["fd"], 0o444)
         os.fsync(entry["fd"])
         after = signature(os.fstat(entry["fd"]))
         need(after[:2] == before[:2] and after[2] == stat.S_IFREG | 0o444 and after[3:8] == before[3:8]
              and signature(os.stat(entry["name"], dir_fd=old_parent["fd"], follow_symlinks=False)) == after, "final-image-owned-mode-transition")
         entry["identity"] = after
+        self.final_image_preimage_post()
         need(self.notary_stream(entry) == sha, "final-image-mode-bytes")
+        self.final_image_preimage_post()
         self.recheck_directory(self.work_entry)
         os.mkdir(self.final_image_directory, 0o700, dir_fd=self.work_entry["fd"])
         parent = self.directory(self.work_entry, self.final_image_directory, "final-image-publication")
         need(stat.S_IMODE(parent["identity"][2]) == 0o700 and not os.listdir(parent["fd"]), "final-image-exclusive-publication")
         self.recheck_directory(old_parent)
         need(os.listdir(old_parent["fd"]) == [entry["name"]], "final-image-publication-input")
+        self.final_image_preimage_post()
         os.rename(entry["name"], entry["name"], src_dir_fd=old_parent["fd"], dst_dir_fd=parent["fd"])
         moved = signature(os.fstat(entry["fd"]))
         need(moved[:8] == after[:8] and not os.listdir(old_parent["fd"])
@@ -4254,7 +4313,9 @@ class Operation:
         self.final_image_roots = [(root, set() if root is old_parent else names) for root, names in self.final_image_roots]
         self.final_image_roots.append((parent, {entry["name"]}))
         os.fsync(parent["fd"]); os.fsync(old_parent["fd"]); os.fsync(self.work_entry["fd"])
+        self.final_image_preimage_post()
         need(self.notary_stream(entry) == sha, "final-image-published-bytes")
+        self.final_image_preimage_post()
         self.recheck_directory(old_parent); self.recheck_directory(parent)
         self.notary_clock()
         self.stager_io_pending = None

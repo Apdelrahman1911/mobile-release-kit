@@ -1818,6 +1818,51 @@ INTEL_FETCH_OFFLINE_REGION = ('                           "--locked", "--release
 ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME = "run-name: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ARM-only final-image diagnostic - not combined qualification' || github.workflow }}\n"
 ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT = ' || github.ref == \'refs/heads/verify/desktop-macos-installed\' && \'[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"}]\''
 
+
+# Installed nonpublishing normal10 SOURCE-only exact delta; all old preview
+# and historical safety contracts consume their authenticated predecessor.
+INSTALLED_NORMAL_UI_WORKFLOW_SHA256 = '63bb8945ed2650ac6997b05eb4dfde3e2c16fd58160558e54d3bc68ebbffc71f'
+INSTALLED_NORMAL_UI_WORKFLOW_PREDECESSOR = '3b3530617a79c694d64fbe9f50eb67306f9928f2f44e5505f2820a5614dd9c8b'
+INSTALLED_NORMAL_UI_WORKFLOW_INVERSE = ((1367, 230, '9aaba1a697d93e0601ad8ea9568017ac2aa07561ca772bb747899568f765645e', '    # Raw timed-step union602min (ARM) /642min (Intel) includes the retained42min alternative.\n'), (1961, 197, '710c578f671c1e39ed8531a368e7b2e1b372c5cdb532b311eec17c263ff1c460', ''), (149565, 0, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', '      - name: Retire only the known uploaded carrier export copy without touching image originals\n        id: p0_carrier_retire\n        if: github.ref == \'refs/heads/verify/desktop-macos-installed\' && steps.p0_carrier_upload.outcome == \'success\'\n        timeout-minutes: 1\n        shell: bash\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          umask 077\n          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1\n          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || exit 1\n          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \\\n            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_RUN_ID=$GITHUB_RUN_ID" \\\n            "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \\\n            "$MRK_PYTHON" -I -S -B - <<\'PY_P0_CARRIER_RETIRE\'\n          import hashlib, json, os, stat, sys\n          \n          \n          def carrier_need(value):\n              if not value:\n                  raise RuntimeError("owned-carrier-export-retirement-refused")\n          \n          \n          def carrier_identity(info):\n              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,\n                      info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)\n          \n          \n          def carrier_parent_identity(info):\n              # Own child retirement legitimately changes parent size/nlink/times.\n              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)\n          \n          \n          def retire_carrier(work, source, run_id, attempt, target):\n              # One known export only. No scan, recursive delete, image-original rewrite,\n              # process stop, signing input or protected installation is permitted here.\n              carrier_need(os.getuid() != 0 and os.getuid() == os.geteuid()\n                           and type(work) is str and os.path.isabs(work)\n                           and target in ("aarch64-apple-darwin", "x86_64-apple-darwin"))\n              flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC\n              parent = output = None\n              opened = []\n              try:\n                  parent = os.open(work, flags | os.O_DIRECTORY)\n                  pinfo = os.fstat(parent)\n                  carrier_need(stat.S_ISDIR(pinfo.st_mode) and stat.S_IMODE(pinfo.st_mode) == 0o700\n                               and (pinfo.st_uid, pinfo.st_gid) == (os.getuid(), os.getgid())\n                               and carrier_identity(os.stat(work, follow_symlinks=False)) == carrier_identity(pinfo))\n                  output = os.open("p0-carrier-input", flags | os.O_DIRECTORY, dir_fd=parent)\n                  oinfo = os.fstat(output)\n                  carrier_need(stat.S_ISDIR(oinfo.st_mode) and stat.S_IMODE(oinfo.st_mode) == 0o555\n                               and oinfo.st_nlink == 2 and (oinfo.st_uid, oinfo.st_gid) == (pinfo.st_uid, pinfo.st_gid)\n                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(oinfo))\n                  limits = {"MobileReleaseKit.dmg": 512 * 1024 * 1024, "PREVIEW.json": 16384}\n                  carrier_need(set(os.listdir(output)) == set(limits))\n                  observations = {}\n                  for name, limit in sorted(limits.items()):\n                      fd = os.open(name, flags, dir_fd=output)\n                      opened.append(fd)\n                      info = os.fstat(fd)\n                      carrier_need(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o444\n                                   and info.st_nlink == 1 and (info.st_uid, info.st_gid) == (pinfo.st_uid, pinfo.st_gid)\n                                   and 0 < info.st_size <= limit\n                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))\n                      count, digest, small = 0, hashlib.sha256(), bytearray()\n                      while True:\n                          piece = os.read(fd, min(1024 * 1024, limit + 1 - count))\n                          if not piece:\n                              break\n                          count += len(piece)\n                          carrier_need(count <= limit)\n                          digest.update(piece)\n                          if name == "PREVIEW.json":\n                              small.extend(piece)\n                      carrier_need(count == info.st_size and carrier_identity(os.fstat(fd)) == carrier_identity(info)\n                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))\n                      observations[name] = (fd, info, count, digest.hexdigest(), bytes(small))\n                  carrier_need(sum(row[2] for row in observations.values()) <= 512 * 1024 * 1024)\n                  def pairs(rows):\n                      value = {}\n                      for key, item in rows:\n                          carrier_need(key not in value)\n                          value[key] = item\n                      return value\n                  def constant(_):\n                      carrier_need(False)\n                  summary = json.loads(observations["PREVIEW.json"][4], object_pairs_hook=pairs, parse_constant=constant)\n                  platform = "macOS26-arm64" if target == "aarch64-apple-darwin" else "macOS26-x86_64"\n                  carrier_need(type(summary) is dict and type(summary.get("schemaVersion")) is int and summary["schemaVersion"] == 2\n                               and summary.get("scope") == "normal-macos-early-preview"\n                               and summary.get("workflow") == ".github/workflows/desktop-macos-installed.yml"\n                               and summary.get("sourceCommit") == source and summary.get("runId") == run_id\n                               and summary.get("runAttempt") == attempt and summary.get("platform") == platform\n                               and summary.get("packageRole") == "ordinary-image" and summary.get("instrumented") is False\n                               and summary.get("fullUIQualified") is False and summary.get("distributionQualified") is False\n                               and summary.get("productReady") is False and type(summary.get("distributionBytes")) is int\n                               and summary["distributionBytes"] == observations["MobileReleaseKit.dmg"][2]\n                               and summary.get("distributionSha256") == observations["MobileReleaseKit.dmg"][3])\n                  carrier_need(carrier_parent_identity(os.fstat(parent)) == carrier_parent_identity(pinfo)\n                               == carrier_parent_identity(os.stat(work, follow_symlinks=False))\n                               and set(os.listdir(output)) == set(limits)\n                               and carrier_identity(os.fstat(output)) == carrier_identity(oinfo)\n                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(oinfo))\n                  for name, (fd, info, _, _, _) in observations.items():\n                      carrier_need(carrier_identity(os.fstat(fd)) == carrier_identity(info)\n                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))\n                  # Only after the complete known roster/hash/POST is admitted may this\n                  # synchronous task-owned duplicate be removed. Partial failure is failure.\n                  os.fchmod(output, 0o700)\n                  for name, (fd, info, _, _, _) in observations.items():\n                      carrier_need(carrier_identity(os.fstat(fd)) == carrier_identity(info)\n                                   and carrier_identity(os.stat(name, dir_fd=output, follow_symlinks=False)) == carrier_identity(info))\n                      os.unlink(name, dir_fd=output)\n                      carrier_need(os.fstat(fd).st_nlink == 0)\n                  carrier_need(os.listdir(output) == [])\n                  os.fsync(output)\n                  final = os.fstat(output)\n                  carrier_need((final.st_dev, final.st_ino, final.st_uid, final.st_gid)\n                               == (oinfo.st_dev, oinfo.st_ino, oinfo.st_uid, oinfo.st_gid)\n                               and carrier_identity(os.stat("p0-carrier-input", dir_fd=parent, follow_symlinks=False)) == carrier_identity(final))\n                  os.rmdir("p0-carrier-input", dir_fd=parent)\n                  os.fsync(parent)\n                  carrier_need(carrier_parent_identity(os.fstat(parent)) == carrier_parent_identity(pinfo)\n                               == carrier_parent_identity(os.stat(work, follow_symlinks=False)))\n              finally:\n                  # Never retry a close: an unknown consuming close fails this step.\n                  primary = sys.exc_info()[1]\n                  errors = []\n                  originals = ([parent] if parent is not None else []) + ([output] if output is not None else []) + opened\n                  for fd in reversed(originals):\n                      try:\n                          os.close(fd)\n                      except OSError as exc:\n                          errors.append(exc)\n                  if errors:\n                      if primary is None:\n                          raise errors[0]\n                      primary.add_note("owned-carrier-export-close-errors:" + str(len(errors)))\n          \n          \n          if __name__ == "__main__":\n              retire_carrier(os.environ["MRK_MACOS_WORK"], os.environ["GITHUB_SHA"],\n                             os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"], os.environ["MRK_MACOS_TARGET"])\n          PY_P0_CARRIER_RETIRE\n'), (150745, 431, '79a5a8d3abfddb32d1769b0d68b7d5f824d2a383ea75d2f8ac2d943a5b422672', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"), (153916, 437, '29c8a0f2d1c7d8dc46df669e75f18e0f53e1cda2b1ccdc76a3010b6ca539401a', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_inputs.outcome == 'success' && steps.package_install.outcome == 'success')\n"), (156862, 438, '46441dbced9d60089d74b49d81c32e438814777d581ba38150dc476952774715', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_ui_test.outcome == 'success' && steps.package_install.outcome == 'success')\n"), (181787, 532, '9a3c0e05605919eade2f52d9e288ce05fed32dd3ce6220dca1222b70eb0dcc28', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"), (184673, 581, 'f47a400d6abc9be67cf54ac5b783278baf320e91a93467954af6da99e4e0e0b0', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"), (187707, 532, '16c95dea6acad17d7184ec6b0a76df0fbb2ace57721a86ab5ce9dbc3cbde6774', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"), (191154, 589, '9539a4a3ee7fa8c87749565944ae43c4039c4f730e7406e49e959b30d75ec09c', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_pending_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"), (213091, 879, '0c743a7a0009405f7bd4365257fe8e827fb39974f24a808e7e53701e76d22e25', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success' && steps.preview_upload.outcome == 'success')\n"), (218475, 878, '7f1e7d0c6f87f46232004b993fd29eedfb1aedb126c3568e72040ae2f782d36f', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_test.outcome == 'success')\n"), (220598, 433, '6ee7aaff993d088d9e72df8fef45683d294bcf07b4961f8f460c7efd9382bf25', '          "$MRK_PYTHON" -I -S -B - <<\'PY_UI_RESULT\'\n'), (222767, 736, '67d46cb15976594bf1d8e30c315b7d0e12753af5b3e5e4fc22fc7cc3e03ef8fd', '          preview = document(root / "preview/PREVIEW.json", 65536)\n'), (234958, 882, '4b2b16a976ff7a1ea03c3f2cf613d059b28829bda18970bebdfd65fcdfa79c74', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success')\n"), (240519, 894, '6b5f5e7bae2555d8d7cf4b3bd4eff0f53485f9a30efae1efb5b39e1a7bf0a857', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success')\n"), (242690, 433, '6ee7aaff993d088d9e72df8fef45683d294bcf07b4961f8f460c7efd9382bf25', '          "$MRK_PYTHON" -I -S -B - <<\'PY_UI_RESULT\'\n'), (244859, 736, '67d46cb15976594bf1d8e30c315b7d0e12753af5b3e5e4fc22fc7cc3e03ef8fd', '          preview = document(root / "preview/PREVIEW.json", 65536)\n'), (258035, 890, 'e43968d0cfe693dc3f154e8f313014f5d83bd81c9046129ced3865a922e79d81', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success')\n"), (267008, 902, 'dee51ce9a4550e5890494df7741f6de6bbdcccca7cdd11eb9e76cd6601fc8d05', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == 'success')\n"), (269203, 580, 'adcd77ba5bbe78a41df96f999f43a776907dd1fd83958938481734fe8b59914a', '          "$MRK_PYTHON" -I -S -B - <<\'PY_PERSISTENCE_RESULT\'\n'), (271606, 722, '8011d22fe14fb765061dcdd4bbfa6c2f78355a9895e2b35326adb58eb4ea4cb2', '          preview = document("preview/PREVIEW.json")\n'), (287518, 906, '39bd32672a3527a612554c03aa79bce421e7d44ea681cd587661d6b2a3c4a7ea', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == 'success')\n"), (296549, 902, 'dba423174b5ab1257a94dda600087182bd5d9e6ea3a4dc65d375afa60f4fa5ca', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_test.outcome == 'success')\n"), (298744, 479, 'c9778e4a283ce9fdd759c288ca87b1a54c953a7a69bdf8d7eb1efeaf67501f02', '          "$MRK_PYTHON" -I -S -B - <<\'PY_DIAGNOSTICS_RESULT\'\n'), (301268, 722, '8011d22fe14fb765061dcdd4bbfa6c2f78355a9895e2b35326adb58eb4ea4cb2', '          preview = document("preview/PREVIEW.json")\n'), (317571, 1023, 'c4bf5df5b9389319e546fa53ef9769e2d8a8309426f2244e4877f3082dc1a476', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three'))\n"), (327117, 904, '369cd0fab68440a2d605af6b9bb0e219f91d40d55eb7c71718599af1ba61085e', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_checks_ui_test.outcome == 'success')\n"), (329318, 480, '00353a337a922604283bd960f733ad4de799139c8d67fbb7700d521fc31e75e9', '          "$MRK_PYTHON" -I -S -B - <<\'PY_SAVED_CHECKS_RESULT\'\n'), (331846, 722, '8011d22fe14fb765061dcdd4bbfa6c2f78355a9895e2b35326adb58eb4ea4cb2', '          preview = document("preview/PREVIEW.json")\n'), (356694, 638, '20dad0f039ccb13415cb98e2ea40739e991a2fe2217900c7e703706d65d83c4c', '          "$MRK_PYTHON" -I -S -B - <<\'PY_SAVED_VERSION_RECOVERY_RESULT\'\n'), (359782, 733, '2c908bb5fe810713cf4def2bc1a9341a5fdf9a2aa76832a7caebdf7966205fa1', '          preview = decode(read("preview/PREVIEW.json", 65536))\n'), (374265, 1084, '09ccbd0f17838e86283384c9b404cc4c534ca191a495ec625e91e916170f25e9', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success')\n"), (380169, 638, '20dad0f039ccb13415cb98e2ea40739e991a2fe2217900c7e703706d65d83c4c', '          "$MRK_PYTHON" -I -S -B - <<\'PY_SAVED_VERSION_RECOVERY_RESULT\'\n'), (383257, 733, '2c908bb5fe810713cf4def2bc1a9341a5fdf9a2aa76832a7caebdf7966205fa1', '          preview = decode(read("preview/PREVIEW.json", 65536))\n'), (397626, 1653, '1b2de2d15ca8fa599d9713932c9f02de5fcee6b7af7cd903949244089047a693', ''), (401117, 18297, '697fc5cd699c34152dc58d742a3725eec67210155fdc2c7586393a3d85827360', ''), (419499, 2706, '1c65f7b9fc917300a4db0560ec52c69c6ebcf89856ff888db02bdca4ca8be5d0', "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))\n"), (424460, 488, '7c579ba0f4f916c4a5c99ce4d4ea78a07529b4645cbc42d1b121e8283d3dabba', '          stems = (("saved-checks", "saved-version-recovery", "workflow-refusal", "release-evidence") if scope == "remaining-three" else\n'))
+
+# Exact paired SOURCE only; restore the temporary diagnostic bytes solely for
+# unchanged39-region historical projection, never for live workflow execution.
+INSTALLED_NORMAL_UI_PAIRED_WORKFLOW_SHA256 = '27b20038461f2eeb83ed0124a9d8464e8dda1625b7eea58fd27362c8f7450269'
+
+def installed_normal_ui_historical_source(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("installed normal UI historical SOURCE bound differs")
+    value = source.encode()
+    if hashlib.sha256(value).hexdigest() != INSTALLED_NORMAL_UI_PAIRED_WORKFLOW_SHA256:
+        return source
+    # Complete pairedSHA admission makes these two fixed SOURCE offsets exact.
+    for start, literal in ((80, ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME),
+                           (4097, ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT)):
+        value = value[:start] + literal.encode() + value[start:]
+    if hashlib.sha256(value).hexdigest() != INSTALLED_NORMAL_UI_WORKFLOW_SHA256:
+        raise AssertionError("installed normal UI exact armed SOURCE restoration differs")
+    restored = value.decode()
+    if without_arm_only_final_image_diagnostic_workflow(restored) != source:
+        raise AssertionError("installed normal UI paired SOURCE roundtrip differs")
+    return restored
+
+def without_installed_normal_ui_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("installed normal UI SOURCE bound differs")
+    markers = ("    # Installed normal10 uses the same app/runner and single retained passive carrier.\n",
+               "          def normal_ui_descriptor_path(workflow_ref):\n", "def carrier_pending_projection(")
+    if not any(marker in source for marker in markers):
+        return source
+    value = installed_normal_ui_historical_source(source).encode()
+    for start, length, expected, prior in reversed(INSTALLED_NORMAL_UI_WORKFLOW_INVERSE):
+        current = value[start:start + length]
+        if hashlib.sha256(current).hexdigest() != expected:
+            raise AssertionError("installed normal UI complete fixed SOURCE delta differs")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != INSTALLED_NORMAL_UI_WORKFLOW_PREDECESSOR:
+        raise AssertionError("installed normal UI exact predecessor differs")
+    return value.decode()
+
 def without_arm_only_final_image_diagnostic_workflow(source):
     # Exact temporary selector only, before unchanged historical supplier counts.
     if type(source) is not str or len(source.encode()) > 512 * 1024:
@@ -2862,7 +2907,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
         helper_body = (Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py").read_bytes()
         self.assertEqual(len(helper_body), module.HELPER_SOURCE_BYTES)
-        self.assertEqual(module.HELPER_SOURCE_BYTES, 566884)
+        self.assertEqual(module.HELPER_SOURCE_BYTES, 571244)
         helper_tree = ast.parse(helper_body)
         constants = [node.value for node in helper_tree.body
                      if isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -2870,7 +2915,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(len(constants), 1)
         source_cap = ast.literal_eval(constants[0])
         self.assertIs(type(source_cap), int)
-        self.assertEqual(source_cap, 566884)
+        self.assertEqual(source_cap, 571244)
         operation = next(node for node in helper_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
         caps = []
         for method in operation.body:
@@ -3113,8 +3158,11 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 def post():
                     counts["post"] += 1
                     if fault == "post" and counts["post"] >= 2: raise primary
-                def mutated(before):
+                def mutated(before, **same_call):
                     self.assertEqual(before, tuple(range(9)))
+                    self.assertEqual(set(same_call), {"before_entry", "before_sha"})
+                    self.assertIs(same_call["before_entry"], selected.final_image_output)
+                    self.assertEqual(same_call["before_sha"], selected.final_image_sha)
                     selected.notary_mutation_pending = False
                 result = object()
                 with (mock.patch.object(selected, "notary_clock", side_effect=clock),
@@ -3169,7 +3217,13 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         os.utime(entry["fd"], ns=(os.fstat(entry["fd"]).st_atime_ns, original_identity[7]))
                     selected.calls.append({"role": role, "returned": True, "capturesSettled": True, "returncode": 0})
                     return CompletedProcess(argv, 0, b"", b"")
-                def mutate(before):
+                def mutate(before, **same_call):
+                    self.assertEqual(set(same_call), {"before_entry", "before_sha"})
+                    self.assertIs(same_call["before_entry"], entry)
+                    self.assertEqual(same_call["before_sha"], original_sha)
+                    # This legacy failure-only observer fixture deliberately
+                    # omits the captured-entry keyword on the real call. It
+                    # does not opt into functional returned-output adoption.
                     if fault == "foreign-primary":
                         error = ForeignXattrs("final-image-stapled-original")
                         selected.stage = "final-image-staple-held-links-unlinked"; primaries.append(error); raise error
@@ -4491,7 +4545,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         replacement.chmod(0o600); replacement.replace(path)
                     else:
                         with path.open("ab") as output_file:
-                            output_file.write(ticket if failure != "ticket-oversize" else b"x" * (1024 * 1024 + 1))
+                            # Excessive size is observed through the fixed
+                            # post-staple stat DATA port below, never a write
+                            # exceeding this owner's genuine 1MiB file cap.
+                            output_file.write(ticket)
                         if failure == "ticket-prefix":
                             with path.open("r+b") as output_file:
                                 output_file.write(b"X")
@@ -4537,7 +4594,36 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 mock.patch.object(module, "NOTARY_FREE_FLOOR", 0), mock.patch.object(module, "NOTARY_STORAGE_RESERVE", 2 * 1024 * 1024):
             # Fixture sizes are <2MiB; retain REAL statvfs and a smaller bounded
             # fixture reservation. The production3GiB+2GiB defaults stay fixed.
-            yield state.operation
+            with contextlib.ExitStack() as ports:
+                if state.failure == "ticket-oversize":
+                    # Observe excessive growth only at the exact SAME held
+                    # output/name pair during its actual post-staple checks.
+                    # This is DATA metadata, not native oversized evidence.
+                    actual_appended = state.operation.final_package_appended
+                    observations = []
+                    def appended(before, before_sha):
+                        entry = state.operation.final_package_output
+                        real_fstat, real_stat = module.os.fstat, module.os.stat
+                        def excessive(info):
+                            fields = {name: getattr(info, name) for name in ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")}
+                            fields["st_size"] = before[6] + 1024 * 1024 + 1
+                            return SimpleNamespace(**fields)
+                        def held(number):
+                            info = real_fstat(number)
+                            if number != entry["fd"]: return info
+                            observations.append("held")
+                            return excessive(info)
+                        def named(name, *args, **kwargs):
+                            info = real_stat(name, *args, **kwargs)
+                            if name != entry["name"] or kwargs.get("dir_fd") != entry["parent"] or kwargs.get("follow_symlinks") is not False:
+                                return info
+                            observations.append("named")
+                            return excessive(info)
+                        with mock.patch.object(module.os, "fstat", side_effect=held), mock.patch.object(module.os, "stat", side_effect=named):
+                            return actual_appended(before, before_sha)
+                    ports.enter_context(mock.patch.object(state.operation, "final_package_appended", side_effect=appended))
+                yield state.operation
+                if state.failure == "ticket-oversize": self.assertEqual(observations, ["held", "named"])
         self.assertEqual(state.operation.notary_tool, original_tool)
         self.assertEqual((module.NOTARY_FREE_FLOOR, module.NOTARY_STORAGE_RESERVE), (3 * 1024 * 1024 * 1024, 2 * 1024 * 1024 * 1024))
 
@@ -5178,7 +5264,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         "archiveFilename": "MobileReleaseKit.dmg", "sha256": TOOL.digest(image), "issues": None,
                         "ticketContents": [{"path": "MobileReleaseKit.dmg", "digestAlgorithm": "SHA-1", "cdhash": "c" * 40, "arch": None}]}
                     if failure == "log-sha": value["sha256"] = "f" * 64
-                    if failure == "nested-null-annotation": value["ticketContents"][0]["path"] += "/Install.pkg"
+                    if failure == "nested-null-annotation":
+                        # The exact embedded Install.pkg container is allowed;
+                        # a nested executable still cannot claim null arch.
+                        value["ticketContents"][0]["path"] += "/Install.pkg/Contents/MacOS/MobileReleaseKit"
                     output = TOOL.canonical(value)
             elif role in ("final-image-staple", "final-image-validate"):
                 self.assertIsNone(operation.notary_key)
@@ -5191,7 +5280,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         replacement = path.with_suffix(".replacement")
                         replacement.write_bytes(final_image); replacement.chmod(0o600); replacement.replace(path)
                     else:
-                        path.write_bytes(final_image if failure != "ticket-oversize" else image + bytes(1024 * 1024 + 1))
+                        # The fixed excessive-size DATA observation lives
+                        # in final_image_fixture_call; actual bytes stay tiny.
+                        path.write_bytes(final_image)
                         if failure == "ticket-mode": path.chmod(0o644)
             elif role == "final-image-verify":
                 self.assertEqual(argv, ["/usr/bin/hdiutil", "verify", str(path)])
@@ -5256,7 +5347,25 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
               mock.patch.object(operation, "notary_tool", side_effect=state.tool),
               mock.patch.object(module, "NOTARY_FREE_FLOOR", 0),
               mock.patch.object(module, "NOTARY_STORAGE_RESERVE", 2 * 1024 * 1024)):
-            yield operation
+            with contextlib.ExitStack() as ports:
+                if state.failure == "ticket-oversize":
+                    actual_mutated = operation.final_image_mutated
+                    observations = []
+                    def mutated(before, **same_call):
+                        entry, real_fstat = operation.final_image_output, module.os.fstat
+                        self.assertIs(same_call["before_entry"], entry)
+                        def excessive(number):
+                            info = real_fstat(number)
+                            if number != entry["fd"]: return info
+                            observations.append(number)
+                            fields = {name: getattr(info, name) for name in ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")}
+                            fields["st_size"] = before[6] + 1024 * 1024 + 1
+                            return SimpleNamespace(**fields)
+                        with mock.patch.object(module.os, "fstat", side_effect=excessive):
+                            return actual_mutated(before, **same_call)
+                    ports.enter_context(mock.patch.object(operation, "final_image_mutated", side_effect=mutated))
+                yield operation
+                if state.failure == "ticket-oversize": self.assertEqual(len(observations), 1)
         self.assertEqual(operation.recheck_mount, original_mount)
         self.assertEqual(operation.notary_tool, original_tool)
         self.assertEqual((module.NOTARY_FREE_FLOOR, module.NOTARY_STORAGE_RESERVE), (3 * 1024 ** 3, 2 * 1024 ** 3))
@@ -6717,7 +6826,15 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             operation.signing = TOOL.service_signing_data(credentials.service)
             operation.package_started = operation.package_observed = credentials.clock[0]
             operation.package_endpoint = credentials.clock[0] + 990_000_000_000
-            with self.credential_fixture_call(operation, credentials), mock.patch.object(module, "load_data", return_value=matcher):
+            # The inert native-tool port creates plain Linux files with no xattrs.
+            # Only Darwin API calls are DATA; real normalization/custody/close runs.
+            inert_image_attributes = SimpleNamespace(
+                names=mock.Mock(return_value=b""),
+                finder_info=mock.Mock(side_effect=AssertionError("inert image has no FinderInfo")),
+                remove_finder_info=mock.Mock(side_effect=AssertionError("inert image has no FinderInfo to remove")))
+            with (self.credential_fixture_call(operation, credentials),
+                  mock.patch.object(module, "load_data", return_value=matcher),
+                  mock.patch.object(module, "_CreatedDmgXattrs", return_value=inert_image_attributes) as image_attribute_api):
                 try:
                     operation.open()
                     entry = operation.original(operation.work_entry, compiler.name, "compiler-original", 4096, (0o755,))
@@ -6739,6 +6856,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         value, path = operation.package_image(root, label)
                         self.assertEqual(value["sha256"], module.digest(path.read_bytes()))
                         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o444)
+                    self.assertEqual(image_attribute_api.call_count, 2)
+                    self.assertEqual(inert_image_attributes.names.call_count, 2)
+                    inert_image_attributes.finder_info.assert_not_called()
+                    inert_image_attributes.remove_finder_info.assert_not_called()
                     self.assertEqual(len(operation.credential_calls), 60)  # 3+19 producer, then19+19 App scopes; NOT64 per scope.
                     self.assertEqual([row["purpose"] for row in operation.credential_contexts],
                                      ["producer", "distribution-image", "observation-image"])
@@ -7063,14 +7184,15 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         with self.assertRaises(module.Refused):
                             module.final_package_receipt(b'{"schemaVersion":1,' + record_body[1:], *arguments)
 
-        # S4 copies ONLY the old signed carrier, mutates that same inode, and
-        # keeps the previous Installer/S3/raw producer originals unchanged.
-        # The native tools/device status are DATA doubles, never qualification.
-        for target, final_ref in ((target, ref) for target in TOOL.MAC_TARGETS for ref in
-                                 ("refs/heads/verify/desktop-macos-preview", "refs/heads/verify/desktop-macos-installed")):
-            with self.subTest(finalImageTarget=target, ref=final_ref), tempfile.TemporaryDirectory() as directory:
+        # S4 copies ONLY the old signed carrier. Both same-inode mutation and
+        # the same settled call's returned name retain all preceding originals.
+        # Tools/device status are DATA doubles, never native qualification.
+        for target, final_ref, replacement in ((target, ref, replacement) for target in TOOL.MAC_TARGETS for ref in
+                                 ("refs/heads/verify/desktop-macos-preview", "refs/heads/verify/desktop-macos-installed") for replacement in (False, True)):
+            with self.subTest(finalImageTarget=target, ref=final_ref, returnedName=replacement), tempfile.TemporaryDirectory() as directory:
                 # The ref is chosen BEFORE preceding S3 originals are generated.
-                state = self.final_image_fixture(Path(directory), target=target, ref=final_ref)
+                state = self.final_image_fixture(Path(directory), target=target, ref=final_ref,
+                                                 failure="ticket-replaced" if replacement else None)
                 operation, peaks, consumed = state.operation, [0], {}
                 active = {id(row): row for row in operation.entries if not row["closed"]}
                 original_register, original_close = operation.register, operation.close
@@ -7087,12 +7209,50 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     finally:
                         if entry["closed"] and entry["fd"] is None:
                             active.pop(id(entry), None)
+                committed, pre_checks = [], []
+                actual_post, actual_pre_post = operation.final_image_post, operation.final_image_preimage_post
+                def pre_post(**kwargs):
+                    value = actual_pre_post(**kwargs)
+                    record = kwargs.get("record", operation.final_image_preimage)
+                    if record is not None:
+                        pre, identity, sha = record
+                        self.assertIs(operation.entry_registry[id(pre)], pre)
+                        self.assertEqual((os.fstat(pre["fd"]).st_nlink, os.pread(pre["fd"], len(state.original_image) + 1, 0), sha),
+                                         (0, state.original_image, TOOL.digest(state.original_image)))
+                        pre_checks.append((id(pre), pre["fd"], operation.stage, kwargs.get("work", True), os.listdir(pre["parent_entry"]["fd"])))
+                    return value
+                def post(**kwargs):
+                    value = actual_post(**kwargs)
+                    if operation.notary_mutation_pending and operation.final_image_preimage is not None:
+                        pre, identity, sha = operation.final_image_preimage
+                        current = operation.final_image_output
+                        self.assertIsNot(pre, current)
+                        self.assertIs(operation.entry_registry[id(current)], current)
+                        self.assertEqual((pre["role"], current["role"]), ("final-image-copy", "final-image-stapled-output"))
+                        self.assertNotEqual((pre["fd"], identity[1]), (current["fd"], current["identity"][1]))
+                        self.assertEqual((operation.notary_stream(current), operation.final_image_sha), (TOOL.digest(state.final_image),) * 2)
+                        committed.append((id(pre), id(current), operation.notary_mutation_pending))
+                    return value
                 with (self.final_image_fixture_call(state), mock.patch.object(operation, "register", new=register),
-                      mock.patch.object(operation, "close", new=close)):
+                      mock.patch.object(operation, "close", new=close), mock.patch.object(operation, "final_image_post", new=post),
+                      mock.patch.object(operation, "final_image_preimage_post", new=pre_post)):
                     returned = operation.execute()
                 path = state.work / "distribution-final/MobileReleaseKit.dmg"
-                self.assertEqual((path.read_bytes(), path.stat().st_ino, stat.S_IMODE(path.stat().st_mode)),
-                                 (state.final_image, state.copy_inode, 0o444))
+                self.assertEqual((path.read_bytes(), stat.S_IMODE(path.stat().st_mode)), (state.final_image, 0o444))
+                if replacement:
+                    self.assertNotEqual(path.stat().st_ino, state.copy_inode)
+                    self.assertEqual(len(committed), 1)
+                    self.assertTrue(committed[0][2])  # Real committed full POST precedes clearing.
+                    self.assertTrue(pre_checks)
+                    self.assertEqual(len({(row[0], row[1]) for row in pre_checks}), 1)
+                    self.assertTrue(any(row[2] == "final-image-owned-publication" and row[4] == [] for row in pre_checks))
+                    self.assertTrue(any(row[3] is False for row in pre_checks))  # Actual pre-close retirement POST.
+                    pre, identity, sha = operation.final_image_preimage
+                    self.assertTrue(pre["closed"] and operation.final_image_output["closed"])
+                    self.assertEqual((consumed[id(pre)], consumed[id(operation.final_image_output)]), (1, 1))
+                else:
+                    self.assertEqual(path.stat().st_ino, state.copy_inode)
+                    self.assertEqual((committed, pre_checks, operation.final_image_preimage), ([], [], None))
                 self.assertNotEqual(path.read_bytes()[:1], state.original_image[:1])
                 self.assertEqual(returned, TOOL.digest(state.final_image))
                 self.assertEqual(tuple(row[0] for row in state.observations), module.FINAL_IMAGE_ROLES)
@@ -8276,6 +8436,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertNotIn("final-package-sign", roles)
                 if failure.startswith("ticket-"):
                     self.assertEqual(roles[-1], "final-package-staple")
+                    if failure == "ticket-oversize": self.assertEqual(operation.receipt["failure"]["reason"], "final-package-ticket-growth")
                     self.assertTrue(operation.notary_mutation_pending)
                     self.assertFalse(operation.receipt["targetRetired"])
                 if failure in ("invalid", "invalid-log-failure"):
@@ -8529,7 +8690,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         self.assertFalse(operation.receipt["targetRetired"])
 
         for failure in ("submit-json", "submit-name", "log-sha", "nested-null-annotation", "invalid", "invalid-log-failure",
-                        "ticket-replaced", "ticket-oversize", "ticket-mode", "mounted-bytes", "mounted-extra"):
+                        "ticket-oversize", "ticket-mode", "mounted-bytes", "mounted-extra"):
             with self.subTest(finalImageRefusal=failure), tempfile.TemporaryDirectory() as directory:
                 state = self.final_image_fixture(Path(directory), failure=failure)
                 operation = state.operation
@@ -8544,12 +8705,135 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertNotIn("final-image-staple", roles)
                 if failure.startswith("ticket-"):
                     self.assertEqual(roles[-1], "final-image-staple")
+                    if failure == "ticket-oversize": self.assertEqual(operation.receipt["failure"]["stage"], "final-image-staple-growth")
                     self.assertTrue(operation.notary_mutation_pending)
                     self.assertFalse(operation.receipt["targetRetired"])
                 if failure.startswith("mounted-"):
                     self.assertEqual(roles[-2:], ["final-image-attach", "final-image-detach"])
                     self.assertTrue(operation.mount_detached and operation.receipt["originalClosesKnown"])
                     self.assertFalse((state.work / "package-mount").exists())
+
+        # Real tiny returned-name failures reach actual PRE/output guards,
+        # registration, committed POST, publication and consuming retirement.
+        # Only specific fallible boundary outcomes are DATA doubles here.
+        for failure in ("returned-mode", "returned-links", "returned-extra", "pre-bytes", "acquire", "registered-stat",
+                        "first-post", "validate-pre", "publication-mode-pre", "publication-rename-pre", "pre-close", "returned-close"):
+            with self.subTest(returnedImageFailure=failure), tempfile.TemporaryDirectory() as directory:
+                state = self.final_image_fixture(Path(directory), failure="ticket-replaced")
+                operation, captured, faults, registered, consumed = state.operation, [], [], [], {}
+                primary = RuntimeError("INERT registered returned-original observation failure")
+                actual_returned, actual_post = operation.final_image_returned, operation.final_image_post
+                actual_original, actual_register, actual_close = operation.original, operation.register, operation.close
+                actual_command = operation.owner.run_owned
+                pre_holder = {"entry": None}; named = state.work / operation.target_name / "final-image/MobileReleaseKit.dmg"
+                def alter_pre():
+                    pre = pre_holder["entry"]
+                    self.assertIsNotNone(pre)
+                    self.assertEqual(os.fstat(pre["fd"]).st_nlink, 0)
+                    os.pwrite(pre["fd"], b"X" * len(state.original_image), 0)
+                    faults.append(failure)
+                def returned(entry, before, after, before_entry, before_sha):
+                    self.assertIs(entry, before_entry)
+                    self.assertEqual(before_sha, TOOL.digest(state.original_image))
+                    pre_holder["entry"] = entry
+                    if failure == "returned-mode": named.chmod(0o644); faults.append(failure)
+                    elif failure == "returned-links": os.link(named, state.work / "foreign-hardlink"); faults.append(failure)
+                    elif failure == "returned-extra": (named.parent / "unexpected").write_bytes(b"INERT"); faults.append(failure)
+                    elif failure == "pre-bytes": alter_pre()
+                    try: return actual_returned(entry, before, after, before_entry, before_sha)
+                    except BaseException as error: captured.append(error); raise
+                def original(parent, name, role, *args, **kwargs):
+                    if role == "final-image-stapled-output":
+                        self.assertTrue(operation.notary_mutation_pending)
+                        self.assertIsNone(operation.final_image_preimage)
+                        if failure == "acquire": faults.append(failure); raise primary
+                    return actual_original(parent, name, role, *args, **kwargs)
+                def register(*args, **kwargs):
+                    entry = actual_register(*args, **kwargs)
+                    if entry["role"] == "final-image-stapled-output":
+                        registered.append(entry)
+                        self.assertIs(operation.entry_registry[id(entry)], entry)
+                    return entry
+                def post(**kwargs):
+                    if failure == "first-post" and operation.notary_mutation_pending and operation.final_image_preimage is not None and not faults:
+                        self.assertIs(operation.final_image_preimage[0], pre_holder["entry"])
+                        self.assertIs(operation.final_image_output, registered[0])
+                        alter_pre()
+                    try: return actual_post(**kwargs)
+                    except BaseException as error:
+                        if not captured: captured.append(error)
+                        raise
+                def command(argv, **kwargs):
+                    result = actual_command(argv, **kwargs)
+                    if failure == "validate-pre" and operation.calls[-1]["role"] == "final-image-validate": alter_pre()
+                    return result
+                def close(entry):
+                    number = entry["fd"]
+                    if number is not None: consumed[id(entry)] = consumed.get(id(entry), 0) + 1
+                    selected = (entry is pre_holder["entry"] if failure == "pre-close"
+                                else any(entry is item for item in registered) if failure == "returned-close" else False)
+                    if selected and number is not None and not faults:
+                        faults.append(failure)
+                        real_close = module.os.close
+                        def unknown(fd):
+                            self.assertEqual(fd, number)
+                            real_close(fd)
+                            raise OSError(5, "INERT consumed close uncertainty")
+                        with mock.patch.object(module.os, "close", side_effect=unknown): return actual_close(entry)
+                    return actual_close(entry)
+                with self.final_image_fixture_call(state), contextlib.ExitStack() as ports:
+                    real_fstat, real_fchmod, real_rename = module.os.fstat, module.os.fchmod, module.os.rename
+                    def fstat(fd):
+                        if failure == "registered-stat" and registered and fd == registered[0]["fd"] and not faults:
+                            self.assertIs(operation.entry_registry[id(registered[0])], registered[0])
+                            faults.append(failure); raise primary
+                        return real_fstat(fd)
+                    def fchmod(fd, mode):
+                        value = real_fchmod(fd, mode)
+                        if failure == "publication-mode-pre" and operation.stage == "final-image-owned-publication" and fd == operation.final_image_output["fd"] and not faults: alter_pre()
+                        return value
+                    def rename(*args, **kwargs):
+                        value = real_rename(*args, **kwargs)
+                        if failure == "publication-rename-pre" and operation.stage == "final-image-owned-publication" and not faults: alter_pre()
+                        return value
+                    for obj, name, port in ((operation, "final_image_returned", returned), (operation, "original", original),
+                        (operation, "register", register), (operation, "final_image_post", post), (operation.owner, "run_owned", command),
+                        (operation, "close", close), (module.os, "fstat", fstat), (module.os, "fchmod", fchmod), (module.os, "rename", rename)):
+                        ports.enter_context(mock.patch.object(obj, name, side_effect=port))
+                    with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"): operation.execute()
+                self.assertEqual(faults, [failure])
+                self.assertFalse(operation.receipt["passed"] or operation.receipt["targetRetired"])
+                self.assertTrue((state.work / operation.target_name).exists())
+                self.assertEqual((state.work / "distribution/MobileReleaseKit.dmg").read_bytes(), state.original_image)
+                roles = [row[0] for row in state.observations]
+                early = failure in ("returned-mode", "returned-links", "returned-extra", "pre-bytes", "acquire", "registered-stat", "first-post")
+                if early:
+                    self.assertEqual(roles, list(module.FINAL_IMAGE_ROLES[:6]))
+                    self.assertTrue(operation.notary_mutation_pending)
+                    self.assertNotIn("finalImage", operation.receipt)
+                    self.assertFalse((state.work / "distribution-final").exists())
+                    self.assertTrue(captured)
+                    if failure in ("acquire", "registered-stat"): self.assertIs(captured[0], primary)
+                    self.assertEqual(operation.receipt["failure"]["type"], type(captured[0]).__name__)
+                elif failure == "validate-pre":
+                    self.assertEqual(roles, list(module.FINAL_IMAGE_ROLES[:7]))
+                    self.assertFalse(operation.notary_mutation_pending)
+                    self.assertTrue(operation.notary_unknown)
+                    self.assertNotIn("finalImage", operation.receipt)
+                else:
+                    self.assertEqual(roles, list(module.FINAL_IMAGE_ROLES))
+                    self.assertFalse(operation.notary_mutation_pending)
+                    if failure.startswith("publication-"):
+                        self.assertEqual(operation.stager_io_pending, "final-image-owned-publication")
+                        self.assertNotIn("finalImage", operation.receipt)
+                    else:
+                        self.assertFalse(operation.receipt["originalClosesKnown"])
+                        self.assertTrue(operation.errors)
+                if failure in ("registered-stat", "first-post", "validate-pre", "publication-mode-pre", "publication-rename-pre", "pre-close", "returned-close"):
+                    self.assertEqual(len(registered), 1)
+                self.assertTrue(all(row["fd"] is None for row in operation.entries))
+                self.assertTrue(all(count == 1 for count in consumed.values()))
+                self.assertEqual(consumed[id(pre_holder["entry"])], 1)
 
         for failure in ("policy-disabled", "policy-disabled-zero", "policy-status-extra", "policy-status-stderr",
                         "policy-denied", "policy-changed", "final-image-policy-status-overflow", "final-image-policy-assess-overflow"):
@@ -8695,7 +8979,14 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL, target=target)
                 with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$") as raised:
                     operation.execute()
-                self.assertEqual(len(observations), 1)
+                expected_roles = ("resident-fetch", "build") if target == module.INTEL_TARGET else ("build",)
+                expected_actions = ("fetch", "build") if target == module.INTEL_TARGET else ("build",)
+                self.assertEqual(len(observations), len(expected_roles))
+                self.assertEqual(tuple(argv[1] for argv, options in observations), expected_actions)
+                self.assertEqual(tuple(call["role"] for call in operation.calls), expected_roles)
+                self.assertEqual(tuple(call["returncode"] for call in operation.calls),
+                                 (0, status) if target == module.INTEL_TARGET else (status,))
+                self.assertTrue(all(call["returned"] and call["capturesSettled"] for call in operation.calls))
                 # The existing receipt schema/reason remains unchanged. The new
                 # private scalar preserves only the admitted stager code lost there.
                 self.assertEqual(operation.receipt["failure"]["reason"],
@@ -8712,7 +9003,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual((value["lastRecordedNative"]["role"], value["lastRecordedNative"]["returncode"],
                                   value["lastRecordedNative"]["returned"], value["lastRecordedNative"]["capturesSettled"]),
                                  ("build", status, True, True))
-                self.assertEqual(value["counts"], {"native": 1, "credential": 0, "contexts": 0, "cleanupErrors": 0})
+                self.assertEqual(value["counts"], {"native": len(expected_roles), "credential": 0, "contexts": 0, "cleanupErrors": 0})
                 self.assertTrue(value["cleanup"]["targetRetired"] and value["cleanup"]["originalClosesKnown"])
                 self.assertFalse(value["cleanup"]["directStagerIOPending"])
                 self.assertIsNone(value["lastRecordedCredential"]["status"])
@@ -8757,7 +9048,11 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertIsNone(operation.diagnostic_failure)
             self.assertEqual(operation.receipt["failure"]["reason"], "original-operation-refused")
             self.assertTrue(operation.receipt["targetRetired"] and operation.receipt["originalClosesKnown"])
-            self.assertEqual(len(observations), 1)
+            self.assertEqual(len(observations), 2)
+            self.assertEqual(tuple(argv[1] for argv, options in observations), ("fetch", "build"))
+            self.assertEqual(tuple(call["role"] for call in operation.calls), ("resident-fetch", "build"))
+            self.assertEqual(tuple(call["returncode"] for call in operation.calls), (0, 0))
+            self.assertTrue(all(call["returned"] and call["capturesSettled"] for call in operation.calls))
         # An inert exact-class object only exercises the passive DATA reducer;
         # it is not a constructor/original-owner or cleanup qualification.
         passive = object.__new__(module.Operation)
@@ -8860,7 +9155,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                       mock.patch.dict(module.os.environ, environment, clear=True),
                       contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr)):
                     self.assertEqual(module.main(), 1 if failed else 0)
-                self.assertEqual(len(observations), 1 if failed else len(module.PREPARE_ROLES))
+                self.assertEqual(len(observations), 2 if failed else len(module.PREPARE_ROLES))
+                if failed:
+                    self.assertEqual(tuple(argv[1] for argv, options in observations), ("fetch", "build"))
                 if failed:
                     self.assertEqual(stdout.getvalue(), "")
                     lines = stderr.getvalue().splitlines()
@@ -8869,6 +9166,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertEqual((value["mainStage"], value["originalFailure"]["type"], value["originalFailure"]["reason"]),
                                      ("operation-execute", "stager-refused", "image-dylib-target"))
                     self.assertEqual(value["terminal"]["reason"], "helper-package-incomplete")
+                    self.assertEqual(value["counts"]["native"], 2)
+                    self.assertEqual((value["lastRecordedNative"]["role"], value["lastRecordedNative"]["returncode"],
+                                      value["lastRecordedNative"]["returned"], value["lastRecordedNative"]["capturesSettled"]),
+                                     ("build", 0, True, True))
                     self.assertTrue(value["cleanup"]["targetRetired"] and value["cleanup"]["originalClosesKnown"])
                 else:
                     self.assertEqual(stderr.getvalue(), "")
@@ -10081,7 +10382,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
     def test_both_workflows_use_one_digest_and_owned_nested_checks_around_app_signing(self):
         # Current ordinary aggregate watchdog contains four unchanged240s scopes.
-        budget_current = without_arm_only_final_image_diagnostic_workflow((Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text())
+        budget_current = without_arm_only_final_image_diagnostic_workflow(without_installed_normal_ui_workflow((Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text()))
         final_prefix = '      - name: Notarize, staple and verify only the final user image\n'
         final_step = final_prefix + budget_current.split(final_prefix, 1)[1].split("      - name: ", 1)[0]
         self.assertEqual(hashlib.sha256(final_step.encode()).hexdigest(), 'd6983030aa7df37ea1ce802a8bf60299095d4ad4cb37a1f15a5b2d0f1ef015b9')
@@ -10136,7 +10437,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 without_ordinary_app_assembly_budget_workflow(invalid)
         self.assertEqual(without_ordinary_app_assembly_budget_workflow("unchanged historical DATA\n"), "unchanged historical DATA\n")
         root = Path(__file__).absolute().parents[2]
-        current = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        current = without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
         restored = without_tool_enrollment_workflow(current)
         self.assertNotEqual(current, restored)
         self.assertNotIn("--github-seal", restored)
@@ -10158,7 +10459,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "^fresh G2 signing exact current nomination differs$"):
                     without_tool_signing_workflow(damaged)
         self.assertEqual(tool_job.count("purpose:"), 4)
-        actual = without_shipping_compile_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
+        actual = without_shipping_compile_workflow(without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text()))
         names = ("Prepare the fixed two-file removal package without executing it",
                  "Sign and notarize the completed removal package without executing it",
                  "Emit the genuine removal descriptor and readonly carrier without Installer",
@@ -10207,7 +10508,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             ("desktop-macos-aqua.yml", "Assemble the instrumented observation app with SOURCE-selected signing",
              "Bind this signed app and current-source runtime into fresh Installer DATA"),
         ):
-            current_workflow = (root / ".github/workflows" / filename).read_text()
+            current_workflow = without_installed_normal_ui_workflow((root / ".github/workflows" / filename).read_text())
             # Current routes are separate from the authenticated historical
             # projection; do not ask an old snapshot to implement newer phases.
             historical_phases = ("prepare", "verify-before", "verify-after", "package-install")
@@ -10543,7 +10844,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertLess(images.index('self.package_call(label + "-verify-signature"'), images.index('self.package_call(label + "-verify-image"'))
         self.assertIn('"package-image-credential-required"', methods["call"])
 
-        installed = without_remove_output_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
+        installed = without_remove_output_workflow(without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text()))
         aqua = without_remove_output_workflow((root / ".github/workflows/desktop-macos-aqua.yml").read_text())
         phase_name = "Notarize, staple and verify only the final user image"
         phase = workflow_step(installed, phase_name)
@@ -10605,7 +10906,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertNotIn('final_package_stapled', final)
 
         # Raw current source is checked before the exact predecessor projection.
-        app_current = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        app_current = without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
         app_predecessor = without_same_package_workflow(app_current)
         app_job = app_predecessor.split("  engineering-install:\n",1)[1].split("  shipping-image-compile:\n",1)[0]
         app_blocks = re.split(r"(?=^      - name: )",app_job,flags=re.M)[1:]
@@ -10902,7 +11203,7 @@ def channel_data(path, body=None, *, private=False):
 class MacInstalledData(unittest.TestCase):
     def test_positive_update_is_unconfigured_and_reverses_to_current_recovery_source(self):
         root = Path(__file__).absolute().parents[2]
-        raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        raw = without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
         self.assertEqual(json.loads((root / "desktop/macos-installed-inputs/update-predecessors.json").read_text()),
                          {"schemaVersion": 1, "mode": "unconfigured"})
         self.assertEqual(raw.count("macos_android_helper_package.py update-baseline --target"), 1)
@@ -10929,7 +11230,7 @@ class MacInstalledData(unittest.TestCase):
 
     def test_intel_android_ui_target_join_precedes_historical_projection(self):
         root = Path(__file__).absolute().parents[2]
-        raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        raw = without_installed_p0_carrier_workflow(without_arm_only_final_image_diagnostic_workflow(without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())))
         # Authenticate the current fixed unsigned successor before historical projection.
         self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '3d4670e8acf2e3bcc7d6246679065357406da8402b7bfd4da9d8adba20bdcccb')
         unsigned_selected = without_installed_final_carrier_workflow(raw)
@@ -11047,7 +11348,7 @@ class MacInstalledData(unittest.TestCase):
 
     def test_app_absence_fixed_route_has_exact_originals_and_current_predecessor(self):
         root = Path(__file__).absolute().parents[2]
-        raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        raw = without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
         raw = without_positive_update_workflow(raw)
         prior = without_app_absence_workflow(raw)
         self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), 'ce06d7acffac6e5d37b0bf2c3afbe86ab7cf58729e68b64408634908642b8f02')
@@ -12338,7 +12639,7 @@ class MacInstalledData(unittest.TestCase):
 
     def test_acl_probe_gate_is_early_nonroot_and_keeps_original_statuses(self):
         root = Path(__file__).absolute().parents[2]
-        workflow = without_remove_output_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8"))
+        workflow = without_remove_output_workflow(without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")))
         marker = "      - name: Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive"
         gate = workflow_step(workflow, "Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive")
         self.assertLess(workflow.index(marker), workflow.index("      - name: Build the ordinary selected-target desktop image and embedded frontend"))
@@ -15322,7 +15623,7 @@ def current_data_fixture():
 class MacCurrentRuntimeData(unittest.TestCase):
     def test_same_package_noop_workflow_is_preview_scoped_and_exactly_reversible(self):
         root = Path(__file__).absolute().parents[2]
-        source = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        source = without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
         owner_source = "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"
         old_owner_source = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
         self.assertEqual(source.count(owner_source), 2)
@@ -15528,7 +15829,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         root = Path(__file__).absolute().parents[2]
         before_pins = {'desktop-macos-installed.yml': {'bytes': 474760, 'sha256': '7ca1cb29075ca0f14bd829f59f826e6da9830d61bb27a2cae5dd32bdb018c8f2'}, 'desktop-macos-aqua.yml': {'bytes': 133491, 'sha256': '36b53942b31b13337875fdd47872a2f54f0a285d746e071b33a42c157f74f57d'}}
         for filename, pin in before_pins.items():
-            raw = (root / ".github/workflows" / filename).read_text()
+            raw = without_installed_normal_ui_workflow((root / ".github/workflows" / filename).read_text())
             # Retire only current supplier/S nominations before isolating the Intel budget delta.
             raw = without_primary_owner_runtime_source_pin(without_fresh_g2_supplier_workflow(raw))
             self.assertEqual(raw.count("&& 26 || 10"), 1)
@@ -16537,7 +16838,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
 
     def test_ordinary_workflow_binds_reviewed_current_payload_before_normal_release(self):
         root = Path(__file__).absolute().parents[2]
-        workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
+        workflow = without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8"))
         anchors = {}
         for variable in ("MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "MRK_BUNDLED_PROTOCOL_SHA256"):
             configured = TOOL.re.findall(r"^      " + variable + r": ([0-9a-f]{64})$", workflow, TOOL.re.M)
@@ -16632,9 +16933,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # This exact helper is already in the readonly SOURCE closure. Inspect
         # its real caller without importing or invoking any operation owner.
         with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
-            helper_raw = original.read(566884 + 1)
+            helper_raw = original.read(571244 + 1)
             self.assertEqual(original.read(1), b"")
-        self.assertEqual(len(helper_raw), 566884)
+        self.assertEqual(len(helper_raw), 571244)
         helper_source = helper_raw.decode("utf-8", "strict")
         helper_tree = ast.parse(helper_source)
         helper_caps = [node.value for node in helper_tree.body
@@ -16698,7 +16999,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         fields = (("githubPreflightToolingSha", "MRK_GITHUB_PREFLIGHT_TOOLING_SHA"),
                   ("githubReleaseToolingSha", "MRK_GITHUB_RELEASE_TOOLING_SHA"))
         for filename in ("desktop-macos-installed.yml", "desktop-macos-aqua.yml"):
-            workflow = without_remove_output_workflow((root / ".github/workflows" / filename).read_text())
+            workflow = without_remove_output_workflow(without_installed_normal_ui_workflow((root / ".github/workflows" / filename).read_text()))
             admission = workflow_step(workflow, "Admit only this exact disposable-hosted source route")
             for field, variable in fields:
                 self.assertEqual(TOOL.re.findall(r"^      " + variable + r": ([0-9a-f]{40})$", workflow, TOOL.re.M), [publisher])
@@ -16717,7 +17018,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         for template in ("mobile-preflight.yml", "mobile-candidate.yml", "mobile-external-testing.yml", "mobile-production-submit.yml"):
             self.assertIn('include_str!("../../templates/workflows/' + template + '")', build)
 
-        workflow = without_remove_output_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
+        workflow = without_remove_output_workflow(without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text()))
         data_step = workflow_step(workflow, "Compile and run only fixed native DATA contracts and exact host-Python regressions")
         self.assertEqual(data_step, (
             "        id: data_contracts\n"
@@ -16807,7 +17108,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
 
     def test_ordinary_current_route_preserves_separate_installer_and_aqua_obligations(self):
         root = Path(__file__).absolute().parents[2]
-        workflow = without_remove_output_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8"))
+        workflow = without_remove_output_workflow(without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")))
         normal = '"/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --manifest-path ../helpers/macos-desktop-image/Cargo.toml --lib'
         build, assembly, inputs = normal_app_steps(workflow)
         self.assertEqual(workflow.count(normal), 1)
@@ -16923,7 +17224,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # inert DATA; never execute the inline main, npm, Cargo or a dylib here.
         import math
         import re
-        actual_shipping = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
+        actual_shipping = without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8"))
         shipping = actual_shipping.split("  shipping-image-compile:\n", 1)[1]
         self.assertEqual(hashlib.sha256(without_shipping_compile_workflow(actual_shipping).encode()).hexdigest(), '03f8546fb009e0f9bc316da6e4b58ff7d851884a364af0caaaf05043602ca11d')
         self.assertEqual(actual_shipping.count("      - verify/desktop-macos-image-compile\n"), 1)
@@ -17709,7 +18010,7 @@ class MacAndroidSupportData(unittest.TestCase):
         name = "Acquire and verify the two fixed Android support archives as DATA"
         for filename, assembly in (("desktop-macos-installed.yml", "Assemble the ordinary image app and sign code inside-out (never --deep)"),
                                    ("desktop-macos-aqua.yml", "Assemble the instrumented observation app with SOURCE-selected signing")):
-            raw = (root / ".github/workflows" / filename).read_text()
+            raw = without_installed_normal_ui_workflow((root / ".github/workflows" / filename).read_text())
             download = workflow_step(raw, "Download the fixed once-signed Android support capsule")
             admission = workflow_step(raw, name)
             self.assertIn("timeout-minutes: 3", download)
@@ -18511,7 +18812,7 @@ class MacNormalPreviewData(unittest.TestCase):
             'self.notary_io("notary-final-input", self.stager.input_command, arguments, ticket_expectations=tickets)',
         ])
         for name in ("desktop-macos-installed.yml", "desktop-macos-aqua.yml"):
-            workflow = without_remove_output_workflow((root / ".github/workflows" / name).read_text())
+            workflow = without_remove_output_workflow(without_installed_normal_ui_workflow((root / ".github/workflows" / name).read_text()))
             build = workflow.index("--manifest-path desktop/helpers/macos-vault-helper/Cargo.toml")
             helper_sign = workflow.index('macos_android_helper_package.py sign-vault-helper --target "$MRK_MACOS_TARGET"', build)
             digest = workflow.index('output.write("MRK_MACOS_VAULT_HELPER_SHA256=', helper_sign)
@@ -18964,8 +19265,155 @@ class MacNormalPreviewData(unittest.TestCase):
                     output.assert_not_called()  # Old distribution image was present; no fallback.
 
     def test_preview_route_targets_only_unrelated_groups_and_retains_package_gates(self):
+        # Inspect the genuine installed successor before any historical inverse.
+        ui_workflow = (Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text()
+        self.assertEqual(hashlib.sha256(ui_workflow.encode()).hexdigest(), INSTALLED_NORMAL_UI_PAIRED_WORKFLOW_SHA256)
+        armed_ui_source = installed_normal_ui_historical_source(ui_workflow)
+        self.assertEqual(hashlib.sha256(armed_ui_source.encode()).hexdigest(), INSTALLED_NORMAL_UI_WORKFLOW_SHA256)
+        self.assertEqual(without_arm_only_final_image_diagnostic_workflow(armed_ui_source), ui_workflow)
+        self.assertEqual(ui_workflow.count(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME), 0)
+        self.assertEqual(ui_workflow.count(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT), 0)
+        matrix_source = ui_workflow.split("        include: ${{ fromJSON(", 1)[1].split("\n", 1)[0]
+        self.assertNotIn(" || github.ref == 'refs/heads/verify/desktop-macos-installed' &&", matrix_source)
+        paired_rows = json.loads(matrix_source.rsplit(" || '", 1)[1].rsplit("') }}", 1)[0])
+        self.assertEqual([(row["target"], row["runner"], row["machine"], row["hosted_job"]) for row in paired_rows],
+                         [("aarch64-apple-darwin", "macos-26", "arm64", "github-hosted-macos26-arm64"),
+                          ("x86_64-apple-darwin", "macos-26-intel", "x86_64", "github-hosted-macos26-x86_64")])
+        for paired_damaged in (ui_workflow + "# unrelated SOURCE mutation\n",
+                               ui_workflow + ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME,
+                               ui_workflow + ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT,
+                               armed_ui_source + ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME,
+                               armed_ui_source + ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT):
+            with self.assertRaises(AssertionError):
+                without_installed_normal_ui_workflow(paired_damaged)
+        ui_prior = without_installed_normal_ui_workflow(ui_workflow)
+        self.assertEqual(hashlib.sha256(ui_prior.encode()).hexdigest(), INSTALLED_NORMAL_UI_WORKFLOW_PREDECESSOR)
+        self.assertEqual(without_installed_normal_ui_workflow(armed_ui_source), ui_prior)
+        self.assertLess(ui_workflow.index("        id: evidence\n"), ui_workflow.index("        id: p0_carrier_retire\n"))
+        self.assertLess(ui_workflow.index("        id: normal_remaining_saved_file_ui\n"), ui_workflow.index("        id: p0_carrier_retire\n"))
+        ui_retire = workflow_step(ui_workflow, "Retire only the known uploaded carrier export copy without touching image originals")
+        for required in ("steps.public_evidence.outcome == 'success'", "steps.evidence.outcome == 'success'",
+                         "steps.normal_remaining_saved_file_ui.outcome == 'success'", "steps.normal_ios_ui_summary.outcome == 'success'"):
+            self.assertIn(required, ui_retire.split("        run: |", 1)[0])
+        for damaged in (ui_workflow.replace("steps.normal_remaining_saved_file_ui.outcome == 'success'", "always()", 1),
+                        ui_workflow.replace("normal_ui_descriptor_path(os.environ.get", "normal_ui_descriptor_path_changed(os.environ.get", 1),
+                        ui_workflow.replace("128 * 1024", "129 * 1024", 1),
+                        ui_workflow + ui_retire):
+            with self.assertRaises(AssertionError): without_installed_normal_ui_workflow(damaged)
+
+        # Execute the actual passive selector, original bounded reader and its
+        # original descriptor-context predicate over genuine owned DATA files.
+        # This is not a native launch or whole UI/result qualification.
+        basic_block = workflow_step(ui_workflow, "Preserve original XCTest counts and a closed UI-only result, never a clean-exit claim")
+        basic_program = basic_block.split("<<'PY_UI_RESULT'\n", 1)[1].split("          PY_UI_RESULT", 1)[0]
+        basic_program = "\n".join(line[10:] for line in basic_program.splitlines()) + "\n"
+        basic_ast = ast.parse(basic_program)
+        passive_nodes = [node for node in basic_ast.body if isinstance(node, (ast.Import, ast.ImportFrom))
+                         or isinstance(node, ast.FunctionDef) and node.name in ("read", "unique", "document", "normal_ui_descriptor_path")
+                         or isinstance(node, ast.Assign) and any(isinstance(name, ast.Name) and name.id in
+                              ("root", "build_target", "platforms", "preview") for name in node.targets)]
+        preview_index = next(index for index, node in enumerate(basic_ast.body) if isinstance(node, ast.Assign)
+                             and any(isinstance(name, ast.Name) and name.id == "preview" for name in node.targets))
+        self.assertIsInstance(basic_ast.body[preview_index + 1], ast.If)
+        passive_nodes.append(basic_ast.body[preview_index + 1])
+        passive = compile(ast.fix_missing_locations(ast.Module(body=passive_nodes, type_ignores=[])), "<actual-ui-descriptor-readback>", "exec")
+        workflow_prefix = "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-"
+        for target in TOOL.MAC_TARGETS:
+            for route in ("installed", "preview"):
+                for fault in (None, "source", "run", "platform", "symlink", "hardlink", "wrong-ref", "missing-ref"):
+                    with self.subTest(ui_descriptor=(target, route, fault)), tempfile.TemporaryDirectory() as temporary:
+                        work = Path(temporary); work.chmod(0o700)
+                        parent = work / ("p0-carrier-input" if route == "installed" else "preview")
+                        parent.mkdir(mode=0o700)
+                        descriptor = {"scope": "normal-macos-early-preview", "sourceCommit": "a" * 40,
+                            "runId": "123", "runAttempt": "1", "platform": "macOS26-arm64" if target == TOOL.ARM_TARGET else "macOS26-x86_64",
+                            "instrumented": False, "entryBundleIdentifier": "dev.mobile-release-kit.desktop.entry",
+                            "payloadBundleIdentifier": "dev.mobile-release-kit.desktop", "fullM2Qualified": False,
+                            "maintenanceQualified": False, "normalBuild": "passed", "packageAudit": "passed", "installationReadback": "passed"}
+                        if fault == "source": descriptor["sourceCommit"] = "b" * 40
+                        if fault == "run": descriptor["runId"] = "124"
+                        if fault == "platform": descriptor["platform"] = "wrong-platform"
+                        selected = parent / "PREVIEW.json"; selected.write_bytes(TOOL.canonical(descriptor)); selected.chmod(0o444)
+                        (parent / "MobileReleaseKit.dmg").write_bytes(b"INERT descriptor fixture image")
+                        if route == "preview": (parent / "README.md").write_bytes(b"INERT unchanged preview guide")
+                        if fault == "symlink": selected.unlink(); selected.symlink_to("MobileReleaseKit.dmg")
+                        if fault == "hardlink": os.link(selected, work / "owned-fixture-hardlink")
+                        environment = {"MRK_MACOS_WORK": str(work), "MRK_MACOS_TARGET": target, "GITHUB_SHA": "a" * 40,
+                            "GITHUB_WORKFLOW_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
+                            "GITHUB_WORKFLOW_REF": workflow_prefix + route}
+                        if fault == "wrong-ref": environment["GITHUB_WORKFLOW_REF"] += "-other"
+                        if fault == "missing-ref": del environment["GITHUB_WORKFLOW_REF"]
+                        namespace = {"__name__": "_actual_passive_ui_descriptor_data"}
+                        with mock.patch.dict(os.environ, environment, clear=True):
+                            if fault is None:
+                                exec(passive, namespace)
+                                self.assertEqual(namespace["preview"], descriptor)
+                            else:
+                                with self.assertRaises((ValueError, OSError)): exec(passive, namespace)
+                        self.assertTrue(parent.is_dir())  # No asset/image/file retirement by DATA binder.
+
+        # Genuine pending projector readback must precede the first export
+        # mutation; absent/refused/wrong-context/status/shape leaves both files.
+        retire_program = ui_retire.split("<<'PY_P0_CARRIER_RETIRE'\n", 1)[1].split("          PY_P0_CARRIER_RETIRE", 1)[0]
+        retire_program = "\n".join(line[10:] for line in retire_program.splitlines()) + "\n"
+        retire_namespace = {"__name__": "_actual_pending_carrier_retirement_data"}
+        exec(compile(retire_program, "<actual-pending-carrier-retirement>", "exec"), retire_namespace)
+        for fault in (None, "absent", "refused", "source", "run", "target", "status", "counts", "account", "oversized", "hardlink"):
+            with self.subTest(pending_retirement=fault), tempfile.TemporaryDirectory() as temporary:
+                work = Path(temporary); work.chmod(0o700)
+                output = work / "p0-carrier-input"; output.mkdir(mode=0o700)
+                image = b"INERT readonly pending carrier DATA"
+                descriptor = {"schemaVersion": 2, "scope": "normal-macos-early-preview", "workflow": ".github/workflows/desktop-macos-installed.yml",
+                    "sourceCommit": "a" * 40, "runId": "123", "runAttempt": "1", "platform": "macOS26-arm64",
+                    "packageRole": "ordinary-image", "instrumented": False, "fullUIQualified": False, "distributionQualified": False,
+                    "productReady": False, "distributionBytes": len(image), "distributionSha256": hashlib.sha256(image).hexdigest()}
+                for name, body in {"MobileReleaseKit.dmg": image, "PREVIEW.json": TOOL.canonical(descriptor)}.items():
+                    (output / name).write_bytes(body); (output / name).chmod(0o444)
+                output.chmod(0o555)
+                counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+                common_account = {key: True for key in ("commandFinalities", "leaseClosed", "sessionClosed", "handlersRestored", "fixtureDescriptorsClosed", "originalDeadlineMet")}
+                observed = {"receiptState": "observed", "binding": "same-work-root-parent-context-only", "nativeSuccessInferred": False,
+                    **{key: True for key in ("sourceAndTargetMatched", "runContextMatched", "callerStatusesMatched", "recordedRunnerOriginalsClosed")},
+                    "testCounts": counts, "observation": {"sourceCommit": "a" * 40, "runId": "123", "runAttempt": "1", "target": TOOL.ARM_TARGET,
+                        "ordinaryQuit": True, "inspect": {"phase": "terminal", "outcome": "complete", "reason": "none", "accountStatus": "pending"},
+                        "recover": {"phase": "terminal", "outcome": "complete", "reason": "none", "accountStatus": "recovered"}},
+                    "account": {**{key: True for key in ("exactPendingSessionRecovered", "originalOwnedNativeAndControlsRemoved", "persistentOriginalLeaseRetained",
+                        "baselineIdentitiesMatched", "baselinePreferencesMatched", "projectMarkerUnchanged")},
+                        "producer": dict(common_account), "nativeReadback": dict(common_account)}}
+                public = {"schemaVersion": 1, "kind": "mrk-public-verification-evidence-v1", "profile": "installed", "source": "a" * 40,
+                    "workflowSource": "a" * 40, "runId": "123", "runAttempt": "1", "target": TOOL.ARM_TARGET, "expectedRemovalCase": "disabled",
+                    "diagnosticOnly": True, "productReady": False, "positiveUiObservations": {"iosPendingRecovery": observed},
+                    "statuses": {name: {"receiptState": "observed", "returncode": 0} for name in
+                        ("normal-ui/ios-pending-recovery-test.status", "normal-ui/ios-pending-recovery-summary.status")}}
+                if fault == "refused": observed["receiptState"] = "refused"
+                if fault == "source": public["source"] = "b" * 40
+                if fault == "run": public["runAttempt"] = "2"
+                if fault == "target": public["target"] = TOOL.INTEL_TARGET
+                if fault == "status": public["statuses"]["normal-ui/ios-pending-recovery-summary.status"]["returncode"] = 1
+                if fault == "counts": counts["passedTests"] = True
+                if fault == "account": observed["account"]["nativeReadback"]["originalDeadlineMet"] = False
+                public_path = work / "public-verification-evidence.json"
+                if fault != "absent":
+                    public_path.write_bytes(b" " * (128 * 1024 + 1) if fault == "oversized" else TOOL.canonical(public)); public_path.chmod(0o600)
+                    if fault == "hardlink": os.link(public_path, work / "owned-public-hardlink")
+                original = {name: (retire_namespace["carrier_identity"](os.lstat(output / name)), (output / name).read_bytes())
+                            for name in os.listdir(output)}
+                try:
+                    if fault is None:
+                        retire_namespace["retire_carrier"](str(work), "a" * 40, "123", "1", TOOL.ARM_TARGET, "ios-pending-recovery")
+                        self.assertFalse(output.exists()); self.assertTrue(public_path.is_file())
+                    else:
+                        with self.assertRaises((RuntimeError, OSError)):
+                            retire_namespace["retire_carrier"](str(work), "a" * 40, "123", "1", TOOL.ARM_TARGET, "ios-pending-recovery")
+                        self.assertEqual(set(os.listdir(output)), set(original))
+                        for name, (identity, body) in original.items():
+                            self.assertEqual(retire_namespace["carrier_identity"](os.lstat(output / name)), identity)
+                            self.assertEqual((output / name).read_bytes(), body)
+                finally:
+                    if output.is_dir(): output.chmod(0o700)  # Only this genuine DATA fixture.
+
         root = Path(__file__).absolute().parents[2]
-        raw_workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        raw_workflow = without_installed_normal_ui_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
         stage_name = "Stage only the finalized ordinary image as an unqualified P0 carrier input"
         upload_name = "Retain one finalized DMG and its finite descriptor for later independent P0 qualification"
         retire_name = "Retire only the known uploaded carrier export copy without touching image originals"
