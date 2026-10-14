@@ -1,0 +1,35 @@
+name: Credential-free Mac DMG attribute experiment
+
+on:
+  push:
+    branches: [verify/desktop-macos-dmg-attributes]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-dmg-attributes-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  attributes:
+    if: github.ref == 'refs/heads/verify/desktop-macos-dmg-attributes'
+    runs-on: macos-26
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Run only the inert ad-hoc image experiment
+        shell: bash
+        run: |
+          set -eu
+          /usr/bin/python3 -I -S -B desktop/tools/macos_dmg_attribute_probe.py
+      - name: Retain only bounded finite public findings
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: macos-dmg-attribute-result
+          path: macos-dmg-attribute-result.json
+          if-no-files-found: error
+          retention-days: 3
