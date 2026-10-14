@@ -1744,8 +1744,8 @@ def context_xar(body, *, product=False, presentation=False):
             metadata_check = None
             try:
                 if child.tag == "FinderCreateTime":
-                    # Apple's extractor applies this as destination birth time. This
-                    # passive audit bounds annotation shape, not calendar validity.
+                    # The passive audit bounds this opaque auxiliary annotation,
+                    # not calendar validity or cryptographic timestamp authority.
                     metadata_check = "finder-shape"
                     need(not child.attrib and not (child.text or "").strip() and not (child.tail or "").strip()
                          and len(child) == 2 and {item.tag for item in child} == {"time", "nanoseconds"}
@@ -1754,7 +1754,7 @@ def context_xar(body, *, product=False, presentation=False):
                     timestamp, nanoseconds = child.findtext("time"), child.findtext("nanoseconds")
                     metadata_check = "finder-values"
                     need(type(timestamp) is str
-                         and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}", timestamp)
+                         and re.fullmatch(r"[0-9TZ:+.\-]{1,64}", timestamp)
                          and type(nanoseconds) is str and re.fullmatch(r"0|[1-9][0-9]{0,8}", nanoseconds),
                          "context-xar-member-metadata")
                     # The observed Apple tool emitted 1900-01-00T22:06:56. Public

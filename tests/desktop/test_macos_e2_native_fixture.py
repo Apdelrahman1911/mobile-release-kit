@@ -2999,9 +2999,28 @@ class InstallerContextTests(unittest.TestCase):
                 with self.subTest(stat_tag=tag, shape=shape), self.assertRaisesRegex(
                         fixture.Refused, "^context-xar-member-" + label + "$"):
                     fixture.context_xar(self.xar(members, mutate=bad_shape))
+        # Fixed auxiliary annotation alphabet, never a calendar/trust parser.
+        # Component and both outer product forms retain identical member bytes.
+        for timestamp in ("1900-01-00T22:06:56", "2026-01-01T12:34:56Z",
+                          "2026-01-01T12:34:56+00:00", "2026-01-01T12:34:56.0",
+                          "+2026-1-01T12:34:56", "1" * 64):
+            def opaque_created(toc, timestamp=timestamp):
+                for element in toc.iter("file"):
+                    element.find("FinderCreateTime/time").text = timestamp
+            with self.subTest(opaque_annotation=timestamp):
+                annotated = self.xar(members, mutate=opaque_created)
+                self.assertEqual(fixture.context_xar(annotated), members)
+                for expanded in (False, True):
+                    outer_members = {"Distribution": fixture.context_distribution(),
+                                     **(members if expanded else {fixture.CONTEXT_PACKAGES[1]: annotated})}
+                    outer = self.xar(outer_members, directory=expanded, mutate=opaque_created)
+                    expected_outer = {(name if name == "Distribution" or not expanded else
+                                       fixture.CONTEXT_PACKAGES[1] + "/" + name): content
+                                      for name, content in outer_members.items()}
+                    self.assertEqual(fixture.context_xar(outer, product=True), expected_outer)
+                    fixture.context_product(outer, annotated, members)
         bad_created_values = (
-            ("time", ("", "2026-01-01T12:34:56Z", "2026-01-01T12:34:56+00:00",
-                      "2026-01-01T12:34:56.0", "2026-1-01T12:34:56", "\u0662" + "026-01-01T12:34:56",
+            ("time", ("", "/private/path", "private prose", "\u0662" + "026-01-01T12:34:56",
                       "1900-01-00T22:06:56\n", "1900-01-00T22:06:5\t", "1900-01-00T22:06:56extra", "1" * 65)),
             ("nanoseconds", ("", "-1", "+1", "00", "01", "1000000000", "1.0", " 1", "\u0661")),
         )
@@ -3113,7 +3132,7 @@ class InstallerContextTests(unittest.TestCase):
         # but the parser no longer treats optional annotation text as a date.
         diagnostic_samples = (
             ("finder-shape", "FinderCreateTime", lambda toc: toc.find("file/FinderCreateTime").set("private-name", "private-value")),
-            ("finder-values", "FinderCreateTime", lambda toc: setattr(toc.find("file/FinderCreateTime/time"), "text", "2026-01-01T12:34:56Z")),
+            ("finder-values", "FinderCreateTime", lambda toc: setattr(toc.find("file/FinderCreateTime/nanoseconds"), "text", "1000000000")),
             ("scalar-shape", "inode", lambda toc: ET.SubElement(toc.find("file/inode"), "private-name")),
             ("inode-value", "inode", lambda toc: setattr(toc.find("file/inode"), "text", "+1")),
             ("deviceno-value", "deviceno", lambda toc: setattr(toc.find("file/deviceno"), "text", "01")),
@@ -3149,7 +3168,7 @@ class InstallerContextTests(unittest.TestCase):
                 self.assertIsNone(fixture.context_metadata_diagnostic_data(diagnostic, diagnostic["phase"], caught.exception.args[0], bad_calls))
             self.assertIsNone(fixture.context_metadata_diagnostic_data(diagnostic, "context-product-audit", caught.exception.args[0], calls))
             self.assertIsNone(fixture.context_metadata_diagnostic_data(diagnostic, diagnostic["phase"], None, calls))
-        for tag, value in (("time", "2026-01-01T12:34:56+00:00"), ("nanoseconds", "1000000000"),
+        for tag, value in (("time", "2026-01-01T12:34:56+00:00extra"), ("nanoseconds", "1000000000"),
                            ("time", "/Users/private/path"), ("time", "\u0662" + "026-01-01T12:34:56"),
                            ("time", "1" * 65), ("nanoseconds", " 1"), ("nanoseconds", "1" * 25)):
             body = self.xar(members, mutate=lambda toc: setattr(toc.find("file/FinderCreateTime/" + tag), "text", value))
@@ -3157,7 +3176,7 @@ class InstallerContextTests(unittest.TestCase):
                 fixture.context_xar(body)
             scalar = caught.exception._context_metadata["metadata"]["timestamp" if tag == "time" else "nanoseconds"]
             self.assertEqual(scalar["characters"], len(value))
-            self.assertEqual(scalar["text"], value if value in ("2026-01-01T12:34:56+00:00", "1000000000") else None)
+            self.assertEqual(scalar["text"], value if value == "1000000000" else None)
         self.assertEqual(fixture.context_xar(component), members)  # Same accepted parse.
 
         entity = '<!DOCTYPE pkg-info [<!ENTITY hidden "expanded">]><pkg-info>&hidden;</pkg-info>'
@@ -4264,7 +4283,7 @@ class InstallerContextTests(unittest.TestCase):
         # These are inert original-read/process/book DATA. The actual pure
         # parser and execute/finish run; no native process or deletion occurs.
         def invalid_finder(toc):
-            toc.find("file/FinderCreateTime/time").text = "2026-01-01T12:34:56Z"
+            toc.find("file/FinderCreateTime/time").text = "2026-01-01T12:34:56extra"
         finder_body = self.xar({"PackageInfo": self.package_info(), "Scripts": b"inert"}, mutate=invalid_finder)
         good_body = self.xar({"PackageInfo": self.package_info(0), "Scripts": b"inert"})
         package_body = self.xar({"PackageInfo": self.package_info(0).replace(b' install-location="/"', b''), "Scripts": b"inert"})

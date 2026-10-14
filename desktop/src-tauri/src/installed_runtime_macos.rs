@@ -1617,13 +1617,13 @@ struct IOSXcodeAlias { parent: usize, identity: Identity, target: PathBuf }
 /// Distinct tool originals, reusing only Book's finite no-follow descriptor,
 /// metadata and one-attempt close primitives. No runtime/tool interchange.
 pub(crate) struct IOSXcodeSlots {
-    original: Book, alias: Option<IOSXcodeAlias>, developer: Option<usize>, executable: Option<usize>,
+    original: Book, alias: Option<IOSXcodeAlias>, sdk_alias: Option<IOSXcodeAlias>, developer: Option<usize>, executable: Option<usize>,
     sdk: Option<usize>, developer_path: Option<PathBuf>, sdk_path: Option<PathBuf>,
     signing: Option<[usize; 3]>, recovery_security: Option<usize>, audit: watch::Receiver<Instant>, prepared: bool,
 }
 impl IOSXcodeSlots {
     pub(crate) fn new(audit: watch::Receiver<Instant>) -> Self {
-        Self { original: Book::new(), alias: None, developer: None, executable: None, sdk: None,
+        Self { original: Book::new(), alias: None, sdk_alias: None, developer: None, executable: None, sdk: None,
             developer_path: None, sdk_path: None, signing: None, recovery_security: None, audit, prepared: false }
     }
     pub(crate) fn arm_acl_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
@@ -1633,6 +1633,7 @@ impl IOSXcodeSlots {
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
         let mut bytes = std::mem::size_of::<Self>().checked_add(self.original.retained_heap_bytes()?)?;
         if let Some(alias) = &self.alias { bytes = bytes.checked_add(alias.target.capacity())?; }
+        if let Some(alias) = &self.sdk_alias { bytes = bytes.checked_add(alias.target.capacity())?; }
         if let Some(path) = &self.developer_path { bytes = bytes.checked_add(path.capacity())?; }
         if let Some(path) = &self.sdk_path { bytes = bytes.checked_add(path.capacity())?; }
         Some(bytes)
@@ -1658,7 +1659,7 @@ impl IOSXcodeSlots {
         self.check_current(end, stop)
     }
     fn inspect_selected(&mut self, end: Instant, stop: &watch::Receiver<bool>, signed: bool) -> Result<()> {
-        use crate::ios_toolchain::{APPLICATIONS, SDK_COMPONENTS, STANDARD_APP, selection_alias_owner, sibling_target};
+        use crate::ios_toolchain::{APPLICATIONS, SDK_COMPONENTS, STANDARD_APP, selection_alias_owner, sibling_target, sdk_sibling_target};
         if !self.original.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
         self.original.records.try_reserve_exact(32).map_err(native_error)?;
         self.original.started = true;
@@ -1691,10 +1692,27 @@ impl IOSXcodeSlots {
         self.executable = Some(self.original.open(Some(tool), "xcodebuild", false, end, stop)?);
         let mut sdk = parent;
         let mut path = self.developer_path.clone().ok_or(AdmissionFailure::Unknown)?;
-        for name in SDK_COMPONENTS {
+        for &name in &SDK_COMPONENTS[..4] {
             sdk = self.original.open(Some(sdk), name, true, end, stop)?;
             path.push(name);
         }
+        checkpoint(end, stop)?;
+        let named = stat::fstatat(self.original.fd(sdk)?, SDK_COMPONENTS[4], AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
+        let name = if named.st_mode & SFlag::S_IFMT.bits() == SFlag::S_IFLNK.bits() {
+            if named.st_uid != 0 || named.st_nlink != 1 || !(1..=1024).contains(&named.st_size) {
+                return Err(AdmissionFailure::Ownership);
+            }
+            checkpoint(end, stop)?;
+            let target = PathBuf::from(fcntl::readlinkat(self.original.fd(sdk)?, SDK_COMPONENTS[4]).map_err(native_error)?);
+            let name = sdk_sibling_target(target.to_str().ok_or(AdmissionFailure::Bounds)?).ok_or(AdmissionFailure::Inventory)?.to_owned();
+            self.sdk_alias = Some(IOSXcodeAlias { parent: sdk, identity: Identity::of(&named), target });
+            self.check_alias(end, stop)?;
+            name
+        } else { SDK_COMPONENTS[4].to_owned() };
+        // The selected sibling is still an ordinary no-follow/root-owned Book
+        // directory. A second alias is never followed or granted authority.
+        sdk = self.original.open(Some(sdk), &name, true, end, stop)?;
+        path.push(&name);
         self.sdk = Some(sdk); self.sdk_path = Some(path);
         if signed {
             // These fixed account/validator tools belong to the same retained
@@ -1713,14 +1731,21 @@ impl IOSXcodeSlots {
         Ok(())
     }
     fn check_alias(&self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
-        let Some(alias) = &self.alias else { return Ok(()); };
-        checkpoint(end, stop)?;
-        let named = stat::fstatat(self.original.fd(alias.parent)?, crate::ios_toolchain::STANDARD_APP,
-            AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
-        if Identity::of(&named) != alias.identity { return Err(AdmissionFailure::Identity); }
-        checkpoint(end, stop)?;
-        let target = fcntl::readlinkat(self.original.fd(alias.parent)?, crate::ios_toolchain::STANDARD_APP).map_err(native_error)?;
-        if PathBuf::from(target) != alias.target { return Err(AdmissionFailure::Identity); }
+        for (slot, name) in [(self.alias.as_ref(), crate::ios_toolchain::STANDARD_APP),
+            (self.sdk_alias.as_ref(), crate::ios_toolchain::SDK_COMPONENTS[4])] {
+            let Some(alias) = slot else { continue; };
+            checkpoint(end, stop)?;
+            let named = stat::fstatat(self.original.fd(alias.parent)?, name,
+                AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
+            if Identity::of(&named) != alias.identity { return Err(AdmissionFailure::Identity); }
+            checkpoint(end, stop)?;
+            let target = fcntl::readlinkat(self.original.fd(alias.parent)?, name).map_err(native_error)?;
+            if target.as_os_str().as_bytes() != alias.target.as_os_str().as_bytes() { return Err(AdmissionFailure::Identity); }
+            checkpoint(end, stop)?;
+            let post = stat::fstatat(self.original.fd(alias.parent)?, name,
+                AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
+            if Identity::of(&post) != alias.identity { return Err(AdmissionFailure::Identity); }
+        }
         checkpoint(end, stop)
     }
     pub(crate) fn check_before_spawn(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
@@ -1775,14 +1800,20 @@ impl IOSXcodeSlots {
     }
     pub(crate) fn check_after_use(&self, end: Instant) -> Result<()> {
         self.original.ios_check_after_use(end, &self.audit)?;
-        if let Some(alias) = &self.alias {
+        for (slot, name) in [(self.alias.as_ref(), crate::ios_toolchain::STANDARD_APP),
+            (self.sdk_alias.as_ref(), crate::ios_toolchain::SDK_COMPONENTS[4])] {
+            let Some(alias) = slot else { continue; };
             ios_audit_point(end, &self.audit)?;
-            let actual = stat::fstatat(self.original.fd(alias.parent)?, crate::ios_toolchain::STANDARD_APP,
+            let actual = stat::fstatat(self.original.fd(alias.parent)?, name,
                 AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
             if Identity::of(&actual) != alias.identity { return Err(AdmissionFailure::Identity); }
             ios_audit_point(end, &self.audit)?;
-            let target = fcntl::readlinkat(self.original.fd(alias.parent)?, crate::ios_toolchain::STANDARD_APP).map_err(native_error)?;
-            if PathBuf::from(target) != alias.target { return Err(AdmissionFailure::Identity); }
+            let target = fcntl::readlinkat(self.original.fd(alias.parent)?, name).map_err(native_error)?;
+            if target.as_os_str().as_bytes() != alias.target.as_os_str().as_bytes() { return Err(AdmissionFailure::Identity); }
+            ios_audit_point(end, &self.audit)?;
+            let post = stat::fstatat(self.original.fd(alias.parent)?, name,
+                AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
+            if Identity::of(&post) != alias.identity { return Err(AdmissionFailure::Identity); }
             ios_audit_point(end, &self.audit)?;
         }
         Ok(())

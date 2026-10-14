@@ -31,20 +31,7 @@ M = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = M
 SPEC.loader.exec_module(M)
 
-NATIVE_PINS = {
-    "desktop/src-tauri/src/installed_runtime_macos.rs":
-        "8f0082bc3909203b1bf67cbd3a42365e670853a46bae16a71fd9407d0659eaab",
-    "desktop/native/macos-installed-native/src/native.m":
-        "d65309035ac1ab231fee503ce9dcda570ded45735490ba80c80ef343bf5c7c5f",
-    "desktop/src-tauri/src/ios_toolchain.rs":
-        "acd508df197ab6369ba29e9f0e3eca781224ba74741af8f757b8d7c93d053b5f",
-    "src/mobile_release/ios_archive_operation.py":
-        "ca724e7943c9862608f4f23db3ffa4202a3904703600c9c338acb8667ee0a49a",
-    "desktop/src-tauri/src/saved_command_owner.rs":
-        "6046335845d909d6f3acc028831c017079029540ff6a9987ef907a978aedea4b",
-    "desktop/src-tauri/src/installed_shell_observation_macos_ios.rs":
-        "fc59e98648ca8c05919271c8f23149263741ab4d488bdba14285593e0fc07216",
-}
+
 
 
 def application(mode=0o775):
@@ -325,10 +312,48 @@ class StreamCloseData:
 
 class MacOSXcodeHostPreparationTests(unittest.TestCase):
     def test_unprepared_native_and_diagnostic_mode_rejection_is_unchanged(self):
-        for path, expected in NATIVE_PINS.items():
-            with self.subTest(path=path):
-                self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), expected)
         runtime = (ROOT / "desktop/src-tauri/src/installed_runtime_macos.rs").read_text()
+        # Structural SOURCE observations, not Darwin mutation/native evidence.
+        def source_unit(start, ending):
+            self.assertEqual(runtime.count(start), 1)
+            self.assertEqual(runtime.count(ending), 1)
+            begin = runtime.index(start)
+            end = runtime.index(ending, begin + len(start))
+            self.assertGreater(end, begin)
+            return runtime[begin:end]
+
+        metadata = source_unit("fn metadata(s: &FileStat, directory: bool) -> Result<Identity> {",
+                               "\nimpl Book {\n    fn new() -> Self")
+        for required in ("if directory { SFlag::S_IFDIR } else { SFlag::S_IFREG }",
+                         "s.st_mode & SFlag::S_IFMT.bits() != kind.bits()", "s.st_uid != 0",
+                         "s.st_mode & 0o7022 != 0", "(!directory && s.st_nlink != 1)"):
+            self.assertIn(required, metadata)
+        opened = source_unit("    fn open(&mut self, parent: Option<usize>, name: &str, directory: bool, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {",
+                             "\n    fn check_name(&self, index: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {")
+        for required in ("AtFlags::AT_SYMLINK_NOFOLLOW", "OFlag::O_NOFOLLOW",
+                         "let identity = metadata(&before, directory)?;",
+                         "metadata(&after, directory)? != identity"):
+            self.assertIn(required, opened)
+        work = source_unit("    fn check_alias(&self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {",
+                           "\n    pub(crate) fn check_before_spawn(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {")
+        audit = source_unit("    pub(crate) fn check_after_use(&self, end: Instant) -> Result<()> {",
+                            "\n    pub(crate) fn mark_interrupted(&mut self) { self.original.unknown = true; }")
+        for unit, before, point in ((work, "named", "checkpoint(end, stop)"),
+                                    (audit, "actual", "ios_audit_point(end, &self.audit)")):
+            self.assertIn("self.alias.as_ref(), crate::ios_toolchain::STANDARD_APP", unit)
+            self.assertIn("self.sdk_alias.as_ref(), crate::ios_toolchain::SDK_COMPONENTS[4]", unit)
+            self.assertEqual(unit.count("self.original.fd(alias.parent)?"), 3)
+            self.assertEqual(unit.count("AtFlags::AT_SYMLINK_NOFOLLOW"), 2)
+            self.assertEqual(unit.count(point), 4)
+            first = "Identity::of(&" + before + ") != alias.identity"
+            raw = "target.as_os_str().as_bytes() != alias.target.as_os_str().as_bytes()"
+            post = "Identity::of(&post) != alias.identity"
+            positions = [unit.index(value) for value in (first, "fcntl::readlinkat", raw,
+                         "let post = stat::fstatat", post)]
+            self.assertEqual(positions, sorted(positions))
+        self.assertIn("self.original.ios_check_after_use(end, &self.audit)?;", audit)
+        self.assertNotIn("checkpoint(", audit)
+        self.assertNotIn("ios_audit_point(", work)
         self.assertIn("s.st_mode & 0o7022 != 0", runtime)
         self.assertIn("self.original.chain(Path::new(APPLICATIONS)", runtime)
         workflow = (ROOT / M.WORKFLOW).read_text()

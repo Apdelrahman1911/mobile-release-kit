@@ -3354,8 +3354,27 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 TOOL.install_product_members(encoded(*counts))
         def node_of_kind(nodes, kind):
             return next(node for node in nodes if node.findtext("type") == kind)
-        # Only finite failure labels change. Metadata spelling/shape remains
-        # the same passive policy; no annotation becomes filesystem authority.
+        # Auxiliary time spellings are opaque; no annotation becomes a
+        # filesystem identity, calendar value or trusted signing timestamp.
+        for timestamp in ("1900-01-00T22:06:56", "2026-01-01T12:34:56Z",
+                          "2026-01-01T12:34:56+00:00", "2026-01-01T12:34:56.123Z",
+                          "+2026-1-01T12:34:56", "1" * 64):
+            def opaque_created(nodes, timestamp=timestamp):
+                for node in nodes:
+                    created = TOOL.ET.SubElement(node, "FinderCreateTime")
+                    TOOL.ET.SubElement(created, "time").text = timestamp
+                    TOOL.ET.SubElement(created, "nanoseconds").text = "999999999"
+            with self.subTest(opaque_annotation=timestamp):
+                self.assertEqual(TOOL.install_product_members(encoded(mutation=opaque_created)), expected)
+        for timestamp in ("", "1" * 65, "1900-01-00T22:06:56\n", "1900-01-00T22:06:56\t",
+                          "\u0662" + "026-01-01T12:34:56", "/private/path", "private prose"):
+            def invalid_created(nodes, timestamp=timestamp):
+                created = TOOL.ET.SubElement(node_of_kind(nodes, "file"), "FinderCreateTime")
+                TOOL.ET.SubElement(created, "time").text = timestamp
+                TOOL.ET.SubElement(created, "nanoseconds").text = "0"
+            with self.subTest(invalid_annotation=timestamp), self.assertRaises(TOOL.Refused) as caught:
+                TOOL.install_product_members(encoded(mutation=invalid_created))
+            self.assertEqual(caught.exception.args, ("install-product-xar-finder-time",))
         metadata_reasons = {
             "tags": "install-product-xar-metadata-tags",
             "finder-shape": "install-product-xar-finder-shape",
@@ -3378,7 +3397,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 TOOL.ET.SubElement(node, "mode").text = "0644"
                 if case == "tags": TOOL.ET.SubElement(node, "unreviewed-metadata")
                 elif case == "finder-shape": finder.set("unreviewed", "value")
-                elif case == "finder-time": finder.find("time").text += "Z"
+                elif case == "finder-time": finder.find("time").text += "extra"
                 elif case == "finder-nanoseconds": finder.find("nanoseconds").text = "-1"
                 elif case == "scalar-shape": node.find("mode").set("unreviewed", "value")
                 elif case == "inode-value": node.find("inode").text = "+1"

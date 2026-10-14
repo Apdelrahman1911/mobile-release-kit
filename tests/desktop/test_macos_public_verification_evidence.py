@@ -136,7 +136,7 @@ def normal_diagnostic_data(*, removal=False, positive=False):
     names = {"Refused", "need", "sha", "pairs", "document", "encoded", "failure_base",
         "normal_failure_diagnostics", "normal_admission_failure", "classify_normal_admission_failure", "ADMISSION_OWNER_REASONS",
         "NORMAL_SELECTIONS", "OUTPUT_DATA_RESULT",
-        "IOS_UNSIGNED_RESULT", "IOS_UNSIGNED_METHOD", "LOADER", "TOOLCHAIN_QUERIES", "ADMISSION_STAGES",
+        "IOS_UNSIGNED_RESULT", "IOS_UNSIGNED_METHOD", "IOS_UNSIGNED_STAGES", "ios_unsigned_stage_diagnostics", "LOADER", "TOOLCHAIN_QUERIES", "ADMISSION_STAGES",
         "ADMISSION_EXCEPTION_TYPES", "ADMISSION_EXCEPTION_LABELS", "ADMISSION_SOURCE_FILES", "ADMISSION_COMMAND_ROLES",
         "TARGET", "PROJECT", "INTEL_TARGET", "PhaseClock", "NormalPhase", "original_command",
         "normal_build_settings_arguments", "normal_build_settings_data", "publish_normal_build_settings",
@@ -1628,6 +1628,119 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             DATA.decode(json.dumps(value).encode(), budget(), inventory=True)
 
     def test_finite_failure_roles_keep_original_classification_not_messages(self):
+        from unittest import mock
+        # One fixed failed unsigned test: original65 is attribution, not positive or native authority.
+        _ios_normal = normal_diagnostic_data()
+        self.assertEqual(DATA.IOS_UNSIGNED_STAGES, _ios_normal["IOS_UNSIGNED_STAGES"])
+        _ios_method = _ios_normal["IOS_UNSIGNED_METHOD"]
+        _ios_selection = _ios_normal["IOS_UNSIGNED_RESULT"]
+        _ios_stages = DATA.IOS_UNSIGNED_STAGES
+        _ios_raw = ("Test Case '-[MRKNormalAppUITests.NormalAppUITests " + _ios_method + "]' started.\n").encode()
+        for _ios_name in _ios_stages[:2]:
+            _ios_raw += ("MRK_NORMAL_PROJECT_STAGE=" + _ios_name + ";result=started\nMRK_NORMAL_PROJECT_STAGE="
+                + _ios_name + ";result=passed\n").encode()
+        _ios_raw += ("MRK_NORMAL_PROJECT_STAGE=" + _ios_stages[2] + ";result=started\nMRK_NORMAL_PROJECT_STAGE="
+            + _ios_stages[2] + ";result=failed;laterStages=not-run\nNormalAppUITests.swift:5751: error: "
+            + "-[MRKNormalAppUITests.NormalAppUITests " + _ios_method + "] : " + SENTINEL + "\n").encode()
+        _ios_value = _ios_normal["normal_failure_diagnostics"]("test", _ios_selection, CompletedProcess([], 65, _ios_raw, b""))
+        self.assertEqual(_ios_value["sourceFailures"], [{"stream": "stdout", "source": "NormalAppUITests.swift",
+            "method": _ios_method, "line": 5751, "column": None}])
+        self.assertEqual(len(_ios_value["iosUnsignedStages"]["events"]), 6)
+        self.assertEqual(_ios_value["iosUnsignedStages"]["state"], "observed")
+        self.assertNotIn(SENTINEL, json.dumps(_ios_value))
+        for _ios_code in (1, 65, 255):
+            _ios_case = _ios_normal["normal_failure_diagnostics"]("test", _ios_selection, CompletedProcess([], _ios_code, _ios_raw, b""))
+            _ios_row = DATA.project_ui_diagnostic(_ios_case, "ios-unsigned-test", {"receiptState": "observed", "returncode": _ios_code})
+            self.assertEqual(_ios_row["originalReturncode"], _ios_code)
+            self.assertIs(_ios_row["nativeSuccessInferred"], False)
+        for _ios_bad_status in (None, {}, {"receiptState": "absent"}, *({"receiptState": "observed", "returncode": x}
+                for x in (0, True, -1, 256, "65", 1))):
+            with self.assertRaises(DATA.Refused): DATA.project_ui_diagnostic(_ios_value, "ios-unsigned-test", _ios_bad_status)
+        for _ios_key, _ios_bad in (("selection", "sibling.xcresult"), ("phase", "summary"), ("sourceFailures", [SENTINEL]),
+                ("iosUnsignedStages", {"state": "observed", "events": [{"stage": SENTINEL, "result": "failed"}]}), ("message", SENTINEL)):
+            _ios_broken = copy.deepcopy(_ios_value); _ios_broken[_ios_key] = _ios_bad
+            with self.assertRaises(DATA.Refused): DATA.project_ui_diagnostic(_ios_broken, "ios-unsigned-test", {"receiptState": "observed", "returncode": 65})
+        for _ios_key, _ios_bad in (("method", "sibling"), ("source", SENTINEL), ("line", True), ("column", 4097)):
+            _ios_broken = copy.deepcopy(_ios_value); _ios_broken["sourceFailures"][0][_ios_key] = _ios_bad
+            with self.assertRaises(DATA.Refused): DATA.project_ui_diagnostic(_ios_broken, "ios-unsigned-test", {"receiptState": "observed", "returncode": 65})
+        for _ios_events in (_ios_value["iosUnsignedStages"]["events"] + [_ios_value["iosUnsignedStages"]["events"][0]],
+                list(reversed(_ios_value["iosUnsignedStages"]["events"])),
+                [{"stage": _ios_stages[0], "result": "passed"}]):
+            _ios_broken = copy.deepcopy(_ios_value)
+            _ios_broken["iosUnsignedStages"] = {"state": "observed", "events": _ios_events}
+            with self.assertRaises(DATA.Refused): DATA.project_ui_diagnostic(_ios_broken, "ios-unsigned-test", {"receiptState": "observed", "returncode": 65})
+        _ios_first = b"MRK_NORMAL_PROJECT_STAGE=ios-unsigned-fixture;result=started\n"
+        for _ios_bad in (_ios_first * 2, _ios_first.rstrip(b"\n"), _ios_first.replace(b"started", b"started;private=" + SENTINEL.encode()),
+                _ios_first.replace(b"fixture", b"close"), _ios_first.replace(b"fixture", b"other"),
+                _ios_first.replace(b"started", b"started\t"), _ios_first.replace(b"started", b"started\xff")):
+            _ios_invalid = _ios_normal["normal_failure_diagnostics"]("test", _ios_selection, CompletedProcess([], 65, _ios_bad, b""))
+            self.assertEqual(_ios_invalid["iosUnsignedStages"], {"state": "refused", "events": []})
+            self.assertNotIn(SENTINEL, json.dumps(_ios_invalid))
+        _ios_invalid = _ios_normal["normal_failure_diagnostics"]("test", _ios_selection, CompletedProcess([], 65, b"", _ios_first))
+        self.assertEqual(_ios_invalid["iosUnsignedStages"], {"state": "refused", "events": []})
+        _ios_raw_admission = _ios_normal["normal_admission_failure"]("execute", _ios_normal["Refused"](SENTINEL), None, [])
+        with self.assertRaises(DATA.Refused): DATA.project_ui_diagnostic(_ios_raw_admission, "ios-unsigned-test", {"receiptState": "observed", "returncode": 65})
+        _ios_admission = _ios_normal["classify_normal_admission_failure"](_ios_normal["encoded"](_ios_raw_admission))
+        _ios_admitted = DATA.project_ui_diagnostic(_ios_admission, "ios-unsigned-test", {"receiptState": "observed", "returncode": 65})
+        self.assertEqual(_ios_admitted["originalCallerReturncode"], 65)
+        self.assertIs(_ios_admitted["unknownStateRetained"], True)
+        for _ios_document in (_ios_value, _ios_admission):
+            with tempfile.TemporaryDirectory() as _ios_directory:
+                _ios_root = Path(_ios_directory)
+                _ios_status_path = write(_ios_root, "normal-ui/ios-unsigned-archive-test.status", b"65\n")
+                _ios_sidecar = write(_ios_root, DATA.IOS_UNSIGNED_DIAGNOSTIC, _ios_document)
+                _ios_private = write(_ios_root, "normal-ui/ios-unsigned-archive.facts.json", SENTINEL.encode())
+                _ios_log = write(_ios_root, "normal-ui/ios-unsigned-archive-test.log", SENTINEL.encode())
+                _ios_before = {p: p.read_bytes() for p in (_ios_status_path, _ios_sidecar, _ios_private, _ios_log)}
+                with mock.patch.object(DATA, "read_input", wraps=DATA.read_input) as _ios_read:
+                    _ios_public = project(_ios_root)
+                _ios_names = [call.args[1] for call in _ios_read.call_args_list]
+                self.assertEqual(_ios_names.count(DATA.IOS_UNSIGNED_DIAGNOSTIC), 1)
+                _ios_expected_attempts = (len(DATA.STATUS_FILES) + len(DATA.PHASES) + 4
+                    + len(DATA.PACKAGE_SIGNATURE_CAPTURES) + len(DATA.INSTALLER_DIAGNOSTIC_INPUTS)
+                    + len(DATA.UI_DIAGNOSTICS) + 6 + len(DATA.POSITIVE_UI_INPUTS) + len(DATA.ORDINARY_UI_INPUTS))
+                self.assertEqual(len(_ios_names), _ios_expected_attempts)
+                self.assertLessEqual(_ios_expected_attempts, 128)
+                self.assertNotIn("normal-ui/ios-unsigned-archive.facts.json", _ios_names)
+                _ios_failure = _ios_public["positiveUiObservations"]["iosUnsignedArchive"]
+                self.assertEqual(_ios_failure["receiptState"], "refused")
+                self.assertEqual(_ios_failure["failureDiagnostic"]["receiptState"], "observed")
+                self.assertIs(_ios_failure["failureDiagnostic"]["nativeSuccessInferred"], False)
+                self.assertIs(_ios_public["productReady"], False)
+                self.assertEqual({p: p.read_bytes() for p in _ios_before}, _ios_before)
+                self.assertNotIn(SENTINEL, (_ios_root / DATA.OUTPUT).read_text())
+        with tempfile.TemporaryDirectory() as _ios_directory:
+            _ios_root = Path(_ios_directory)
+            write(_ios_root, "normal-ui/ios-unsigned-archive-test.status", b"0\n")
+            write(_ios_root, DATA.IOS_UNSIGNED_DIAGNOSTIC, SENTINEL.encode())
+            with mock.patch.object(DATA, "read_input", wraps=DATA.read_input) as _ios_read: project(_ios_root)
+            _ios_names = [call.args[1] for call in _ios_read.call_args_list]
+            self.assertNotIn(DATA.IOS_UNSIGNED_DIAGNOSTIC, _ios_names)
+            self.assertEqual(_ios_names.count("normal-ui/ios-unsigned-archive.facts.json"), 1)
+        for _ios_bad_body in (b'{"scope":1,"scope":2}', b'{"bad":NaN}', b" " * 4097):
+            with tempfile.TemporaryDirectory() as _ios_directory:
+                _ios_root = Path(_ios_directory)
+                write(_ios_root, "normal-ui/ios-unsigned-archive-test.status", b"65\n")
+                write(_ios_root, DATA.IOS_UNSIGNED_DIAGNOSTIC, _ios_bad_body)
+                self.assertEqual(project(_ios_root)["positiveUiObservations"]["iosUnsignedArchive"]["failureDiagnostic"], {"receiptState": "refused"})
+        with tempfile.TemporaryDirectory() as _ios_directory:
+            _ios_root = Path(_ios_directory)
+            write(_ios_root, DATA.IOS_UNSIGNED_DIAGNOSTIC, _ios_value)
+            _ios_fd = DATA.open_root(str(_ios_root))
+            try:
+                _ios_budget = {"deadline": time.monotonic_ns() + 45_000_000_000, "files": 0, "bytes": 0,
+                    "nodes": 0, "outputBytes": 0}
+                DATA.reserve_ordinary_ui_reads(_ios_budget)
+                _ios_budget["outputBytes"] = DATA.OUTPUT_LIMIT + DATA.ORDINARY_UI_OUTPUT_LIMIT
+                with self.assertRaises(DATA.Refused):
+                    DATA.positive_ui_observations(_ios_fd, CONTEXT,
+                        {"normal-ui/ios-unsigned-archive-test.status": {"receiptState": "observed", "returncode": 65}},
+                        {}, {}, _ios_budget)
+                self.assertIs(_ios_budget["ordinaryUiOutputReserved"], False)
+            finally: os.close(_ios_fd)
+        # The original fixed roster and combined/global output ceilings do not grow.
+        self.assertEqual((DATA.INPUT_LIMIT, DATA.OUTPUT_LIMIT), (3 << 20, 128 << 10))
+        self.assertEqual(len(DATA.UI_DIAGNOSTICS), 3)
         value = receipt(); value["passed"] = False
         value["failure"] = {"stage": "final-image-log", "type": "Refused", "reason": "notary-log-" + SENTINEL}
         call = value["originalCalls"][0]
@@ -1730,6 +1843,99 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             namespace["project_original"](original, error)
             self.assertEqual(original.receipt["failure"]["reason"], "original-operation-refused")
             self.assertNotIn(SENTINEL, json.dumps(original.receipt))
+
+        # The real helper receipt retains fixed transport guards even though
+        # its separate captured diagnostic classifier intentionally omits them.
+        transport = ('package-mount-host-admission', 'package-mount-host-source', 'package-mount-host-source-post', 'package-transport-automounted', 'package-transport-context', 'package-transport-detach-original', 'package-transport-host-original', 'package-transport-host-unavailable', 'package-transport-mounted-namespace', 'package-transport-one-admission', 'package-transport-original-device', 'package-transport-original-mount', 'removal-bounded-roster', 'removal-directory-facts-changed', 'removal-directory-flags', 'removal-directory-named-held', 'removal-directory-original', 'removal-directory-post', 'removal-fixed-name-collision', 'removal-local-filesystem', 'removal-original-control-pool', 'removal-original-empty-acl', 'removal-original-headroom', 'removal-protected-apfs', 'removal-protected-owner', 'removal-readonly-filesystem', 'removal-roster-original', 'removal-roster-post', 'removal-roster-previous-unknown')
+        direct = ("normal_mount_host", "transport_source_post", "transport_mount_admit",
+                  "transport_mount_facts", "transport_mount_detached")
+        protected = ("removal_reserve", "removal_acl", "removal_directory_facts",
+                     "removal_directory_post", "removal_absent", "removal_names", "removal_roster")
+        path_guard = next(node for node in helper_tree.body if isinstance(node, ast.FunctionDef)
+                          and node.name == "transport_mount_path_data")
+        selected_guards = [path_guard] + [node for node in operation.body
+            if isinstance(node, ast.FunctionDef) and node.name in direct + protected]
+        self.assertEqual(len(selected_guards), 1 + len(direct) + len(protected))
+        source_guards = set()
+        for selected in selected_guards:
+            for node in ast.walk(selected):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id == "need" and len(node.args) > 1
+                        and isinstance(node.args[-1], ast.Constant) and type(node.args[-1].value) is str):
+                    source_guards.add(node.args[-1].value)
+                if (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+                        and isinstance(node.exc.func, ast.Name) and node.exc.func.id == "Refused"
+                        and node.exc.args and isinstance(node.exc.args[0], ast.Constant)
+                        and type(node.exc.args[0].value) is str):
+                    source_guards.add(node.exc.args[0].value)
+        self.assertEqual(set(transport), source_guards - {"removal-channel-directory", "removal-input-flags"})
+        self.assertTrue(set(transport) <= DATA.REASONS)
+        self.assertTrue(set(transport).isdisjoint(namespace["_FAILURE_REASONS"]))
+        for label in transport:
+            error = namespace["Refused"](label); before = BaseException.args.__get__(error)
+            captured = namespace["failure_exception"](error, stager)
+            self.assertEqual(captured, {"type": "helper-refused", "reason": "unclassified", "errno": None})
+            original = SimpleNamespace(stage="package-readonly-attach", stager=stager,
+                diagnostic_failure=captured, receipt={})
+            namespace["project_original"](original, error)
+            expected = {"stage": "package-readonly-attach", "type": "Refused", "reason": label}
+            self.assertEqual(original.receipt["failure"], expected)
+            self.assertEqual(DATA.project_failure(expected), dict(expected, errno=None))
+            self.assertIs(type(error), namespace["Refused"])
+            self.assertEqual(BaseException.args.__get__(error), before)
+            private = namespace["Refused"](label + "-" + SENTINEL)
+            current = SimpleNamespace(stage="package-readonly-attach", stager=stager,
+                diagnostic_failure=namespace["failure_exception"](private, stager), receipt={})
+            namespace["project_original"](current, private)
+            projected = DATA.project_failure(current.receipt["failure"])
+            self.assertEqual(projected["reason"], "unclassified")
+            self.assertNotIn(SENTINEL, json.dumps(projected))
+        class HelperChild(namespace["Refused"]):
+            def __str__(self): raise AssertionError("private helper subclass rendered")
+        class TokenChild(str): pass
+        # Exact classifier/public DATA boundaries remain unchanged. Do not run
+        # the existing helper str(error) receipt path on an opaque argument.
+        for error in (namespace["Refused"](PrivateArgument()), namespace["Refused"](*transport[:2]),
+                      ForeignRefused(transport[0]), HelperChild(transport[0])):
+            before = BaseException.args.__get__(error)
+            classified = namespace["failure_exception"](error, stager)
+            self.assertEqual(classified["reason"], "unclassified")
+            self.assertEqual(BaseException.args.__get__(error), before)
+            if type(error) is not namespace["Refused"]:
+                current = SimpleNamespace(stage="package-readonly-attach", stager=stager,
+                    diagnostic_failure=classified, receipt={})
+                namespace["project_original"](current, error)
+                projected = DATA.project_failure(current.receipt["failure"])
+                self.assertEqual(projected["reason"], "original-operation-refused")
+                self.assertNotIn(projected["reason"], transport)
+                self.assertNotIn(SENTINEL, json.dumps(projected))
+        for invalid in (None, transport[0].encode(), list(transport[:2]), TokenChild(transport[0]),
+                        "package-transport-" + SENTINEL, "removal-" + SENTINEL,
+                        transport[0] + "\x00", SENTINEL):
+            projected = DATA.project_failure({"reason": invalid})
+            self.assertEqual(projected["reason"], "unclassified")
+            self.assertNotIn(SENTINEL, json.dumps(projected))
+        for label in ("package-transport-context", "removal-protected-owner"):
+            with self.subTest(transport_original=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); failed = receipt("package-install")
+                del failed["finalImage"], failed["notarySubmission"]
+                failed.update(passed=False, targetRetired=False, originalClosesKnown=False,
+                    originalCalls=[], productReady=False,
+                    notaryAuthentication={"created": False, "closed": False, "retired": False},
+                    failure={"stage": "package-readonly-attach", "type": "Refused", "reason": label})
+                original = write(root, "android-helper-package-install.json", failed)
+                write(root, "package-install.status", b"1\n")
+                before = original.read_bytes(); output = project(root); phase = output["phases"]["package-install"]
+                self.assertIs(output["diagnosticOnly"], True); self.assertIs(output["productReady"], False)
+                self.assertIs(phase["recordedPassed"], False)
+                self.assertIs(phase["targetRetired"], False); self.assertIs(phase["originalClosesKnown"], False)
+                self.assertEqual(phase["failure"]["reason"], label)
+                self.assertEqual(phase["callerStatus"], {"receiptState": "observed", "returncode": 1})
+                self.assertEqual(phase["originalCalls"], {"recordedCount": 0, "unclassifiedCount": 0, "calls": []})
+                self.assertEqual(original.read_bytes(), before)
+                encoded = json.dumps(output, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+                self.assertLessEqual(len(encoded), DATA.OUTPUT_LIMIT)
+                self.assertNotIn(SENTINEL.encode(), encoded); self.assertNotIn(str(root).encode(), encoded)
 
         # Genuine fixed-token projector and reader, no native/credential work.
         source = (ROOT / "desktop/src-tauri/examples/macos_package_producer.rs").read_text()

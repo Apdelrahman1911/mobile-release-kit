@@ -19,6 +19,21 @@ pub(crate) fn sibling_target(value: &str) -> Option<&str> {
         .then_some(name)
 }
 
+/// Only a concrete decimal-version sibling of the fixed iPhoneOS.sdk alias.
+/// This is link DATA, not path following or SDK/tool execution authority.
+pub(crate) fn sdk_sibling_target(value: &str) -> Option<&str> {
+    if value.len() > 255 { return None; }
+    let version = value.strip_prefix("iPhoneOS")?.strip_suffix(".sdk")?;
+    for (index, part) in version.split('.').enumerate() {
+        if index >= 3 || part.is_empty() || part.len() > 3
+            || !part.bytes().all(|byte| byte.is_ascii_digit())
+            || (part.len() > 1 && part.starts_with('0')) || (index == 0 && part == "0") {
+            return None;
+        }
+    }
+    Some(value)
+}
+
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use crate::installed_runtime::IOSXcodeSlots;
 
@@ -37,6 +52,16 @@ mod tests {
         for bad in ["Xcode.app", "/Applications/Xcode.app", "../Xcode_26.app", "./Xcode_26.app",
             "/tmp/Xcode_26.app", "/Applications/../Xcode_26.app", "Xcode_26.app/Contents", "Other.app", "Xcode_26.app\0"] {
             assert_eq!(sibling_target(bad), None, "{bad:?}");
+        }
+        for good in ["iPhoneOS1.sdk", "iPhoneOS26.0.sdk", "iPhoneOS26.2.sdk", "iPhoneOS26.0.1.sdk", "iPhoneOS999.999.999.sdk"] {
+            assert_eq!(sdk_sibling_target(good), Some(good));
+        }
+        for bad in ["iPhoneOS.sdk", "/Applications/iPhoneOS26.0.sdk", "../iPhoneOS26.0.sdk", "./iPhoneOS26.0.sdk",
+            "iPhoneOS26.0.sdk/Other.sdk", "iPhoneOS26.0.sdk/iPhoneOS.sdk", "iPhoneOS26.0\\.sdk",
+            "iPhoneSimulator26.0.sdk", "MacOSX26.0.sdk", "iPhoneOS0.sdk", "iPhoneOS026.0.sdk", "iPhoneOS26.00.sdk",
+            "iPhoneOS26..sdk", "iPhoneOS26.0.0.1.sdk", "iPhoneOS1000.sdk", "iPhoneOS26-beta.sdk", "iPhoneOS٢٦.sdk",
+            "iPhoneOS26.0.sdk\0", "iPhoneOS26.0.sdk\n"] {
+            assert_eq!(sdk_sibling_target(bad), None, "{bad:?}");
         }
     }
 }

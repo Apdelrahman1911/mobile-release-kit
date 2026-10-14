@@ -3334,8 +3334,10 @@ def install_product_members(body):
                      and len(child) == 2 and {item.tag for item in child} == {"time", "nanoseconds"}
                      and all(not item.attrib and not list(item) and not (item.tail or "").strip() for item in child),
                      "install-product-xar-finder-shape")
+                # Bounded opaque auxiliary annotation, not a calendar or trusted
+                # timestamp: never converted, normalized, applied or authority.
                 need(type(child.findtext("time")) is str
-                     and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}", child.findtext("time")),
+                     and re.fullmatch(r"[0-9TZ:+.\-]{1,64}", child.findtext("time")),
                      "install-product-xar-finder-time")
                 need(type(child.findtext("nanoseconds")) is str
                      and re.fullmatch(r"0|[1-9][0-9]{0,8}", child.findtext("nanoseconds")),

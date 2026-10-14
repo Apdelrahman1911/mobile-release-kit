@@ -32,7 +32,7 @@ ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
 PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
-LOADER_SHA = "4363d4ba39f49f1752070baa0b144eae01e703be73d4c7f9bbadacbe30d07524"
+LOADER_SHA = "d12b9125f1f445a194ba71f004c4ac4e364a9751bd7d972eda1a3156ed063db8"
 LOADER_MODULE = "mrk_normal_ui_owner_loader"
 TARGET = "MRKNormalAppUITests"
 CLASS = TARGET + "/NormalAppUITests/"
@@ -595,6 +595,8 @@ IOS_PENDING_RUN = "TEST_RUNNER_MRK_NORMAL_UI_IOS_RECOVERY_RUN_ID"
 IOS_PENDING_ATTEMPT = "TEST_RUNNER_MRK_NORMAL_UI_IOS_RECOVERY_RUN_ATTEMPT"
 IOS_UNSIGNED_METHOD = "testSyntheticProjectUnsignedIOSArchive"
 IOS_UNSIGNED_RESULT = "ios-unsigned-archive-test.xcresult"
+IOS_UNSIGNED_STAGES = ("ios-unsigned-fixture", "ios-unsigned-launch", "ios-unsigned-project",
+    "ios-unsigned-review", "ios-unsigned-original-result", "ios-unsigned-close")
 IOS_UNSIGNED_PREFIX = b"MRK_MACOS_IOS_UNSIGNED_ARCHIVE_UI="
 
 
@@ -2582,7 +2584,57 @@ def failure_base(phase, selection, original, *, engineering=False):
         value["markers"]["buildFailed"] = False
     if not engineering and phase == "test" and selection == OUTPUT_DATA_RESULT:
         value["outputDataFailure"] = None
+    if not engineering and phase == "test" and selection == IOS_UNSIGNED_RESULT:
+        value["iosUnsignedStages"] = {"state": "unavailable", "events": []}
     return value
+
+
+def ios_unsigned_stage_diagnostics(stdout, stderr):
+    """Exact existing SOURCE marker observations; no outcome/finality authority."""
+    namespace = b"MRK_NORMAL_PROJECT_STAGE="
+    pattern = rb"MRK_NORMAL_PROJECT_STAGE=(ios-unsigned-(?:fixture|launch|project|review|original-result|close));result=(started|passed|failed)(;laterStages=not-run)?"
+    events, seen = [], set()
+    index, active, finished, invalid, attempted = 0, None, False, False, False
+    for stream, body in (("stdout", stdout), ("stderr", stderr)):
+        offset = 0
+        while offset < len(body):
+            end = body.find(b"\n", offset)
+            complete = end != -1
+            if not complete: end = len(body)
+            size = end - offset
+            # Never copy an unbounded physical line just to inspect its prefix.
+            short = body[offset:end] if size <= 192 else None
+            prefix = body[offset:min(end, offset + len(namespace))]
+            suffix = body[max(offset, end - len(namespace)):end]
+            candidate = (body.find(namespace, offset, end) != -1
+                or bool(prefix) and namespace.startswith(prefix)
+                or not complete and any(suffix.endswith(namespace[:n]) for n in range(1, len(namespace))))
+            offset = end + 1
+            if not candidate: continue
+            attempted = True
+            record = short[:-1] if short is not None and complete and short.endswith(b"\r") else short
+            match = re.fullmatch(pattern, record) if (record is not None and complete and stream == "stdout"
+                and all(32 <= byte <= 126 for byte in record)) else None
+            if match is None:
+                invalid = True
+                continue
+            stage, result = match.group(1).decode("ascii"), match.group(2).decode("ascii")
+            key = (stage, result)
+            if ((result == "failed") != (match.group(3) is not None) or key in seen or finished
+                    or index >= len(IOS_UNSIGNED_STAGES) or stage != IOS_UNSIGNED_STAGES[index]
+                    or (result == "started" and active is not None)
+                    or (result != "started" and active != stage)):
+                invalid = True
+                continue
+            seen.add(key)
+            events.append({"stage": stage, "result": result})
+            if result == "started": active = stage
+            else:
+                active = None
+                if result == "passed": index += 1
+                else: finished = True
+    if invalid: return {"state": "refused", "events": []}
+    return {"state": "observed" if attempted else "absent", "events": events}
 
 
 def normal_failure_diagnostics(phase, selection, original, *, engineering=False):
@@ -3189,6 +3241,11 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     value["status"] = ("unavailable" if require_invalid or guide_invalid or artifact_invalid or first_invalid or output_invalid else "classified" if any(value[key]
         for key in ("errorCodes", "sourceFailures", "queryObservations", "requireObservations"))
         or value.get("engineeringFirstFailure") is not None or value.get("outputDataFailure") is not None or value.get("compilerDiagnostics") or value.get("buildFailureReasons") else "unclassified")
+    if not engineering and phase == "test" and selection == IOS_UNSIGNED_RESULT:
+        value["iosUnsignedStages"] = ios_unsigned_stage_diagnostics(original.stdout, original.stderr)
+        if len(encoded(value)) + 1 > 4096:
+            value["iosUnsignedStages"] = {"state": "unavailable", "events": []}
+            value["findingsTruncated"] = True
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
     return value
 
@@ -4131,11 +4188,12 @@ def main():
                 # Optional closed diagnostics cannot replace an original return or
                 # create a usable result after failed/unknown publication/close.
                 need(phase is not None, "ios-unsigned-diagnostic-context-admitted")
-                failure = normal_admission_failure(stage, error, owner, records)
+                failure = classify_normal_admission_failure(encoded(
+                    normal_admission_failure(stage, error, owner, records)))
                 body = encoded(failure) + b"\n"
-                need(len(body) <= 16384, "ios-unsigned-failure-bound")
+                need(len(body) <= 4096, "ios-unsigned-failure-bound")
                 stem = SUMMARY_STEMS[request["result"].name] if request["phase"] == "summary" else request["result"].stem
-                exclusive_output(request["derived"].parent / (stem + ".failure-diagnostics.json"), body, 16384)
+                exclusive_output(request["derived"].parent / (stem + ".failure-diagnostics.json"), body, 4096)
             except BaseException:
                 pass
             return code

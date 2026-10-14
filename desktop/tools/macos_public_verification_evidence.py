@@ -218,7 +218,19 @@ REASONS = frozenset((*DISTRIBUTION_STAGER_REASONS,"producer-tests-bound", "produ
     "package-signature-trust-timestamp", "package-signature-chain-order", "package-signature-chain-format",
     "package-signature-fingerprint-repeated", "package-signature-fingerprint-position", "package-signature-fingerprint-bound",
     "package-signature-expiry-repeated", "package-signature-source-chain", "package-signature-source-fingerprint",
-    "notary-submit-terminal", "notary-submit-metadata", "notary-submit-archive", "notary-uuid"))
+    "notary-submit-terminal", "notary-submit-metadata", "notary-submit-archive", "notary-uuid",
+    # Fixed transport/held-parent SOURCE guards; diagnostic observations only.
+    'package-mount-host-admission', 'package-mount-host-source', 'package-mount-host-source-post',
+    'package-transport-automounted', 'package-transport-context', 'package-transport-detach-original',
+    'package-transport-host-original', 'package-transport-host-unavailable', 'package-transport-mounted-namespace',
+    'package-transport-one-admission', 'package-transport-original-device', 'package-transport-original-mount',
+    'removal-bounded-roster', 'removal-directory-facts-changed', 'removal-directory-flags',
+    'removal-directory-named-held', 'removal-directory-original', 'removal-directory-post',
+    'removal-fixed-name-collision', 'removal-local-filesystem', 'removal-original-control-pool',
+    'removal-original-empty-acl', 'removal-original-headroom', 'removal-protected-apfs',
+    'removal-protected-owner', 'removal-readonly-filesystem', 'removal-roster-original',
+    'removal-roster-post', 'removal-roster-previous-unknown',
+))
 REASON_CATEGORIES = (
     ("notary-key-", "notary-authentication"), ("notary-profile-", "notary-profile"),
     ("notary-json-", "notary-schema"), ("notary-log-", "notary-log"),
@@ -249,6 +261,11 @@ SUMMARY_BOOLS = ("originalInstallerReturnedZero", "originalPackageGroupReturnedZ
     "originalImageFinalizationReturnedZero", "originalFinalImageMountDetached", "finalImageScopedNotarizationObserved",
     "originalPackageFinalizationReturnedZero", "originalPackageRemoveReturnedZero", "removalExecuted",
     "installedAppLaunchedByRemovalRoute", "distributionQualified", "productReady")
+IOS_UNSIGNED_DIAGNOSTIC = "normal-ui/ios-unsigned-archive-test.failure-diagnostics.json"
+IOS_UNSIGNED_SELECTION = "ios-unsigned-archive-test.xcresult"
+IOS_UNSIGNED_METHOD = "testSyntheticProjectUnsignedIOSArchive"
+IOS_UNSIGNED_STAGES = ("ios-unsigned-fixture", "ios-unsigned-launch", "ios-unsigned-project",
+    "ios-unsigned-review", "ios-unsigned-original-result", "ios-unsigned-close")
 UI_DIAGNOSTICS = (("build", "normal-ui/build.failure-diagnostics.json"),
     ("toolchain", "normal-ui/toolchain.failure-diagnostics.json"),
     ("admission", "normal-ui/build.admission-diagnostics.json"))
@@ -499,29 +516,73 @@ def token(value, choices):
     return value if type(value) is str and value in choices else "unclassified"
 
 
+def project_ios_unsigned_stages(value):
+    need(type(value) is dict and set(value) == {"state", "events"}
+         and type(value["state"]) is str and value["state"] in ("unavailable", "absent", "refused", "observed")
+         and type(value["events"]) is list and len(value["events"]) <= 12)
+    if value["state"] != "observed":
+        need(value["events"] == [])
+        return dict(value)
+    need(bool(value["events"]))
+    index, active, finished, seen = 0, None, False, set()
+    for row in value["events"]:
+        need(type(row) is dict and set(row) == {"stage", "result"}
+             and type(row["stage"]) is str and row["stage"] in IOS_UNSIGNED_STAGES
+             and type(row["result"]) is str and row["result"] in ("started", "passed", "failed"))
+        stage, result = row["stage"], row["result"]
+        key = (stage, result)
+        need(key not in seen and not finished and index < len(IOS_UNSIGNED_STAGES)
+             and stage == IOS_UNSIGNED_STAGES[index]
+             and ((result == "started" and active is None) or (result != "started" and active == stage)))
+        seen.add(key)
+        if result == "started": active = stage
+        else:
+            active = None
+            if result == "passed": index += 1
+            else: finished = True
+    return dict(value)
+
+
 def project_ui_failure(value, phase):
-    """Validate only the existing ordinary build/query writer's closed schema."""
+    """Existing build/query or the one fixed unsigned test; no general test reader."""
     fields = {"schemaVersion", "scope", "phase", "selection", "originalReturncode", "stdoutBytes", "stdoutSha256",
         "stderrBytes", "stderrSha256", "status", "findingsTruncated", "errorCodes", "sourceFailures",
         "queryObservations", "requireObservations", "dashboardReadiness", "markers"}
+    unsigned = phase == "test"
     build_fields = {"compilerDiagnostics"} if phase == "build" else set()
+    if unsigned and "iosUnsignedStages" in value: build_fields.add("iosUnsignedStages")
     if phase == "build" and "buildFailureReasons" in value:
         build_fields.add("buildFailureReasons")  # Backward-compatible absence remains unproven, not empty.
     if phase == "build" and "destinationTable" in value:
         build_fields.add("destinationTable")  # Optional absence is not an empty table observation.
-    need(phase in ("build", "query") and set(value) == fields | build_fields
+    need(phase in ("build", "query", "test") and set(value) == fields | build_fields
          and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
          and value["scope"] == "normal-macos-ui-failure-diagnostic-only" and value["phase"] == phase
-         and value["selection"] is None and value["status"] in ("unavailable", "classified", "unclassified"))
+          and ((not unsigned and value["selection"] is None) or (unsigned and type(value["selection"]) is str
+               and value["selection"] == IOS_UNSIGNED_SELECTION))
+          and value["status"] in ("unavailable", "classified", "unclassified"))
     integer(value["originalReturncode"], 255, 1)
     cap = 4096 if phase == "query" else 1024 * 1024
     size = integer(value["stdoutBytes"], cap)
     integer(value["stderrBytes"], cap - size)
     hex_value(value["stdoutSha256"]); hex_value(value["stderrSha256"])
     boolean(value["findingsTruncated"])
-    need(value["sourceFailures"] == [] and type(value["sourceFailures"]) is list
+    failures = value["sourceFailures"]
+    need(type(failures) is list and (len(failures) <= 4 if unsigned else failures == [])
          and value["requireObservations"] == [] and type(value["requireObservations"]) is list
          and value["dashboardReadiness"] is None)
+    if unsigned:
+        sites = []
+        for row in failures:
+            need(type(row) is dict and set(row) == {"stream", "source", "method", "line", "column"}
+                 and type(row["stream"]) is str and row["stream"] in ("stdout", "stderr")
+                 and type(row["source"]) is str and row["source"] == "NormalAppUITests.swift"
+                 and type(row["method"]) is str and row["method"] == IOS_UNSIGNED_METHOD)
+            integer(row["line"], 65535, 1)
+            if row["column"] is not None: integer(row["column"], 4096, 1)
+            sites.append((row["stream"], row["source"], row["method"], row["line"], row["column"]))
+        need(len(set(sites)) == len(sites))
+        if "iosUnsignedStages" in value: project_ios_unsigned_stages(value["iosUnsignedStages"])
     markers = value["markers"]
     need(type(markers) is dict and set(markers) == {"selectedCaseStarted", "selectedCaseFailed",
          "testExecuteFailed", "testingFailed", "xcodebuildError"} | ({"buildFailed"} if phase == "build" else set())
@@ -660,16 +721,23 @@ def project_ui_admission(value):
 
 
 def project_ui_diagnostic(value, role, caller_status):
-    need(type(value) is dict and role in ("build", "toolchain", "admission")
+    need(type(value) is dict and role in ("build", "toolchain", "admission", "ios-unsigned-test")
          and type(caller_status) is dict and caller_status.get("receiptState") == "observed")
     status = integer(caller_status.get("returncode"), 255, 1)
     # Writers have no embedded source/run tuple. This is only parent-context
     # attribution from the fixed fresh work root, never independent attestation.
     try:
-        row = project_ui_admission(value) if role == "admission" else project_ui_failure(value, "build" if role == "build" else "query")
+        if role == "ios-unsigned-test":
+            if value.get("scope") == "normal-macos-ui-admission-diagnostic-only":
+                row = project_ui_admission(value)
+                row["originalCallerReturncode"] = status  # Scalar attribution, not a native-command outcome.
+            else:
+                row = project_ui_failure(value, "test")
+        else:
+            row = project_ui_admission(value) if role == "admission" else project_ui_failure(value, "build" if role == "build" else "query")
     except KeyError:
         raise Refused("public-evidence-refused") from None
-    if role != "admission":
+    if role != "admission" and not (role == "ios-unsigned-test" and value.get("scope") == "normal-macos-ui-admission-diagnostic-only"):
         need(row["originalReturncode"] == status)
     return {**row, "receiptState": "observed", "binding": "same-work-root-parent-context-only", "nativeSuccessInferred": False}
 
@@ -2622,7 +2690,21 @@ def ordinary_ui_observations(root, context, statuses, phases, inventory, preview
 
 def positive_ui_observations(root, context, statuses, phases, inventory, budget, deliveries=None):
     inputs = {}
+    ios_status = statuses.get("normal-ui/ios-unsigned-archive-test.status", {})
+    ios_failed = (type(ios_status) is dict and ios_status.get("receiptState") == "observed"
+        and type(ios_status.get("returncode")) is int and 1 <= ios_status["returncode"] <= 255)
+    ios_failure = None
     for key, path, limit, admission in POSITIVE_UI_INPUTS:
+        if key == "iosFacts" and ios_failed:
+            try:
+                ios_failure = project_ui_diagnostic(decode(read_input(root, IOS_UNSIGNED_DIAGNOSTIC, 4096, budget), budget),
+                    "ios-unsigned-test", ios_status)
+            except FileNotFoundError:
+                ios_failure = {"receiptState": "absent"}
+            except Refused:
+                ios_failure = {"receiptState": "refused"}
+            inputs[key] = ("absent", None)  # One alternative attempt, never a fallback facts read.
+            continue
         try:
             inputs[key] = ("observed", decode(read_input(root, path, limit, budget), budget, ui_admission=admission))
         except FileNotFoundError:
@@ -2645,6 +2727,8 @@ def positive_ui_observations(root, context, statuses, phases, inventory, budget,
             result[name] = projector(*values, context, statuses, phases, inventory)
         except Refused:
             result[name] = {"receiptState": "refused"}
+    if ios_failed:
+        result["iosUnsignedArchive"] = {"receiptState": "refused", "failureDiagnostic": ios_failure}
     result["ordinary"] = ordinary_ui_observations(root, context, statuses, phases, inventory,
         (deliveries or {}).get("preview", {}), budget)
     size = len(json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
