@@ -149,6 +149,7 @@ def classify_log(body, helper_body):
         "knownKeyTypeMasks": {name: 0 for name in ("null", "boolean", "integer", "string", "list", "object", "other")},
         "unknownKeyCount": None, "ticketRowCount": None, "issueRowCount": None,
         "exactNestedPackageAbsentArchRows": 0, "exactNestedPackageNullArchRows": 0,
+        "exactArchiveAbsentArchRows": 0, "exactArchiveNullArchRows": 0,
         "malformedNonArchitectureTicketRows": None,
         "architectureClasses": {name: 0 for name in ("arm64", "x86_64", "i386", "absent", "null", "other-string", "wrong-type")},
         "ticketPathClasses": {name: 0 for name in ("exact-archive", "exact-nested-Install.pkg", "under-Install.pkg", "other-relative", "other-invalid")}}
@@ -175,6 +176,11 @@ def classify_log(body, helper_body):
         for row in rows if type(rows) is list and len(rows) <= 2048 else ():
             if not namespace["_diagnostic_non_architecture_ticket_shape"](row):
                 result["malformedNonArchitectureTicketRows"] += 1
+            if type(row) is dict and row.get("path") == ARCHIVE:
+                if "arch" not in row:
+                    result["exactArchiveAbsentArchRows"] += 1
+                elif row["arch"] is None:
+                    result["exactArchiveNullArchRows"] += 1
             if type(row) is dict and row.get("path") == ARCHIVE + "/Install.pkg":
                 if "arch" not in row:
                     result["exactNestedPackageAbsentArchRows"] += 1

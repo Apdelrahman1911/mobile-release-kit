@@ -8868,6 +8868,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertIsNone(observed["firstKnownFailure"])
         self.assertFalse(observed["originalParserPassInferred"] or observed["nativeSuccessInferred"] or observed["productReady"])
         self.assertEqual(observed["exactOriginalFirstFailure"], "unresolved")
+        self.assertEqual(observed["exactArchiveAbsentArchRows"], 0)
+        self.assertEqual(observed["exactArchiveNullArchRows"], 1)
+        root_omitted = dict(log["ticketContents"][0]); del root_omitted["arch"]
+        root_observed = classify(dict(log, ticketContents=[root_omitted]))
+        self.assertEqual(root_observed["exactArchiveAbsentArchRows"], 1)
+        self.assertEqual(root_observed["exactArchiveNullArchRows"], 0)
         self.assertEqual(observed["knownKeyTypeMasks"]["integer"], 1 << probe.KEYS.index("logFormatVersion"))
         self.assertEqual(observed["knownKeyTypeMasks"]["null"], 1 << probe.KEYS.index("issues"))
         self.assertEqual(observed["knownKeyTypeMasks"]["list"], 1 << probe.KEYS.index("ticketContents"))
@@ -8897,6 +8903,18 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(misleading_observed["exactNestedPackageAbsentArchRows"], 0)
         self.assertEqual(misleading_observed["exactNestedPackageNullArchRows"], 0)
         self.assertEqual(misleading_observed["malformedNonArchitectureTicketRows"], 0)
+        root_misleading = [dict(log["ticketContents"][0], arch="arm64"),
+                           dict(log["ticketContents"][0], path=probe.ARCHIVE + "/Install.pkg/code", arch=None)]
+        root_misleading_observed = classify(dict(log, ticketContents=root_misleading))
+        self.assertEqual(root_misleading_observed["architectureClasses"]["null"], 1)
+        self.assertEqual(root_misleading_observed["ticketPathClasses"]["exact-archive"], 1)
+        self.assertEqual(root_misleading_observed["exactArchiveAbsentArchRows"], 0)
+        self.assertEqual(root_misleading_observed["exactArchiveNullArchRows"], 0)
+        exhausted = classify(dict(log, ticketContents=[root_omitted, omitted]))
+        self.assertEqual(exhausted["exactArchiveAbsentArchRows"] + exhausted["exactNestedPackageAbsentArchRows"],
+                         exhausted["architectureClasses"]["absent"])
+        self.assertEqual(exhausted["exactArchiveNullArchRows"] + exhausted["exactNestedPackageNullArchRows"],
+                         exhausted["architectureClasses"]["null"])
         valid = nested["ticketContents"][0]
         malformed_rows = [None, dict(valid, cdhash=marker), dict(valid, digestAlgorithm="MD5"),
                           dict(valid, extra=marker), dict(valid, path=marker + "\n"),
@@ -8909,6 +8927,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertIsNone(invalid_observed["malformedNonArchitectureTicketRows"])
             self.assertEqual(invalid_observed["exactNestedPackageAbsentArchRows"], 0)
             self.assertEqual(invalid_observed["exactNestedPackageNullArchRows"], 0)
+            self.assertEqual(invalid_observed["exactArchiveAbsentArchRows"], 0)
+            self.assertEqual(invalid_observed["exactArchiveNullArchRows"], 0)
         self.assertEqual(classify(dict(log, ticketContents=None))["malformedNonArchitectureTicketRows"], 0)
         for changes in ({"jobId": "99999999-1111-2222-3333-444444444444"}, {"status": "Invalid"},
                         {"archiveFilename": "Other.dmg"}, {"logFormatVersion": True}, {marker: marker}):
