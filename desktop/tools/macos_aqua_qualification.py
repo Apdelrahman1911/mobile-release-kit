@@ -5730,7 +5730,7 @@ def shipping_gate_compiler_argv(target=ARM_TARGET):
     return argv
 
 
-SHIPPING_GATE_SOURCE_PINS = {'desktop/tools/stage_macos_installed.py': '31315ed43c72f44c02814822ee3888a8816b18a34f15db50ec177238b7ca7d14', 'desktop/macos-installed-inputs/build-release.json': '521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512', 'desktop/macos-installed-inputs/build-release-intel.json': '5864c0efb2a66219cf7efa41d3863721327148ef7b4c6d6f3252de3ce20596e7'}
+SHIPPING_GATE_SOURCE_PINS = {'desktop/tools/stage_macos_installed.py': '6b7e462c3244b3ecbbebf17eee7b8ecd6a7485aebea3cc06b6160060975d6fb9', 'desktop/macos-installed-inputs/build-release.json': '521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512', 'desktop/macos-installed-inputs/build-release-intel.json': '5864c0efb2a66219cf7efa41d3863721327148ef7b4c6d6f3252de3ce20596e7'}
 SHIPPING_GATE_REPORT = "shipping-gate-control.receipt.json"
 SHIPPING_GATE_STATUS = "shipping-gate-control.status"
 

@@ -647,7 +647,24 @@ INTEL_FETCH_PREPARE_PREFIX = '        if self.target == INTEL_TARGET:\n         
 
 INTEL_FETCH_OFFLINE_REGION = ('                           "--locked", "--release", "--jobs", "1", "--target", self.target,', '                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--jobs", "1", "--target", self.target,')
 
+
+ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME = "run-name: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ARM-only final-image diagnostic - not combined qualification' || github.workflow }}\n"
+ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT = ' || github.ref == \'refs/heads/verify/desktop-macos-installed\' && \'[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"}]\''
+
+def without_arm_only_final_image_diagnostic_workflow(source):
+    # Exact temporary selector only, before unchanged historical supplier counts.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("ARM final-image diagnostic workflow bound differs")
+    markers = ("ARM-only final-image diagnostic", "run-name: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed'",
+               " || github.ref == 'refs/heads/verify/desktop-macos-installed' && '[{")
+    if not any(marker in source for marker in markers):
+        return source
+    if source.count(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME) != 1 or source.count(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT) != 1:
+        raise AssertionError("ARM final-image diagnostic exact complete SOURCE delta differs")
+    return source.replace(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME, "").replace(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT, "")
+
 def without_fresh_g2_supplier_workflow(source):
+    source = without_arm_only_final_image_diagnostic_workflow(source)
     # Current supplier DATA only; preserve unchanged historical SOURCE oracles.
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("fresh G2 supplier workflow bound differs")

@@ -392,7 +392,9 @@ def no_xattrs(fd):
             call.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
             call.restype = ctypes.c_ssize_t
             _DARWIN_XATTRS = call
-        need(_DARWIN_XATTRS(fd, None, 0, 0) == 0, "file-extended-attributes")
+        count = _DARWIN_XATTRS(fd, None, 0, 0)
+        need(count >= 0, "file-extended-attributes-query")
+        need(count == 0, "file-extended-attributes")
     elif sys.platform == "linux":
         need(not os.listxattr(fd), "file-extended-attributes")
     else:

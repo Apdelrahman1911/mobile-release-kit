@@ -2505,6 +2505,13 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertEqual(DATA.project_failure({"reason": reason})["reason"], reason)
         self.assertEqual(DATA.project_failure({"reason": "package-signature-" + SENTINEL})["reason"], "unclassified")
 
+        for stage in DATA.FINAL_IMAGE_STAPLE_STAGES:
+            self.assertEqual(DATA.project_failure({"stage": stage})["stage"], stage)
+            self.assertEqual(DATA.project_failure({"stage": stage + "-" + SENTINEL})["stage"], "unclassified")
+        for reason in DATA.FINAL_IMAGE_STAPLE_REASONS:
+            self.assertEqual(DATA.project_failure({"reason": reason})["reason"], reason)
+        self.assertEqual(DATA.project_failure({"stage": SENTINEL, "reason": "file-extended-attributes-" + SENTINEL})["reason"], "unclassified")
+
     def test_successful_normalized_receipt_and_original_zero_survive_file_projection(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

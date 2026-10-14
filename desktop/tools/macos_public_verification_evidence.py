@@ -101,6 +101,11 @@ OWNER_REASONS = frozenset(("output-bound", "deadline", "protocol-or-original-own
 FAILURE_TYPES = frozenset(("Refused", "OSError", "ValueError", "TypeError", "RuntimeError", "AssertionError",
     "MemoryError", "RecursionError", "UnicodeError", "JSONDecodeError", "KeyboardInterrupt", "SystemExit",
     "ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown", "Incomplete"))
+
+# Fixed first-failing post-staple facts only; never native/finality authority.
+FINAL_IMAGE_STAPLE_STAGES = ('final-image-staple-clock', 'final-image-staple-parent', 'final-image-staple-held-stat', 'final-image-staple-held-device', 'final-image-staple-held-inode', 'final-image-staple-held-mode', 'final-image-staple-held-links', 'final-image-staple-held-links-unlinked', 'final-image-staple-held-links-other', 'final-image-staple-held-uid', 'final-image-staple-held-gid', 'final-image-staple-size', 'final-image-staple-growth', 'final-image-staple-name-stat', 'final-image-staple-binding', 'final-image-staple-xattr-query', 'final-image-staple-xattrs-present', 'final-image-staple-stream', 'final-image-staple-post')
+FINAL_IMAGE_STAPLE_REASONS = frozenset(('final-image-stapled-original', 'file-extended-attributes-query', 'file-extended-attributes', 'notary-monotonic-clock', 'directory-original-unavailable', 'directory-parent-changed', 'directory-original-unbound', 'directory-original-changed', 'notary-zip-original', 'notary-zip-short-read', 'notary-zip-post', 'final-image-directory-census', 'final-image-input-changed', 'final-image-output-changed', 'final-image-target-census'))
+
 FINAL_IMAGE_INPUT_STAGES = (
     'final-image-original-inputs',
     'final-image-package-owner',
@@ -158,7 +163,7 @@ FINAL_IMAGE_INPUT_STAGER_REASONS = frozenset((
     'source-service-profile',
 ))
 
-STAGES = frozenset((*PHASES, *NATIVE_ROLES, *FINAL_IMAGE_INPUT_STAGES, "owned-directory-admission", "source-image-binding",
+STAGES = frozenset((*FINAL_IMAGE_STAPLE_STAGES, *PHASES, *NATIVE_ROLES, *FINAL_IMAGE_INPUT_STAGES, "owned-directory-admission", "source-image-binding",
     "resident-dependency-fetch", "separate-resident-image-compiler", "compiler-original-copy", "resident-image-source-selected-signing",
     "fixed-installed-entry-compiler", "desktop-facade-compiler", "resident-facade-compiler",
     "helper-source-selected-signing", "notary-preflight-input", "notary-known-private-retirement", "final-image-owned-publication",
@@ -266,7 +271,7 @@ FINAL_PACKAGE_POST_REASONS = frozenset((
 
 DISTRIBUTION_STAGER_REASONS = frozenset(('distribution-attach-original', 'distribution-attach-plist', 'distribution-attach-entity', 'distribution-attach-mount', 'distribution-attach-single-mount', 'distribution-package-name', 'distribution-three-file-roster', 'distribution-original-byte-mode'))
 
-REASONS = frozenset((*DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,"producer-tests-bound", "producer-tests-framing", "producer-tests-roster", "producer-tests-result",
+REASONS = frozenset((*FINAL_IMAGE_STAPLE_REASONS, *DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,"producer-tests-bound", "producer-tests-framing", "producer-tests-roster", "producer-tests-result",
     "original-nonzero-producer-tests", *FINAL_PACKAGE_POST_REASONS, *INSTALL_PRODUCT_AUDIT_REASONS, "notary-key-purpose", "notary-key-input", "notary-key-base64", "notary-key-pem-shape",
     *NOTARY_ADMISSION_REASONS, "notary-submission-invalid", "notary-authentication-not-retired", "notary-group-deadline",
     "notary-group-hard-deadline", "notary-final-input-result", "notary-private-key-retained", "original-return-contract",

@@ -69,7 +69,7 @@ PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.op
 # Intel alone uses this fixed shared-package release optimization.
 # Runtime dependencies retain release3; generic code instantiated here inherits release2.
 RESIDENT_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=2"
-HELPER_SOURCE_BYTES = 558790
+HELPER_SOURCE_BYTES = 561596
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -1306,6 +1306,11 @@ def original_failure(error, owner, checkout, timeout, limit):
 DISTRIBUTION_STAGER_REASONS = frozenset(('distribution-attach-original', 'distribution-attach-plist', 'distribution-attach-entity', 'distribution-attach-mount', 'distribution-attach-single-mount', 'distribution-package-name', 'distribution-three-file-roster', 'distribution-original-byte-mode'))
 
 # Closed passive input guards only; these labels never confer native or finality authority.
+
+# Fixed first-failing post-staple facts only; never native/finality authority.
+FINAL_IMAGE_STAPLE_STAGES = ('final-image-staple-clock', 'final-image-staple-parent', 'final-image-staple-held-stat', 'final-image-staple-held-device', 'final-image-staple-held-inode', 'final-image-staple-held-mode', 'final-image-staple-held-links', 'final-image-staple-held-links-unlinked', 'final-image-staple-held-links-other', 'final-image-staple-held-uid', 'final-image-staple-held-gid', 'final-image-staple-size', 'final-image-staple-growth', 'final-image-staple-name-stat', 'final-image-staple-binding', 'final-image-staple-xattr-query', 'final-image-staple-xattrs-present', 'final-image-staple-stream', 'final-image-staple-post')
+FINAL_IMAGE_STAPLE_REASONS = frozenset(('final-image-stapled-original', 'file-extended-attributes-query', 'file-extended-attributes', 'notary-monotonic-clock', 'directory-original-unavailable', 'directory-parent-changed', 'directory-original-unbound', 'directory-original-changed', 'notary-zip-original', 'notary-zip-short-read', 'notary-zip-post', 'final-image-directory-census', 'final-image-input-changed', 'final-image-output-changed', 'final-image-target-census'))
+
 FINAL_IMAGE_INPUT_STAGES = (
     'final-image-original-inputs',
     'final-image-package-owner',
@@ -1363,7 +1368,7 @@ FINAL_IMAGE_INPUT_STAGER_REASONS = frozenset((
     'source-service-profile',
 ))
 
-_FAILURE_REASONS = frozenset((*DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,
+_FAILURE_REASONS = frozenset((*FINAL_IMAGE_STAPLE_REASONS, *DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,
     'producer-tests-bound', 'producer-tests-framing', 'producer-tests-roster', 'producer-tests-result',
     'original-nonzero-producer-tests',
     'same-package-baseline-export', 'same-package-case', 'same-package-census', 'same-package-final-carrier', 'same-package-final-carrier-bytes', 'same-package-final-carrier-root', 'same-package-final-carrier-roster', 'same-package-finalizer-original', 'same-package-fixed-purpose', 'same-package-fresh-baseline', 'same-package-immediate-predecessor', 'same-package-input-', 'same-package-inventory', 'same-package-inventory-binding', 'same-package-inventory-input', 'same-package-live-readback', 'same-package-noop', 'same-package-notary-source', 'same-package-original-boundary', 'same-package-original-input', 'same-package-originals-unknown', 'same-package-parent-entry-bound', 'same-package-previous-shape', 'same-package-readback', 'same-package-readonly-mount', 'same-package-result-delta', 'same-package-result-namespace', 'same-package-result-post', 'same-package-source-scope', 'same-package-status-absence', 'same-package-status-post', 'same-package-status-purpose',
@@ -1428,7 +1433,7 @@ _FAILURE_REASONS = frozenset((*DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_S
     'strict-original-verification', 'work-original',
 ))
 _FAILURE_STAGES = (
-    *FINAL_IMAGE_INPUT_STAGES,
+    *FINAL_IMAGE_STAPLE_STAGES, *FINAL_IMAGE_INPUT_STAGES,
     "package-producer-tests",
     "same-package-noop",
     "owned-directory-admission", "source-image-binding", "resident-dependency-fetch", "separate-resident-image-compiler",
@@ -4075,20 +4080,42 @@ class Operation:
         self.final_image_roots.append((root, {self.image_filename}))
 
     def final_image_mutated(self, before):
-        # Apple DiskImageRep rewrites a signature SuperBlob AND trailing UDIF
-        # header. This is not S3's appended PKG trailer; no prefix claim/offset guess.
+        # Apple rewrites SuperBlob/UDIF, not a PKG prefix. All original guards
+        # and short-circuit reads remain; these finite stages only locate refusal.
         entry = self.final_image_output
+        self.stage = "final-image-staple-parent"
         self.recheck_directory(entry["parent_entry"])
+        self.stage = "final-image-staple-held-stat"
         after = signature(os.fstat(entry["fd"]))
-        need(after[:6] == before[:6] and 0 < after[6] <= self.stager.MAX_BYTES
-             and abs(after[6] - before[6]) <= 1024 * 1024
-             and after == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
-             "final-image-stapled-original")
-        self.stager.no_xattrs(entry["fd"])
+        for index, label in enumerate(("device", "inode", "mode", "links", "uid", "gid")):
+            self.stage = "final-image-staple-held-" + label
+            if index == 3 and after[index] != before[index]:
+                self.stage += "-unlinked" if after[index] == 0 else "-other"
+            need(after[index] == before[index], "final-image-stapled-original")
+        self.stage = "final-image-staple-size"
+        need(0 < after[6] <= self.stager.MAX_BYTES, "final-image-stapled-original")
+        self.stage = "final-image-staple-growth"
+        need(abs(after[6] - before[6]) <= 1024 * 1024, "final-image-stapled-original")
+        self.stage = "final-image-staple-name-stat"
+        named = signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False))
+        self.stage = "final-image-staple-binding"
+        need(after == named, "final-image-stapled-original")
+        self.stage = "final-image-staple-xattr-query"
+        try:
+            self.stager.no_xattrs(entry["fd"])
+        except BaseException as error:
+            # Only the trusted exact class/one-string literal is diagnostic.
+            # Never render error text, consult foreign properties or replace it.
+            if type(error) is self.stager.Refused:
+                args = BaseException.args.__get__(error)
+                if type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                    if args[0] == "file-extended-attributes":
+                        self.stage = "final-image-staple-xattrs-present"
+            raise
         entry["identity"] = after
+        self.stage = "final-image-staple-stream"
         self.final_image_sha = self.notary_stream(entry)
         self.notary_mutation_pending = False  # Same original only; native integrity/mount gates still required.
-
     def final_image_call(self, role, argv, *, maximum=30, limit=65536, developer=False):
         need(self.phase in FINAL_IMAGE_PHASES and self.final_image_known() and not self.notary_retiring
              and len(self.calls) < len(FINAL_IMAGE_ROLES) and role == FINAL_IMAGE_ROLES[len(self.calls)], "final-image-fixed-role-order")
@@ -4111,10 +4138,15 @@ class Operation:
         self.notary_mutation_pending = changing
         try:
             result = self.call(role, argv, environment, cwd=self.work, timeout=timeout, limit=limit)
+            if changing:
+                self.stage = "final-image-staple-clock"
             self.notary_clock()
             if changing:
                 self.final_image_mutated(before)
+                self.stage = "final-image-staple-post"
             self.notary_post()
+            if changing:
+                self.stage = role
             return result
         except BaseException:
             if self.final_image_known():

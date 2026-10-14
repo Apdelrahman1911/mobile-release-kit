@@ -1814,7 +1814,24 @@ INTEL_FETCH_WORKFLOW_INVERSE = (('name: Desktop Mac normal package and limited e
 INTEL_FETCH_PREPARE_PREFIX = '        if self.target == INTEL_TARGET:\n            self.stage = "resident-dependency-fetch"\n            # Separate acquisition from the unchanged compiler deadline. The\n            # same original call must return0 with settled captures first.\n            self.call("resident-fetch", [direct_rust_tools(self.target)[0], "fetch", "--manifest-path",\n                      str(self.checkout / WORKSPACE / "Cargo.toml"), "--locked", "--target", self.target],\n                      build_environment(self.environment, self.work, self.image_release, target=self.target),\n                      cwd=self.checkout / WORKSPACE, timeout=120, limit=4 * 1024 * 1024)\n'
 INTEL_FETCH_OFFLINE_REGION = ('                           "--locked", "--release", "--jobs", "1", "--target", self.target,', '                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--jobs", "1", "--target", self.target,')
 
+
+ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME = "run-name: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ARM-only final-image diagnostic - not combined qualification' || github.workflow }}\n"
+ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT = ' || github.ref == \'refs/heads/verify/desktop-macos-installed\' && \'[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"}]\''
+
+def without_arm_only_final_image_diagnostic_workflow(source):
+    # Exact temporary selector only, before unchanged historical supplier counts.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("ARM final-image diagnostic workflow bound differs")
+    markers = ("ARM-only final-image diagnostic", "run-name: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed'",
+               " || github.ref == 'refs/heads/verify/desktop-macos-installed' && '[{")
+    if not any(marker in source for marker in markers):
+        return source
+    if source.count(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME) != 1 or source.count(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT) != 1:
+        raise AssertionError("ARM final-image diagnostic exact complete SOURCE delta differs")
+    return source.replace(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME, "").replace(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT, "")
+
 def without_fresh_g2_supplier_workflow(source):
+    source = without_arm_only_final_image_diagnostic_workflow(source)
     # Current supplier DATA only; preserve unchanged historical SOURCE oracles.
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("fresh G2 supplier workflow bound differs")
@@ -2845,7 +2862,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
         helper_body = (Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py").read_bytes()
         self.assertEqual(len(helper_body), module.HELPER_SOURCE_BYTES)
-        self.assertEqual(module.HELPER_SOURCE_BYTES, 558790)
+        self.assertEqual(module.HELPER_SOURCE_BYTES, 561596)
         helper_tree = ast.parse(helper_body)
         constants = [node.value for node in helper_tree.body
                      if isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -2853,7 +2870,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(len(constants), 1)
         source_cap = ast.literal_eval(constants[0])
         self.assertIs(type(source_cap), int)
-        self.assertEqual(source_cap, 558790)
+        self.assertEqual(source_cap, 561596)
         operation = next(node for node in helper_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
         caps = []
         for method in operation.body:
@@ -2999,6 +3016,125 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 finally:
                     for entry in reversed(port.entries): port.close(entry)
                 self.assertTrue(all(entry["fd"] is None for entry in port.entries))
+
+        # Actual ordinary-file mutation seam, never a native stapler receipt.
+        # Every original FD is registered and consumed once by this test owner.
+        faults = (None, "mode", "links", "unlinked", "empty", "growth", "binding", "query", "attrs", "foreign", "unknown-args", "extra-args", "foreign-string", "unexpected", "stream")
+        synthetic_receipt = {"GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40,
+                             "GITHUB_WORKFLOW_REF": "SYNTHETIC SOURCE DATA", "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}
+        expected = {"mode": "held-mode", "links": "held-links-other", "unlinked": "held-links-unlinked",
+                    "empty": "size", "growth": "growth", "binding": "binding", "query": "xattr-query",
+                    "attrs": "xattrs-present", "foreign": "xattr-query", "unknown-args": "xattr-query",
+                    "extra-args": "xattr-query", "foreign-string": "xattr-query", "unexpected": "xattr-query", "stream": "stream"}
+        class ForeignXattrs(TOOL.Refused):
+            pass
+        class ForeignLiteral(str):
+            pass
+        for fault in faults:
+            with self.subTest(stapleGate=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); root.chmod(0o700)
+                path = root / "image.dmg"; path.write_bytes(b"before"); path.chmod(0o600)
+                selected = module.Operation(SimpleNamespace(), root, root, "finalize-image", synthetic_receipt, TOOL)
+                parent = selected.register(os.open(root, os.O_RDONLY | os.O_DIRECTORY), "test-parent", "directory")
+                parent["identity"] = module.directory_identity(os.fstat(parent["fd"]))
+                selected.work_entry = parent
+                entry = selected.register(os.open(path, os.O_RDWR | os.O_NOFOLLOW), "test-image", "file", parent["fd"], path.name)
+                entry.update(parent_entry=parent, identity=module.signature(os.fstat(entry["fd"])))
+                selected.final_image_output = entry; selected.final_image_sha = module.digest(b"before")
+                selected.notary_started = selected.notary_observed = module.time.monotonic_ns()
+                selected.notary_mutation_pending = True
+                original_identity = entry["identity"]; primary = RuntimeError("inert stream failure")
+                xattr_error = {"foreign": ForeignXattrs("file-extended-attributes"),
+                    "unknown-args": TOOL.Refused("inert unknown argument"),
+                    "extra-args": TOOL.Refused("file-extended-attributes", "inert extra argument"),
+                    "foreign-string": TOOL.Refused(ForeignLiteral("file-extended-attributes")),
+                    "unexpected": primary}.get(fault)
+                try:
+                    path.write_bytes(b"after-original")
+                    if fault == "mode": path.chmod(0o644)
+                    elif fault == "links": os.link(path, root / "second")
+                    elif fault == "unlinked":
+                        other = root / "replacement"; other.write_bytes(b"after-original"); other.chmod(0o600); other.replace(path)
+                    elif fault == "empty": path.write_bytes(b"")
+                    elif fault == "binding":
+                        path.rename(root / "retained"); path.write_bytes(b"after-original"); path.chmod(0o600)
+                    with contextlib.ExitStack() as ports:
+                        if fault == "growth":
+                            # Observe an excessive growth through the fixed stat
+                            # DATA port, not a file exceeding this owner's 1MiB
+                            # write cap. All other held fields are genuine.
+                            real_fstat = module.os.fstat
+                            def excessive_growth(fd):
+                                info = real_fstat(fd)
+                                if fd != entry["fd"]: return info
+                                fields = {name: getattr(info, name) for name in ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")}
+                                fields["st_size"] = 1024 * 1024 + original_identity[6] + 1
+                                return SimpleNamespace(**fields)
+                            ports.enter_context(mock.patch.object(module.os, "fstat", side_effect=excessive_growth))
+                        elif fault in ("query", "attrs"):
+                            ports.enter_context(mock.patch.object(TOOL.sys, "platform", "darwin"))
+                            ports.enter_context(mock.patch.object(TOOL, "_DARWIN_XATTRS", return_value=(-1 if fault == "query" else 1)))
+                        elif xattr_error is not None:
+                            ports.enter_context(mock.patch.object(TOOL, "no_xattrs", side_effect=xattr_error))
+                        elif fault == "stream": ports.enter_context(mock.patch.object(selected, "notary_stream", side_effect=primary))
+                        if fault is None:
+                            selected.final_image_mutated(original_identity)
+                            self.assertFalse(selected.notary_mutation_pending)
+                            self.assertEqual(selected.final_image_sha, module.digest(b"after-original"))
+                            self.assertEqual(selected.notary_stream(entry), selected.final_image_sha)
+                        else:
+                            with self.assertRaises(BaseException) as caught: selected.final_image_mutated(original_identity)
+                            self.assertEqual(selected.stage, "final-image-staple-" + expected[fault])
+                            self.assertTrue(selected.notary_mutation_pending)
+                            if fault == "stream": self.assertIs(caught.exception, primary)
+                            elif fault == "query": self.assertEqual(BaseException.args.__get__(caught.exception), ("file-extended-attributes-query",))
+                            elif fault == "attrs": self.assertEqual(BaseException.args.__get__(caught.exception), ("file-extended-attributes",))
+                            elif xattr_error is not None: self.assertIs(caught.exception, xattr_error)
+                            else: self.assertEqual(BaseException.args.__get__(caught.exception), ("final-image-stapled-original",))
+                    self.assertEqual(selected.calls, [])  # No native or later validate entry.
+                    self.assertFalse(selected.notary_complete)
+                finally:
+                    for original in reversed(selected.entries): selected.close(original)
+                    self.assertTrue(all(row["fd"] is None and row["closed"] for row in selected.entries))
+                    self.assertEqual(selected.errors, [])
+
+        # Fixed call port exercises the actual returned-original clock/POST
+        # catch. It is synthetic DATA, never native command/finality evidence.
+        for fault in (None, "clock", "post"):
+            with self.subTest(stapleCall=fault):
+                selected = module.Operation(SimpleNamespace(), Path("/inert"), Path("/inert/work"), "finalize-image", synthetic_receipt, TOOL)
+                selected.calls = [{"returned": True, "capturesSettled": True} for _ in module.FINAL_IMAGE_ROLES[:5]]
+                selected.final_image_output = {"identity": tuple(range(9))}
+                primary = RuntimeError("inert original boundary failure"); counts = {"clock": 0, "post": 0}
+                def clock():
+                    counts["clock"] += 1
+                    if fault == "clock" and counts["clock"] == 2: raise primary
+                    return 10_000_000_000, 1740_000_000_000
+                def post():
+                    counts["post"] += 1
+                    if fault == "post" and counts["post"] >= 2: raise primary
+                def mutated(before):
+                    self.assertEqual(before, tuple(range(9)))
+                    selected.notary_mutation_pending = False
+                result = object()
+                with (mock.patch.object(selected, "notary_clock", side_effect=clock),
+                      mock.patch.object(selected, "notary_post", side_effect=post),
+                      mock.patch.object(selected, "native_environment", return_value={}),
+                      mock.patch.object(selected, "call", return_value=result),
+                      mock.patch.object(selected, "final_image_mutated", side_effect=mutated)):
+                    if fault is None:
+                        self.assertIs(selected.final_image_call("final-image-staple", []), result)
+                        self.assertEqual(selected.stage, "final-image-staple")
+                        self.assertFalse(selected.notary_mutation_pending or selected.notary_unknown)
+                    else:
+                        with self.assertRaises(RuntimeError) as caught: selected.final_image_call("final-image-staple", [])
+                        self.assertIs(caught.exception, primary)
+                        self.assertEqual(selected.stage, "final-image-staple-" + fault)
+                        self.assertEqual(selected.notary_mutation_pending, fault == "clock")
+                        self.assertEqual(selected.notary_unknown, fault == "post")
+                        self.assertEqual(len(selected.errors), 1 if fault == "post" else 0)
+                    self.assertFalse(selected.notary_complete)
+                    self.assertEqual(len(selected.calls), 5)  # Inert call port did not fabricate a receipt.
 
     def notary_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None):
         """Actual copy/FD/parser code, inert app/runtime/key and native doubles.
@@ -9849,7 +9985,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
     def test_both_workflows_use_one_digest_and_owned_nested_checks_around_app_signing(self):
         # Current ordinary aggregate watchdog contains four unchanged240s scopes.
-        budget_current = (Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text()
+        budget_current = without_arm_only_final_image_diagnostic_workflow((Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text())
         final_prefix = '      - name: Notarize, staple and verify only the final user image\n'
         final_step = final_prefix + budget_current.split(final_prefix, 1)[1].split("      - name: ", 1)[0]
         self.assertEqual(hashlib.sha256(final_step.encode()).hexdigest(), 'd6983030aa7df37ea1ce802a8bf60299095d4ad4cb37a1f15a5b2d0f1ef015b9')
@@ -10367,7 +10503,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             for suffix in ("stdout", "stderr", "status"):
                 self.assertNotIn('/android-helper-' + role + '.' + suffix, installed)
         self.assertIn('return self.final_image_call("final-image-detach", argv)', methods["package_call"])
-        self.assertIn('after[:6] == before[:6]', methods["final_image_mutated"])
+        self.assertIn('enumerate(("device", "inode", "mode", "links", "uid", "gid"))', methods["final_image_mutated"])
+        self.assertIn('need(after[index] == before[index]', methods["final_image_mutated"])
         self.assertIn('abs(after[6] - before[6]) <= 1024 * 1024', methods["final_image_mutated"])
         self.assertNotIn('final_package_stapled', final)
 
@@ -11528,6 +11665,27 @@ class MacInstalledData(unittest.TestCase):
         # delta is independently composed/reviewed, not fictitiously exercised.
         path = Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml"
         current = path.read_text(encoding="utf-8")
+
+        # Explicit temporary diagnostic: exact ARM only, never a combined pass.
+        matrix = re.search(r"^        include: \$\{\{ fromJSON\(github\.ref == '([^']+)' && '([^']+)' \|\| github\.ref == '([^']+)' && '([^']+)' \|\| '([^']+)'\) \}\}$", current, re.M)
+        self.assertIsNotNone(matrix)
+        self.assertEqual((matrix.group(1), matrix.group(3)),
+                         ("refs/heads/verify/desktop-macos-removal-lifecycle", "refs/heads/verify/desktop-macos-installed"))
+        removal, arm_only, default = (json.loads(matrix.group(n)) for n in (2, 4, 5))
+        self.assertEqual([row["target"] for row in default], ["aarch64-apple-darwin", "x86_64-apple-darwin"])
+        self.assertEqual(arm_only, [default[0]])
+        self.assertEqual(removal, [dict(default[0], removal_case=case) for case in ("ordinary", "abrupt")])
+        self.assertEqual(current.count(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME), 1)
+        restored = without_arm_only_final_image_diagnostic_workflow(current)
+        self.assertEqual(hashlib.sha256(restored.encode()).hexdigest(), "6cac885035d80e5515e0a276a059a8d8807b88a255ae2d0ba14b00a6594d1d09")
+        self.assertEqual(without_arm_only_final_image_diagnostic_workflow(restored), restored)
+        fragment = ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT
+        for damaged in (current.replace(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME, "", 1),
+                        current.replace(fragment, "", 1), current.replace(fragment, fragment + fragment, 1),
+                        current.replace(fragment, fragment.replace("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview"), 1),
+                        current.replace(fragment, fragment.replace('"machine":"arm64"', '"machine":"x86_64"'), 1)):
+            with self.assertRaises(AssertionError): without_arm_only_final_image_diagnostic_workflow(damaged)
+        current = restored  # Every native step body is byte-exact; old oracles remain.
         # Actual Intel aggregate8min exhaustion: one compile is moved, not retried.
         compile_name = 'Compile the fixed ordinary root Installer before credential admission'
         build_name = 'Build the fixed one-shot root Installer and scripts-only package'
@@ -11549,11 +11707,12 @@ class MacInstalledData(unittest.TestCase):
         # survive for downstream whole-source checks, and partial/duplicate splits refuse.
         normalized = without_intel_fetch_workflow(current)
         self.assertEqual(without_intel_fetch_workflow(normalized), normalized)
+        split_current = without_ordinary_app_assembly_budget_workflow(current)
         for old, changed in ((compile_name, compile_name + ' altered'),
             ('Raw timed-step union585min', 'Raw timed-step union584min'),
             ('' + compile_run, compile_run.replace('--features macos-installed-installer', '--features macos-installed-installer-fixture', 1))):
-            self.assertIn(old, current)
-            with self.assertRaises(AssertionError): without_intel_fetch_workflow(current.replace(old, changed, 1))
+            self.assertIn(old, split_current)
+            with self.assertRaises(AssertionError): without_intel_fetch_workflow(split_current.replace(old, changed, 1))
         with self.assertRaises(AssertionError): without_intel_fetch_workflow(current.replace('      - name: ' + compile_name + '\n', '      - name: ' + compile_name + '\n      - name: ' + compile_name + '\n', 1))
         outside = current + '# unrelated-mutated-region\n'
         self.assertTrue(without_intel_fetch_workflow(outside).endswith('# unrelated-mutated-region\n'))
@@ -16377,9 +16536,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # This exact helper is already in the readonly SOURCE closure. Inspect
         # its real caller without importing or invoking any operation owner.
         with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
-            helper_raw = original.read(558790 + 1)
+            helper_raw = original.read(561596 + 1)
             self.assertEqual(original.read(1), b"")
-        self.assertEqual(len(helper_raw), 558790)
+        self.assertEqual(len(helper_raw), 561596)
         helper_source = helper_raw.decode("utf-8", "strict")
         helper_tree = ast.parse(helper_source)
         helper_caps = [node.value for node in helper_tree.body
@@ -18716,7 +18875,7 @@ class MacNormalPreviewData(unittest.TestCase):
         retire_name = "Retire only the known uploaded carrier export copy without touching image originals"
         stage, upload, retire = (workflow_step(raw_workflow, name) for name in (stage_name, upload_name, retire_name))
         self.assertEqual(raw_workflow.count(P0_CARRIER_WORKFLOW_BUNDLE), 1)
-        self.assertEqual(hashlib.sha256(without_installed_p0_carrier_workflow(raw_workflow).encode()).hexdigest(),
+        self.assertEqual(hashlib.sha256(without_installed_p0_carrier_workflow(without_arm_only_final_image_diagnostic_workflow(raw_workflow)).encode()).hexdigest(),
                          "3d4670e8acf2e3bcc7d6246679065357406da8402b7bfd4da9d8adba20bdcccb")
         self.assertLess(raw_workflow.index("        id: finalize_image\n"), raw_workflow.index("        id: p0_carrier_stage\n"))
         self.assertLess(raw_workflow.index("        id: p0_carrier_stage\n"), raw_workflow.index("        id: p0_carrier_upload\n"))
