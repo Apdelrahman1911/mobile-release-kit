@@ -697,6 +697,45 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         self.assertEqual(DATA.project_failure({"stage": SENTINEL, "type": "OSError", "errno": 13}),
                          {"stage": "unclassified", "type": "OSError", "reason": "unclassified", "errno": 13})
         self.assertNotIn(SENTINEL, json.dumps(DATA.project_failure({"reason": SENTINEL})))
+        # Same explicit SOURCE passive closure, not dynamic exception rendering.
+        helper_parsed = ast.parse(source)
+        stager_parsed = ast.parse((ROOT / "desktop/tools/stage_macos_installed.py").read_bytes())
+        functions = {node.name: node for node in stager_parsed.body if isinstance(node, ast.FunctionDef)}
+        closure = ('build_release_data', 'mac_target', 'maintenance_hex', 'maintenance_json', 'decode', 'pairs', 'maintenance_map', 'maintenance_result_data', 'maintenance_write_data', 'registration_reservation_result', 'emitted_package_data', 'maintenance_producer_data', 'maintenance_release_data', 'packaging_signing_data', 'service_signing_data', 'digest')
+        reasons = set()
+        for name in closure:
+            for node in ast.walk(functions[name]):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                    continue
+                index = {"need": 1, "Refused": 0, "maintenance_map": 2}.get(node.func.id)
+                if index is not None and len(node.args) > index and isinstance(node.args[index], ast.Constant) and type(node.args[index].value) is str:
+                    reasons.add(node.args[index].value)
+        def declared(name):
+            value = next(node.value for node in helper_parsed.body if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == name for target in node.targets))
+            return ast.literal_eval(value.args[0] if isinstance(value, ast.Call) else value)
+        self.assertEqual(len(reasons), 45)
+        self.assertEqual(set(declared("FINAL_IMAGE_INPUT_STAGER_REASONS")), reasons)
+        self.assertEqual(DATA.FINAL_IMAGE_INPUT_STAGER_REASONS, reasons)
+        expected_stages = ('final-image-original-inputs', 'final-image-package-owner', 'final-image-original-readback', 'final-image-package-audit', 'final-image-producer', 'final-image-source-profiles', 'final-image-original-image')
+        self.assertEqual(declared("FINAL_IMAGE_INPUT_STAGES"), expected_stages)
+        self.assertEqual(DATA.FINAL_IMAGE_INPUT_STAGES, expected_stages)
+        input_method = next(node for node in ast.walk(helper_parsed) if isinstance(node, ast.FunctionDef) and node.name == "final_image_input")
+        assigned = tuple(node.value.value for node in input_method.body if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+                and target.value.id == "self" and target.attr == "stage" for target in node.targets))
+        self.assertEqual(assigned, expected_stages)
+        for stage in expected_stages:
+            for reason in reasons:
+                expected = {"stage": stage, "type": "Refused", "reason": reason, "errno": None}
+                self.assertEqual(DATA.project_failure(expected), expected)
+                unknown = DATA.project_failure({**expected, "reason": reason + SENTINEL})
+                self.assertEqual(unknown["reason"], "unclassified")
+                self.assertNotIn(SENTINEL, json.dumps(unknown))
+                self.assertEqual(set(unknown), {"stage", "type", "reason", "errno"})
+        self.assertEqual(DATA.project_failure({"stage": SENTINEL, "type": True, "reason": SENTINEL, "errno": None}),
+            {"stage": "unclassified", "type": "unclassified", "reason": "unclassified", "errno": None})
+
     def test_android_positive_closed_result_matches_genuine_facts_and_statuses(self):
         for target_value in DATA.TARGETS:
             context = dict(CONTEXT, target=target_value)

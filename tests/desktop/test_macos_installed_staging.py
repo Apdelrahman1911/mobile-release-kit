@@ -2820,7 +2820,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
         helper_body = (Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py").read_bytes()
         self.assertEqual(len(helper_body), module.HELPER_SOURCE_BYTES)
-        self.assertEqual(module.HELPER_SOURCE_BYTES, 548830)
+        self.assertEqual(module.HELPER_SOURCE_BYTES, 551896)
         helper_tree = ast.parse(helper_body)
         constants = [node.value for node in helper_tree.body
                      if isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -2828,7 +2828,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(len(constants), 1)
         source_cap = ast.literal_eval(constants[0])
         self.assertIs(type(source_cap), int)
-        self.assertEqual(source_cap, 548830)
+        self.assertEqual(source_cap, 551896)
         operation = next(node for node in helper_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
         caps = []
         for method in operation.body:
@@ -3833,6 +3833,55 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertFalse(state.operation.receipt["passed"])
                 self.assertEqual(state.observations, [])
                 self.assertFalse((state.work / "distribution-final").exists())
+
+        # Exact passive SOURCE guards remain diagnostic facts, not native success.
+        class ForeignRefused(TOOL.Refused):
+            pass
+        class StringSubclass(str):
+            pass
+        private = "PRIVATE_final_image_input_value_not_a_SOURCE_label"
+        cases = (("owner", TOOL.Refused("maintenance-record-map"), "stager-refused", "maintenance-record-map"),
+            ("readback", TOOL.Refused("maintenance-export-shape"), "stager-refused", "maintenance-export-shape"),
+            ("owner", TOOL.Refused(private), "stager-refused", "unclassified"),
+            ("owner", ForeignRefused("maintenance-record-map"), "other", "unclassified"),
+            ("owner", TOOL.Refused("maintenance-record-map", private), "stager-refused", "unclassified"),
+            ("owner", TOOL.Refused(StringSubclass("maintenance-record-map")), "stager-refused", "unclassified"))
+        for boundary, primary, expected_type, expected_reason in cases:
+            with self.subTest(inputBoundary=boundary, errorType=type(primary).__name__, reason=expected_reason), tempfile.TemporaryDirectory() as directory:
+                state = self.final_image_fixture(Path(directory)); operation = state.operation
+                owner_body = (state.work / "android-helper-package-install.json").read_bytes()
+                original_json, original_capture = TOOL.maintenance_json, module.failure_exception
+                captures = []
+                def owner_json(body, limit):
+                    if body == owner_body:
+                        raise primary
+                    return original_json(body, limit)
+                def capture(error, stager=None):
+                    if error is primary:
+                        captures.append(error)
+                    return original_capture(error, stager)
+                port = (mock.patch.object(TOOL, "maintenance_json", side_effect=owner_json) if boundary == "owner"
+                        else mock.patch.object(TOOL, "maintenance_result_data", side_effect=primary))
+                with self.final_image_fixture_call(state), port, mock.patch.object(module, "failure_exception", side_effect=capture):
+                    with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"):
+                        operation.execute()
+                self.assertEqual(captures, [primary])  # Same swallowed original, unchanged terminal contract.
+                self.assertEqual(operation.diagnostic_failure, {"type": expected_type, "reason": expected_reason, "errno": None})
+                expected_stage = "final-image-package-owner" if boundary == "owner" else "final-image-original-readback"
+                self.assertEqual(operation.receipt["failure"]["stage"], expected_stage)
+                self.assertEqual(operation.receipt["failure"]["reason"],
+                    expected_reason if expected_reason != "unclassified" else "original-operation-refused")
+                self.assertFalse(operation.receipt["passed"])
+                self.assertEqual(state.observations, [])
+                self.assertFalse((state.work / "distribution-final").exists())
+                self.assertEqual((state.work / "distribution/MobileReleaseKit.dmg").read_bytes(), state.original_image)
+                self.assertTrue(operation.receipt["targetRetired"] and operation.receipt["originalClosesKnown"])
+                self.assertTrue(all(entry["closed"] for entry in operation.entries))
+                self.assertFalse(operation.installer_entered or operation.final_image_complete)
+                self.assertNotIn("finalImage", operation.receipt)
+                self.assertEqual(operation.receipt["notaryAuthentication"], {"created": False, "closed": False, "retired": False})
+                self.assertNotIn(private, json.dumps(operation.receipt))
+                self.assertNotIn(private, json.dumps(operation.diagnostic_failure))
 
     def test_returned_package_preimage_survives_full_finalization_and_late_failure(self):
         module = ANDROID_HELPER
@@ -5473,6 +5522,28 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                              target / selected / "release" / module.RESIDENT_IMAGE)
             with self.subTest(selected=selected), self.assertRaisesRegex(module.Refused, "^helper-package-artifact$"):
                 module.artifact(self.encoded(paired), checkout, target, build_target=opposite)
+            # The two validators agree on the one Intel resident shared-package override.
+            _, binary, _, body = normal_cargo_fixture(target, role="resident", checkout=checkout, build_target=selected)
+            with mock.patch.object(TOOL, "DESKTOP", checkout / "desktop"):
+                self.assertEqual(TOOL.image_cargo_artifact(self.encoded(paired), binary, target, body,
+                                                         "resident", target=selected)["target"], selected)
+                for index, wrong in ((0, "2"), (1, "3" if selected == module.INTEL_TARGET else "2"), (2, "2")):
+                    changed = copy.deepcopy(paired); changed[index]["profile"]["opt_level"] = wrong
+                    with self.subTest(target=selected, profileRow=index), self.assertRaises(module.Refused):
+                        module.artifact(self.encoded(changed), checkout, target, build_target=selected)
+                    with self.assertRaises(TOOL.Refused):
+                        TOOL.image_cargo_artifact(self.encoded(changed), binary, target, body, "resident", target=selected)
+                if selected == module.INTEL_TARGET:
+                    # The ordinary Intel Desktop must still require shared release3.
+                    _, desktop_binary, desktop_rows, desktop_body = normal_cargo_fixture(
+                        target, role="desktop", checkout=checkout, build_target=selected)
+                    desktop_messages = desktop_rows + [{"reason": "build-finished", "success": True}]
+                    self.assertEqual(TOOL.image_cargo_artifact(self.encoded(desktop_messages), desktop_binary,
+                        target, desktop_body, "desktop", target=selected)["imageRole"], "desktop")
+                    desktop_messages[1]["profile"]["opt_level"] = "2"
+                    with self.assertRaises(TOOL.Refused):
+                        TOOL.image_cargo_artifact(self.encoded(desktop_messages), desktop_binary,
+                            target, desktop_body, "desktop", target=selected)
         class TargetSubclass(str):
             pass
         for invalid in (None, True, [], {}, "x86_64h-apple-darwin", "x86_64-apple-darwin ", TargetSubclass("x86_64-apple-darwin")):
@@ -6022,6 +6093,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         + ("MRK_MACOS_NOTARY_API_KEY_BASE64", "GITHUB_TOKEN", "HTTP_PROXY", "HTTPS_PROXY")))
                     self.assertEqual((work / "android-helper-resident-fetch.stderr").read_bytes(), b"synthetic fetch DATA\n")
                 self.assertEqual("--offline" in build_argv, bool(build_index))
+                self.assertEqual(build_argv.count("--config"), build_index)
+                if build_index:
+                    self.assertEqual(build_argv[build_argv.index("--config") + 1],
+                                     "profile.release.package.mobile-release-kit-desktop.opt-level=2")
+                    self.assertEqual(module.RESIDENT_CARGO_OVERRIDE,
+                                     "profile.release.package.mobile-release-kit-desktop.opt-level=2")
                 self.assertEqual([arg for arg in build_argv if arg.startswith("--message-format=")],
                                  ["--message-format=json-render-diagnostics"])
                 self.assertEqual((build_options["timeout"], build_options["capture"],
@@ -10454,15 +10531,14 @@ class MacInstalledData(unittest.TestCase):
     def test_intel_android_ui_target_join_precedes_historical_projection(self):
         root = Path(__file__).absolute().parents[2]
         raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
-        # Authenticate the new full candidate before any historical projection.
-        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '9d1216591c34b5c05a70d61b9e88008061c7bf2fb4c1e38247f80b4622a0695b')
-        pending_selected = without_installed_final_carrier_workflow(raw)
-        self.assertEqual(hashlib.sha256(pending_selected.encode()).hexdigest(), '076dfc18029bb3e2f728e5ec81542cffcc07fe4b134c3162129bb534727ad662')
-        self.assertEqual(pending_selected.count(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[0]), 1)
-        self.assertNotIn(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[1], pending_selected)
+        # Authenticate the current fixed unsigned successor before historical projection.
+        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '3d4670e8acf2e3bcc7d6246679065357406da8402b7bfd4da9d8adba20bdcccb')
+        unsigned_selected = without_installed_final_carrier_workflow(raw)
+        self.assertEqual(hashlib.sha256(unsigned_selected.encode()).hexdigest(), '2c33be79764a763804c94ea0fbaa74bd4dba92ac1b0022a50f84ef378bbd9748')
+        self.assertEqual(unsigned_selected.count(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[1]), 1)
+        self.assertNotIn(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[0], unsigned_selected)
         # Preserve the complete original unsigned and pending/activation tail.
-        raw = pending_selected.replace(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[0],
-                                       IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[1], 1)
+        raw = unsigned_selected
         # Actual current unsigned selector before all original pending/activation guards.
         self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '2c33be79764a763804c94ea0fbaa74bd4dba92ac1b0022a50f84ef378bbd9748')
         previous, current = IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE
@@ -16135,9 +16211,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # This exact helper is already in the readonly SOURCE closure. Inspect
         # its real caller without importing or invoking any operation owner.
         with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
-            helper_raw = original.read(548830 + 1)
+            helper_raw = original.read(551896 + 1)
             self.assertEqual(original.read(1), b"")
-        self.assertEqual(len(helper_raw), 548830)
+        self.assertEqual(len(helper_raw), 551896)
         helper_source = helper_raw.decode("utf-8", "strict")
         helper_tree = ast.parse(helper_source)
         helper_caps = [node.value for node in helper_tree.body
@@ -16940,7 +17016,9 @@ def normal_cargo_fixture(target=None, *, role="desktop", checkout=None, build_ta
             "manifest_path": str(directory / "Cargo.toml"), "features": features,
             "target": {"name": name, "kind": ["lib"], "crate_types": ["lib"],
                        "src_path": str(directory / "src/lib.rs"), "edition": "2021"},
-            "profile": dict(profile), "filenames": [str(binary.parent / "deps" / ("lib" + name + "-0123456789abcdef.rlib"))],
+            "profile": dict(profile, opt_level="2" if role == "resident" and build_target == "x86_64-apple-darwin"
+                            and package == "mobile-release-kit-desktop" else "3"),
+            "filenames": [str(binary.parent / "deps" / ("lib" + name + "-0123456789abcdef.rlib"))],
             "executable": None, "fresh": False})
     return target, binary, rows, image_macho_fixture(role, target=build_target)
 

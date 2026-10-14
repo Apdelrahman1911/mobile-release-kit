@@ -4010,15 +4010,14 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
     def test_intel_android_ui_target_join_precedes_historical_projection(self):
         root = Path(__file__).absolute().parents[2]
         raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
-        # Authenticate the new full candidate before any historical projection.
-        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '9d1216591c34b5c05a70d61b9e88008061c7bf2fb4c1e38247f80b4622a0695b')
-        pending_selected = without_installed_final_carrier_workflow(raw)
-        self.assertEqual(hashlib.sha256(pending_selected.encode()).hexdigest(), '076dfc18029bb3e2f728e5ec81542cffcc07fe4b134c3162129bb534727ad662')
-        self.assertEqual(pending_selected.count(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[0]), 1)
-        self.assertNotIn(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[1], pending_selected)
+        # Authenticate the current fixed unsigned successor before historical projection.
+        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '3d4670e8acf2e3bcc7d6246679065357406da8402b7bfd4da9d8adba20bdcccb')
+        unsigned_selected = without_installed_final_carrier_workflow(raw)
+        self.assertEqual(hashlib.sha256(unsigned_selected.encode()).hexdigest(), '2c33be79764a763804c94ea0fbaa74bd4dba92ac1b0022a50f84ef378bbd9748')
+        self.assertEqual(unsigned_selected.count(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[1]), 1)
+        self.assertNotIn(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[0], unsigned_selected)
         # Preserve the complete original unsigned and pending/activation tail.
-        raw = pending_selected.replace(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[0],
-                                       IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[1], 1)
+        raw = unsigned_selected
         # Actual current unsigned selector before all original pending/activation guards.
         self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '2c33be79764a763804c94ea0fbaa74bd4dba92ac1b0022a50f84ef378bbd9748')
         previous, current = IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE
@@ -5578,15 +5577,14 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
 
     def test_normal_diagnostics_workflow_has_one_bounded_original_result(self):
         raw = (ROOT / '.github/workflows/desktop-macos-installed.yml').read_text()
-        # Authenticate the new full candidate before any historical projection.
-        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '9d1216591c34b5c05a70d61b9e88008061c7bf2fb4c1e38247f80b4622a0695b')
-        pending_selected = without_installed_final_carrier_workflow(raw)
-        self.assertEqual(hashlib.sha256(pending_selected.encode()).hexdigest(), '076dfc18029bb3e2f728e5ec81542cffcc07fe4b134c3162129bb534727ad662')
-        self.assertEqual(pending_selected.count(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[0]), 1)
-        self.assertNotIn(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[1], pending_selected)
+        # Authenticate the current fixed unsigned successor before historical projection.
+        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '3d4670e8acf2e3bcc7d6246679065357406da8402b7bfd4da9d8adba20bdcccb')
+        unsigned_selected = without_installed_final_carrier_workflow(raw)
+        self.assertEqual(hashlib.sha256(unsigned_selected.encode()).hexdigest(), '2c33be79764a763804c94ea0fbaa74bd4dba92ac1b0022a50f84ef378bbd9748')
+        self.assertEqual(unsigned_selected.count(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[1]), 1)
+        self.assertNotIn(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[0], unsigned_selected)
         # Preserve the complete original unsigned and pending/activation tail.
-        raw = pending_selected.replace(IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[0],
-                                       IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE[1], 1)
+        raw = unsigned_selected
         # Actual unsigned selector finite inverse before the complete original Android proof.
         self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '2c33be79764a763804c94ea0fbaa74bd4dba92ac1b0022a50f84ef378bbd9748')
         previous, current = IOS_UNSIGNED_RESELECTION_WORKFLOW_INVERSE

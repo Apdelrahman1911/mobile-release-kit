@@ -64,9 +64,12 @@ PRODUCER_PROFILE = "desktop/packaging/macos-install-producer-signing.profile"
 ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
 MAX_HELPER = 32 * 1024 * 1024
-# Only nonshipping producer graphs; packaged programs keep release3.
+# Only nonshipping producer graphs use this opt0 override.
 PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=0"
-HELPER_SOURCE_BYTES = 548830
+# Intel alone uses this fixed shared-package release optimization.
+# Runtime dependencies retain release3; generic code instantiated here inherits release2.
+RESIDENT_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=2"
+HELPER_SOURCE_BYTES = 551896
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -1087,9 +1090,10 @@ def artifact(messages, checkout, target, *, build_target=ARM_TARGET):
              and "executable" in library and library["executable"] is None, "helper-separate-library-features")
         selected_rows.append(library)
     for selected in selected_rows:
+        expected_opt = "2" if build_target == INTEL_TARGET and selected is selected_rows[1] else "3"
         profile = selected.get("profile")
         need(type(profile) is dict and profile.get("test") is False and profile.get("debug_assertions") is False
-             and profile.get("opt_level") == "3" and type(selected.get("fresh")) is bool, "helper-release-profile")
+             and profile.get("opt_level") == expected_opt and type(selected.get("fresh")) is bool, "helper-release-profile")
     return binary
 
 
@@ -1198,7 +1202,65 @@ def original_failure(error, owner, checkout, timeout, limit):
 # unclassified; in particular exact Refused class alone is not a sanitizer.
 DISTRIBUTION_STAGER_REASONS = frozenset(('distribution-attach-original', 'distribution-attach-plist', 'distribution-attach-entity', 'distribution-attach-mount', 'distribution-attach-single-mount', 'distribution-package-name', 'distribution-three-file-roster', 'distribution-original-byte-mode'))
 
-_FAILURE_REASONS = frozenset((*DISTRIBUTION_STAGER_REASONS,
+# Closed passive input guards only; these labels never confer native or finality authority.
+FINAL_IMAGE_INPUT_STAGES = (
+    'final-image-original-inputs',
+    'final-image-package-owner',
+    'final-image-original-readback',
+    'final-image-package-audit',
+    'final-image-producer',
+    'final-image-source-profiles',
+    'final-image-original-image',
+)
+FINAL_IMAGE_INPUT_STAGER_REASONS = frozenset((
+    'build-release-identity',
+    'build-release-shape',
+    'build-release-size',
+    'build-release-version',
+    'build-target',
+    'duplicate-json-key',
+    'installer-export-byte-bound',
+    'json-byte-bound',
+    'json-constant',
+    'json-shape-bound',
+    'maintenance-export-action',
+    'maintenance-export-binding',
+    'maintenance-export-shape',
+    'maintenance-policy-binding',
+    'maintenance-policy-digest-or-order',
+    'maintenance-policy-membership',
+    'maintenance-policy-row',
+    'maintenance-policy-shape',
+    'maintenance-predecessor-order',
+    'maintenance-producer-binding',
+    'maintenance-producer-shape',
+    'maintenance-record-byte-bound',
+    'maintenance-record-encoding-or-shape',
+    'maintenance-record-map',
+    'maintenance-release-binding',
+    'maintenance-release-set-bound',
+    'maintenance-release-set-shape',
+    'maintenance-release-shape',
+    'maintenance-request-id',
+    'maintenance-reused-release-identity',
+    'maintenance-signing-policies-bound',
+    'maintenance-write-accounting',
+    'producer-emitter-original',
+    'producer-emitter-package-binding',
+    'producer-emitter-summary',
+    'registration-reservation-creation-incomplete',
+    'registration-reservation-not-predecessor-creation',
+    'registration-reservation-parent-not-settled',
+    'registration-reservation-result',
+    'registration-reservation-reuse-not-observed',
+    'registration-reservation-unentered',
+    'source-producer-correspondence',
+    'source-producer-profile',
+    'source-producer-unconfigured',
+    'source-service-profile',
+))
+
+_FAILURE_REASONS = frozenset((*DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,
     'producer-tests-bound', 'producer-tests-framing', 'producer-tests-roster', 'producer-tests-result',
     'original-nonzero-producer-tests',
     'same-package-baseline-export', 'same-package-case', 'same-package-census', 'same-package-final-carrier', 'same-package-final-carrier-bytes', 'same-package-final-carrier-root', 'same-package-final-carrier-roster', 'same-package-finalizer-original', 'same-package-fixed-purpose', 'same-package-fresh-baseline', 'same-package-immediate-predecessor', 'same-package-input-', 'same-package-inventory', 'same-package-inventory-binding', 'same-package-inventory-input', 'same-package-live-readback', 'same-package-noop', 'same-package-notary-source', 'same-package-original-boundary', 'same-package-original-input', 'same-package-originals-unknown', 'same-package-parent-entry-bound', 'same-package-previous-shape', 'same-package-readback', 'same-package-readonly-mount', 'same-package-result-delta', 'same-package-result-namespace', 'same-package-result-post', 'same-package-source-scope', 'same-package-status-absence', 'same-package-status-post', 'same-package-status-purpose',
@@ -1263,6 +1325,7 @@ _FAILURE_REASONS = frozenset((*DISTRIBUTION_STAGER_REASONS,
     'strict-original-verification', 'work-original',
 ))
 _FAILURE_STAGES = (
+    *FINAL_IMAGE_INPUT_STAGES,
     "package-producer-tests",
     "same-package-noop",
     "owned-directory-admission", "source-image-binding", "resident-dependency-fetch", "separate-resident-image-compiler",
@@ -3740,6 +3803,7 @@ class Operation:
 
     def final_image_input(self):
         """Keep the preceding original statuses, receipts and final P distinct."""
+        self.stage = 'final-image-original-inputs'
         selection = self.stager.BuildSelection(self.target,
             self.stager.build_release_data(self.read(self.release_entry), target=self.target)["packageVersion"], self.image_release)
         def retained(parent, name, limit, modes=(0o444, 0o600, 0o644, 0o400)):
@@ -3756,6 +3820,7 @@ class Operation:
         package_entry, package = retained(final_root, "MobileReleaseKit.pkg", self.stager.MAX_BYTES, (0o444,))
         self.package_finalization_input(package_entry, package)
         self.final_image_inputs.extend(self.package_outputs)
+        self.stage = 'final-image-package-owner'
         _, owner_body = retained(self.work_entry, "android-helper-package-install.json", 16384, (0o600,))
         owner = self.stager.maintenance_json(owner_body, 16384)
         need(type(owner) is dict and type(owner.get("schemaVersion")) is int and owner["schemaVersion"] == 1
@@ -3806,6 +3871,7 @@ class Operation:
         need(self.stager.maintenance_hex(request, 32)
              and retained(self.work_entry, "package-request-id.txt", 33)[1] == (request + "\n").encode("ascii"),
              "final-image-original-request")
+        self.stage = 'final-image-original-readback'
         _, observed_body = retained(self.work_entry, "installation-observation.json", self.stager.INSTALLER_RESULT_BYTES)
         observed = self.stager.maintenance_json(observed_body, self.stager.INSTALLER_RESULT_BYTES)
         need(type(observed) is dict and type(observed.get("schemaVersion")) is int and observed["schemaVersion"] == 2 and observed.get("requestId") == request
@@ -3819,11 +3885,13 @@ class Operation:
              "final-image-original-readback")
         nested = self.stager.maintenance_result_data(self.stager.canonical(observed.get("originalInstallerResult")) + b"\n", request)
         need(nested["invocation"] == observed.get("invocation"), "final-image-readback-invocation")
+        self.stage = 'final-image-package-audit'
         _, audit_body = retained(self.work_entry, "package-audit.json", 16384)
         audit = self.stager.maintenance_json(audit_body, 16384)
         need(type(audit) is dict and audit.get("packageSha256") == digest(package) and type(audit.get("packageSize")) is int
              and audit["packageSize"] == len(package) and audit.get("packageIdentifier") == "dev.mobile-release-kit.desktop.installed"
              and audit.get("qualification") == self.stager.INSTALL_PRODUCT_QUALIFICATION, "final-image-package-audit")
+        self.stage = 'final-image-producer'
         root = self.directory(self.work_entry, "producer-root", "final-image-producer-root")
         names = {"Install.pkg", "producer.json", "producer.sig"}
         need(set(os.listdir(root["fd"])) == names, "final-image-producer-roster")
@@ -3843,9 +3911,11 @@ class Operation:
              and current["runtimeManifestSha256"] == observed["runtimeManifestSha256"]
              and (distribution.get("packageSha256"), distribution.get("descriptorSha256"), distribution.get("signatureSha256"))
                  == (digest(package), digest(descriptor), digest(signed)), "final-image-producer-current")
+        self.stage = 'final-image-source-profiles'
         source = self.stager.packaging_signing_data(self.producer_profile, self.service_profile)
         need(distribution.get("sourceProducerProfileSha256") == source.producer_sha256
              and distribution.get("sourceServiceProfileSha256") == source.service_sha256, "final-image-package-source-profiles")
+        self.stage = 'final-image-original-image'
         image_root = self.directory(self.work_entry, "distribution", "final-image-original-distribution")
         names = {"MobileReleaseKit.dmg", "MobileReleaseKit-Observation.dmg"}
         need(set(os.listdir(image_root["fd"])) == names, "final-image-original-roster")
@@ -4897,7 +4967,8 @@ class Operation:
                       cwd=self.checkout / WORKSPACE, timeout=120, limit=4 * 1024 * 1024)
         self.stage = "separate-resident-image-compiler"
         result = self.call("build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(self.checkout / WORKSPACE / "Cargo.toml"),
-                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--jobs", "1", "--target", self.target,
+                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", *(("--config", RESIDENT_CARGO_OVERRIDE) if self.target == INTEL_TARGET else ()),
+                           "--jobs", "1", "--target", self.target,
                            "--lib", "--message-format=json-render-diagnostics"],
                            build_environment(self.environment, self.work, self.image_release, target=self.target),
                            cwd=self.checkout / WORKSPACE, timeout=720 if self.target == INTEL_TARGET else 480, limit=4 * 1024 * 1024)
@@ -7434,7 +7505,10 @@ class Operation:
                     and type(captured) is dict and all(type(key) is str for key in captured)
                     and tuple(captured) == ("type", "reason", "errno")
                     and type(captured["type"]) is str and captured["type"] == "stager-refused"
-                    and type(captured["reason"]) is str and captured["reason"] in DISTRIBUTION_STAGER_REASONS
+                    and type(captured["reason"]) is str
+                    and (captured["reason"] in DISTRIBUTION_STAGER_REASONS
+                         or self.phase in FINAL_IMAGE_PHASES and self.stage in FINAL_IMAGE_INPUT_STAGES
+                         and captured["reason"] in FINAL_IMAGE_INPUT_STAGER_REASONS)
                     and captured["errno"] is None):
                 self.receipt["failure"]["reason"] = captured["reason"]
             if isinstance(error, OSError):

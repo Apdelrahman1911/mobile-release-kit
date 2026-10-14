@@ -1637,11 +1637,11 @@ def cargo_records(messages):
     return records
 
 
-def cargo_profile(row, *, test):
+def cargo_profile(row, *, test, opt_level="3"):
     profile = row.get("profile")
     need(type(profile) is dict and profile.get("test") is test
          and profile.get("debug_assertions") is test
-         and profile.get("opt_level") == ("0" if test else "3"), "image-cargo-profile")
+         and profile.get("opt_level") == ("0" if test else opt_level), "image-cargo-profile")
     need(type(row.get("fresh")) is bool, "image-cargo-fresh-field")
 
 
@@ -1651,7 +1651,7 @@ def cargo_features(row, expected):
          and sorted(features) == sorted(expected), "image-cargo-exact-features")
 
 
-def cargo_library(records, directory, package, name, features, *, test):
+def cargo_library(records, directory, package, name, features, *, test, opt_level="3"):
     selected = [row for row in records if row["target"].get("name") == name]
     need(len(selected) == 1, "image-cargo-one-library")
     row = selected[0]
@@ -1661,7 +1661,7 @@ def cargo_library(records, directory, package, name, features, *, test):
          and row["target"].get("src_path") == str(directory / "src/lib.rs")
          and row["target"].get("edition") == "2021"
          and "executable" in row and row["executable"] is None, "image-cargo-source-library")
-    cargo_profile(row, test=test)
+    cargo_profile(row, test=test, opt_level=opt_level)
     cargo_features(row, features)
 
 
@@ -1695,7 +1695,8 @@ def image_cargo_artifact(messages, binary, target_dir, body, role, *, target=ARM
     native_features = (["default", "desktop-image"] if role == "desktop"
                        else ["android-registration-helper", "default", "resident-image"])
     cargo_library(records, DESKTOP / "src-tauri", "mobile-release-kit-desktop",
-                  "mobile_release_desktop", app_features, test=False)
+                  "mobile_release_desktop", app_features, test=False,
+                  opt_level="2" if role == "resident" and target == INTEL_TARGET else "3")
     cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
                   "mrk_macos_installed_native", native_features, test=False)
     need(not any(item["target"].get("kind") in (["bin"], ["test"], ["example"], ["bench"])

@@ -57,8 +57,8 @@ jobs:
       MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}
       # This installed verification run exercises iOS; Android keeps its separate qualification.
       MRK_MACOS_ANDROID_UI_SCOPE: disabled
-      # SOURCE-owned: pending iOS recovery journey only on the fixed installed verification ref.
-      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ios-pending-recovery' || 'disabled' }}
+      # SOURCE-owned: unsigned iOS archive journey only on the fixed installed verification ref.
+      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ios-unsigned-archive' || 'disabled' }}
       # A separate reviewed SOURCE change selects the targeted recovery run.
       # Default seven cases and each closed singleton are distinct native obligations.
       MRK_MACOS_SAVED_FILE_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'remaining-three' || 'ordinary-seven' }}
