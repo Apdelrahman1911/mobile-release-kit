@@ -14,8 +14,25 @@ NORMALIZERS = ('tests/desktop/test_macos_installed_staging.py',
 SOURCE, RUN_ID, ATTEMPT = 'a' * 40, '123', '1'
 
 
+SHIPPING_SOURCE_FRONT_NAMES = ('SHIPPING_SOURCE_ORIGINAL_SHA256', 'SHIPPING_SOURCE_SCRIPT_SHA256', 'SHIPPING_SOURCE_WORKFLOW_BYTES', 'SHIPPING_SOURCE_WORKFLOW_SHA256', 'SHIPPING_SOURCE_WRAPPER', 'without_shipping_source_extraction_workflow')
+
+
+def shipping_source_view():
+    names = set(SHIPPING_SOURCE_FRONT_NAMES)
+    raw = (ROOT / NORMALIZERS[0]).read_text()
+    selected = []
+    for node in ast.parse(raw).body:
+        name = node.name if isinstance(node, ast.FunctionDef) else (
+            node.targets[0].id if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) else None)
+        if name in names: selected.append(node)
+    assert len(selected) == len(names)
+    namespace = dict(hashlib=hashlib, Path=Path, __file__=str(ROOT / NORMALIZERS[0]))
+    exec(compile(ast.Module(body=selected, type_ignores=[]), '<exact-shipping-source-front>', 'exec'), namespace)
+    return namespace['without_shipping_source_extraction_workflow']
+
+
 def programs():
-    workflow = WORKFLOW.read_text()
+    workflow = shipping_source_view()(WORKFLOW.read_text())
     result = []
     for marker in ('PY_SHIPPING_COMPILE_ADMIT', 'PY_SHIPPING_IMAGE_COMPILE'):
         opening = " <<'" + marker + "'\n"
@@ -70,6 +87,14 @@ def normalizer(path):
 class ShippingCompilePublicEvidenceData(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        absent = object()
+        prior = {name: cls.__dict__.get(name, absent) for name in ("workflow", "programs", "projectors")}
+        def restore_original_bindings():
+            for name, value in prior.items():
+                if value is absent:
+                    if name in cls.__dict__: delattr(cls, name)
+                else: setattr(cls, name, value)
+        cls.addClassCleanup(restore_original_bindings)  # Enrolled before fallible SOURCE setup.
         cls.workflow, cls.programs = programs()
         cls.projectors = tuple(reducers(program) for program in cls.programs)
 
