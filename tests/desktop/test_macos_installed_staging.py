@@ -19876,18 +19876,18 @@ class MacNormalPreviewData(unittest.TestCase):
         with (purpose_root / '.github/workflows/desktop-macos-p0-readonly-enrollment.yml').open('rb') as stream:
             dormant_workflow_body = stream.read(6242)
         self.assertEqual(len(dormant_workflow_body), 6241)
-        self.assertEqual(hashlib.sha256(dormant_workflow_body).hexdigest(), 'b6a5689574ee565a4570e30f13dad14350db4978612de2da2d88688fd6964210')
+        self.assertEqual(hashlib.sha256(dormant_workflow_body).hexdigest(), 'c3fe8c8cd425eb3605fcbd49eace3a952410a58a0659b535c164ca15cc57bf23')
         dormant_workflow = dormant_workflow_body.decode('utf-8')
         with (purpose_root / 'desktop/tools/macos_p0_readonly_native.py').open('rb') as stream:
             dormant_native_body = stream.read(63219)
         self.assertEqual(len(dormant_native_body), 63218)
-        self.assertEqual(hashlib.sha256(dormant_native_body).hexdigest(), '3ebbc4a958ed25819d0a86432739c906572ce6631037acefed3fbbd1b3012ca5')
+        self.assertEqual(hashlib.sha256(dormant_native_body).hexdigest(), '26694a8702a68efe8f2fd0cb86ff5bf932c0788571af4382fe93e0c02f6fd796')
         dormant_native = dormant_native_body.decode('utf-8')
         self.assertEqual(dormant_workflow.count('    branches: [verify/desktop-macos-p0-readonly-enrollment]\n'), 1)
         self.assertEqual(dormant_workflow.count("    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-p0-readonly-enrollment'\n"), 1)
         self.assertEqual(dormant_workflow.count('          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REF" == refs/heads/verify/desktop-macos-p0-readonly-enrollment ]] || exit 1\n'), 1)
         self.assertEqual(dormant_workflow.count('          MRK_P0_NATIVE_BYTES: "63218"\n'), 1)
-        self.assertEqual(dormant_workflow.count('          MRK_P0_NATIVE_SHA256: "3ebbc4a958ed25819d0a86432739c906572ce6631037acefed3fbbd1b3012ca5"\n'), 1)
+        self.assertEqual(dormant_workflow.count('          MRK_P0_NATIVE_SHA256: "26694a8702a68efe8f2fd0cb86ff5bf932c0788571af4382fe93e0c02f6fd796"\n'), 1)
         self.assertEqual(dormant_native.count("ENROLLMENT_REF = 'refs/heads/verify/desktop-macos-p0-readonly-enrollment'\n"), 1)
         self.assertNotIn('refs/heads/verify/desktop-macos-installed', dormant_workflow)
         android_selector = "      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'android-signed-build' || 'disabled' }}\n"

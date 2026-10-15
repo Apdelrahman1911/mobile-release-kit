@@ -3095,6 +3095,73 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         with self.assertRaises(DATA.Refused):
             DATA.project_summary(value, CONTEXT, False)
 
+        # The actual readonly project/CLI select exactly one public carrier path.
+        # This is DATA correspondence, never a qualified native/product receipt.
+        base = {"schemaVersion": 2, "scope": "normal-macos-early-preview", "sourceCommit": CONTEXT["source"],
+            "sourceTree": "4" * 40, "runId": "123", "runAttempt": "2", "platform": "macOS26-arm64",
+            "distributionSha256": "5" * 64, "originalImageFinalizationReturnedZero": True,
+            "productReady": False, "guide": SENTINEL, "error": SENTINEL}
+        for purpose, selected, other in (("legacy-preview", "preview/PREVIEW.json", "p0-carrier-input/PREVIEW.json"),
+                ("installed-passive-carrier", "p0-carrier-input/PREVIEW.json", "preview/PREVIEW.json")):
+            for fault in ("valid", "absent", "foreign", "symlink", "hardlink", "oversized"):
+                with self.subTest(purpose=purpose, fault=fault), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    other_path = write(root, other, {**base, "distributionSha256": "6" * 64})
+                    other_original = other_path.read_bytes()
+                    selected_path = root / selected
+                    if fault != "absent":
+                        if fault == "symlink":
+                            selected_path.parent.mkdir(parents=True, exist_ok=True)
+                            selected_path.symlink_to(other_path)
+                        elif fault == "hardlink":
+                            selected_path.parent.mkdir(parents=True, exist_ok=True)
+                            os.link(other_path, selected_path)
+                        else:
+                            document = {**base, **({"sourceCommit": "7" * 40} if fault == "foreign" else {})}
+                            write(root, selected, b" " * 16385 if fault == "oversized" else document)
+                    originals = {p: p.read_bytes() for p in (other_path, selected_path) if p.exists()}
+                    result = DATA.project(str(root), profile="installed", source=CONTEXT["source"],
+                        workflow_source=CONTEXT["workflowSource"], run_id=CONTEXT["runId"],
+                        run_attempt=CONTEXT["runAttempt"], target=CONTEXT["target"], delivery_purpose=purpose)
+                    expected = "observed" if fault == "valid" else "absent" if fault == "absent" else "refused"
+                    self.assertEqual(result["deliveries"]["preview"]["receiptState"], expected)
+                    if expected == "observed":
+                        self.assertEqual(result["deliveries"]["preview"], DATA.project_summary(base, CONTEXT, False))
+                        self.assertEqual(result["deliveries"]["preview"]["distributionSha256"], "5" * 64)
+                    self.assertIs(result["productReady"], False)
+                    self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
+                    self.assertEqual(other_path.read_bytes(), other_original)
+                    for path, original in originals.items():
+                        self.assertEqual(path.read_bytes(), original)
+        # The optional suffix is fixed, and old14/16 argument forms stay valid.
+        for suffix, profile, expected in (([], "installed", 0),
+                (["--removal-case", "disabled"], "installed", 0),
+                (["--delivery-purpose", "legacy-preview"], "installed", 0),
+                (["--delivery-purpose", "installed-passive-carrier"], "installed", 0),
+                (["--removal-case", "disabled", "--delivery-purpose", "installed-passive-carrier"], "installed", 0),
+                (["--delivery-purpose", "installed-passive-carrier"], "aqua", 1),
+                (["--removal-case", "ordinary", "--delivery-purpose", "installed-passive-carrier"], "installed", 1),
+                (["--delivery-purpose", SENTINEL], "installed", 1),
+                (["--delivery-purpose", "legacy-preview", "--delivery-purpose", "legacy-preview"], "installed", 1),
+                (["--delivery-purpose", "installed-passive-carrier", "--removal-case", "disabled"], "installed", 1)):
+            with self.subTest(suffix=suffix, profile=profile), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); write(root, "p0-carrier-input/PREVIEW.json", base)
+                args = ["--profile", profile, "--work", str(root), "--target", CONTEXT["target"],
+                    "--source", CONTEXT["source"], "--workflow-source", CONTEXT["workflowSource"],
+                    "--run-id", CONTEXT["runId"], "--run-attempt", CONTEXT["runAttempt"]]
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(DATA.main(args + suffix), expected)
+                if expected:
+                    self.assertFalse((root / DATA.OUTPUT).exists())
+                elif "installed-passive-carrier" in suffix:
+                    self.assertEqual(json.loads((root / DATA.OUTPUT).read_text())["deliveries"]["preview"],
+                                     DATA.project_summary(base, CONTEXT, False))
+        for purpose in (None, False, 1, {}, []):
+            with self.subTest(purpose=purpose), tempfile.TemporaryDirectory() as directory, self.assertRaises(DATA.Refused):
+                DATA.project(directory, profile="installed", source=CONTEXT["source"],
+                    workflow_source=CONTEXT["workflowSource"], run_id=CONTEXT["runId"],
+                    run_attempt=CONTEXT["runAttempt"], target=CONTEXT["target"], delivery_purpose=purpose)
+
     def test_genuine_destination_table_projection_preserves_partial_observations_only(self):
         normal = normal_diagnostic_data()
         status = {"receiptState": "observed", "returncode": 70}

@@ -1469,6 +1469,65 @@ class FixedCarrierResumeData(unittest.TestCase):
         self.assertEqual(base, 6 * (m.ORIGIN['artifactBytes'] + m.ORIGIN['imageBytes'])
                          + (16 << 20) + 123 + (512 << 20) + (1 << 30))
         self.assertLess(base, 3190128640)
+        # Acquisition-only ZIP copies leave the later baseline only after the
+        # genuine return/correspondence boundary, not before an allocation.
+        for retained in (0, 123, 1 << 30):
+            initial = m.acquisition_memory_requirement(retained)
+            later = m.post_acquisition_memory_requirement(retained)
+            self.assertEqual(initial - later, 6 * m.ORIGIN['artifactBytes'])
+            self.assertEqual(later, 6 * m.ORIGIN['imageBytes'] + (16 << 20)
+                             + retained + (512 << 20) + (1 << 30))
+            self.assertEqual(m.allocation_memory_requirement(later, 10, 20, 30),
+                             later + 10 + 60 + 62 + (16 << 20))
+        for retained in (True, -1, (1 << 30) + 1, 1.0, None):
+            with self.subTest(retained=retained), self.assertRaises(m.Refused):
+                m.post_acquisition_memory_requirement(retained)
+
+        # Execute the five actual main statements with passive DATA ports. The
+        # real preview parser must return before the actual baseline assignment.
+        import ast
+        main_node = next(n for n in ast.parse((ROOT / 'desktop/tools/macos_fixed_carrier_resume.py').read_bytes()).body
+                         if isinstance(n, ast.FunctionDef) and n.name == 'main')
+        def acquired(n):
+            return isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'artifact' for t in n.targets)
+        block = next(n.body for n in ast.walk(main_node) if isinstance(n, ast.Try)
+                     and any(acquired(s) for s in n.body))
+        at = next(i for i, n in enumerate(block) if acquired(n))
+        boundary = block[at:at + 5]
+        expected_boundary = ast.parse("artifact = session.acquire_fixed()\n"
+            "preview = preview_data(artifact['PREVIEW.json'], session.stager)\n"
+            "session.memory_base = post_acquisition_memory_requirement(retained)\n"
+            "session.preview_bytes, session.preview_sha = len(artifact['PREVIEW.json']), sha(artifact['PREVIEW.json'])\n"
+            "session.install_image(artifact['MobileReleaseKit.dmg'], preview)\n").body
+        self.assertEqual([ast.dump(n, include_attributes=False) for n in boundary],
+                         [ast.dump(n, include_attributes=False) for n in expected_boundary])
+        program = compile(ast.Module(body=boundary, type_ignores=[]), 'actual_post_acquisition_boundary', 'exec')
+        valid_preview = m.canonical(self.preview())
+        installed = []
+        passive = SimpleNamespace(memory_base=base, stager=tool,
+            acquire_fixed=lambda: {'MobileReleaseKit.dmg': b'PUBLIC_IMAGE_DATA', 'PREVIEW.json': valid_preview},
+            install_image=lambda image, preview: installed.append((image, preview)))
+        ports = {'session': passive, 'retained': 123, 'preview_data': m.preview_data,
+                 'post_acquisition_memory_requirement': m.post_acquisition_memory_requirement, 'sha': m.sha}
+        exec(program, ports)
+        self.assertEqual(passive.memory_base, m.post_acquisition_memory_requirement(123))
+        self.assertEqual(installed, [(b'PUBLIC_IMAGE_DATA', self.preview())])
+        primary = RuntimeError('passive acquisition failure')
+        def acquire_failed():
+            raise primary
+        passive.memory_base = base; passive.acquire_fixed = acquire_failed; installed.clear()
+        with self.assertRaises(RuntimeError) as caught:
+            exec(program, ports)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(passive.memory_base, base)
+        self.assertEqual(installed, [])
+        passive.acquire_fixed = lambda: {'MobileReleaseKit.dmg': b'PUBLIC_IMAGE_DATA',
+            'PREVIEW.json': m.canonical({**self.preview(), 'runId': '0'})}
+        with self.assertRaises(m.Refused):
+            exec(program, ports)
+        self.assertEqual(passive.memory_base, base)
+        self.assertEqual(installed, [])
+
         self.assertEqual(m.allocation_memory_requirement(base, 10, 20, 30),
                          base + 10 + 60 + 62 + (16 << 20))
         for args in ((True, 0, 0, 0), (base, -1, 0, 0), (base, 0, True, 0),
@@ -1632,6 +1691,7 @@ class FixedCarrierResumeData(unittest.TestCase):
             image_path.write_bytes(image)
             image_path.chmod(0o444)
             quota = m.OriginalQuota()
+            self.addCleanup(quota.finish)
             book = quota.book(donor['Originals'])
             parent = quota.call(book, 'directory', work)
             probe_entry, probe_copy = quota.call(book, 'file', image_path, len(image), modes=(0o444,))
@@ -1665,9 +1725,9 @@ class FixedCarrierResumeData(unittest.TestCase):
             # refuses before fresh reads, then consuming closes happen once.
             image_path.chmod(0o600)
             image_path.write_bytes(b'X' * len(image))
-            image_path.chmod(0o444)
             with self.assertRaises(donor['Refused']):
                 book.read(observed['held'])
+            image_path.chmod(0o444)
             close_calls = []
             actual_close = m.os.close
             def consume(fd):

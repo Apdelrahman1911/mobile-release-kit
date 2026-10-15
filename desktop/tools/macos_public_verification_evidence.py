@@ -2897,10 +2897,13 @@ def project_producer_refusal(body, phase):
             "binding": "same-source-run-target-failed-original", "nativeSuccessInferred": False}
 
 
-def project(work, *, profile, source, workflow_source, run_id, run_attempt, target, removal_case="disabled"):
+def project(work, *, profile, source, workflow_source, run_id, run_attempt, target, removal_case="disabled",
+            delivery_purpose="legacy-preview"):
     need(profile in ("installed", "aqua") and target in TARGETS)
     need(removal_case in ("disabled", "ordinary", "abrupt")
          and (removal_case == "disabled" or profile == "installed" and target == "aarch64-apple-darwin"))
+    need(type(delivery_purpose) is str and delivery_purpose in ("legacy-preview", "installed-passive-carrier")
+         and (delivery_purpose == "legacy-preview" or profile == "installed" and removal_case == "disabled"))
     context = {"profile": profile, "source": hex_value(source, 40), "workflowSource": hex_value(workflow_source, 40),
                "runId": identifier(run_id), "runAttempt": identifier(run_attempt), "target": target,
                "expectedRemovalCase": removal_case}
@@ -3011,7 +3014,8 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
             lambda body: project_inventory(decode(body, budget, inventory=True), body, context, collect_paths=inventory_paths))
         deliveries = {name: observe(path, 16384, lambda body, removal=removal:
             project_summary(decode(body, budget), context, removal)) for name, path, removal in
-            (("preview", "preview/PREVIEW.json", False), ("removal", "remove-preview/REMOVAL.json", True))}
+            (("preview", "p0-carrier-input/PREVIEW.json" if delivery_purpose == "installed-passive-carrier"
+                else "preview/PREVIEW.json", False), ("removal", "remove-preview/REMOVAL.json", True))}
         ui_diagnostics = {role: observe(path, 4096, lambda body, role=role:
             project_ui_diagnostic(decode(body, budget), role, statuses["normal-ui/build.status"]))
             for role, path in UI_DIAGNOSTICS} if profile == "installed" else {}
@@ -3064,13 +3068,17 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
 
 def main(arguments):
     try:
-        need(len(arguments) in (14, 16) and tuple(arguments[:14:2]) ==
+        need(len(arguments) in (14, 16, 18) and tuple(arguments[:14:2]) ==
              ("--profile", "--work", "--target", "--source", "--workflow-source", "--run-id", "--run-attempt"))
-        need(len(arguments) == 14 or arguments[14] == "--removal-case")
-        removal_case = "disabled" if len(arguments) == 14 else arguments[15]
+        suffix = tuple(arguments[14::2])
+        need(suffix in ((), ("--removal-case",), ("--delivery-purpose",),
+                        ("--removal-case", "--delivery-purpose")))
+        removal_case = arguments[15] if suffix and suffix[0] == "--removal-case" else "disabled"
+        delivery_purpose = arguments[-1] if suffix and suffix[-1] == "--delivery-purpose" else "legacy-preview"
         profile, work, target, source, workflow_source, run_id, run_attempt = arguments[1:14:2]
         project(work, profile=profile, source=source, workflow_source=workflow_source,
-                run_id=run_id, run_attempt=run_attempt, target=target, removal_case=removal_case)
+                run_id=run_id, run_attempt=run_attempt, target=target, removal_case=removal_case,
+                delivery_purpose=delivery_purpose)
     except Exception:
         print("Public evidence projection refused; originals remain local.", file=sys.stderr)
         return 1
