@@ -38,7 +38,7 @@ TERMINAL_LIMIT = 64 << 10
 TRANSPORT_LIMIT = LIMIT
 MEMBERS = {'MobileReleaseKit.dmg': LIMIT, 'PREVIEW.json': 16384, 'public-verification-evidence.json': 128 << 10}
 STATE = {'phase': 'admission', 'firstFailurePhase': None, 'lastRole': None, 'originalClosesKnown': False,
-         'privateOutputsRetired': False, 'workloadsKnownSettled': False, 'resourceAdmission': None}
+         'privateOutputsRetired': False, 'workloadsKnownSettled': False, 'resourceAdmission': None, 'installerObservation': None}
 SCOPE = 'fixed-ce644-arm-carrier-ios-unsigned-only'
 ORIGIN = {'source': 'ce644711fb6e2bea26182473441aac192d5638e1', 'tree': 'e5c4c43b2a903b3040d24c8bfa94b5236fd12882',
  'runId': '38649386495', 'runAttempt': '1', 'jobId': '116144135875', 'artifactId': '11935748046',
@@ -1023,6 +1023,40 @@ def producer_message_data(descriptor):
     return b'MobileReleaseKit-package-producer-v2\0' + descriptor
 
 
+def transport_path_data(run, attempt):
+    need(all(type(v) is str and re.fullmatch(r'[1-9][0-9]{0,19}', v)
+             for v in (run, attempt)), 'resume-transport-context')
+    context = '\n'.join((run, attempt, TARGETS[0], 'fixed-carrier-resume'))
+    return Path('/Volumes') / ('MRK-Install-' + sha(context.encode('ascii'))[:32])
+
+
+def transport_transition_data(before, after, previous, current, name, member, *, present):
+    # Only our observed attach/detach may change directory bookkeeping. The
+    # protected identity, ACL/flags/mount and every unrelated name stay fixed.
+    need(current[0][:5] == previous[0][:5] and current[1:] == previous[1:],
+         'resume-transport-parent-authority')
+    wanted = dict(before)
+    if present:
+        need(name not in wanted, 'resume-transport-collision')
+        wanted[name] = member
+    else:
+        need(wanted.get(name) == member, 'resume-transport-original-mount')
+        del wanted[name]
+    need(after == wanted, 'resume-transport-exact-namespace-effect')
+
+
+def fresh_installer_request_data(before, after):
+    # Install.pkg generates its request inside the native parent. Only this
+    # fresh original0 and a one-entry delta in the protected export namespace
+    # may select it; neither the old carrier nor a caller-supplied receipt can.
+    need(type(before) is dict and not before and type(after) is dict and len(after) == 1,
+         'resume-fresh-installer-result-delta')
+    request = next(iter(after))
+    need(type(request) is str and re.fullmatch(r'[0-9a-f]{32}', request)
+         and request != '0' * 32, 'resume-fresh-installer-request')
+    return request
+
+
 class Resume:
     def __init__(self, root, work, clock, factory, *, quota=None):
         self.root, self.work, self.clock = root, work, clock
@@ -1036,14 +1070,15 @@ class Resume:
         self.parent = self.quota.call(self.outer, 'directory', work)
 
 
-    def fresh_book(self):
+    def fresh_book(self, *, transport=False):
         book = self.quota.book(self.factory)
         # Borrow ONLY authenticated outer ancestor originals, never a mount leaf.
         need(not book.entries and not book.directories, 'p0-fresh-book-shape')
         self.outer.check()
+        base = Path('/Volumes') if transport else self.work
         borrowed = {path: entry for path, entry in self.outer.directories.items()
-                    if path == self.work or path in self.work.parents}
-        need(self.work in borrowed and all(entry['kind'] == 'directory' and entry['fd'] is not None
+                    if path == base or path in base.parents}
+        need(base in borrowed and all(entry['kind'] == 'directory' and entry['fd'] is not None
              and not entry['closed'] for entry in borrowed.values()), 'p0-borrowed-ancestor-admission')
         book.directories.update(borrowed)
         book._p0_borrowed = tuple(borrowed.items())
@@ -1167,6 +1202,54 @@ class Resume:
         self.private[str(path.relative_to(self.work))] = entry['identity']
         return entry
 
+    def transport_facts(self, entry):
+        # Same protected /Volumes policy as the existing packaging transport.
+        self.point(); self.outer.check_one(entry)
+        info = os.fstat(entry['fd'])
+        need(stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0
+             and not info.st_mode & 0o7022, 'resume-transport-protected-parent')
+        acl = self.host_module._acl_snapshot(self.host.library, entry['fd'], self.host_module.full9(info))
+        need(acl.get('empty') is True and acl.get('phase') == 0 and acl.get('filesecFreeReturned') is True
+             and acl.get('aclFreeResult') in (None, 0), 'resume-transport-empty-acl')
+        flags = acl.get('snapshotFlags'); fs = self.host.filesystem(entry['fd'])
+        need(type(flags) is int and 0 <= flags < 1 << 32 and flags == getattr(info, 'st_flags', None)
+             and fs['typeName'] == 'apfs' and fs['flags'] & 0x1000
+             and not fs['flags'] & (0x20 | 0x200000 | 0x400000), 'resume-transport-local-apfs')
+        self.outer.check_one(entry)
+        need(identity(os.fstat(entry['fd'])) == identity(info), 'resume-transport-facts-post')
+        self.clock.check()
+        return identity(info), flags, fs
+
+    def transport_roster(self, entry):
+        before = self.transport_facts(entry); rows = {}
+        self.quota.reserve(1)  # Before acquiring the iterator's transient FD.
+        original, primary = None, None
+        try:
+            original = os.scandir(entry['fd'])
+            for item in original:
+                self.clock.check()
+                need(len(rows) < 350 and item.name not in rows, 'resume-transport-roster-bound')
+                info = os.stat(item.name, dir_fd=entry['fd'], follow_symlinks=False)
+                rows[item.name] = (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            if original is not None:
+                consumed, original = original, None
+                try:
+                    consumed.close()
+                except BaseException:
+                    self.outer.errors.append('resume-transport-iterator-close-unknown')
+                    if primary is None: raise
+                    BaseException.add_note(primary, 'resume-transport-iterator-close-unknown')
+        for name, expected in rows.items():
+            self.clock.check()
+            info = os.stat(name, dir_fd=entry['fd'], follow_symlinks=False)
+            need((info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)) == expected, 'resume-transport-roster-post')
+        need(self.transport_facts(entry) == before, 'resume-transport-scan-parent-post')
+        return rows, before
+
     def acquire_fixed(self):
         self.point(); self.quota.reserve(3)
         request = {'row': ORIGIN, 'role': 'carrier', 'target': TARGETS[0], 'work': str(self.work),
@@ -1191,14 +1274,14 @@ class Resume:
         need(original == image, 'resume-image-copy-original')
         del original
         self.private['arm64.dmg'] = image_entry['identity']
-        mount = self.work / 'arm64-mount'
-        self.quota.reserve(1)  # Before fresh placeholder mkdir, as in approved P0 quotation.
-        os.mkdir(mount.name, 0o700, dir_fd=self.parent['fd'])
-        placeholder = self.fresh_book(); leaf = self.quota.call(placeholder, 'directory', mount)
-        before = leaf['identity']
-        need(os.listdir(leaf['fd']) == [], 'resume-empty-placeholder')
-        placeholder.check(); need(placeholder.finish(), 'resume-placeholder-close')
+        mount = transport_path_data(self.run_id, self.run_attempt)
+        volumes = self.quota.call(self.outer, 'directory', Path('/Volumes'))
+        slash = self.outer.directories[Path('/')]
+        slash_facts = self.transport_facts(slash)
+        roster, volumes_facts = self.transport_roster(volumes)
+        need(mount.name not in roster, 'resume-transport-collision')
         attached, mounted, primary, detached, device = False, None, None, False, None
+        member, mounted_roster = None, None
         self.installer_entered = self.installer_zero = self.readback_known = False
         try:
             STATE['phase'] = 'attach'
@@ -1207,12 +1290,19 @@ class Resume:
             need(call.returncode == 0, 'resume-original-attach')
             device = self.stager.distribution_mount_data(call.stdout, call.stderr, call.returncode, mount)
             attached = True
-            mounted = self.fresh_book(); directory = self.quota.call(mounted, 'directory', mount)
+            mounted = self.fresh_book(transport=True); directory = self.quota.call(mounted, 'directory', mount)
+            member = (directory['identity'][0], directory['identity'][1], stat.S_IFDIR)
+            mounted_roster, current = self.transport_roster(volumes)
+            transport_transition_data(roster, mounted_roster, volumes_facts, current, mount.name, member, present=True)
+            volumes_facts = current
             def post():
                 self.point(); mounted.check()
                 held = os.fstat(directory['fd']); facts = self.host.filesystem(directory['fd'])
-                mount_data(held, os.fstat(self.parent['fd']), facts, os.fstatvfs(directory['fd']).f_flag, mount, device)
-                need(identity(os.stat(mount.name, dir_fd=self.parent['fd'], follow_symlinks=False)) == identity(held)
+                mount_data(held, os.fstat(volumes['fd']), facts, os.fstatvfs(directory['fd']).f_flag, mount, device)
+                need(not facts['flags'] & 0x400000, 'resume-transport-no-automount')
+                need(self.transport_facts(slash) == slash_facts and self.transport_facts(volumes) == volumes_facts,
+                     'resume-transport-retained-parents')
+                need(identity(os.stat(mount.name, dir_fd=volumes['fd'], follow_symlinks=False)) == identity(held)
                      and set(os.listdir(directory['fd'])) == {'Install.pkg', 'producer.json', 'producer.sig'}, 'resume-mounted-original-roster')
                 need(self.outer.read(image_entry) == image, 'resume-image-retained-post')
                 return facts
@@ -1252,32 +1342,31 @@ class Resume:
             readback = original_release_readback_data(result, inventory, target=TARGETS[0])
             input_parent = self.fresh_directory(self.parent, 'input')
             self.publish_owned(input_parent['path'] / self.stager.INSTALLATION_INVENTORY_NAME, inventory)
-            request_id = os.urandom(16).hex()  # New current Installer correlation; never copied from origin.
-            package_name = self.stager.distribution_request_name(request_id)
-            self.publish_owned(self.work / package_name, originals['Install.pkg'][0])
-            package_entry, package_body = self.quota.call(self.outer, 'file', self.work / package_name, ORIGIN['package']['bytes'], modes=(0o444,))
-            need(sha(package_body) == ORIGIN['package']['sha256'], 'resume-request-package-copy')
             args = argparse.Namespace(target=TARGETS[0], fixture=False, input=self.work / 'input', expected_source=ORIGIN['source'],
                 expected_inventory=row['inventorySha256'], expected_manifest=row['runtimeManifestSha256'],
-                expected_package=ORIGIN['package']['sha256'], request_id=request_id,
+                expected_package=ORIGIN['package']['sha256'], request_id=None,
                 producer_descriptor=mount / 'producer.json', producer_signature=mount / 'producer.sig',
-                installer_status=self.work / 'installer-output.status', package=self.work / package_name)
+                installer_status=self.work / 'installer-output.status', package=mount / 'Install.pkg')
             self.point(); before_census = self.stager.same_package_result_census()
             need(before_census == {}, 'resume-fresh-installer-result-census')
-            self.stager.installer_result_absent_command(args)
-            need(post() == facts and self.outer.read(package_entry) == package_body, 'resume-installer-input-post')
+            need(post() == facts, 'resume-installer-input-post')
             STATE['phase'] = 'installer'
             need(self.clock.seconds(123) == 123, 'resume-installer-original-clock-reserve')
             self.installer_entered = True
             original = self.command('installer', ['/usr/bin/sudo', '-n', '--', '/usr/sbin/installer', '-pkg', str(args.package),
                 '-target', '/', '-dumplog', '-verboseR'], 123)
             self.installer_zero = original.returncode == 0
+            if not self.installer_zero:
+                STATE['installerObservation'] = installer_observation_data(original.returncode, original.stdout, original.stderr)
             need(self.installer_zero, 'resume-original-installer-zero')
             self.publish_owned(self.work / 'installer-output.status', b'0\n', 0o600)
             STATE['phase'] = 'readback'
             self.point(); need(post() == facts, 'resume-post-installer-mounted-inputs')
+            after_census = self.stager.same_package_result_census()
+            request_id = fresh_installer_request_data(before_census, after_census)
+            args.request_id = request_id
             observed = self.stager.observation_command(args, original_release_readback=readback)
-            self.point(); after_census = self.stager.same_package_result_census()
+            self.point(); need(self.stager.same_package_result_census() == after_census, 'resume-installer-result-census-post')
             need(set(after_census) == {request_id} and observed['requestId'] == request_id
                  and observed['originalInstallerReturnedZero'] is True and observed['originalWriterJoined'] is True
                  and observed['sourceCommit'] == ORIGIN['source'] and observed['completedPackageSha256'] == ORIGIN['package']['sha256']
@@ -1310,12 +1399,10 @@ class Resume:
                     try:
                         self.point(); call = self.command('detach', ['/usr/bin/hdiutil', 'detach', device], 30)
                         need(call.returncode == 0, 'resume-original-detach')
-                        restored = self.fresh_book(); leaf = self.quota.call(restored, 'directory', mount)
-                        need(leaf['identity'] == before and os.listdir(leaf['fd']) == []
-                             and not os.fstatvfs(leaf['fd']).f_flag & os.ST_RDONLY, 'resume-restored-placeholder')
-                        restored.check(); need(restored.finish(), 'resume-restored-placeholder-close')
-                        self.outer.check(); os.rmdir(mount.name, dir_fd=self.parent['fd'])
-                        need(not os.path.lexists(mount), 'resume-placeholder-retirement')
+                        need(member is not None and mounted_roster is not None, 'resume-transport-mounted-state-unobserved')
+                        after, current = self.transport_roster(volumes)
+                        transport_transition_data(mounted_roster, after, volumes_facts, current, mount.name, member, present=False)
+                        need(after == roster and self.transport_facts(slash) == slash_facts, 'resume-transport-detach-post')
                         detached = True
                     except BaseException:
                         if primary is None: raise
@@ -1596,6 +1683,71 @@ def normal_batch_project_main():
 
 # Finite observation only. A failed/unknown row never authorizes another family
 # or cleanup; already-closed family receipts remain independently interpretable.
+INSTALLER_PHASES = ('entry','target-ok','relative-entry','absolute-entry','cwd-ok','pre-exec')
+INSTALLER_REFUSALS = ('target','entry','cwd')
+INSTALLER_ACL_ROLES = ('input-directory','input-inventory','system-root','system-library','system-support','other-protected-object')
+INSTALLER_ACL_PHASES = ('filesec-allocation','fstatx-snapshot','snapshot-owner','snapshot-group','snapshot-mode','acl-presence','acl-conversion','acl-object','acl-validation','acl-first-entry','acl-entry-present','acl-free','ffi-output')
+
+
+def installer_observation_projection_data(value):
+    """Optional failure-only finite DATA; never raw captures or success authority."""
+    keys = {'returncode','stdoutBytes','stderrBytes','postinstallPhases','postinstallRefusals','aclDiagnostics','completedParentRefusals','truncated','markerState'}
+    if type(value) is not dict or set(value) != keys: return None
+    if (type(value['returncode']) is not int or not -255 <= value['returncode'] <= 255 or value['returncode'] == 0
+        or any(type(value[k]) is not int or value[k] < 0 for k in ('stdoutBytes','stderrBytes'))
+        or value['stdoutBytes'] + value['stderrBytes'] > 256*1024 or type(value['truncated']) is not bool): return None
+    for key, choices in (('postinstallPhases',INSTALLER_PHASES),('postinstallRefusals',INSTALLER_REFUSALS)):
+        rows = value[key]
+        if type(rows) is not list or len(rows) > len(choices) or any(type(v) is not str or v not in choices for v in rows): return None
+        if rows != [v for v in choices if v in rows]: return None
+    aclkeys = {'role','phase','result','call','errno','freeCall','freeErrno'}
+    parentkeys = {'exit','originals','native','timely','unknown'}
+    for key, fields, cap in (('aclDiagnostics',aclkeys,8),('completedParentRefusals',parentkeys,4)):
+        rows = value[key]
+        if type(rows) is not list or len(rows) > cap: return None
+        for row in rows:
+            if type(row) is not dict or set(row) != fields: return None
+            if key == 'aclDiagnostics':
+                if (type(row['role']) is not str or row['role'] not in INSTALLER_ACL_ROLES
+                    or type(row['phase']) is not str or row['phase'] not in INSTALLER_ACL_PHASES
+                    or any(type(row[k]) is not int or not -9999999999 <= row[k] <= 9999999999 for k in fields-{'role','phase'})): return None
+            elif (type(row['exit']) is not int or row['exit'] not in (1,20)
+                  or any(type(row[k]) is not bool for k in fields-{'exit'})): return None
+    observed = any(value[k] for k in ('postinstallPhases','postinstallRefusals','aclDiagnostics','completedParentRefusals'))
+    if value['markerState'] != ('observed' if observed else 'absent'): return None
+    return {**value, **{k:[dict(v) if type(v) is dict else v for v in value[k]] for k in ('postinstallPhases','postinstallRefusals','aclDiagnostics','completedParentRefusals')}}
+
+
+def installer_observation_data(code, stdout, stderr):
+    """Classify only already-owned captures; failed diagnostics stay unavailable."""
+    try:
+        if (type(code) is not int or not -255 <= code <= 255 or code == 0
+            or type(stdout) is not bytes or type(stderr) is not bytes or len(stdout)+len(stderr) > 256*1024): return None
+        value = dict(returncode=code,stdoutBytes=len(stdout),stderrBytes=len(stderr),postinstallPhases=[],postinstallRefusals=[],aclDiagnostics=[],completedParentRefusals=[],truncated=False,markerState='absent')
+        patterns = (
+            ('postinstallPhases',re.compile(rb'(?<![A-Za-z0-9_])MRK_MACOS_POSTINSTALL_PHASE=(' + b'|'.join(v.encode() for v in INSTALLER_PHASES) + rb')(?![A-Za-z0-9_-])'),6),
+            ('postinstallRefusals',re.compile(rb'(?<![A-Za-z0-9_])MRK_MACOS_POSTINSTALL_REFUSED=(' + b'|'.join(v.encode() for v in INSTALLER_REFUSALS) + rb')(?![A-Za-z0-9_-])'),3),
+            ('aclDiagnostics',re.compile(rb'(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role=(' + b'|'.join(v.encode() for v in INSTALLER_ACL_ROLES) + rb');phase=(' + b'|'.join(v.encode() for v in INSTALLER_ACL_PHASES) + rb');result=(-?[0-9]{1,10});call=(-?[0-9]{1,10});errno=(-?[0-9]{1,10});freeCall=(-?[0-9]{1,10});freeErrno=(-?[0-9]{1,10})(?=\r?\n$)'),8),
+            ('completedParentRefusals',re.compile(rb'(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=[0-9a-f]{64};exit=(1|20);originals=([01]);native=([01]);timely=([01]);unknown=([01])(?=\r?\n$)'),4))
+        for body in (stdout,stderr):
+            for line in body.splitlines(keepends=True):
+                if len(line) > 16384:
+                    value['truncated'] = True; continue
+                for key, pattern, cap in patterns:
+                    for match in pattern.finditer(line):
+                        parts = match.groups()
+                        row = (dict(zip(('role','phase','result','call','errno','freeCall','freeErrno'),[parts[0].decode('ascii'),parts[1].decode('ascii'),*[int(p) for p in parts[2:]]])) if key == 'aclDiagnostics' else
+                               dict(zip(('exit','originals','native','timely','unknown'),[int(parts[0]),*[p == b'1' for p in parts[1:]]])) if key == 'completedParentRefusals' else parts[0].decode('ascii'))
+                        if len(value[key]) == cap or row in value[key]: value['truncated'] = True
+                        else: value[key].append(row)
+        for key, choices in (('postinstallPhases',INSTALLER_PHASES),('postinstallRefusals',INSTALLER_REFUSALS)):
+            value[key] = [v for v in choices if v in value[key]]
+        if any(value[k] for k,_,_ in patterns): value['markerState'] = 'observed'
+        return installer_observation_projection_data(value)
+    except BaseException:
+        return None  # No diagnostic error can replace the known failed Installer.
+
+
 def normal_failure_data(native,batch,statuses,passed,harness_status):
     need(type(batch) is str and batch in NORMAL_FAMILIES, 'resume-normal-diagnostic-batch')
     expected = {row[0] for row in NORMAL_FAMILIES[batch]}
@@ -1615,7 +1767,7 @@ def normal_failure_data(native,batch,statuses,passed,harness_status):
     need(harness_status is None or type(harness_status) is int and 0 <= harness_status <= 255,
          'resume-normal-diagnostic-harness')
     native_row = {'state':'unavailable','phase':None,'originalClosesKnown':None,'workloadsKnownSettled':None,
-                  'privateOutputsRetired':None,'failureLocation':unavailable_location(),'resourceAdmission':None}
+                  'privateOutputsRetired':None,'failureLocation':unavailable_location(),'resourceAdmission':None,'installerObservation':None}
     allowed = ('admission','initial-source','attach','producer-signature','installer','readback','detach-finality',
                'resource-admission','acquire-carrier','complete')
     if type(native) is dict and native.get('schemaVersion') == 1 and native.get('scope') == NORMAL_SCOPE and native.get('normalBatch') == batch and native.get('accepted') is False:
@@ -1623,6 +1775,7 @@ def normal_failure_data(native,batch,statuses,passed,harness_status):
         if type(phase) is str and phase in allowed:
             native_row.update(state='observed-failure',phase=phase,failureLocation=location_data(native.get('failureLocation')))
             native_row['resourceAdmission'] = resource_projection_data(native.get('resourceAdmission'))
+            if phase == 'installer': native_row['installerObservation'] = installer_observation_projection_data(native.get('installerObservation'))
             for key in ('originalClosesKnown','workloadsKnownSettled','privateOutputsRetired'):
                 native_row[key] = native.get(key) if type(native.get(key)) is bool else None
     return {'schemaVersion':1,'scope':NORMAL_SCOPE,'normalBatch':batch,'families':rows,
@@ -1749,7 +1902,9 @@ def main():
                 modules[Path(p).name] = load_module('_mrk_resume_' + Path(p).stem, root / p, source)
         session.stager = modules['stage_macos_installed.py']
         session.owner = modules['macos_aqua_qualification.py'].load_owner(root)
-        session.host = modules['macos_xcode_host_preparation.py'].DarwinAPI(clock, target=TARGETS[0])
+        session.host_module = modules['macos_xcode_host_preparation.py']
+        session.host = session.host_module.DarwinAPI(clock, target=TARGETS[0])
+        session.run_id, session.run_attempt = env['GITHUB_RUN_ID'], env['GITHUB_RUN_ATTEMPT']
         session.host.waitable_sigchld()
         session.python = os.path.realpath(sys.executable)
         # Keep all private host originals until every native command and POST
@@ -1948,7 +2103,7 @@ def project_main():
 # Closed first-party SOURCE locations only. These exact leaves are compiled only
 # after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
 # traceback rendering, error args/notes/locals or private filenames are used.
-FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3090, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2248}
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3090, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2405}
 FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
 
 
@@ -2008,7 +2163,7 @@ def finite_failure_data(native, statuses, ui):
     for role,value in statuses.items():
         need(value is None or type(value)is int and 0<=value<=255,'resume-diagnostic-status-value')
         rows[role]={'state':'unavailable' if value is None else 'observed','returncode':value}
-    native_row={'state':'unavailable','phase':None,'originalClosesKnown':None,'workloadsKnownSettled':None,'privateOutputsRetired':None,'failureLocation':unavailable_location(),'resourceAdmission':None}
+    native_row={'state':'unavailable','phase':None,'originalClosesKnown':None,'workloadsKnownSettled':None,'privateOutputsRetired':None,'failureLocation':unavailable_location(),'resourceAdmission':None,'installerObservation':None}
     allowed=('admission','initial-source','attach','producer-signature','installer','readback','detach-finality',
              'resource-admission','acquire-carrier','complete')
     if type(native)is dict and native.get('schemaVersion')==1 and native.get('scope')==SCOPE and native.get('accepted')is False:
@@ -2017,6 +2172,7 @@ def finite_failure_data(native, statuses, ui):
             native_row['state']='observed-failure';native_row['phase']=phase
             native_row['failureLocation']=location_data(native.get('failureLocation'))
             native_row['resourceAdmission']=resource_projection_data(native.get('resourceAdmission'))
+            if phase == 'installer': native_row['installerObservation']=installer_observation_projection_data(native.get('installerObservation'))
             for key in ('originalClosesKnown','workloadsKnownSettled','privateOutputsRetired'):
                 native_row[key]=native.get(key) if type(native.get(key))is bool else None
     stages={'state':'unavailable','events':[]};owner={'dispatched':None,'contained':None,'cleanupComplete':None}
@@ -2241,6 +2397,7 @@ if __name__ == '__main__':
             sys.stdout.buffer.write(canonical({'schemaVersion': 1, 'scope': NORMAL_SCOPE if ordinary else SCOPE, **selection, 'accepted': False,
                 'phase': STATE['phase'], 'firstFailurePhase': STATE['firstFailurePhase'],
                 'failureLocation': failure_location(error), 'resourceAdmission': STATE['resourceAdmission'],
+                'installerObservation': installer_observation_projection_data(STATE['installerObservation']),
                 'originalClosesKnown': STATE['originalClosesKnown'],
                 'workloadsKnownSettled': STATE['workloadsKnownSettled'], 'privateOutputsRetired': STATE['privateOutputsRetired'],
                 'productReady': False, 'p0Qualified': False, 'intelQualified': False}) + b'\n')

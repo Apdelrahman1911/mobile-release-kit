@@ -380,6 +380,116 @@ class FixedCarrierResumeData(unittest.TestCase):
                 m.resource_admission_data(*values)
         self.assertIsNone(m.resource_projection_data(None))
 
+        # Diagnostic extension: only current original failed Installer captures.
+        phase_line = b'installer: MRK_MACOS_POSTINSTALL_PHASE=pre-exec\n'
+        refusal_line = b'installer: MRK_MACOS_POSTINSTALL_REFUSED=cwd\n'
+        acl_line = (b'installer: MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role=input-directory;phase=snapshot-owner;'
+                    b'result=-1;call=-1;errno=13;freeCall=0;freeErrno=0\n')
+        completed_line = (b'installer: MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=' + b'a'*64
+                          + b';exit=20;originals=1;native=0;timely=1;unknown=1\n')
+        hidden = b'private-fixture-password=/unrelated/private/file.p12\n'
+        capture = hidden + phase_line + refusal_line + acl_line + completed_line
+        observation = m.installer_observation_data(1, capture, hidden)
+        self.assertEqual(observation['returncode'], 1)
+        self.assertEqual(observation['stdoutBytes'], len(capture))
+        self.assertEqual(observation['stderrBytes'], len(hidden))
+        self.assertEqual(observation['postinstallPhases'], ['pre-exec'])
+        self.assertEqual(observation['postinstallRefusals'], ['cwd'])
+        self.assertEqual(observation['aclDiagnostics'], [dict(role='input-directory', phase='snapshot-owner',
+                         result=-1, call=-1, errno=13, freeCall=0, freeErrno=0)])
+        self.assertEqual(observation['completedParentRefusals'], [dict(exit=20, originals=True, native=False, timely=True, unknown=True)])
+        self.assertEqual(observation['markerState'], 'observed')
+        self.assertFalse(observation['truncated'])
+        encoded = m.canonical(observation)
+        for private in (hidden.rstrip(), b'private-fixture', b'.p12', b'a'*64, b'reasonSha256', b'installer:'):
+            self.assertNotIn(private, encoded)
+        # Existing marker vocabularies only; unknown/prefix/suffix records do not match.
+        malformed = (b'xMRK_MACOS_POSTINSTALL_PHASE=entry\nMRK_MACOS_POSTINSTALL_PHASE=entry-private\n'
+                     b'MRK_MACOS_POSTINSTALL_REFUSED=secret\n' + acl_line.replace(b'input-directory', b'private-role')
+                     + completed_line.replace(b';exit=20;', b';exit=21;'))
+        absent = m.installer_observation_data(65, malformed, hidden)
+        self.assertEqual(absent['markerState'], 'absent')
+        self.assertEqual(absent['returncode'], 65)
+        self.assertNotIn(b'private-', m.canonical(absent))
+        self.assertEqual(m.installer_observation_data(-9, b'', b'')['returncode'], -9)
+        for code, out, err in ((True,b'',b''),(0,b'',b''),(256,b'',b''),(-256,b'',b''),
+                               (1,'text',b''),(1,b'',bytearray()),(1,b'x'*(256*1024),b'x')):
+            with self.subTest(installer_capture_type=(type(code).__name__,type(out).__name__,type(err).__name__)):
+                self.assertIsNone(m.installer_observation_data(code,out,err))
+        self.assertIsNone(m.installer_observation_projection_data(None))
+        self.assertEqual(m.installer_observation_projection_data(observation), observation)
+        mutations = ({**observation, 'private': hidden.decode()}, {**observation,'returncode':True},
+                     {**observation,'markerState':'success'}, {**observation,'truncated':1},
+                     {**observation,'stdoutBytes':256*1024}, {**observation,'postinstallPhases':['private-phase']},
+                     {**observation,'postinstallPhases':['pre-exec','pre-exec']},
+                     {**observation,'aclDiagnostics':[{**observation['aclDiagnostics'][0],'errno':True}]},
+                     {**observation,'aclDiagnostics':[{**observation['aclDiagnostics'][0],'private':'secret'}]},
+                     {**observation,'completedParentRefusals':[{**observation['completedParentRefusals'][0],'native':1}]})
+        for changed in mutations:
+            self.assertIsNone(m.installer_observation_projection_data(changed))
+        excessive = phase_line*8 + b'x'*16385+b'\n' + b''.join(acl_line.replace(b'errno=13;',('errno='+str(i)+';').encode()) for i in range(9))
+        capped = m.installer_observation_data(1, excessive, b'')
+        self.assertTrue(capped['truncated'])
+        self.assertEqual(capped['postinstallPhases'], ['pre-exec'])
+        self.assertEqual(len(capped['aclDiagnostics']), 8)
+        completed_rows = b''.join(completed_line.replace(b'originals=1;native=0;timely=1;',
+                    ('originals='+str(i&1)+';native='+str((i>>1)&1)+';timely='+str((i>>2)&1)+';').encode()) for i in range(5))
+        self.assertEqual(len(m.installer_observation_data(1, completed_rows, b'')['completedParentRefusals']), 4)
+        self.assertTrue(m.installer_observation_data(1, completed_rows, b'')['truncated'])
+        native_with_observation = dict(native,phase='detach-finality',firstFailurePhase='installer',installerObservation=observation)
+        self.assertEqual(m.finite_failure_data(native_with_observation,statuses,None)['native']['installerObservation'],observation)
+        self.assertEqual(m.finite_failure_data(native_with_observation,statuses,None)['native']['phase'],'installer')
+        batch = 'launch-project'
+        normal_statuses = {row[0]:dict(test=None,summary=None,result=None) for row in m.NORMAL_FAMILIES[batch]}
+        normal_native = dict(native_with_observation,scope=m.NORMAL_SCOPE,normalBatch=batch)
+        normal_projection = m.normal_failure_data(normal_native,batch,normal_statuses,set(),None)
+        self.assertEqual(normal_projection['native']['installerObservation'],observation)
+        self.assertFalse(normal_projection['successInferred'])
+        for changed in mutations:
+            self.assertIsNone(m.finite_failure_data(dict(native_with_observation,installerObservation=changed),statuses,None)['native']['installerObservation'])
+            self.assertIsNone(m.normal_failure_data(dict(normal_native,installerObservation=changed),batch,normal_statuses,set(),None)['native']['installerObservation'])
+        self.assertIsNone(m.finite_failure_data(dict(native_with_observation,firstFailurePhase='readback'),statuses,None)['native']['installerObservation'])
+        # Execute exactly the actual returned-command/latch/unchanged zero gate.
+        install = next(n for n in next(n for n in body.body if isinstance(n,ast.ClassDef) and n.name=='Resume').body
+                       if isinstance(n,ast.FunctionDef) and n.name=='install_image')
+        block = next(n.body for n in ast.walk(install) if isinstance(n,ast.Try) and any(
+            isinstance(s,ast.Assign) and isinstance(s.value,ast.Call) and isinstance(s.value.func,ast.Attribute)
+            and s.value.func.attr=='command' and s.value.args and isinstance(s.value.args[0],ast.Constant)
+            and s.value.args[0].value=='installer' for s in n.body))
+        first = next(i for i,s in enumerate(block) if isinstance(s,ast.Assign) and isinstance(s.value,ast.Call)
+                     and isinstance(s.value.func,ast.Attribute) and s.value.func.attr=='command'
+                     and s.value.args and isinstance(s.value.args[0],ast.Constant) and s.value.args[0].value=='installer')
+        sequence = block[first:first+4]
+        self.assertEqual(ast.unparse(sequence[-1]), "need(self.installer_zero, 'resume-original-installer-zero')")
+        program = compile(ast.Module(body=sequence,type_ignores=[]),str(ROOT/'desktop/tools/macos_fixed_carrier_resume.py'),'exec')
+        package = Path('/scratch/synthetic-never-executed.pkg')
+        for code, fail_diagnostic in ((0,False),(1,False),(-9,False),(1,True)):
+            original = SimpleNamespace(returncode=code,stdout=capture,stderr=hidden)
+            seen = []
+            def command(role,argv,maximum):
+                self.assertEqual((role,argv,maximum),('installer',['/usr/bin/sudo','-n','--','/usr/sbin/installer','-pkg',str(package),'-target','/','-dumplog','-verboseR'],123))
+                return original
+            def observe(*args):
+                seen.append(args)
+                if fail_diagnostic:
+                    with mock.patch.object(m,'installer_observation_projection_data',side_effect=ValueError('private-parser-error')):
+                        return m.installer_observation_data(*args)
+                return m.installer_observation_data(*args)
+            session = SimpleNamespace(command=command)
+            with mock.patch.dict(m.STATE,installerObservation=None):
+                ports = dict(self=session,args=SimpleNamespace(package=package),STATE=m.STATE,need=m.need,installer_observation_data=observe)
+                if code == 0:
+                    exec(program,ports)
+                    self.assertEqual(seen,[])
+                    self.assertIsNone(m.STATE['installerObservation'])
+                else:
+                    with self.assertRaises(m.Refused) as refused: exec(program,ports)
+                    self.assertEqual(refused.exception.args,('resume-original-installer-zero',))
+                    self.assertEqual(seen,[(code,capture,hidden)])
+                    self.assertEqual(m.STATE['installerObservation'],None if fail_diagnostic else m.installer_observation_data(code,capture,hidden))
+                self.assertIs(session.installer_zero,code==0)
+                self.assertIs(ports['original'],original)
+
     def test_fixed_sudo_originals_preserve_quota_snapshot_and_finality(self):
         # Synthetic protocol only: no Darwin syscall, descriptor or command.
         m = ADAPTER
@@ -1505,6 +1615,140 @@ class FixedCarrierResumeData(unittest.TestCase):
         self.assertEqual(m.SOURCE_PINS["desktop/tools/stage_macos_installed.py"], (path.stat().st_size, m.sha(path.read_bytes())))
 
 
+
+    def test_original_distribution_transport_and_fresh_request_are_bound(self):
+        import ast
+        import argparse
+        import stat
+        import types
+        m = ADAPTER
+        mount = m.transport_path_data('123', '1')
+        self.assertEqual(mount.parent, Path('/Volumes'))
+        self.assertNotEqual(mount, m.transport_path_data('123', '2'))
+        for run, attempt in (('', '1'), ('0', '1'), ('123', True), ('../other', '1')):
+            with self.assertRaises(m.Refused): m.transport_path_data(run, attempt)
+        # Actual native parent requires protected ancestry and companion files;
+        # our caller must use the complete original distribution, not a copy.
+        native = (ROOT / 'desktop/src-tauri/src/bin/macos_install.rs').read_text()
+        for contract in ('else if observed.uid != 0', 'let descriptor=open_file(purpose.descriptor_name())?',
+                         'let signature=open_file(purpose.signature_name())?'):
+            self.assertIn(contract, native)
+        parent = ((1, 2, stat.S_IFDIR | 0o755, 0, 0, 1, 0, 1, 1), 0, {'flags': 0x1000})
+        current = (parent[0][:5] + (2, 10, 2, 2), *parent[1:])
+        other, member = {'Other': (1, 3, stat.S_IFDIR)}, (9, 8, stat.S_IFDIR)
+        during = dict(other, **{mount.name: member})
+        m.transport_transition_data(other, during, parent, current, mount.name, member, present=True)
+        m.transport_transition_data(during, other, current, parent, mount.name, member, present=False)
+        for before, after, facts in ((during, during, current), (other, {mount.name: member}, current),
+                                     (other, dict(during, Other=(1, 4, stat.S_IFDIR)), current),
+                                     (other, during, (current[0], 1, current[2]))):
+            with self.assertRaises(m.Refused):
+                m.transport_transition_data(before, after, parent, facts, mount.name, member, present=True)
+        request = '1' * 32
+        self.assertEqual(m.fresh_installer_request_data({}, {request: {}}), request)
+        for before, after in (({request: {}}, {request: {}}), ({}, {}), ({}, {request: {}, '2'*32: {}}),
+                              ({}, {'0'*32: {}}), ({}, {'../private': {}})):
+            with self.assertRaises(m.Refused): m.fresh_installer_request_data(before, after)
+
+        info = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0,
+            st_nlink=1, st_size=0, st_mtime_ns=1, st_ctime_ns=1, st_flags=0)
+        acl = {'empty': True, 'phase': 0, 'filesecFreeReturned': True, 'aclFreeResult': 0, 'snapshotFlags': 0}
+        fs = {'typeName': 'apfs', 'flags': 0x1000}
+        session = SimpleNamespace(point=lambda: None, outer=SimpleNamespace(check_one=lambda e: None),
+            host_module=SimpleNamespace(full9=lambda i: m.identity(i), _acl_snapshot=lambda *a: acl),
+            host=SimpleNamespace(library=None, filesystem=lambda fd: fs), clock=SimpleNamespace(check=lambda: None))
+        with mock.patch.object(m.os, 'fstat', return_value=info):
+            self.assertEqual(m.Resume.transport_facts(session, {'fd': 17}), (m.identity(info), 0, fs))
+            for target, key, bad in ((info, 'st_uid', 501), (info, 'st_mode', stat.S_IFDIR | 0o775),
+                                     (acl, 'empty', False), (acl, 'filesecFreeReturned', False),
+                                     (acl, 'snapshotFlags', 1), (fs, 'flags', 0x1000 | 0x400000),
+                                     (fs, 'typeName', 'nfs')):
+                old = target[key] if isinstance(target, dict) else getattr(target, key)
+                try:
+                    if isinstance(target, dict): target[key] = bad
+                    else: setattr(target, key, bad)
+                    with self.assertRaises(m.Refused): m.Resume.transport_facts(session, {'fd': 17})
+                finally:
+                    if isinstance(target, dict): target[key] = old
+                    else: setattr(target, key, old)
+        # Real scanner body consumes its one original once; close uncertainty
+        # cannot erase the first error or become finality success.
+        for fail_read, fail_close in ((False, False), (False, True), (True, True)):
+            events, errors = [], []
+            first = m.Refused('synthetic-scan-failure')
+            class Scan:
+                def __iter__(self):
+                    if fail_read: raise first
+                    return iter([SimpleNamespace(name='Other')])
+                def close(self):
+                    events.append('close')
+                    if fail_close: raise OSError('synthetic-close-failure')
+            fake = SimpleNamespace(transport_facts=lambda e: parent, clock=SimpleNamespace(check=lambda: None),
+                quota=SimpleNamespace(reserve=lambda n: events.append(('reserve', n))), outer=SimpleNamespace(errors=errors))
+            with mock.patch.object(m.os, 'scandir', side_effect=lambda fd: (events.append('open') or Scan())), \
+                 mock.patch.object(m.os, 'stat', return_value=info):
+                if fail_close:
+                    with self.assertRaises((m.Refused, OSError)) as caught: m.Resume.transport_roster(fake, {'fd': 17})
+                    if fail_read: self.assertIs(caught.exception, first)
+                    self.assertEqual(errors, ['resume-transport-iterator-close-unknown'])
+                else:
+                    self.assertEqual(m.Resume.transport_roster(fake, {'fd': 17})[0], {'Other': (1, 2, stat.S_IFDIR)})
+            self.assertEqual(events, [('reserve', 1), 'open', 'close'])
+
+        tree = ast.parse((ROOT / 'desktop/tools/macos_fixed_carrier_resume.py').read_bytes())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Resume')
+        method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'install_image')
+        block = next(n.body for n in ast.walk(method) if isinstance(n, ast.Try)
+                     and any(isinstance(s, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'args' for t in s.targets) for s in n.body))
+        start = next(i for i,n in enumerate(block) if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == 'args' for t in n.targets))
+        end = next(i for i,n in enumerate(block) if isinstance(n, ast.Assign)
+                   and any(isinstance(t, ast.Attribute) and t.attr == 'readback_known' for t in n.targets))
+        program = compile(ast.Module(body=block[start:end+1], type_ignores=[]), str(ROOT / 'desktop/tools/macos_fixed_carrier_resume.py'), 'exec')
+        work = Path('/scratch/task')
+        row = {'inventorySha256': 'a'*64, 'runtimeManifestSha256': 'b'*64}
+        for fault in (None, 'occupied', 'installer', 'missing-export', 'changed-export', 'readback'):
+            events = []
+            before = {request: {}} if fault == 'occupied' else {}
+            after = {} if fault == 'missing-export' else {request: {'identity': 'original'}}
+            final = {request: {'identity': 'changed'}} if fault == 'changed-export' else after
+            censuses = iter((before, after, final))
+            def command(role, argv, seconds):
+                events.append('installer')
+                self.assertEqual((role, seconds), ('installer', 123))
+                self.assertEqual(argv, ['/usr/bin/sudo', '-n', '--', '/usr/sbin/installer', '-pkg', str(mount / 'Install.pkg'),
+                                        '-target', '/', '-dumplog', '-verboseR'])
+                return SimpleNamespace(returncode=1 if fault == 'installer' else 0, stdout=b'', stderr=b'')
+            def readback(args, **kwargs):
+                events.append('readback')
+                self.assertEqual(args.request_id, request)
+                self.assertEqual(args.package.parent, args.producer_descriptor.parent)
+                self.assertEqual(args.package.parent, args.producer_signature.parent)
+                return dict(requestId=request, originalInstallerReturnedZero=True, originalWriterJoined=fault != 'readback',
+                    sourceCommit=m.ORIGIN['source'], completedPackageSha256=m.ORIGIN['package']['sha256'],
+                    inventorySha256=row['inventorySha256'], runtimeManifestSha256=row['runtimeManifestSha256'])
+            fake = SimpleNamespace(work=work, stager=SimpleNamespace(same_package_result_census=lambda: next(censuses), observation_command=readback),
+                point=lambda: None, clock=SimpleNamespace(seconds=lambda n: n), command=command,
+                publish_owned=lambda p,b,mode: events.append('status0'), readback_known=False)
+            ports = dict(vars(m), self=fake, argparse=argparse, mount=mount, row=row, post=lambda: 'same',
+                         facts='same', readback='original-release', STATE=dict(m.STATE))
+            if fault is None:
+                exec(program, ports)
+                self.assertTrue(fake.readback_known)
+                self.assertEqual(events, ['installer', 'status0', 'readback'])
+            else:
+                with self.assertRaises(m.Refused): exec(program, ports)
+                self.assertFalse(fake.readback_known)
+                if fault == 'installer': self.assertEqual(events, ['installer'])
+                if fault == 'occupied': self.assertEqual(events, [])
+        # The original domain message/verification remains wired; no copying or
+        # privileged directory fabrication is a substitute for the real image.
+        text = ast.unparse(method)
+        self.assertNotIn('distribution_request_name', text)
+        self.assertNotIn('os.mkdir', text)
+        self.assertNotIn('os.rmdir', text)
+        self.assertIn('fresh_book(transport=True)', text)
+        self.assertIn("transport_transition_data(mounted_roster, after, volumes_facts, current, mount.name, member, present=False)", text)
 
     def test_producer_signature_uses_native_domain_and_retained_original_message(self):
         import ast
