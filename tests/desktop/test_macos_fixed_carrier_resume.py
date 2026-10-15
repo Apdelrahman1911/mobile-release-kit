@@ -1506,6 +1506,86 @@ class FixedCarrierResumeData(unittest.TestCase):
 
 
 
+    def test_producer_signature_uses_native_domain_and_retained_original_message(self):
+        import ast
+        import re
+        from types import SimpleNamespace
+        m = ADAPTER
+        domain = b'MobileReleaseKit-package-producer-v2\0'
+        descriptor = b'{ "schemaVersion" : 2, "order" : [2, 1] }\n'
+        message = domain + descriptor
+        self.assertEqual(m.producer_message_data(descriptor), message)
+        self.assertEqual(m.producer_message_data(b'x' * (64 * 1024)), domain + b'x' * (64 * 1024))
+        for bad in (b'', b'x' * (64 * 1024 + 1), 'text', bytearray(descriptor), None):
+            with self.subTest(bad_type=type(bad).__name__), self.assertRaises(m.Refused):
+                m.producer_message_data(bad)
+        native = (ROOT / 'desktop/native/macos-installed-native/src/install_producer.m').read_text()
+        declared = re.search(r'static const uint8_t message_domain\[\]="([^"]+)";', native).group(1)
+        self.assertEqual(declared.encode('ascii') + b'\0', domain)
+        for constructor in ('mrk_install_producer_new', 'mrk_install_producer_sign_new'):
+            body = native.split('void *' + constructor + '(', 1)[1].split('\n}', 1)[0]
+            self.assertIn('cell->message_size=sizeof(message_domain)+size;', body)
+            self.assertIn('memcpy(cell->message,message_domain,sizeof(message_domain));memcpy(cell->message+sizeof(message_domain),descriptor,size);', body)
+        rust = (ROOT / 'desktop/src-tauri/src/macos_install_producer.rs').read_text()
+        self.assertIn('pub const SIGNED_DOMAIN: &[u8] = b"MobileReleaseKit-package-producer-v2\\0";', rust)
+        self.assertIn('bytes.extend_from_slice(SIGNED_DOMAIN); bytes.extend_from_slice(descriptor);', rust)
+        # Execute the actual newly wired sequence, not a second implementation.
+        source = ast.parse((ROOT / 'desktop/tools/macos_fixed_carrier_resume.py').read_bytes())
+        cls = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == 'Resume')
+        method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'install_image')
+        block = next(n.body for n in ast.walk(method) if isinstance(n, ast.Try)
+                     and any(isinstance(s, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'message' for t in s.targets) for s in n.body))
+        first = next(i for i,n in enumerate(block) if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == 'message' for t in n.targets))
+        last = next(i for i,n in enumerate(block) if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+                    and any(isinstance(a, ast.Constant) and a.value == 'resume-producer-mounted-signature-post' for a in n.value.args))
+        program = compile(ast.Module(body=block[first:last + 1], type_ignores=[]),
+                          str(ROOT / 'desktop/tools/macos_fixed_carrier_resume.py'), 'exec')
+        self.assertEqual(last - first + 1, 11)
+        work, mount = Path('/scratch/task'), Path('/scratch/task/mount')
+        path = work / 'producer-message.bin'
+        for fault in (None, 'publish', 'initial-readback', 'command', 'post-readback', 'mounted-post'):
+            with self.subTest(fault=fault):
+                events, published = [], {}
+                entry = object()
+                def publish(selected, data):
+                    events.append('publish')
+                    self.assertEqual((selected, data), (path, message))
+                    if fault == 'publish': raise m.Refused('synthetic-publication-refused')
+                    published[selected] = data
+                def acquire(book, role, selected, size, *, modes):
+                    events.append('retained-readback')
+                    self.assertIs(book, outer)
+                    self.assertEqual((role, selected, size, modes), ('file', path, len(message), (0o444,)))
+                    return entry, (b'changed' if fault == 'initial-readback' else published[selected])
+                def command(role, argv, timeout):
+                    events.append('command')
+                    self.assertEqual((role, timeout), ('producer-signature', 15))
+                    self.assertEqual(argv, ['/usr/bin/openssl', 'dgst', '-sha256', '-verify', str(work / 'producer-key.pem'),
+                                            '-signature', str(mount / 'producer.sig'), str(path)])
+                    self.assertEqual(published[path], domain + descriptor)
+                    self.assertNotEqual(published[path], descriptor)
+                    self.assertNotEqual(published[path], b'MobileReleaseKit-remove-producer-v1\0' + descriptor)
+                    return SimpleNamespace(returncode=1 if fault == 'command' else 0, stdout=b'Verified OK\n', stderr=b'')
+                def read(selected):
+                    events.append('original-post')
+                    self.assertIs(selected, entry)
+                    return b'changed' if fault == 'post-readback' else published[path]
+                def post():
+                    events.append('mounted-post')
+                    return 'changed' if fault == 'mounted-post' else 'original'
+                outer = SimpleNamespace(read=read)
+                session = SimpleNamespace(work=work, outer=outer, quota=SimpleNamespace(call=acquire), publish_owned=publish, command=command)
+                ports = {'self': session, 'originals': {'producer.json': (descriptor, 0o444)}, 'mount': mount,
+                         'producer_message_data': m.producer_message_data, 'need': m.need, 'post': post, 'facts': 'original'}
+                if fault is None:
+                    exec(program, ports)
+                else:
+                    with self.assertRaises(m.Refused): exec(program, ports)
+                stages = ['publish', 'retained-readback', 'command', 'original-post', 'mounted-post']
+                stop = {None: 5, 'publish': 1, 'initial-readback': 2, 'command': 3, 'post-readback': 4, 'mounted-post': 5}[fault]
+                self.assertEqual(events, stages[:stop])
+
     def test_phase_budget_accounts_live_codecs_and_funds_cpio_only_once(self):
         m = ADAPTER
         tool = inert_module('phase_budget_stager_data', 'desktop/tools/stage_macos_installed.py')

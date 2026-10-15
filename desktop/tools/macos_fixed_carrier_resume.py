@@ -1015,6 +1015,14 @@ def mounted_data(originals, row, target, stager, *, allocation_budget=None):
     return result, inventory
 
 
+def producer_message_data(descriptor):
+    # Native install_producer.m and Rust message_data sign the domain (one NUL)
+    # followed by the exact original descriptor bytes, never reserialized JSON.
+    need(type(descriptor) is bytes and 0 < len(descriptor) <= 64 * 1024,
+         'resume-producer-message-bound')
+    return b'MobileReleaseKit-package-producer-v2\0' + descriptor
+
+
 class Resume:
     def __init__(self, root, work, clock, factory, *, quota=None):
         self.root, self.work, self.clock = root, work, clock
@@ -1228,11 +1236,19 @@ class Resume:
             need(key.returncode == 0 and key.stderr == b'' and 0 < len(key.stdout) <= 16384
                  and key.stdout.startswith(b'-----BEGIN PUBLIC KEY-----\n') and key.stdout.endswith(b'-----END PUBLIC KEY-----\n'), 'resume-original-public-key')
             self.publish_owned(self.work / 'producer-key.pem', key.stdout)
+            message = producer_message_data(originals['producer.json'][0])
+            message_path = self.work / 'producer-message.bin'
+            self.publish_owned(message_path, message)
+            message_entry, message_readback = self.quota.call(
+                self.outer, 'file', message_path, len(message), modes=(0o444,))
+            need(message_readback == message, 'resume-producer-message-readback')
             verified = self.command('producer-signature', ['/usr/bin/openssl', 'dgst', '-sha256', '-verify', str(self.work / 'producer-key.pem'),
-                '-signature', str(mount / 'producer.sig'), str(mount / 'producer.json')], 15)
+                '-signature', str(mount / 'producer.sig'), str(message_path)], 15)
             need(verified.returncode == 0, 'resume-native-producer-signature')
             need(verified.stdout == b'Verified OK\n', 'resume-native-producer-signature')
             need(verified.stderr == b'', 'resume-native-producer-signature')
+            need(self.outer.read(message_entry) == message, 'resume-producer-message-post')
+            need(post() == facts, 'resume-producer-mounted-signature-post')
             readback = original_release_readback_data(result, inventory, target=TARGETS[0])
             input_parent = self.fresh_directory(self.parent, 'input')
             self.publish_owned(input_parent['path'] / self.stager.INSTALLATION_INVENTORY_NAME, inventory)
@@ -1932,7 +1948,7 @@ def project_main():
 # Closed first-party SOURCE locations only. These exact leaves are compiled only
 # after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
 # traceback rendering, error args/notes/locals or private filenames are used.
-FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3090, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2232}
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3090, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2248}
 FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
 
 
