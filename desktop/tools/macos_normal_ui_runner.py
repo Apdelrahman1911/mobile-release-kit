@@ -3317,9 +3317,48 @@ def failure_base(phase, selection, original, *, engineering=False):
         value["markers"]["buildFailed"] = False
     if not engineering and phase == "test" and selection == OUTPUT_DATA_RESULT:
         value["outputDataFailure"] = None
+    if not engineering and phase == "test" and selection == "project-test.xcresult":
+        value["projectProgress"] = None
     if not engineering and phase == "test" and selection == IOS_UNSIGNED_RESULT:
         value["iosUnsignedStages"] = {"state": "unavailable", "events": []}
     return value
+
+
+PROJECT_STAGES = tuple('launch fixture project-open android-source-jdk android-source-sdk android-source-gradle android-source-cancel android-source-reselect android-source-refused field-version field-project field-workspace field-metadata field-file-cancel field-directory-cancel field-review quit project-cancel config github text version images-cancel images readback-and-quit'.split())
+
+
+def project_stage_diagnostics(stdout, stderr):
+    """Existing project stdout markers only; no method, order or success claim."""
+    namespace = b"MRK_NORMAL_PROJECT_STAGE="
+    pattern = re.escape(namespace) + b"(" + b"|".join(s.encode() for s in PROJECT_STAGES) + rb");result=(started|passed|failed)(;laterStages=not-run)?"
+    first_failed = last = None
+    invalid = False
+    count = 0
+    for stream, body in (("stdout", stdout), ("stderr", stderr)):
+        offset = 0
+        while offset < len(body):
+            end = body.find(b"\n", offset)
+            complete = end != -1
+            if not complete: end = len(body)
+            short = body[offset:end] if end-offset <= 192 else None
+            prefix = body[offset:min(end, offset+len(namespace))]
+            suffix = body[max(offset, end-len(namespace)):end]
+            candidate = (body.find(namespace, offset, end) != -1
+                or bool(prefix) and namespace.startswith(prefix)
+                or not complete and any(suffix.endswith(namespace[:i]) for i in range(1,len(namespace))))
+            offset = end+1
+            if not candidate: continue
+            count += 1
+            record = short[:-1] if short is not None and complete and short.endswith(b"\r") else short
+            match = re.fullmatch(pattern, record) if (record is not None and complete and stream == "stdout") else None
+            if count > 128 or match is None or ((match.group(2) == b"failed") != (match.group(3) is not None)):
+                invalid = True
+                continue
+            stage, result = (v.decode("ascii") for v in match.group(1,2))
+            if result == "failed" and first_failed is None: first_failed = stage
+            last = {"stage":stage,"result":result}
+    if invalid: return {"state":"refused","firstFailed":None,"lastObserved":None}
+    return {"state":"observed" if last else "absent","firstFailed":first_failed,"lastObserved":last}
 
 
 def ios_unsigned_stage_diagnostics(stdout, stderr):
@@ -3983,6 +4022,11 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         value["iosUnsignedStages"] = ios_unsigned_stage_diagnostics(original.stdout, original.stderr)
         if len(encoded(value)) + 1 > 4096:
             value["iosUnsignedStages"] = {"state": "unavailable", "events": []}
+            value["findingsTruncated"] = True
+    if "projectProgress" in value:
+        value["projectProgress"] = project_stage_diagnostics(original.stdout, original.stderr)
+        if len(encoded(value)) + 1 > 4096:
+            value["projectProgress"] = None
             value["findingsTruncated"] = True
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
     return value

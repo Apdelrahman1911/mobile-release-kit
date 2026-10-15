@@ -31,7 +31,7 @@ RESUME_WORKFLOW = '.github/workflows/desktop-macos-fixed-carrier-resume.yml'
 ENROLLMENT_REF = 'refs/heads/verify/desktop-macos-installed'
 TARGETS = ('aarch64-apple-darwin',)
 LIMIT = 512 << 20
-SOURCE_LIMIT = 160 << 10
+SOURCE_LIMIT = 164 << 10
 MAX_ORIGINALS = 96
 OUTPUT_LIMIT = 2 << 20
 TERMINAL_LIMIT = 64 << 10
@@ -1751,6 +1751,38 @@ def installer_observation_data(code, stdout, stderr):
         return None  # No diagnostic error can replace the known failed Installer.
 
 
+PROJECT_STAGES = tuple('launch fixture project-open android-source-jdk android-source-sdk android-source-gradle android-source-cancel android-source-reselect android-source-refused field-version field-project field-workspace field-metadata field-file-cancel field-directory-cancel field-review quit project-cancel config github text version images-cancel images readback-and-quit'.split())
+
+
+def project_test_failure_data(v, status):
+    """Optional fixed project observation, never raw text or release authority."""
+    if (type(v) is not dict or type(status) is not int or not 1 <= status <= 255
+        or type(v.get('schemaVersion')) is not int or v['schemaVersion'] != 1
+        or v.get('scope') != 'normal-macos-ui-failure-diagnostic-only' or v.get('phase') != 'test'
+        or v.get('selection') != 'project-test.xcresult' or type(v.get('originalReturncode')) is not int
+        or v['originalReturncode'] != status or v.get('status') not in ('unavailable','classified','unclassified')
+        or type(v.get('findingsTruncated')) is not bool): return None
+    rows = v.get('sourceFailures'); progress = v.get('projectProgress')
+    if type(rows) is not list or len(rows) > 4: return None
+    for i,r in enumerate(rows):
+        if (type(r) is not dict or set(r) != {'stream','source','method','line','column'} or r in rows[:i]
+            or r['stream'] not in ('stdout','stderr') or r['source'] != 'NormalAppUITests.swift'
+            or r['method'] not in ('testSyntheticProjectLocalEditsAndImages','testSyntheticProjectPathFields')
+            or type(r['line']) is not int or not 1 <= r['line'] <= 65535
+            or not (r['column'] is None or type(r['column']) is int and 1 <= r['column'] <= 4096)): return None
+    if progress is not None:
+        if type(progress) is not dict or set(progress) != {'state','firstFailed','lastObserved'}: return None
+        state,first,last = (progress[k] for k in ('state','firstFailed','lastObserved'))
+        if state == 'observed':
+            if (first is not None and first not in PROJECT_STAGES or type(last) is not dict
+                or set(last) != {'stage','result'} or last['stage'] not in PROJECT_STAGES
+                or last['result'] not in ('started','passed','failed') or last['result'] == 'failed' and first is None): return None
+        elif state not in ('absent','refused') or first is not None or last is not None: return None
+    return {**{k:v[k] for k in ('phase','selection','originalReturncode','status','findingsTruncated')},
+            'sourceFailures':[dict(r) for r in rows],'projectProgress':None if progress is None else {**progress,
+            'lastObserved':None if progress['lastObserved'] is None else dict(progress['lastObserved'])}}
+
+
 def normal_projection_failure_data(value, batch, statuses):
     if type(value) is not dict or set(value) != {'family','failureLocation'}: return None
     family = value['family']
@@ -1817,7 +1849,7 @@ def normal_diagnostic_main():
         body = optional(name,16)
         return int(body) if body is not None and re.fullmatch(rb'(0|[1-9][0-9]{0,2})\n',body) and int(body) <= 255 else None
     try:
-        statuses = {}; passed = set(); ui = None; projection_failure = None
+        statuses = {}; passed = set(); ui = None; projection_failure = None; project_failure = None
         for bundle,test_stem,summary_stem,_,_ in NORMAL_FAMILIES[batch]:
             values = {'test':status(test_stem+'.status'),'summary':status(summary_stem+'.status'),
                       'result':status('fixed-normal-'+test_stem+'.status')}
@@ -1841,7 +1873,9 @@ def normal_diagnostic_main():
                     pass # Earlier unverifiable publication remains unknown.
             for stem in (test_stem,summary_stem):
                 body = optional(stem+'.failure-diagnostics.json',4096)
-                candidate = decode(body) if body else None
+                try: candidate = decode(body) if body else None
+                except ValueError: candidate = None
+                if stem == 'project-test': project_failure = project_test_failure_data(candidate,values['test'])
                 if ui is None and type(candidate) is dict and candidate.get('scope') == 'normal-macos-ui-admission-diagnostic-only':
                     ui = candidate
         body = optional('build.failure-diagnostics.json',4096)
@@ -1852,7 +1886,7 @@ def normal_diagnostic_main():
         native = decode(body) if body else None
         result = normal_failure_data(native,batch,statuses,passed,status('build.status'), projection_failure=projection_failure)
         admission = finite_failure_data(None,{k:None for k in ('installer','harness','ios','summary','result')},ui)
-        result.update(admissionExceptionClass=admission['admissionExceptionClass'],
+        result.update(projectTestFailure=project_failure,admissionExceptionClass=admission['admissionExceptionClass'],
                       admissionStage=admission['admissionStage'],ownerFailure=admission['ownerFailure'],
                       producerSource=ORIGIN['source'],consumerSource=env['GITHUB_SHA'],
                       consumerRunId=env['GITHUB_RUN_ID'],consumerRunAttempt=env['GITHUB_RUN_ATTEMPT'])
@@ -2127,7 +2161,7 @@ def project_main():
 # Closed first-party SOURCE locations only. These exact leaves are compiled only
 # after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
 # traceback rendering, error args/notes/locals or private filenames are used.
-FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3090, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2430}
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3090, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2464}
 FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
 
 

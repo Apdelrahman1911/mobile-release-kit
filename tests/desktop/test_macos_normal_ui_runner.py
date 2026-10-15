@@ -5350,6 +5350,54 @@ class NormalPhaseDataTests(unittest.TestCase):
                             with self.assertRaises(OSError): os.fstat(fd)
 
     def test_closed_normal_failure_diagnostics_preserve_original_nonzero_and_privacy(self):
+
+        # The two genuine project methods reuse stages; observations are not a
+        # single case FSM, and an absent marker cannot prove work not attempted.
+        source=SWIFT.read_text()
+        fields=source.split('func testSyntheticProjectPathFields() throws {',1)[1].split('func testSyntheticProjectLocalEdits() throws {',1)[0]
+        journey=source.split('private func syntheticProjectJourney(includeImages: Bool) throws {',1)[1].split('func testSyntheticProjectSavedVersionRecovery() throws {',1)[0]
+        self.assertEqual(set(MODULE.PROJECT_STAGES),set(re.findall(r'try stage\("([^"\n]+)"\)',fields+journey)))
+        def event(stage,result='started',ending=b'\n'):
+            return ('MRK_NORMAL_PROJECT_STAGE='+stage+';result='+result+(';laterStages=not-run' if result=='failed' else '')).encode()+ending
+        project_body=(event('launch')+event('launch','passed')+event('project-open')+event('project-open','failed')
+            +event('launch')+event('launch','passed')+event('quit','passed',b'\r\n'))
+        progress=dict(state='observed',firstFailed='project-open',lastObserved=dict(stage='quit',result='passed'))
+        self.assertEqual(MODULE.project_stage_diagnostics(project_body,b''),progress)
+        selection='project-test.xcresult'
+        site=b'NormalAppUITests.swift:4935: error: -[MRKNormalAppUITests.NormalAppUITests testSyntheticProjectLocalEditsAndImages] : synthetic-private-reason\n'
+        original=subprocess.CompletedProcess([],65,project_body+site,b'')
+        value=MODULE.normal_failure_diagnostics('test',selection,original)
+        self.assertEqual(value['projectProgress'],progress)
+        self.assertEqual(value['sourceFailures'][0]['line'],4935)
+        self.assertEqual(value['originalReturncode'],65)
+        self.assertNotIn(b'synthetic-private-reason',MODULE.encoded(value))
+        self.assertEqual(MODULE.project_stage_diagnostics(b'no stage\n',b''),dict(state='absent',firstFailed=None,lastObserved=None))
+        self.assertEqual(MODULE.project_stage_diagnostics(event('launch')*128,b'')['state'],'observed')
+        for raw in (event('unknown'),event('launch')[:-1],event('launch','failed').replace(b';laterStages=not-run',b''),
+                event('launch').replace(b';result=started',b';result=started;laterStages=not-run'),
+                b'prefix '+event('launch'),event('launch').replace(b'launch',b'x'*193),
+                b'MRK_NORMAL_PROJECT_STA',event('launch')*129,event('launch').replace(b'launch',b'launch\x00')):
+            refused=MODULE.project_stage_diagnostics(project_body+raw,b'')
+            self.assertEqual(refused,dict(state='refused',firstFailed=None,lastObserved=None))
+        self.assertEqual(MODULE.project_stage_diagnostics(project_body,event('launch'))['state'],'refused')
+        self.assertIsNone(MODULE.failure_base('test',selection,original)['projectProgress'])
+        for phase,other in (('test','test.xcresult'),('summary',selection),('build',None)):
+            self.assertNotIn('projectProgress',MODULE.normal_failure_diagnostics(phase,other,original))
+        # Added observation never displaces established fields or the 4096 cap.
+        encode=MODULE.encoded
+        def projected_size(item):
+            body=encode(item)
+            return b' '*4096 if item.get('projectProgress') is not None else body
+        with patch.object(MODULE,'encoded',side_effect=projected_size):
+            bounded=MODULE.normal_failure_diagnostics('test',selection,original)
+        self.assertIsNone(bounded['projectProgress']);self.assertTrue(bounded['findingsTruncated'])
+        request=MODULE.normal_request(normal_arguments(selection),'/Users/runner/work/_temp/mrk-macos-installed.ABCDef12/normal-ui/tmp/')
+        published=[]
+        with patch.object(MODULE,'exclusive_output',side_effect=lambda path,body,cap:published.append((path,body,cap))):
+            MODULE.publish_failure_diagnostics(request,original)
+        self.assertEqual(published[0][0].name,'project-test.failure-diagnostics.json')
+        self.assertEqual(json.loads(published[0][1])['projectProgress'],progress)
+        self.assertEqual(published[0][2],4096)
         # Both exact iOS originals use the same finite grammar and existing publisher.
         marker = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=3942;check=singleton\n"
         for selection, method, option in (

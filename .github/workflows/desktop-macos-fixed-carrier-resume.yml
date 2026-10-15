@@ -31,8 +31,8 @@ jobs:
     env:
       MRK_MACOS_TARGET: aarch64-apple-darwin
       MRK_MACOS_HOSTED_JOB: github-hosted-macos26-arm64
-      MRK_FIXED_RESUME_BYTES: "161748"
-      MRK_FIXED_RESUME_SHA256: "a904a2bd6dfc62e6bca562d6bb2d3159bdb143da28491a261c029022ee40fea1"
+      MRK_FIXED_RESUME_BYTES: "164709"
+      MRK_FIXED_RESUME_SHA256: "10e10edebaa170f2b98a2276719411e575536eb277b0b398f19b5becb432c52c"
       TEST_RUNNER_MRK_NORMAL_UI_FIXED_CARRIER_RESUME: fixed-ce644-arm-carrier-normal-local-batch-v1
       TEST_RUNNER_MRK_NORMAL_UI_FIXED_NORMAL_BATCH: ${{ matrix.normalBatch }}
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -504,7 +504,7 @@ jobs:
                   if not v:raise ValueError('fixed-resume-source-admission')
               def identity(v):
                   return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
-              need(type(size)is int and 0<size<=163840 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
+              need(type(size)is int and 0<size<=167936 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
               fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
               try:
                   before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1
@@ -625,7 +625,7 @@ jobs:
                   if not v:raise ValueError('fixed-resume-source-admission')
               def identity(v):
                   return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
-              need(type(size)is int and 0<size<=163840 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
+              need(type(size)is int and 0<size<=167936 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
               fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
               try:
                   before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1
@@ -731,7 +731,7 @@ jobs:
                   if not v:raise ValueError('fixed-resume-source-admission')
               def identity(v):
                   return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
-              need(type(size)is int and 0<size<=163840 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
+              need(type(size)is int and 0<size<=167936 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
               fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
               try:
                   before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1
@@ -807,7 +807,7 @@ jobs:
                   if not v:raise ValueError('fixed-resume-source-admission')
               def identity(v):
                   return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
-              need(type(size)is int and 0<size<=163840 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
+              need(type(size)is int and 0<size<=167936 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
               fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
               try:
                   before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1
@@ -872,7 +872,7 @@ jobs:
                   if not v:raise ValueError('fixed-resume-source-admission')
               def identity(v):
                   return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
-              need(type(size)is int and 0<size<=163840 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
+              need(type(size)is int and 0<size<=167936 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
               fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
               try:
                   before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1

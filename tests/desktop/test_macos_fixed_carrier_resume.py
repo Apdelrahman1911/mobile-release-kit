@@ -538,6 +538,66 @@ class FixedCarrierResumeData(unittest.TestCase):
         self.assertIn('failure_location(error)',ast.unparse(handlers[0]))
 
 
+        self.assertEqual(m.SOURCE_LIMIT,164 << 10)
+        workflow=(ROOT/'.github/workflows/desktop-macos-fixed-carrier-resume.yml').read_text()
+        self.assertEqual(workflow.count('<=167936'),5)
+        self.assertNotIn('<=163840',workflow)
+        project=dict(schemaVersion=1,scope='normal-macos-ui-failure-diagnostic-only',phase='test',
+            selection='project-test.xcresult',originalReturncode=65,status='classified',findingsTruncated=False,
+            sourceFailures=[dict(stream='stdout',source='NormalAppUITests.swift',method='testSyntheticProjectLocalEditsAndImages',line=4935,column=None)],
+            projectProgress=dict(state='observed',firstFailed='project-open',lastObserved=dict(stage='quit',result='passed')),
+            stdoutSha256='synthetic-private-digest',private='synthetic-secret')
+        expected={k:project[k] for k in ('phase','selection','originalReturncode','status','findingsTruncated','sourceFailures','projectProgress')}
+        self.assertEqual(m.project_test_failure_data(project,65),expected)
+        for key,invalid in (('schemaVersion',True),('scope','normal-macos-ui-admission-diagnostic-only'),
+                ('phase','summary'),('selection','test.xcresult'),('originalReturncode',True),('originalReturncode',64),
+                ('status','synthetic-secret'),('findingsTruncated',1),('sourceFailures',{})):
+            changed=copy.deepcopy(project);changed[key]=invalid
+            self.assertIsNone(m.project_test_failure_data(changed,65))
+        for code in (None,True,0,64,256): self.assertIsNone(m.project_test_failure_data(project,code))
+        for key,invalid in (('stream','other'),('source','../private'),('method','testLaunchCancelAndQuit'),
+                ('line',True),('line',0),('line',65536),('column',False),('column',0),('column',4097),('private','synthetic-secret')):
+            changed=copy.deepcopy(project);changed['sourceFailures'][0][key]=invalid
+            self.assertIsNone(m.project_test_failure_data(changed,65))
+        changed=copy.deepcopy(project);changed['sourceFailures']*=2
+        self.assertIsNone(m.project_test_failure_data(changed,65))
+        for invalid in ({},dict(state='absent',firstFailed='launch',lastObserved=None),
+                dict(state='refused',firstFailed=None,lastObserved={'stage':'launch','result':'started'}),
+                dict(state='observed',firstFailed=None,lastObserved=None),
+                dict(state='observed',firstFailed=None,lastObserved={'stage':'launch','result':'failed'}),
+                dict(state='observed',firstFailed='../private',lastObserved={'stage':'quit','result':'passed'}),
+                dict(state='observed',firstFailed=None,lastObserved={'stage':'private','result':'started'}),
+                dict(state='observed',firstFailed=None,lastObserved={'stage':'quit','result':'private'}),
+                dict(state='observed',firstFailed=None,lastObserved={'stage':'quit','result':'passed','private':'synthetic-secret'})):
+            changed=copy.deepcopy(project);changed['projectProgress']=invalid
+            self.assertIsNone(m.project_test_failure_data(changed,65))
+        for progress in (None,dict(state='absent',firstFailed=None,lastObserved=None),dict(state='refused',firstFailed=None,lastObserved=None)):
+            changed=copy.deepcopy(project);changed['projectProgress']=progress
+            self.assertEqual(m.project_test_failure_data(changed,65)['projectProgress'],progress)
+        changed=copy.deepcopy(project);del changed['projectProgress']
+        self.assertIsNone(m.project_test_failure_data(changed,65)['projectProgress'])
+        # Real optional descriptor path, but entirely synthetic local DATA.
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)
+            for name,body in {'build.status':b'0\n','project-test.status':b'65\n',
+                    'project-test.failure-diagnostics.json':m.canonical(project)+b'\n'}.items():
+                path=root/name;path.write_bytes(body);path.chmod(0o600)
+            context=({'GITHUB_SHA':'a'*40,'GITHUB_RUN_ID':'2','GITHUB_RUN_ATTEMPT':'1'},'launch-project',root)
+            with mock.patch.object(m,'normal_projection_context',return_value=context): observed=m.normal_diagnostic_main()
+            self.assertEqual(observed['projectTestFailure'],expected)
+            self.assertFalse(observed['successInferred'])
+            self.assertNotIn(b'synthetic-secret',m.canonical(observed))
+            self.assertNotIn(b'synthetic-private-digest',m.canonical(observed))
+            path=root/'project-test.failure-diagnostics.json'
+            for body in (b'{',b'{"bad":NaN}',m.canonical(dict(project,originalReturncode=64))):
+                path.write_bytes(body)
+                with mock.patch.object(m,'normal_projection_context',return_value=context): rejected=m.normal_diagnostic_main()
+                self.assertIsNone(rejected['projectTestFailure'])
+            path.chmod(0o644)
+            with mock.patch.object(m,'normal_projection_context',return_value=context),self.assertRaises(m.Refused):
+                m.normal_diagnostic_main()  # Optional DATA refusal never swallows original I/O/postconditions.
+
+
     def test_fixed_sudo_originals_preserve_quota_snapshot_and_finality(self):
         # Synthetic protocol only: no Darwin syscall, descriptor or command.
         m = ADAPTER
