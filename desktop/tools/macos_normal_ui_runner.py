@@ -3357,6 +3357,51 @@ def project_require_source_sites(stdout, stderr):
     return sites
 
 
+PROJECT_NAVIGATION_RELATIONS = ('non-string','exact','empty','trailing-slash','tmp-alias',
+    'tmp-alias-trailing-slash','case-only','case-only-trailing-slash','tmp-alias-case-only',
+    'tmp-alias-case-only-trailing-slash','prefix','extra-suffix','suffix','other')
+
+
+def project_navigation_diagnostics(stdout, stderr):
+    """Finite observations from original project stdout; never field contents."""
+    need(type(stdout) is bytes and type(stderr) is bytes and len(stdout)+len(stderr) <= 1024*1024,
+         'project-navigation-original')
+    namespace = b'MRK_NORMAL_PROJECT_NAVIGATION'
+    methods = b'testSyntheticProjectPathFields|testSyntheticProjectLocalEditsAndImages'
+    states = rb'(absent|ambiguous|disabled|obscured|ready)'
+    pattern = (re.escape(namespace) + rb'=v1;method=(' + methods
+        + rb');phase=(after-typing|after-return-timeout);role=(standalone-field|combo-child|combo);relation=('
+        + b'|'.join(x.encode('ascii') for x in PROJECT_NAVIGATION_RELATIONS)
+        + rb');unchanged=([01]);field=(absent|disabled|obscured|ready);fields=([0-2]);combos=([0-2]);go='
+        + states + rb';open=' + states + rb';cancel=' + states + rb';nonAtomic=1')
+    rows, seen = [], set()
+    for stream, body in (('stdout',stdout),('stderr',stderr)):
+        offset = 0
+        while offset < len(body):
+            end = body.find(b'\n',offset); complete = end != -1
+            if not complete: end = len(body)
+            short = body[offset:end] if end-offset <= 512 else None
+            prefix = body[offset:min(end,offset+len(namespace))]
+            suffix = body[max(offset,end-len(namespace)):end]
+            candidate = (body.find(namespace,offset,end) != -1 or bool(prefix) and namespace.startswith(prefix)
+                or not complete and any(suffix.endswith(namespace[:i]) for i in range(1,len(namespace))))
+            offset = end+1
+            if not candidate: continue
+            record = short[:-1] if short is not None and complete and short.endswith(b'\r') else short
+            match = re.fullmatch(pattern,record) if record is not None and complete and stream == 'stdout' else None
+            if match is None or len(rows) == 4: return {'state':'refused','observations':[]}
+            method,phase,role,relation,unchanged,field,fields,combos,go,opened,cancel = (
+                x.decode('ascii') for x in match.groups())
+            key = (method,phase)
+            if key in seen or relation == 'non-string' and unchanged != '0':
+                return {'state':'refused','observations':[]}
+            seen.add(key)
+            rows.append(dict(method=method,phase=phase,role=role,relation=relation,
+                unchangedFromBefore=unchanged == '1',elementState=field,fields=int(fields),combos=int(combos),
+                go=go,open=opened,cancel=cancel,nonAtomic=True))
+    return {'state':'observed' if rows else 'absent','observations':rows}
+
+
 def project_stage_diagnostics(stdout, stderr):
     """Existing project stdout markers only; no method, order or success claim."""
     namespace = b"MRK_NORMAL_PROJECT_STAGE="
@@ -4065,6 +4110,14 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         if len(encoded(value)) + 1 > 4096:
             value["projectProgress"] = None
             value["findingsTruncated"] = True
+    if "projectProgress" in value:
+        value["projectNavigation"] = project_navigation_diagnostics(original.stdout, original.stderr)
+        if value["projectNavigation"]["state"] == "refused": value["findingsTruncated"] = True
+        if len(encoded(value)) + 1 > 4096:
+            value["projectNavigation"] = {"state": "refused", "observations": []}
+            value["findingsTruncated"] = True
+        if len(encoded(value)) + 1 > 4096:
+            del value["projectNavigation"]  # Optional observations never displace original facts.
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
     return value
 

@@ -53,6 +53,7 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private var engineeringRequireDiagnosticActive = false
     @MainActor private var engineeringRequireDiagnosticEmitted = false
     @MainActor private var projectRequireDiagnosticMethod: ProjectRequireMethod?
+    @MainActor private var projectNavigationDiagnosticPhases: Set<String> = []
     @MainActor private var projectRequireDiagnosticEmitted = false
     @MainActor private var originalLaunch: OrdinaryLaunch?
     @MainActor private var caseClock: CaseClock?
@@ -116,6 +117,10 @@ final class NormalAppUITests: XCTestCase {
             }
             last = value
             return value
+        }
+        // Diagnostics cannot latch failures or change the ordinary clock sample.
+        func observationAllowed(_ now: TimeInterval, before end: TimeInterval) -> Bool {
+            !unusable && now.isFinite && end.isFinite && now >= last && now < min(deadline, end)
         }
         func remaining(_ maximum: TimeInterval, before end: TimeInterval? = nil,
                        cleanup: Bool = false) throws -> TimeInterval {
@@ -4171,6 +4176,58 @@ final class NormalAppUITests: XCTestCase {
         }
         return sheet
     }
+    private enum NavigationPhase: String { case typed = "after-typing", timeout = "after-return-timeout" }
+    private enum NavigationRole: String { case field = "standalone-field", child = "combo-child", combo }
+    @MainActor private func observeProjectNavigation(_ field: XCUIElement, sheet: XCUIElement,
+        role: NavigationRole, phase: NavigationPhase, path: String, initialValue: String?,
+        value: () -> String?) {
+        guard journeyStage == "project-open", let method = projectRequireDiagnosticMethod,
+              let clock = caseClock, let end = journeyDeadline else { return }
+        let key = method.rawValue + ";" + phase.rawValue
+        guard !projectNavigationDiagnosticPhases.contains(key) else { return }
+        let start = ProcessInfo.processInfo.systemUptime
+        guard clock.observationAllowed(start, before: end) else { return }
+        // Original control only. Attribute reads are separate, non-atomic samples.
+        let current = value()
+        let relation: String
+        let alias = "/tmp/" + String(path.dropFirst("/private/tmp/".count))
+        if let current {
+            if current == path { relation = "exact" }
+            else if current.isEmpty { relation = "empty" }
+            else if current == path + "/" { relation = "trailing-slash" }
+            else if current == alias { relation = "tmp-alias" }
+            else if current == alias + "/" { relation = "tmp-alias-trailing-slash" }
+            else if current.lowercased() == path.lowercased() { relation = "case-only" }
+            else if current.lowercased() == (path + "/").lowercased() { relation = "case-only-trailing-slash" }
+            else if current.lowercased() == alias.lowercased() { relation = "tmp-alias-case-only" }
+            else if current.lowercased() == (alias + "/").lowercased() { relation = "tmp-alias-case-only-trailing-slash" }
+            else if path.hasPrefix(current) { relation = "prefix" }
+            else if current.hasPrefix(path) { relation = "extra-suffix" }
+            else if path.hasSuffix(current) { relation = "suffix" }
+            else { relation = "other" }
+        } else { relation = "non-string" }
+        let unchanged = current != nil && initialValue != nil && current == initialValue
+        func elementState(_ element: XCUIElement) -> String {
+            if !element.exists { return "absent" }
+            if !element.isEnabled { return "disabled" }
+            return element.isHittable ? "ready" : "obscured"
+        }
+        func buttonState(_ identifier: String) -> String {
+            let query = sheet.buttons.matching(identifier: identifier)
+            let count = query.count
+            if count == 0 { return "absent" }
+            if count != 1 { return "ambiguous" }
+            return elementState(query.element(boundBy: 0))
+        }
+        let selected = elementState(field)
+        let fields = min(sheet.textFields.count, 2), combos = min(sheet.comboBoxes.count, 2)
+        let go = buttonState("Go"), open = buttonState("Open"), cancel = buttonState("Cancel")
+        let finish = ProcessInfo.processInfo.systemUptime
+        guard finish >= start, clock.observationAllowed(finish, before: end) else { return }
+        projectNavigationDiagnosticPhases.insert(key)
+        print("MRK_NORMAL_PROJECT_NAVIGATION=v1;method=\(method.rawValue);phase=\(phase.rawValue);role=\(role.rawValue);relation=\(relation);unchanged=\(unchanged ? 1 : 0);field=\(selected);fields=\(fields);combos=\(combos);go=\(go);open=\(open);cancel=\(cancel);nonAtomic=1")
+    }
+
     @MainActor private func goToFolder(_ sheet: XCUIElement, path: String) throws {
         try require(path.hasPrefix("/private/tmp/mrk-normal-project-"),
                     "native navigation is not the owned synthetic fixture")
@@ -4196,6 +4253,7 @@ final class NormalAppUITests: XCTestCase {
         try require(fieldCount <= 1 && comboCount <= 1 && fieldCount + comboCount > 0,
                     "standard Go to Folder editor is missing or ambiguous", check: .singleton)
         let pathField: XCUIElement
+        let navigationRole: NavigationRole
         if comboCount == 1 {
             let combo = combos.element(boundBy: 0)
             let children = combo.textFields
@@ -4204,11 +4262,14 @@ final class NormalAppUITests: XCTestCase {
             try require(children.count == fieldCount,
                         "native navigation editors do not form one control", check: .singleton)
             pathField = fieldCount == 1 ? children.element(boundBy: 0) : combo
+            navigationRole = fieldCount == 1 ? .child : .combo
         } else {
             pathField = fields.element(boundBy: 0) // Count was proved exactly one.
+            navigationRole = .field
         }
         try require(pathField.exists && pathField.isEnabled && pathField.isHittable,
                     "standard Go to Folder field is not actionable", check: .actionable)
+        let navigationInitial = projectRequireDiagnosticMethod == nil || journeyStage != "project-open" ? nil : pathField.value as? String
         pathField.click()
         pathField.typeKey("a", modifierFlags: .command)
         pathField.typeText(path)
@@ -4216,6 +4277,8 @@ final class NormalAppUITests: XCTestCase {
         // only closed relations to the expected synthetic path, never its text
         // or a guessed explanation. No alternate spelling is accepted.
         let typedValue = pathField.value as? String
+        observeProjectNavigation(pathField, sheet: sheet, role: navigationRole, phase: .typed,
+                                 path: path, initialValue: navigationInitial, value: { typedValue })
         if typedValue == nil {
             try require(false, "native navigation value is not a String")
         } else if let value = typedValue, value != path {
@@ -4237,7 +4300,12 @@ final class NormalAppUITests: XCTestCase {
         }
         try require(typedValue == path, "native Go to Folder did not retain the exact fixture path")
         pathField.typeKey("\r", modifierFlags: [])
-        try waitGone(pathField)
+        do { try waitGone(pathField) }
+        catch {
+            observeProjectNavigation(pathField, sheet: sheet, role: navigationRole, phase: .timeout,
+                                     path: path, initialValue: navigationInitial, value: { pathField.value as? String })
+            throw error // Keep the original dismissal failure and its SOURCE site.
+        }
     }
     @MainActor private func nativeOpen(_ sheet: XCUIElement) throws {
         let open = try waitElement(sheet.buttons.matching(identifier: "Open"), in: sheet, enabled: true)
@@ -4771,6 +4839,7 @@ final class NormalAppUITests: XCTestCase {
     @MainActor func testSyntheticProjectPathFields() throws {
         projectRequireDiagnosticMethod = .pathFields
         projectRequireDiagnosticEmitted = false
+        projectNavigationDiagnosticPhases.removeAll()
         defer { projectRequireDiagnosticMethod = nil }
         continueAfterFailure = false
         executionTimeAllowance = 300
@@ -4996,6 +5065,7 @@ final class NormalAppUITests: XCTestCase {
     @MainActor func testSyntheticProjectLocalEditsAndImages() throws {
         projectRequireDiagnosticMethod = .localEditsAndImages
         projectRequireDiagnosticEmitted = false
+        projectNavigationDiagnosticPhases.removeAll()
         defer { projectRequireDiagnosticMethod = nil }
         try syntheticProjectJourney(includeImages: true)
     }

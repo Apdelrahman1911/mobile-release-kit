@@ -1778,9 +1778,37 @@ def project_test_failure_data(v, status):
                 or set(last) != {'stage','result'} or last['stage'] not in PROJECT_STAGES
                 or last['result'] not in ('started','passed','failed') or last['result'] == 'failed' and first is None): return None
         elif state not in ('absent','refused') or first is not None or last is not None: return None
-    return {**{k:v[k] for k in ('phase','selection','originalReturncode','status','findingsTruncated')},
+    result = {**{k:v[k] for k in ('phase','selection','originalReturncode','status','findingsTruncated')},
             'sourceFailures':[dict(r) for r in rows],'projectProgress':None if progress is None else {**progress,
             'lastObserved':None if progress['lastObserved'] is None else dict(progress['lastObserved'])}}
+    if 'projectNavigation' in v:
+        nav = v['projectNavigation']; states = ('absent','ambiguous','disabled','obscured','ready')
+        relations = ('non-string','exact','empty','trailing-slash','tmp-alias','tmp-alias-trailing-slash',
+            'case-only','case-only-trailing-slash','tmp-alias-case-only','tmp-alias-case-only-trailing-slash',
+            'prefix','extra-suffix','suffix','other')
+        keys = {'method','phase','role','relation','unchangedFromBefore','elementState','fields','combos',
+                'go','open','cancel','nonAtomic'}
+        valid = (type(nav) is dict and set(nav) == {'state','observations'}
+            and type(nav['observations']) is list and (nav['state'] in ('absent','refused')
+            and not nav['observations'] or nav['state'] == 'observed' and 1 <= len(nav['observations']) <= 4))
+        seen = set()
+        if valid:
+            for row in nav['observations']:
+                if (type(row) is not dict or set(row) != keys
+                    or row['method'] not in ('testSyntheticProjectPathFields','testSyntheticProjectLocalEditsAndImages')
+                    or row['phase'] not in ('after-typing','after-return-timeout')
+                    or row['role'] not in ('standalone-field','combo-child','combo') or row['relation'] not in relations
+                    or type(row['unchangedFromBefore']) is not bool
+                    or row['relation'] == 'non-string' and row['unchangedFromBefore']
+                    or row['elementState'] not in ('absent','disabled','obscured','ready')
+                    or any(type(row[k]) is not int or not 0 <= row[k] <= 2 for k in ('fields','combos'))
+                    or any(row[k] not in states for k in ('go','open','cancel')) or row['nonAtomic'] is not True
+                    or (row['method'],row['phase']) in seen):
+                    valid = False; break
+                seen.add((row['method'],row['phase']))
+        result['projectNavigation'] = {'state':nav['state'],'observations':[dict(r) for r in nav['observations']]} if valid else {'state':'refused','observations':[]}
+        if not valid: result['findingsTruncated'] = True
+    return result
 
 
 def normal_projection_failure_data(value, batch, statuses):
@@ -2161,7 +2189,7 @@ def project_main():
 # Closed first-party SOURCE locations only. These exact leaves are compiled only
 # after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
 # traceback rendering, error args/notes/locals or private filenames are used.
-FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3090, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2464}
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3090, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2492}
 FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
 
 

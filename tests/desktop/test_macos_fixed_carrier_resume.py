@@ -181,6 +181,43 @@ class FixedCarrierResumeData(unittest.TestCase):
         self.assertEqual(book.file.call_count, 1)
 
     def test_failure_projection_preserves_first_phase_and_filters_private_or_unknown_values(self):
+        # The original project failure remains useful even if optional navigation
+        # is malformed. No private scalar or unrecognized member is projected.
+        navrow=dict(method='testSyntheticProjectPathFields',phase='after-typing',role='combo-child',relation='exact',
+            unchangedFromBefore=False,elementState='ready',fields=1,combos=1,go='ready',open='disabled',cancel='ready',nonAtomic=True)
+        project_nav=dict(schemaVersion=1,scope='normal-macos-ui-failure-diagnostic-only',phase='test',
+            selection='project-test.xcresult',originalReturncode=65,status='classified',findingsTruncated=False,
+            sourceFailures=[dict(stream='stdout',source='NormalAppUITests.swift',method=navrow['method'],line=4240,column=None)],
+            projectProgress=dict(state='observed',firstFailed='project-open',lastObserved=dict(stage='project-open',result='failed')))
+        old=ADAPTER.project_test_failure_data(project_nav,65)
+        self.assertNotIn('projectNavigation',old)
+        rows=[{**navrow,'method':method,'phase':phase} for method in ('testSyntheticProjectPathFields','testSyntheticProjectLocalEditsAndImages')
+            for phase in ('after-typing','after-return-timeout')]
+        for nav in ({'state':'absent','observations':[]},{'state':'refused','observations':[]},{'state':'observed','observations':rows}):
+            value=ADAPTER.project_test_failure_data({**project_nav,'projectNavigation':nav},65)
+            self.assertEqual(value['projectNavigation'],nav)
+            self.assertEqual({k:v for k,v in value.items() if k!='projectNavigation'},old)
+            self.assertIsNot(value['projectNavigation'],nav)
+        bad_values=[None,True,[],{}, {'state':'absent','observations':[navrow]}, {'state':'observed','observations':[]},
+            {'state':'observed','observations':[navrow]*2},{'state':'observed','observations':rows+[navrow]},
+            {'state':'observed','observations':[navrow],'private':'PRIVATE-synthetic'}, {'state':'unknown','observations':[]}]
+        for key,bad in (('method','unknown'),('phase','unknown'),('role','unknown'),('relation','PRIVATE-synthetic'),
+                ('unchangedFromBefore',1),('elementState','ambiguous'),('fields',True),('fields',3),('combos',-1),
+                ('go','unknown'),('open','unknown'),('cancel','unknown'),('nonAtomic',1)):
+            bad_values.append({'state':'observed','observations':[{**navrow,key:bad}]})
+        bad_values += [{'state':'observed','observations':[{**navrow,'relation':'non-string','unchangedFromBefore':True}]},
+            {'state':'observed','observations':[{**navrow,'raw':'PRIVATE-synthetic'}]},
+            {'state':'observed','observations':[{k:v for k,v in navrow.items() if k!='role'}]}]
+        for nav in bad_values:
+            value=ADAPTER.project_test_failure_data({**project_nav,'projectNavigation':nav},65)
+            self.assertEqual(value['projectNavigation'],{'state':'refused','observations':[]})
+            self.assertTrue(value['findingsTruncated'])
+            self.assertEqual(value['sourceFailures'],old['sourceFailures'])
+            self.assertEqual(value['projectProgress'],old['projectProgress'])
+            self.assertEqual(value['originalReturncode'],65)
+            self.assertNotIn(b'PRIVATE-synthetic',ADAPTER.canonical(value))
+        for status in (None,0,True,64):self.assertIsNone(ADAPTER.project_test_failure_data({**project_nav,'projectNavigation':None},status))
+
         m = ADAPTER
         statuses = dict(installer=None, harness=0, ios=65, summary=None, result=None)
         native = dict(schemaVersion=1, scope=m.SCOPE, accepted=False, phase="detach-finality",
