@@ -4178,13 +4178,37 @@ final class NormalAppUITests: XCTestCase {
         // always-available control; Open may be disabled until a file is chosen.
         let cancel = try waitElement(sheet.buttons.matching(identifier: "Cancel"), in: sheet, enabled: true)
         try require(cancel.isHittable, "original native selection panel is not actionable")
+        // Open-panel internals do not promise an English AX field label. Bind
+        // the editor to this original sheet and its appearance after the shortcut,
+        // never to a first field elsewhere in the app or the renderer.
+        let fields = sheet.textFields
+        let combos = sheet.comboBoxes
+        try require(fields.count == 0 && combos.count == 0,
+                    "original native panel already has an ambiguous navigation editor", check: .singleton)
         sheet.typeKey("g", modifierFlags: [.command, .shift])
-        let fields = sheet.descendants(matching: .any).matching(NSPredicate(
-            format: "elementType IN %@ AND label IN %@",
-            [XCUIElement.ElementType.textField, .comboBox].map { NSNumber(value: $0.rawValue) },
-            ["Go to the folder:", "Go to folder:", "Go to Folder", "Go to the folder"]))
-        let pathField = try waitElement(fields, in: sheet, enabled: true)
-        try require(pathField.isHittable, "standard Go to Folder field is not actionable")
+        let targets: NSDictionary = ["field": fields.element(boundBy: 0), "combo": combos.element(boundBy: 0)]
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format:
+            "(field.exists == true AND field.enabled == true) OR (combo.exists == true AND combo.enabled == true)"),
+            object: targets)
+        try require(XCTWaiter.wait(for: [ready], timeout: try remaining(5)) == .completed,
+                    "standard Go to Folder editor did not appear in the original sheet")
+        let fieldCount = fields.count, comboCount = combos.count
+        try require(fieldCount <= 1 && comboCount <= 1 && fieldCount + comboCount > 0,
+                    "standard Go to Folder editor is missing or ambiguous", check: .singleton)
+        let pathField: XCUIElement
+        if comboCount == 1 {
+            let combo = combos.element(boundBy: 0)
+            let children = combo.textFields
+            // If both roles exist, the sole sheet field must be the sole child
+            // of the sole combo. Disjoint editors are not a fallback choice.
+            try require(children.count == fieldCount,
+                        "native navigation editors do not form one control", check: .singleton)
+            pathField = fieldCount == 1 ? children.element(boundBy: 0) : combo
+        } else {
+            pathField = fields.element(boundBy: 0) // Count was proved exactly one.
+        }
+        try require(pathField.exists && pathField.isEnabled && pathField.isHittable,
+                    "standard Go to Folder field is not actionable", check: .actionable)
         pathField.click()
         pathField.typeKey("a", modifierFlags: .command)
         pathField.typeText(path)
@@ -5108,7 +5132,7 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Text saved")), in: review, timeout: 48, failures: Self.textFailures)
             try fixture.accept("text")
             let older = try waitElement(editor.staticTexts.matching(identifier:
-                "The passive observation predates the original settled save check. Saved facts come from that exact native plan, not a fabricated fresh file read."), in: editor)
+                "This passive observation predates the latest original save/recovery boundary. Refresh explicitly; retained facts are not a fabricated fresh file read."), in: editor)
             try press(editor, "Refresh text", renderer: renderer, failures: Self.textFailures)
             try waitGone(older)
             try require(field(editor, "App title", multiline: true).value as? String == fixture.text(LocalFixture.title, stage: "text"),

@@ -31,7 +31,21 @@ SWIFT = ROOT / "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITe
 PROJECT_REQUIRE_SWIFT_INVERSE = (('    private enum RequireCheck: String { case condition, singleton, actionable }\n', '    private enum RequireCheck: String { case condition, singleton, actionable }\n    private enum ProjectRequireMethod: String {\n        case pathFields = "testSyntheticProjectPathFields"\n        case localEditsAndImages = "testSyntheticProjectLocalEditsAndImages"\n    }\n'), ('    @MainActor private var engineeringRequireDiagnosticEmitted = false\n', '    @MainActor private var engineeringRequireDiagnosticEmitted = false\n    @MainActor private var projectRequireDiagnosticMethod: ProjectRequireMethod?\n    @MainActor private var projectRequireDiagnosticEmitted = false\n'), ('            if engineeringRequireDiagnosticActive && originalFailureAbsent && !engineeringRequireDiagnosticEmitted\n', '            if let method = projectRequireDiagnosticMethod, originalFailureAbsent,\n                !projectRequireDiagnosticEmitted, line >= 1 && line <= 65535 {\n                projectRequireDiagnosticEmitted = true\n                print("MRK_NORMAL_PROJECT_REQUIRE_FAILURE=v1;method=\\(method.rawValue);line=\\(line);check=\\(check.rawValue)")\n            }\n            if engineeringRequireDiagnosticActive && originalFailureAbsent && !engineeringRequireDiagnosticEmitted\n'), ('            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive {\n                try require(false, "terminal UI refusal in " + journeyStage, line: line)', '            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {\n                try require(false, "terminal UI refusal in " + journeyStage, line: line)'), ('            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive {\n                try require(false, "missing or ambiguous expected control in " + journeyStage, line: line)', '            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {\n                try require(false, "missing or ambiguous expected control in " + journeyStage, line: line)'), ('            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive {\n                try require(false, "unexpected original native sheet title in " + journeyStage, line: line)', '            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {\n                try require(false, "unexpected original native sheet title in " + journeyStage, line: line)'), ('    @MainActor func testSyntheticProjectPathFields() throws {\n', '    @MainActor func testSyntheticProjectPathFields() throws {\n        projectRequireDiagnosticMethod = .pathFields\n        projectRequireDiagnosticEmitted = false\n        defer { projectRequireDiagnosticMethod = nil }\n'), ('    @MainActor func testSyntheticProjectLocalEditsAndImages() throws {\n', '    @MainActor func testSyntheticProjectLocalEditsAndImages() throws {\n        projectRequireDiagnosticMethod = .localEditsAndImages\n        projectRequireDiagnosticEmitted = false\n        defer { projectRequireDiagnosticMethod = nil }\n'))
 
 
+# Exact inverse of the reviewed native-editor/actual-notice correction only.
+# Older SOURCE expectations remain bound to their unchanged previous layers.
+NATIVE_FOLDER_SWIFT_INVERSE = (('        sheet.typeKey("g", modifierFlags: [.command, .shift])\n        let fields = sheet.descendants(matching: .any).matching(NSPredicate(\n            format: "elementType IN %@ AND label IN %@",\n            [XCUIElement.ElementType.textField, .comboBox].map { NSNumber(value: $0.rawValue) },\n            ["Go to the folder:", "Go to folder:", "Go to Folder", "Go to the folder"]))\n        let pathField = try waitElement(fields, in: sheet, enabled: true)\n        try require(pathField.isHittable, "standard Go to Folder field is not actionable")\n', '        // Open-panel internals do not promise an English AX field label. Bind\n        // the editor to this original sheet and its appearance after the shortcut,\n        // never to a first field elsewhere in the app or the renderer.\n        let fields = sheet.textFields\n        let combos = sheet.comboBoxes\n        try require(fields.count == 0 && combos.count == 0,\n                    "original native panel already has an ambiguous navigation editor", check: .singleton)\n        sheet.typeKey("g", modifierFlags: [.command, .shift])\n        let targets: NSDictionary = ["field": fields.element(boundBy: 0), "combo": combos.element(boundBy: 0)]\n        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format:\n            "(field.exists == true AND field.enabled == true) OR (combo.exists == true AND combo.enabled == true)"),\n            object: targets)\n        try require(XCTWaiter.wait(for: [ready], timeout: try remaining(5)) == .completed,\n                    "standard Go to Folder editor did not appear in the original sheet")\n        let fieldCount = fields.count, comboCount = combos.count\n        try require(fieldCount <= 1 && comboCount <= 1 && fieldCount + comboCount > 0,\n                    "standard Go to Folder editor is missing or ambiguous", check: .singleton)\n        let pathField: XCUIElement\n        if comboCount == 1 {\n            let combo = combos.element(boundBy: 0)\n            let children = combo.textFields\n            // If both roles exist, the sole sheet field must be the sole child\n            // of the sole combo. Disjoint editors are not a fallback choice.\n            try require(children.count == fieldCount,\n                        "native navigation editors do not form one control", check: .singleton)\n            pathField = fieldCount == 1 ? children.element(boundBy: 0) : combo\n        } else {\n            pathField = fields.element(boundBy: 0) // Count was proved exactly one.\n        }\n        try require(pathField.exists && pathField.isEnabled && pathField.isHittable,\n                    "standard Go to Folder field is not actionable", check: .actionable)\n'), ('The passive observation predates the original settled save check. Saved facts come from that exact native plan, not a fabricated fresh file read.', 'This passive observation predates the latest original save/recovery boundary. Refresh explicitly; retained facts are not a fabricated fresh file read.'))
+
+
+def without_native_folder_source(source):
+    for previous, current in reversed(NATIVE_FOLDER_SWIFT_INVERSE):
+        assert source.count(current) == 1
+        source = source.replace(current, previous, 1)
+    assert hashlib.sha256(source.encode()).hexdigest() == '0d36dd7f5b335f69cafbd3b977d24cb236b703daf6b6166752d37790071464c4'
+    return source
+
+
 def without_project_require_source(source):
+    source = without_native_folder_source(source)
     for previous, current in reversed(PROJECT_REQUIRE_SWIFT_INVERSE):
         assert source.count(current) == 1
         source = source.replace(current, previous, 1)
@@ -5363,6 +5377,33 @@ class NormalPhaseDataTests(unittest.TestCase):
                             with self.assertRaises(OSError): os.fstat(fd)
 
     def test_closed_normal_failure_diagnostics_preserve_original_nonzero_and_privacy(self):
+
+        native_source = SWIFT.read_text()
+        previous_source = without_native_folder_source(native_source)
+        self.assertEqual(hashlib.sha256(previous_source.encode()).hexdigest(), '0d36dd7f5b335f69cafbd3b977d24cb236b703daf6b6166752d37790071464c4')
+        navigation = native_source.split('@MainActor private func goToFolder(',1)[1].split('@MainActor private func nativeOpen(',1)[0]
+        self.assertNotIn('label IN', navigation)
+        self.assertNotIn('hasFocus', navigation)
+        self.assertNotIn('hasKeyboardFocus', navigation)
+        self.assertIn('let fields = sheet.textFields', navigation)
+        self.assertIn('let combos = sheet.comboBoxes', navigation)
+        self.assertLess(navigation.index('fields.count == 0 && combos.count == 0'), navigation.index('sheet.typeKey("g"'))
+        for token in ('timeout: try remaining(5)', 'fieldCount <= 1 && comboCount <= 1 && fieldCount + comboCount > 0',
+                'if comboCount == 1', 'let children = combo.textFields', 'children.count == fieldCount',
+                'pathField = fieldCount == 1 ? children.element(boundBy: 0) : combo',
+                'pathField = fields.element(boundBy: 0)', 'pathField.exists && pathField.isEnabled && pathField.isHittable',
+                'pathField.click()', 'pathField.typeText(path)', 'pathField.value as? String == path',
+                'try waitGone(pathField)', 'path.hasPrefix("/private/tmp/mrk-normal-project-")'):
+            self.assertIn(token, navigation)
+        # This is an unchanged affirmative native action, not selection by typing.
+        native_open = native_source.split('@MainActor private func nativeOpen(',1)[1].split('@MainActor private func workflowDiff(',1)[0]
+        self.assertEqual(native_open, previous_source.split('@MainActor private func nativeOpen(',1)[1].split('@MainActor private func workflowDiff(',1)[0])
+        self.assertNotIn('The passive observation predates the original settled save check. Saved facts come from that exact native plan, not a fabricated fresh file read.', native_source)
+        self.assertEqual(native_source.count('This passive observation predates the latest original save/recovery boundary. Refresh explicitly; retained facts are not a fabricated fresh file read.'), 1)
+        for previous, current in NATIVE_FOLDER_SWIFT_INVERSE:
+            for replacement in (previous, current+current, current+'// altered\n'):
+                with self.assertRaises(AssertionError):
+                    without_native_folder_source(native_source.replace(current,replacement,1))
 
         # Real SOURCE emission and exact inverse: no model supplies native evidence.
         raw_source = SWIFT.read_text()
