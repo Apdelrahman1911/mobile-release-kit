@@ -31,14 +31,14 @@ RESUME_WORKFLOW = '.github/workflows/desktop-macos-fixed-carrier-resume.yml'
 ENROLLMENT_REF = 'refs/heads/verify/desktop-macos-installed'
 TARGETS = ('aarch64-apple-darwin',)
 LIMIT = 512 << 20
-SOURCE_LIMIT = 128 << 10
+SOURCE_LIMIT = 160 << 10
 MAX_ORIGINALS = 96
 OUTPUT_LIMIT = 2 << 20
 TERMINAL_LIMIT = 64 << 10
 TRANSPORT_LIMIT = LIMIT
 MEMBERS = {'MobileReleaseKit.dmg': LIMIT, 'PREVIEW.json': 16384, 'public-verification-evidence.json': 128 << 10}
 STATE = {'phase': 'admission', 'firstFailurePhase': None, 'lastRole': None, 'originalClosesKnown': False,
-         'privateOutputsRetired': False, 'workloadsKnownSettled': False}
+         'privateOutputsRetired': False, 'workloadsKnownSettled': False, 'resourceAdmission': None}
 SCOPE = 'fixed-ce644-arm-carrier-ios-unsigned-only'
 ORIGIN = {'source': 'ce644711fb6e2bea26182473441aac192d5638e1', 'tree': 'e5c4c43b2a903b3040d24c8bfa94b5236fd12882',
  'runId': '38649386495', 'runAttempt': '1', 'jobId': '116144135875', 'artifactId': '11935748046',
@@ -53,7 +53,7 @@ ORIGIN = {'source': 'ce644711fb6e2bea26182473441aac192d5638e1', 'tree': 'e5c4c43
  'packageVersion': '0.1.1', 'release': 'macos26-arm64-desktop-01'}
 SOURCE_PINS = {'desktop/tools/macos_e2_native_fixture.py': (390457, 'bcfbaf9ec8a8ae3253ef0ac91a1e73256de00a9adb6a9d280f64127b340cd51e'), 'desktop/tools/stage_macos_installed.py': (388486, '08a4609a37ea50426cfde297273b4e2ec53adc3727a86a13bdd5871988b3cfa2'), 'desktop/tools/macos_public_verification_evidence.py': (209883, '05ff6cf585f45601909afd14e7038df89adb8b56ee7411cb49428a0e8524a863'), 'desktop/tools/macos_aqua_qualification.py': (463990, 'd1ab3a83633c7e824277a4b316e2188877ecf03e8d54517a4275f931dd41290a'), 'desktop/tools/macos_xcode_host_preparation.py': (96477, 'd03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376'), 'src/mobile_release/owned_process.py': (9127, 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59'), 'src/mobile_release/_command_process.py': (177438, 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43'), 'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'), 'src/mobile_release/cancellation.py': (32351, 'eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a'), 'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'), 'src/mobile_release/errors.py': (749, '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'), 'src/mobile_release/_lifetime_evidence.py': (19514, 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'), 'src/mobile_release/_store_lane_contract.py': (9500, '8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e'), 'src/mobile_release/_store_lane_evidence.py': (17638, 'bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872'), 'desktop/packaging/macos-install-producer-certificates/leaf.der': (1490, 'e5ba1d05f136fbef3ca5816f0efb1e946cb2cfb81819b745d9f914e7e9256d72')}
 
-RESUME_WORKFLOW_BYTES = 58017
+RESUME_WORKFLOW_BYTES = 63911
 TLS_CA_PATH = 'desktop/macos-installed-inputs/fixed-consumer-tls/cacert.pem'
 TLS_CA_BYTES = 240216
 TLS_CA_SHA256 = '9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f'
@@ -559,6 +559,31 @@ def memory_data(stdout, stderr, returncode, *, page_size, physical_bytes):
     need(0 < result <= physical_bytes, 'p0-memory-bound')
     return {'availableEstimateBytes': result, 'pageSize': pagesize,
             'counters': selected, 'physicalMemoryBytes': physical_bytes, 'osMemoryReservation': False, 'peakRssQualified': False}
+
+
+RESOURCE_BYTE_KEYS = ('availableMemoryEstimateBytes','requiredMemoryBytes','availableDiskBytes','requiredDiskBytes')
+
+
+def resource_admission_data(available_memory,required_memory,available_disk,required_disk):
+    values = (available_memory,required_memory,available_disk,required_disk)
+    need(all(type(v) is int and 0 <= v <= (1 << 53)-1 for v in values)
+         and required_memory > 0 and required_disk > 0, 'resume-resource-diagnostic-bound')
+    return {**dict(zip(RESOURCE_BYTE_KEYS,values)),
+            'memorySufficient':available_memory >= required_memory,
+            'diskSufficient':available_disk >= required_disk,
+            'osMemoryReservation':False,'peakRssQualified':False}
+
+
+def resource_projection_data(value):
+    """An exact finite observation, never reservation or operation success."""
+    if type(value) is not dict or set(value) != set(RESOURCE_BYTE_KEYS) | {
+            'memorySufficient','diskSufficient','osMemoryReservation','peakRssQualified'}:
+        return None
+    if any(type(value[k]) is not bool for k in ('memorySufficient','diskSufficient','osMemoryReservation','peakRssQualified')):
+        return None
+    try: expected = resource_admission_data(*(value[k] for k in RESOURCE_BYTE_KEYS))
+    except Refused: return None
+    return expected if value == expected else None
 
 
 def host_memory_data(host, clock):
@@ -1229,6 +1254,326 @@ def admit_pinned_tls_roots(session):
     return body
 
 
+# Detached ordinary-family draft for integration into the existing adapter.
+# Not an executor, not imported, reviewed or exercised; no publication authority.
+NORMAL_SCOPE = 'fixed-ce644-arm-carrier-normal-local-batch-v1'
+NORMAL_BATCH_ENV = 'TEST_RUNNER_MRK_NORMAL_UI_FIXED_NORMAL_BATCH'
+NORMAL_FAMILIES = {
+    'launch-project': (('test.xcresult', 'test', 'summary', 1, 345),
+                       ('project-test.xcresult', 'project-test', 'project-summary', 2, 885)),
+    'doctor-saved-checks': (('diagnostics-test.xcresult', 'diagnostics-test', 'diagnostics-summary', 1, 585),
+                            ('saved-checks-test.xcresult', 'saved-checks-test', 'saved-checks-summary', 2, 885)),
+    'local-github-evidence': (('workflow-refusal-test.xcresult', 'workflow-refusal-test', 'workflow-refusal-summary', 1, 585),
+                              ('release-evidence-test.xcresult', 'release-evidence-test', 'release-evidence-summary', 1, 585)),
+    'persistence': (('persistence-test.xcresult', 'persistence-test', 'persistence-summary', 1, 585),),
+}
+
+
+def normal_batch_data(env):
+    """Finite route only; native context/owner admission remains mandatory."""
+    batch = env.get(NORMAL_BATCH_ENV)
+    need(type(batch) is str and batch in NORMAL_FAMILIES, 'resume-normal-fixed-batch')
+    return batch
+
+
+def normal_installer_projection_data(install, batch, source, run_id, attempt):
+    need(type(batch) is str and batch in NORMAL_FAMILIES, 'resume-normal-installer-batch')
+    need(type(install) is dict and install.get('scope') == NORMAL_SCOPE and install.get('normalBatch') == batch
+         and install.get('producerSource') == ORIGIN['source'] and install.get('producerTree') == ORIGIN['tree']
+         and (install.get('producerRunId'),install.get('producerRunAttempt'),install.get('producerJobId'))
+              == (ORIGIN['runId'],ORIGIN['runAttempt'],ORIGIN['jobId'])
+         and install.get('artifactId') == ORIGIN['artifactId'] and install.get('artifactSha256') == ORIGIN['artifactSha256']
+         and (install.get('consumerSource'),install.get('consumerRunId'),install.get('consumerRunAttempt'))
+              == (source,run_id,attempt) and install.get('target') == TARGETS[0]
+         and all(install.get(k) is True for k in ('originalInstallerReturnedZero','sameRequestReadback','originalMountDetached',
+                 'originalClosesKnown','workloadsKnownSettled','privateOutputsRetired'))
+         and all(install.get(k) is False for k in ('productReady','p0Qualified','intelQualified'))
+         and install.get('receiptAuthority') == 'same-consumer-owned-installer-and-readback-not-old-status',
+         'resume-normal-installer-original')
+
+
+def normal_original_projection_data(row, batch, source, phase, seconds, bundle):
+    """Use the existing original command/codesign/source/clock receipt contract."""
+    need(type(row) is dict and row.get('sourceCommit') == source and row.get('target') == TARGETS[0]
+         and row.get('fixedCarrierResumeScope') == NORMAL_SCOPE and row.get('fixedNormalBatch') == batch
+         and row.get('applicationSourceCommit') == ORIGIN['source']
+         and all(row.get(k) is False for k in ('currentProductQualified','p0Qualified','intelQualified'))
+         and row.get('sourcePrePostMatched') is True and row.get('originalCommandReturned') is True
+         and row.get('normalPhase' if phase == 'test' else 'phase') == phase and row.get('resultBundle') == bundle
+         and type(row.get('originalTestReturncode' if phase == 'test' else 'originalReturncode')) is int
+         and row['originalTestReturncode' if phase == 'test' else 'originalReturncode'] == 0
+         and row.get('receiptPolicy') == 'exclusive0600-readback-consuming-close', 'resume-normal-original')
+    roster = row.get('sourceRosterSha256')
+    need(type(roster) is str and re.fullmatch(r'[0-9a-f]{64}',roster), 'resume-normal-source-roster')
+    clock = row.get('phaseClock')
+    need(type(clock) is dict and clock.get('postCloseDeadlineRequired') is True
+         and all(type(clock.get(k)) is str and re.fullmatch(r'0|[1-9][0-9]{0,19}',clock[k])
+                 for k in ('startNs','deadlineNs','beforePublicationNs')), 'resume-normal-phase-clock')
+    start,end,before = (int(clock[k]) for k in ('startNs','deadlineNs','beforePublicationNs'))
+    need(end-start == seconds*1_000_000_000 and start <= before < end, 'resume-normal-phase-clock')
+    commands = row.get('commands')
+    source_role = ('normal-ui-source-roster',15,1048576)
+    roles = ([source_role,*[('normal-toolchain-'+k,15,4096) for k in ('xcode','sdkPath','sdkVersion','sdkBuild')],
+              ('normal-ui-build',240,1048576),source_role] if phase == 'build' else
+             [source_role,('verify-generated-runner',30,1048576),('generated-runner-entitlements',30,1048576),
+              ('one-admitted-ui-test',{345:180,585:420,885:720}[seconds],1048576),source_role] if phase == 'test' else
+             [source_role,('normal-ui-summary',30,262144),source_role])
+    keys = {'role','returncode','timeoutSeconds','roleCapSeconds','outputLimitBytes','argvSha256',
+            'stdoutBytes','stdoutSha256','stderrBytes','stderrSha256'}
+    need(type(commands) is list and len(commands) == len(roles), 'resume-normal-command-roster')
+    for command,(role,cap,limit) in zip(commands,roles):
+        need(type(command) is dict and set(command) == keys and command['role'] == role
+             and type(command['returncode']) is int and command['returncode'] == 0
+             and all(type(command[k]) is int for k in ('timeoutSeconds','roleCapSeconds','outputLimitBytes','stdoutBytes','stderrBytes'))
+             and 1 <= command['timeoutSeconds'] <= command['roleCapSeconds'] == cap
+             and command['outputLimitBytes'] == limit and 0 <= command['stdoutBytes'] <= limit
+             and 0 <= command['stderrBytes'] <= limit-command['stdoutBytes']
+             and all(type(command[k]) is str and re.fullmatch(r'[0-9a-f]{64}',command[k])
+                     for k in ('argvSha256','stdoutSha256','stderrSha256')), 'resume-normal-command-finality')
+    need(commands[0]['stdoutSha256'] == commands[-1]['stdoutSha256']
+         and commands[0]['stdoutBytes'] == commands[-1]['stdoutBytes'], 'resume-normal-original-source-query')
+    return roster
+
+
+def normal_family_projection_data(install, build, test, summary, summary_body, batch, bundle, source, run_id, attempt):
+    """A family's real pass can be retained independently of its sibling's failure."""
+    normal_installer_projection_data(install,batch,source,run_id,attempt)
+    choices = [row for row in NORMAL_FAMILIES[batch] if row[0] == bundle]
+    need(len(choices) == 1, 'resume-normal-family')
+    _,test_stem,summary_stem,count,seconds = choices[0]
+    rosters = [normal_original_projection_data(row,batch,source,phase,budget,result)
+               for row,phase,budget,result in ((build,'build',450,None),(test,'test',seconds,bundle),(summary,'summary',90,bundle))]
+    need(rosters[0] == rosters[1] == rosters[2] and test.get('originalClosesCompleted') is True
+         and test.get('originalProductsPrePostMatched') is True and test.get('strictCodesignOriginalZero') is True
+         and test.get('reSignedOrRepaired') is False, 'resume-normal-generated-products-finality')
+    expected = {'totalTestCount':count,'passedTests':count,'failedTests':0,'skippedTests':0,'expectedFailures':0}
+    need(type(summary_body) is bytes and 0 < len(summary_body) <= 262144, 'resume-normal-summary-body')
+    counts = decode(summary_body)
+    need(type(counts) is dict and all(type(counts.get(k)) is int and counts[k] == v for k,v in expected.items()),
+         'resume-normal-counts')
+    need(summary['commands'][1]['stdoutBytes'] == len(summary_body)
+         and summary['commands'][1]['stdoutSha256'] == sha(summary_body), 'resume-normal-original-summary-binding')
+    markers = {'project-test.xcresult': ('projectFieldAndEditMarkersObserved','androidToolSourceBrowseMarkerObserved'),
+               'workflow-refusal-test.xcresult': ('managedWorkflowRefusalMarkerObserved',),
+               'release-evidence-test.xcresult': ('savedReleaseEvidenceMarkerObserved',)}
+    need(all(test.get(k) is True for k in markers.get(bundle,())), 'resume-normal-existing-ui-markers')
+    return {'schemaVersion':1,'scope':NORMAL_SCOPE,'normalBatch':batch,'family':bundle,
+            'producerSource':ORIGIN['source'],'producerTree':ORIGIN['tree'],
+            'carrierArtifactId':ORIGIN['artifactId'],'carrierArtifactSha256':ORIGIN['artifactSha256'],
+            'harnessSource':source,'consumerRunId':run_id,'consumerRunAttempt':attempt,'target':TARGETS[0],
+            'freshInstallerReadback':'passed','currentHarnessBuild':'passed','familyResult':'passed',
+            'sourceRosterSha256':rosters[0],'testCounts':expected,'rawTextExported':False,
+            'currentProductQualified':False,'p0Qualified':False,'intelQualified':False,'productReady':False}
+
+
+# Detached addition: actual family originals, never a previous job's live state.
+def normal_projection_context():
+    env = os.environ
+    need(env.get('GITHUB_REPOSITORY') == REPOSITORY and env.get('GITHUB_REF') == ENROLLMENT_REF
+         and env.get('GITHUB_SHA') == env.get('GITHUB_WORKFLOW_SHA') and env.get('GITHUB_SHA') != ORIGIN['source']
+         and re.fullmatch(r'[0-9a-f]{40}',env.get('GITHUB_SHA',''))
+         and env.get('GITHUB_WORKFLOW_REF') == REPOSITORY+'/'+RESUME_WORKFLOW+'@'+ENROLLMENT_REF,
+         'resume-normal-projection-context')
+    scope,batch = resume_selection_data(env)
+    need(scope == NORMAL_SCOPE, 'resume-normal-projection-scope')
+    root = Path(env['MRK_MACOS_WORK'])/'normal-ui'
+    need(re.fullmatch(r'/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}/normal-ui',str(root)),
+         'resume-normal-projection-work')
+    return env,batch,root
+
+
+def normal_project_main(bundle):
+    env,batch,root = normal_projection_context()
+    choices = [row for row in NORMAL_FAMILIES[batch] if row[0] == bundle]
+    need(type(bundle) is str and len(choices) == 1, 'resume-normal-family-route')
+    _,test_stem,summary_stem,_,_ = choices[0]
+    started = time.monotonic_ns(); originals = []; primary = None
+    def read(name,cap):
+        need(time.monotonic_ns() < started+10_000_000_000, 'resume-normal-projection-clock')
+        path = root/name
+        fd = os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+        originals.append((fd,path,None))
+        before = identity(os.fstat(fd)); originals[-1] = (fd,path,before)
+        need(stat.S_ISREG(before[2]) and stat.S_IMODE(before[2]) == 0o600
+             and before[3:6] == (os.getuid(),os.getgid(),1) and 0 < before[6] <= cap
+             and identity(os.stat(path,follow_symlinks=False)) == before, 'resume-normal-projection-file')
+        body = os.pread(fd,before[6]+1,0)
+        need(len(body) == before[6] and not os.pread(fd,1,before[6])
+             and identity(os.fstat(fd)) == before, 'resume-normal-projection-read-post')
+        return body
+    try:
+        for name in ('build.status',test_stem+'.status',summary_stem+'.status'):
+            need(read(name,16) == b'0\n', 'resume-normal-caller-zero')
+        rows = [decode(read(name,32768)) for name in ('fixed-carrier-install.json','build.command-admission.json',
+                 test_stem+'.runner-admission.json',summary_stem+'.command-admission.json')]
+        summary_body = read(summary_stem+'.json',262144)
+        result = normal_family_projection_data(*rows,summary_body,batch,bundle,
+                    env['GITHUB_SHA'],env['GITHUB_RUN_ID'],env['GITHUB_RUN_ATTEMPT'])
+        for fd,path,before in originals:
+            need(identity(os.fstat(fd)) == before == identity(os.stat(path,follow_symlinks=False)),
+                 'resume-normal-projection-terminal-post')
+    except BaseException as error:
+        primary = error; raise
+    finally:
+        failures = []
+        for fd,path,before in originals:
+            try: os.close(fd)
+            except BaseException: failures.append(1)
+        if failures:
+            if primary is None: raise Refused('resume-normal-projection-close')
+            BaseException.add_note(primary,'resume-normal-projection-close')
+    need(time.monotonic_ns() < started+10_000_000_000, 'resume-normal-projection-final-clock')
+    return result
+
+
+def normal_batch_project_main():
+    env,batch,root = normal_projection_context()
+    started = time.monotonic_ns(); originals = []; primary = None; families = []
+    try:
+        for bundle,test_stem,_,_,_ in NORMAL_FAMILIES[batch]:
+            expected = normal_project_main(bundle)
+            path = root/('fixed-normal-'+test_stem+'.json')
+            fd = os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+            originals.append((fd,path,None)); before = identity(os.fstat(fd)); originals[-1] = (fd,path,before)
+            need(stat.S_ISREG(before[2]) and stat.S_IMODE(before[2]) == 0o600
+                 and before[3:6] == (os.getuid(),os.getgid(),1) and 0 < before[6] <= 32768
+                 and identity(os.stat(path,follow_symlinks=False)) == before, 'resume-normal-family-publication-original')
+            body = os.pread(fd,before[6]+1,0)
+            need(len(body) == before[6] and not os.pread(fd,1,before[6]) and body == canonical(expected)+b'\n'
+                 and identity(os.fstat(fd)) == before, 'resume-normal-family-publication-readback')
+            families.append({'family':bundle,'result':'passed','receiptSha256':sha(body),'testCounts':expected['testCounts']})
+        for fd,path,before in originals:
+            need(identity(os.fstat(fd)) == before == identity(os.stat(path,follow_symlinks=False)),
+                 'resume-normal-batch-terminal-post')
+    except BaseException as error:
+        primary = error; raise
+    finally:
+        failures = []
+        for fd,path,before in originals:
+            try: os.close(fd)
+            except BaseException: failures.append(1)
+        if failures:
+            if primary is None: raise Refused('resume-normal-batch-close')
+            BaseException.add_note(primary,'resume-normal-batch-close')
+    need(time.monotonic_ns() < started+30_000_000_000, 'resume-normal-batch-final-clock')
+    return {'schemaVersion':1,'scope':NORMAL_SCOPE,'normalBatch':batch,'producerSource':ORIGIN['source'],
+            'harnessSource':env['GITHUB_SHA'],'consumerRunId':env['GITHUB_RUN_ID'],
+            'consumerRunAttempt':env['GITHUB_RUN_ATTEMPT'],'target':TARGETS[0],
+            'families':families,'batchResult':'passed','rawTextExported':False,
+            'currentProductQualified':False,'p0Qualified':False,'intelQualified':False,'productReady':False}
+
+# Finite observation only. A failed/unknown row never authorizes another family
+# or cleanup; already-closed family receipts remain independently interpretable.
+def normal_failure_data(native,batch,statuses,passed,harness_status):
+    need(type(batch) is str and batch in NORMAL_FAMILIES, 'resume-normal-diagnostic-batch')
+    expected = {row[0] for row in NORMAL_FAMILIES[batch]}
+    need(type(statuses) is dict and set(statuses) == expected and type(passed) is set and passed <= expected,
+         'resume-normal-diagnostic-roster')
+    rows = []
+    for bundle,_,_,_,_ in NORMAL_FAMILIES[batch]:
+        values = statuses[bundle]
+        need(type(values) is dict and set(values) == {'test','summary','result'}
+             and all(v is None or type(v) is int and 0 <= v <= 255 for v in values.values()),
+             'resume-normal-diagnostic-status')
+        need(bundle not in passed or all(type(v) is int and v == 0 for v in values.values()),
+             'resume-normal-diagnostic-passed-status')
+        state = ('passed' if bundle in passed else 'not-run' if all(v is None for v in values.values())
+                 else 'failed' if any(type(v) is int and v != 0 for v in values.values()) else 'unknown')
+        rows.append({'family':bundle,'state':state,'callerStatuses':dict(values)})
+    need(harness_status is None or type(harness_status) is int and 0 <= harness_status <= 255,
+         'resume-normal-diagnostic-harness')
+    native_row = {'state':'unavailable','phase':None,'originalClosesKnown':None,'workloadsKnownSettled':None,
+                  'privateOutputsRetired':None,'failureLocation':unavailable_location(),'resourceAdmission':None}
+    allowed = ('admission','initial-source','attach','producer-signature','installer','readback','detach-finality',
+               'resource-admission','acquire-carrier','complete')
+    if type(native) is dict and native.get('schemaVersion') == 1 and native.get('scope') == NORMAL_SCOPE and native.get('normalBatch') == batch and native.get('accepted') is False:
+        phase = native.get('firstFailurePhase') or native.get('phase')
+        if type(phase) is str and phase in allowed:
+            native_row.update(state='observed-failure',phase=phase,failureLocation=location_data(native.get('failureLocation')))
+            native_row['resourceAdmission'] = resource_projection_data(native.get('resourceAdmission'))
+            for key in ('originalClosesKnown','workloadsKnownSettled','privateOutputsRetired'):
+                native_row[key] = native.get(key) if type(native.get(key)) is bool else None
+    return {'schemaVersion':1,'scope':NORMAL_SCOPE,'normalBatch':batch,'families':rows,
+            'harnessReturncode':harness_status,'native':native_row,'purpose':'finite-current-consumer-observation-only',
+            'successInferred':False,'unknownStateNotConvertedToCleanup':True,'rawTextExported':False,
+            'currentProductQualified':False,'p0Qualified':False,'intelQualified':False,'productReady':False}
+
+# Observation must preserve source/close failure as unknown, never as success.
+def normal_diagnostic_main():
+    env,batch,root = normal_projection_context()
+    started = time.monotonic_ns(); originals = []; primary = None
+    def optional(name,cap):
+        need(time.monotonic_ns() < started+30_000_000_000, 'resume-normal-diagnostic-clock')
+        path = root/name
+        try: fd = os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+        except FileNotFoundError: return None
+        originals.append((fd,path,None)); before = identity(os.fstat(fd)); originals[-1] = (fd,path,before)
+        need(stat.S_ISREG(before[2]) and stat.S_IMODE(before[2]) == 0o600
+             and before[3:6] == (os.getuid(),os.getgid(),1) and 0 <= before[6] <= cap
+             and identity(os.stat(path,follow_symlinks=False)) == before, 'resume-normal-diagnostic-file')
+        body = os.pread(fd,before[6]+1,0)
+        need(len(body) == before[6] and not os.pread(fd,1,before[6]) and identity(os.fstat(fd)) == before,
+             'resume-normal-diagnostic-read-post')
+        return body
+    def status(name):
+        body = optional(name,16)
+        return int(body) if body is not None and re.fullmatch(rb'(0|[1-9][0-9]{0,2})\n',body) and int(body) <= 255 else None
+    try:
+        statuses = {}; passed = set(); ui = None
+        for bundle,test_stem,summary_stem,_,_ in NORMAL_FAMILIES[batch]:
+            values = {'test':status(test_stem+'.status'),'summary':status(summary_stem+'.status'),
+                      'result':status('fixed-normal-'+test_stem+'.status')}
+            statuses[bundle] = values
+            if all(type(v) is int and v == 0 for v in values.values()):
+                try:
+                    expected = normal_project_main(bundle)
+                    body = optional('fixed-normal-'+test_stem+'.json',32768)
+                    if body == canonical(expected)+b'\n': passed.add(bundle)
+                except (Refused,OSError,ValueError,TypeError):
+                    pass # Earlier unverifiable publication remains unknown.
+            for stem in (test_stem,summary_stem):
+                body = optional(stem+'.failure-diagnostics.json',4096)
+                candidate = decode(body) if body else None
+                if ui is None and type(candidate) is dict and candidate.get('scope') == 'normal-macos-ui-admission-diagnostic-only':
+                    ui = candidate
+        body = optional('build.failure-diagnostics.json',4096)
+        candidate = decode(body) if body else None
+        if ui is None and type(candidate) is dict and candidate.get('scope') == 'normal-macos-ui-admission-diagnostic-only':
+            ui = candidate
+        body = optional('fixed-carrier-install.json',16384)
+        native = decode(body) if body else None
+        result = normal_failure_data(native,batch,statuses,passed,status('build.status'))
+        admission = finite_failure_data(None,{k:None for k in ('installer','harness','ios','summary','result')},ui)
+        result.update(admissionExceptionClass=admission['admissionExceptionClass'],
+                      admissionStage=admission['admissionStage'],ownerFailure=admission['ownerFailure'],
+                      producerSource=ORIGIN['source'],consumerSource=env['GITHUB_SHA'],
+                      consumerRunId=env['GITHUB_RUN_ID'],consumerRunAttempt=env['GITHUB_RUN_ATTEMPT'])
+        for fd,path,before in originals:
+            need(identity(os.fstat(fd)) == before == identity(os.stat(path,follow_symlinks=False)),
+                 'resume-normal-diagnostic-terminal-post')
+    except BaseException as error:
+        primary = error; raise
+    finally:
+        failures = []
+        for fd,path,before in originals:
+            try: os.close(fd)
+            except BaseException: failures.append(1)
+        if failures:
+            if primary is None: raise Refused('resume-normal-diagnostic-close')
+            BaseException.add_note(primary,'resume-normal-diagnostic-close')
+    need(time.monotonic_ns() < started+30_000_000_000, 'resume-normal-diagnostic-final-clock')
+    return result
+
+
+def resume_selection_data(env):
+    marker = env.get('TEST_RUNNER_MRK_NORMAL_UI_FIXED_CARRIER_RESUME')
+    if env.get(NORMAL_BATCH_ENV) is None:
+        need(marker in (None,SCOPE), 'resume-legacy-scope')
+        return SCOPE,None
+    need(marker == NORMAL_SCOPE, 'resume-normal-explicit-scope')
+    return NORMAL_SCOPE,normal_batch_data(env)
+
+
 def main():
     env = os.environ
     started = env.get('MRK_FIXED_RESUME_STARTED_NS', '')
@@ -1244,6 +1589,7 @@ def main():
          and re.fullmatch(r'[0-9a-f]{40}', env.get('GITHUB_SHA', ''))
          and all(re.fullmatch(r'[1-9][0-9]{0,19}', env.get(k, '')) for k in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')),
          'resume-current-harness-context')
+    scope, normal_batch = resume_selection_data(env)
     root = Path(__file__).absolute().parents[2]
     need(str(root) == env.get('GITHUB_WORKSPACE') and str(root) == '/Users/runner/work/mobile-release-kit/mobile-release-kit'
          and env.get('RUNNER_TEMP') == '/Users/runner/work/_temp', 'resume-fixed-checkout')
@@ -1322,7 +1668,10 @@ def main():
         retained = sum(len(content) for _, content in session.sources) + len(ca_body) + ORIGIN['artifactBytes'] + ORIGIN['imageBytes'] + ORIGIN['package']['bytes'] + host_retained_bytes + (2 << 20)
         required_memory = 6 * LIMIT + retained + (512 << 20) + (1 << 30)
         disk = os.fstatvfs(session.parent['fd'])
-        need(memory['availableEstimateBytes'] >= required_memory and disk.f_bavail * disk.f_frsize >= (3 << 30) + 2 * ORIGIN['artifactBytes'] + host_output_bytes, 'resume-resource-admission')
+        STATE['resourceAdmission'] = resource_admission_data(memory['availableEstimateBytes'],required_memory,
+                    disk.f_bavail * disk.f_frsize,(3 << 30) + 2 * ORIGIN['artifactBytes'] + host_output_bytes)
+        need(STATE['resourceAdmission']['memorySufficient'], 'resume-resource-memory-admission')
+        need(STATE['resourceAdmission']['diskSufficient'], 'resume-resource-disk-admission')
         STATE['phase'] = 'acquire-carrier'
         artifact = session.acquire_fixed(); preview = preview_data(artifact['PREVIEW.json'], session.stager)
         session.preview_bytes, session.preview_sha = len(artifact['PREVIEW.json']), sha(artifact['PREVIEW.json'])
@@ -1333,7 +1682,7 @@ def main():
         STATE['workloadsKnownSettled'] = all(v['returned'] and v['capturesSettled'] for v in session.calls)
         need(STATE['workloadsKnownSettled'] and session.installer_zero and session.readback_known and session.mount_detached, 'resume-original-terminal-finality')
         STATE['phase'] = 'complete'
-        return {'schemaVersion': 1, 'scope': SCOPE, 'producerSource': ORIGIN['source'], 'producerTree': ORIGIN['tree'],
+        receipt = {'schemaVersion': 1, 'scope': scope, 'producerSource': ORIGIN['source'], 'producerTree': ORIGIN['tree'],
                 'producerRunId': ORIGIN['runId'], 'producerRunAttempt': ORIGIN['runAttempt'], 'producerJobId': ORIGIN['jobId'],
                 'artifactId': ORIGIN['artifactId'], 'artifactSha256': ORIGIN['artifactSha256'], 'consumerSource': env['GITHUB_SHA'],
                 'consumerRunId': env['GITHUB_RUN_ID'], 'consumerRunAttempt': env['GITHUB_RUN_ATTEMPT'], 'target': TARGETS[0],
@@ -1341,6 +1690,9 @@ def main():
                 'originalClosesKnown': True, 'workloadsKnownSettled': True, 'privateOutputsRetired': True,
                 'receiptAuthority': 'same-consumer-owned-installer-and-readback-not-old-status', 'productReady': False,
                 'p0Qualified': False, 'intelQualified': False}
+        if normal_batch is not None:
+            receipt['normalBatch'] = normal_batch
+        return receipt
     except BaseException as error:
         primary = error
         if STATE['firstFailurePhase'] is None:
@@ -1456,7 +1808,7 @@ def project_main():
 # Closed first-party SOURCE locations only. These exact leaves are compiled only
 # after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
 # traceback rendering, error args/notes/locals or private filenames are used.
-FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6023, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 1684}
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6023, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2108}
 FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
 
 
@@ -1516,7 +1868,7 @@ def finite_failure_data(native, statuses, ui):
     for role,value in statuses.items():
         need(value is None or type(value)is int and 0<=value<=255,'resume-diagnostic-status-value')
         rows[role]={'state':'unavailable' if value is None else 'observed','returncode':value}
-    native_row={'state':'unavailable','phase':None,'originalClosesKnown':None,'workloadsKnownSettled':None,'privateOutputsRetired':None,'failureLocation':unavailable_location()}
+    native_row={'state':'unavailable','phase':None,'originalClosesKnown':None,'workloadsKnownSettled':None,'privateOutputsRetired':None,'failureLocation':unavailable_location(),'resourceAdmission':None}
     allowed=('admission','initial-source','attach','producer-signature','installer','readback','detach-finality',
              'resource-admission','acquire-carrier','complete')
     if type(native)is dict and native.get('schemaVersion')==1 and native.get('scope')==SCOPE and native.get('accepted')is False:
@@ -1524,6 +1876,7 @@ def finite_failure_data(native, statuses, ui):
         if phase in allowed and type(phase)is str:
             native_row['state']='observed-failure';native_row['phase']=phase
             native_row['failureLocation']=location_data(native.get('failureLocation'))
+            native_row['resourceAdmission']=resource_projection_data(native.get('resourceAdmission'))
             for key in ('originalClosesKnown','workloadsKnownSettled','privateOutputsRetired'):
                 native_row[key]=native.get(key) if type(native.get(key))is bool else None
     stages={'state':'unavailable','events':[]};owner={'dispatched':None,'contained':None,'cleanupComplete':None}
@@ -1650,6 +2003,61 @@ def cleanup_main():
             if primary is None:raise Refused('resume-cleanup-close')
             BaseException.add_note(primary,'resume-cleanup-close')
 
+def normal_cleanup_main():
+    """Existing symlink-safe fixed-output cleanup, only after joined success.
+
+    Protected installed state/vault and separately retained Swift /private/tmp
+    fixture originals are outside this cleanup authority, never glob-discovered.
+    """
+    import shutil
+    env=os.environ
+    need(env.get('MRK_FIXED_RESULT_OUTCOME')=='success' and env.get('MRK_FIXED_UPLOAD_OUTCOME')=='success'
+         and shutil.rmtree.avoids_symlink_attacks,'resume-cleanup-success-authority')
+    result=normal_batch_project_main() # Same genuine current0/status/admission/marker joins before deletion.
+    _,batch,normal=normal_projection_context()
+    work=normal.parent;fds=[];primary=None
+    try:
+        for path in (work,normal):
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_DIRECTORY|os.O_CLOEXEC);fds.append((fd,path,identity(os.fstat(fd))[:5]))
+        wfd,_,wbefore=fds[0];nfd,_,nbefore=fds[1]
+        for fd,path,before in fds:
+            need(stat.S_ISDIR(before[2])and stat.S_IMODE(before[2])==0o700 and before[3:5]==(os.getuid(),os.getgid())
+                 and identity(os.stat(path,follow_symlinks=False))[:5]==before,'resume-cleanup-parent')
+        binding_fd=os.open('consumer-work-binding.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=nfd);fds.append((binding_fd,normal/'consumer-work-binding.json',identity(os.fstat(binding_fd))))
+        original=fds[-1][2];need(stat.S_ISREG(original[2])and stat.S_IMODE(original[2])==0o600 and original[3:6]==(os.getuid(),os.getgid(),1)
+             and 0<original[6]<=4096,'resume-cleanup-binding-original')
+        body=os.pread(binding_fd,original[6]+1,0);need(len(body)==original[6]and not os.pread(binding_fd,1,original[6]),'resume-cleanup-binding-read')
+        binding=decode(body)
+        need(binding.get('source')==env['GITHUB_SHA'] and binding.get('runId')==env['GITHUB_RUN_ID'] and binding.get('runAttempt')==env['GITHUB_RUN_ATTEMPT']
+             and binding.get('workIdentity')==list(wbefore)and binding.get('normalIdentity')==list(nbefore),'resume-cleanup-admitted-root')
+        def post():
+            for fd,path,before in fds:need(identity(os.fstat(fd))[:len(before)]==before==identity(os.stat(path,follow_symlinks=False))[:len(before)],'resume-cleanup-parent-post')
+        post()
+        # Same standard fd-based shutil primitive used in the original installed
+        # workflow, narrowed to this consumer's three known settled output roots.
+        for name in ('DerivedData',*[row[0] for row in NORMAL_FAMILIES[batch]],'tmp'):
+            info=os.stat(name,dir_fd=nfd,follow_symlinks=False)
+            need(stat.S_ISDIR(info.st_mode)and info.st_uid==os.getuid()and info.st_dev==wbefore[0],'resume-cleanup-directory')
+            post();shutil.rmtree(name,dir_fd=nfd);post()
+        outputs=['build.log','build.stderr']
+        for _,test_stem,summary_stem,_,_ in NORMAL_FAMILIES[batch]:
+            outputs.extend((test_stem+'.log',test_stem+'.stderr',summary_stem+'.json',summary_stem+'.stderr'))
+        for name in outputs:
+            info=os.stat(name,dir_fd=nfd,follow_symlinks=False)
+            need(stat.S_ISREG(info.st_mode)and info.st_uid==os.getuid()and info.st_nlink==1 and info.st_dev==wbefore[0],'resume-cleanup-private-output')
+            post();os.unlink(name,dir_fd=nfd);post()
+        return {'schemaVersion':1,'scope':NORMAL_SCOPE,'normalBatch':batch,'taskHarnessOutputsRetired':True,'installedAppRetained':True,
+                'separateSyntheticFixtureRetired':False,'sharedServicesStopped':False,'productReady':False}
+    except BaseException as error:primary=error;raise
+    finally:
+        errors=[]
+        for fd,path,before in reversed(fds):
+            try:os.close(fd)
+            except BaseException:errors.append(1)
+        if errors:
+            if primary is None:raise Refused('resume-cleanup-close')
+            BaseException.add_note(primary,'resume-cleanup-close')
+
 if __name__ == '__main__':
     if sys.argv[1:] == ['acquire']:
         # Never native install in the transport child.
@@ -1667,6 +2075,19 @@ if __name__ == '__main__':
             sys.stdout.buffer.write(canonical({'schemaVersion':1,'scope':SCOPE,'accepted':False,'phase':'projection','productReady':False,'p0Qualified':False})+b'\n')
             raise SystemExit(1) from None
         sys.stdout.buffer.write(canonical(result)+b'\n')
+    elif sys.argv[1:] in (['project-normal-batch'],['diagnostic-normal'],['cleanup-normal']) or (len(sys.argv) == 3 and sys.argv[1] == 'project-normal'):
+        scope,batch = NORMAL_SCOPE,None
+        try:
+            _,batch,_ = normal_projection_context()
+            result = (normal_project_main(sys.argv[2]+'.xcresult') if sys.argv[1] == 'project-normal' else
+                      normal_batch_project_main() if sys.argv[1] == 'project-normal-batch' else
+                      normal_diagnostic_main() if sys.argv[1] == 'diagnostic-normal' else normal_cleanup_main())
+        except BaseException:
+            sys.stdout.buffer.write(canonical({'schemaVersion':1,'scope':scope,'normalBatch':batch,'accepted':False,
+                'phase':'finite-observation-or-cleanup' if sys.argv[1] in ('diagnostic-normal','cleanup-normal') else 'projection',
+                'productReady':False,'currentProductQualified':False,'p0Qualified':False,'intelQualified':False})+b'\n')
+            raise SystemExit(1) from None
+        sys.stdout.buffer.write(canonical(result)+b'\n')
     elif sys.argv[1:]:
         raise SystemExit(2)
     else:
@@ -1674,9 +2095,12 @@ if __name__ == '__main__':
             result = main()
         except BaseException as error:
             # Fixed finite state only; no paths, tokens, inputs/captures or exception text.
-            sys.stdout.buffer.write(canonical({'schemaVersion': 1, 'scope': SCOPE, 'accepted': False,
+            normal_batch = os.environ.get(NORMAL_BATCH_ENV)
+            ordinary = os.environ.get('TEST_RUNNER_MRK_NORMAL_UI_FIXED_CARRIER_RESUME') == NORMAL_SCOPE and normal_batch in NORMAL_FAMILIES
+            selection = {'normalBatch':normal_batch} if ordinary else {}
+            sys.stdout.buffer.write(canonical({'schemaVersion': 1, 'scope': NORMAL_SCOPE if ordinary else SCOPE, **selection, 'accepted': False,
                 'phase': STATE['phase'], 'firstFailurePhase': STATE['firstFailurePhase'],
-                'failureLocation': failure_location(error),
+                'failureLocation': failure_location(error), 'resourceAdmission': STATE['resourceAdmission'],
                 'originalClosesKnown': STATE['originalClosesKnown'],
                 'workloadsKnownSettled': STATE['workloadsKnownSettled'], 'privateOutputsRetired': STATE['privateOutputsRetired'],
                 'productReady': False, 'p0Qualified': False, 'intelQualified': False}) + b'\n')

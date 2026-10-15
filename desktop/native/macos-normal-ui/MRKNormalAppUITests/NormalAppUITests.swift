@@ -986,7 +986,29 @@ final class NormalAppUITests: XCTestCase {
     }
     // End engineering main fixture; ordinary installed cases below are unchanged.
 
-    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, updateP0Bootstrap }
+    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, fixedNormalBatch, updateP0Bootstrap }
+
+    private let fixedNormalBatches: [String: Set<String>] = [
+        "launch-project": ["test.xcresult", "project-test.xcresult"],
+        "doctor-saved-checks": ["diagnostics-test.xcresult", "saved-checks-test.xcresult"],
+        "local-github-evidence": ["workflow-refusal-test.xcresult", "release-evidence-test.xcresult"],
+        "persistence": ["persistence-test.xcresult"],
+    ]
+
+    @MainActor private func normalJourneyProfile(for result: String) throws -> SourceProfile {
+        let context = ProcessInfo.processInfo.environment
+        guard let scope = context["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] else {
+            try require(context["MRK_NORMAL_UI_FIXED_NORMAL_BATCH"] == nil,
+                        "a normal batch cannot be selected without its closed source profile")
+            return .sameBuild
+        }
+        guard let batch = context["MRK_NORMAL_UI_FIXED_NORMAL_BATCH"], let results = fixedNormalBatches[batch] else {
+            throw Refusal.condition("the fixed normal batch is missing or unsupported")
+        }
+        try require(scope == "fixed-ce644-arm-carrier-normal-local-batch-v1" && results.contains(result),
+                    "this ordinary journey is not selected by the fixed normal batch")
+        return .fixedNormalBatch
+    }
 
     @MainActor private func admitHostedAccount(_ profile: SourceProfile = .sameBuild) throws -> HostedAccount {
         let context = ProcessInfo.processInfo.environment
@@ -1034,6 +1056,16 @@ final class NormalAppUITests: XCTestCase {
             #else
             try require(false, "the fixed-carrier recovery has no nominated Intel output")
             #endif
+        case .fixedNormalBatch:
+            #if arch(arm64)
+            let batch = context["MRK_NORMAL_UI_FIXED_NORMAL_BATCH"] ?? ""
+            try require(applicationSource == "ce644711fb6e2bea26182473441aac192d5638e1" && harnessSource != applicationSource
+                        && context["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] == "fixed-ce644-arm-carrier-normal-local-batch-v1"
+                        && fixedNormalBatches[batch] != nil,
+                        "only the exact retained-carrier normal batch admits separate package and harness sources")
+            #else
+            try require(false, "the fixed normal batch has no nominated Intel output")
+            #endif
         case .updateP0Bootstrap:
             guard let fixture = ownedFixture else { throw Refusal.condition("qualified P0 fixture admission missing") }
             try fixture.updateInputPost()
@@ -1069,7 +1101,14 @@ final class NormalAppUITests: XCTestCase {
         // XCTest's whole-minute allowance remains exactly sixty seconds.
         executionTimeAllowance = 60
         try beginCase(seconds: 60) // Before any in-case account or installation admission.
-        _ = try admittedJourneyApplication(profile: profile)
+        let admittedProfile: SourceProfile
+        switch profile {
+        case .sameBuild:
+            admittedProfile = try normalJourneyProfile(for: "test.xcresult")
+        default:
+            admittedProfile = profile
+        }
+        _ = try admittedJourneyApplication(profile: admittedProfile)
         let app = try launchOrdinaryApplication()
         guard let gate = entryGateObservation else { throw Refusal.condition("original gate observation missing") }
         try require(app.wait(for: .runningForeground, timeout: try remaining(5)), "ordinary app did not enter the foreground")
@@ -4464,14 +4503,14 @@ final class NormalAppUITests: XCTestCase {
         let fixture = LocalFixture()
         ownedFixture = fixture
         try stage("persistence-admission") {
-            _ = try admittedJourneyApplication()
+            _ = try admittedJourneyApplication(profile: normalJourneyProfile(for: "persistence-test.xcresult"))
             try fixture.admitDefaultVault() // Before any application launch.
             try fixture.prepare(.persistentCredentials)
         }
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
         try stage("persistence-launch") {
             try fixture.assertDefaultVaultAbsent()
-            launched = try launchForJourney()
+            launched = try launchForJourney(profile: normalJourneyProfile(for: "persistence-test.xcresult"))
         }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary launch returned no original") }
         var selectedStorage: XCUIElement?
@@ -4592,7 +4631,7 @@ final class NormalAppUITests: XCTestCase {
         var restarted: (XCUIApplication, XCUIElement, XCUIElement)?
         try stage("persistence-restart-launch") {
             try retainPersistenceLifetimeForRestart(app, fixture: fixture)
-            restarted = try launchForJourney()
+            restarted = try launchForJourney(profile: normalJourneyProfile(for: "persistence-test.xcresult"))
         }
         guard let (restartedApp, restartedWindow, restartedRenderer) = restarted else {
             throw Refusal.condition("second ordinary launch returned no original")
@@ -4650,7 +4689,7 @@ final class NormalAppUITests: XCTestCase {
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
-        try stage("launch") { launched = try launchForJourney() }
+        try stage("launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "project-test.xcresult")) }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary launch returned no original") }
         let fixture = LocalFixture()
         ownedFixture = fixture
@@ -4875,7 +4914,15 @@ final class NormalAppUITests: XCTestCase {
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
-        try stage("launch") { launched = try launchForJourney() }
+        try stage("launch") {
+            let profile: SourceProfile
+            if includeImages {
+                profile = try normalJourneyProfile(for: "project-test.xcresult")
+            } else {
+                profile = .sameBuild
+            }
+            launched = try launchForJourney(profile: profile)
+        }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary launch returned no original") }
         let fixture = LocalFixture()
         ownedFixture = fixture
@@ -5239,7 +5286,7 @@ final class NormalAppUITests: XCTestCase {
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
-        try stage("evidence-launch") { launched = try launchForJourney() }
+        try stage("evidence-launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "release-evidence-test.xcresult")) }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary launch returned no original") }
         let fixture = LocalFixture()
         ownedFixture = fixture
@@ -5359,7 +5406,7 @@ final class NormalAppUITests: XCTestCase {
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
-        try stage("workflow-refusal-launch") { launched = try launchForJourney() }
+        try stage("workflow-refusal-launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "workflow-refusal-test.xcresult")) }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary launch returned no original") }
         let fixture = LocalFixture()
         ownedFixture = fixture
@@ -5533,7 +5580,7 @@ final class NormalAppUITests: XCTestCase {
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
-        try stage("offline-launch") { launched = try launchForJourney() }
+        try stage("offline-launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "saved-checks-test.xcresult")) }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary offline launch returned no original") }
         let fixture = LocalFixture()
         ownedFixture = fixture
@@ -5650,7 +5697,7 @@ final class NormalAppUITests: XCTestCase {
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
-        try stage("recovery-idle-launch") { launched = try launchForJourney() }
+        try stage("recovery-idle-launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "saved-checks-test.xcresult")) }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary empty-recovery launch returned no original") }
         let fixture = LocalFixture()
         ownedFixture = fixture
@@ -5773,7 +5820,7 @@ final class NormalAppUITests: XCTestCase {
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
-        try stage("diagnostics-launch") { launched = try launchForJourney() }
+        try stage("diagnostics-launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "diagnostics-test.xcresult")) }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary diagnostics launch returned no original") }
         let fixture = LocalFixture()
         ownedFixture = fixture

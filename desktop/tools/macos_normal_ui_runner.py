@@ -3129,7 +3129,13 @@ def execute_normal_phase(phase, request, source, file_limit):
             facts["savedReleaseEvidenceMarkerObserved"] = normal_release_evidence_markers(original.stdout)
         receipt = result.with_suffix(".runner-admission.json")
     need(normal_source_state(phase, source) == before, "normal-ui-source-pre-post")
-    if FIXED_RESUME_ENV in phase.environment:
+    if FIXED_NORMAL_BATCH_ENV in phase.environment:
+        need(phase.environment.get(FIXED_RESUME_ENV) == FIXED_NORMAL_SCOPE
+             and phase.environment[FIXED_NORMAL_BATCH_ENV] in FIXED_NORMAL_BATCHES, "fixed-normal-receipt-marker-pair")
+        facts.update(fixedCarrierResumeScope=FIXED_NORMAL_SCOPE, applicationSourceCommit=FIXED_RESUME_SOURCE,
+                     fixedNormalBatch=phase.environment[FIXED_NORMAL_BATCH_ENV],
+                     currentProductQualified=False, p0Qualified=False, intelQualified=False)
+    elif FIXED_RESUME_ENV in phase.environment:
         facts.update(fixedCarrierResumeScope=FIXED_RESUME_SCOPE, applicationSourceCommit=FIXED_RESUME_SOURCE,
                      currentProductQualified=False, p0Qualified=False, intelQualified=False)
     facts.update(target=target, sourceCommit=source, sourceRosterSha256=sha(encoded(before)), sourcePrePostMatched=True,
@@ -4147,6 +4153,94 @@ def fixed_resume_context(request, source):
     return {FIXED_RESUME_ENV: FIXED_RESUME_SCOPE}
 
 
+FIXED_NORMAL_SCOPE = 'fixed-ce644-arm-carrier-normal-local-batch-v1'
+FIXED_NORMAL_BATCH_ENV = 'TEST_RUNNER_MRK_NORMAL_UI_FIXED_NORMAL_BATCH'
+FIXED_NORMAL_BATCHES = {
+    'launch-project': ('test.xcresult', 'project-test.xcresult'),
+    'doctor-saved-checks': ('diagnostics-test.xcresult', 'saved-checks-test.xcresult'),
+    'local-github-evidence': ('workflow-refusal-test.xcresult', 'release-evidence-test.xcresult'),
+    'persistence': ('persistence-test.xcresult',),
+}
+
+
+def fixed_normal_context(request, source):
+    """Closed ordinary local batch; origin is not current-product or P0 authority."""
+    env = os.environ
+    batch = env.get(FIXED_NORMAL_BATCH_ENV)
+    need(type(batch) is str and batch in FIXED_NORMAL_BATCHES
+         and set(request) == {'phase', 'derived', 'result', 'methods', 'allowance', 'timeout', 'phaseSeconds', 'target'},
+         'fixed-normal-closed-request')
+    if request['phase'] == 'build':
+        need(request['result'] is None and request['methods'] == () and request['allowance'] is None
+             and (request['timeout'], request['phaseSeconds']) == (240, 450), 'fixed-normal-build-selection')
+    else:
+        result = request['result']
+        need(isinstance(result, Path) and result.name in FIXED_NORMAL_BATCHES[batch]
+             and result.parent == request['derived'].parent, 'fixed-normal-result-selection')
+        methods, allowance, timeout = NORMAL_SELECTIONS[result.name]
+        need(request['phase'] == 'test' and request['methods'] == tuple(CLASS + method for method in methods)
+             and request['allowance'] == allowance and request['timeout'] == timeout
+             and request['phaseSeconds'] == (345 if timeout == 180 else 885 if timeout == 720 else 585)
+             or request['phase'] == 'summary' and request['methods'] == () and request['allowance'] is None
+             and (request['timeout'], request['phaseSeconds']) == (30, 90), 'fixed-normal-existing-selection')
+    need(request['target'] == ARM_TARGET and request['phase'] in ('build', 'test', 'summary')
+         and sys.version_info[:3] == (3, 14, 7) and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
+         and env.get(FIXED_RESUME_ENV) == FIXED_NORMAL_SCOPE
+         and env.get('TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE') == FIXED_RESUME_SOURCE
+         and source != FIXED_RESUME_SOURCE
+         and env.get('GITHUB_REPOSITORY') == 'Apdelrahman1911/mobile-release-kit'
+         and env.get('GITHUB_EVENT_NAME') == 'push'
+         and env.get('GITHUB_REF') == 'refs/heads/verify/desktop-macos-installed'
+         and env.get('GITHUB_SHA') == source == env.get('GITHUB_WORKFLOW_SHA')
+         and env.get('GITHUB_WORKFLOW_REF') == 'Apdelrahman1911/mobile-release-kit/' + FIXED_RESUME_WORKFLOW
+              + '@refs/heads/verify/desktop-macos-installed'
+         and env.get('RUNNER_ENVIRONMENT') == 'github-hosted'
+         and env.get('RUNNER_OS') == 'macOS' and env.get('RUNNER_ARCH') == 'ARM64'
+         and all(re.fullmatch(r'[1-9][0-9]{0,19}', env.get(k, '')) for k in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')),
+         'fixed-normal-two-source-context')
+    path = request['derived'].parent / 'fixed-carrier-install.json'
+    expected = env.get('MRK_FIXED_RESUME_RECEIPT_SHA256', '')
+    need(re.fullmatch(r'[0-9a-f]{64}', expected), 'fixed-resume-native-receipt-pin')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    primary = None
+    try:
+        body, before, digest = original_body(fd, 16384, collect=True)
+        need(stat.S_IMODE(before[2]) == 0o600 and before[3:6] == (os.getuid(), os.getgid(), 1)
+             and digest == expected and full9(os.stat(path, follow_symlinks=False)) == before,
+             'fixed-resume-native-receipt-original')
+        row = document(body)
+        need(set(row) == {'schemaVersion', 'scope', 'producerSource', 'producerTree', 'producerRunId', 'producerRunAttempt',
+             'producerJobId', 'artifactId', 'artifactSha256', 'consumerSource', 'consumerRunId', 'consumerRunAttempt',
+             'target', 'originalInstallerReturnedZero', 'sameRequestReadback', 'originalMountDetached', 'originalClosesKnown',
+             'workloadsKnownSettled', 'privateOutputsRetired', 'receiptAuthority', 'productReady', 'p0Qualified', 'intelQualified', 'normalBatch'}
+             and type(row['schemaVersion']) is int and row['schemaVersion'] == 1
+             and row['scope'] == FIXED_NORMAL_SCOPE and row['normalBatch'] == batch
+             and row['producerSource'] == FIXED_RESUME_SOURCE
+             and row['producerTree'] == 'e5c4c43b2a903b3040d24c8bfa94b5236fd12882'
+             and (row['producerRunId'], row['producerRunAttempt'], row['producerJobId']) == ('38649386495', '1', '116144135875')
+             and (row['artifactId'], row['artifactSha256']) == (FIXED_RESUME_ARTIFACT, FIXED_RESUME_ARTIFACT_SHA256)
+             and (row['consumerSource'], row['consumerRunId'], row['consumerRunAttempt'])
+                  == (source, env['GITHUB_RUN_ID'], env['GITHUB_RUN_ATTEMPT'])
+             and row['target'] == ARM_TARGET
+             and all(row[k] is True for k in ('originalInstallerReturnedZero', 'sameRequestReadback', 'originalMountDetached',
+                  'originalClosesKnown', 'workloadsKnownSettled', 'privateOutputsRetired'))
+             and all(row[k] is False for k in ('productReady', 'p0Qualified', 'intelQualified'))
+             and row['receiptAuthority'] == 'same-consumer-owned-installer-and-readback-not-old-status'
+             and encoded(row) + b'\n' == body, 'fixed-resume-native-receipt-join')
+        need(full9(os.fstat(fd)) == before == full9(os.stat(path, follow_symlinks=False)), 'fixed-resume-native-receipt-post')
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        consumed, fd = fd, None
+        try: os.close(consumed)
+        except BaseException:
+            if primary is None: raise Refused('fixed-resume-native-receipt-close') from None
+            BaseException.add_note(primary, 'fixed-resume-native-receipt-close')
+    return {FIXED_RESUME_ENV: FIXED_NORMAL_SCOPE, FIXED_NORMAL_BATCH_ENV: batch}
+
+
+
 def normal_context(request, *, diagnostics=None):
     need(diagnostics is None or type(diagnostics) is dict and not diagnostics, "normal-context-diagnostic-collector")
     machine, hosted_job = normal_target_data(request["target"])
@@ -4156,7 +4250,10 @@ def normal_context(request, *, diagnostics=None):
          and (resume or os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE") == source)
          and os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB") == hosted_job,
          "normal-same-build-only")
-    resume_environment = fixed_resume_context(request, source) if resume else {}
+    normal_batch = os.environ.get(FIXED_RESUME_ENV) == FIXED_NORMAL_SCOPE
+    need(normal_batch or FIXED_NORMAL_BATCH_ENV not in os.environ, "fixed-normal-marker-pair")
+    resume_environment = (fixed_normal_context(request, source) if normal_batch else
+                          fixed_resume_context(request, source) if resume else {})
     import resource  # Native CLI only; inert helper import stays portable.
     need(sys.platform == "darwin" and platform.machine() == machine and (host_version := platform.mac_ver()[0]).startswith("26.")
          and os.environ.get("DEVELOPER_DIR") == DEVELOPER, "normal-host-developer-file-budget")

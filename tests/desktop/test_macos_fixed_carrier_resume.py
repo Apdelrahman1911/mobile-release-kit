@@ -272,6 +272,70 @@ class FixedCarrierResumeData(unittest.TestCase):
         with mock.patch.object(m, 'Path', side_effect=RuntimeError(secret)):
             self.assertEqual(m.failure_location(primary), m.unavailable_location())
 
+
+        # Normal local batches retain an earlier independently joined pass;
+        # later failure/absence cannot manufacture or erase that observation.
+        batch = "launch-project"
+        families = [r[0] for r in m.NORMAL_FAMILIES[batch]]
+        normal_statuses = {families[0]: dict(test=0, summary=0, result=0),
+                           families[1]: dict(test=65, summary=None, result=None)}
+        normal_native = {**native, "scope": m.NORMAL_SCOPE, "normalBatch": batch}
+        retained = m.normal_failure_data(normal_native, batch, normal_statuses, {families[0]}, 0)
+        self.assertEqual([(r["family"], r["state"]) for r in retained["families"]],
+                         [(families[0], "passed"), (families[1], "failed")])
+        self.assertEqual(retained["native"]["phase"], "readback")
+        self.assertIsNone(retained["native"]["originalClosesKnown"])
+        self.assertIs(retained["native"]["workloadsKnownSettled"], False)
+        self.assertIs(retained["successInferred"], False)
+        self.assertNotIn(native["rawText"].encode(), m.canonical(retained))
+        for key, value in (("test", 65), ("summary", None), ("result", True)):
+            bad_statuses = copy.deepcopy(normal_statuses)
+            bad_statuses[families[0]][key] = value
+            with self.subTest(normalPassedStatus=key), self.assertRaises(m.Refused):
+                m.normal_failure_data(normal_native, batch, bad_statuses, {families[0]}, 0)
+        missing = {family: dict(test=None, summary=None, result=None) for family in families}
+        unavailable = m.normal_failure_data(None, batch, missing, set(), None)
+        self.assertEqual([r["state"] for r in unavailable["families"]], ["not-run", "not-run"])
+        self.assertEqual(unavailable["native"]["state"], "unavailable")
+        self.assertIsNone(unavailable["harnessReturncode"])
+        zeros_without_original = {family: dict(test=0, summary=0, result=0) for family in families}
+        unknown = m.normal_failure_data(None, batch, zeros_without_original, set(), 0)
+        self.assertEqual([r["state"] for r in unknown["families"]], ["unknown", "unknown"])
+        with self.assertRaises(m.Refused):
+            m.normal_failure_data(normal_native, batch, missing, {"foreign.xcresult"}, 0)
+        for wrong in (None, True, "foreign-batch"):
+            with self.subTest(normalBatch=wrong), self.assertRaises(m.Refused):
+                m.normal_batch_data({m.NORMAL_BATCH_ENV: wrong})
+
+        # Original resource numbers distinguish memory and disk without changing
+        # either admission floor or exposing host/environment/private strings.
+        for memory_ok, disk_ok in ((False, False), (False, True), (True, False), (True, True)):
+            observation = m.resource_admission_data(100 if memory_ok else 99, 100, 200 if disk_ok else 199, 200)
+            self.assertEqual((observation["memorySufficient"], observation["diskSufficient"]), (memory_ok, disk_ok))
+            self.assertFalse(observation["osMemoryReservation"])
+            self.assertFalse(observation["peakRssQualified"])
+            self.assertEqual(m.resource_projection_data(observation), observation)
+            observed = m.finite_failure_data({**native, "resourceAdmission": observation}, statuses, ui)
+            self.assertEqual(observed["native"]["resourceAdmission"], observation)
+            normal_observed = m.normal_failure_data({**normal_native, "resourceAdmission": observation}, batch, normal_statuses, {families[0]}, 0)
+            self.assertEqual(normal_observed["native"]["resourceAdmission"], observation)
+            for key, value in (("availableMemoryEstimateBytes", True), ("requiredMemoryBytes", 0),
+                               ("availableDiskBytes", -1), ("requiredDiskBytes", 1 << 53),
+                               ("memorySufficient", not memory_ok), ("diskSufficient", not disk_ok),
+                               ("osMemoryReservation", True), ("peakRssQualified", True),
+                               ("availableMemoryEstimateBytes", secret)):
+                with self.subTest(resourceKey=key, memory=memory_ok, disk=disk_ok):
+                    changed = {**observation, key: value}
+                    self.assertIsNone(m.resource_projection_data(changed))
+                    filtered = m.finite_failure_data({**native, "resourceAdmission": changed}, statuses, ui)
+                    self.assertIsNone(filtered["native"]["resourceAdmission"])
+                    self.assertNotIn(secret.encode(), m.canonical(filtered))
+            self.assertIsNone(m.resource_projection_data({**observation, "unrelated": secret}))
+        for values in ((True, 100, 200, 200), (100, 0, 200, 200), (100, 100, -1, 200), (100, 100, 200, 1 << 53)):
+            with self.subTest(resourceValues=values), self.assertRaises(m.Refused):
+                m.resource_admission_data(*values)
+        self.assertIsNone(m.resource_projection_data(None))
+
     def test_fixed_sudo_originals_preserve_quota_snapshot_and_finality(self):
         # Synthetic protocol only: no Darwin syscall, descriptor or command.
         m = ADAPTER
@@ -453,6 +517,68 @@ class FixedCarrierResumeData(unittest.TestCase):
                 self.assertEqual(sentinel.read_bytes(), b"unrelated-owned-test-sentinel")
                 self.assertEqual(keep.read_bytes(), b"unrelated-normal-output")
 
+
+        # Real normal sibling cleanup uses the same fd-based symlink-safe
+        # primitive, narrowed to this batch's exact settled result roster.
+        for batch in m.NORMAL_FAMILIES:
+            for symlink in ((False, True) if batch == "launch-project" else (False,)):
+                with self.subTest(normalBatch=batch, symlink=symlink), tempfile.TemporaryDirectory() as temporary:
+                    work = Path(temporary)
+                    normal = work / "normal-ui"; normal.mkdir(mode=0o700)
+                    outside = work / "unrelated-output"; outside.mkdir(mode=0o700)
+                    sentinel = outside / "keep.txt"; sentinel.write_bytes(b"unrelated-owned-test-sentinel")
+                    host = work / "host-python"; host.mkdir(mode=0o700)
+                    (host / "keep.txt").write_bytes(b"retained-private-host-original")
+                    keep = normal / "keep.txt"; keep.write_bytes(b"unrelated-normal-output")
+                    unselected = normal / "unselected-result.xcresult"; unselected.mkdir(mode=0o700)
+                    (unselected / "keep.txt").write_bytes(b"unselected-original")
+                    roots = ["DerivedData", *[r[0] for r in m.NORMAL_FAMILIES[batch]], "tmp"]
+                    for name in roots:
+                        if symlink and name == "DerivedData":
+                            (normal / name).symlink_to(outside, target_is_directory=True)
+                        else:
+                            (normal / name).mkdir(mode=0o700)
+                            (normal / name / "disposable.txt").write_bytes(b"synthetic-disposable-output")
+                    disposable = ["build.log", "build.stderr"]
+                    retained_files = ["fixed-carrier-install.json", "fixed-normal-batch.json", "fixed-normal-diagnostic.json"]
+                    for _, test_stem, summary_stem, _, _ in m.NORMAL_FAMILIES[batch]:
+                        disposable.extend((test_stem + ".log", test_stem + ".stderr", summary_stem + ".json", summary_stem + ".stderr"))
+                        retained_files.extend((test_stem + ".status", summary_stem + ".status", "fixed-normal-" + test_stem + ".json"))
+                    for name in disposable: (normal / name).write_bytes(b"synthetic-disposable-capture")
+                    for name in retained_files: (normal / name).write_bytes(b"retained-finite-original")
+                    binding = dict(source="a" * 40, runId="2", runAttempt="1",
+                        workIdentity=list(m.identity(work.stat())[:5]), normalIdentity=list(m.identity(normal.stat())[:5]))
+                    binding_path = normal / "consumer-work-binding.json"
+                    binding_path.write_bytes(m.canonical(binding)); binding_path.chmod(0o600)
+                    env = dict(MRK_FIXED_RESULT_OUTCOME="success", MRK_FIXED_UPLOAD_OUTCOME="success",
+                               GITHUB_SHA="a" * 40, GITHUB_RUN_ID="2", GITHUB_RUN_ATTEMPT="1")
+                    # Joined family/batch authority is covered by the actual
+                    # reducer and readback cases below; isolate filesystem effects.
+                    with mock.patch.dict(m.os.environ, env, clear=True), \
+                         mock.patch.object(m, "normal_batch_project_main", return_value={}), \
+                         mock.patch.object(m, "normal_projection_context", return_value=(env, batch, normal)):
+                        if symlink:
+                            with self.assertRaises(m.Refused): m.normal_cleanup_main()
+                            self.assertTrue(all((normal / r[0]).is_dir() for r in m.NORMAL_FAMILIES[batch]))
+                            self.assertTrue((normal / "build.log").exists())
+                        else:
+                            retired = m.normal_cleanup_main()
+                            self.assertIs(retired["taskHarnessOutputsRetired"], True)
+                            self.assertIs(retired["installedAppRetained"], True)
+                            self.assertIs(retired["separateSyntheticFixtureRetired"], False)
+                            self.assertFalse(any((normal / name).exists() for name in roots + disposable))
+                    self.assertEqual(sentinel.read_bytes(), b"unrelated-owned-test-sentinel")
+                    self.assertEqual(keep.read_bytes(), b"unrelated-normal-output")
+                    self.assertEqual((host / "keep.txt").read_bytes(), b"retained-private-host-original")
+                    self.assertEqual((unselected / "keep.txt").read_bytes(), b"unselected-original")
+                    self.assertTrue(all((normal / name).exists() for name in retained_files))
+        # Failed or unknown publication has no normal cleanup authority.
+        for bad in ({"MRK_FIXED_RESULT_OUTCOME": "failure"}, {"MRK_FIXED_UPLOAD_OUTCOME": "skipped"}):
+            with mock.patch.dict(m.os.environ, {"MRK_FIXED_RESULT_OUTCOME": "success", "MRK_FIXED_UPLOAD_OUTCOME": "success", **bad}, clear=True), \
+                 mock.patch.object(m, "normal_batch_project_main") as no_read, self.assertRaises(m.Refused):
+                m.normal_cleanup_main()
+            no_read.assert_not_called()
+
     def receipt(self, source, run, attempt):
         m, row = RUNNER, ADAPTER.ORIGIN
         value = dict(schemaVersion=1, scope=m.FIXED_RESUME_SCOPE, producerSource=row["source"],
@@ -506,6 +632,118 @@ class FixedCarrierResumeData(unittest.TestCase):
             changed[index][key] = value
             with self.subTest(index=index, key=key), self.assertRaises(m.Refused):
                 m.projection_data(*changed, source, "2", "1")
+
+
+        # Genuine finite normal reducer inputs for all four closed batches and
+        # all seven result families. No native status or signature is fabricated.
+        def command(role, cap, limit, output=b""):
+            return dict(role=role, returncode=0, timeoutSeconds=cap, roleCapSeconds=cap,
+                        outputLimitBytes=limit, argvSha256="d" * 64, stdoutBytes=len(output),
+                        stdoutSha256=m.sha(output), stderrBytes=0, stderrSha256=m.sha(b""))
+        def normal_row(batch, phase, seconds, bundle, summary_body):
+            source_role = ("normal-ui-source-roster", 15, 1048576)
+            roles = ([source_role, *[("normal-toolchain-" + k, 15, 4096) for k in ("xcode", "sdkPath", "sdkVersion", "sdkBuild")],
+                      ("normal-ui-build", 240, 1048576), source_role] if phase == "build" else
+                     [source_role, ("verify-generated-runner", 30, 1048576), ("generated-runner-entitlements", 30, 1048576),
+                      ("one-admitted-ui-test", {345: 180, 585: 420, 885: 720}[seconds], 1048576), source_role] if phase == "test" else
+                     [source_role, ("normal-ui-summary", 30, 262144), source_role])
+            commands = [command(role, cap, limit, b"source-roster" if role == source_role[0] else
+                                summary_body if role == "normal-ui-summary" else b"") for role, cap, limit in roles]
+            row = dict(sourceCommit=source, target=m.TARGETS[0], fixedCarrierResumeScope=m.NORMAL_SCOPE,
+                fixedNormalBatch=batch, applicationSourceCommit=m.ORIGIN["source"], currentProductQualified=False,
+                p0Qualified=False, intelQualified=False, sourcePrePostMatched=True, originalCommandReturned=True,
+                sourceRosterSha256="b" * 64, receiptPolicy="exclusive0600-readback-consuming-close", commands=commands,
+                phaseClock=dict(startNs="1", deadlineNs=str(1 + seconds * 1_000_000_000), beforePublicationNs="2", postCloseDeadlineRequired=True),
+                resultBundle=bundle)
+            if phase == "test":
+                row.update(normalPhase="test", originalTestReturncode=0, originalClosesCompleted=True,
+                    originalProductsPrePostMatched=True, strictCodesignOriginalZero=True, reSignedOrRepaired=False,
+                    projectFieldAndEditMarkersObserved=True, androidToolSourceBrowseMarkerObserved=True,
+                    managedWorkflowRefusalMarkerObserved=True, savedReleaseEvidenceMarkerObserved=True)
+            else: row.update(phase=phase, originalReturncode=0)
+            return row
+        self.assertEqual({batch: tuple(row[0] for row in families) for batch, families in m.NORMAL_FAMILIES.items()}, RUNNER.FIXED_NORMAL_BATCHES)
+        self.assertEqual(len(m.NORMAL_FAMILIES), 4)
+        self.assertEqual(sum(len(families) for families in m.NORMAL_FAMILIES.values()), 7)
+        fixtures = {}
+        for batch, families in m.NORMAL_FAMILIES.items():
+            self.assertEqual(m.normal_batch_data({m.NORMAL_BATCH_ENV: batch}), batch)
+            normal_install = {**self.receipt(source, "2", "1"), "scope": m.NORMAL_SCOPE, "normalBatch": batch}
+            fixtures[batch] = []
+            for bundle, test_stem, summary_stem, count, seconds in families:
+                summary_body = m.canonical(dict(totalTestCount=count, passedTests=count, failedTests=0, skippedTests=0, expectedFailures=0))
+                normal_rows = [normal_row(batch, phase, budget, result, summary_body)
+                    for phase, budget, result in (("build", 450, None), ("test", seconds, bundle), ("summary", 90, bundle))]
+                inputs = (normal_install, *normal_rows, summary_body)
+                with self.subTest(normalBatch=batch, family=bundle):
+                    projected = m.normal_family_projection_data(*inputs, batch, bundle, source, "2", "1")
+                    self.assertEqual(projected["testCounts"]["passedTests"], count)
+                    self.assertEqual(projected["producerSource"], m.ORIGIN["source"])
+                    self.assertEqual(projected["harnessSource"], source)
+                    self.assertEqual(projected["familyResult"], "passed")
+                    self.assertTrue(all(projected[k] is False for k in ("rawTextExported", "currentProductQualified", "p0Qualified", "intelQualified", "productReady")))
+                fixtures[batch].append((bundle, test_stem, summary_stem, inputs, projected))
+        batch = "launch-project"
+        bundle, test_stem, summary_stem, inputs, expected = fixtures[batch][0]
+        for index, key, value in ((0, "producerSource", source), (0, "consumerRunId", "1"),
+                                 (0, "originalClosesKnown", None), (0, "productReady", True),
+                                 (1, "sourceCommit", m.ORIGIN["source"]), (2, "sourceRosterSha256", "c" * 64),
+                                 (2, "originalClosesCompleted", None), (2, "strictCodesignOriginalZero", False),
+                                 (2, "reSignedOrRepaired", True)):
+            changed = copy.deepcopy(inputs); changed[index][key] = value
+            with self.subTest(normalOriginal=key), self.assertRaises(m.Refused):
+                m.normal_family_projection_data(*changed, batch, bundle, source, "2", "1")
+        for mutation in ("role", "count", "clock", "source-output", "summary-digest", "test-counts"):
+            changed = list(copy.deepcopy(inputs))
+            if mutation == "role": changed[2]["commands"][3]["role"] = "foreign-native-role"
+            elif mutation == "count": changed[1]["commands"].pop()
+            elif mutation == "clock": changed[2]["phaseClock"]["deadlineNs"] = "3"
+            elif mutation == "source-output": changed[1]["commands"][-1]["stdoutSha256"] = "c" * 64
+            elif mutation == "summary-digest": changed[3]["commands"][1]["stdoutSha256"] = "c" * 64
+            else:
+                wrong_counts = json.loads(changed[4]); wrong_counts["skippedTests"] = 1
+                changed[4] = m.canonical(wrong_counts)
+            with self.subTest(normalMutation=mutation), self.assertRaises(m.Refused):
+                m.normal_family_projection_data(*changed, batch, bundle, source, "2", "1")
+        with self.assertRaises(m.Refused):
+            m.normal_family_projection_data(*inputs, batch, "diagnostics-test.xcresult", source, "2", "1")
+        # Actual per-family and batch projectors consume genuine tiny regular
+        # source receipts; only the already-reviewed host context is a DATA port.
+        with tempfile.TemporaryDirectory() as temporary:
+            normal = Path(temporary)
+            env = dict(GITHUB_SHA=source, GITHUB_RUN_ID="2", GITHUB_RUN_ATTEMPT="1")
+            def put(name, value):
+                body = value if type(value) is bytes else m.canonical(value) + b"\n"
+                path = normal / name; path.write_bytes(body); path.chmod(0o600)
+            for current_bundle, stem, summary_name, current_inputs, projected in fixtures[batch]:
+                put("build.status", b"0\n"); put(stem + ".status", b"0\n"); put(summary_name + ".status", b"0\n")
+                for name, row in zip(("fixed-carrier-install.json", "build.command-admission.json",
+                                     stem + ".runner-admission.json", summary_name + ".command-admission.json"), current_inputs[:4]): put(name, row)
+                put(summary_name + ".json", current_inputs[4])
+                put("fixed-normal-" + stem + ".json", projected)
+            with mock.patch.object(m, "normal_projection_context", return_value=(env, batch, normal)):
+                self.assertEqual(m.normal_project_main(bundle), expected)
+                joined = m.normal_batch_project_main()
+                self.assertEqual([r["family"] for r in joined["families"]], [r[0] for r in m.NORMAL_FAMILIES[batch]])
+                self.assertEqual(joined["batchResult"], "passed")
+                self.assertIs(joined["productReady"], False)
+                wrong = normal / ("fixed-normal-" + fixtures[batch][1][1] + ".json")
+                original_publication = wrong.read_bytes(); wrong.write_bytes(original_publication + b" ")
+                with self.assertRaises(m.Refused): m.normal_batch_project_main()
+                wrong.write_bytes(original_publication)
+                real_close = m.os.close; closed = []
+                def consumed_unknown(fd):
+                    real_close(fd); closed.append(fd)
+                    if len(closed) == 1: raise OSError("synthetic-consuming-close-unknown")
+                with mock.patch.object(m.os, "close", side_effect=consumed_unknown), self.assertRaisesRegex(m.Refused, "resume-normal-projection-close"):
+                    m.normal_project_main(bundle)
+                self.assertEqual(len(closed), 8)
+                closed.clear(); put(test_stem + ".status", b"65\n")
+                with mock.patch.object(m.os, "close", side_effect=consumed_unknown), self.assertRaises(m.Refused) as caught:
+                    m.normal_project_main(bundle)
+                self.assertEqual(caught.exception.args, ("resume-normal-caller-zero",))
+                self.assertIn("resume-normal-projection-close", caught.exception.__notes__)
+                self.assertEqual(len(closed), 2)
 
     def test_two_source_receipt_is_current_original_only_and_consumes_close(self):
         # Actual private host DATA/guards and source-pin closure; no venv/native execution.
@@ -659,6 +897,169 @@ class FixedCarrierResumeData(unittest.TestCase):
                 with mock.patch.object(m.os, "close", side_effect=failed_close), self.assertRaises(m.Refused) as caught:
                     m.fixed_resume_context(request, source)
                 self.assertEqual(caught.exception.args, ("fixed-resume-native-receipt-join",))
+
+
+        # Actual closed normal request/context, with explicit original-file DATA ports.
+        # These observations do not execute a host tool, Installer, XCTest or app.
+        from contextlib import ExitStack
+        import re
+        normal_root = Path("/inert-owned-normal-data/normal-ui")
+        temporary = str(normal_root / "tmp") + "/"
+        expected_batches = {
+            "launch-project": ("test.xcresult", "project-test.xcresult"),
+            "doctor-saved-checks": ("diagnostics-test.xcresult", "saved-checks-test.xcresult"),
+            "local-github-evidence": ("workflow-refusal-test.xcresult", "release-evidence-test.xcresult"),
+            "persistence": ("persistence-test.xcresult",),
+        }
+        self.assertEqual(m.FIXED_NORMAL_BATCHES, expected_batches)
+        self.assertEqual(m.FIXED_NORMAL_SCOPE, "fixed-ce644-arm-carrier-normal-local-batch-v1")
+        self.assertEqual(m.FIXED_NORMAL_BATCH_ENV, "TEST_RUNNER_MRK_NORMAL_UI_FIXED_NORMAL_BATCH")
+        self.assertNotIn("saved-version-recovery-test.xcresult", {r for rows in expected_batches.values() for r in rows})
+        def parsed(result, phase):
+            if phase == "build":
+                arguments = ["--normal-build"]
+            elif phase == "summary":
+                arguments = ["--normal-summary", result]
+            else:
+                methods, allowance, _ = m.NORMAL_SELECTIONS[result]
+                arguments = ["test-without-building", "-project", m.PROJECT, "-scheme", "MRKNormalAppUI",
+                    "-configuration", "Debug", "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
+                    "-derivedDataPath", str(normal_root / "DerivedData"), "-resultBundlePath", str(normal_root / result),
+                    *["-only-testing:" + m.CLASS + name for name in methods], "-parallel-testing-enabled", "NO",
+                    "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", str(allowance),
+                    "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
+            return m.normal_request(arguments, temporary)
+        observation = {}
+        fd = 501
+        uid, gid = m.os.getuid(), m.os.getgid()
+        def file_state():
+            return SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFREG | 0o600,
+                st_uid=uid, st_gid=gid, st_nlink=1, st_size=len(observation["body"]), st_mtime_ns=4, st_ctime_ns=5)
+        def held(value):
+            self.assertEqual(value, fd)
+            return file_state()
+        def named(path, *, follow_symlinks):
+            self.assertEqual(path, normal_root / "fixed-carrier-install.json")
+            self.assertIs(follow_symlinks, False)
+            return file_state()
+        def pread(value, maximum, offset):
+            self.assertEqual(value, fd)
+            return observation["body"][offset:offset + maximum]
+        normal_env = {**env, m.FIXED_RESUME_ENV: m.FIXED_NORMAL_SCOPE,
+                      "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB": m.normal_target_data(m.ARM_TARGET)[1]}
+        with ExitStack() as ports:
+            opened = ports.enter_context(mock.patch.object(m.os, "open", return_value=fd))
+            fstat_port = ports.enter_context(mock.patch.object(m.os, "fstat", side_effect=held))
+            stat_port = ports.enter_context(mock.patch.object(m.os, "stat", side_effect=named))
+            read_port = ports.enter_context(mock.patch.object(m.os, "pread", side_effect=pread))
+            closed = ports.enter_context(mock.patch.object(m.os, "close"))
+            ports.enter_context(mock.patch.object(m.sys, "version_info", (3, 14, 7)))
+            ports.enter_context(mock.patch.object(m.sys, "flags", SimpleNamespace(isolated=True, no_site=True)))
+            ports.enter_context(mock.patch.object(m.sys, "dont_write_bytecode", True))
+            def nominate(row):
+                observation["body"] = m.encoded(row) + b"\n"
+                for port in (opened, fstat_port, stat_port, read_port, closed): port.reset_mock()
+                normal_env["MRK_FIXED_RESUME_RECEIPT_SHA256"] = m.sha(observation["body"])
+            for batch, results in expected_batches.items():
+                normal_env[m.FIXED_NORMAL_BATCH_ENV] = batch
+                normal_receipt = {**self.receipt(source, "2", "1"), "scope": m.FIXED_NORMAL_SCOPE, "normalBatch": batch}
+                cases = [(None, "build"), *[(r, p) for r in results for p in ("test", "summary")]]
+                for result, phase in cases:
+                    request = parsed(result, phase)
+                    nominate(normal_receipt)
+                    with self.subTest(normalBatch=batch, phase=phase, result=result), mock.patch.dict(m.os.environ, normal_env, clear=True):
+                        self.assertEqual(m.fixed_normal_context(request, source),
+                            {m.FIXED_RESUME_ENV: m.FIXED_NORMAL_SCOPE, m.FIXED_NORMAL_BATCH_ENV: batch})
+                    opened.assert_called_once_with(normal_root / "fixed-carrier-install.json",
+                        m.os.O_RDONLY | m.os.O_NOFOLLOW | m.os.O_NONBLOCK | m.os.O_CLOEXEC)
+                    self.assertEqual(closed.call_args_list, [mock.call(fd)])
+                    self.assertEqual((fstat_port.call_count, stat_port.call_count, read_port.call_count), (3, 2, 2))
+            batch = "launch-project"
+            normal_env[m.FIXED_NORMAL_BATCH_ENV] = batch
+            normal_receipt = {**self.receipt(source, "2", "1"), "scope": m.FIXED_NORMAL_SCOPE, "normalBatch": batch}
+            request = parsed("test.xcresult", "test")
+            for changed in ({**request, "methods": ()}, {**request, "allowance": 300},
+                            {**request, "result": normal_root / "diagnostics-test.xcresult"},
+                            {**request, "target": m.INTEL_TARGET}, {**request, "iosUnsigned": True}):
+                nominate(normal_receipt)
+                with self.subTest(normalRequest=changed), mock.patch.dict(m.os.environ, normal_env, clear=True), self.assertRaises(m.Refused):
+                    m.fixed_normal_context(changed, source)
+                opened.assert_not_called(); closed.assert_not_called()
+            for changes in ({m.FIXED_RESUME_ENV: m.FIXED_RESUME_SCOPE}, {m.FIXED_RESUME_ENV: "foreign-scope"},
+                            {m.FIXED_NORMAL_BATCH_ENV: "foreign-batch"}, {"GITHUB_SHA": "b" * 40}):
+                nominate(normal_receipt)
+                with self.subTest(normalContext=changes), mock.patch.dict(m.os.environ, {**normal_env, **changes}, clear=True), self.assertRaises(m.Refused):
+                    m.fixed_normal_context(request, source)
+                opened.assert_not_called(); closed.assert_not_called()
+            nominate(normal_receipt)
+            without_batch = {k: v for k, v in normal_env.items() if k != m.FIXED_NORMAL_BATCH_ENV}
+            with mock.patch.dict(m.os.environ, without_batch, clear=True), self.assertRaises(m.Refused):
+                m.fixed_normal_context(request, source)
+            opened.assert_not_called()
+            # The actual dispatch rejects the opposite partial marker before native host admission.
+            partial = {k: v for k, v in normal_env.items() if k != m.FIXED_RESUME_ENV}
+            partial["TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE"] = source
+            partial["TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE"] = source
+            with mock.patch.dict(m.os.environ, partial, clear=True), self.assertRaisesRegex(m.Refused, "fixed-normal-marker-pair"):
+                m.normal_context(request)
+            opened.assert_not_called()
+            for key, value in (("normalBatch", "persistence"), ("scope", m.FIXED_RESUME_SCOPE),
+                               ("producerSource", source), ("consumerRunId", "1"),
+                               ("sameRequestReadback", False), ("originalClosesKnown", None), ("productReady", True)):
+                nominate({**normal_receipt, key: value})
+                with self.subTest(normalReceipt=key), mock.patch.dict(m.os.environ, normal_env, clear=True), self.assertRaises(m.Refused):
+                    m.fixed_normal_context(request, source)
+                self.assertEqual(closed.call_args_list, [mock.call(fd)])
+            nominate(normal_receipt)
+            with mock.patch.dict(m.os.environ, normal_env, clear=True), mock.patch.object(m.os, "close", side_effect=OSError("synthetic-close-unknown")) as once:
+                with self.assertRaisesRegex(m.Refused, "fixed-resume-native-receipt-close"):
+                    m.fixed_normal_context(request, source)
+                self.assertEqual(once.call_args_list, [mock.call(fd)])
+            nominate({**normal_receipt, "sameRequestReadback": False})
+            with mock.patch.dict(m.os.environ, normal_env, clear=True), mock.patch.object(m.os, "close", side_effect=OSError("synthetic-close-unknown")) as once:
+                with self.assertRaises(m.Refused) as caught:
+                    m.fixed_normal_context(request, source)
+                self.assertEqual(caught.exception.args, ("fixed-resume-native-receipt-join",))
+                self.assertIn("fixed-resume-native-receipt-close", caught.exception.__notes__)
+                self.assertEqual(once.call_args_list, [mock.call(fd)])
+            nominate(normal_receipt)
+            first = RuntimeError("synthetic-normal-original-read-failure")
+            with mock.patch.dict(m.os.environ, normal_env, clear=True), mock.patch.object(m.os, "pread", side_effect=first), \
+                 mock.patch.object(m.os, "close", side_effect=OSError("synthetic-close-unknown")) as once:
+                with self.assertRaises(RuntimeError) as caught:
+                    m.fixed_normal_context(request, source)
+                self.assertIs(caught.exception, first)
+                self.assertIn("fixed-resume-native-receipt-close", first.__notes__)
+                self.assertEqual(once.call_args_list, [mock.call(fd)])
+        # Actual Swift SOURCE: closed result-to-profile calls remain after each original clock.
+        swift = (ROOT / "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift").read_text()
+        self.assertIn('private func launchForJourney(profile: SourceProfile = .sameBuild)', swift)
+        self.assertIn('case .sameBuild:\n            try require(applicationSource == harnessSource,', swift)
+        self.assertIn('context["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] == "fixed-ce644-arm-carrier-ios-unsigned-only"', swift)
+        self.assertIn('scope == "fixed-ce644-arm-carrier-normal-local-batch-v1" && results.contains(result)', swift)
+        selected_sources = {
+            "launchCancelAndQuit": ("test.xcresult", 1),
+            "syntheticProjectJourney": ("project-test.xcresult", 1),
+            "testSyntheticProjectPathFields": ("project-test.xcresult", 1),
+            "testSyntheticPersistentCredentials": ("persistence-test.xcresult", 3),
+            "testSyntheticProjectBuildToolDiagnostics": ("diagnostics-test.xcresult", 1),
+            "testSyntheticProjectSavedOfflineChecks": ("saved-checks-test.xcresult", 1),
+            "testSyntheticProjectEmptyBuildInputInspection": ("saved-checks-test.xcresult", 1),
+            "testSyntheticProjectManagedWorkflowRefusal": ("workflow-refusal-test.xcresult", 1),
+            "testSyntheticProjectSavedReleaseEvidence": ("release-evidence-test.xcresult", 1),
+        }
+        for name, (result, count) in selected_sources.items():
+            start = re.search(r'^    (?:@MainActor )?(?:private )?func ' + name + r'\(', swift, re.M)
+            self.assertIsNotNone(start)
+            rest = swift[start.end():]
+            next_member = re.search(r'^    (?:@MainActor\b|(?:private )?(?:static )?func\b|private (?:final )?class\b)', rest, re.M)
+            block = rest[:next_member.start()] if next_member else rest
+            literal = 'normalJourneyProfile(for: "' + result + '")'
+            with self.subTest(swiftMethod=name):
+                self.assertEqual(block.count(literal), count)
+                self.assertLess(block.index('try beginCase('), block.index(literal))
+        local = swift.split('private func syntheticProjectJourney(includeImages: Bool) throws {', 1)[1]
+        self.assertIn('if includeImages {\n                profile = try normalJourneyProfile(for: "project-test.xcresult")\n            } else {\n                profile = .sameBuild', local)
 
     def test_dormant_p1_hybrids_and_original_release_readback_remain_closed(self):
         # Passive actual SOURCE units + ordinary API ports only. No native
