@@ -1164,11 +1164,20 @@ def main():
                                                env['GITHUB_SHA'], env['GITHUB_RUN_ID'], env['GITHUB_RUN_ATTEMPT']) + len(host_body)
         host_retained_bytes = len(host_body) + len(host_cfg)
         session.point()
-        for tool in (session.python, '/usr/bin/hdiutil', '/usr/bin/vm_stat', '/usr/bin/openssl', '/usr/bin/codesign', '/usr/bin/sudo', '/usr/sbin/installer'):
+        def admit_tool(tool):
             tool_uid = os.stat(tool, follow_symlinks=False).st_uid
             need(tool_uid in (0, os.getuid()), 'resume-tool-owner')
             entry, content = session.quota.call(session.outer, 'file', Path(tool), 64 << 20, uid=tool_uid, modes=(0o555, 0o755, 0o4555, 0o4755))
             need(content, 'resume-tool-original')
+        # Explicit closed call sites make a denied file observable by exact
+        # SOURCE location; identical order, arguments, guards and original quota.
+        admit_tool(session.python)
+        admit_tool('/usr/bin/hdiutil')
+        admit_tool('/usr/bin/vm_stat')
+        admit_tool('/usr/bin/openssl')
+        admit_tool('/usr/bin/codesign')
+        admit_tool('/usr/bin/sudo')
+        admit_tool('/usr/sbin/installer')
         ca = ssl.get_default_verify_paths().cafile
         need(type(ca) is str and os.path.isabs(ca), 'resume-stock-ca')
         session.ca_path = os.path.realpath(ca)
@@ -1322,7 +1331,7 @@ def project_main():
 # Closed first-party SOURCE locations only. These exact leaves are compiled only
 # after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
 # traceback rendering, error args/notes/locals or private filenames are used.
-FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 5982, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 1550}
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 5982, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 1559}
 FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
 
 

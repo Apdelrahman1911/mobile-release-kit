@@ -203,6 +203,16 @@ class FixedCarrierResumeData(unittest.TestCase):
         with self.assertRaises(m.Refused):
             m.finite_failure_data(native, {**statuses, "ios": True}, ui)
 
+        # No tool can silently lose its original admission during call-site split.
+        import ast
+        body = ast.parse((ROOT / 'desktop/tools/macos_fixed_carrier_resume.py').read_bytes())
+        main = next(node for node in body.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        calls = [node for node in ast.walk(main) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == 'admit_tool']
+        self.assertEqual([ast.unparse(node.args[0]) for node in calls],
+                         ['session.python', "'/usr/bin/hdiutil'", "'/usr/bin/vm_stat'", "'/usr/bin/openssl'",
+                          "'/usr/bin/codesign'", "'/usr/bin/sudo'", "'/usr/sbin/installer'"])
+        self.assertTrue(all(len(node.args) == 1 and not node.keywords for node in calls))
         # Real Python traceback objects, synthetic exception only: no native work.
         secret = 'private-error-value-never-export'
         namespace = {}
