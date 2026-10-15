@@ -1,0 +1,433 @@
+name: Fixed ARM finalized-carrier resume (fresh Installer and one unsigned iOS case only)
+on:
+  push:
+    branches: [verify/desktop-macos-installed]
+    paths:
+      - .github/workflows/desktop-macos-fixed-carrier-resume.yml
+      - desktop/tools/macos_fixed_carrier_resume.py
+      - desktop/tools/macos_normal_ui_runner.py
+      - desktop/native/macos-normal-ui/**
+      - desktop/macos-installed-inputs/fixed-arm-carrier-origin-public.json
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: mrk-fixed-arm-carrier-resume-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  fixed-arm-consumer:
+    if: github.event_name == 'push' && github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-installed'
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      MRK_MACOS_HOSTED_JOB: github-hosted-macos26-arm64
+      RUNNER_ENVIRONMENT: ${{ runner.environment }}
+      MRK_FIXED_RESUME_BYTES: "90436"
+      MRK_FIXED_RESUME_SHA256: "f7a735cbd2d391fe88e78795356dc180b6cd9bb8e976cad74953c4eb512b646f"
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+          architecture: arm64
+      - name: Admit the actual host interpreter and create one private consumer work root
+        id: work
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed ]] || exit 1
+          work=$(mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
+          mkdir -m 700 "$work/normal-ui" "$work/normal-ui/tmp"
+          export MRK_MACOS_WORK="$work"
+          python3 -I -S -B - <<'PY_RESUME_PYTHON'
+          import hashlib,json,os,pathlib,stat,sys
+          if sys.version_info[:3]!=(3,14,7) or not sys.flags.isolated or not sys.flags.no_site or not sys.dont_write_bytecode:raise SystemExit(1)
+          path=pathlib.Path(sys.executable).resolve();fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC);first=None
+          try:
+              before=os.fstat(fd)
+              ident=lambda v:(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
+              if not stat.S_ISREG(before.st_mode) or before.st_uid not in (0,os.getuid()) or before.st_nlink!=1 or before.st_mode&0o022 or not 0<before.st_size<=64<<20:raise ValueError('resume-python-original')
+              data=os.pread(fd,before.st_size+1,0)
+              if len(data)!=before.st_size or os.pread(fd,1,before.st_size) or ident(os.fstat(fd))!=ident(before) or ident(os.stat(path,follow_symlinks=False))!=ident(before):raise ValueError('resume-python-post')
+          except BaseException as error:first=error;raise
+          finally:
+              try:os.close(fd)
+              except BaseException:
+                  if first is None:raise
+                  BaseException.add_note(first,'resume-python-close')
+          work=pathlib.Path(os.environ['MRK_MACOS_WORK']);normal=work/'normal-ui'
+          identity=lambda v:(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid)
+          binding={'schemaVersion':1,'source':os.environ['GITHUB_SHA'],'runId':os.environ['GITHUB_RUN_ID'],'runAttempt':os.environ['GITHUB_RUN_ATTEMPT'],
+                   'workIdentity':list(identity(os.stat(work,follow_symlinks=False))),'normalIdentity':list(identity(os.stat(normal,follow_symlinks=False)))}
+          body=json.dumps(binding,sort_keys=True,separators=(',',':')).encode()+b'\n'
+          outfd=os.open(normal/'consumer-work-binding.json',os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+          try:
+              if os.write(outfd,body)!=len(body):raise ValueError('resume-work-binding-short-write')
+              os.fsync(outfd)
+              if os.pread(outfd,len(body)+1,0)!=body:raise ValueError('resume-work-binding-readback')
+          finally:os.close(outfd)
+          # This is the trusted setup action's real host executable, not an
+          # unverified installed app interpreter. Native admission holds it again.
+          with open(os.environ['GITHUB_ENV'],'a') as out:out.write('MRK_PYTHON='+str(path)+'\nMRK_MACOS_WORK='+os.environ['MRK_MACOS_WORK']+'\n')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out:out.write('root='+os.environ['MRK_MACOS_WORK']+'\n')
+          PY_RESUME_PYTHON
+      - name: Import only the fixed authenticated carrier and execute our fresh Installer and readback originals
+        id: installer
+        timeout-minutes: 11
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          "$MRK_PYTHON" -I -S -B - > "$MRK_MACOS_WORK/normal-ui/fixed-carrier-install.json" <<'PY_RESUME_NATIVE'
+          import hashlib,os,stat,sys,time
+          from pathlib import Path
+          
+          def fixed_source_bytes(path,size,digest,started):
+              def need(v):
+                  if not v:raise ValueError('fixed-resume-source-admission')
+              def identity(v):
+                  return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
+              need(type(size)is int and 0<size<=131072 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
+              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
+              try:
+                  before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1
+                       and not before[2]&0o022 and before[6]==size and identity(os.stat(path,follow_symlinks=False))==before)
+                  data=bytearray()
+                  while len(data)<size:
+                      need(started<=time.monotonic_ns()<started+10_000_000_000)
+                      block=os.pread(fd,min(65536,size-len(data)),len(data));need(0<len(block)<=min(65536,size-len(data)));data.extend(block)
+                  need(not os.pread(fd,1,size) and hashlib.sha256(data).hexdigest()==digest
+                       and identity(os.fstat(fd))==before==identity(os.stat(path,follow_symlinks=False)))
+              except BaseException as error:primary=error;raise
+              finally:
+                  consumed,fd=fd,None
+                  try:os.close(consumed)
+                  except BaseException:
+                      if primary is None:raise ValueError('fixed-resume-source-close') from None
+                      BaseException.add_note(primary,'fixed-resume-source-close')
+              need(started<=time.monotonic_ns()<started+10_000_000_000)
+              return bytes(data)
+          
+          try:
+              started=time.monotonic_ns();path=Path('desktop/tools/macos_fixed_carrier_resume.py').absolute()
+              body=fixed_source_bytes(path,int(os.environ['MRK_FIXED_RESUME_BYTES']),os.environ['MRK_FIXED_RESUME_SHA256'],started)
+              code=compile(body,str(path),'exec');os.environ['MRK_FIXED_RESUME_STARTED_NS']=str(started)
+          except BaseException:
+              print('{"schemaVersion":1,"scope":"fixed-ce644-arm-carrier-ios-unsigned-only","accepted":false,"phase":"initial-source","productReady":false}')
+              raise SystemExit(1) from None
+          exec(code,{'__file__':str(path),'__name__':'__main__'})
+          PY_RESUME_NATIVE
+          status=$?
+          set -e
+          [[ "$status" == 0 ]] || exit "$status"
+          receipt_sha=$("$MRK_PYTHON" -I -S -B - <<'PY_RESUME_RECEIPT_SHA'
+          import hashlib,os,stat
+          path=os.environ['MRK_MACOS_WORK']+'/normal-ui/fixed-carrier-install.json';fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC);primary=None
+          try:
+              before=os.fstat(fd);identity=lambda v:(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
+              if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode)!=0o600 or (before.st_uid,before.st_gid,before.st_nlink)!=(os.getuid(),os.getgid(),1) or not 0<before.st_size<=16384:raise ValueError('resume-receipt-policy')
+              data=os.pread(fd,before.st_size+1,0)
+              if len(data)!=before.st_size or os.pread(fd,1,before.st_size) or identity(os.fstat(fd))!=identity(before) or identity(os.stat(path,follow_symlinks=False))!=identity(before):raise ValueError('resume-receipt-post')
+          except BaseException as error:primary=error;raise
+          finally:
+              try:os.close(fd)
+              except BaseException:
+                  if primary is None:raise
+                  BaseException.add_note(primary,'resume-receipt-close')
+          print(hashlib.sha256(data).hexdigest())
+          PY_RESUME_RECEIPT_SHA
+          )
+          [[ "$receipt_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          printf 'MRK_FIXED_RESUME_RECEIPT_SHA256=%s\n' "$receipt_sha" >> "$GITHUB_ENV"
+      - name: Build only the external XCTest harness from this actual consumer source
+        id: harness
+        timeout-minutes: 9
+        shell: bash
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -f 33554432
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+              "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+              "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+              TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=ce644711fb6e2bea26182473441aac192d5638e1 \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+              TEST_RUNNER_MRK_NORMAL_UI_FIXED_CARRIER_RESUME=fixed-ce644-arm-carrier-ios-unsigned-only \
+              "MRK_FIXED_RESUME_RECEIPT_SHA256=$MRK_FIXED_RESUME_RECEIPT_SHA256" \
+              "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \
+              "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+              "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+              "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" "$@"
+          }
+          set +e
+          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-build \
+            > "$MRK_MACOS_WORK/normal-ui/build.log" 2> "$MRK_MACOS_WORK/normal-ui/build.stderr"
+          status=$?
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/normal-ui/build.status"
+          status_saved=$?
+          set -e
+          [[ "$status" == 0 ]] || exit "$status"
+          [[ "$status_saved" == 0 ]] || exit 1
+      - name: Exercise only the retained unsigned iOS case through fresh installed originals
+        id: ios
+        timeout-minutes: 22
+        shell: bash
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -f 1048576
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+              "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+              "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+              TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=ce644711fb6e2bea26182473441aac192d5638e1 \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+              TEST_RUNNER_MRK_NORMAL_UI_FIXED_CARRIER_RESUME=fixed-ce644-arm-carrier-ios-unsigned-only \
+              "MRK_FIXED_RESUME_RECEIPT_SHA256=$MRK_FIXED_RESUME_RECEIPT_SHA256" \
+              "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \
+              "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+              "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+              "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" "$@"
+          }
+          set +e
+          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-ios-unsigned-archive-test \
+            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.log" 2> "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.stderr"
+          status=$?
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.status"
+          status_saved=$?
+          set -e
+          [[ "$status" == 0 ]] || exit "$status"
+          [[ "$status_saved" == 0 ]] || exit 1
+      - name: Observe exactly one successful unsigned iOS test without skipped or expected failures
+        id: summary
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -f 1048576
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+              "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+              "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+              TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=ce644711fb6e2bea26182473441aac192d5638e1 \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+              TEST_RUNNER_MRK_NORMAL_UI_FIXED_CARRIER_RESUME=fixed-ce644-arm-carrier-ios-unsigned-only \
+              "MRK_FIXED_RESUME_RECEIPT_SHA256=$MRK_FIXED_RESUME_RECEIPT_SHA256" \
+              "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \
+              "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+              "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+              "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" "$@"
+          }
+          set +e
+          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-ios-unsigned-archive-summary \
+            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.json" 2> "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.stderr"
+          status=$?
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.status"
+          status_saved=$?
+          set -e
+          [[ "$status" == 0 ]] || exit "$status"
+          [[ "$status_saved" == 0 ]] || exit 1
+      - name: Join only finite fresh-consumer success receipts (not P0 or current-product qualification)
+        id: result
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          "$MRK_PYTHON" -I -S -B - project > "$MRK_MACOS_WORK/normal-ui/fixed-carrier-result.json" <<'PY_RESUME_RESULT'
+          import hashlib,os,stat,sys,time
+          from pathlib import Path
+          
+          def fixed_source_bytes(path,size,digest,started):
+              def need(v):
+                  if not v:raise ValueError('fixed-resume-source-admission')
+              def identity(v):
+                  return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
+              need(type(size)is int and 0<size<=131072 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
+              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
+              try:
+                  before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1
+                       and not before[2]&0o022 and before[6]==size and identity(os.stat(path,follow_symlinks=False))==before)
+                  data=bytearray()
+                  while len(data)<size:
+                      need(started<=time.monotonic_ns()<started+10_000_000_000)
+                      block=os.pread(fd,min(65536,size-len(data)),len(data));need(0<len(block)<=min(65536,size-len(data)));data.extend(block)
+                  need(not os.pread(fd,1,size) and hashlib.sha256(data).hexdigest()==digest
+                       and identity(os.fstat(fd))==before==identity(os.stat(path,follow_symlinks=False)))
+              except BaseException as error:primary=error;raise
+              finally:
+                  consumed,fd=fd,None
+                  try:os.close(consumed)
+                  except BaseException:
+                      if primary is None:raise ValueError('fixed-resume-source-close') from None
+                      BaseException.add_note(primary,'fixed-resume-source-close')
+              need(started<=time.monotonic_ns()<started+10_000_000_000)
+              return bytes(data)
+          
+          try:
+              started=time.monotonic_ns();path=Path('desktop/tools/macos_fixed_carrier_resume.py').absolute()
+              body=fixed_source_bytes(path,int(os.environ['MRK_FIXED_RESUME_BYTES']),os.environ['MRK_FIXED_RESUME_SHA256'],started)
+              code=compile(body,str(path),'exec');os.environ['MRK_FIXED_RESUME_STARTED_NS']=str(started)
+          except BaseException:
+              print('{"schemaVersion":1,"scope":"fixed-ce644-arm-carrier-ios-unsigned-only","accepted":false,"phase":"initial-source","productReady":false}')
+              raise SystemExit(1) from None
+          exec(code,{'__file__':str(path),'__name__':'__main__'})
+          PY_RESUME_RESULT
+      - name: Retain only finite original-consumer result and installer authority (never private logs, image or archive)
+        id: success_upload
+        if: steps.result.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fixed-arm-carrier-resume-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/normal-ui/fixed-carrier-result.json
+            ${{ steps.work.outputs.root }}/normal-ui/fixed-carrier-install.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Observe only bounded finite failures even after Installer or XCTest refusal
+        id: diagnostic
+        if: always() && steps.work.outputs.root != ''
+        timeout-minutes: 1
+        shell: bash
+        env:
+          MRK_FIXED_INSTALL_OUTCOME: ${{ steps.installer.outcome }}
+          MRK_FIXED_RESULT_OUTCOME: ${{ steps.result.outcome }}
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          "$MRK_PYTHON" -I -S -B - diagnostic > "$MRK_MACOS_WORK/normal-ui/fixed-carrier-diagnostic.json" <<'PY_RESUME_DIAGNOSTIC'
+          import hashlib,os,stat,sys,time
+          from pathlib import Path
+          
+          def fixed_source_bytes(path,size,digest,started):
+              def need(v):
+                  if not v:raise ValueError('fixed-resume-source-admission')
+              def identity(v):
+                  return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
+              need(type(size)is int and 0<size<=131072 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
+              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
+              try:
+                  before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1
+                       and not before[2]&0o022 and before[6]==size and identity(os.stat(path,follow_symlinks=False))==before)
+                  data=bytearray()
+                  while len(data)<size:
+                      need(started<=time.monotonic_ns()<started+10_000_000_000)
+                      block=os.pread(fd,min(65536,size-len(data)),len(data));need(0<len(block)<=min(65536,size-len(data)));data.extend(block)
+                  need(not os.pread(fd,1,size) and hashlib.sha256(data).hexdigest()==digest
+                       and identity(os.fstat(fd))==before==identity(os.stat(path,follow_symlinks=False)))
+              except BaseException as error:primary=error;raise
+              finally:
+                  consumed,fd=fd,None
+                  try:os.close(consumed)
+                  except BaseException:
+                      if primary is None:raise ValueError('fixed-resume-source-close') from None
+                      BaseException.add_note(primary,'fixed-resume-source-close')
+              need(started<=time.monotonic_ns()<started+10_000_000_000)
+              return bytes(data)
+          
+          try:
+              started=time.monotonic_ns();path=Path('desktop/tools/macos_fixed_carrier_resume.py').absolute()
+              body=fixed_source_bytes(path,int(os.environ['MRK_FIXED_RESUME_BYTES']),os.environ['MRK_FIXED_RESUME_SHA256'],started)
+              code=compile(body,str(path),'exec');os.environ['MRK_FIXED_RESUME_STARTED_NS']=str(started)
+          except BaseException:
+              print('{"schemaVersion":1,"scope":"fixed-ce644-arm-carrier-ios-unsigned-only","accepted":false,"phase":"initial-source","productReady":false}')
+              raise SystemExit(1) from None
+          exec(code,{'__file__':str(path),'__name__':'__main__'})
+          PY_RESUME_DIAGNOSTIC
+      - name: Retain only the finite diagnostic after original failure or success (never raw native output)
+        if: always() && steps.work.outputs.root != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fixed-arm-carrier-resume-diagnostic-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/normal-ui/fixed-carrier-diagnostic.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Retire only proven settled private harness outputs, preserving installation and finite evidence
+        id: cleanup
+        if: always() && steps.result.outcome == 'success' && steps.success_upload.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_FIXED_RESULT_OUTCOME: ${{ steps.result.outcome }}
+          MRK_FIXED_UPLOAD_OUTCOME: ${{ steps.success_upload.outcome }}
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          "$MRK_PYTHON" -I -S -B - cleanup > "$MRK_MACOS_WORK/normal-ui/fixed-carrier-cleanup.json" <<'PY_RESUME_CLEANUP'
+          import hashlib,os,stat,sys,time
+          from pathlib import Path
+          
+          def fixed_source_bytes(path,size,digest,started):
+              def need(v):
+                  if not v:raise ValueError('fixed-resume-source-admission')
+              def identity(v):
+                  return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
+              need(type(size)is int and 0<size<=131072 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
+              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
+              try:
+                  before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1
+                       and not before[2]&0o022 and before[6]==size and identity(os.stat(path,follow_symlinks=False))==before)
+                  data=bytearray()
+                  while len(data)<size:
+                      need(started<=time.monotonic_ns()<started+10_000_000_000)
+                      block=os.pread(fd,min(65536,size-len(data)),len(data));need(0<len(block)<=min(65536,size-len(data)));data.extend(block)
+                  need(not os.pread(fd,1,size) and hashlib.sha256(data).hexdigest()==digest
+                       and identity(os.fstat(fd))==before==identity(os.stat(path,follow_symlinks=False)))
+              except BaseException as error:primary=error;raise
+              finally:
+                  consumed,fd=fd,None
+                  try:os.close(consumed)
+                  except BaseException:
+                      if primary is None:raise ValueError('fixed-resume-source-close') from None
+                      BaseException.add_note(primary,'fixed-resume-source-close')
+              need(started<=time.monotonic_ns()<started+10_000_000_000)
+              return bytes(data)
+          
+          try:
+              started=time.monotonic_ns();path=Path('desktop/tools/macos_fixed_carrier_resume.py').absolute()
+              body=fixed_source_bytes(path,int(os.environ['MRK_FIXED_RESUME_BYTES']),os.environ['MRK_FIXED_RESUME_SHA256'],started)
+              code=compile(body,str(path),'exec');os.environ['MRK_FIXED_RESUME_STARTED_NS']=str(started)
+          except BaseException:
+              print('{"schemaVersion":1,"scope":"fixed-ce644-arm-carrier-ios-unsigned-only","accepted":false,"phase":"initial-source","productReady":false}')
+              raise SystemExit(1) from None
+          exec(code,{'__file__':str(path),'__name__':'__main__'})
+          PY_RESUME_CLEANUP

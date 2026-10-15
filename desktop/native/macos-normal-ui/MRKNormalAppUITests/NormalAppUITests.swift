@@ -986,7 +986,7 @@ final class NormalAppUITests: XCTestCase {
     }
     // End engineering main fixture; ordinary installed cases below are unchanged.
 
-    private enum SourceProfile { case sameBuild, packagedEntry }
+    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume }
 
     @MainActor private func admitHostedAccount(_ profile: SourceProfile = .sameBuild) throws -> HostedAccount {
         let context = ProcessInfo.processInfo.environment
@@ -1026,6 +1026,14 @@ final class NormalAppUITests: XCTestCase {
         case .sameBuild:
             try require(applicationSource == harnessSource,
                         "this same-build scenario needs exact application and harness source bindings")
+        case .fixedCarrierResume:
+            #if arch(arm64)
+            try require(applicationSource == "ce644711fb6e2bea26182473441aac192d5638e1" && harnessSource != applicationSource
+                        && context["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] == "fixed-ce644-arm-carrier-ios-unsigned-only",
+                        "only the exact fixed-carrier recovery case admits separate package and harness sources")
+            #else
+            try require(false, "the fixed-carrier recovery has no nominated Intel output")
+            #endif
         case .packagedEntry:
             try require(applicationSource == "53850a9fd94768a2521f2634db6121550dbdd71c" && harnessSource != applicationSource
                         && context["MRK_NORMAL_UI_ARTIFACT_ID"] == "11281078057"
@@ -3933,8 +3941,12 @@ final class NormalAppUITests: XCTestCase {
         return sheet
     }
     @MainActor private func goToFolder(_ sheet: XCUIElement, path: String) throws {
-        try require(sheet.isHittable && path.hasPrefix("/private/tmp/mrk-normal-project-"),
+        try require(path.hasPrefix("/private/tmp/mrk-normal-project-"),
                     "native navigation is not the owned synthetic fixture")
+        // A panel container need not expose a mouse hit point. Check an actual
+        // always-available control; Open may be disabled until a file is chosen.
+        let cancel = try waitElement(sheet.buttons.matching(identifier: "Cancel"), in: sheet, enabled: true)
+        try require(cancel.isHittable, "original native selection panel is not actionable")
         sheet.typeKey("g", modifierFlags: [.command, .shift])
         let fields = sheet.descendants(matching: .any).matching(NSPredicate(
             format: "elementType IN %@ AND label IN %@",
@@ -3977,8 +3989,8 @@ final class NormalAppUITests: XCTestCase {
         return (url, account)
     }
 
-    @MainActor private func launchForJourney() throws -> (XCUIApplication, XCUIElement, XCUIElement) {
-        _ = try admittedJourneyApplication() // Every extended journey stays same-build.
+    @MainActor private func launchForJourney(profile: SourceProfile = .sameBuild) throws -> (XCUIApplication, XCUIElement, XCUIElement) {
+        _ = try admittedJourneyApplication(profile: profile) // Defaults remain exact same-build.
         let app = try launchOrdinaryApplication()
         try require(app.wait(for: .runningForeground, timeout: try remaining(5)), "ordinary app did not enter the foreground")
         try require(app.windows.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "ordinary app has no visible main window")
@@ -5757,7 +5769,12 @@ final class NormalAppUITests: XCTestCase {
         var successBeforeCutoff = false
         do {
             try stage("ios-unsigned-fixture") { try fixture.prepare(.iosUnsignedArchive) }
-            try stage("ios-unsigned-launch") { launched = try launchForJourney() }
+            try stage("ios-unsigned-launch") {
+                let fixedResume = ProcessInfo.processInfo.environment["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"]
+                try require(fixedResume == nil || fixedResume == "fixed-ce644-arm-carrier-ios-unsigned-only",
+                            "unrecognized recovery source purpose")
+                launched = try launchForJourney(profile: fixedResume == nil ? .sameBuild : .fixedCarrierResume)
+            }
             guard let (app, window, renderer) = launched else { throw Refusal.condition("iOS ordinary launch absent") }
             try stage("ios-unsigned-project") {
                 try press(renderer, "Open project folder", renderer: renderer)
