@@ -53,6 +53,130 @@ ORIGIN = {'source': 'ce644711fb6e2bea26182473441aac192d5638e1', 'tree': 'e5c4c43
  'packageVersion': '0.1.1', 'release': 'macos26-arm64-desktop-01'}
 SOURCE_PINS = {'desktop/tools/macos_e2_native_fixture.py': (390457, 'bcfbaf9ec8a8ae3253ef0ac91a1e73256de00a9adb6a9d280f64127b340cd51e'), 'desktop/tools/stage_macos_installed.py': (385322, 'c53fc6eba693f16786b2d3873c8b889f2812ebabd311d93af792a3376c679f7d'), 'desktop/tools/macos_public_verification_evidence.py': (209883, '05ff6cf585f45601909afd14e7038df89adb8b56ee7411cb49428a0e8524a863'), 'desktop/tools/macos_aqua_qualification.py': (463990, '164300e80f0cf3bf1389261565901c7fcd9f0d2abb811b16aa11d719e5e4d287'), 'desktop/tools/macos_xcode_host_preparation.py': (96477, 'd03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376'), 'src/mobile_release/owned_process.py': (9127, 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59'), 'src/mobile_release/_command_process.py': (177438, 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43'), 'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'), 'src/mobile_release/cancellation.py': (32351, 'eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a'), 'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'), 'src/mobile_release/errors.py': (749, '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'), 'src/mobile_release/_lifetime_evidence.py': (19514, 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'), 'src/mobile_release/_store_lane_contract.py': (9500, '8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e'), 'src/mobile_release/_store_lane_evidence.py': (17638, 'bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872'), 'desktop/packaging/macos-install-producer-certificates/leaf.der': (1490, 'e5ba1d05f136fbef3ca5816f0efb1e946cb2cfb81819b745d9f914e7e9256d72')}
 
+RESUME_WORKFLOW_BYTES = 58016
+
+HOST_FILES = ('pyvenv.cfg', 'bin/python', 'bin/python3', 'bin/python3.14',
+              'bin/activate', 'bin/activate.csh', 'bin/activate.fish', 'bin/Activate.ps1')
+HOST_OPTIONAL = 'bin/𝜋thon'  # Documented CPython3.14 UTF-8 executable alias.
+HOST_DIRS = ('.', 'bin', 'include', 'lib', 'lib/python3.14', 'lib/python3.14/site-packages')
+HOST_BYTES = (256 << 20) + (256 << 10)
+
+
+def host_read(path, limit, *, base=False):
+    """Small preparation originals; shared base is observed, never modified."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    primary = None
+    try:
+        before = identity(os.fstat(fd))
+        need(stat.S_ISREG(before[2]) and before[3] in (0, os.getuid()) and before[5] == 1
+             and 0 < before[6] <= limit and (base or not before[2] & 0o022), 'resume-host-file')
+        body = os.pread(fd, before[6] + 1, 0)
+        need(len(body) == before[6] and not os.pread(fd, 1, before[6])
+             and identity(os.fstat(fd)) == before == identity(os.stat(path, follow_symlinks=False)), 'resume-host-file-post')
+        return before, body
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        consumed, fd = fd, None
+        try: os.close(consumed)
+        except BaseException:
+            if primary is None: raise ValueError('resume-host-file-close') from None
+            BaseException.add_note(primary, 'resume-host-file-close')
+
+
+def host_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    primary = None
+    try:
+        before = identity(os.fstat(fd))[:5]
+        need(stat.S_ISDIR(before[2]) and stat.S_IMODE(before[2]) == 0o700
+             and before[3:5] == (os.getuid(), os.getgid()), 'resume-host-directory')
+        names = os.listdir(fd)
+        need(len(names) <= 10 and all(type(n) is str and '/' not in n for n in names)
+             and identity(os.fstat(fd))[:5] == before == identity(os.stat(path, follow_symlinks=False))[:5], 'resume-host-directory-post')
+        return before, names
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        consumed, fd = fd, None
+        try: os.close(consumed)
+        except BaseException:
+            if primary is None: raise ValueError('resume-host-directory-close') from None
+            BaseException.add_note(primary, 'resume-host-directory-close')
+
+
+def host_config_data(body, base, root):
+    need(type(body) is bytes and 0 < len(body) <= 4096, 'resume-host-config-size')
+    cfg = {}
+    for line in body.decode('utf-8').splitlines():
+        key, sep, value = line.partition('='); key, value = key.strip(), value.strip()
+        need(sep and key not in cfg, 'resume-host-config-key')
+        cfg[key] = value
+    need(set(cfg) == {'home', 'include-system-site-packages', 'version', 'executable', 'command'}
+         and cfg['home'] == str(Path(base['copyPath']).parent)
+         and cfg['include-system-site-packages'] == 'false' and cfg['version'] == '3.14.7'
+         and cfg['executable'] == base['executable']
+         and cfg['command'] == base['launcherPath'] + ' -m venv --copies --without-pip --without-scm-ignore-files ' + str(root), 'resume-host-config-binding')
+    return cfg
+
+
+def host_snapshot(root, directory, read_file, *, sidecar=False):
+    """Only the documented without-pip Darwin venv roster, no glob discovery."""
+    dirs, files, bodies, names = [], [], {}, {}
+    for relative in HOST_DIRS:
+        original, children = directory(root if relative == '.' else root / relative)
+        need(stat.S_ISDIR(original[2]) and stat.S_IMODE(original[2]) == 0o700
+             and original[3:5] == (os.getuid(), os.getgid()), 'resume-host-roster-directory')
+        dirs.append({'path': relative, 'identity': list(original[:5])})
+        names[relative] = set(children)
+        need(len(children) == len(names[relative]), 'resume-host-roster-duplicates')
+    optional = HOST_OPTIONAL.split('/')[-1] in names['bin']
+    selected = HOST_FILES + ((HOST_OPTIONAL,) if optional else ())
+    expected = {'.': {'bin', 'include', 'lib', 'pyvenv.cfg'} | ({'host-binding.json'} if sidecar else set()),
+                'bin': {Path(p).name for p in selected if p.startswith('bin/')},
+                'include': set(), 'lib': {'python3.14'}, 'lib/python3.14': {'site-packages'},
+                'lib/python3.14/site-packages': set()}
+    need(names == expected, 'resume-host-roster')
+    total = 0
+    for relative in selected:
+        executable = relative in ('bin/python', 'bin/python3', 'bin/python3.14', HOST_OPTIONAL)
+        limit = (64 << 20) if executable else (4096 if relative == 'pyvenv.cfg' else 64 << 10)
+        original, body = read_file(root / relative, limit)
+        need(stat.S_ISREG(original[2]) and original[3:6] == (os.getuid(), os.getgid(), 1)
+             and not original[2] & 0o022 and 0 < original[6] == len(body) <= limit
+             and (not executable or stat.S_IMODE(original[2]) == 0o755), 'resume-host-roster-file')
+        total += len(body); need(total <= HOST_BYTES, 'resume-host-roster-bytes')
+        files.append({'path': relative, 'identity': list(original), 'sha256': sha(body)})
+        if relative == 'pyvenv.cfg': bodies[relative] = body
+    return {'directories': dirs, 'files': files, 'totalBytes': total}, bodies['pyvenv.cfg']
+
+
+def host_selection_data(binding, snapshot, cfg_body, root, context, source, run, attempt):
+    keys = {'schemaVersion', 'source', 'runId', 'runAttempt', 'base', 'prefix', 'basePrefix', 'baseExecutable',
+            'directories', 'files', 'totalBytes', 'retainedUntilHostedTeardown'}
+    need(type(binding) is dict and set(binding) == keys and type(binding['schemaVersion']) is int
+         and binding['schemaVersion'] == 1 and binding['source'] == source and binding['runId'] == run
+         and binding['runAttempt'] == attempt and binding['retainedUntilHostedTeardown'] is True, 'resume-host-binding')
+    base = binding['base']
+    need(type(base) is dict and set(base) == {'launcherPath', 'executable', 'copyPath', 'copyExecutable', 'prefix', 'identity', 'sha256'}
+         and all(type(base[k]) is str and 0 < len(base[k]) <= 4096 and os.path.isabs(base[k])
+                 and os.path.normpath(base[k]) == base[k] for k in ('launcherPath', 'executable', 'copyPath', 'copyExecutable', 'prefix'))
+         and type(base['identity']) is list and len(base['identity']) == 9 and all(type(n) is int for n in base['identity'])
+         and type(base['sha256']) is str and re.fullmatch(r'[0-9a-f]{64}', base['sha256']), 'resume-host-base-shape')
+    need(context == {'executable': str(root / 'bin/python3'), 'prefix': str(root), 'basePrefix': base['prefix'],
+                     'baseExecutable': base['copyExecutable']}
+         and binding['prefix'] == context['prefix'] and binding['basePrefix'] == context['basePrefix']
+         and binding['baseExecutable'] == context['baseExecutable'] and binding['basePrefix'] != binding['prefix'], 'resume-host-selection')
+    need(all(binding[k] == snapshot[k] for k in ('directories', 'files', 'totalBytes'))
+         and type(binding['totalBytes']) is int and 0 < binding['totalBytes'] <= HOST_BYTES, 'resume-host-snapshot-binding')
+    host_config_data(cfg_body, base, root)
+    copied = [row for row in snapshot['files'] if row['path'] in ('bin/python', 'bin/python3', 'bin/python3.14', HOST_OPTIONAL)]
+    need(all(row['sha256'] == base['sha256'] and row['identity'][6] == base['identity'][6] for row in copied), 'resume-host-copy-binding')
+    return binding['totalBytes']
+
+
 class Refused(ValueError):
     """Only finite tokens; no native/HTTP error text is public."""
 
@@ -1009,7 +1133,7 @@ def main():
              and re.fullmatch(r'[0-9a-f]{64}', digest), 'resume-initial-source-binding')
         session.script = session.source('desktop/tools/macos_fixed_carrier_resume.py', int(size), digest)
         need(len(session.script) == int(size), 'resume-initial-source-size')
-        session.source(RESUME_WORKFLOW, 32768)
+        need(len(session.source(RESUME_WORKFLOW, RESUME_WORKFLOW_BYTES)) == RESUME_WORKFLOW_BYTES, 'resume-workflow-exact-size')
         public = session.source('desktop/macos-installed-inputs/fixed-arm-carrier-origin-public.json', 64405, ORIGIN['qualificationEvidenceSha256'])
         origin_public_data(public)
         modules = {}
@@ -1022,6 +1146,24 @@ def main():
         session.host = modules['macos_xcode_host_preparation.py'].DarwinAPI(clock, target=TARGETS[0])
         session.host.waitable_sigchld()
         session.python = os.path.realpath(sys.executable)
+        # Keep all private host originals until every native command and POST
+        # closes. This sibling is retained until hosted job teardown, not retired.
+        host_root = Path(env['MRK_MACOS_WORK']) / 'host-python'
+        host_entry, host_body = session.quota.call(session.outer, 'file', host_root / 'host-binding.json', 32768, modes=(0o600,))
+        host_binding = decode(host_body)
+        def directory(path):
+            held = session.quota.call(session.outer, 'directory', path)
+            return held['identity'], os.listdir(held['fd'])
+        def read_file(path, limit):
+            held, body = session.quota.call(session.outer, 'file', path, limit)
+            return held['identity'], body
+        host_snapshot_value, host_cfg = host_snapshot(host_root, directory, read_file, sidecar=True)
+        host_context = {'executable': session.python, 'prefix': sys.prefix, 'basePrefix': sys.base_prefix,
+                        'baseExecutable': str(Path(sys._base_executable).resolve())}
+        host_output_bytes = host_selection_data(host_binding, host_snapshot_value, host_cfg, host_root, host_context,
+                                               env['GITHUB_SHA'], env['GITHUB_RUN_ID'], env['GITHUB_RUN_ATTEMPT']) + len(host_body)
+        host_retained_bytes = len(host_body) + len(host_cfg)
+        session.point()
         for tool in (session.python, '/usr/bin/hdiutil', '/usr/bin/vm_stat', '/usr/bin/openssl', '/usr/bin/codesign', '/usr/bin/sudo', '/usr/sbin/installer'):
             tool_uid = os.stat(tool, follow_symlinks=False).st_uid
             need(tool_uid in (0, os.getuid()), 'resume-tool-owner')
@@ -1043,10 +1185,10 @@ def main():
         memory_call = session.command('memory', ['/usr/bin/vm_stat'], 10)
         page_size, physical = host_memory_data(session.host, clock)
         memory = memory_data(memory_call.stdout, memory_call.stderr, memory_call.returncode, page_size=page_size, physical_bytes=physical)
-        retained = sum(len(content) for _, content in session.sources) + len(ca_body) + ORIGIN['artifactBytes'] + ORIGIN['imageBytes'] + ORIGIN['package']['bytes'] + (2 << 20)
+        retained = sum(len(content) for _, content in session.sources) + len(ca_body) + ORIGIN['artifactBytes'] + ORIGIN['imageBytes'] + ORIGIN['package']['bytes'] + host_retained_bytes + (2 << 20)
         required_memory = 6 * LIMIT + retained + (512 << 20) + (1 << 30)
         disk = os.fstatvfs(session.parent['fd'])
-        need(memory['availableEstimateBytes'] >= required_memory and disk.f_bavail * disk.f_frsize >= (3 << 30) + 2 * ORIGIN['artifactBytes'], 'resume-resource-admission')
+        need(memory['availableEstimateBytes'] >= required_memory and disk.f_bavail * disk.f_frsize >= (3 << 30) + 2 * ORIGIN['artifactBytes'] + host_output_bytes, 'resume-resource-admission')
         STATE['phase'] = 'acquire-carrier'
         artifact = session.acquire_fixed(); preview = preview_data(artifact['PREVIEW.json'], session.stager)
         session.preview_bytes, session.preview_sha = len(artifact['PREVIEW.json']), sha(artifact['PREVIEW.json'])

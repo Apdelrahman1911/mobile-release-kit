@@ -22,8 +22,8 @@ jobs:
     env:
       MRK_MACOS_TARGET: aarch64-apple-darwin
       MRK_MACOS_HOSTED_JOB: github-hosted-macos26-arm64
-      MRK_FIXED_RESUME_BYTES: "90436"
-      MRK_FIXED_RESUME_SHA256: "f7a735cbd2d391fe88e78795356dc180b6cd9bb8e976cad74953c4eb512b646f"
+      MRK_FIXED_RESUME_BYTES: "99516"
+      MRK_FIXED_RESUME_SHA256: "0b9d3b6a44529d18263a646f9aef2c1d101aaa65beb49f838b41027659795a2b"
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -134,9 +134,180 @@ jobs:
           mkdir -m 700 "$work/normal-ui" "$work/normal-ui/tmp"
           early_phase=shell-work-export
           export MRK_MACOS_WORK="$work"
+          # Supported disposable host venv, never a relocated shared launcher.
+          [[ ! -e "$work/host-python" && ! -L "$work/host-python" ]] || exit 1
+          MRK_HOST_BASE_CONTEXT=$(python3 -I -S -B - <<'PY_RESUME_HOST_BASE'
+          import hashlib,json,os,re,stat,sys
+          from pathlib import Path
+
+          def need(value, reason):
+              if not value: raise ValueError(reason)
+          def sha(body): return hashlib.sha256(body).hexdigest()
+          def identity(v): return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
+          def host_read(path, limit, *, base=False):
+              """Small preparation originals; shared base is observed, never modified."""
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+              primary = None
+              try:
+                  before = identity(os.fstat(fd))
+                  need(stat.S_ISREG(before[2]) and before[3] in (0, os.getuid()) and before[5] == 1
+                       and 0 < before[6] <= limit and (base or not before[2] & 0o022), 'resume-host-file')
+                  body = os.pread(fd, before[6] + 1, 0)
+                  need(len(body) == before[6] and not os.pread(fd, 1, before[6])
+                       and identity(os.fstat(fd)) == before == identity(os.stat(path, follow_symlinks=False)), 'resume-host-file-post')
+                  return before, body
+              except BaseException as error:
+                  primary = error
+                  raise
+              finally:
+                  consumed, fd = fd, None
+                  try: os.close(consumed)
+                  except BaseException:
+                      if primary is None: raise ValueError('resume-host-file-close') from None
+                      BaseException.add_note(primary, 'resume-host-file-close')
+
+          try:
+              need(sys.version_info[:3]==(3,14,7) and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode,'resume-host-base-version')
+              copy_path=Path(sys._base_executable).absolute();copy_executable=copy_path.resolve()
+              original,body=host_read(copy_executable,64<<20,base=True)
+              value={'launcherPath':sys.executable,'executable':str(Path(sys.executable).resolve()),'copyPath':str(copy_path),
+                     'copyExecutable':str(copy_executable),'prefix':sys.base_prefix,'identity':list(original),'sha256':sha(body)}
+              print(json.dumps(value,sort_keys=True,separators=(',',':')))
+          except BaseException:
+              print('::error::MRK_RESUME_HOST_BASE_UNAVAILABLE',file=sys.stderr)
+              raise SystemExit(1)from None
+          PY_RESUME_HOST_BASE
+          )
+          export MRK_HOST_BASE_CONTEXT
+          python3 -I -S -B -m venv --copies --without-pip --without-scm-ignore-files "$work/host-python"
           early_python_started=1
-          python3 -I -S -B - <<'PY_RESUME_PYTHON'
-          import hashlib,json,os,pathlib,stat,sys
+          "$work/host-python/bin/python3" -I -S -B - <<'PY_RESUME_PYTHON'
+          import hashlib,json,os,pathlib,re,stat,sys
+          from pathlib import Path
+          def need(value, reason):
+              if not value: raise ValueError(reason)
+          def sha(body): return hashlib.sha256(body).hexdigest()
+          def identity(v): return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
+          HOST_FILES = ('pyvenv.cfg', 'bin/python', 'bin/python3', 'bin/python3.14',
+                        'bin/activate', 'bin/activate.csh', 'bin/activate.fish', 'bin/Activate.ps1')
+          HOST_OPTIONAL = 'bin/𝜋thon'  # Documented CPython3.14 UTF-8 executable alias.
+          HOST_DIRS = ('.', 'bin', 'include', 'lib', 'lib/python3.14', 'lib/python3.14/site-packages')
+          HOST_BYTES = (256 << 20) + (256 << 10)
+
+
+          def host_read(path, limit, *, base=False):
+              """Small preparation originals; shared base is observed, never modified."""
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+              primary = None
+              try:
+                  before = identity(os.fstat(fd))
+                  need(stat.S_ISREG(before[2]) and before[3] in (0, os.getuid()) and before[5] == 1
+                       and 0 < before[6] <= limit and (base or not before[2] & 0o022), 'resume-host-file')
+                  body = os.pread(fd, before[6] + 1, 0)
+                  need(len(body) == before[6] and not os.pread(fd, 1, before[6])
+                       and identity(os.fstat(fd)) == before == identity(os.stat(path, follow_symlinks=False)), 'resume-host-file-post')
+                  return before, body
+              except BaseException as error:
+                  primary = error
+                  raise
+              finally:
+                  consumed, fd = fd, None
+                  try: os.close(consumed)
+                  except BaseException:
+                      if primary is None: raise ValueError('resume-host-file-close') from None
+                      BaseException.add_note(primary, 'resume-host-file-close')
+
+
+          def host_directory(path):
+              fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+              primary = None
+              try:
+                  before = identity(os.fstat(fd))[:5]
+                  need(stat.S_ISDIR(before[2]) and stat.S_IMODE(before[2]) == 0o700
+                       and before[3:5] == (os.getuid(), os.getgid()), 'resume-host-directory')
+                  names = os.listdir(fd)
+                  need(len(names) <= 10 and all(type(n) is str and '/' not in n for n in names)
+                       and identity(os.fstat(fd))[:5] == before == identity(os.stat(path, follow_symlinks=False))[:5], 'resume-host-directory-post')
+                  return before, names
+              except BaseException as error:
+                  primary = error
+                  raise
+              finally:
+                  consumed, fd = fd, None
+                  try: os.close(consumed)
+                  except BaseException:
+                      if primary is None: raise ValueError('resume-host-directory-close') from None
+                      BaseException.add_note(primary, 'resume-host-directory-close')
+
+
+          def host_config_data(body, base, root):
+              need(type(body) is bytes and 0 < len(body) <= 4096, 'resume-host-config-size')
+              cfg = {}
+              for line in body.decode('utf-8').splitlines():
+                  key, sep, value = line.partition('='); key, value = key.strip(), value.strip()
+                  need(sep and key not in cfg, 'resume-host-config-key')
+                  cfg[key] = value
+              need(set(cfg) == {'home', 'include-system-site-packages', 'version', 'executable', 'command'}
+                   and cfg['home'] == str(Path(base['copyPath']).parent)
+                   and cfg['include-system-site-packages'] == 'false' and cfg['version'] == '3.14.7'
+                   and cfg['executable'] == base['executable']
+                   and cfg['command'] == base['launcherPath'] + ' -m venv --copies --without-pip --without-scm-ignore-files ' + str(root), 'resume-host-config-binding')
+              return cfg
+
+
+          def host_snapshot(root, directory, read_file, *, sidecar=False):
+              """Only the documented without-pip Darwin venv roster, no glob discovery."""
+              dirs, files, bodies, names = [], [], {}, {}
+              for relative in HOST_DIRS:
+                  original, children = directory(root if relative == '.' else root / relative)
+                  need(stat.S_ISDIR(original[2]) and stat.S_IMODE(original[2]) == 0o700
+                       and original[3:5] == (os.getuid(), os.getgid()), 'resume-host-roster-directory')
+                  dirs.append({'path': relative, 'identity': list(original[:5])})
+                  names[relative] = set(children)
+                  need(len(children) == len(names[relative]), 'resume-host-roster-duplicates')
+              optional = HOST_OPTIONAL.split('/')[-1] in names['bin']
+              selected = HOST_FILES + ((HOST_OPTIONAL,) if optional else ())
+              expected = {'.': {'bin', 'include', 'lib', 'pyvenv.cfg'} | ({'host-binding.json'} if sidecar else set()),
+                          'bin': {Path(p).name for p in selected if p.startswith('bin/')},
+                          'include': set(), 'lib': {'python3.14'}, 'lib/python3.14': {'site-packages'},
+                          'lib/python3.14/site-packages': set()}
+              need(names == expected, 'resume-host-roster')
+              total = 0
+              for relative in selected:
+                  executable = relative in ('bin/python', 'bin/python3', 'bin/python3.14', HOST_OPTIONAL)
+                  limit = (64 << 20) if executable else (4096 if relative == 'pyvenv.cfg' else 64 << 10)
+                  original, body = read_file(root / relative, limit)
+                  need(stat.S_ISREG(original[2]) and original[3:6] == (os.getuid(), os.getgid(), 1)
+                       and not original[2] & 0o022 and 0 < original[6] == len(body) <= limit
+                       and (not executable or stat.S_IMODE(original[2]) == 0o755), 'resume-host-roster-file')
+                  total += len(body); need(total <= HOST_BYTES, 'resume-host-roster-bytes')
+                  files.append({'path': relative, 'identity': list(original), 'sha256': sha(body)})
+                  if relative == 'pyvenv.cfg': bodies[relative] = body
+              return {'directories': dirs, 'files': files, 'totalBytes': total}, bodies['pyvenv.cfg']
+
+
+          def host_selection_data(binding, snapshot, cfg_body, root, context, source, run, attempt):
+              keys = {'schemaVersion', 'source', 'runId', 'runAttempt', 'base', 'prefix', 'basePrefix', 'baseExecutable',
+                      'directories', 'files', 'totalBytes', 'retainedUntilHostedTeardown'}
+              need(type(binding) is dict and set(binding) == keys and type(binding['schemaVersion']) is int
+                   and binding['schemaVersion'] == 1 and binding['source'] == source and binding['runId'] == run
+                   and binding['runAttempt'] == attempt and binding['retainedUntilHostedTeardown'] is True, 'resume-host-binding')
+              base = binding['base']
+              need(type(base) is dict and set(base) == {'launcherPath', 'executable', 'copyPath', 'copyExecutable', 'prefix', 'identity', 'sha256'}
+                   and all(type(base[k]) is str and 0 < len(base[k]) <= 4096 and os.path.isabs(base[k])
+                           and os.path.normpath(base[k]) == base[k] for k in ('launcherPath', 'executable', 'copyPath', 'copyExecutable', 'prefix'))
+                   and type(base['identity']) is list and len(base['identity']) == 9 and all(type(n) is int for n in base['identity'])
+                   and type(base['sha256']) is str and re.fullmatch(r'[0-9a-f]{64}', base['sha256']), 'resume-host-base-shape')
+              need(context == {'executable': str(root / 'bin/python3'), 'prefix': str(root), 'basePrefix': base['prefix'],
+                               'baseExecutable': base['copyExecutable']}
+                   and binding['prefix'] == context['prefix'] and binding['basePrefix'] == context['basePrefix']
+                   and binding['baseExecutable'] == context['baseExecutable'] and binding['basePrefix'] != binding['prefix'], 'resume-host-selection')
+              need(all(binding[k] == snapshot[k] for k in ('directories', 'files', 'totalBytes'))
+                   and type(binding['totalBytes']) is int and 0 < binding['totalBytes'] <= HOST_BYTES, 'resume-host-snapshot-binding')
+              host_config_data(cfg_body, base, root)
+              copied = [row for row in snapshot['files'] if row['path'] in ('bin/python', 'bin/python3', 'bin/python3.14', HOST_OPTIONAL)]
+              need(all(row['sha256'] == base['sha256'] and row['identity'][6] == base['identity'][6] for row in copied), 'resume-host-copy-binding')
+              return binding['totalBytes']
           EARLY_PHASES=('shell-context','shell-work-create','shell-work-directories','shell-work-export','shell-unknown','version-flags','python-path','python-open','python-metadata','python-read','python-post','python-close','work-state','work-binding-open','work-binding-write','work-binding-sync','work-binding-readback','work-binding-close','publish-environment','publish-root','complete')
           EARLY_CLASSES=('SystemExit','ValueError','TypeError','AttributeError','KeyError','OSError','FileNotFoundError','PermissionError','AssertionError','RuntimeError','KeyboardInterrupt','shell-failure','other')
           EARLY_KEYS=('versionExpected','isolatedFlag','noSiteFlag','dontWriteBytecode','fileRegular','fileOwnerTrusted','fileSingleLink','fileWriteBitsClear','fileSizeBound','readLengthMatched','logicalEofEmpty','heldPostMatched','namedPostMatched','pythonCloseCompleted','workStatRead','normalStatRead','workBindingOpened','workBindingWriteMatched','workBindingSynced','workBindingReadbackMatched','workBindingCloseCompleted','environmentPublished','rootPublished','runnerTempFixed','workflowSourceJoined','fixedInstalledRef')
@@ -235,6 +406,36 @@ jobs:
                       if first is None:raise
                       BaseException.add_note(first,'resume-python-close')
               _stage('work-state')
+              host_root=pathlib.Path(os.environ['MRK_MACOS_WORK'])/'host-python'
+              raw_base=os.environ.pop('MRK_HOST_BASE_CONTEXT')
+              need(len(raw_base)<=16384,'resume-host-base-size');base=json.loads(raw_base)
+              current,base_body=host_read(base['copyExecutable'],64<<20,base=True)
+              need(list(current)==base['identity'] and sha(base_body)==base['sha256'],'resume-host-base-post')
+              snapshot,cfg_body=host_snapshot(host_root,host_directory,host_read)
+              context={'executable':str(path),'prefix':sys.prefix,'basePrefix':sys.base_prefix,
+                       'baseExecutable':str(pathlib.Path(sys._base_executable).resolve())}
+              private_binding={'schemaVersion':1,'source':os.environ['GITHUB_SHA'],'runId':os.environ['GITHUB_RUN_ID'],
+                               'runAttempt':os.environ['GITHUB_RUN_ATTEMPT'],'base':base,'prefix':context['prefix'],
+                               'basePrefix':context['basePrefix'],'baseExecutable':context['baseExecutable'],
+                               **snapshot,'retainedUntilHostedTeardown':True}
+              host_selection_data(private_binding,snapshot,cfg_body,host_root,context,os.environ['GITHUB_SHA'],os.environ['GITHUB_RUN_ID'],os.environ['GITHUB_RUN_ATTEMPT'])
+              # Separate private sidecar: old consumer-work binding stays unchanged.
+              private_body=json.dumps(private_binding,sort_keys=True,separators=(',',':')).encode('ascii')+b'\n'
+              need(0<len(private_body)<=32768,'resume-host-binding-size')
+              private_path=host_root/'host-binding.json';private_fd=os.open(private_path,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600);private_first=None
+              try:
+                  opened=ident(os.fstat(private_fd));need(stat.S_ISREG(opened[2]) and stat.S_IMODE(opened[2])==0o600 and opened[3:7]==(os.getuid(),os.getgid(),1,0),'resume-host-binding-open')
+                  need(os.write(private_fd,private_body)==len(private_body),'resume-host-binding-write');os.fsync(private_fd)
+                  after=ident(os.fstat(private_fd));need(after[:6]==opened[:6] and after[6]==len(private_body)
+                       and os.pread(private_fd,len(private_body)+1,0)==private_body and not os.pread(private_fd,1,len(private_body))
+                       and ident(os.fstat(private_fd))==after==ident(os.stat(private_path,follow_symlinks=False)),'resume-host-binding-post')
+              except BaseException as error:private_first=error;raise
+              finally:
+                  consumed,private_fd=private_fd,None
+                  try:os.close(consumed)
+                  except BaseException:
+                      if private_first is None:raise ValueError('resume-host-binding-close')from None
+                      BaseException.add_note(private_first,'resume-host-binding-close')
               work=pathlib.Path(os.environ['MRK_MACOS_WORK']);normal=work/'normal-ui'
               identity=lambda v:(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid)
               binding={'schemaVersion':1,'source':os.environ['GITHUB_SHA'],'runId':os.environ['GITHUB_RUN_ID'],'runAttempt':os.environ['GITHUB_RUN_ATTEMPT'],

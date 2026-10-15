@@ -305,6 +305,109 @@ class FixedCarrierResumeData(unittest.TestCase):
                 m.projection_data(*changed, source, "2", "1")
 
     def test_two_source_receipt_is_current_original_only_and_consumes_close(self):
+        # Actual private host DATA/guards and source-pin closure; no venv/native execution.
+        import ast, stat
+        adapter = ADAPTER
+        root = Path('/Users/runner/work/_temp/mrk-macos-installed.TEST1234/host-python')
+        uid, gid = adapter.os.getuid(), adapter.os.getgid()
+        base_path = '/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14'
+        base = dict(launcherPath=base_path, executable=base_path, copyPath=base_path,
+                    copyExecutable=base_path, prefix=str(Path(base_path).parent.parent),
+                    identity=[1, 2, stat.S_IFREG | 0o775, 0, 0, 1, 3, 4, 5], sha256=adapter.sha(b'exe'))
+        cfg = ('home = ' + str(Path(base_path).parent) + '\ninclude-system-site-packages = false\nversion = 3.14.7\nexecutable = ' + base_path +
+               '\ncommand = ' + base_path + ' -m venv --copies --without-pip --without-scm-ignore-files ' + str(root) + '\n').encode()
+        roster = adapter.HOST_FILES + (adapter.HOST_OPTIONAL,)
+        dir_names = {'.': ['bin', 'include', 'lib', 'pyvenv.cfg'], 'bin': [Path(p).name for p in roster if p.startswith('bin/')],
+                     'include': [], 'lib': ['python3.14'], 'lib/python3.14': ['site-packages'], 'lib/python3.14/site-packages': []}
+        bodies = {p: (cfg if p == 'pyvenv.cfg' else b'exe' if p in ('bin/python', 'bin/python3', 'bin/python3.14', adapter.HOST_OPTIONAL) else b'data') for p in roster}
+        def directory(path):
+            relative = '.' if path == root else path.relative_to(root).as_posix()
+            return (1, adapter.HOST_DIRS.index(relative) + 10, stat.S_IFDIR | 0o700, uid, gid), dir_names[relative]
+        def read_file(path, limit):
+            relative = path.relative_to(root).as_posix(); body = bodies[relative]
+            mode = 0o755 if body == b'exe' else 0o600
+            return (1, roster.index(relative) + 20, stat.S_IFREG | mode, uid, gid, 1, len(body), 4, 5), body
+        snapshot, actual_cfg = adapter.host_snapshot(root, directory, read_file)
+        context = dict(executable=str(root/'bin/python3'), prefix=str(root), basePrefix=base['prefix'], baseExecutable=base_path)
+        binding = dict(schemaVersion=1, source='a'*40, runId='2', runAttempt='1', base=base, prefix=str(root),
+                       basePrefix=base['prefix'], baseExecutable=base_path, **snapshot, retainedUntilHostedTeardown=True)
+        self.assertEqual(adapter.host_selection_data(binding, snapshot, actual_cfg, root, context, 'a'*40, '2', '1'), sum(map(len, bodies.values())))
+        for key, value in (('executable', str(root/'bin/python')), ('prefix', str(root.parent)),
+                           ('basePrefix', str(root)), ('baseExecutable', '/unrelated/python3')):
+            with self.subTest(hostContext=key), self.assertRaises(adapter.Refused):
+                adapter.host_selection_data(binding, snapshot, cfg, root, {**context, key: value}, 'a'*40, '2', '1')
+        for key, value in (('source', 'b'*40), ('runId', '1'), ('totalBytes', snapshot['totalBytes']+1), ('retainedUntilHostedTeardown', False)):
+            with self.subTest(hostBinding=key), self.assertRaises(adapter.Refused):
+                adapter.host_selection_data({**binding, key: value}, snapshot, cfg, root, context, 'a'*40, '2', '1')
+        for old, new in ((b'version = 3.14.7', b'version = 3.12.0'), (b'include-system-site-packages = false', b'include-system-site-packages = true'),
+                         (b'--copies', b'--symlinks'), (b'home = ', b'home = /unrelated/')):
+            with self.subTest(hostConfig=new), self.assertRaises(adapter.Refused):
+                adapter.host_config_data(cfg.replace(old,new), base, root)
+        with self.assertRaises(adapter.Refused): adapter.host_config_data(cfg+b'version = 3.14.7\n',base,root)
+        changed_snapshot = copy.deepcopy(snapshot); changed_snapshot['files'][1]['sha256'] = 'b'*64
+        with self.assertRaises(adapter.Refused):
+            adapter.host_selection_data({**binding, **changed_snapshot}, changed_snapshot, cfg, root, context, 'a'*40, '2', '1')
+        for change in ('extra', 'symlink-directory', 'writable-directory', 'hardlink', 'writable-file', 'symlink-file'):
+            def bad_directory(path):
+                original, names = directory(path)
+                if change == 'extra' and path == root: names = names + ['unexpected-output']
+                if path == root/'bin' and change in ('symlink-directory', 'writable-directory'):
+                    original = (*original[:2], stat.S_IFLNK|0o700 if change=='symlink-directory' else stat.S_IFDIR|0o722, *original[3:])
+                return original,names
+            def bad_file(path, limit):
+                original, body = read_file(path,limit)
+                if path == root/'bin/python3':
+                    original = list(original)
+                    if change=='hardlink': original[5]=2
+                    elif change=='writable-file': original[2]|=0o022
+                    elif change=='symlink-file': original[2]=stat.S_IFLNK|0o755
+                return original,body
+            with self.subTest(hostRoster=change), self.assertRaises(adapter.Refused):
+                adapter.host_snapshot(root,bad_directory,bad_file)
+        # Real host_read implementation with synthetic syscall observations;
+        # verify first error is preserved and the one original is consumed once.
+        fields = dict(st_dev=1,st_ino=2,st_mode=stat.S_IFREG|0o755,st_uid=uid,st_gid=gid,st_nlink=1,st_size=3,st_mtime_ns=4,st_ctime_ns=5)
+        original = SimpleNamespace(**fields)
+        with mock.patch.object(adapter.os,'open',return_value=101), mock.patch.object(adapter.os,'fstat',return_value=original), \
+             mock.patch.object(adapter.os,'stat',return_value=original), mock.patch.object(adapter.os,'pread',side_effect=lambda fd,n,off:b'exe' if off==0 else b''), \
+             mock.patch.object(adapter.os,'close') as closed:
+            self.assertEqual(adapter.host_read(root/'bin/python3',64), (adapter.identity(original),b'exe'))
+            self.assertEqual(closed.call_args_list,[mock.call(101)])
+            for key,value in (('st_mode',stat.S_IFREG|0o777), ('st_mode',stat.S_IFLNK|0o755), ('st_nlink',2), ('st_size',65)):
+                closed.reset_mock()
+                with mock.patch.object(adapter.os,'fstat',return_value=SimpleNamespace(**{**fields,key:value})), self.assertRaises(adapter.Refused):
+                    adapter.host_read(root/'bin/python3',64)
+                self.assertEqual(closed.call_args_list,[mock.call(101)])
+            for short,eof,changed in ((b'ex',b'',False),(b'exe',b'x',False),(b'exe',b'',True)):
+                closed.reset_mock()
+                with mock.patch.object(adapter.os,'pread',side_effect=lambda fd,n,off:short if off==0 else eof), \
+                     mock.patch.object(adapter.os,'stat',return_value=SimpleNamespace(**{**fields,'st_ino':3}) if changed else original), self.assertRaises(adapter.Refused):
+                    adapter.host_read(root/'bin/python3',64)
+                self.assertEqual(closed.call_args_list,[mock.call(101)])
+            closed.reset_mock();closed.side_effect=OSError('synthetic-close-unknown')
+            with self.assertRaisesRegex(ValueError,'resume-host-file-close'):adapter.host_read(root/'bin/python3',64)
+            self.assertEqual(closed.call_args_list,[mock.call(101)])
+            closed.reset_mock()
+            first = RuntimeError('synthetic-original-read-failure')
+            with mock.patch.object(adapter.os,'pread',side_effect=first), self.assertRaises(RuntimeError) as caught:
+                adapter.host_read(root/'bin/python3',64)
+            self.assertIs(caught.exception,first);self.assertEqual(closed.call_args_list,[mock.call(101)])
+            self.assertIn('resume-host-file-close',first.__notes__)
+        workflow = (ROOT/adapter.RESUME_WORKFLOW).read_bytes()
+        helper = (ROOT/'desktop/tools/macos_fixed_carrier_resume.py').read_bytes()
+        self.assertEqual(len(workflow),adapter.RESUME_WORKFLOW_BYTES)
+        self.assertIn(('MRK_FIXED_RESUME_BYTES: "'+str(len(helper))+'"').encode(),workflow)
+        self.assertIn(('MRK_FIXED_RESUME_SHA256: "'+adapter.sha(helper)+'"').encode(),workflow)
+        self.assertIn(b'-m venv --copies --without-pip --without-scm-ignore-files "$work/host-python"',workflow)
+        self.assertIn(b'"$work/host-python/bin/python3" -I -S -B -',workflow)
+        # Actual inline private admission functions must be byte-logic identical.
+        text = workflow.decode();block=text.split("<<'PY_RESUME_PYTHON'\n",1)[1].split('\n          PY_RESUME_PYTHON',1)[0]
+        import textwrap
+        inline_ast = ast.parse(textwrap.dedent(block));helper_ast=ast.parse(helper)
+        for name in ('host_read','host_directory','host_config_data','host_snapshot','host_selection_data'):
+            left=next(n for n in inline_ast.body if isinstance(n,ast.FunctionDef) and n.name==name)
+            right=next(n for n in helper_ast.body if isinstance(n,ast.FunctionDef) and n.name==name)
+            self.assertEqual(ast.dump(left,include_attributes=False),ast.dump(right,include_attributes=False))
         m, source = RUNNER, "a" * 40
         env = dict(TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=m.FIXED_RESUME_SOURCE,
                    GITHUB_REPOSITORY="Apdelrahman1911/mobile-release-kit", GITHUB_EVENT_NAME="push",
