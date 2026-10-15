@@ -980,6 +980,8 @@ def mounted_data(originals, row, target, stager, *, allocation_budget=None):
     else:
         component = {k: members[stager.INSTALL_COMPONENT + '/' + k] for k in ('PackageInfo', 'Scripts')}
     need(set(component) == {'PackageInfo', 'Scripts'}, 'enrollment-product-component')
+    del members
+    outer_retained = 0
     stager.package_info(component['PackageInfo'], selection=selection)
     packed = component['Scripts']
     component_retained = sum(len(value) for value in component.values())
@@ -1919,7 +1921,7 @@ def project_main():
 # Closed first-party SOURCE locations only. These exact leaves are compiled only
 # after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
 # traceback rendering, error args/notes/locals or private filenames are used.
-FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2219}
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2221}
 FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
 
 

@@ -1695,6 +1695,189 @@ class FixedCarrierResumeData(unittest.TestCase):
             finally:
                 self.assertTrue(other_quota.finish())
 
+        # Actual mounted_data boundary: nested and direct public XAR parsers
+        # release only the dead outer dict; direct component aliases stay live.
+        manifest_digest = 'a' * 64
+        required_paths = {'app/' + tool.ENTRY_BINARY, 'app/' + tool.APP_BINARY,
+                          'app/' + tool.VAULT_HELPER, 'app/Contents/Info.plist',
+                          'app/' + tool.PAYLOAD_INFO, 'runtime/python/bin/python3', 'runtime/manifest.json'}
+        executables = {'app/' + tool.ENTRY_BINARY, 'app/' + tool.APP_BINARY,
+                       'app/' + tool.VAULT_HELPER, 'runtime/python/bin/python3'}
+        actual_inventory = tool.canonical(dict(schemaVersion=1, release=m.ORIGIN['release'],
+            runtimeManifestSha256=manifest_digest,
+            files=[dict(path=p, sha256=manifest_digest if p == 'runtime/manifest.json' else 'b' * 64,
+                        size=1, executable=p in executables) for p in sorted(required_paths)]))
+        small_archive = (odc('.', m.stat.S_IFDIR | 0o755)
+                         + odc('input', m.stat.S_IFDIR | 0o555)
+                         + odc('input/' + tool.INSTALLATION_INVENTORY_NAME,
+                               m.stat.S_IFREG | 0o444, actual_inventory)
+                         + odc('TRAILER!!!', 0))
+        gzip_writer = m.zlib.compressobj(wbits=31)
+        small_gzip = gzip_writer.compress(small_archive) + gzip_writer.flush()
+        info = ('<pkg-info identifier="%s" version="%s" install-location="/" auth="root">'
+                '<scripts><postinstall file="./postinstall"/></scripts></pkg-info>'
+                % (tool.PACKAGE_ID, m.ORIGIN['packageVersion'])).encode()
+        synthetic_policy = dict(schemaVersion=1, kind='mrk-macos-developer-id-code-policy-v1',
+            teamIdentifier='ABCDE12345', leafCertificateSha1='c' * 40,
+            leafCertificateSha256='d' * 64, hardenedRuntime=True, entitlements='empty')
+        policy_digest = m.sha(json.dumps(synthetic_policy, ensure_ascii=True,
+            separators=(',', ':'), allow_nan=False).encode('ascii'))
+
+        def inner_fixture(script_bytes, *, extra=False):
+            parts = [('PackageInfo', info), ('Scripts', script_bytes)]
+            if extra:
+                parts.append(('Bom', b'PUBLIC-EXTRA-ROSTER'))
+            content = b''; nodes = []
+            for name, value in parts:
+                nodes.append('<file><name>%s</name><type>file</type><data><length>%d</length>'
+                    '<offset>%d</offset><size>%d</size><encoding style="application/octet-stream"/></data></file>'
+                    % (name, len(value), len(content), len(value)))
+                content += value
+            xml = ('<xar><toc>' + ''.join(nodes) + '</toc></xar>').encode()
+            compressed = m.zlib.compress(xml)
+            return m.struct.pack('>IHHQQI', 0x78617221, 28, 1, len(compressed), len(xml), 0) + compressed + content
+
+        def product_fixture(script_bytes, direct, *, extra=False):
+            content = b''
+            def file_node(identifier, name, value):
+                nonlocal content
+                text = ('<file id="%d"><name>%s</name><type>file</type><data><length>%d</length>'
+                        '<offset>%d</offset><size>%d</size><encoding style="application/octet-stream"/></data></file>'
+                        % (identifier, name, len(value), 20 + len(content), len(value)))
+                content += value
+                return text
+            nodes = [file_node(1, 'Distribution', b'PUBLIC-XML')]
+            nodes.append('<file id="2"><name>Resources</name><type>directory</type>'
+                         + file_node(3, 'InstallerReadMe.html', b'PUBLIC-HTML') + '</file>')
+            if direct:
+                nodes.append('<file id="4"><name>' + tool.INSTALL_COMPONENT + '</name><type>directory</type>'
+                             + file_node(5, 'PackageInfo', info) + file_node(6, 'Scripts', script_bytes) + '</file>')
+            else:
+                nodes.append(file_node(4, tool.INSTALL_COMPONENT, inner_fixture(script_bytes, extra=extra)))
+            xml = ('<xar><toc><checksum style="sha1"><offset>0</offset><size>20</size></checksum>'
+                   + ''.join(nodes) + '</toc></xar>').encode()
+            compressed = m.zlib.compress(xml)
+            package = (m.struct.pack('>IHHQQI', 0x78617221, 28, 1, len(compressed), len(xml), 1)
+                       + compressed + m.hashlib.sha1(compressed).digest() + content)
+            release = dict(profile='fixed-macos26-arm64-maintenance-v2', packageIdentifier=tool.PACKAGE_ID,
+                bundleIdentifier=tool.BUNDLE_ID, packageVersion=m.ORIGIN['packageVersion'], release=m.ORIGIN['release'],
+                sourceCommit=m.ORIGIN['source'], protocolSha256=tool.CURRENT_PROTOCOL,
+                runtimeManifestSha256=manifest_digest, inventorySha256=m.sha(actual_inventory),
+                signingPolicySha256=policy_digest, packageSha256=m.sha(package))
+            producer = tool.canonical(dict(schemaVersion=2, kind='mrk-macos-install-producer-v2',
+                domain='MobileReleaseKit-package-producer-v2', target=tool.ARM_TARGET,
+                releaseSet=dict(schemaVersion=2, current=release, acceptedPredecessors=[]),
+                signingPolicies=[dict(sha256=policy_digest, policy=synthetic_policy)]))
+            signature = b'PUBLIC-SYNTHETIC-SIGNATURE-NOT-NATIVE-EVIDENCE'
+            originals = {'Install.pkg': (package, 0o444), 'producer.json': (producer, 0o444),
+                         'producer.sig': (signature, 0o444)}
+            row = dict(m.ORIGIN, members=[], inventorySha256=m.sha(actual_inventory),
+                       runtimeManifestSha256=manifest_digest, signingIdentity={key: synthetic_policy[key]
+                       for key in ('teamIdentifier', 'leafCertificateSha1', 'leafCertificateSha256')})
+            for key, name in (('package', 'Install.pkg'), ('descriptor', 'producer.json'), ('signature', 'producer.sig')):
+                value = originals[name][0]
+                row[key] = dict(name=name, bytes=len(value), sha256=m.sha(value))
+            return originals, row
+
+        actual_outer_parser = tool.install_product_members
+        # Observers retain only scalar charges/identities, never returned buffers
+        # or frames. new= functions avoid unittest.mock's extra sideeffect stack.
+        for direct in (False, True):
+            for is_gzip in (False, True):
+                originals, row = product_fixture(small_gzip if is_gzip else small_archive, direct)
+                scalar = {}; phases = []
+                def observe_outer(*args, **kwargs):
+                    parsed = actual_outer_parser(*args, **kwargs)
+                    scalar['outerBytes'] = sum(map(len, parsed.values()))
+                    scalar['innerBytes'] = 0 if direct else len(parsed[tool.INSTALL_COMPONENT])
+                    scalar['directScriptId'] = id(parsed[tool.INSTALL_COMPONENT + '/Scripts']) if direct else 0
+                    return parsed
+                def observe_budget(phase, live, packed_bytes, output):
+                    phases.append((phase, live, packed_bytes, output))
+                    # Never materialize cached f_locals while members is live:
+                    # a test observer must not manufacture a retained dict root.
+                    if phase in ('install-product-toc', 'install-product-member'):
+                        return
+                    if phase in ('xar-toc', 'xar-member'):
+                        retained = scalar['outerBytes'] + scalar['innerBytes']
+                        if phase == 'xar-toc':
+                            self.assertEqual(live, retained)
+                        else:
+                            self.assertGreaterEqual(live, retained)
+                        return
+                    self.assertIn(phase, ('scripts', 'cpio-window', 'cpio-slice'))
+                    frame = m.sys._getframe()
+                    local = None
+                    try:
+                        for _ in range(8):
+                            frame = frame.f_back
+                            if frame is None:
+                                break
+                            if frame.f_code is m.mounted_data.__code__:
+                                break
+                        self.assertIsNotNone(frame)
+                        self.assertIs(frame.f_code, m.mounted_data.__code__)
+                        local = frame.f_locals
+                        if phase in ('scripts', 'cpio-window', 'cpio-slice'):
+                            self.assertNotIn('members', local)
+                            self.assertEqual(local['outer_retained'], 0)
+                            self.assertEqual(set(local['component']), {'PackageInfo', 'Scripts'})
+                            component_bytes = sum(map(len, local['component'].values()))
+                            self.assertEqual(local['component_retained'], component_bytes)
+                            self.assertIs(local['bodies']['Install.pkg'], originals['Install.pkg'][0])
+                            self.assertIs(local['bodies']['producer.json'], originals['producer.json'][0])
+                            self.assertIs(local['bodies']['producer.sig'], originals['producer.sig'][0])
+                            self.assertIs(local['packed'], local['component']['Scripts'])
+                            if direct:
+                                self.assertEqual(id(local['component']['Scripts']), scalar['directScriptId'])
+                            if phase == 'scripts':
+                                self.assertEqual((live, packed_bytes, output),
+                                    (component_bytes, len(local['packed']), len(small_archive)))
+                            elif phase == 'cpio-window':
+                                self.assertEqual((live, packed_bytes, output),
+                                    (component_bytes + 2 * len(local['archive']), 0, 0))
+                                if not is_gzip:
+                                    self.assertIs(local['archive'], local['packed'])
+                            else:
+                                self.assertEqual((live, packed_bytes, output),
+                                    (component_bytes + len(local['archive']) + len(actual_inventory), 0, 0))
+                            scalar['postOuterReleased'] = 1
+                    finally:
+                        del local, frame
+                with mock.patch.object(tool, 'install_product_members', new=observe_outer):
+                    expected = m.mounted_data(originals, row, tool.ARM_TARGET, tool)
+                    result = m.mounted_data(originals, row, tool.ARM_TARGET, tool, allocation_budget=observe_budget)
+                self.assertEqual(result, expected)
+                self.assertEqual(result[1], actual_inventory)
+                self.assertEqual(result[0]['inventoryPayloadBytes'], len(required_paths))
+                self.assertFalse(result[0]['nativeQualificationInferred'])
+                self.assertEqual(scalar['postOuterReleased'], 1)
+                self.assertEqual(sum(p[0] == 'scripts' for p in phases), int(is_gzip))
+                self.assertEqual(sum(p[0] == 'cpio-window' for p in phases), 1)
+                self.assertEqual(sum(p[0] == 'xar-toc' for p in phases), int(not direct))
+
+        invalid, invalid_row = product_fixture(small_gzip, False, extra=True)
+        refused_phases = []
+        with self.assertRaisesRegex(m.Refused, '^enrollment-product-component$'):
+            m.mounted_data(invalid, invalid_row, tool.ARM_TARGET, tool,
+                allocation_budget=lambda phase, *args: refused_phases.append(phase))
+        self.assertNotIn('scripts', refused_phases)
+        # Actual Scripts codec remains unentered when its allocation refuses;
+        # prior outer/inner codecs are real and the first exception is unchanged.
+        originals, row = product_fixture(small_gzip, False)
+        first = m.Refused('outer-lifetime-allocation-stop')
+        scalar = {}
+        with mock.patch.object(tool, 'inflate', wraps=tool.inflate) as decoder:
+            def refuse_scripts(phase, *args):
+                if phase == 'scripts':
+                    scalar['priorInflateCalls'] = decoder.call_count
+                    raise first
+            with self.assertRaises(m.Refused) as caught:
+                m.mounted_data(originals, row, tool.ARM_TARGET, tool, allocation_budget=refuse_scripts)
+            self.assertIs(caught.exception, first)
+            self.assertEqual(decoder.call_count, scalar['priorInflateCalls'])
+            self.assertGreater(scalar['priorInflateCalls'], 0)
+
     def test_pinned_tls_roots_require_source_authentication_and_strict_tls(self):
         m = ADAPTER
         pem = (ROOT / m.TLS_CA_PATH).read_bytes()
