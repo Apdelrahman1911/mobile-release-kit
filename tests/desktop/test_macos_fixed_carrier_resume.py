@@ -211,7 +211,7 @@ class FixedCarrierResumeData(unittest.TestCase):
                  and isinstance(node.func, ast.Name) and node.func.id == 'admit_tool']
         self.assertEqual([ast.unparse(node.args[0]) for node in calls],
                          ['session.python', "'/usr/bin/hdiutil'", "'/usr/bin/vm_stat'", "'/usr/bin/openssl'",
-                          "'/usr/bin/codesign'", "'/usr/bin/sudo'", "'/usr/sbin/installer'"])
+                          "'/usr/bin/codesign'", "'/usr/sbin/installer'"])
         self.assertTrue(all(len(node.args) == 1 and not node.keywords for node in calls))
         # Real Python traceback objects, synthetic exception only: no native work.
         secret = 'private-error-value-never-export'
@@ -250,6 +250,140 @@ class FixedCarrierResumeData(unittest.TestCase):
             self.assertNotIn(secret.encode(), m.canonical(bounded))
         with mock.patch.object(m, 'Path', side_effect=RuntimeError(secret)):
             self.assertEqual(m.failure_location(primary), m.unavailable_location())
+
+    def test_fixed_sudo_originals_preserve_quota_snapshot_and_finality(self):
+        # Synthetic protocol only: no Darwin syscall, descriptor or command.
+        m = ADAPTER
+        marker = RuntimeError('inert-primary-acquire-failure')
+
+        def fixture():
+            quota = m.OriginalQuota()
+            clock = SimpleNamespace(check=mock.Mock())
+            api, events = object(), []
+
+            class Book:
+                def __init__(self, actual_api, context, actual_clock):
+                    self.api, self.context, self.clock = actual_api, context, actual_clock
+                    self.nodes, self.errors = {}, []
+                    self.budget = {'live': 0, 'uncertain': False}
+                    self.result_fd = None
+                    self.fail_at = self.close_error_at = None
+                    self.change = self.snapshot_error = self.raise_close = False
+                    self.close_calls = 0
+
+                def open(self, parent, name, kind, policy, role):
+                    self_test.assertIn(wrapper, quota.books)
+                    self_test.assertEqual(quota.reserved, 4)
+                    path = '/' if parent is None else parent.path.rstrip('/') + '/' + name
+                    pre = {'inertGeneration': len(self.nodes), 'inertSnapshotBasis': 'not-native-evidence'}
+                    node = SimpleNamespace(path=path, parent=parent, name=name, kind=kind, policy=policy, role=role,
+                                           fd=None, close_state='not-opened', pre=None, expected=None)
+                    self.nodes[path] = node
+                    events.append(('open', path, kind, policy, role))
+                    if len(self.nodes) == self.fail_at: raise marker
+                    node.fd = 100 + len(self.nodes)  # Never passed to an OS API.
+                    node.close_state, node.pre, node.expected = 'owned', pre, pre
+                    self.budget['live'] += 1
+                    return node
+
+                def snapshot(self, node, phase):
+                    events.append(('snapshot', node.path, phase))
+                    if self.snapshot_error: self.errors.append('inert-native-ACL-or-snapshot-refusal')
+                    return {**node.expected, 'inertGeneration': -1} if self.change else dict(node.expected)
+
+                def close_all(self):
+                    self.close_calls += 1
+                    if self.raise_close: raise RuntimeError('inert-close-api-failure')
+                    errors = []
+                    for index, node in enumerate(reversed(list(self.nodes.values()))):
+                        if node.fd is None: continue
+                        node.fd = None  # Consume before reporting close outcome.
+                        events.append(('close', node.path))
+                        unknown = index == self.close_error_at
+                        node.close_state = 'unknown' if unknown else 'closed'
+                        if unknown:
+                            errors.append('inert-close-unknown'); self.budget['uncertain'] = True
+                        else: self.budget['live'] -= 1
+                    return errors
+
+            self_test = self
+            module = SimpleNamespace(Originals=Book, _same_snapshot=lambda before, after: before == after)
+            wrapper = quota.book(lambda: m.FixedSudoOriginals(module, api, clock, 123))
+            self.assertEqual(events, [])  # Inert constructor and registration.
+            self.assertIs(wrapper.book.api, api); self.assertIs(wrapper.book.clock, clock)
+            self.assertEqual(wrapper.book.context, {'uid': 123})
+            return quota, wrapper, events
+
+        quota, wrapper, events = fixture()
+        wrapper.acquire(quota)
+        self.assertEqual([event[1:] for event in events if event[0] == 'open'], [
+            ('/', 'directory', 'native', 'os-provisioner-root'),
+            ('/usr', 'directory', 'native', 'os-provisioner-usr'),
+            ('/usr/bin', 'directory', 'native', 'os-provisioner-bin'),
+            ('/usr/bin/sudo', 'file', 'sudo', 'os-provisioner-sudo')])
+        self.assertEqual(len(wrapper.entries), 4)
+        self.assertEqual(wrapper.entries[-1]['kind'], 'file')
+        quota.check()
+        self.assertTrue(quota.finish()); self.assertTrue(quota.finish())
+        self.assertEqual(wrapper.book.close_calls, 1)
+        self.assertTrue(all(entry['fd'] is None for entry in wrapper.entries))
+        self.assertEqual(quota.reserved, 4)
+        with self.assertRaises(m.Refused): wrapper.check()
+
+        quota, wrapper, events = fixture()
+        quota.reserve(m.MAX_ORIGINALS - 3)
+        with self.assertRaises(m.Refused): wrapper.acquire(quota)
+        self.assertEqual(events, []); self.assertEqual(quota.reserved, m.MAX_ORIGINALS - 3)
+        self.assertTrue(quota.finish())
+
+        quota, wrapper, events = fixture()
+        wrapper.book.fail_at = 3
+        try:
+            wrapper.acquire(quota)
+        except RuntimeError as primary:
+            self.assertIs(primary, marker)
+            self.assertTrue(quota.finish())
+        else: self.fail('partial acquisition unexpectedly succeeded')
+        self.assertEqual([event[1] for event in events if event[0] == 'close'], ['/usr', '/'])
+        self.assertEqual(quota.reserved, 4)
+
+        for fault in ('change', 'snapshot_error', 'missing_fd'):
+            with self.subTest(snapshot_fault=fault):
+                quota, wrapper, events = fixture(); wrapper.acquire(quota)
+                if fault == 'missing_fd':
+                    # The view must reflect the actual node; never a cached FD.
+                    wrapper.entries[-1].node.fd = None
+                    self.assertIsNone(wrapper.entries[-1]['fd'])
+                else: setattr(wrapper.book, fault, True)
+                with self.assertRaises(m.Refused): quota.check()
+                wrapper.book.change = wrapper.book.snapshot_error = False
+                with self.assertRaises(m.Refused): quota.check()  # Refusal remains latched.
+                quota.finish()
+
+        for fault in ('close_error_at', 'raise_close'):
+            with self.subTest(close_fault=fault):
+                quota, wrapper, events = fixture(); wrapper.acquire(quota)
+                setattr(wrapper.book, fault, 0 if fault == 'close_error_at' else True)
+                other = SimpleNamespace(finish=mock.Mock(return_value=True))
+                quota.books.insert(0, other)
+                self.assertFalse(quota.finish()); other.finish.assert_called_once()
+                self.assertFalse(quota.finish()); self.assertEqual(wrapper.book.close_calls, 1)
+                if fault == 'close_error_at':
+                    self.assertEqual(len([event for event in events if event[0] == 'close']), 4)
+                    self.assertTrue(all(entry['fd'] is None for entry in wrapper.entries))
+                self.assertEqual(quota.reserved, 4)
+
+        import ast
+        body = ast.parse((ROOT / 'desktop/tools/macos_fixed_carrier_resume.py').read_bytes())
+        main = next(node for node in body.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        protected = [node for node in ast.walk(main) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Name) and node.func.id == 'FixedSudoOriginals']
+        self.assertEqual(len(protected), 1)
+        retire = next(node for node in ast.walk(body) if isinstance(node, ast.FunctionDef) and node.name == 'retire')
+        skips = [node for node in ast.walk(retire) if isinstance(node, ast.If)
+                 and ast.unparse(node.test) == 'isinstance(book, FixedSudoOriginals)']
+        self.assertEqual(len(skips), 1)
+        self.assertEqual(len(skips[0].body), 1); self.assertIsInstance(skips[0].body[0], ast.Continue)
 
     def test_cleanup_retires_only_owned_outputs_and_refuses_symlink_before_deletion(self):
         m = ADAPTER

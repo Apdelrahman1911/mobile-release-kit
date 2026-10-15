@@ -305,6 +305,86 @@ class OriginalQuota:
         return settled
 
 
+class _FixedSudoEntry:
+    """A live view, never an independent descriptor owner."""
+    def __init__(self, node):
+        self.node = node
+
+    def __getitem__(self, key):
+        if key == 'fd': return self.node.fd
+        if key == 'kind': return self.node.kind
+        raise KeyError(key)
+
+
+class FixedSudoOriginals:
+    """Reuse the host's exact protected-sudo policy, not a read fallback."""
+    def __init__(self, module, api, clock, uid):
+        # Construction is inert; global registration precedes every acquisition.
+        self.module, self.clock = module, clock
+        self.book = module.Originals(api, {'uid': uid}, clock)
+        self.entries = []
+        self.attempted = self.ready = self.failed = self.finished = False
+        self.close_uncertain = False
+
+    @property
+    def errors(self):
+        return self.book.errors
+
+    def acquire(self, quota):
+        need(self in quota.books and not self.attempted and not self.finished, 'resume-sudo-registration')
+        self.attempted = True
+        quota.reserve(4)  # Independent root/usr/bin/sudo originals; never refund.
+        parent = None
+        for name, kind, policy, role in (
+                ('/', 'directory', 'native', 'os-provisioner-root'),
+                ('usr', 'directory', 'native', 'os-provisioner-usr'),
+                ('bin', 'directory', 'native', 'os-provisioner-bin'),
+                ('sudo', 'file', 'sudo', 'os-provisioner-sudo')):
+            node = self.book.open(parent, name, kind, policy, role)
+            self.entries.append(_FixedSudoEntry(node))
+            need(not self.errors and node.fd is not None and node.close_state == 'owned'
+                 and node.pre and node.expected is node.pre, 'resume-sudo-original')
+            parent = node
+        need(len(self.book.nodes) == len(self.entries) == 4, 'resume-sudo-original-count')
+        self.ready = True
+        self.check()
+
+    def check_one(self, entry):
+        try:
+            self.clock.check()
+            need(self.ready and not self.failed and not self.finished and not self.errors
+                 and any(held is entry for held in self.entries), 'resume-sudo-live-entry')
+            node = entry.node
+            need(self.book.nodes.get(node.path) is node and node.fd is not None
+                 and node.close_state == 'owned' and node.pre and node.expected is node.pre,
+                 'resume-sudo-original-custody')
+            current = self.book.snapshot(node, 'resume-sudo-post')
+            need(not self.errors and self.module._same_snapshot(node.expected, current), 'resume-sudo-original-post')
+            node.post = current
+        except BaseException:
+            self.failed = True
+            raise
+
+    def check(self):
+        need(self.ready and len(self.book.nodes) == len(self.entries) == 4, 'resume-sudo-check-count')
+        for entry in self.entries:
+            self.check_one(entry)
+
+    def finish(self):
+        # The donor consumes before close and attempts every node. Never retry
+        # a consumed original or let a later empty close list erase uncertainty.
+        if not self.finished:
+            self.finished = True
+            try:
+                self.close_uncertain = bool(self.book.close_all())
+            except BaseException:
+                self.close_uncertain = True
+        return (not self.close_uncertain and not self.book.budget['uncertain']
+                and self.book.result_fd is None
+                and all(node.fd is None and node.close_state in ('closed', 'not-opened')
+                        for node in self.book.nodes.values()))
+
+
 def redirect_data(address):
     need(type(address) is str and 0 < len(address) <= 8192, 'p0-artifact-redirect')
     parsed = urllib.parse.urlsplit(address)
@@ -1085,6 +1165,8 @@ class Resume:
         self.point(); self.outer.check()
         # Only our fixed outputs, never installed root, source, vault or user data.
         for book in self.quota.books:
+            if isinstance(book, FixedSudoOriginals):
+                continue  # Keep all four originals until the global final close.
             for entry in book.entries:
                 if entry['kind'] != 'directory': book.close(entry)
         need(all(not book.errors for book in self.quota.books), 'resume-private-original-close')
@@ -1170,13 +1252,15 @@ def main():
             entry, content = session.quota.call(session.outer, 'file', Path(tool), 64 << 20, uid=tool_uid, modes=(0o555, 0o755, 0o4555, 0o4755))
             need(content, 'resume-tool-original')
         # Explicit closed call sites make a denied file observable by exact
-        # SOURCE location; identical order, arguments, guards and original quota.
+        # SOURCE location; ordinary roles keep their arguments, guards and order.
         admit_tool(session.python)
         admit_tool('/usr/bin/hdiutil')
         admit_tool('/usr/bin/vm_stat')
         admit_tool('/usr/bin/openssl')
         admit_tool('/usr/bin/codesign')
-        admit_tool('/usr/bin/sudo')
+        sudo = session.quota.book(lambda: FixedSudoOriginals(
+            modules['macos_xcode_host_preparation.py'], session.host, clock, os.getuid()))
+        sudo.acquire(session.quota)
         admit_tool('/usr/sbin/installer')
         ca = ssl.get_default_verify_paths().cafile
         need(type(ca) is str and os.path.isabs(ca), 'resume-stock-ca')
@@ -1331,7 +1415,7 @@ def project_main():
 # Closed first-party SOURCE locations only. These exact leaves are compiled only
 # after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
 # traceback rendering, error args/notes/locals or private filenames are used.
-FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 5982, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 1559}
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 5982, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 1643}
 FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
 
 
