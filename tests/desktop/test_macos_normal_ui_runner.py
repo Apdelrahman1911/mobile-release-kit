@@ -26,6 +26,19 @@ SPEC.loader.exec_module(MODULE)
 SWIFT = ROOT / "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift"
 
 
+# Strict inverse for the reviewed project-only diagnostic addition. Historical
+# SOURCE oracles keep their old exact bytes; runtime reads are never normalized.
+PROJECT_REQUIRE_SWIFT_INVERSE = (('    private enum RequireCheck: String { case condition, singleton, actionable }\n', '    private enum RequireCheck: String { case condition, singleton, actionable }\n    private enum ProjectRequireMethod: String {\n        case pathFields = "testSyntheticProjectPathFields"\n        case localEditsAndImages = "testSyntheticProjectLocalEditsAndImages"\n    }\n'), ('    @MainActor private var engineeringRequireDiagnosticEmitted = false\n', '    @MainActor private var engineeringRequireDiagnosticEmitted = false\n    @MainActor private var projectRequireDiagnosticMethod: ProjectRequireMethod?\n    @MainActor private var projectRequireDiagnosticEmitted = false\n'), ('            if engineeringRequireDiagnosticActive && originalFailureAbsent && !engineeringRequireDiagnosticEmitted\n', '            if let method = projectRequireDiagnosticMethod, originalFailureAbsent,\n                !projectRequireDiagnosticEmitted, line >= 1 && line <= 65535 {\n                projectRequireDiagnosticEmitted = true\n                print("MRK_NORMAL_PROJECT_REQUIRE_FAILURE=v1;method=\\(method.rawValue);line=\\(line);check=\\(check.rawValue)")\n            }\n            if engineeringRequireDiagnosticActive && originalFailureAbsent && !engineeringRequireDiagnosticEmitted\n'), ('            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive {\n                try require(false, "terminal UI refusal in " + journeyStage, line: line)', '            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {\n                try require(false, "terminal UI refusal in " + journeyStage, line: line)'), ('            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive {\n                try require(false, "missing or ambiguous expected control in " + journeyStage, line: line)', '            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {\n                try require(false, "missing or ambiguous expected control in " + journeyStage, line: line)'), ('            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive {\n                try require(false, "unexpected original native sheet title in " + journeyStage, line: line)', '            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {\n                try require(false, "unexpected original native sheet title in " + journeyStage, line: line)'), ('    @MainActor func testSyntheticProjectPathFields() throws {\n', '    @MainActor func testSyntheticProjectPathFields() throws {\n        projectRequireDiagnosticMethod = .pathFields\n        projectRequireDiagnosticEmitted = false\n        defer { projectRequireDiagnosticMethod = nil }\n'), ('    @MainActor func testSyntheticProjectLocalEditsAndImages() throws {\n', '    @MainActor func testSyntheticProjectLocalEditsAndImages() throws {\n        projectRequireDiagnosticMethod = .localEditsAndImages\n        projectRequireDiagnosticEmitted = false\n        defer { projectRequireDiagnosticMethod = nil }\n'))
+
+
+def without_project_require_source(source):
+    for previous, current in reversed(PROJECT_REQUIRE_SWIFT_INVERSE):
+        assert source.count(current) == 1
+        source = source.replace(current, previous, 1)
+    assert hashlib.sha256(source.encode()).hexdigest() == '4a05a297f5945279a1287cba8961f5ce7f381d226dd80e3bb81303a6ce06bfb2'
+    return source
+
+
 # Exact regional SOURCE inverse for the separately reviewed positive/private
 # addition. No existing ordinary-owner or historical whole-source hash is relaxed.
 ANDROID_POSITIVE_SWIFT_INVERSE = ((70,
@@ -1171,7 +1184,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertEqual(project.count("isa = PBXNativeTarget;"), 1)
         self.assertNotIn("PBXShellScriptBuildPhase", project)
 
-        source = without_positive_android_source(SWIFT.read_text(encoding="utf-8"))
+        source = without_positive_android_source(without_project_require_source(SWIFT.read_text(encoding="utf-8")))
         begin = "        // Fixed public XML prerequisite only."
         end = "        private func children(_ directory: Directory) throws -> Set<String> {"
         self.assertEqual(source.count(begin), 1)
@@ -1374,7 +1387,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
     def test_android_output_custody_is_bounded_without_activating_a_profile(self):
         # SOURCE assertions are not the separately selected native DATA test.
         # In particular they never duplicate/execute a Python version of the DFS.
-        source = without_positive_android_source(SWIFT.read_text(encoding="utf-8"))
+        source = without_positive_android_source(without_project_require_source(SWIFT.read_text(encoding="utf-8")))
         begin = "        // Fixed positive Android output custody. No current Profile enters it."
         end = "        // A one-case transfer of observation custody, never a product lease."
         self.assertEqual(source.count(begin), 1)
@@ -1484,7 +1497,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         # local group verifies SOURCE and exact historical inverses, not an
         # independently reimplemented archive scanner or a native pass.
         import base64
-        current = without_release_evidence_source(SWIFT.read_text(encoding="utf-8"))
+        current = without_release_evidence_source(without_project_require_source(SWIFT.read_text(encoding="utf-8")))
         removal_before = without_removal_ui_source(current)
         self.assertEqual((len(removal_before.encode()), hashlib.sha256(removal_before.encode()).hexdigest()),
                          (385349, '03c9285e0ed83a3b2d019cfa75ddd5e309c60dbc48ac162964755122279842b8'))
@@ -1839,7 +1852,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                          '                      "desktop/packaging/macos-history-provider.profile"))\n')
         self.assertEqual(len(MODULE.SAVED_VERSION_BOOTSTRAPS), 13)
         self.assertEqual(len(set(MODULE.SAVED_VERSION_BOOTSTRAPS)), 13)
-        swift = SWIFT.read_text(encoding="utf-8")
+        swift = without_project_require_source(SWIFT.read_text(encoding="utf-8"))
         current_line = '                  raw["sourceInputsSha256"] as? String == "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2",\n'
         prior_line = '                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",\n'
         self.assertEqual(swift.count(current_line), 1)
@@ -2028,7 +2041,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                     self.assertNotIn("savedReleaseEvidenceMarkerObserved", receipt); parser.assert_not_called()
 
     def test_workflow_refusal_source_derives_originals_before_creation_and_never_applies(self):
-        source = without_positive_android_source(SWIFT.read_text())
+        source = without_positive_android_source(without_project_require_source(SWIFT.read_text()))
         prepare = source.split("func prepare(_ profile: Profile = .projectEdits) throws {", 1)[1].split(
             "func admitDefaultVault()", 1)[0]
         self.assertIn("case projectEdits, projectFields, persistentCredentials, workflowRefusal", source)
@@ -2079,7 +2092,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertIn('"Local workflow bundle refused"', failures)  # Never remove it globally.
 
         import base64
-        current = SWIFT.read_text()
+        current = without_project_require_source(SWIFT.read_text())
         rows = current.split("static let releaseEvidenceDocuments: [(String, String, Int, String)] = [", 1)[1].split("\n        ]", 1)[0]
         additions = re.findall(r'\("([^"]+)", "([A-Za-z0-9+/=]+)", ([0-9]+), "([0-9a-f]{64})"\)', rows)
         expected = {
@@ -2126,7 +2139,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
             with self.assertRaises(AssertionError): without_release_evidence_source(current.replace(token, token + "changed", 1))
 
     def test_project_field_fixture_and_normal_workflow_keep_draft_only_scope(self):
-        source = without_positive_android_source(SWIFT.read_text())
+        source = without_positive_android_source(without_project_require_source(SWIFT.read_text()))
         prepare = source.split("func prepare(_ profile: Profile = .projectEdits) throws {", 1)[1].split(
             "func admitDefaultVault()", 1)[0]
         self.assertIn("let projectData = profile != .persistentCredentials", prepare)
@@ -2382,7 +2395,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
             MODULE.packaged_ui_result(output, summary[:-1] + b',"passedTests":1}', tree)
 
     def test_source_has_one_fixed_request_and_only_original_cleanup_receivers(self):
-        source = without_positive_android_source(SWIFT.read_text())
+        source = without_positive_android_source(without_project_require_source(SWIFT.read_text()))
         self.assertEqual(source.count("NSWorkspace.shared.openApplication(at: requestURL"), 1)
         self.assertEqual(source.count("let app = try launchOrdinaryApplication()"), 2)
         self.assertEqual(source.count("original.terminate()"), 1)
@@ -2429,7 +2442,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertIn('ProcessInfo.processInfo.environment["MRK_ENGINEERING_UI_WORK"] == nil', source)
 
     def test_first_callback_custody_survives_reordered_main_handoffs(self):
-        source = without_positive_android_source(SWIFT.read_text())
+        source = without_positive_android_source(without_project_require_source(SWIFT.read_text()))
         reply = source.split("private final class LaunchReply:", 1)[1].split(
             "@MainActor private final class OrdinaryLaunch", 1)[0]
         body = reply.split("func body(", 1)[1].split("func snapshot()", 1)[0]
@@ -2609,7 +2622,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
             with self.assertRaises(AssertionError): without_shared_ui_readiness_source(bad)
         # Current raw diagnostic sites are validated before historical inverses.
         first_source = without_normal_ios_pending_source(
-            without_shared_ui_readiness_source(SWIFT.read_text()))
+            without_shared_ui_readiness_source(without_project_require_source(SWIFT.read_text())))
         first_original = without_engineering_first_failure_source(first_source)
         self.assertEqual(hashlib.sha256(first_original.encode()).hexdigest(),
                          '9406d68728c6380150ad4f49ad5459b69b4a13684b37866f32ddb3b53f6589e6')
@@ -2665,7 +2678,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                     without_engineering_wait_status_source(bad)
         self.assertEqual(MODULE.LOADER_SHA,
                          hashlib.sha256((ROOT / "desktop/tools/macos_aqua_qualification.py").read_bytes()).hexdigest())
-        source = without_positive_android_source(SWIFT.read_text())
+        source = without_positive_android_source(without_project_require_source(SWIFT.read_text()))
         self.assertEqual(source.count("line: UInt = #line"), 3)
         self.assertIn("private enum RequireCheck: String { case condition, singleton, actionable }", source)
         self.assertEqual(source.count("packagedRequireDiagnosticActive = true"), 1)
@@ -2901,7 +2914,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                          tuple(method for methods, _, _ in MODULE.NORMAL_SELECTIONS.values() for method in methods))
 
     def test_source_uses_nonrenewable_case_clock_and_all_terminal_gates(self):
-        source = without_positive_android_source(SWIFT.read_text())
+        source = without_positive_android_source(without_project_require_source(SWIFT.read_text()))
         custody = source.split("    private final class GateObservation {", 1)[0]
         self.assertEqual(source.count("try beginCase(seconds: 60)"), 2)
         self.assertEqual(source.count("try beginCase(seconds: 300)"), 8)
@@ -2975,14 +2988,14 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertLess(start.index(message), start.index("[panel setCanChooseFiles:"))
         self.assertLess(start.index(message), start.index("beginSheetModalForWindow:s->parent"))
         # A visible purpose is not permission to accept an arbitrary native sheet.
-        sheet = without_positive_android_source(SWIFT.read_text()).split("private func nativeSheet(", 1)[1].split(
+        sheet = without_positive_android_source(without_project_require_source(SWIFT.read_text())).split("private func nativeSheet(", 1)[1].split(
             "private func goToFolder(", 1)[0]
         self.assertIn("let sheet = try waitElement(window.sheets, in: window)", sheet)
         self.assertIn("if sheet.label != title && sheet.staticTexts.matching(identifier: title).count != 1 {", sheet)
         self.assertIn('throw Refusal.condition("unexpected original native sheet title in " + journeyStage)', sheet)
 
     def test_reuse_profile_cannot_relax_the_existing_same_build_cases(self):
-        source = without_positive_android_source(SWIFT.read_text())
+        source = without_positive_android_source(without_project_require_source(SWIFT.read_text()))
         self.assertIn('#if !os(macOS) || !(arch(arm64) || arch(x86_64))\n#error(', source)
         compiled = ('        #if arch(arm64)\n'
                     '        let hostedJob = "github-hosted-macos26-arm64"\n'
@@ -3449,7 +3462,7 @@ class NormalPhaseDataTests(unittest.TestCase):
 
     def test_android_positive_source_uses_closed_private_role_and_ordinary_ui(self):
         # Actual new Swift source, not an executable Python model of its reader.
-        source=SWIFT.read_bytes().decode('utf-8')
+        source=without_project_require_source(SWIFT.read_bytes().decode('utf-8'))
         self.assertEqual(hashlib.sha256(source.encode()).hexdigest(), '9ad2757affd9d558915622e0e1d08254b7efa5de9f913afb54c82b120de849db')
         journey = source.split('    @MainActor func testSyntheticProjectAndroidSignedBuild() throws {',1)[1].split('    override func tearDown()',1)[0]
         stages = ['android-separate-installed-service-setup', 'android-source-inspection-without-license-acceptance',
@@ -5351,9 +5364,51 @@ class NormalPhaseDataTests(unittest.TestCase):
 
     def test_closed_normal_failure_diagnostics_preserve_original_nonzero_and_privacy(self):
 
+        # Real SOURCE emission and exact inverse: no model supplies native evidence.
+        raw_source = SWIFT.read_text()
+        original_source = without_project_require_source(raw_source)
+        self.assertEqual(hashlib.sha256(original_source.encode()).hexdigest(), '4a05a297f5945279a1287cba8961f5ce7f381d226dd80e3bb81303a6ce06bfb2')
+        self.assertEqual(raw_source.count('print("MRK_NORMAL_PROJECT_REQUIRE_FAILURE='), 1)
+        self.assertEqual(raw_source.count('projectRequireDiagnosticMethod = .'), 2)
+        self.assertEqual(raw_source.count('defer { projectRequireDiagnosticMethod = nil }'), 2)
+        emitter = raw_source.split('if let method = projectRequireDiagnosticMethod,',1)[1].split('if engineeringRequireDiagnosticActive',1)[0]
+        for token in ('originalFailureAbsent','!projectRequireDiagnosticEmitted','line >= 1 && line <= 65535','projectRequireDiagnosticEmitted = true'):
+            self.assertIn(token, emitter)
+        self.assertNotIn('reason', emitter)
+        self.assertEqual(raw_source.count('|| projectRequireDiagnosticMethod != nil {'), 3)
+        self.assertEqual(raw_source.count('try require(false,'), original_source.count('try require(false,'))
+        for previous, current in PROJECT_REQUIRE_SWIFT_INVERSE:
+            for replacement in (previous, current+current, current+'// altered\n'):
+                with self.assertRaises(AssertionError):
+                    without_project_require_source(raw_source.replace(current,replacement,1))
+        def marker(method,line=4725,check='condition',ending=b'\n'):
+            return ('MRK_NORMAL_PROJECT_REQUIRE_FAILURE=v1;method='+method+';line='+str(line)+';check='+check).encode()+ending
+        method_names=('testSyntheticProjectPathFields','testSyntheticProjectLocalEditsAndImages')
+        first=marker(method_names[0]); second=marker(method_names[1],4975,'singleton',b'\r\n')
+        sites=MODULE.project_require_source_sites(first+second,b'')
+        self.assertEqual([r['method'] for r in sites],list(method_names))
+        self.assertEqual([r['line'] for r in sites],[4725,4975])
+        self.assertEqual(MODULE.project_require_source_sites(b'unrelated\n',b''),[])
+        for bad in (first, first[:-1], marker('unselected'), marker(method_names[1],65536),
+                marker(method_names[1],0),marker(method_names[1],1,'private-reason'),
+                b'prefix '+second,b'MRK_NORMAL_PROJECT_REQUI',b'x'*193+second,
+                second.replace(b';line=',b';line=0')):
+            self.assertIsNone(MODULE.project_require_source_sites(first+bad,b''))
+        self.assertIsNone(MODULE.project_require_source_sites(first,second))
+        selected='project-test.xcresult'
+        observed=MODULE.normal_failure_diagnostics('test',selected,subprocess.CompletedProcess([],65,first+second,b''))
+        self.assertEqual(observed['sourceFailures'],sites)
+        self.assertEqual(observed['status'],'classified')
+        self.assertNotIn(b'MRK_NORMAL_PROJECT_REQUIRE_FAILURE',MODULE.encoded(observed))
+        refused=MODULE.normal_failure_diagnostics('test',selected,subprocess.CompletedProcess([],65,first+first,b''))
+        self.assertEqual(refused['sourceFailures'],[]);self.assertEqual(refused['status'],'unavailable')
+        for phase,selected in (('test','test.xcresult'),('summary','project-test.xcresult')):
+            other=MODULE.normal_failure_diagnostics(phase,selected,subprocess.CompletedProcess([],65,first,b''))
+            self.assertEqual(other['sourceFailures'],[])
+
         # The two genuine project methods reuse stages; observations are not a
         # single case FSM, and an absent marker cannot prove work not attempted.
-        source=SWIFT.read_text()
+        source=without_project_require_source(SWIFT.read_text())
         fields=source.split('func testSyntheticProjectPathFields() throws {',1)[1].split('func testSyntheticProjectLocalEdits() throws {',1)[0]
         journey=source.split('private func syntheticProjectJourney(includeImages: Bool) throws {',1)[1].split('func testSyntheticProjectSavedVersionRecovery() throws {',1)[0]
         self.assertEqual(set(MODULE.PROJECT_STAGES),set(re.findall(r'try stage\("([^"\n]+)"\)',fields+journey)))
@@ -6080,7 +6135,7 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertEqual(len(data_reasons), 140)
         self.assertEqual([code for _, code in data_reasons], [f"r{i:03d}" for i in range(1, 142) if i != 66])
         self.assertEqual(len({literal for literal, _ in data_reasons}), 140)
-        swift = SWIFT.read_text(encoding="utf-8")
+        swift = without_project_require_source(SWIFT.read_text(encoding="utf-8"))
         data_swift = swift.split("        static func exerciseAndroidOutputCustodyData() throws {", 1)[1].split(
             "        // A one-case transfer of observation custody", 1)[0]
         closure = swift.split("        private static func facts(", 1)[1].split(

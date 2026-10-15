@@ -13,6 +13,10 @@ import XCTest
 final class NormalAppUITests: XCTestCase {
     private enum Refusal: Error { case condition(String) }
     private enum RequireCheck: String { case condition, singleton, actionable }
+    private enum ProjectRequireMethod: String {
+        case pathFields = "testSyntheticProjectPathFields"
+        case localEditsAndImages = "testSyntheticProjectLocalEditsAndImages"
+    }
     private enum DashboardReason: String {
         case loading, notLoaded = "not-loaded", bridgeUnavailable = "bridge-unavailable"
         case selectionUnavailable = "selection-unavailable", selectionInProgress = "selection-in-progress"
@@ -48,6 +52,8 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private var packagedRequireDiagnosticEmitted = false
     @MainActor private var engineeringRequireDiagnosticActive = false
     @MainActor private var engineeringRequireDiagnosticEmitted = false
+    @MainActor private var projectRequireDiagnosticMethod: ProjectRequireMethod?
+    @MainActor private var projectRequireDiagnosticEmitted = false
     @MainActor private var originalLaunch: OrdinaryLaunch?
     @MainActor private var caseClock: CaseClock?
     @MainActor private var normalQuitObserved = false
@@ -558,6 +564,11 @@ final class NormalAppUITests: XCTestCase {
                     // Immutable pre-wait DATA only; no native observation after failure.
                     print("MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=\(line);ordinal=\(sample.ordinal);waiter=\(waiter.rawValue);enabled=\(sample.enabled ? 1 : 0);hittable=\(sample.hittable ? 1 : 0);reason=\(sample.reason.rawValue);sample=pre-wait;nonAtomic=1")
                 }
+            }
+            if let method = projectRequireDiagnosticMethod, originalFailureAbsent,
+                !projectRequireDiagnosticEmitted, line >= 1 && line <= 65535 {
+                projectRequireDiagnosticEmitted = true
+                print("MRK_NORMAL_PROJECT_REQUIRE_FAILURE=v1;method=\(method.rawValue);line=\(line);check=\(check.rawValue)")
             }
             if engineeringRequireDiagnosticActive && originalFailureAbsent && !engineeringRequireDiagnosticEmitted
                 && line >= 1 && line <= 65535 {
@@ -4046,14 +4057,14 @@ final class NormalAppUITests: XCTestCase {
         let result = XCTWaiter.wait(for: [expected], timeout: try remaining(timeout))
         if failed.count > 0 {
             diagnostic(root)
-            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive {
+            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {
                 try require(false, "terminal UI refusal in " + journeyStage, line: line)
             }
             throw Refusal.condition("terminal UI refusal in " + journeyStage)
         }
         if result != .completed || query.count != 1 {
             diagnostic(root)
-            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive {
+            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {
                 try require(false, "missing or ambiguous expected control in " + journeyStage, line: line)
             }
             throw Refusal.condition("missing or ambiguous expected control in " + journeyStage)
@@ -4153,7 +4164,7 @@ final class NormalAppUITests: XCTestCase {
         let sheet = try waitElement(window.sheets, in: window, line: line)
         if sheet.label != title && sheet.staticTexts.matching(identifier: title).count != 1 {
             diagnostic(sheet)
-            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive {
+            if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {
                 try require(false, "unexpected original native sheet title in " + journeyStage, line: line)
             }
             throw Refusal.condition("unexpected original native sheet title in " + journeyStage)
@@ -4711,6 +4722,9 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor func testSyntheticProjectPathFields() throws {
+        projectRequireDiagnosticMethod = .pathFields
+        projectRequireDiagnosticEmitted = false
+        defer { projectRequireDiagnosticMethod = nil }
         continueAfterFailure = false
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
@@ -4933,6 +4947,9 @@ final class NormalAppUITests: XCTestCase {
         try syntheticProjectJourney(includeImages: false)
     }
     @MainActor func testSyntheticProjectLocalEditsAndImages() throws {
+        projectRequireDiagnosticMethod = .localEditsAndImages
+        projectRequireDiagnosticEmitted = false
+        defer { projectRequireDiagnosticMethod = nil }
         try syntheticProjectJourney(includeImages: true)
     }
     @MainActor private func syntheticProjectJourney(includeImages: Bool) throws {

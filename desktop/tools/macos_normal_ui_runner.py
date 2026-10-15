@@ -3327,6 +3327,36 @@ def failure_base(phase, selection, original, *, engineering=False):
 PROJECT_STAGES = tuple('launch fixture project-open android-source-jdk android-source-sdk android-source-gradle android-source-cancel android-source-reselect android-source-refused field-version field-project field-workspace field-metadata field-file-cancel field-directory-cancel field-review quit project-cancel config github text version images-cancel images readback-and-quit'.split())
 
 
+def project_require_source_sites(stdout, stderr):
+    """First-latched SOURCE sites for two project cases; no arbitrary error prose."""
+    namespace = b"MRK_NORMAL_PROJECT_REQUIRE_FAILURE"
+    methods = (b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages")
+    pattern = (re.escape(namespace) + rb"=v1;method=(" + b"|".join(methods)
+               + rb");line=([1-9][0-9]{0,4});check=(condition|singleton|actionable)")
+    sites, seen = [], set()
+    for stream, body in (("stdout", stdout), ("stderr", stderr)):
+        offset = 0
+        while offset < len(body):
+            end = body.find(b"\n", offset)
+            complete = end != -1
+            if not complete: end = len(body)
+            short = body[offset:end] if end-offset <= 192 else None
+            prefix = body[offset:min(end, offset+len(namespace))]
+            suffix = body[max(offset, end-len(namespace)):end]
+            candidate = (body.find(namespace, offset, end) != -1
+                or bool(prefix) and namespace.startswith(prefix)
+                or not complete and any(suffix.endswith(namespace[:i]) for i in range(1,len(namespace))))
+            offset = end+1
+            if not candidate: continue
+            record = short[:-1] if short is not None and complete and short.endswith(b"\r") else short
+            match = re.fullmatch(pattern, record) if (record is not None and complete and stream == "stdout") else None
+            if match is None or int(match.group(2)) > 65535 or match.group(1) in seen: return None
+            seen.add(match.group(1))
+            sites.append({"stream":"stdout", "source":"NormalAppUITests.swift",
+                "method":match.group(1).decode("ascii"), "line":int(match.group(2)), "column":None})
+    return sites
+
+
 def project_stage_diagnostics(stdout, stderr):
     """Existing project stdout markers only; no method, order or success claim."""
     namespace = b"MRK_NORMAL_PROJECT_STAGE="
@@ -3722,6 +3752,13 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                 value[key].append(finding)
             else:
                 value["findingsTruncated"] = True
+
+    if "projectProgress" in value:
+        sites = project_require_source_sites(original.stdout, original.stderr)
+        if sites is None:
+            require_invalid = True
+        else:
+            for site in sites: retain("sourceFailures", site, 4)
 
     for stream, body in (("stdout", original.stdout), ("stderr", original.stderr)):
         destination_section = None  # A header never lends authority across streams.
