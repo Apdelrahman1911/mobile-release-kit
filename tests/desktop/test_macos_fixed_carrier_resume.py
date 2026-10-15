@@ -213,6 +213,50 @@ class FixedCarrierResumeData(unittest.TestCase):
                          ['session.python', "'/usr/bin/hdiutil'", "'/usr/bin/vm_stat'", "'/usr/bin/openssl'",
                           "'/usr/bin/codesign'", "'/usr/sbin/installer'"])
         self.assertTrue(all(len(node.args) == 1 and not node.keywords for node in calls))
+        # Execute the real signature predicates as passive DATA. Distinct SOURCE
+        # lines identify only the first rejected predicate, never raw captures.
+        install_class = next(n for n in body.body if isinstance(n, ast.ClassDef) and n.name == 'Resume')
+        install = next(n for n in install_class.body if isinstance(n, ast.FunctionDef) and n.name == 'install_image')
+        checks = [n for n in ast.walk(install) if isinstance(n, ast.Expr)
+                  and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name)
+                  and n.value.func.id == 'need' and len(n.value.args) == 2
+                  and isinstance(n.value.args[1], ast.Constant)
+                  and n.value.args[1].value == 'resume-native-producer-signature']
+        self.assertEqual(len(checks), 3)
+        self.assertEqual([ast.unparse(n.value.args[0]) for n in checks],
+                         ['verified.returncode == 0', "verified.stdout == b'Verified OK\\n'", "verified.stderr == b''"])
+        self.assertEqual([n.lineno for n in checks], list(range(checks[0].lineno, checks[0].lineno + 3)))
+        program = compile(ast.Module(body=checks, type_ignores=[]),
+                          str(ROOT / 'desktop/tools/macos_fixed_carrier_resume.py'), 'exec')
+        for code, out, err, failed, expected_reads in (
+                (0, b'Verified OK\n', b'', None, ['returncode', 'stdout', 'stderr']),
+                (1, b'Verified OK\n', b'', 0, ['returncode']),
+                (0, b'private-capture-not-exported', b'', 1, ['returncode', 'stdout']),
+                (0, b'Verified OK\n', b'private-error-not-exported', 2, ['returncode', 'stdout', 'stderr'])):
+            with self.subTest(first_signature_failure=failed):
+                reads = []
+                class VerifiedCapture:
+                    def __getattr__(self, name):
+                        reads.append(name)
+                        return {'returncode': code, 'stdout': out, 'stderr': err}[name]
+                ports = {'need': m.need, 'verified': VerifiedCapture()}
+                if failed is None:
+                    exec(program, ports)
+                else:
+                    try:
+                        exec(program, ports)
+                    except m.Refused as error:
+                        self.assertEqual(error.args, ('resume-native-producer-signature',))
+                        # Inspect the original traceback inside except; unittest's
+                        # assertRaises would intentionally clear it on exit.
+                        observed = m.failure_location(error)
+                    else:
+                        self.fail('signature predicate did not refuse')
+                    self.assertIn({'source': 'desktop/tools/macos_fixed_carrier_resume.py',
+                                   'line': checks[failed].lineno}, observed['frames'])
+                    self.assertNotIn(b'private-', m.canonical(observed))
+                self.assertEqual(reads, expected_reads)
+
         # Real Python traceback objects, synthetic exception only: no native work.
         secret = 'private-error-value-never-export'
         namespace = {}
