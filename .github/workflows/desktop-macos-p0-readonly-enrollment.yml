@@ -32,7 +32,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           GITHUB_TOKEN: ${{ github.token }}
           MRK_P0_NATIVE_BYTES: "63218"
-          MRK_P0_NATIVE_SHA256: "36f0e43c5685041cb03e8f02b62f6931dbbd0104ca81a735ac86d0a85404476c"
+          MRK_P0_NATIVE_SHA256: "3ebbc4a958ed25819d0a86432739c906572ce6631037acefed3fbbd1b3012ca5"
         run: |
           set +x
           set +a

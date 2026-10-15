@@ -1296,8 +1296,9 @@ class FixedCarrierResumeData(unittest.TestCase):
                 with self.assertRaises(r.Refused): r.execute_normal_phase(phase, request, source, (1, 1))
                 output.assert_not_called()
         swift = (ROOT / "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift").read_text()
-        self.assertEqual(swift.count("private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, updateP0Bootstrap }"), 1)
+        self.assertEqual(swift.count("private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, fixedNormalBatch, updateP0Bootstrap }"), 1)
         self.assertEqual(swift.count("case .fixedCarrierResume:"), 1)
+        self.assertEqual(swift.count("case .fixedNormalBatch:"), 1)
         self.assertEqual(swift.count("case .updateP0Bootstrap:"), 1)
         picker = swift[swift.index("private func goToFolder("):swift.index("@MainActor private func nativeOpen(")]
         self.assertEqual(picker.count('sheet.buttons.matching(identifier: "Cancel")'), 1)
@@ -1319,6 +1320,152 @@ class FixedCarrierResumeData(unittest.TestCase):
         self.assertEqual(m.SOURCE_PINS["desktop/tools/stage_macos_installed.py"], (path.stat().st_size, m.sha(path.read_bytes())))
 
 
+
+    def test_phase_budget_accounts_live_codecs_and_funds_cpio_only_once(self):
+        m = ADAPTER
+        tool = inert_module('phase_budget_stager_data', 'desktop/tools/stage_macos_installed.py')
+        base = m.acquisition_memory_requirement(123)
+        self.assertEqual(base, 6 * (m.ORIGIN['artifactBytes'] + m.ORIGIN['imageBytes'])
+                         + (16 << 20) + 123 + (512 << 20) + (1 << 30))
+        self.assertLess(base, 3190128640)
+        self.assertEqual(m.allocation_memory_requirement(base, 10, 20, 30),
+                         base + 10 + 60 + 62 + (16 << 20))
+        for args in ((True, 0, 0, 0), (base, -1, 0, 0), (base, 0, True, 0),
+                     (base, 0, 0, m.LIMIT + 1), (base, 8 * m.LIMIT + 1, 0, 0)):
+            with self.subTest(args=args), self.assertRaises(m.Refused):
+                m.allocation_memory_requirement(*args)
+
+        # Tiny genuine XAR and CPIO decoders; no extraction or native command.
+        def odc(name, mode, data=b''):
+            name = name.encode() + b'\0'
+            values = ((0, 6), (1, 6), (mode, 6), (0, 6), (0, 6), (1, 6),
+                      (0, 6), (0, 11), (len(name), 6), (len(data), 11))
+            return b'070707' + ''.join(format(v, '0%do' % width) for v, width in values).encode() + name + data
+        archive = odc('.', m.stat.S_IFDIR | 0o755)
+        for index in range(178):
+            archive += odc('f%d' % index, m.stat.S_IFREG | 0o444, b'DATA')
+        archive += odc('TRAILER!!!', 0)
+        cpio_rows = []
+        expected = tool.cpio_members(archive)
+        self.assertEqual(tool.cpio_members(archive, allocation_budget=lambda *args: cpio_rows.append(args)), expected)
+        self.assertEqual(cpio_rows[0], ('cpio-window', 2 * len(archive), 0, 0))
+        self.assertEqual(len(cpio_rows), 179)
+        self.assertEqual(cpio_rows[-1], ('cpio-slice', len(archive) + 178 * 4, 0, 0))
+        def refused(*args):
+            raise m.Refused('test-allocation-refused')
+        with self.assertRaisesRegex(m.Refused, 'test-allocation-refused'):
+            tool.cpio_members(archive, allocation_budget=refused)
+
+        values = [('PackageInfo', b'INFO'), ('Scripts', archive)]
+        heap = b''; nodes = []
+        for name, body in values:
+            packed = m.zlib.compress(body)
+            nodes.append('<file><name>%s</name><type>file</type><data><length>%d</length>'
+                '<offset>%d</offset><size>%d</size><encoding style="application/x-gzip"/></data></file>'
+                % (name, len(packed), len(heap), len(body)))
+            heap += packed
+        toc = ('<xar><toc>' + ''.join(nodes) + '</toc></xar>').encode()
+        packed_toc = m.zlib.compress(toc)
+        inner = m.struct.pack('>IHHQQI', 0x78617221, 28, 1, len(packed_toc), len(toc), 0) + packed_toc + heap
+        seen = []
+        self.assertEqual(tool.xar_members(inner, allocation_budget=lambda *args: seen.append(args)), dict(values))
+        self.assertEqual(tool.xar_members(inner), dict(values))
+        self.assertEqual([row[0] for row in seen], ['xar-toc', 'xar-member', 'xar-member'])
+        self.assertEqual(seen[2][1], len(inner) + 4 * len(toc) + 2 * len(values[0][1])
+                         + len(m.zlib.compress(values[0][1])))
+        with mock.patch.object(tool, 'inflate', wraps=tool.inflate) as inflate:
+            with self.assertRaisesRegex(m.Refused, 'test-allocation-refused'):
+                tool.xar_members(inner, allocation_budget=lambda phase, *args:
+                    None if phase == 'xar-toc' else refused())
+            self.assertEqual(inflate.call_count, 1)  # Refused before the member codec.
+
+        # Closed outer product layout, including the live prior packed/decoded
+        # member references. Signature authority is not simulated by this DATA.
+        outer_values = [('Distribution', b'XML'), ('Resources/InstallerReadMe.html', b'HTML'),
+                        (tool.INSTALL_COMPONENT, inner)]
+        heap = b''; outer_nodes = []
+        for index, (name, body) in enumerate(outer_values):
+            packed = m.zlib.compress(body)
+            data = ('<data><length>%d</length><offset>%d</offset><size>%d</size>'
+                    '<encoding style="application/x-gzip"/></data>') % (len(packed), 20 + len(heap), len(body))
+            if name.startswith('Resources/'):
+                node = ('<file id="2"><name>Resources</name><type>directory</type><file id="3">'
+                        '<name>InstallerReadMe.html</name><type>file</type>%s</file></file>') % data
+            else:
+                node = '<file id="%d"><name>%s</name><type>file</type>%s</file>' % (1 if index == 0 else 4, name, data)
+            outer_nodes.append(node); heap += packed
+        outer_toc = ('<xar><toc><checksum style="sha1"><offset>0</offset><size>20</size></checksum>'
+                     + ''.join(outer_nodes) + '</toc></xar>').encode()
+        outer_packed = m.zlib.compress(outer_toc)
+        outer = (m.struct.pack('>IHHQQI', 0x78617221, 28, 1, len(outer_packed), len(outer_toc), 1)
+                 + outer_packed + m.hashlib.sha1(outer_packed).digest() + heap)
+        seen = []
+        self.assertEqual(tool.install_product_members(outer), dict(outer_values))
+        self.assertEqual(tool.install_product_members(outer, allocation_budget=lambda *args: seen.append(args)), dict(outer_values))
+        self.assertEqual([row[0] for row in seen], ['install-product-toc'] + ['install-product-member'] * 3)
+        # Breadth-first traversal visits Distribution, component, then ReadMe.
+        self.assertEqual(seen[2][1], len(outer) + 2 * len(outer_packed) + 4 * len(outer_toc)
+                         + 2 * len(b'XML') + len(m.zlib.compress(b'XML')))
+        with mock.patch.object(tool, 'inflate', wraps=tool.inflate) as inflate:
+            with self.assertRaisesRegex(m.Refused, 'test-allocation-refused'):
+                tool.install_product_members(outer, allocation_budget=lambda phase, *args:
+                    None if phase == 'install-product-toc' else refused())
+            self.assertEqual(inflate.call_count, 1)
+
+        # ISIZE is an enforced cap, not a trustworthy memory/provenance claim.
+        compressor = m.zlib.compressobj(wbits=31)
+        gzip = compressor.compress(archive) + compressor.flush()
+        seen = []
+        self.assertEqual(m.scripts_archive_data(gzip, tool, 55, lambda *args: seen.append(args)), archive)
+        self.assertEqual(seen, [('scripts', 55, len(gzip), len(archive))])
+        self.assertEqual(m.scripts_archive_data(gzip, tool, 55), archive)
+        for damaged in (gzip[:-4] + m.struct.pack('<I', 1), gzip + gzip, gzip + b'tail',
+                        gzip[:-4] + m.struct.pack('<I', m.LIMIT + 1)):
+            with self.subTest(bytes=len(damaged)), self.assertRaises((m.Refused, tool.Refused, m.zlib.error)):
+                m.scripts_archive_data(damaged, tool, 55, lambda *args: None)
+        with mock.patch.object(tool, 'inflate', wraps=tool.inflate) as inflate:
+            with self.assertRaisesRegex(m.Refused, 'test-allocation-refused'):
+                m.scripts_archive_data(gzip, tool, 55, refused)
+            inflate.assert_not_called()
+
+        # The genuine owner method is exercised with synthetic read-only DATA
+        # ports. Linux does not certify Darwin vm_stat or an OS reservation.
+        session = m.Resume.__new__(m.Resume)
+        session.memory_base, session.required_disk = base, 1234
+        session.allocation_samples, session.cpio_window = 0, None
+        session.clock = SimpleNamespace(check=lambda: 1)
+        session.host = object(); session.parent = {'fd': 987}
+        calls = []
+        session.command = lambda *args: calls.append(args) or SimpleNamespace(stdout=b'', stderr=b'', returncode=0)
+        enough = m.allocation_memory_requirement(base, 100, 0, 0)
+        with (mock.patch.object(m, 'host_memory_data', return_value=(4096, 1 << 36)),
+              mock.patch.object(m, 'memory_data', return_value={'availableEstimateBytes': enough}),
+              mock.patch.object(m.os, 'fstatvfs', return_value=SimpleNamespace(f_bavail=1234, f_frsize=1)),
+              mock.patch.dict(m.STATE, phase='attach', resourceAdmission=None)):
+            session.allocation_budget('cpio-window', 100, 0, 0)
+            with self.assertRaisesRegex(m.Refused, 'resume-cpio-window-once'):
+                session.allocation_budget('cpio-window', 100, 0, 0)
+            self.assertEqual(len(calls), 1)  # Duplicate funding refuses before another command.
+            for live in range(101):
+                session.allocation_budget('cpio-slice', live, 0, 0)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(m.STATE['phase'], 'attach')
+            self.assertFalse(m.STATE['resourceAdmission']['osMemoryReservation'])
+            with self.assertRaisesRegex(m.Refused, 'resume-cpio-allocation-window'):
+                session.allocation_budget('cpio-slice', 101, 0, 0)
+            session.cpio_window = None; calls.clear()
+            for index in range(12):
+                session.allocation_budget('xar-member', 100, 0, 0)
+            self.assertEqual(session.allocation_samples, 13)
+            with self.assertRaisesRegex(m.Refused, 'resume-allocation-sample-bound'):
+                session.allocation_budget('xar-member', 100, 0, 0)
+            self.assertEqual(len(calls), 12)
+            session.allocation_samples = 0
+            with mock.patch.object(m, 'memory_data', return_value={'availableEstimateBytes': enough - 1}):
+                with self.assertRaisesRegex(m.Refused, 'resume-resource-memory-admission'):
+                    session.allocation_budget('xar-member', 100, 0, 0)
+            self.assertEqual(m.STATE['phase'], 'resource-admission')
+            self.assertFalse(m.STATE['resourceAdmission']['memorySufficient'])
 
     def test_pinned_tls_roots_require_source_authentication_and_strict_tls(self):
         m = ADAPTER

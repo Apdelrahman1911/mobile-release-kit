@@ -51,7 +51,7 @@ ORIGIN = {'source': 'ce644711fb6e2bea26182473441aac192d5638e1', 'tree': 'e5c4c43
  'signature': {'name': 'producer.sig', 'bytes': 256, 'sha256': '28ed5658f1d0aa49d9213cb818984379b8a2df4a11e970b8987dda80f8dc2a7e'},
  'imageBytes': 73665231, 'imageSha256': '66945f93f8331ae5f4ad945dbb248b263c77b091de6874b84366ddf142685e45',
  'packageVersion': '0.1.1', 'release': 'macos26-arm64-desktop-01'}
-SOURCE_PINS = {'desktop/tools/macos_e2_native_fixture.py': (390457, 'bcfbaf9ec8a8ae3253ef0ac91a1e73256de00a9adb6a9d280f64127b340cd51e'), 'desktop/tools/stage_macos_installed.py': (388486, '08a4609a37ea50426cfde297273b4e2ec53adc3727a86a13bdd5871988b3cfa2'), 'desktop/tools/macos_public_verification_evidence.py': (209883, '05ff6cf585f45601909afd14e7038df89adb8b56ee7411cb49428a0e8524a863'), 'desktop/tools/macos_aqua_qualification.py': (463990, 'd1ab3a83633c7e824277a4b316e2188877ecf03e8d54517a4275f931dd41290a'), 'desktop/tools/macos_xcode_host_preparation.py': (96477, 'd03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376'), 'src/mobile_release/owned_process.py': (9127, 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59'), 'src/mobile_release/_command_process.py': (177438, 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43'), 'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'), 'src/mobile_release/cancellation.py': (32351, 'eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a'), 'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'), 'src/mobile_release/errors.py': (749, '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'), 'src/mobile_release/_lifetime_evidence.py': (19514, 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'), 'src/mobile_release/_store_lane_contract.py': (9500, '8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e'), 'src/mobile_release/_store_lane_evidence.py': (17638, 'bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872'), 'desktop/packaging/macos-install-producer-certificates/leaf.der': (1490, 'e5ba1d05f136fbef3ca5816f0efb1e946cb2cfb81819b745d9f914e7e9256d72')}
+SOURCE_PINS = {'desktop/tools/macos_e2_native_fixture.py': (390457, 'bcfbaf9ec8a8ae3253ef0ac91a1e73256de00a9adb6a9d280f64127b340cd51e'), 'desktop/tools/stage_macos_installed.py': (389653, '15896e062c2e23e47158adeea3fe0856b97955bafeda87616b92a889232ec190'), 'desktop/tools/macos_public_verification_evidence.py': (209883, '05ff6cf585f45601909afd14e7038df89adb8b56ee7411cb49428a0e8524a863'), 'desktop/tools/macos_aqua_qualification.py': (463990, '95587646a468cea1ad1b212ec7a0aeac39d903eb68deef3ee29b1f889cc4d9f5'), 'desktop/tools/macos_xcode_host_preparation.py': (96477, 'd03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376'), 'src/mobile_release/owned_process.py': (9127, 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59'), 'src/mobile_release/_command_process.py': (177438, 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43'), 'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'), 'src/mobile_release/cancellation.py': (32351, 'eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a'), 'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'), 'src/mobile_release/errors.py': (749, '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'), 'src/mobile_release/_lifetime_evidence.py': (19514, 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'), 'src/mobile_release/_store_lane_contract.py': (9500, '8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e'), 'src/mobile_release/_store_lane_evidence.py': (17638, 'bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872'), 'desktop/packaging/macos-install-producer-certificates/leaf.der': (1490, 'e5ba1d05f136fbef3ca5816f0efb1e946cb2cfb81819b745d9f914e7e9256d72')}
 
 RESUME_WORKFLOW_BYTES = 63911
 TLS_CA_PATH = 'desktop/macos-installed-inputs/fixed-consumer-tls/cacert.pem'
@@ -586,6 +586,23 @@ def resource_projection_data(value):
     return expected if value == expected else None
 
 
+def acquisition_memory_requirement(retained):
+    """Bound immutable acquisition copies, not unentered codec maxima."""
+    need(type(retained) is int and 0 <= retained <= 1 << 30, 'resume-memory-retained-bound')
+    return 6 * (ORIGIN['artifactBytes'] + ORIGIN['imageBytes']) + (16 << 20) + retained + (512 << 20) + (1 << 30)
+
+
+def allocation_memory_requirement(base, live, packed, output):
+    # Packed slices and zlib unused/unconsumed copies may coexist; growth and
+    # final immutable output can coexist too. Do not credit either as released.
+    need(type(base) is int and 0 < base < 1 << 53
+         and all(type(value) is int and 0 <= value <= 8 * LIMIT for value in (live, packed))
+         and type(output) is int and 0 <= output <= LIMIT, 'resume-allocation-byte-bound')
+    required = base + live + 3 * packed + 2 * (output + 1) + (16 << 20)
+    need(required < 1 << 53, 'resume-allocation-byte-bound')
+    return required
+
+
 def host_memory_data(host, clock):
     # Existing authenticated DarwinAPI's read-only sysctlbyname ABI only.
     values = {}
@@ -918,7 +935,21 @@ def original_release_readback_data(mounted, inventory, *, target):
             'inventory': {key: mounted['inventory'][key] for key in ('bytes', 'sha256')}}
 
 
-def mounted_data(originals, row, target, stager):
+def scripts_archive_data(packed, stager, live, allocation_budget=None):
+    if packed[:2] != b'\x1f\x8b':
+        return packed
+    if allocation_budget is None:
+        return stager.inflate(packed, LIMIT, gzip=True)
+    need(len(packed) >= 18, 'resume-scripts-gzip-header')
+    expanded = struct.unpack_from('<I', packed, len(packed) - 4)[0]
+    need(expanded <= LIMIT, 'resume-scripts-expanded-bound')
+    allocation_budget('scripts', live, len(packed), expanded)
+    archive = stager.inflate(packed, expanded, gzip=True)
+    need(len(archive) == expanded, 'resume-scripts-expanded-size')
+    return archive
+
+
+def mounted_data(originals, row, target, stager, *, allocation_budget=None):
     """Actual unchanged package parsers; inventory digest precedes observed size."""
     need(type(originals) is dict and set(originals) == {'Install.pkg', 'producer.json', 'producer.sig'}
          and all(type(v) is tuple and len(v) == 2 and type(v[0]) is bytes and type(v[1]) is int for v in originals.values()), 'enrollment-mounted-roster')
@@ -937,15 +968,28 @@ def mounted_data(originals, row, target, stager):
     policy = descriptor['signingPolicies'][0]
     need(policy['sha256'] == release['signingPolicySha256'] and all(policy['policy'][k] == v for k, v in row['signingIdentity'].items()), 'enrollment-policy-original')
     selection = stager.BuildSelection(target, row['packageVersion'], row['release'])
-    members = stager.install_product_members(bodies['Install.pkg'])
+    members = (stager.install_product_members(bodies['Install.pkg']) if allocation_budget is None else
+        stager.install_product_members(bodies['Install.pkg'], allocation_budget=allocation_budget))
+    outer_retained = sum(len(value) for value in members.values())
+    def nested_budget(phase, live, packed, output):
+        if allocation_budget is not None:
+            allocation_budget(phase, outer_retained + live, packed, output)
     if stager.INSTALL_COMPONENT in members:
-        component = stager.xar_members(members[stager.INSTALL_COMPONENT])
+        component = (stager.xar_members(members[stager.INSTALL_COMPONENT]) if allocation_budget is None else
+            stager.xar_members(members[stager.INSTALL_COMPONENT], allocation_budget=nested_budget))
     else:
         component = {k: members[stager.INSTALL_COMPONENT + '/' + k] for k in ('PackageInfo', 'Scripts')}
     need(set(component) == {'PackageInfo', 'Scripts'}, 'enrollment-product-component')
     stager.package_info(component['PackageInfo'], selection=selection)
-    packed = component['Scripts']; archive = stager.inflate(packed, LIMIT, gzip=True) if packed[:2] == b'\x1f\x8b' else packed
-    scripts = stager.cpio_members(archive); key = 'input/' + stager.INSTALLATION_INVENTORY_NAME
+    packed = component['Scripts']
+    component_retained = sum(len(value) for value in component.values())
+    archive = scripts_archive_data(packed, stager, outer_retained + component_retained, allocation_budget)
+    def cpio_budget(phase, live, packed_bytes, output):
+        if allocation_budget is not None:
+            allocation_budget(phase, outer_retained + component_retained + live, packed_bytes, output)
+    scripts = (stager.cpio_members(archive) if allocation_budget is None else
+        stager.cpio_members(archive, allocation_budget=cpio_budget))
+    key = 'input/' + stager.INSTALLATION_INVENTORY_NAME
     need(key in scripts and type(scripts[key][0]) is bytes and scripts[key][1] == 0o444, 'enrollment-original-inventory')
     inventory = scripts[key][0]
     rows = stager.observation_inventory_bytes(inventory, row['inventorySha256'], row['runtimeManifestSha256'], selection=selection)
@@ -1019,6 +1063,36 @@ class Resume:
         row.update(returned=True, capturesSettled=True, returncode=result.returncode)
         self.point()
         return result
+
+
+    def allocation_budget(self, phase, live, packed, output):
+        need(phase in ('install-product-toc', 'install-product-member', 'xar-toc', 'xar-member',
+              'scripts', 'cpio-window', 'cpio-slice'), 'resume-allocation-role')
+        required = allocation_memory_requirement(self.memory_base, live, packed, output)
+        self.clock.check()
+        if phase == 'cpio-slice':
+            # One phase envelope funds all monotone, nonoverlapping slices.
+            # Not an OS reservation; never spawn a command for each file.
+            need(self.cpio_window is not None and packed == output == 0
+                 and required <= self.cpio_window, 'resume-cpio-allocation-window')
+            return
+        if phase == 'cpio-window':
+            need(self.cpio_window is None and packed == output == 0, 'resume-cpio-window-once')
+        self.allocation_samples += 1
+        need(self.allocation_samples <= 13, 'resume-allocation-sample-bound')
+        previous_phase = STATE['phase']
+        STATE['phase'] = 'resource-admission'
+        call = self.command('memory', ['/usr/bin/vm_stat'], 10)
+        page_size, physical = host_memory_data(self.host, self.clock)
+        memory = memory_data(call.stdout, call.stderr, call.returncode, page_size=page_size, physical_bytes=physical)
+        disk = os.fstatvfs(self.parent['fd'])
+        STATE['resourceAdmission'] = resource_admission_data(memory['availableEstimateBytes'], required,
+            disk.f_bavail * disk.f_frsize, self.required_disk)
+        need(STATE['resourceAdmission']['memorySufficient'], 'resume-resource-memory-admission')
+        need(STATE['resourceAdmission']['diskSufficient'], 'resume-resource-disk-admission')
+        if phase == 'cpio-window':
+            self.cpio_window = required
+        STATE['phase'] = previous_phase
 
 
     def publish_image(self, path, image):
@@ -1134,7 +1208,8 @@ class Resume:
                  {'name': 'PREVIEW.json', 'bytes': self.preview_bytes, 'sha256': self.preview_sha}],
                  inventorySha256=preview['installerInventorySha256'], runtimeManifestSha256=preview['runtimeManifestSha256'],
                  signingIdentity=self.signing_identity)
-            result, inventory = mounted_data(originals, row, TARGETS[0], self.stager)
+            result, inventory = mounted_data(originals, row, TARGETS[0], self.stager,
+                allocation_budget=self.allocation_budget)
             need(post() == facts, 'resume-mounted-parser-post')
             STATE['phase'] = 'producer-signature'
             key = self.command('producer-key', ['/usr/bin/openssl', 'x509', '-inform', 'DER', '-in',
@@ -1665,11 +1740,13 @@ def main():
         memory_call = session.command('memory', ['/usr/bin/vm_stat'], 10)
         page_size, physical = host_memory_data(session.host, clock)
         memory = memory_data(memory_call.stdout, memory_call.stderr, memory_call.returncode, page_size=page_size, physical_bytes=physical)
-        retained = sum(len(content) for _, content in session.sources) + len(ca_body) + ORIGIN['artifactBytes'] + ORIGIN['imageBytes'] + ORIGIN['package']['bytes'] + host_retained_bytes + (2 << 20)
-        required_memory = 6 * LIMIT + retained + (512 << 20) + (1 << 30)
+        retained = sum(len(content) for _, content in session.sources) + len(ca_body) + host_retained_bytes + (2 << 20)
+        required_memory = acquisition_memory_requirement(retained)
+        session.memory_base, session.required_disk = required_memory, (3 << 30) + 2 * ORIGIN['artifactBytes'] + host_output_bytes
+        session.allocation_samples, session.cpio_window = 0, None
         disk = os.fstatvfs(session.parent['fd'])
         STATE['resourceAdmission'] = resource_admission_data(memory['availableEstimateBytes'],required_memory,
-                    disk.f_bavail * disk.f_frsize,(3 << 30) + 2 * ORIGIN['artifactBytes'] + host_output_bytes)
+                    disk.f_bavail * disk.f_frsize,session.required_disk)
         need(STATE['resourceAdmission']['memorySufficient'], 'resume-resource-memory-admission')
         need(STATE['resourceAdmission']['diskSufficient'], 'resume-resource-disk-admission')
         STATE['phase'] = 'acquire-carrier'
@@ -1808,7 +1885,7 @@ def project_main():
 # Closed first-party SOURCE locations only. These exact leaves are compiled only
 # after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
 # traceback rendering, error args/notes/locals or private filenames are used.
-FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6023, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2108}
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2185}
 FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
 
 

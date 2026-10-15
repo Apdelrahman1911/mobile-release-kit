@@ -3070,16 +3070,19 @@ def inflate(body, limit, *, gzip=False):
     return output
 
 
-def xar_members(body):
+def xar_members(body, *, allocation_budget=None):
     need(len(body) >= 28, "xar-header")
     magic, header, version, compressed, expanded, checksum = struct.unpack_from(">IHHQQI", body)
     need(magic == 0x78617221 and header == 28 and version == 1 and compressed <= 1024 * 1024
          and expanded <= 2 * 1024 * 1024 and header + compressed <= len(body), "xar-header-bound")
+    if allocation_budget is not None:
+        allocation_budget('xar-toc', len(body), compressed, expanded)
     toc_bytes = inflate(body[header:header + compressed], expanded)
     need(len(toc_bytes) == expanded, "xar-toc-size")
     toc = ET.fromstring(toc_bytes)
     need(toc.tag == "xar" and len(toc.findall("toc")) == 1, "xar-toc")
     result = {}
+    packed = unpacked = b''
     for member in toc.findall("toc/file"):
         name = member.findtext("name")
         need(name in ("Bom", "PackageInfo", "Scripts") and name not in result and member.findtext("type") == "file"
@@ -3089,6 +3092,9 @@ def xar_members(body):
         length, offset, size = int(length), int(offset), int(size)
         start = header + compressed + offset
         need(length <= MAX_BYTES and size <= MAX_BYTES and start + length <= len(body), "xar-member-bound")
+        if allocation_budget is not None:
+            allocation_budget('xar-member', len(body) + 4 * len(toc_bytes)
+                + sum(len(value) for value in result.values()) + len(packed) + len(unpacked), length, size)
         packed = body[start:start + length]
         encoding = member.find("data/encoding")
         need(encoding is not None and encoding.get("style") in ("application/octet-stream", "application/x-gzip"), "xar-member-encoding")
@@ -3099,11 +3105,14 @@ def xar_members(body):
     return result
 
 
-def _cpio_members(body, owner):
+def _cpio_members(body, owner, *, allocation_budget=None):
     # The only nonzero owner caller is original-package PREPARATION below.
     # Public cpio_members and final package acceptance are always fixed0:0.
     need(len(body) <= MAX_BYTES, "scripts-archive-bound")
+    if allocation_budget is not None:
+        allocation_budget('cpio-window', 2 * len(body), 0, 0)
     entries = {}
+    copied_bytes = 0
     root_seen = False
     offset = 0
     for _ in range(4098):
@@ -3155,12 +3164,15 @@ def _cpio_members(body, owner):
             entries[name] = (None, 0o555)
         else:
             need(stat.S_ISREG(mode) and links == 1 and stat.S_IMODE(mode) in (0o444, 0o555), "scripts-file-type-mode")
+            if allocation_budget is not None:
+                allocation_budget('cpio-slice', len(body) + copied_bytes + size, 0, 0)
             entries[name] = (body[data_start:data_start + size], stat.S_IMODE(mode))
+            copied_bytes += size
     raise Refused("scripts-entry-count")
 
 
-def cpio_members(body):
-    return _cpio_members(body, (0, 0))
+def cpio_members(body, *, allocation_budget=None):
+    return _cpio_members(body, (0, 0), allocation_budget=allocation_budget)
 
 
 def package_info(body, *, fixture=False, selection=None, remove=False, app_absence=False):
@@ -3536,7 +3548,7 @@ INSTALL_PRODUCT_AUDIT_REASONS = frozenset((
 ))
 
 
-def install_product_members(body):
+def install_product_members(body, *, allocation_budget=None):
     """Closed outer Install XAR using the existing context's member syntax.
 
     Native signature/timestamp/staple verification and final whole-P binding
@@ -3549,6 +3561,8 @@ def install_product_members(body):
     need((magic, header, version) == (0x78617221, 28, 1) and 0 < compressed <= 1024 * 1024
          and 0 < expanded <= 2 * 1024 * 1024 and header + compressed <= len(body)
          and checksum in algorithms, "install-product-xar-header")
+    if allocation_budget is not None:
+        allocation_budget('install-product-toc', len(body), compressed, expanded)
     packed_toc = body[header:header + compressed]
     toc_body = inflate(packed_toc, expanded)
     need(len(toc_body) == expanded, "install-product-xar-toc")
@@ -3585,6 +3599,7 @@ def install_product_members(body):
                INSTALL_COMPONENT + "/PackageInfo", INSTALL_COMPONENT + "/Scripts"}
     queue = [(element, "") for element in toc.findall("file")]
     members, directories, identifiers, intervals, expanded_bytes = {}, set(), set(), [], 0
+    packed = decoded = b''
     while queue:
         need(len(queue) + len(identifiers) <= 6, "install-product-xar-count")
         element, parent = queue.pop(0)
@@ -3659,6 +3674,9 @@ def install_product_members(body):
         encoding = data.find("encoding")
         need(encoding.attrib in ({"style": "application/octet-stream"}, {"style": "application/x-gzip"})
              and not list(encoding) and not (encoding.text or "").strip(), "install-product-xar-encoding")
+        if allocation_budget is not None:
+            allocation_budget('install-product-member', len(body) + 2 * len(packed_toc) + 4 * len(toc_body)
+                + expanded_bytes + len(packed) + len(decoded), length, size)
         packed = body[heap + offset:heap + offset + length]
         decoded = packed if encoding.get("style") == "application/octet-stream" else inflate(packed, size, gzip=packed[:2] == b"\x1f\x8b")
         need(len(decoded) == size, "install-product-xar-size")
