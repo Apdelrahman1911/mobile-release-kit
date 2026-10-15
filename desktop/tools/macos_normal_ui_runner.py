@@ -7,6 +7,7 @@ Only XCTest/NSWorkspace in the reviewed Swift source may request the outer app.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -1694,6 +1695,59 @@ class NormalIOSRecoveryFixture:
         return False
 
 
+SAVED_VERSION_RUNTIME_SCOPE = "fixed-original-release-saved-version-runtime-v1"
+SAVED_VERSION_ORIGINAL_RELEASE = "macos26-arm64-desktop-01"
+SAVED_VERSION_STAGER = "desktop/tools/stage_macos_installed.py"
+SAVED_VERSION_STAGER_SHA = "15896e062c2e23e47158adeea3fe0856b97955bafeda87616b92a889232ec190"
+SAVED_VERSION_STAGER_MODULE = "_mrk_saved_version_original_stager"
+
+
+def saved_version_runtime_origin_data(value):
+    need(type(value) is dict and set(value) == {"scope", "sourceCommit", "release", "runtimeManifestSha256", "installationInventorySha256"}
+         and value["scope"] == SAVED_VERSION_RUNTIME_SCOPE and value["sourceCommit"] == FIXED_RESUME_SOURCE
+         and value["release"] == SAVED_VERSION_ORIGINAL_RELEASE
+         and all(type(value[k]) is str and re.fullmatch(r"[0-9a-f]{64}", value[k])
+                 for k in ("runtimeManifestSha256", "installationInventorySha256")), "saved-version-original-runtime-origin")
+    return dict(value)
+
+
+def saved_version_runtime_data(stager, origin, inventory, manifest_body, core_body, bootstraps, source_bytes, target):
+    """Existing anchored inventory/manifest/core parsers; no current-runtime receipt."""
+    origin = saved_version_runtime_origin_data(origin)
+    need(target == ARM_TARGET and type(source_bytes) is dict and type(bootstraps) is dict,
+         "saved-version-original-runtime-profile")
+    fixed = {"desktop/" + name for name in SAVED_VERSION_BOOTSTRAPS}
+    fixed.update(("desktop/cpython-source-inputs/github-ca.pem", "desktop/tools/prepare_runtime.py",
+                  "desktop/packaging/macos-history-provider.profile"))
+    selected = {name: body for name, body in source_bytes.items() if name in fixed or name.startswith("src/mobile_release/")}
+    need(len(selected) == 178 and fixed <= selected.keys()
+         and all(type(body) is bytes for body in selected.values())
+         and sha(encoded([{"path":name,"size":len(selected[name]),"sha256":sha(selected[name])} for name in sorted(selected)])) == SAVED_VERSION_SOURCE,
+         "saved-version-original-source-profile")
+    version = re.search(rb'^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"$', selected["src/mobile_release/__init__.py"], re.M)
+    need(version is not None, "saved-version-original-core-version-source")
+    selection = stager.selected_build(stager.BuildSelection(target, "0.1.1", SAVED_VERSION_ORIGINAL_RELEASE))
+    inventory_rows = stager.observation_inventory_bytes(inventory, origin["installationInventorySha256"], origin["runtimeManifestSha256"], selection=selection)
+    manifest, rows = stager.manifest_files(manifest_body, origin["runtimeManifestSha256"], current=True, target=target)
+    need(manifest["coreVersion"] == version[1].decode("ascii") and set(bootstraps) == set(SAVED_VERSION_BOOTSTRAPS) | {"github-ca.pem"},
+         "saved-version-original-core-version")
+    bodies = {"manifest.json": manifest_body, "core.zip": core_body, **bootstraps}
+    for name, body in bodies.items():
+        need(type(body) is bytes and "runtime/" + name in inventory_rows
+             and (len(body), sha(body)) == (inventory_rows["runtime/" + name]["size"], inventory_rows["runtime/" + name]["sha256"]),
+             "saved-version-original-runtime-inventory")
+        if name != "manifest.json":
+            need(name in rows and (len(body), sha(body)) == (rows[name]["size"], rows[name]["sha256"]),
+                 "saved-version-original-runtime-manifest")
+    for name, body in bootstraps.items():
+        source_name = "desktop/cpython-source-inputs/github-ca.pem" if name == "github-ca.pem" else "desktop/" + name
+        need(body == selected[source_name], "saved-version-original-bootstrap-source")
+    # This accepted parser proves decoded byte/CRC correspondence, not raw compressed EOF.
+    stager.current_core_matches(core_body, {name: (body, 0o644) for name, body in selected.items()})
+    return {**origin, "coreVersion": version[1].decode("ascii"), "sourceInputsSha256": SAVED_VERSION_SOURCE,
+            "runtimeOriginalsMatched": True}
+
+
 class SavedVersionFixture:
     """Retained fixed SOURCE/fixture originals, borrowed by exactly one XCTest.
 
@@ -1708,6 +1762,11 @@ class SavedVersionFixture:
         self.handoff = self.normal / "saved-version-recovery-fixture.json"
         self.handoff_original = None
         self.receipt = None
+        self.fixed_saved = (phase.environment.get(FIXED_RESUME_ENV) == FIXED_NORMAL_SCOPE
+                            and phase.environment.get(FIXED_NORMAL_BATCH_ENV) == "saved-version-recovery")
+        self.runtime_stack, self.runtime_stager = None, None
+        self.runtime_entries = []
+        self.runtime_witness = None
 
     def _adopt(self, fd):
         self.fds.append(fd)
@@ -1771,18 +1830,68 @@ class SavedVersionFixture:
             expected = {Path(item).name for item in names | directories if str(Path(item).parent) == name}
             need(set(os.listdir(fd)) == expected, "saved-version-no-shadow-imports")
         self.core_names, self.core_dirs = names, directories
-        runtime_parent = self._adopt(open_directory(self.normal.parent))
-        self.runtime = self._read(runtime_parent, "runtime-result.json", 65536)
-        runtime = document(self.runtime[1])
-        need(runtime.get("sourceInputsSha256") == SAVED_VERSION_SOURCE and runtime.get("sourceInputCount") == len(core)
-             and runtime.get("target") == self.phase_target
-             and runtime.get("qualification") == "current-source-staged-no-native-execution"
-             and type(runtime.get("successorManifestSha256")) is str
-             and re.fullmatch(r"[0-9a-f]{64}", runtime["successorManifestSha256"]), "saved-version-runtime-source-binding")
-        self.runtime_parent = runtime_parent
-        self.runtime_manifest = runtime["successorManifestSha256"]
+        if self.fixed_saved:
+            self._original_runtime()
+        else:
+            runtime_parent = self._adopt(open_directory(self.normal.parent))
+            self.runtime = self._read(runtime_parent, "runtime-result.json", 65536)
+            runtime = document(self.runtime[1])
+            need(runtime.get("sourceInputsSha256") == SAVED_VERSION_SOURCE and runtime.get("sourceInputCount") == len(core)
+                 and runtime.get("target") == self.phase_target
+                 and runtime.get("qualification") == "current-source-staged-no-native-execution"
+                 and type(runtime.get("successorManifestSha256")) is str
+                 and re.fullmatch(r"[0-9a-f]{64}", runtime["successorManifestSha256"]), "saved-version-runtime-source-binding")
+            self.runtime_parent = runtime_parent
+            self.runtime_manifest = runtime["successorManifestSha256"]
         self.source_digest = sha(encoded({name: [decimal(entry[2]), entry[3]] for name, entry in sorted(self.sources.items())}))
         self.check_sources()
+
+    def _original_runtime(self):
+        # The native receipt has already passed fixed_normal_context. Retain its
+        # exact original bytes again through producer/UI/POST, not a status copy.
+        self.runtime_parent = self._adopt(open_directory(self.normal))
+        self.runtime = self._read(self.runtime_parent, "fixed-carrier-install.json", 16384)
+        need(self.runtime[3] == os.environ.get("MRK_FIXED_RESUME_RECEIPT_SHA256")
+             and self.runtime[2][2] == stat.S_IFREG | 0o600
+             and self.runtime[2][3:5] == (os.getuid(), os.getgid()), "saved-version-native-receipt-original")
+        native = document(self.runtime[1])
+        need(native.get("scope") == FIXED_NORMAL_SCOPE and native.get("normalBatch") == "saved-version-recovery"
+             and native.get("consumerSource") == self.source and native.get("producerSource") == FIXED_RESUME_SOURCE,
+             "saved-version-native-receipt-source")
+        origin = saved_version_runtime_origin_data(native.get("savedVersionRuntimeOrigin"))
+        parent = self._source_directory("desktop/tools")
+        source = self._read(parent, "stage_macos_installed.py", 1024 * 1024)
+        need(source[3] == SAVED_VERSION_STAGER_SHA and SAVED_VERSION_STAGER_MODULE not in sys.modules,
+             "saved-version-stager-source")
+        self.runtime_entries.append((parent, "stage_macos_installed.py", source, 1024 * 1024, False))
+        spec = importlib.util.spec_from_file_location(SAVED_VERSION_STAGER_MODULE, self.phase.root / SAVED_VERSION_STAGER)
+        need(spec is not None and spec.loader is not None, "saved-version-stager-loader")
+        module = importlib.util.module_from_spec(spec)
+        self.runtime_stager = module
+        sys.modules[SAVED_VERSION_STAGER_MODULE] = module  # Register before real definitions execute.
+        exec(compile(source[1], str(self.phase.root / SAVED_VERSION_STAGER), "exec"), module.__dict__)
+        need(sys.modules.get(SAVED_VERSION_STAGER_MODULE) is module, "saved-version-stager-registry")
+        self.runtime_stack = contextlib.ExitStack()
+        selection = module.selected_build(module.BuildSelection(self.phase_target, "0.1.1", SAVED_VERSION_ORIGINAL_RELEASE))
+        names = {"runtime", module.INSTALLATION_INVENTORY_NAME, module.INSTALLATION_RECORD_NAME}
+        _, _, release_fd = self.runtime_stack.enter_context(module.installation_metadata_directory(module.INSTALL_ROOT, names, selection=selection))
+        runtime_fd, _ = self.runtime_stack.enter_context(module.maintenance_directory(release_fd, "runtime", 0o555))
+        inventory = self._installed_runtime_leaf(release_fd, module.INSTALLATION_INVENTORY_NAME, 1024 * 1024)
+        manifest = self._installed_runtime_leaf(runtime_fd, "manifest.json", 1024 * 1024)
+        core = self._installed_runtime_leaf(runtime_fd, "core.zip", module.CURRENT_CORE_BYTES + module.MAX_FILES * 2048)
+        bootstraps = {name:self._installed_runtime_leaf(runtime_fd, name, 1024 * 1024)
+                      for name in sorted(set(SAVED_VERSION_BOOTSTRAPS) | {"github-ca.pem"})}
+        self.runtime_witness = saved_version_runtime_data(module, origin, inventory, manifest, core, bootstraps,
+                           {name:entry[1] for name,entry in self.sources.items()}, self.phase_target)
+        self.runtime_manifest = origin["runtimeManifestSha256"]
+
+    def _installed_runtime_leaf(self, parent, name, limit):
+        entry = self._read(parent, name, limit)
+        need(entry[2][2] == stat.S_IFREG | 0o444 and entry[2][3:6] == (0, 0, 1) and entry[2][9] == 0,
+             "saved-version-installed-runtime-policy")
+        self.runtime_stager.no_xattrs(entry[0])
+        self.runtime_entries.append((parent, name, entry, limit, True))
+        return entry[1]
 
     def check_sources(self):
         for name, (fd, before) in self.source_dirs.items():
@@ -1797,10 +1906,18 @@ class SavedVersionFixture:
             need(actual == body and actual_digest == digest and saved_version_facts(os.fstat(fd)) == facts
                  and saved_version_facts(os.stat(Path(name).name, dir_fd=parent, follow_symlinks=False)) == facts, "saved-version-source-post")
         fd, body, facts, digest = self.runtime
-        actual, _, actual_digest = original_body(fd, 65536, collect=True)
+        actual, _, actual_digest = original_body(fd, 16384 if self.fixed_saved else 65536, collect=True)
         need(actual == body and actual_digest == digest and saved_version_facts(os.fstat(fd)) == facts
-             and saved_version_facts(os.stat("runtime-result.json", dir_fd=self.runtime_parent, follow_symlinks=False)) == facts,
+              and saved_version_facts(os.stat("fixed-carrier-install.json" if self.fixed_saved else "runtime-result.json", dir_fd=self.runtime_parent, follow_symlinks=False)) == facts,
              "saved-version-runtime-post")
+        if self.fixed_saved:
+            need(sys.modules.get(SAVED_VERSION_STAGER_MODULE) is self.runtime_stager, "saved-version-stager-registry-post")
+            for parent, name, (original, data, before, digest), limit, installed in self.runtime_entries:
+                observed, _, found = original_body(original, limit, collect=True)
+                need(observed == data and found == digest and saved_version_facts(os.fstat(original)) == before
+                     == saved_version_facts(os.stat(name, dir_fd=parent, follow_symlinks=False)), "saved-version-live-runtime-post")
+                if installed: self.runtime_stager.no_xattrs(original)
+            self.phase.clock.check()
 
     def _directory(self, path, parent, name):
         fd = self._adopt(os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent))
@@ -1929,6 +2046,9 @@ class SavedVersionFixture:
             "originalVersionFacts": decimal(self.originals[SAVED_VERSION_PATH][2]),
             "directories": {name: decimal(row[3]) for name, row in sorted(self.dirs.items())},
             "files": {name: {"facts": decimal(row[2]), "sha256": row[3]} for name, row in sorted(self.seed.items())}}
+        if self.fixed_saved:
+            handoff.update(scope="one-owned-original-release-saved-version-recovery-fixture",
+                           applicationSourceCommit=FIXED_RESUME_SOURCE, runtimeOrigin=self.runtime_witness)
         exclusive_output(self.handoff, encoded(handoff) + b"\n", 16384)
         parent = self._adopt(open_directory(self.normal))
         self.handoff_original = (parent, self._read(parent, self.handoff.name, 16384))
@@ -1936,6 +2056,10 @@ class SavedVersionFixture:
             "fixtureDataSha256", "producerSha256", "producerFramesSha256")}
         self.receipt.update(runtimeResultSha256=self.runtime[3], handoffSha256=sha(encoded(handoff) + b"\n"), producerReturncode=86,
             publicOriginalCount=13, readyJournalFileCount=6, interruptedGuiSaveObserved=False)
+        if self.fixed_saved:
+            self.receipt.pop("runtimeResultSha256")
+            self.receipt.update(originalRuntimeReceiptSha256=self.runtime[3], originalRuntimeWitness=self.runtime_witness,
+                                currentRuntimeQualified=False)
 
     def ui_call(self, role, argv, seconds, limit=1024 * 1024):
         need(self.handoff_original is not None, "saved-version-handoff-not-published")
@@ -1998,6 +2122,17 @@ class SavedVersionFixture:
                 os.close(fd)
             except BaseException as error:
                 if failure is None: failure = error
+        if self.runtime_stack is not None:
+            stack, self.runtime_stack = self.runtime_stack, None
+            try: stack.close()
+            except BaseException as error:
+                if failure is None: failure = error
+                else: BaseException.add_note(failure, "saved-version-installed-runtime-consuming-close")
+        if self.runtime_stager is not None:
+            if sys.modules.get(SAVED_VERSION_STAGER_MODULE) is self.runtime_stager:
+                del sys.modules[SAVED_VERSION_STAGER_MODULE]
+            elif failure is None: failure = Refused("saved-version-stager-retirement-identity")
+            self.runtime_stager = None
         if failure is not None: raise failure
 
     def __enter__(self):
@@ -2008,6 +2143,7 @@ class SavedVersionFixture:
             self.close()
         except BaseException:
             if kind is None: raise
+            if self.fixed_saved: BaseException.add_note(value, "saved-version-live-runtime-consuming-close")
         return False
 
 
@@ -4160,6 +4296,7 @@ FIXED_NORMAL_BATCHES = {
     'doctor-saved-checks': ('diagnostics-test.xcresult', 'saved-checks-test.xcresult'),
     'local-github-evidence': ('workflow-refusal-test.xcresult', 'release-evidence-test.xcresult'),
     'persistence': ('persistence-test.xcresult',),
+    'saved-version-recovery': ('saved-version-recovery-test.xcresult',),
 }
 
 
@@ -4209,7 +4346,8 @@ def fixed_normal_context(request, source):
              and digest == expected and full9(os.stat(path, follow_symlinks=False)) == before,
              'fixed-resume-native-receipt-original')
         row = document(body)
-        need(set(row) == {'schemaVersion', 'scope', 'producerSource', 'producerTree', 'producerRunId', 'producerRunAttempt',
+        native_keys = {'savedVersionRuntimeOrigin'} if batch == 'saved-version-recovery' else set()
+        need(set(row) == native_keys | {'schemaVersion', 'scope', 'producerSource', 'producerTree', 'producerRunId', 'producerRunAttempt',
              'producerJobId', 'artifactId', 'artifactSha256', 'consumerSource', 'consumerRunId', 'consumerRunAttempt',
              'target', 'originalInstallerReturnedZero', 'sameRequestReadback', 'originalMountDetached', 'originalClosesKnown',
              'workloadsKnownSettled', 'privateOutputsRetired', 'receiptAuthority', 'productReady', 'p0Qualified', 'intelQualified', 'normalBatch'}
@@ -4227,6 +4365,7 @@ def fixed_normal_context(request, source):
              and all(row[k] is False for k in ('productReady', 'p0Qualified', 'intelQualified'))
              and row['receiptAuthority'] == 'same-consumer-owned-installer-and-readback-not-old-status'
              and encoded(row) + b'\n' == body, 'fixed-resume-native-receipt-join')
+        if batch == 'saved-version-recovery': saved_version_runtime_origin_data(row['savedVersionRuntimeOrigin'])
         need(full9(os.fstat(fd)) == before == full9(os.stat(path, follow_symlinks=False)), 'fixed-resume-native-receipt-post')
     except BaseException as error:
         primary = error

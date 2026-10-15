@@ -31,8 +31,8 @@ jobs:
     env:
       MRK_MACOS_TARGET: aarch64-apple-darwin
       MRK_MACOS_HOSTED_JOB: github-hosted-macos26-arm64
-      MRK_FIXED_RESUME_BYTES: "143779"
-      MRK_FIXED_RESUME_SHA256: "7d643c0ce8c595e3c4ad26d396e1820f6ba2c383b9b0191eadd77c78c165c47e"
+      MRK_FIXED_RESUME_BYTES: "147042"
+      MRK_FIXED_RESUME_SHA256: "6a02a87d3ac691e2033dcc452eca5d3be4041442d098eef78e2f34b8c86677a8"
       TEST_RUNNER_MRK_NORMAL_UI_FIXED_CARRIER_RESUME: fixed-ce644-arm-carrier-normal-local-batch-v1
       TEST_RUNNER_MRK_NORMAL_UI_FIXED_NORMAL_BATCH: ${{ matrix.normalBatch }}
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -661,6 +661,7 @@ jobs:
             doctor-saved-checks) families=(diagnostics-test saved-checks-test) ;;
             local-github-evidence) families=(workflow-refusal-test release-evidence-test) ;;
             persistence) families=(persistence-test) ;;
+            saved-version-recovery) families=(saved-version-recovery-test) ;;
             *) exit 1 ;;
           esac
           for test_stem in "${families[@]}"; do
@@ -668,6 +669,7 @@ jobs:
               test) methods=("-only-testing:MRKNormalAppUITests/NormalAppUITests/testLaunchCancelAndQuit"); allowance=60; summary_stem=summary ;;
               project-test) methods=("-only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages" "-only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectPathFields"); allowance=300; summary_stem=project-summary ;;
               persistence-test) methods=("-only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticPersistentCredentials"); allowance=300; summary_stem=persistence-summary ;;
+              saved-version-recovery-test) methods=("-only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedVersionRecovery"); allowance=300; summary_stem=saved-version-recovery-summary ;;
               diagnostics-test) methods=("-only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectBuildToolDiagnostics"); allowance=300; summary_stem=diagnostics-summary ;;
               saved-checks-test) methods=("-only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedOfflineChecks" "-only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectEmptyBuildInputInspection"); allowance=300; summary_stem=saved-checks-summary ;;
               workflow-refusal-test) methods=("-only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectManagedWorkflowRefusal"); allowance=300; summary_stem=workflow-refusal-summary ;;
@@ -776,6 +778,7 @@ jobs:
             ${{ steps.work.outputs.root }}/normal-ui/fixed-normal-workflow-refusal-test.json
             ${{ steps.work.outputs.root }}/normal-ui/fixed-normal-release-evidence-test.json
             ${{ steps.work.outputs.root }}/normal-ui/fixed-normal-persistence-test.json
+            ${{ steps.work.outputs.root }}/normal-ui/fixed-normal-saved-version-recovery-test.json
             ${{ steps.work.outputs.root }}/normal-ui/fixed-normal-batch.json
           if-no-files-found: error
           retention-days: 14

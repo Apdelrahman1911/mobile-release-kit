@@ -662,11 +662,12 @@ class FixedCarrierResumeData(unittest.TestCase):
                     managedWorkflowRefusalMarkerObserved=True, savedReleaseEvidenceMarkerObserved=True)
             else: row.update(phase=phase, originalReturncode=0)
             return row
-        self.assertEqual({batch: tuple(row[0] for row in families) for batch, families in m.NORMAL_FAMILIES.items()}, RUNNER.FIXED_NORMAL_BATCHES)
-        self.assertEqual(len(m.NORMAL_FAMILIES), 4)
-        self.assertEqual(sum(len(families) for families in m.NORMAL_FAMILIES.values()), 7)
+        self.assertEqual({batch: tuple(row[0] for row in families) for batch, families in m.NORMAL_FAMILIES.items() if batch != "saved-version-recovery"}, {batch:rows for batch,rows in RUNNER.FIXED_NORMAL_BATCHES.items() if batch != "saved-version-recovery"})
+        self.assertEqual(len(m.NORMAL_FAMILIES), 5)
+        self.assertEqual(sum(len(families) for families in m.NORMAL_FAMILIES.values()), 8)
         fixtures = {}
         for batch, families in m.NORMAL_FAMILIES.items():
+            if batch == "saved-version-recovery": continue  # Separate genuine prefix/witness case below.
             self.assertEqual(m.normal_batch_data({m.NORMAL_BATCH_ENV: batch}), batch)
             normal_install = {**self.receipt(source, "2", "1"), "scope": m.NORMAL_SCOPE, "normalBatch": batch}
             fixtures[batch] = []
@@ -910,11 +911,12 @@ class FixedCarrierResumeData(unittest.TestCase):
             "doctor-saved-checks": ("diagnostics-test.xcresult", "saved-checks-test.xcresult"),
             "local-github-evidence": ("workflow-refusal-test.xcresult", "release-evidence-test.xcresult"),
             "persistence": ("persistence-test.xcresult",),
+            "saved-version-recovery": ("saved-version-recovery-test.xcresult",),
         }
         self.assertEqual(m.FIXED_NORMAL_BATCHES, expected_batches)
         self.assertEqual(m.FIXED_NORMAL_SCOPE, "fixed-ce644-arm-carrier-normal-local-batch-v1")
         self.assertEqual(m.FIXED_NORMAL_BATCH_ENV, "TEST_RUNNER_MRK_NORMAL_UI_FIXED_NORMAL_BATCH")
-        self.assertNotIn("saved-version-recovery-test.xcresult", {r for rows in expected_batches.values() for r in rows})
+        self.assertEqual(expected_batches["saved-version-recovery"], (m.SAVED_VERSION_RESULT,))
         def parsed(result, phase):
             if phase == "build":
                 arguments = ["--normal-build"]
@@ -963,6 +965,10 @@ class FixedCarrierResumeData(unittest.TestCase):
             for batch, results in expected_batches.items():
                 normal_env[m.FIXED_NORMAL_BATCH_ENV] = batch
                 normal_receipt = {**self.receipt(source, "2", "1"), "scope": m.FIXED_NORMAL_SCOPE, "normalBatch": batch}
+                if batch == "saved-version-recovery":
+                    normal_receipt["savedVersionRuntimeOrigin"] = dict(scope=m.SAVED_VERSION_RUNTIME_SCOPE,
+                        sourceCommit=m.FIXED_RESUME_SOURCE, release=m.SAVED_VERSION_ORIGINAL_RELEASE,
+                        runtimeManifestSha256="a"*64, installationInventorySha256="b"*64)
                 cases = [(None, "build"), *[(r, p) for r in results for p in ("test", "summary")]]
                 for result, phase in cases:
                     request = parsed(result, phase)
@@ -1060,6 +1066,141 @@ class FixedCarrierResumeData(unittest.TestCase):
                 self.assertLess(block.index('try beginCase('), block.index(literal))
         local = swift.split('private func syntheticProjectJourney(includeImages: Bool) throws {', 1)[1]
         self.assertIn('if includeImages {\n                profile = try normalJourneyProfile(for: "project-test.xcresult")\n            } else {\n                profile = .sameBuild', local)
+
+
+        # Saved-only original-runtime witness. Tiny DATA nominations exercise the
+        # actual SOURCE-selected parsers, not the restart producer/app/runtime.
+        import io, zipfile, hashlib, types
+        from collections import namedtuple
+        runner, adapter = RUNNER, ADAPTER
+        stage_path = ROOT / runner.SAVED_VERSION_STAGER
+        stage_tree = ast.parse(stage_path.read_bytes())
+        wanted = {"Refused", "need", "sha", "digest", "canonical", "pairs", "decode", "mac_target",
+                  "source_build_selection", "selected_build", "build_release_data", "safe_path", "directories",
+                  "observation_inventory_bytes", "manifest_files", "current_core_matches"}
+        definitions = [n for n in stage_tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in wanted]
+        self.assertEqual({n.name for n in definitions}, wanted)
+        assignments = {t.id:n for n in stage_tree.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t,ast.Name)}
+        constants = {n.id for definition in definitions for n in ast.walk(definition) if isinstance(n,ast.Name) and n.id.isupper()} - {"PACKAGE_VERSION","RELEASE"}
+        constants.add("BuildSelection")
+        pending = list(constants)
+        while pending:
+            name = pending.pop()
+            if name not in assignments: continue
+            for item in ast.walk(assignments[name].value):
+                if isinstance(item,ast.Call):
+                    self.assertIsInstance(item.func, ast.Name); self.assertIn(item.func.id, {"Path","namedtuple"})
+                if isinstance(item,ast.Name) and item.id.isupper() and item.id not in constants:
+                    constants.add(item.id); pending.append(item.id)
+        selected = [n for n in stage_tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id in constants for t in n.targets)] + definitions
+        namespace = dict(__file__=str(stage_path), __name__="saved_original_runtime_data", Path=Path, namedtuple=namedtuple,
+                         hashlib=hashlib, json=json, re=re, os=adapter.os, stat=stat, io=io, zipfile=zipfile)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=selected,type_ignores=[])),str(stage_path),"exec"), namespace)
+        stage = types.SimpleNamespace(**namespace)
+        namespace.update(PACKAGE_VERSION="0.1.2", RELEASE="macos26-arm64-desktop-02")
+        fixed = {"desktop/"+name for name in runner.SAVED_VERSION_BOOTSTRAPS}
+        fixed.update(("desktop/cpython-source-inputs/github-ca.pem","desktop/tools/prepare_runtime.py","desktop/packaging/macos-history-provider.profile"))
+        source_bytes = {name:b"tiny-SOURCE-data" for name in fixed}
+        for index in range(178-len(fixed)-1): source_bytes["src/mobile_release/unit%03d.py"%index] = b"tiny-core-SOURCE\n"
+        source_bytes["src/mobile_release/__init__.py"] = b'__version__ = "0.3.0"\n'
+        synthetic_s = runner.sha(runner.encoded([dict(path=n,size=len(source_bytes[n]),sha256=runner.sha(source_bytes[n])) for n in sorted(source_bytes)]))
+        out = io.BytesIO()
+        with zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED) as archive:
+            for name in sorted(n for n in source_bytes if n.startswith("src/mobile_release/")):
+                info=zipfile.ZipInfo(name[len("src/"):],date_time=(1980,1,1,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED
+                info.create_system=3;info.external_attr=(stat.S_IFREG|0o644)<<16
+                archive.writestr(info,source_bytes[name])
+        core_body=out.getvalue()
+        bootstraps={name:source_bytes["desktop/"+name] for name in runner.SAVED_VERSION_BOOTSTRAPS}
+        bootstraps["github-ca.pem"]=source_bytes["desktop/cpython-source-inputs/github-ca.pem"]
+        runtime_bodies={"core.zip":core_body,**bootstraps,"python/bin/python3":b"not-an-executed-interpreter"}
+        rows=[dict(path=n,size=len(b),sha256=adapter.sha(b)) for n,b in sorted(runtime_bodies.items())]
+        manifest_body=stage.canonical(dict(schemaVersion=1,protocol=1,coreVersion="0.3.0",target=stage.ARM_TARGET,
+                          coreSha256=adapter.sha(core_body),protocolSha256=stage.CURRENT_PROTOCOL,
+                          inventorySha256=adapter.sha(stage.canonical(rows)),files=rows))
+        inv={"runtime/"+n:dict(path="runtime/"+n,size=len(b),sha256=adapter.sha(b),executable=n=="python/bin/python3") for n,b in runtime_bodies.items()}
+        inv["runtime/manifest.json"]=dict(path="runtime/manifest.json",size=len(manifest_body),sha256=adapter.sha(manifest_body),executable=False)
+        for name in {"app/"+stage.ENTRY_BINARY,"app/"+stage.APP_BINARY,"app/"+stage.VAULT_HELPER,"app/Contents/Info.plist","app/"+stage.PAYLOAD_INFO}:
+            inv[name]=dict(path=name,size=1,sha256=adapter.sha(b"a"),executable=name in {"app/"+stage.ENTRY_BINARY,"app/"+stage.APP_BINARY,"app/"+stage.VAULT_HELPER})
+        inventory=stage.canonical(dict(schemaVersion=1,release=runner.SAVED_VERSION_ORIGINAL_RELEASE,runtimeManifestSha256=adapter.sha(manifest_body),files=[inv[n] for n in sorted(inv)]))
+        origin=dict(scope=runner.SAVED_VERSION_RUNTIME_SCOPE,sourceCommit=runner.FIXED_RESUME_SOURCE,release=runner.SAVED_VERSION_ORIGINAL_RELEASE,
+                    runtimeManifestSha256=adapter.sha(manifest_body),installationInventorySha256=adapter.sha(inventory))
+        with mock.patch.object(runner,"SAVED_VERSION_SOURCE",synthetic_s):
+            witness=runner.saved_version_runtime_data(stage,origin,inventory,manifest_body,core_body,bootstraps,source_bytes,runner.ARM_TARGET)
+            self.assertEqual(witness["coreVersion"],"0.3.0");self.assertIs(witness["runtimeOriginalsMatched"],True)
+            self.assertNotIn("qualification",witness)
+            for field,value in (("scope","current-runtime"),("sourceCommit","f"*40),("release","macos26-arm64-desktop-02"),("runtimeManifestSha256",True),("extra",False)):
+                changed={**origin,field:value}
+                with self.subTest(runtimeOrigin=field),self.assertRaises(runner.Refused):
+                    runner.saved_version_runtime_data(stage,changed,inventory,manifest_body,core_body,bootstraps,source_bytes,runner.ARM_TARGET)
+            for index,args in enumerate(((inventory+b" ",manifest_body,core_body,bootstraps,source_bytes),
+                        (inventory,manifest_body+b" ",core_body,bootstraps,source_bytes),
+                        (inventory,manifest_body,core_body+b"foreign",bootstraps,source_bytes),
+                        (inventory,manifest_body,core_body,{**bootstraps,"engine_bootstrap.py":b"foreign"},source_bytes),
+                        (inventory,manifest_body,core_body,bootstraps,{**source_bytes,"src/mobile_release/extra.py":b"foreign"}))):
+                with self.subTest(runtimeBytes=index),self.assertRaises((runner.Refused,stage.Refused,zipfile.BadZipFile)):
+                    runner.saved_version_runtime_data(stage,origin,*args,runner.ARM_TARGET)
+        with self.assertRaises(stage.Refused): stage.observation_inventory_bytes(inventory,origin["installationInventorySha256"],origin["runtimeManifestSha256"])
+        fixture=runner.SavedVersionFixture.__new__(runner.SavedVersionFixture)
+        fixture.fds=[31,32];fixture.runtime_stack=None;fixture.runtime_stager=None
+        first=OSError("synthetic-consuming-close")
+        with mock.patch.object(runner.os,"close",side_effect=[first,None]) as consuming,self.assertRaises(OSError) as caught:
+            fixture.close()
+        self.assertIs(caught.exception,first);self.assertEqual(consuming.call_args_list,[mock.call(32),mock.call(31)])
+        self.assertIn('module.installation_metadata_directory(module.INSTALL_ROOT, names, selection=selection)', (ROOT/'desktop/tools/macos_normal_ui_runner.py').read_text())
+        self.assertIn('"runtime-result.json", 65536', (ROOT/'desktop/tools/macos_normal_ui_runner.py').read_text())
+        self.assertIn('launchForJourney(profile: try normalJourneyProfile(for: "saved-version-recovery-test.xcresult"))',swift)
+        self.assertIn('origin["coreVersion"] as? String == "0.3.0"',swift)
+        # Exact saved prefix census: owned SOURCE query0 then actual interrupt86.
+        row=dict(sourceCommit=source,target=adapter.TARGETS[0],fixedCarrierResumeScope=adapter.NORMAL_SCOPE,fixedNormalBatch="saved-version-recovery",
+                 applicationSourceCommit=adapter.ORIGIN["source"],currentProductQualified=False,p0Qualified=False,intelQualified=False,
+                 sourcePrePostMatched=True,originalCommandReturned=True,normalPhase="test",resultBundle=runner.SAVED_VERSION_RESULT,
+                 originalTestReturncode=0,receiptPolicy="exclusive0600-readback-consuming-close",sourceRosterSha256="a"*64,
+                 phaseClock=dict(startNs="1",deadlineNs=str(1+585*10**9),beforePublicationNs="2",postCloseDeadlineRequired=True))
+        roles=[("normal-ui-source-roster",15,1048576,0),("saved-version-source-roster",15,65536,0),("saved-version-core-interrupt",20,65536,86),
+               ("verify-generated-runner",30,1048576,0),("generated-runner-entitlements",30,1048576,0),("one-admitted-ui-test",420,1048576,0),("normal-ui-source-roster",15,1048576,0)]
+        row["commands"]=[dict(role=role,returncode=code,timeoutSeconds=cap,roleCapSeconds=cap,outputLimitBytes=limit,argvSha256="a"*64,
+                               stdoutBytes=1,stdoutSha256="b"*64,stderrBytes=0,stderrSha256="c"*64) for role,cap,limit,code in roles]
+        self.assertEqual(adapter.normal_original_projection_data(row,"saved-version-recovery",source,"test",585,runner.SAVED_VERSION_RESULT),"a"*64)
+        for index,field,value in ((2,"returncode",0),(2,"returncode",True),(1,"role","foreign-source-query"),(2,"stderrBytes",1)):
+            changed=copy.deepcopy(row);changed["commands"][index][field]=value
+            with self.subTest(savedCensus=(index,field)),self.assertRaises(adapter.Refused):
+                adapter.normal_original_projection_data(changed,"saved-version-recovery",source,"test",585,runner.SAVED_VERSION_RESULT)
+
+
+        # Complete saved-family reducer joins the actual private native receipt
+        # bytes/hash, producer stdout digest, runtime witness and recovery facts.
+        install={**self.receipt(source,"2","1"),"scope":adapter.NORMAL_SCOPE,"normalBatch":"saved-version-recovery",
+                 "savedVersionRuntimeOrigin":origin}
+        row.update(originalClosesCompleted=True,originalProductsPrePostMatched=True,strictCodesignOriginalZero=True,reSignedOrRepaired=False)
+        row["savedVersionRecovery"]=dict(originalRuntimeWitness={**origin,"coreVersion":"0.3.0","sourceInputsSha256":runner.SAVED_VERSION_SOURCE,"runtimeOriginalsMatched":True},
+            runtimeManifestSha256=origin["runtimeManifestSha256"],sourceInputsSha256=runner.SAVED_VERSION_SOURCE,
+            producerReturncode=86,publicOriginalCount=13,readyJournalFileCount=6,originalFixtureRestored=True,unrelatedOriginalsUnchanged=True,
+            readyJournalRemoved=True,sourcePrePostMatched=True,uiOriginalMarkersObserved=True,originalClosesCompleted=True,
+            interruptedGuiSaveObserved=False,currentRuntimeQualified=False,producerFramesSha256=row["commands"][2]["stdoutSha256"],
+            originalRuntimeReceiptSha256=adapter.sha(adapter.canonical(install)+b"\n"))
+        def ordinary_row(phase,seconds,roles):
+            value={k:v for k,v in row.items() if k not in {"commands","savedVersionRecovery","normalPhase","originalTestReturncode"}}
+            value.update(phase=phase,originalReturncode=0,resultBundle=None if phase=="build" else runner.SAVED_VERSION_RESULT,
+                         phaseClock=dict(startNs="1",deadlineNs=str(1+seconds*10**9),beforePublicationNs="2",postCloseDeadlineRequired=True))
+            value["commands"]=[dict(role=role,returncode=0,timeoutSeconds=cap,roleCapSeconds=cap,outputLimitBytes=limit,argvSha256="a"*64,
+                                 stdoutBytes=1,stdoutSha256="b"*64,stderrBytes=0,stderrSha256="c"*64) for role,cap,limit in roles]
+            return value
+        build=ordinary_row("build",450,[("normal-ui-source-roster",15,1048576),*[('normal-toolchain-'+k,15,4096) for k in ('xcode','sdkPath','sdkVersion','sdkBuild')],
+                      ("normal-ui-build",240,1048576),("normal-ui-source-roster",15,1048576)])
+        summary=ordinary_row("summary",90,[("normal-ui-source-roster",15,1048576),("normal-ui-summary",30,262144),("normal-ui-source-roster",15,1048576)])
+        summary_body=adapter.canonical(dict(totalTestCount=1,passedTests=1,failedTests=0,skippedTests=0,expectedFailures=0))
+        summary["commands"][1].update(stdoutBytes=len(summary_body),stdoutSha256=adapter.sha(summary_body))
+        args=(install,build,row,summary,summary_body,"saved-version-recovery",runner.SAVED_VERSION_RESULT,source,"2","1")
+        self.assertEqual(adapter.normal_family_projection_data(*args)["familyResult"],"passed")
+        changed=copy.deepcopy(row);changed["savedVersionRecovery"]["originalRuntimeWitness"]["runtimeOriginalsMatched"]=1
+        with self.assertRaises(adapter.Refused):
+            adapter.normal_family_projection_data(install,build,changed,summary,summary_body,"saved-version-recovery",runner.SAVED_VERSION_RESULT,source,"2","1")
+        for field,value in (("producerReturncode",True),("currentRuntimeQualified",True),("originalClosesCompleted",False),
+                            ("producerFramesSha256","f"*64),("originalRuntimeReceiptSha256","f"*64),("runtimeResultSha256","f"*64)):
+            changed=copy.deepcopy(row);changed["savedVersionRecovery"][field]=value
+            with self.subTest(savedFamily=field),self.assertRaises(adapter.Refused):
+                adapter.normal_family_projection_data(install,build,changed,summary,summary_body,"saved-version-recovery",runner.SAVED_VERSION_RESULT,source,"2","1")
 
     def test_dormant_p1_hybrids_and_original_release_readback_remain_closed(self):
         # Passive actual SOURCE units + ordinary API ports only. No native
@@ -1466,6 +1607,93 @@ class FixedCarrierResumeData(unittest.TestCase):
                     session.allocation_budget('xar-member', 100, 0, 0)
             self.assertEqual(m.STATE['phase'], 'resource-admission')
             self.assertFalse(m.STATE['resourceAdmission']['memorySufficient'])
+
+        # The initial DMG readback binding is dead after equality; the held
+        # original and fresh POST stay live. Tiny genuine FD DATA only.
+        import ast
+        donor_source = (ROOT / 'desktop/tools/macos_e2_native_fixture.py').read_bytes()
+        self.assertEqual((len(donor_source), m.sha(donor_source)), m.SOURCE_PINS['desktop/tools/macos_e2_native_fixture.py'])
+        donor_tree = ast.parse(donor_source)
+        names = {'Originals', 'Refused', 'need', 'signature'}
+        selected = [n for n in donor_tree.body
+                    if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names
+                    or isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'READ_FLAGS' for t in n.targets)]
+        self.assertEqual({n.name if hasattr(n, 'name') else 'READ_FLAGS' for n in selected}, names | {'READ_FLAGS'})
+        donor = {'__name__': 'tiny_original_file_data', 'os': m.os, 'stat': m.stat, 'Path': Path}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), 'tiny_original_file_data', 'exec'), donor)
+        class BeforePlaceholder(Exception):
+            pass
+        image = b'PUBLIC-TINY-IMAGE-DATA\n' * 64
+        # Existing quick owner supplies private0700 TMPDIR=/scratch. Never
+        # change the donor's safe ancestor/mode policy to admit /tmp.
+        with tempfile.TemporaryDirectory(dir=m.os.environ['TMPDIR']) as folder:
+            work = Path(folder).resolve()
+            image_path = work / 'arm64.dmg'
+            image_path.write_bytes(image)
+            image_path.chmod(0o444)
+            quota = m.OriginalQuota()
+            book = quota.book(donor['Originals'])
+            parent = quota.call(book, 'directory', work)
+            probe_entry, probe_copy = quota.call(book, 'file', image_path, len(image), modes=(0o444,))
+            self.assertEqual(probe_copy, image)
+            self.assertIsNot(probe_copy, image)
+            self.assertTrue(all(not any(isinstance(v, (bytes, bytearray, memoryview)) for v in entry.values()) for entry in book.entries))
+            del probe_copy
+            observed = {}
+            def published(path, body):
+                self.assertEqual(path, image_path)
+                self.assertIs(body, image)
+            session = SimpleNamespace(work=work, quota=quota, outer=book, parent=parent,
+                                      private={}, publish_image=published)
+            def stop(name, mode, *, dir_fd):
+                frame = m.sys._getframe(1)
+                self.assertIs(frame.f_code, m.Resume.install_image.__code__)
+                self.assertNotIn('original', frame.f_locals)
+                self.assertIs(frame.f_locals['image'], image)
+                held = frame.f_locals['image_entry']
+                self.assertTrue(any(held is entry for entry in book.entries))
+                self.assertEqual(session.private['arm64.dmg'], held['identity'])
+                self.assertEqual((name, mode, dir_fd), ('arm64-mount', 0o700, parent['fd']))
+                self.assertEqual(book.read(held), image)
+                observed['held'] = held
+                raise BeforePlaceholder()
+            with mock.patch.object(m.os, 'mkdir', new=stop):
+                with self.assertRaises(BeforePlaceholder):
+                    m.Resume.install_image(session, image, {})
+            self.assertIn('held', observed)
+            # No native/mount call was reached; held/named mutation still
+            # refuses before fresh reads, then consuming closes happen once.
+            image_path.chmod(0o600)
+            image_path.write_bytes(b'X' * len(image))
+            image_path.chmod(0o444)
+            with self.assertRaises(donor['Refused']):
+                book.read(observed['held'])
+            close_calls = []
+            actual_close = m.os.close
+            def consume(fd):
+                close_calls.append(fd)
+                actual_close(fd)
+            with mock.patch.object(m.os, 'close', side_effect=consume):
+                self.assertTrue(quota.finish())
+                first = list(close_calls)
+                self.assertTrue(quota.finish())
+                self.assertEqual(close_calls, first)
+            self.assertEqual(len(first), len(book.entries))
+            self.assertTrue(all(entry['fd'] is None and entry['closed'] for entry in book.entries))
+            # A genuine differently read image fails the original equality
+            # before the deletion/private/mkdir boundary; no guard relaxed.
+            other_quota = m.OriginalQuota()
+            other_book = other_quota.book(donor['Originals'])
+            other_parent = other_quota.call(other_book, 'directory', work)
+            failed = SimpleNamespace(work=work, quota=other_quota, outer=other_book,
+                                     parent=other_parent, private={}, publish_image=published)
+            try:
+                with mock.patch.object(m.os, 'mkdir', side_effect=AssertionError('unexpected-placeholder')):
+                    with self.assertRaisesRegex(m.Refused, '^resume-image-copy-original$'):
+                        m.Resume.install_image(failed, image, {})
+                self.assertEqual(failed.private, {})
+            finally:
+                self.assertTrue(other_quota.finish())
 
     def test_pinned_tls_roots_require_source_authentication_and_strict_tls(self):
         m = ADAPTER

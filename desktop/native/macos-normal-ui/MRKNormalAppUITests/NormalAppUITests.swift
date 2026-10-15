@@ -993,6 +993,7 @@ final class NormalAppUITests: XCTestCase {
         "doctor-saved-checks": ["diagnostics-test.xcresult", "saved-checks-test.xcresult"],
         "local-github-evidence": ["workflow-refusal-test.xcresult", "release-evidence-test.xcresult"],
         "persistence": ["persistence-test.xcresult"],
+        "saved-version-recovery": ["saved-version-recovery-test.xcresult"],
     ]
 
     @MainActor private func normalJourneyProfile(for result: String) throws -> SourceProfile {
@@ -3179,14 +3180,18 @@ final class NormalAppUITests: XCTestCase {
             }
             let handoff = try readLeaf(parent, name: "saved-version-recovery-fixture.json", privateOnly: true, limit: 16 * 1024)
             try Self.need(handoff.bytes.count <= 16 * 1024 && handoff.bytes.last == 10, "recovery handoff bound")
+            let fixedSaved = env["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] == "fixed-ce644-arm-carrier-normal-local-batch-v1"
+                && env["MRK_NORMAL_UI_FIXED_NORMAL_BATCH"] == "saved-version-recovery"
+            let fixedKeys: Set<String> = fixedSaved ? ["applicationSourceCommit", "runtimeOrigin"] : []
             guard let raw = try JSONSerialization.jsonObject(with: handoff.bytes) as? [String: Any],
-                  Set(raw.keys) == Set(["schemaVersion", "scope", "sourceCommit", "sourceInputsSha256", "runtimeManifestSha256",
+                  Set(raw.keys) == fixedKeys.union(Set(["schemaVersion", "scope", "sourceCommit", "sourceInputsSha256", "runtimeManifestSha256",
                       "sourceClosureSha256", "fixtureDataSha256", "producerSha256", "producerFramesSha256", "root",
-                      "transactionId", "originalVersionFacts", "directories", "files"]),
+                      "transactionId", "originalVersionFacts", "directories", "files"])),
                   let schema = raw["schemaVersion"] as? Int, schema == 1,
                   let source = raw["sourceCommit"] as? String,
-                  source == env["MRK_NORMAL_UI_HARNESS_SOURCE"], source == env["MRK_NORMAL_UI_APPLICATION_SOURCE"],
-                  raw["scope"] as? String == "one-owned-saved-version-recovery-fixture",
+                  source == env["MRK_NORMAL_UI_HARNESS_SOURCE"],
+                  fixedSaved || source == env["MRK_NORMAL_UI_APPLICATION_SOURCE"],
+                  raw["scope"] as? String == (fixedSaved ? "one-owned-original-release-saved-version-recovery-fixture" : "one-owned-saved-version-recovery-fixture"),
                   raw["sourceInputsSha256"] as? String == "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2",
                   let root = raw["root"] as? String,
                   root.range(of: #"^/private/tmp/mrk-normal-project-[A-Za-z0-9_-]{6,16}$"#, options: .regularExpression) != nil,
@@ -3197,10 +3202,31 @@ final class NormalAppUITests: XCTestCase {
                   let fileFacts = raw["files"] as? [String: [String: Any]] else {
                 throw Refusal.condition("fixture: closed recovery handoff differs")
             }
+            if fixedSaved {
+                guard let origin = raw["runtimeOrigin"] as? [String: Any],
+                      Set(origin.keys) == Set(["scope", "sourceCommit", "release", "runtimeManifestSha256", "installationInventorySha256", "coreVersion", "sourceInputsSha256", "runtimeOriginalsMatched"]),
+                      raw["applicationSourceCommit"] as? String == env["MRK_NORMAL_UI_APPLICATION_SOURCE"],
+                      env["MRK_NORMAL_UI_APPLICATION_SOURCE"] == "ce644711fb6e2bea26182473441aac192d5638e1", source != env["MRK_NORMAL_UI_APPLICATION_SOURCE"],
+                      origin["scope"] as? String == "fixed-original-release-saved-version-runtime-v1",
+                      origin["sourceCommit"] as? String == env["MRK_NORMAL_UI_APPLICATION_SOURCE"],
+                      origin["release"] as? String == "macos26-arm64-desktop-01",
+                      origin["coreVersion"] as? String == "0.3.0",
+                      origin["sourceInputsSha256"] as? String == raw["sourceInputsSha256"] as? String,
+                      origin["runtimeManifestSha256"] as? String == raw["runtimeManifestSha256"] as? String,
+                      let inventory = origin["installationInventorySha256"] as? String,
+                      inventory.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+                      let matched = origin["runtimeOriginalsMatched"] as? Bool, matched else {
+                    throw Refusal.condition("fixture: original runtime SOURCE witness differs")
+                }
+            }
             // Parent emits canonical ASCII JSON. Equality also rejects duplicate
             // keys/coerced numeric spellings, without a second permissive parser.
             var canonicalObject = raw
             canonicalObject["schemaVersion"] = 1 // Reject JSON true coercing to NSNumber/Int one.
+            if fixedSaved, var origin = raw["runtimeOrigin"] as? [String: Any] {
+                origin["runtimeOriginalsMatched"] = true // Also rejects NSNumber one instead of JSON true.
+                canonicalObject["runtimeOrigin"] = origin
+            }
             let canonical = try JSONSerialization.data(withJSONObject: canonicalObject, options: [.sortedKeys, .withoutEscapingSlashes]) + Data([10])
             try Self.need(canonical == handoff.bytes, "recovery handoff is not the exact canonical document")
             for key in ["runtimeManifestSha256", "sourceClosureSha256", "fixtureDataSha256", "producerSha256", "producerFramesSha256"] {
@@ -5190,7 +5216,7 @@ final class NormalAppUITests: XCTestCase {
         ownedFixture = fixture
         try stage("saved-version-fixture") { try fixture.prepare(.savedVersionRecovery) }
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
-        try stage("saved-version-launch") { launched = try launchForJourney() }
+        try stage("saved-version-launch") { launched = try launchForJourney(profile: try normalJourneyProfile(for: "saved-version-recovery-test.xcresult")) }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary recovery launch returned no original") }
         try stage("saved-version-project-open") {
             try press(renderer, "Open project folder", renderer: renderer)

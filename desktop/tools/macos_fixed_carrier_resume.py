@@ -53,7 +53,7 @@ ORIGIN = {'source': 'ce644711fb6e2bea26182473441aac192d5638e1', 'tree': 'e5c4c43
  'packageVersion': '0.1.1', 'release': 'macos26-arm64-desktop-01'}
 SOURCE_PINS = {'desktop/tools/macos_e2_native_fixture.py': (390457, 'bcfbaf9ec8a8ae3253ef0ac91a1e73256de00a9adb6a9d280f64127b340cd51e'), 'desktop/tools/stage_macos_installed.py': (389653, '15896e062c2e23e47158adeea3fe0856b97955bafeda87616b92a889232ec190'), 'desktop/tools/macos_public_verification_evidence.py': (209883, '05ff6cf585f45601909afd14e7038df89adb8b56ee7411cb49428a0e8524a863'), 'desktop/tools/macos_aqua_qualification.py': (463990, '95587646a468cea1ad1b212ec7a0aeac39d903eb68deef3ee29b1f889cc4d9f5'), 'desktop/tools/macos_xcode_host_preparation.py': (96477, 'd03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376'), 'src/mobile_release/owned_process.py': (9127, 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59'), 'src/mobile_release/_command_process.py': (177438, 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43'), 'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'), 'src/mobile_release/cancellation.py': (32351, 'eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a'), 'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'), 'src/mobile_release/errors.py': (749, '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'), 'src/mobile_release/_lifetime_evidence.py': (19514, 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'), 'src/mobile_release/_store_lane_contract.py': (9500, '8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e'), 'src/mobile_release/_store_lane_evidence.py': (17638, 'bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872'), 'desktop/packaging/macos-install-producer-certificates/leaf.der': (1490, 'e5ba1d05f136fbef3ca5816f0efb1e946cb2cfb81819b745d9f914e7e9256d72')}
 
-RESUME_WORKFLOW_BYTES = 63911
+RESUME_WORKFLOW_BYTES = 64298
 TLS_CA_PATH = 'desktop/macos-installed-inputs/fixed-consumer-tls/cacert.pem'
 TLS_CA_BYTES = 240216
 TLS_CA_SHA256 = '9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f'
@@ -1171,6 +1171,7 @@ class Resume:
         self.publish_image(self.work / 'arm64.dmg', image)
         image_entry, original = self.quota.call(self.outer, 'file', self.work / 'arm64.dmg', len(image), modes=(0o444,))
         need(original == image, 'resume-image-copy-original')
+        del original
         self.private['arm64.dmg'] = image_entry['identity']
         mount = self.work / 'arm64-mount'
         self.quota.reserve(1)  # Before fresh placeholder mkdir, as in approved P0 quotation.
@@ -1341,6 +1342,7 @@ NORMAL_FAMILIES = {
     'local-github-evidence': (('workflow-refusal-test.xcresult', 'workflow-refusal-test', 'workflow-refusal-summary', 1, 585),
                               ('release-evidence-test.xcresult', 'release-evidence-test', 'release-evidence-summary', 1, 585)),
     'persistence': (('persistence-test.xcresult', 'persistence-test', 'persistence-summary', 1, 585),),
+    'saved-version-recovery': (('saved-version-recovery-test.xcresult', 'saved-version-recovery-test', 'saved-version-recovery-summary', 1, 585),),
 }
 
 
@@ -1365,6 +1367,15 @@ def normal_installer_projection_data(install, batch, source, run_id, attempt):
          and all(install.get(k) is False for k in ('productReady','p0Qualified','intelQualified'))
          and install.get('receiptAuthority') == 'same-consumer-owned-installer-and-readback-not-old-status',
          'resume-normal-installer-original')
+    if batch == 'saved-version-recovery':
+        origin = install.get('savedVersionRuntimeOrigin')
+        need(type(origin) is dict and set(origin) == {'scope','sourceCommit','release','runtimeManifestSha256','installationInventorySha256'}
+             and origin['scope'] == 'fixed-original-release-saved-version-runtime-v1'
+             and origin['sourceCommit'] == ORIGIN['source'] and origin['release'] == ORIGIN['release']
+             and all(type(origin[k]) is str and re.fullmatch(r'[0-9a-f]{64}',origin[k]) for k in ('runtimeManifestSha256','installationInventorySha256')),
+             'resume-normal-saved-runtime-origin')
+    else:
+        need('savedVersionRuntimeOrigin' not in install, 'resume-normal-no-foreign-runtime-purpose')
 
 
 def normal_original_projection_data(row, batch, source, phase, seconds, bundle):
@@ -1393,18 +1404,22 @@ def normal_original_projection_data(row, batch, source, phase, seconds, bundle):
              [source_role,('verify-generated-runner',30,1048576),('generated-runner-entitlements',30,1048576),
               ('one-admitted-ui-test',{345:180,585:420,885:720}[seconds],1048576),source_role] if phase == 'test' else
              [source_role,('normal-ui-summary',30,262144),source_role])
+    if phase == 'test' and batch == 'saved-version-recovery':
+        roles[1:1] = [('saved-version-source-roster',15,65536),('saved-version-core-interrupt',20,65536)]
     keys = {'role','returncode','timeoutSeconds','roleCapSeconds','outputLimitBytes','argvSha256',
             'stdoutBytes','stdoutSha256','stderrBytes','stderrSha256'}
     need(type(commands) is list and len(commands) == len(roles), 'resume-normal-command-roster')
     for command,(role,cap,limit) in zip(commands,roles):
         need(type(command) is dict and set(command) == keys and command['role'] == role
-             and type(command['returncode']) is int and command['returncode'] == 0
+             and type(command['returncode']) is int and command['returncode'] == (86 if role == 'saved-version-core-interrupt' else 0)
              and all(type(command[k]) is int for k in ('timeoutSeconds','roleCapSeconds','outputLimitBytes','stdoutBytes','stderrBytes'))
              and 1 <= command['timeoutSeconds'] <= command['roleCapSeconds'] == cap
              and command['outputLimitBytes'] == limit and 0 <= command['stdoutBytes'] <= limit
              and 0 <= command['stderrBytes'] <= limit-command['stdoutBytes']
              and all(type(command[k]) is str and re.fullmatch(r'[0-9a-f]{64}',command[k])
                      for k in ('argvSha256','stdoutSha256','stderrSha256')), 'resume-normal-command-finality')
+    if phase == 'test' and batch == 'saved-version-recovery':
+        need(commands[1]['stderrBytes'] == commands[2]['stderrBytes'] == 0, 'resume-normal-saved-prefix-stderr')
     need(commands[0]['stdoutSha256'] == commands[-1]['stdoutSha256']
          and commands[0]['stdoutBytes'] == commands[-1]['stdoutBytes'], 'resume-normal-original-source-query')
     return roster
@@ -1432,6 +1447,20 @@ def normal_family_projection_data(install, build, test, summary, summary_body, b
                'workflow-refusal-test.xcresult': ('managedWorkflowRefusalMarkerObserved',),
                'release-evidence-test.xcresult': ('savedReleaseEvidenceMarkerObserved',)}
     need(all(test.get(k) is True for k in markers.get(bundle,())), 'resume-normal-existing-ui-markers')
+    if batch == 'saved-version-recovery':
+        saved = test.get('savedVersionRecovery'); origin = install['savedVersionRuntimeOrigin']
+        need(type(saved) is dict and type(saved.get('originalRuntimeWitness')) is dict
+             and saved['originalRuntimeWitness'] == {**origin,'coreVersion':'0.3.0','sourceInputsSha256':'10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2','runtimeOriginalsMatched':True}
+             and saved.get('producerReturncode') == 86 and type(saved.get('producerReturncode')) is int
+             and saved.get('publicOriginalCount') == 13 and saved.get('readyJournalFileCount') == 6
+             and all(saved.get(k) is True for k in ('originalFixtureRestored','unrelatedOriginalsUnchanged','readyJournalRemoved','sourcePrePostMatched','uiOriginalMarkersObserved','originalClosesCompleted'))
+             and saved.get('interruptedGuiSaveObserved') is False and saved.get('currentRuntimeQualified') is False
+             and saved['originalRuntimeWitness'].get('runtimeOriginalsMatched') is True
+             and saved.get('runtimeManifestSha256') == origin['runtimeManifestSha256']
+             and saved.get('sourceInputsSha256') == saved['originalRuntimeWitness']['sourceInputsSha256']
+             and saved.get('producerFramesSha256') == test['commands'][2]['stdoutSha256']
+             and saved.get('originalRuntimeReceiptSha256') == sha(canonical(install) + b'\n')
+             and 'runtimeResultSha256' not in saved, 'resume-normal-saved-genuine-recovery')
     return {'schemaVersion':1,'scope':NORMAL_SCOPE,'normalBatch':batch,'family':bundle,
             'producerSource':ORIGIN['source'],'producerTree':ORIGIN['tree'],
             'carrierArtifactId':ORIGIN['artifactId'],'carrierArtifactSha256':ORIGIN['artifactSha256'],
@@ -1769,6 +1798,11 @@ def main():
                 'p0Qualified': False, 'intelQualified': False}
         if normal_batch is not None:
             receipt['normalBatch'] = normal_batch
+            if normal_batch == 'saved-version-recovery':
+                receipt['savedVersionRuntimeOrigin'] = {'scope':'fixed-original-release-saved-version-runtime-v1',
+                    'sourceCommit':ORIGIN['source'],'release':ORIGIN['release'],
+                    'runtimeManifestSha256':session.installation['runtimeManifestSha256'],
+                    'installationInventorySha256':session.installation['inventorySha256']}
         return receipt
     except BaseException as error:
         primary = error
@@ -1885,7 +1919,7 @@ def project_main():
 # Closed first-party SOURCE locations only. These exact leaves are compiled only
 # after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
 # traceback rendering, error args/notes/locals or private filenames are used.
-FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2185}
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2219}
 FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
 
 
