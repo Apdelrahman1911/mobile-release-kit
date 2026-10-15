@@ -99,12 +99,12 @@ mod tests {
         assert_eq!(value.package_version, crate::macos_install_paths::PACKAGE_VERSION);
         assert_eq!(value.release, crate::macos_install_paths::RELEASE);
         let arm = BuildRelease::parse(include_bytes!("../../macos-installed-inputs/build-release.json")).unwrap();
-        assert_eq!(arm.package_version, "0.1.1");
-        assert_eq!(arm.release, "macos26-arm64-desktop-01"); // Candidate identity only; no signed/qualified v2 publisher release.
+        assert_eq!(arm.package_version, "0.1.2");
+        assert_eq!(arm.release, "macos26-arm64-desktop-02"); // Candidate identity only; no signed/qualified v2 publisher release.
         assert_eq!(arm.declarations(), concat!(
             "// Generated from the fixed source build-release.json; no runtime override.\n",
-            "pub const PACKAGE_VERSION: &str = \"0.1.1\";\n",
-            "pub const RELEASE: &str = \"macos26-arm64-desktop-01\";\n"));
+            "pub const PACKAGE_VERSION: &str = \"0.1.2\";\n",
+            "pub const RELEASE: &str = \"macos26-arm64-desktop-02\";\n"));
     }
 
     #[test]
@@ -114,7 +114,7 @@ mod tests {
         let arm = BuildRelease::parse(arm_bytes).unwrap();
         let intel = BuildRelease::parse_for(MacBuildTarget::Intel, intel_bytes).unwrap();
         intel.check_projections(env!("CARGO_PKG_VERSION"), include_bytes!("../tauri.conf.json")).unwrap();
-        assert_eq!(intel.release, "macos26-x86_64-desktop-01");
+        assert_eq!(intel.release, "macos26-x86_64-desktop-02");
         assert_eq!(BuildRelease::from_source("aarch64-apple-darwin", "macos").unwrap(), arm);
         assert_eq!(BuildRelease::from_source("x86_64-apple-darwin", "macos").unwrap(), intel);
         assert_eq!(BuildRelease::from_source("x86_64-unknown-linux-gnu", "linux").unwrap(), arm);
@@ -126,8 +126,8 @@ mod tests {
         assert!(BuildRelease::from_source("x86_64-apple-darwin", "linux").is_err());
         assert_eq!(intel.declarations(), concat!(
             "// Generated from the fixed source build-release-intel.json; no runtime override.\n",
-            "pub const PACKAGE_VERSION: &str = \"0.1.1\";\n",
-            "pub const RELEASE: &str = \"macos26-x86_64-desktop-01\";\n"));
+            "pub const PACKAGE_VERSION: &str = \"0.1.2\";\n",
+            "pub const RELEASE: &str = \"macos26-x86_64-desktop-02\";\n"));
     }
 
     #[test]

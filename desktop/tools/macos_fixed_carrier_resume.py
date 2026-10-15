@@ -51,7 +51,7 @@ ORIGIN = {'source': 'ce644711fb6e2bea26182473441aac192d5638e1', 'tree': 'e5c4c43
  'signature': {'name': 'producer.sig', 'bytes': 256, 'sha256': '28ed5658f1d0aa49d9213cb818984379b8a2df4a11e970b8987dda80f8dc2a7e'},
  'imageBytes': 73665231, 'imageSha256': '66945f93f8331ae5f4ad945dbb248b263c77b091de6874b84366ddf142685e45',
  'packageVersion': '0.1.1', 'release': 'macos26-arm64-desktop-01'}
-SOURCE_PINS = {'desktop/tools/macos_e2_native_fixture.py': (390457, 'bcfbaf9ec8a8ae3253ef0ac91a1e73256de00a9adb6a9d280f64127b340cd51e'), 'desktop/tools/stage_macos_installed.py': (385322, 'c53fc6eba693f16786b2d3873c8b889f2812ebabd311d93af792a3376c679f7d'), 'desktop/tools/macos_public_verification_evidence.py': (209883, '05ff6cf585f45601909afd14e7038df89adb8b56ee7411cb49428a0e8524a863'), 'desktop/tools/macos_aqua_qualification.py': (463990, '164300e80f0cf3bf1389261565901c7fcd9f0d2abb811b16aa11d719e5e4d287'), 'desktop/tools/macos_xcode_host_preparation.py': (96477, 'd03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376'), 'src/mobile_release/owned_process.py': (9127, 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59'), 'src/mobile_release/_command_process.py': (177438, 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43'), 'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'), 'src/mobile_release/cancellation.py': (32351, 'eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a'), 'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'), 'src/mobile_release/errors.py': (749, '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'), 'src/mobile_release/_lifetime_evidence.py': (19514, 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'), 'src/mobile_release/_store_lane_contract.py': (9500, '8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e'), 'src/mobile_release/_store_lane_evidence.py': (17638, 'bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872'), 'desktop/packaging/macos-install-producer-certificates/leaf.der': (1490, 'e5ba1d05f136fbef3ca5816f0efb1e946cb2cfb81819b745d9f914e7e9256d72')}
+SOURCE_PINS = {'desktop/tools/macos_e2_native_fixture.py': (390457, 'bcfbaf9ec8a8ae3253ef0ac91a1e73256de00a9adb6a9d280f64127b340cd51e'), 'desktop/tools/stage_macos_installed.py': (388486, '08a4609a37ea50426cfde297273b4e2ec53adc3727a86a13bdd5871988b3cfa2'), 'desktop/tools/macos_public_verification_evidence.py': (209883, '05ff6cf585f45601909afd14e7038df89adb8b56ee7411cb49428a0e8524a863'), 'desktop/tools/macos_aqua_qualification.py': (463990, 'd1ab3a83633c7e824277a4b316e2188877ecf03e8d54517a4275f931dd41290a'), 'desktop/tools/macos_xcode_host_preparation.py': (96477, 'd03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376'), 'src/mobile_release/owned_process.py': (9127, 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59'), 'src/mobile_release/_command_process.py': (177438, 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43'), 'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'), 'src/mobile_release/cancellation.py': (32351, 'eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a'), 'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'), 'src/mobile_release/errors.py': (749, '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'), 'src/mobile_release/_lifetime_evidence.py': (19514, 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'), 'src/mobile_release/_store_lane_contract.py': (9500, '8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e'), 'src/mobile_release/_store_lane_evidence.py': (17638, 'bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872'), 'desktop/packaging/macos-install-producer-certificates/leaf.der': (1490, 'e5ba1d05f136fbef3ca5816f0efb1e946cb2cfb81819b745d9f914e7e9256d72')}
 
 RESUME_WORKFLOW_BYTES = 58017
 
@@ -858,6 +858,27 @@ def acquisition_main():
     return result
 
 
+def original_release_readback_data(mounted, inventory, *, target):
+    # Called only after the fixed held carrier/member and native signature
+    # owners succeeded. This DATA record is neither P0 nor signature authority.
+    need(type(mounted) is dict and target == TARGETS[0] == mounted.get('target')
+         and all(mounted.get(key) == ORIGIN[key] for key in ('source', 'tree', 'runId', 'runAttempt', 'jobId',
+                 'artifactId', 'artifactSha256', 'package', 'descriptor', 'signature')),
+         'resume-original-release-provenance')
+    release = mounted['release']
+    need(type(release) is dict and all(release.get(key) == ORIGIN[origin] for key, origin in
+         (('sourceCommit', 'source'), ('packageVersion', 'packageVersion'), ('release', 'release')))
+         and release.get('packageSha256') == ORIGIN['package']['sha256']
+         and type(inventory) is bytes and 0 < len(inventory) <= 1024 * 1024
+         and mounted['inventory'] == {'name': 'install-inventory.json', 'bytes': len(inventory), 'sha256': sha(inventory)}
+         and mounted['inventory']['sha256'] == release.get('inventorySha256')
+         and mounted['signingPolicy']['sha256'] == release.get('signingPolicySha256'), 'resume-original-release-binding')
+    return {'schemaVersion': 1, 'purpose': 'fixed-ce644-arm-original-release-readback', 'target': target,
+            'release': dict(release), 'descriptor': {key: mounted['descriptor'][key] for key in ('bytes', 'sha256')},
+            'signature': {key: mounted['signature'][key] for key in ('bytes', 'sha256')},
+            'inventory': {key: mounted['inventory'][key] for key in ('bytes', 'sha256')}}
+
+
 def mounted_data(originals, row, target, stager):
     """Actual unchanged package parsers; inventory digest precedes observed size."""
     need(type(originals) is dict and set(originals) == {'Install.pkg', 'producer.json', 'producer.sig'}
@@ -1085,6 +1106,7 @@ class Resume:
             verified = self.command('producer-signature', ['/usr/bin/openssl', 'dgst', '-sha256', '-verify', str(self.work / 'producer-key.pem'),
                 '-signature', str(mount / 'producer.sig'), str(mount / 'producer.json')], 15)
             need(verified.returncode == 0 and verified.stdout == b'Verified OK\n' and verified.stderr == b'', 'resume-native-producer-signature')
+            readback = original_release_readback_data(result, inventory, target=TARGETS[0])
             input_parent = self.fresh_directory(self.parent, 'input')
             self.publish_owned(input_parent['path'] / self.stager.INSTALLATION_INVENTORY_NAME, inventory)
             request_id = os.urandom(16).hex()  # New current Installer correlation; never copied from origin.
@@ -1111,7 +1133,7 @@ class Resume:
             self.publish_owned(self.work / 'installer-output.status', b'0\n', 0o600)
             STATE['phase'] = 'readback'
             self.point(); need(post() == facts, 'resume-post-installer-mounted-inputs')
-            observed = self.stager.observation_command(args)
+            observed = self.stager.observation_command(args, original_release_readback=readback)
             self.point(); after_census = self.stager.same_package_result_census()
             need(set(after_census) == {request_id} and observed['requestId'] == request_id
                  and observed['originalInstallerReturnedZero'] is True and observed['originalWriterJoined'] is True
@@ -1415,7 +1437,7 @@ def project_main():
 # Closed first-party SOURCE locations only. These exact leaves are compiled only
 # after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
 # traceback rendering, error args/notes/locals or private filenames are used.
-FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 5982, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 1643}
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6023, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 1665}
 FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
 
 
@@ -1443,7 +1465,7 @@ def location_data(value):
 
 
 def failure_location(error):
-    """Standard traceback API; at most64 scanned /8 retained SOURCE frames."""
+    """At most64 scanned SOURCE frames; retain first4 and latest4 visited."""
     try:
         result = unavailable_location()
         name = type(error).__name__
@@ -1457,7 +1479,7 @@ def failure_location(error):
             if relative is not None and type(line) is int and 0 < line <= FAULT_SOURCE_LINES[relative]:
                 result['frames'].append({'source': relative, 'line': line})
                 if len(result['frames']) > 8:
-                    del result['frames'][0]; result['truncated'] = True
+                    del result['frames'][4]; result['truncated'] = True
             else: result['foreignFramesExcluded'] = True
             tb = tb.tb_next; scanned += 1
         result['truncated'] = result['truncated'] or tb is not None

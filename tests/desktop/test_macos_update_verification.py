@@ -64,6 +64,57 @@ def nested_nomination():
 
 
 class UpdateDataTests(unittest.TestCase):
+
+    def test_credential_update_closed_state_and_original_bootstrap_handoff(self):
+        facts = lambda inode, mode, size, links=1: [str(x) for x in (1, inode, mode, 501, 20, links, 0, size, 1, 0, 1, 0)]
+        leaf = lambda inode, size, digest: {"facts": facts(inode, stat.S_IFREG | 0o600, size), "bytes": size, "sha256": digest}
+        sentinel = leaf(2, len(DATA.SENTINEL), DATA.sha(DATA.SENTINEL))
+        state = {"root": facts(1, stat.S_IFDIR | 0o700, 128, 3), "sentinel": sentinel,
+            "vault": {"directory": facts(3, stat.S_IFDIR | 0o700, 128, 2), "files": {
+                "vault-lock": leaf(4, 0, DATA.sha(b"")), "initialization-reservation": leaf(5, 48, "1" * 64),
+                "vault-header": leaf(6, 104, "2" * 64), "record-" + "a" * 32: leaf(7, 248, "3" * 64)}}}
+        baseline_sentinel = {"identity": [1, 2, stat.S_IFREG | 0o600, 1, 501, 20, len(DATA.SENTINEL), 1000000000, 1000000000],
+            "parentIdentity": [1, 1, stat.S_IFDIR | 0o700, 501, 20], "bytes": len(DATA.SENTINEL), "sha256": DATA.sha(DATA.SENTINEL)}
+        selected = nomination()["targets"][DATA.TARGETS[0]]
+        baseline = {"sentinel": baseline_sentinel, "nominationSha256": DATA.sha(DATA.encoded_credential(selected))}
+        result = {"schemaVersion": 1, "scope": DATA.CREDENTIAL_SCOPE, "segment": "p0-bootstrap", "sourceCommit": "b" * 40,
+            "applicationSourceCommit": selected["source"], "target": DATA.TARGETS[0], "runId": "123", "runAttempt": "1",
+            "nominationSha256": baseline["nominationSha256"], "baselineReceiptSha256": "4" * 64, "helperSha256": "5" * 64,
+            "helperBytes": 4096, "state": state, "recordRevision": 1, "testAdmissionSha256": "6" * 64,
+            "summaryAdmissionSha256": "7" * 64, "nativeSummarySha256": "8" * 64, "fixtureOriginalClosesCompleted": True,
+            "normalQuitObserved": True, "gateReleased": True, "originalCommandsSettled": True, "productReady": False}
+        args = dict(baseline_sha="4" * 64, source="b" * 40, target=DATA.TARGETS[0], run="123", attempt="1", selected=selected)
+        with mock.patch.object(DATA.os, "getuid", return_value=501), mock.patch.object(DATA.os, "getgid", return_value=20):
+            self.assertEqual(DATA.credential_bootstrap_data(result, baseline, **args), result)
+            for key, value in (("applicationSourceCommit", "b" * 40), ("recordRevision", True), ("helperBytes", True),
+                ("baselineReceiptSha256", "9" * 64), ("fixtureOriginalClosesCompleted", False),
+                ("originalCommandsSettled", False), ("productReady", True), ("segment", "p1-resume")):
+                bad = copy.deepcopy(result); bad[key] = value
+                with self.subTest(field=key), self.assertRaises(ValueError): DATA.credential_bootstrap_data(bad, baseline, **args)
+            for fault in ("foreign-root", "foreign-sentinel", "vault-mode", "extra-record", "duplicate-inode", "header-size", "extra-control", "debris"):
+                bad = copy.deepcopy(state); files = bad["vault"]["files"]
+                if fault == "foreign-root": bad["root"][1] = "99"
+                elif fault == "foreign-sentinel": bad["sentinel"]["sha256"] = "9" * 64
+                elif fault == "vault-mode": bad["vault"]["directory"][2] = str(stat.S_IFDIR | 0o755)
+                elif fault == "extra-record": files["record-" + "b" * 32] = leaf(8, 248, "4" * 64)
+                elif fault == "duplicate-inode": files["vault-header"]["facts"][1] = "5"
+                elif fault == "header-size": files["vault-header"]["facts"][7] = "105"; files["vault-header"]["bytes"] = 105
+                elif fault == "extra-control": files["foreign"] = leaf(8, 248, "4" * 64)
+                else: files[".pending"] = leaf(8, 1, "4" * 64)
+                with self.subTest(state=fault), self.assertRaises(ValueError): DATA.credential_state_data(bad, baseline_sentinel, records=1)
+            deleted = copy.deepcopy(state); del deleted["vault"]["files"]["record-" + "a" * 32]
+            self.assertEqual(DATA.credential_state_data(deleted, baseline_sentinel, records=0), deleted)
+            with self.assertRaises(ValueError): DATA.credential_state_data(deleted, baseline_sentinel, records=1)
+        source = (ROOT / "desktop/tools/macos_update_verification.py").read_text()
+        before = source.split("def before_current(op, descriptor):", 1)[1].split("def current_readback", 1)[0]
+        self.assertLess(before.index("baseline_input(op)"), before.index("credential_bootstrap_input(op, row)"))
+        self.assertLess(before.index("sentinel_post(op, sentinel)"), before.index("credential_bootstrap_input(op, row)"))
+        self.assertIn('io(op, "credential-state", credential_state_open, op, bootstrap["state"])', before)
+        post = source.split("def current_readback(op, args):", 1)[1].split("def current_complete", 1)[0]
+        self.assertIn('io(op, "credential-state-post", credential_state_post, op)', post)
+        for flag in ("op.package_settled()", 'op.stager_io_pending = "update-" + name', '"CompletionUnknown"'):
+            self.assertIn(flag, source.split("def io(op, name, function", 1)[1].split("def retain", 1)[0])
+
     def test_closed_nomination_requires_real_independent_qualified_source(self):
         source = nomination()
         for target in DATA.TARGETS:

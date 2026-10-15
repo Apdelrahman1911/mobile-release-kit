@@ -17,6 +17,260 @@ NATIVE = ROOT / "desktop/native/macos-normal-ui"
 
 
 class NormalPersistenceSourceTests(unittest.TestCase):
+
+    def test_real_two_source_update_uses_owned_sentinel_and_login_without_reinitialize(self):
+        source = (NATIVE / "MRKNormalAppUITests/NormalAppUITests.swift").read_text()
+        bootstrap = source.split("@MainActor func testQualifiedP0CredentialBootstrap() throws {", 1)[1].split("@MainActor func testQualifiedP1CredentialResume", 1)[0]
+        resume = source.split("@MainActor func testQualifiedP1CredentialResume() throws {", 1)[1].split("@MainActor func testSyntheticPersistentCredentials", 1)[0]
+        for part in (bootstrap, resume):
+            self.assertIn("executionTimeAllowance = 300", part)
+            self.assertEqual(part.count("try beginCase(seconds: 300)"), 1)
+            self.assertIn("fixture.prepare(.persistentCredentials)", part)
+            self.assertNotIn(".terminate()", part)
+        self.assertLess(bootstrap.index('fixture.admitUpdateCredentials("p0-bootstrap")'), bootstrap.index("launchForJourney(profile: .updateP0Bootstrap)"))
+        self.assertIn("fixture.assertUpdateVaultAbsent()", bootstrap)
+        self.assertIn('privateStatus(storage, action: "initialize", mutation: true)', bootstrap)
+        self.assertIn("fixture.acceptStore(.saveP12)", bootstrap)
+        self.assertIn("count: 1, assigned: 0", bootstrap)
+        self.assertLess(resume.index('fixture.admitUpdateCredentials("p1-resume")'), resume.index("launchForJourney()"))
+        self.assertIn("openAndUnlockPrivateVault(storage, renderer: renderer)", resume)
+        self.assertNotIn('action: "initialize"', resume)
+        self.assertNotIn('"Create encrypted vault"', resume)
+        self.assertIn("assigned: false, notChecked: true", resume)
+        self.assertIn("fixture.acceptStore(.deleteUpdateP12)", resume)
+        self.assertIn("count: 0, assigned: 0", resume)
+        final = source.split("private func finishUpdateCredentialSegment(", 1)[1].split("func testQualifiedP0CredentialBootstrap", 1)[0]
+        self.assertLess(final.index("completeNormalQuit(app)"), final.index("fixture.closeOriginals()"))
+        self.assertLess(final.index("fixture.closeOriginals()"), final.index("acceptFinalScenario()"))
+        self.assertLess(final.index("acceptFinalScenario()"), final.index('print("MRK_MACOS_UPDATE_CREDENTIALS="'))
+        self.assertIn("applicationSource == harnessSource", source)
+        self.assertIn("only the closed source-qualified P0 credential bootstrap", source)
+        for required in ("original parent-admitted update input digest differs", "only the exact baseline-owned app-data root may be reused",
+                         "P0 bootstrap requires only its original sentinel", "P1 resume requires exactly the original controls and one record"):
+            self.assertIn(required, source)
+        self.assertNotIn("SecItemDelete", resume.split("fixture.acceptStore(.deleteUpdateP12)", 1)[0])
+        runner = (ROOT / "desktop/tools/macos_normal_ui_runner.py").read_text()
+        syntax = ast.parse(runner)
+        defs = {target.id: node.value for node in syntax.body if isinstance(node, ast.Assign) for target in node.targets if isinstance(target, ast.Name)}
+        self.assertEqual(len(ast.literal_eval(defs["NORMAL_SELECTIONS"])), 8)
+        selected = ast.literal_eval(defs["CREDENTIAL_UPDATE_SELECTIONS"])
+        self.assertEqual(set(selected), {"p0-bootstrap", "p1-resume"})
+        self.assertEqual(ast.literal_eval(defs["CREDENTIAL_UPDATE_REF"]), "refs/heads/verify/desktop-macos-positive-update")
+        for required in ("update-credential-source-module-collision", "update-credential-genuine-qualified-baseline",
+                         "update-credential-current-update-lineage", "update-credential-exact-bootstrap-handoff",
+                         "update-credential-only-owned-record-deleted", "update-credential-source-pre-post"):
+            self.assertIn(required, runner)
+        workflow = (ROOT / ".github/workflows/desktop-macos-installed.yml").read_text()
+        for segment in ("p0-bootstrap", "p1-resume"):
+            for phase in ("test", "summary"):
+                self.assertEqual(workflow.count("--normal-update-" + segment + "-" + phase + " \\\n"), 1)
+        self.assertLess(workflow.index("id: update_p0_bootstrap_summary"), workflow.index("id: package_install"))
+        self.assertLess(workflow.index("id: package_install"), workflow.index("id: update_p1_resume_test"))
+        package = workflow.split("id: package_install", 1)[1].split("      - name:", 1)[0]
+        self.assertEqual(package.count("macos_android_helper_package.py package-install --target"), 1)
+        self.assertIn("steps.update_p0_bootstrap_summary.outcome == 'success'", workflow.split("id: package_install", 1)[0][-600:])
+        for key in ("p0-readonly-enrollment.json", "update-predecessors.json"):
+            row = json.loads((ROOT / "desktop/macos-installed-inputs" / key).read_bytes())
+            self.assertEqual(row, {"schemaVersion": 1, "mode": "unconfigured"})
+        # This source check is neither an Add/Lookup native result nor an authority
+        # to activate dormant refs or mutate a login Keychain.
+        # KC-R1: invoke only these actual AST-selected DATA readers with fully
+        # synthetic descriptors/stat/body originals. No product module import,
+        # live file descriptor, process, credential, or Keychain is involved.
+        import stat as data_stat
+        from types import SimpleNamespace
+        actual_function = next(n for n in syntax.body if isinstance(n, ast.FunctionDef)
+                               and n.name == "credential_source_state")
+        actual_class = next(n for n in syntax.body if isinstance(n, ast.ClassDef)
+                            and n.name == "CredentialUpdateInputs")
+        method_names = {"read", "leaf_snapshot", "snapshot", "close", "__enter__", "__exit__"}
+        methods = [n for n in actual_class.body if isinstance(n, ast.FunctionDef) and n.name in method_names]
+        self.assertEqual({n.name for n in methods}, method_names)
+        passive = ast.Module(body=[actual_function, ast.ClassDef(name="CredentialUpdateInputs",
+            bases=[], keywords=[], body=methods, decorator_list=[], type_params=[])], type_ignores=[])
+        ast.fix_missing_locations(passive)
+
+        class DataRefused(ValueError):
+            pass
+
+        def data_need(ok, reason):
+            if not ok: raise DataRefused(reason)
+
+        def info(mode):
+            return SimpleNamespace(st_dev=1, st_ino=2, st_mode=mode, st_uid=1000,
+                st_gid=1000, st_nlink=1, st_size=4, st_mtime_ns=5, st_ctime_ns=6, st_flags=0)
+
+        def full(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                    info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+        class DataOS:
+            O_RDONLY, O_NONBLOCK, O_NOFOLLOW, O_CLOEXEC, O_DIRECTORY = 0, 1, 2, 4, 8
+            def __init__(self):
+                self.closes = []
+                self.close_errors = []
+                self.file = info(data_stat.S_IFREG | 0o600)
+                self.directory = info(data_stat.S_IFDIR | 0o700)
+                self.vault_mode = False
+                self.list_failure = None
+            def open(self, *args, **kwargs): return 102
+            def close(self, fd):
+                self.closes.append(fd)
+                error = OSError("synthetic-secondary-close")
+                self.close_errors.append(error)
+                raise error
+            def fstat(self, fd):
+                return self.directory if fd in (101, 200) or self.vault_mode else self.file
+            def stat(self, *args, **kwargs):
+                return self.directory if self.vault_mode else self.file
+            def getuid(self): return 1000
+            def getgid(self): return 1000
+            def listdir(self, fd):
+                if fd == 200: return ["sentinel", "credential-vault-v1"]
+                if self.list_failure is not None: raise self.list_failure
+                return ["vault-lock", "initialization-reservation", "vault-header"]
+
+        data_os = DataOS()
+        data_sys = SimpleNamespace(modules={})
+        clock = SimpleNamespace(check=lambda: None)
+        paths = ast.literal_eval(defs["CREDENTIAL_SOURCE_PATHS"])
+        body = b"synthetic-data"
+        digest = hashlib.sha256(body).hexdigest()
+        blob = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
+        roster = b"".join(b"100644 blob " + blob.encode() + b"\t" + name.encode() + b"\0" for name in paths)
+        phase = SimpleNamespace(root=Path("/synthetic-owned-source"), clock=clock,
+            call=lambda *args: SimpleNamespace(returncode=0, stdout=roster))
+        read_primary = RuntimeError("synthetic-original-read")
+        def original_fault(*args, **kwargs): raise read_primary
+        def original_ok(*args, **kwargs): return body, full(data_os.file), digest
+        namespace = {"os": data_os, "sys": data_sys, "Path": Path, "stat": data_stat,
+            "hashlib": hashlib, "CREDENTIAL_SOURCE_PATHS": paths,
+            "need": data_need, "Refused": DataRefused, "full9": full,
+            "decimal": lambda value: [str(v) for v in value],
+            "sha": lambda value: hashlib.sha256(value).hexdigest(),
+            "open_directory": lambda path: 101, "original_body": original_fault}
+        exec(compile(passive, "<actual-credential-reader-data-slice>", "exec"), namespace)
+        Reader = namespace["CredentialUpdateInputs"]
+        def fresh():
+            value = object.__new__(Reader)
+            value.phase, value.held, value.modules, value.closed = phase, {}, {}, False
+            value.update = SimpleNamespace(credential_facts=full)
+            value.root_fd, value.root_parent = None, None
+            return value
+        allowed_notes = {
+            "update-credential-source-secondary-close", "update-credential-input-secondary-close",
+            "update-credential-leaf-secondary-close", "update-credential-vault-secondary-close",
+            "update-credential-consuming-close", "update-credential-secondary-consuming-close"}
+        def notes(error, count):
+            values = getattr(error, "__notes__", ())
+            self.assertEqual(len(values), count)
+            self.assertTrue(set(values) <= allowed_notes)
+            self.assertFalse(any("synthetic-secondary" in note or "/" in note for note in values))
+
+        # The original source/read/leaf exception remains the identical object;
+        # every acquired descriptor gets one close even when every close fails.
+        for call, expected in (
+            (lambda: namespace["credential_source_state"](phase, "synthetic-source"), [102, 101]),
+            (lambda: fresh().read(Path("/synthetic-input/receipt"), 32768, keep=False), [102, 101]),
+            (lambda: fresh().leaf_snapshot(101, "synthetic-leaf"), [102]),
+        ):
+            read_primary = RuntimeError("synthetic-original-read")
+            data_os.closes.clear()
+            with self.assertRaises(RuntimeError) as caught: call()
+            self.assertIs(caught.exception, read_primary)
+            self.assertEqual(data_os.closes, expected)
+            notes(read_primary, len(expected))
+        namespace["original_body"] = original_ok
+        for call, expected in (
+            (lambda: namespace["credential_source_state"](phase, "synthetic-source"), [102, 101]),
+            (lambda: fresh().read(Path("/synthetic-input/receipt"), 32768, keep=False), [102, 101]),
+            (lambda: fresh().leaf_snapshot(101, "synthetic-leaf"), [102]),
+        ):
+            data_os.closes.clear()
+            with self.assertRaises(DataRefused) as caught: call()
+            self.assertTrue(str(caught.exception).endswith("-close"))
+            self.assertEqual(data_os.closes, expected)
+            notes(caught.exception, len(expected) - 1)
+
+        # Vault close cannot replace its original roster/leaf refusal. The
+        # surrounding root/sentinel admissions here are explicitly synthetic.
+        sentinel = b"synthetic-sentinel"
+        update = SimpleNamespace(SENTINEL=sentinel, credential_facts=full,
+            credential_fact_values=lambda *args, **kwargs: None,
+            credential_state_data=lambda *args, **kwargs: None)
+        def snapshot_reader():
+            value = fresh()
+            value.root_fd, value.sentinel_name, value.update, value.baseline = 200, "sentinel", update, {"sentinel": {}}
+            value.root_post, value.check = lambda: None, lambda: None
+            value.leaf_snapshot = lambda *args: {"bytes": len(sentinel), "sha256": hashlib.sha256(sentinel).hexdigest()}
+            return value
+        data_os.vault_mode = True
+        vault_primary = RuntimeError("synthetic-original-vault-roster")
+        data_os.list_failure = vault_primary
+        data_os.closes.clear()
+        with self.assertRaises(RuntimeError) as caught: snapshot_reader().snapshot(records=1)
+        self.assertIs(caught.exception, vault_primary)
+        self.assertEqual(data_os.closes, [102])
+        notes(vault_primary, 1)
+        data_os.list_failure = None
+        data_os.closes.clear()
+        with self.assertRaises(DataRefused) as caught: snapshot_reader().snapshot(records=1)
+        self.assertEqual(str(caught.exception), "update-credential-vault-close")
+        self.assertEqual(data_os.closes, [102])
+        notes(caught.exception, 0)
+        data_os.vault_mode = False
+
+        # Successful keep=True transfers custody, not a close obligation retry.
+        value = fresh()
+        data_os.closes.clear()
+        self.assertEqual(value.read(Path("/synthetic-input/held"), 32768), body)
+        self.assertEqual(data_os.closes, [])
+        with self.assertRaises(OSError): value.close()
+        self.assertEqual(data_os.closes, [102, 101])
+        self.assertEqual(value.held, {})
+
+        def held_reader():
+            value = fresh()
+            value.held = {Path("/synthetic-input/held"): (301, 302, (), (), "", 0, b"")}
+            value.root_fd, value.root_parent = 303, 304
+            module = object()
+            value.modules = {"synthetic_owned_module": module}
+            data_sys.modules = dict(value.modules)
+            value.check = lambda: None
+            return value
+        for mode in ("close", "enter", "exit-check", "exit-primary", "exit-success"):
+            value = held_reader()
+            data_os.closes.clear()
+            data_os.close_errors.clear()
+            primary = RuntimeError("synthetic-original-context")
+            def fail(): raise primary
+            if mode == "enter": value.baseline_inputs = fail
+            if mode == "exit-check": value.check = fail
+            if mode == "exit-primary":
+                self.assertFalse(value.__exit__(RuntimeError, primary, None))
+                notes(primary, 4)
+            else:
+                expected = RuntimeError if mode in ("enter", "exit-check") else OSError
+                with self.assertRaises(expected) as caught:
+                    if mode == "close": value.close()
+                    elif mode == "enter": value.__enter__()
+                    else: value.__exit__(None, None, None)
+                if expected is RuntimeError:
+                    self.assertIs(caught.exception, primary)
+                    notes(primary, 4)
+                else:
+                    self.assertIs(caught.exception, data_os.close_errors[0])
+                    notes(caught.exception, 3)
+            self.assertEqual(data_os.closes, [301, 302, 303, 304])
+            self.assertTrue(value.closed)
+            self.assertEqual(value.held, {})
+            self.assertIsNone(value.root_fd)
+            self.assertIsNone(value.root_parent)
+            self.assertEqual(value.modules, {})
+            self.assertEqual(data_sys.modules, {})
+            with self.assertRaises(DataRefused): value.close()
+            self.assertEqual(data_os.closes, [301, 302, 303, 304])
+
     def test_closed_fixture_reuses_inert_envelopes_and_saved_signing_configuration(self):
         path = NATIVE / "MRKNormalAppUITests/Fixtures/normal-persistence-v1.json"
         data = path.read_bytes()

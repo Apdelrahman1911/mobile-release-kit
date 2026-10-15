@@ -587,7 +587,7 @@ class AquaDataTests(unittest.TestCase):
             '               ["default", "installed-observation"] if shipping_gate else ["default"], native_names, native_count, "headless-native"),\n')
         for required in ("if len(targets) != 2:", "for role, directory, package, library, features, test_names, count, prefix in libraries:",
                          'r.get("target", {}).get("name") == library', "if len(matches) != 1:",
-                         'package_id = "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.1" if package == "mobile-release-kit-desktop" else "@0.1.0")',
+                         'package_id = "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0")',
                          'target.get("package_id") != package_id',
                          'target.get("manifest_path") != str(checkout / directory / "Cargo.toml")',
                          'target["target"].get("kind") != ["lib"]', 'target["target"].get("crate_types") != ["lib"]',
@@ -9498,7 +9498,7 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
     def test_codec_compiler_requires_exact_app_empty_features_debug_libtest_and_one_artifact(self):
         f = self.functions(); app, work = f["app"], f["work"]
         binary = work / "wrapping-codec-target/aarch64-apple-darwin/debug/deps/mobile_release_desktop-0123456789abcdef"
-        artifact = {"reason": "compiler-artifact", "package_id": "path+" + app.as_uri() + "#mobile-release-kit-desktop@0.1.1",
+        artifact = {"reason": "compiler-artifact", "package_id": "path+" + app.as_uri() + "#mobile-release-kit-desktop@0.1.2",
                     "manifest_path": str(app / "Cargo.toml"), "features": [], "executable": str(binary), "filenames": [str(binary)],
                     "target": {"name": "mobile_release_desktop", "kind": ["lib"], "crate_types": ["lib"], "src_path": str(app / "src/lib.rs")},
                     "profile": {"test": True, "debug_assertions": True, "overflow_checks": True, "opt_level": "0"}}
@@ -9508,6 +9508,8 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
         check = f["admit_codec_compiler"]
         self.assertEqual(check(captured([artifact, finish])), binary)
         mutations = [lambda a: a.__setitem__("package_id", "path+file:///different#mobile-release-kit-desktop@0.1.1"),
+                     lambda a: a.__setitem__("package_id", "path+file:///different#mobile-release-kit-desktop@0.1.2"),
+                     lambda a: a.__setitem__("package_id", artifact["package_id"].replace("@0.1.2", "@0.1.1")),
                      lambda a: a.__setitem__("manifest_path", str(app.parent / "Cargo.toml")),
                      lambda a: a.__setitem__("features", ["macos-installed-observation"]),
                      lambda a: a["target"].__setitem__("name", "mrk_macos_installed_native"),
@@ -10199,7 +10201,7 @@ def shipping_gate_headless_data(binding=BINDING):
          ["default", "installed-observation"], M.SHIPPING_GATE_NATIVE_TESTS, "headless-native"))
     for index, (role, directory, package, library, features, names, prefix) in enumerate(selected):
         path = str(work / "cargo-target" / binding.target / "debug/deps" / (library + "-123abc"))
-        package_id = "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.1" if package == "mobile-release-kit-desktop" else "@0.1.0")
+        package_id = "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0")
         # Deliberately beyond binary64 exact precision; only integers/strings.
         identity = (7, 2**60 + index + 1, stat.S_IFREG | 0o700, UID, GID, 1, 3, 2**60 + 3, 2**60 + 4)
         artifact = {"path": path, "sha256": M.digest(b"abc"), "full9": [str(v) for v in identity],
@@ -11945,7 +11947,7 @@ class CatalogueHeadlessControlDataTests(unittest.TestCase):
     """
 
     _SCRIPT_BYTES = 48542
-    _SCRIPT_SHA256 = "c6efa4f622e3784ecd89129f89986352aac2faf5f5f647bb62aa9a5a3f7a6735"
+    _SCRIPT_SHA256 = "71beb0298f1908dd6552e126cd28954e07569f377d1d89388be0f320e3a57102"
     _HELPER_SHA256 = "9a25cbc411843de619678e9db1739762e5dd4a1c7415a29d39f6575d5992763c"
 
     @classmethod

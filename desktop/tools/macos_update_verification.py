@@ -220,7 +220,7 @@ def start(op, api):
 
 
 def io(op, name, function, *args, **kwargs):
-    need(name in ("census", "absence", "baseline-readback", "update-readback", "sentinel", "sentinel-post")
+    need(name in ("census", "absence", "baseline-readback", "update-readback", "sentinel", "sentinel-post", "credential-state", "credential-state-post")
          and op.package_settled(), "update-io-originals-unknown")
     op.package_clock()
     op.stager_io_pending = "update-" + name
@@ -460,6 +460,7 @@ def baseline_input(op):
     phase_credit(row["originalCalls"], phase=PHASE)
     _, status_body = retain(op, op.work_entry, "update-baseline.status", 16, (0o600,))
     need(status_body == b"0\n", "update-baseline-outer-original")
+    op.update["baselineReceiptSha256"] = sha(body)
     result = row["updateBaseline"]
     need(type(result) is dict and all(result.get(k) == v for k, v in context(op).items())
          and result.get("nominationSha256") == sha(op.stager.canonical(op.update["nomination"]))
@@ -468,6 +469,156 @@ def baseline_input(op):
          and result.get("originalMountDetached") is True, "update-baseline-context")
     return result
 
+
+
+# Closed two-segment credential fixture DATA; no Keychain selection/repair API.
+CREDENTIAL_SCOPE = "one-owned-p0-p1-credential-update-ui-v1"
+CREDENTIAL_CONTROLS = {"vault-lock": 0, "initialization-reservation": 48, "vault-header": 104}
+CREDENTIAL_RECORD = "Synthetic distribution input"
+
+
+def credential_facts(info):
+    return [str(value) for value in (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+        info.st_nlink, info.st_flags, info.st_size, info.st_mtime_ns // 1_000_000_000,
+        info.st_mtime_ns % 1_000_000_000, info.st_ctime_ns // 1_000_000_000, info.st_ctime_ns % 1_000_000_000)]
+
+
+def credential_fact_values(value, *, directory):
+    need(type(value) is list and len(value) == 12 and all(type(v) is str and v.isascii()
+         and v.isdecimal() and str(int(v)) == v and len(v) <= 20 for v in value), "update-credential-facts")
+    values = tuple(map(int, value))
+    need(values[0] > 0 and values[1] > 0 and values[2] == (stat.S_IFDIR | 0o700 if directory else stat.S_IFREG | 0o600)
+         and values[3] == os.getuid() > 0 and values[4] == os.getgid() and values[6] == 0
+         and (values[5] >= 1 if directory else values[5] == 1) and 0 <= values[7] <= 65536
+         and 0 <= values[9] < 1_000_000_000 and 0 <= values[11] < 1_000_000_000, "update-credential-facts-policy")
+    return values
+
+
+def credential_leaf_data(row):
+    need(type(row) is dict and set(row) == {"facts", "bytes", "sha256"}
+         and type(row["bytes"]) is int and 0 <= row["bytes"] <= 32768 and hx(row["sha256"], 64),
+         "update-credential-leaf")
+    facts = credential_fact_values(row["facts"], directory=False)
+    need(facts[7] == row["bytes"], "update-credential-leaf-size")
+    return facts
+
+
+def credential_state_data(value, sentinel, *, records):
+    need(type(records) is int and records in (0, 1) and type(value) is dict
+         and set(value) == {"root", "sentinel", "vault"}, "update-credential-state")
+    root = credential_fact_values(value["root"], directory=True)
+    leaf = credential_leaf_data(value["sentinel"])
+    signature = [leaf[0], leaf[1], leaf[2], leaf[5], leaf[3], leaf[4], leaf[7],
+                 leaf[8] * 1_000_000_000 + leaf[9], leaf[10] * 1_000_000_000 + leaf[11]]
+    need(type(sentinel) is dict and set(sentinel) == {"identity", "parentIdentity", "sha256", "bytes"}
+         and sentinel == {"identity": signature, "parentIdentity": list(root[:5]),
+                          "sha256": sha(SENTINEL), "bytes": len(SENTINEL)}
+         and value["sentinel"]["sha256"] == sha(SENTINEL) and leaf[7] == len(SENTINEL)
+         and leaf[0] == root[0], "update-credential-owned-sentinel")
+    vault = value["vault"]
+    need(type(vault) is dict and set(vault) == {"directory", "files"} and type(vault["files"]) is dict,
+         "update-credential-vault")
+    directory = credential_fact_values(vault["directory"], directory=True)
+    names = set(vault["files"])
+    record_names = names - set(CREDENTIAL_CONTROLS)
+    need(directory[0] == root[0] and names.issuperset(CREDENTIAL_CONTROLS)
+         and len(record_names) == records and all(type(name) is str and len(name) == 39
+              and name.startswith("record-") and hx(name[7:], 32) for name in record_names),
+         "update-credential-exact-vault-roster")
+    identities = set()
+    total = 0
+    for name, row in vault["files"].items():
+        facts = credential_leaf_data(row)
+        need(facts[0] == directory[0] and (facts[0], facts[1]) not in identities
+             and (facts[7] == CREDENTIAL_CONTROLS[name] if name in CREDENTIAL_CONTROLS else facts[7] >= 248),
+             "update-credential-vault-leaf-policy")
+        identities.add((facts[0], facts[1])); total += facts[7]
+    need(total <= 65536 and len(encoded_credential(value)) <= 8192, "update-credential-state-bound")
+    return value
+
+
+def encoded_credential(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
+
+
+def credential_bootstrap_data(value, baseline, *, baseline_sha, source, target, run, attempt, selected):
+    keys = {"schemaVersion", "scope", "segment", "sourceCommit", "applicationSourceCommit", "target", "runId", "runAttempt",
+        "nominationSha256", "baselineReceiptSha256", "helperSha256", "helperBytes", "state", "recordRevision",
+        "testAdmissionSha256", "summaryAdmissionSha256", "nativeSummarySha256", "fixtureOriginalClosesCompleted",
+        "normalQuitObserved", "gateReleased", "originalCommandsSettled", "productReady"}
+    need(type(value) is dict and set(value) == keys and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["scope"] == CREDENTIAL_SCOPE and value["segment"] == "p0-bootstrap"
+         and (value["sourceCommit"], value["applicationSourceCommit"], value["target"], value["runId"], value["runAttempt"])
+             == (source, selected["source"], target, run, attempt)
+         and value["nominationSha256"] == sha(encoded_credential(selected)) == baseline["nominationSha256"]
+         and value["baselineReceiptSha256"] == baseline_sha and hx(baseline_sha, 64)
+         and all(hx(value[k], 64) for k in ("helperSha256", "testAdmissionSha256", "summaryAdmissionSha256", "nativeSummarySha256"))
+         and scalar(value["helperBytes"], 32 * 1024 * 1024) and type(value["recordRevision"]) is int and value["recordRevision"] == 1
+         and all(value[k] is True for k in ("fixtureOriginalClosesCompleted", "normalQuitObserved", "gateReleased", "originalCommandsSettled"))
+         and value["productReady"] is False, "update-credential-bootstrap-context-and-finality")
+    credential_state_data(value["state"], baseline["sentinel"], records=1)
+    return value
+
+
+def credential_state_open(op, expected):
+    """Retain only the already owned sentinel root's exact three controls/one record."""
+    api = op.update_api
+    need(op.update is not None and "credentialEntries" not in op.update, "update-credential-open-once")
+    op.update["credentialEntries"] = entries = []  # Pending custody before any open.
+    roots = [row for row in op.update["sentinelEntries"] if row[4]["kind"] == "update-user-directory"]
+    root_fd = roots[-1][0]
+    need(credential_facts(os.fstat(root_fd)) == expected["root"]
+         and set(os.listdir(root_fd)) == {"credential-vault-v1", "mrk-update-preservation-" + op.environment["GITHUB_RUN_ID"] + "-" + op.environment["GITHUB_RUN_ATTEMPT"] + ".txt"},
+         "update-credential-owned-root-roster")
+    name = "credential-vault-v1"
+    op.removal_reserve()
+    entry = op.register(None, "update-credential-vault", "update-credential-directory", root_fd, name)
+    entry["fd"] = fd = os.open(name, api.READ_FLAGS | os.O_DIRECTORY, dir_fd=root_fd)
+    facts = credential_facts(os.fstat(fd)); entry["identity"] = api.signature(os.fstat(fd))
+    entries.append((fd, root_fd, name, facts, None, entry))
+    need(facts == expected["vault"]["directory"] == credential_facts(os.stat(name, dir_fd=root_fd, follow_symlinks=False))
+         and set(os.listdir(fd)) == set(expected["vault"]["files"]), "update-credential-vault-original")
+    for name, row in sorted(expected["vault"]["files"].items()):
+        op.removal_reserve()
+        entry = op.register(None, "update-credential-leaf", "update-credential-file", fd, name)
+        entry["fd"] = item = os.open(name, api.READ_FLAGS, dir_fd=fd)
+        info = os.fstat(item); entry["identity"] = api.signature(info)
+        facts = credential_facts(info)
+        entries.append((item, fd, name, facts, row["sha256"], entry))
+        need(facts == row["facts"] and sha(os.pread(item, row["bytes"] + 1, 0)) == row["sha256"]
+             and facts == credential_facts(os.stat(name, dir_fd=fd, follow_symlinks=False)), "update-credential-leaf-original")
+    op.update["credentialState"] = expected
+    credential_state_post(op)
+
+
+def credential_state_post(op):
+    need(op.update.get("credentialEntries") and op.update.get("credentialState"), "update-credential-unobserved")
+    expected = op.update["credentialState"]
+    for fd, parent, name, facts, digest, entry in op.update["credentialEntries"]:
+        need(entry["fd"] == fd and credential_facts(os.fstat(fd)) == facts
+             == credential_facts(os.stat(name, dir_fd=parent, follow_symlinks=False)), "update-credential-held-named-post")
+        if digest is not None:
+            need(sha(os.pread(fd, int(facts[7]) + 1, 0)) == digest, "update-credential-byte-post")
+        else:
+            need(set(os.listdir(fd)) == set(expected["vault"]["files"]), "update-credential-roster-post")
+    root_fd = op.update["credentialEntries"][0][1]
+    need(credential_facts(os.fstat(root_fd)) == expected["root"] and set(os.listdir(root_fd)) ==
+         {"credential-vault-v1", "mrk-update-preservation-" + op.environment["GITHUB_RUN_ID"] + "-" + op.environment["GITHUB_RUN_ATTEMPT"] + ".txt"},
+         "update-credential-root-post")
+    op.package_clock()
+
+
+def credential_bootstrap_input(op, baseline):
+    normal = op.directory(op.work_entry, "normal-ui", "update-credential-normal-ui")
+    _, body = retain(op, normal, "update-p0-bootstrap.result.json", RECORD_LIMIT, (0o600,))
+    for name in ("update-p0-bootstrap-test.status", "update-p0-bootstrap-summary.status"):
+        _, status = retain(op, normal, name, 16, (0o600,))
+        need(status == b"0\n", "update-credential-bootstrap-original-status")
+    value = credential_bootstrap_data(op.update_api.tool_json(body), baseline,
+        baseline_sha=op.update["baselineReceiptSha256"], source=op.image_source, target=op.target,
+        run=op.environment["GITHUB_RUN_ID"], attempt=op.environment["GITHUB_RUN_ATTEMPT"], selected=op.update["nomination"])
+    op.update["credentialBootstrapSha256"] = sha(body)
+    return value
 
 def before_current(op, descriptor):
     row = baseline_input(op)
@@ -483,6 +634,8 @@ def before_current(op, descriptor):
          "update-baseline-changed-before-current")
     sentinel = io(op, "sentinel", sentinel_open, op, False, row["sentinel"])
     sentinel_post(op, sentinel)
+    bootstrap = credential_bootstrap_input(op, row)
+    io(op, "credential-state", credential_state_open, op, bootstrap["state"])
     op.update["baseline"] = row
 
 
@@ -496,6 +649,7 @@ def current_readback(op, args):
     request = census_data(baseline["census"], after, baseline=baseline["requestId"])
     need(request == args.request_id and observed["originalInstallerResult"]["action"] == "update", "update-current-request")
     sentinel_post(op, baseline["sentinel"])
+    io(op, "credential-state-post", credential_state_post, op)
     op.update["facts"] = facts
     op.update["afterCensus"] = after
     return observed  # EXACT existing ordinary observation schema.
@@ -508,6 +662,7 @@ def current_complete(op):
         "predecessorPackageSha256": op.update["nomination"]["package"]["sha256"],
         "predecessorQualificationEvidenceSha256": op.update["nomination"]["qualificationEvidenceSha256"],
         "currentDescriptorSha256": baseline["expectedCurrentDescriptorSha256"],
+        "credentialBootstrapSha256": op.update["credentialBootstrapSha256"],
         "baselineInvocation": baseline["readback"]["previous"]["invocation"], "currentInvocation": facts["previous"]["invocation"],
         "rootIdentityPreserved": facts["rootIdentity"] == baseline["readback"]["rootIdentity"],
         "generationInstancesDistinct": facts["generation"]["instance"] != baseline["readback"]["generation"]["instance"],

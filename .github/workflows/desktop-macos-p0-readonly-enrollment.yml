@@ -1,0 +1,119 @@
+name: Fixed read-only P0 enrollment (never executes installed payloads)
+on:
+  push:
+    branches: [verify/desktop-macos-p0-readonly-enrollment]
+    paths:
+      - .github/workflows/desktop-macos-p0-readonly-enrollment.yml
+      - desktop/tools/macos_p0_readonly_enrollment.py
+      - desktop/tools/macos_p0_readonly_native.py
+      - desktop/macos-installed-inputs/p0-readonly-enrollment.json
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: mrk-p0-readonly-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  readonly-enrollment:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-p0-readonly-enrollment'
+    runs-on: macos-26-intel
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Inspect both independently qualified DMGs using only host read-only tools
+        id: enrollment
+        timeout-minutes: 10
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+          MRK_P0_NATIVE_BYTES: "63218"
+          MRK_P0_NATIVE_SHA256: "36f0e43c5685041cb03e8f02b62f6931dbbd0104ca81a735ac86d0a85404476c"
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REF" == refs/heads/verify/desktop-macos-p0-readonly-enrollment ]] || exit 1
+          terminal="$RUNNER_TEMP/mrk-p0-readonly-terminal-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          # One exclusive finite terminal, no native captures or raw errors.
+          set +e
+          python3 -I -S -B - > "$terminal" <<'PY_P0_AUTHENTICATED_NATIVE'
+          import hashlib, os, stat, time
+          from pathlib import Path
+          
+          
+          def p0_source_need(value):
+              if not value: raise ValueError('fixed-p0-source-admission-refused')
+          
+          
+          def p0_source_identity(info):
+              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                      info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+          
+          
+          def p0_source_bytes(path, size, digest, started):
+              p0_source_need(type(size) is int and 0 < size <= 131072 and type(digest) is str
+                             and len(digest) == 64 and all(v in '0123456789abcdef' for v in digest))
+              p0_source_need(type(started) is int and 0 < started <= time.monotonic_ns() < started + 10_000_000_000)
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+              try:
+                  before = p0_source_identity(os.fstat(fd))
+                  p0_source_need(stat.S_ISREG(before[2]) and before[3] == os.getuid()
+                                 and before[5] == 1 and not before[2] & 0o022 and before[6] == size
+                                 and p0_source_identity(os.stat(path, follow_symlinks=False)) == before)
+                  body, offset = bytearray(), 0
+                  while offset < size:
+                      p0_source_need(started <= time.monotonic_ns() < started + 10_000_000_000)
+                      block = os.pread(fd, min(65536, size - offset), offset)
+                      p0_source_need(type(block) is bytes and 0 < len(block) <= min(65536, size - offset))
+                      body.extend(block); offset += len(block)
+                  p0_source_need(os.pread(fd, 1, size) == b'' and hashlib.sha256(body).hexdigest() == digest
+                                 and p0_source_identity(os.fstat(fd)) == before
+                                 == p0_source_identity(os.stat(path, follow_symlinks=False)))
+              finally:
+                  consumed, fd = fd, None  # Consuming close; never retry unknown close.
+                  os.close(consumed)
+              p0_source_need(started <= time.monotonic_ns() < started + 10_000_000_000)
+              return bytes(body)
+          
+          
+          try:
+              started = time.monotonic_ns()
+              path = Path('desktop/tools/macos_p0_readonly_native.py').absolute()
+              body = p0_source_bytes(path, int(os.environ['MRK_P0_NATIVE_BYTES']), os.environ['MRK_P0_NATIVE_SHA256'], started)
+              code = compile(body, str(path), 'exec')
+              os.environ['MRK_P0_TASK_STARTED_NS'] = str(started)
+          except BaseException:
+              print('{"schemaVersion":1,"nativeEnrollmentAccepted":false,"failureClass":"InitialSourceAdmissionFailed","productReady":false}')
+              raise SystemExit(1) from None
+          # No second execution read; __file__/__name__ keep the real adapter route.
+          exec(code, {'__file__': str(path), '__name__': '__main__'})
+          PY_P0_AUTHENTICATED_NATIVE
+          status=$?
+          set -e
+          [[ -f "$terminal" && ! -L "$terminal" && $(wc -c < "$terminal") -le 65536 ]] || exit 1
+          exit "$status"
+      - name: Retain only finite enrollment and exact public inventories after known original success
+        if: steps.enrollment.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mrk-p0-readonly-enrollment-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mrk-p0-readonly-${{ github.run_id }}-${{ github.run_attempt }}/public/*.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Retain bounded finite terminal even on original failure (not qualification)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mrk-p0-readonly-terminal-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mrk-p0-readonly-terminal-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0

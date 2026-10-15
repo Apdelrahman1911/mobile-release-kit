@@ -67,7 +67,7 @@ def messages(rows):
 
 def metadata():
     packages = [
-        {"id": "root", "name": "mobile-release-kit-desktop", "version": "0.1.1", "source": None,
+        {"id": "root", "name": "mobile-release-kit-desktop", "version": "0.1.2", "source": None,
          "manifest_path": "/source/desktop/src-tauri/Cargo.toml"},
         {"id": "mount", "name": "mrk-linux-mount-observation", "version": "0.1.0", "source": None,
          "manifest_path": "/source/desktop/native/linux-mount-observation/Cargo.toml"},
@@ -1364,7 +1364,19 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         parsed, packages, nodes = S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
         self.assertEqual(len(packages), 38)
         self.assertEqual(nodes["root"]["features"], S.SHELL_FEATURES)
+        # Other-platform declarations must match current SOURCE exactly even
+        # though no Mac package becomes active in this Linux-filtered graph.
+        for target in ('cfg(all(target_os = "macos", target_arch = "aarch64"))',
+                       'cfg(target_os = "macos")'):
+            changed = deepcopy(value)
+            declaration = next(row for row in changed["packages"][0]["dependencies"]
+                               if row["name"] == "mrk-macos-installed-native")
+            declaration["target"] = target
+            with self.subTest(mac_declaration=target), self.assertRaisesRegex(
+                    S.D.Refused, "^Linux Cargo local dependency declarations differ$"):
+                S.shell_cargo_metadata(S.D.canonical(changed), Path("/source"), Path("/target"))
         changes = (
+            lambda row: row["packages"][0].update(version="0.1.1"),
             lambda row: row["resolve"]["nodes"][0].update(features=[*S.SHELL_FEATURES, "development-runtime"]),
             lambda row: next(item for item in row["resolve"]["nodes"] if item["id"] == "tauri").update(features=["wry"]),
             lambda row: row["packages"].append(deepcopy(next(item for item in row["packages"] if item["id"] == "tauri"))),

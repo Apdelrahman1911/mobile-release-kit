@@ -1191,7 +1191,7 @@ def artifact(messages, checkout, target, *, build_target=ARM_TARGET):
         libraries = [item for item in records if item["target"].get("name") == name]
         need(len(libraries) == 1, "helper-one-library")
         library = libraries[0]
-        need(library.get("package_id") == "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.1" if package == "mobile-release-kit-desktop" else "@0.1.0")
+        need(library.get("package_id") == "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0")
              and library.get("manifest_path") == str(checkout / directory / "Cargo.toml")
              and library.get("features") == features
              and library["target"].get("src_path") == str(checkout / directory / "src/lib.rs")
@@ -1469,7 +1469,7 @@ _FAILURE_OWNER_REASONS = (
 # Only these SOURCE crate identities can disambiguate relative compiler spans.
 _COMPILER_PACKAGES = {
     "mrk-android-register": ("desktop/helpers/macos-android-register", "0.1.0"),
-    "mobile-release-kit-desktop": ("desktop/src-tauri", "0.1.1"),
+    "mobile-release-kit-desktop": ("desktop/src-tauri", "0.1.2"),
     "mrk-macos-installed-native": ("desktop/native/macos-installed-native", "0.1.0"),
 }
 _COMPILER_ROOTS = tuple(value[0] for value in _COMPILER_PACKAGES.values()) + ("desktop/native/macos-installed-entry",)
@@ -1864,7 +1864,7 @@ def producer_artifact(messages, checkout, target_root, target, *, remove=False, 
         need(len(matches) == 1, "producer-one-target")
         row, root = matches[0], checkout / directory
         profile = row.get("profile")
-        need(row.get("package_id") == "path+" + root.as_uri() + "#" + package + ("@0.1.1" if package == "mobile-release-kit-desktop" else "@0.1.0")
+        need(row.get("package_id") == "path+" + root.as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0")
              and row.get("manifest_path") == str(root / "Cargo.toml") and row.get("features") == features
              and row["target"].get("src_path") == str(root / source)
              and row["target"].get("kind") == kinds and row["target"].get("crate_types") == crates

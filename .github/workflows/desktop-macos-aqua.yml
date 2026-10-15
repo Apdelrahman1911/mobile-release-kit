@@ -815,7 +815,7 @@ jobs:
             --output "$MRK_MACOS_WORK/package-format-scripts" > "$MRK_MACOS_WORK/package-format-input.json"
           [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \
-            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.1 \
+            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.2 \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package \
             --target "$MRK_MACOS_TARGET" \

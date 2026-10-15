@@ -986,7 +986,7 @@ final class NormalAppUITests: XCTestCase {
     }
     // End engineering main fixture; ordinary installed cases below are unchanged.
 
-    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume }
+    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, updateP0Bootstrap }
 
     @MainActor private func admitHostedAccount(_ profile: SourceProfile = .sameBuild) throws -> HostedAccount {
         let context = ProcessInfo.processInfo.environment
@@ -1034,6 +1034,12 @@ final class NormalAppUITests: XCTestCase {
             #else
             try require(false, "the fixed-carrier recovery has no nominated Intel output")
             #endif
+        case .updateP0Bootstrap:
+            guard let fixture = ownedFixture else { throw Refusal.condition("qualified P0 fixture admission missing") }
+            try fixture.updateInputPost()
+            try require(fixture.updateSegment == "p0-bootstrap" && applicationSource == fixture.updateApplicationSource
+                        && harnessSource == fixture.updateHarnessSource && applicationSource != harnessSource,
+                        "only the closed source-qualified P0 credential bootstrap may cross source generations")
         case .packagedEntry:
             try require(applicationSource == "53850a9fd94768a2521f2634db6121550dbdd71c" && harnessSource != applicationSource
                         && context["MRK_NORMAL_UI_ARTIFACT_ID"] == "11281078057"
@@ -1572,7 +1578,7 @@ final class NormalAppUITests: XCTestCase {
 
     private final class LocalFixture {
         enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery, releaseEvidence, androidSignedBuild, iosUnsignedArchive }
-        enum StoreChange { case initialize, saveP12, saveProfile, replaceP12, deleteProfile }
+        enum StoreChange { case initialize, saveP12, saveProfile, replaceP12, deleteProfile, deleteUpdateP12 }
         static let config = "project/release/mobile-release.json"
         static let version = "project/release/version.properties"
         static let title = "project/release/store/android/fr-FR/title.txt"
@@ -1653,6 +1659,13 @@ final class NormalAppUITests: XCTestCase {
         private var p12Record: String?
         private var profileRecord: String?
         private var replacedP12 = false
+        private var updateInputParent: Directory?
+        private var updateInputName: String?
+        private var updateInputOriginal: File?
+        private var updateSentinelName: String?
+        private var updateSentinelOriginal: File?
+        private var deletedUpdateP12 = false
+        private(set) var updateSegment = "", updateApplicationSource = "", updateHarnessSource = ""
         private var deletedProfile = false
         private(set) var rootPath = ""
         var projectPath: String { rootPath + "/project" }
@@ -3513,6 +3526,136 @@ final class NormalAppUITests: XCTestCase {
             }
             print("MRK_NORMAL_PROJECT_FIXTURE=retained-for-disposable-job-retirement;path=\(rootPath);bytes=\(current.values.reduce(0) { $0 + $1.bytes.count })")
         }
+
+        private func wireFacts(_ facts: StatFacts) -> [String] {
+            [String(facts.device), String(facts.inode), String(facts.mode), String(facts.uid), String(facts.gid),
+             String(facts.links), String(facts.flags), String(facts.bytes), String(facts.modifiedSeconds),
+             String(facts.modifiedNanoseconds), String(facts.changedSeconds), String(facts.changedNanoseconds)]
+        }
+        private func wireLeaf(_ file: File) -> [String: Any] {
+            ["facts": wireFacts(file.facts), "bytes": file.bytes.count,
+             "sha256": SHA256.hash(data: file.bytes).map { String(format: "%02x", $0) }.joined()]
+        }
+        private func exactWire(_ actual: [String: Any], _ expected: Any?) throws {
+            guard let expected = expected as? [String: Any] else { throw Refusal.condition("fixture: update state shape") }
+            let a = try JSONSerialization.data(withJSONObject: actual, options: [.sortedKeys])
+            let b = try JSONSerialization.data(withJSONObject: expected, options: [.sortedKeys])
+            try Self.need(a == b, "exact owned update fixture metadata/bytes differ")
+        }
+        func updateInputPost() throws {
+            guard let parent = updateInputParent, let name = updateInputName, let before = updateInputOriginal else {
+                throw Refusal.condition("fixture: update input original absent")
+            }
+            let current = try readLeaf(parent, name: name, privateOnly: true, limit: 16 * 1024)
+            try Self.need(current.facts == before.facts && current.bytes == before.bytes, "update input original changed")
+        }
+        private func updateSentinelPost() throws {
+            guard let app = applicationDirectory, let name = updateSentinelName, let before = updateSentinelOriginal else {
+                throw Refusal.condition("fixture: owned update sentinel absent")
+            }
+            let observed = try readLeaf(app, name: name, privateOnly: true)
+            try Self.need(observed.facts == before.facts && observed.bytes == before.bytes, "owned update sentinel changed")
+            try updateInputPost()
+        }
+        func admitUpdateCredentials(_ segment: String) throws {
+            try Self.need(["p0-bootstrap", "p1-resume"].contains(segment) && updateSegment.isEmpty
+                && applicationSupport == nil && applicationDirectory == nil && vaultDirectory == nil && storeCurrent.isEmpty,
+                "update credential admission is one closed segment")
+            let context = ProcessInfo.processInfo.environment
+            let input = context["MRK_NORMAL_UI_UPDATE_INPUT"] ?? ""
+            let digest = context["MRK_NORMAL_UI_UPDATE_INPUT_SHA256"] ?? ""
+            let pattern = #"^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}/normal-ui/update-"# + segment + #"\.input\.json$"#
+            try Self.need(input.range(of: pattern, options: .regularExpression) != nil
+                && digest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+                "fixed original update input path/digest unavailable")
+            let parts = input.split(separator: "/").map(String.init)
+            var parent = try adoptDirectory(open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: nil, name: "/")
+            anchors.append(parent)
+            for name in parts.dropLast() {
+                parent = try adoptDirectory(openat(parent.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: parent.fd, name: name)
+                anchors.append(parent)
+                try Self.need((parent.facts.uid == 0 || parent.facts.uid == getuid()) && parent.facts.mode & 0o022 == 0,
+                              "update input ancestor policy")
+            }
+            try Self.need(parent.facts.uid == getuid() && parent.facts.gid == getgid() && parent.facts.mode & 0o7777 == 0o700,
+                          "update input task parent policy")
+            let name = parts.last!
+            let original = try readLeaf(parent, name: name, privateOnly: true, limit: 16 * 1024)
+            try Self.need(SHA256.hash(data: original.bytes).map { String(format: "%02x", $0) }.joined() == digest,
+                          "original parent-admitted update input digest differs")
+            guard let document = try JSONSerialization.jsonObject(with: original.bytes) as? [String: Any],
+                  let state = document["state"] as? [String: Any], let application = document["applicationSourceCommit"] as? String,
+                  let harness = document["sourceCommit"] as? String, let run = document["runId"] as? String,
+                  let attempt = document["runAttempt"] as? String else { throw Refusal.condition("fixture: update input fields") }
+            let keys: Set<String> = ["schemaVersion", "scope", "segment", "sourceCommit", "applicationSourceCommit", "target", "runId", "runAttempt",
+                "baselineReceiptSha256", "nominationSha256", "helperSha256", "helperBytes", "state"]
+            #if arch(arm64)
+            let target = "aarch64-apple-darwin"
+            #elseif arch(x86_64)
+            let target = "x86_64-apple-darwin"
+            #endif
+            try Self.need(Set(document.keys) == keys && document["schemaVersion"] as? Int == 1
+                && document["scope"] as? String == "one-owned-p0-p1-credential-update-ui-v1"
+                && document["segment"] as? String == segment && document["target"] as? String == target
+                && harness == context["MRK_NORMAL_UI_HARNESS_SOURCE"] && application == context["MRK_NORMAL_UI_APPLICATION_SOURCE"]
+                && application.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
+                && harness.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
+                && (segment == "p0-bootstrap" ? application != harness : application == harness)
+                && run.range(of: #"^[1-9][0-9]{0,19}$"#, options: .regularExpression) != nil
+                && attempt.range(of: #"^[1-9][0-9]{0,19}$"#, options: .regularExpression) != nil
+                && ["baselineReceiptSha256", "nominationSha256", "helperSha256"].allSatisfy { key in
+                    (document[key] as? String)?.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+                } && (document["helperBytes"] as? Int ?? 0) > 0 && (document["helperBytes"] as? Int ?? Int.max) <= 32 * 1024 * 1024,
+                "original update input two-source/package/helper binding differs")
+            updateInputParent = parent; updateInputName = name; updateInputOriginal = original
+            updateSegment = segment; updateApplicationSource = application; updateHarnessSource = harness
+            parent = try adoptDirectory(open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: nil, name: "/")
+            anchors.append(parent)
+            for name in ["Users", "runner", "Library", "Application Support"] {
+                parent = try adoptDirectory(openat(parent.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: parent.fd, name: name)
+                anchors.append(parent)
+                try Self.need((parent.facts.uid == 0 || parent.facts.uid == getuid()) && parent.facts.mode & 0o022 == 0,
+                              "owned update app-data ancestor policy")
+            }
+            applicationSupport = parent
+            let app = try privateStoreDirectory(parent, name: Self.applicationName)
+            applicationDirectory = app
+            try Self.need(wireFacts(app.facts) == (state["root"] as? [String]) && Set(state.keys) == ["root", "sentinel", "vault"],
+                          "only the exact baseline-owned app-data root may be reused")
+            updateSentinelName = "mrk-update-preservation-\(run)-\(attempt).txt"
+            let sentinel = try readLeaf(app, name: updateSentinelName!, privateOnly: true)
+            try Self.need(sentinel.bytes == Data("MobileReleaseKit public update preservation fixture v1\n".utf8),
+                          "exact task-owned update sentinel bytes differ")
+            try exactWire(wireLeaf(sentinel), state["sentinel"])
+            updateSentinelOriginal = sentinel
+            if segment == "p0-bootstrap" {
+                try Self.need(state["vault"] is NSNull && (try children(app)) == [updateSentinelName!],
+                              "P0 bootstrap requires only its original sentinel, never an existing vault")
+            } else {
+                let observed = try storeSnapshot()
+                try Self.need(observed.count == 4 && Set(observed.keys).isSuperset(of: Self.storeControls.keys),
+                              "P1 resume requires exactly the original controls and one record")
+                storeCurrent = observed
+                p12Record = Set(observed.keys).subtracting(Self.storeControls.keys).first
+                try exactWire(try updateState(), state)
+            }
+            try updateSentinelPost()
+        }
+        func assertUpdateVaultAbsent() throws {
+            guard let app = applicationDirectory, let name = updateSentinelName else { throw Refusal.condition("fixture: update root absent") }
+            try Self.need(updateSegment == "p0-bootstrap" && storeCurrent.isEmpty && vaultDirectory == nil
+                          && (try children(app)) == [name], "P0 bootstrap must not adopt or initialize an occupied vault")
+            try updateSentinelPost()
+        }
+        func updateState() throws -> [String: Any] {
+            try assertStoreUnchanged()
+            guard let app = applicationDirectory, let vault = vaultDirectory, let sentinel = updateSentinelOriginal else {
+                throw Refusal.condition("fixture: owned update store state absent")
+            }
+            let files = storeCurrent.mapValues { wireLeaf($0) }
+            return ["root": wireFacts(try Self.facts(app.fd)), "sentinel": wireLeaf(sentinel),
+                    "vault": ["directory": wireFacts(try Self.facts(vault.fd)), "files": files]]
+        }
         // Read-only admission BEFORE app launch. This does not adopt an existing
         // store, create a substitute app-data location, or inspect a Keychain.
         func admitDefaultVault() throws {
@@ -3556,7 +3699,12 @@ final class NormalAppUITests: XCTestCase {
             try checkDirectory(support)
             if applicationDirectory == nil { applicationDirectory = try privateStoreDirectory(support, name: Self.applicationName) }
             guard let app = applicationDirectory else { throw Refusal.condition("fixture: default app-data missing") }
-            try Self.need(try children(app) == ["credential-vault-v1"], "unexpected default app-data output")
+            if let sentinel = updateSentinelName {
+                try Self.need(try children(app) == [sentinel, "credential-vault-v1"], "unexpected owned update app-data output")
+                try updateSentinelPost()
+            } else {
+                try Self.need(try children(app) == ["credential-vault-v1"], "unexpected default app-data output")
+            }
             if vaultDirectory == nil { vaultDirectory = try privateStoreDirectory(app, name: "credential-vault-v1") }
             guard let vault = vaultDirectory else { throw Refusal.condition("fixture: default vault missing") }
             let names = try children(vault)
@@ -3585,6 +3733,7 @@ final class NormalAppUITests: XCTestCase {
             }
             try Self.need(try children(vault) == names, "default-store roster changed during readback")
             try checkDirectory(app); try checkDirectory(support)
+            if updateSentinelName != nil { try updateSentinelPost() }
             return result
         }
         func acceptStore(_ change: StoreChange) throws {
@@ -3613,6 +3762,12 @@ final class NormalAppUITests: XCTestCase {
                 try Self.need(!replacedP12 && profileRecord != nil && before.count == 5 && after == before
                     && new.facts.inode != old.facts.inode && new.bytes != old.bytes, "default-store replacement stage")
                 changed.insert(name); replacedP12 = true
+            case .deleteUpdateP12:
+                guard let name = p12Record else { throw Refusal.condition("fixture: update record missing") }
+                try Self.need(updateSegment == "p1-resume" && !deletedUpdateP12 && profileRecord == nil
+                    && before == Set(Self.storeControls.keys).union([name]) && after == Set(Self.storeControls.keys),
+                    "only the one cross-version encrypted record may be removed")
+                changed.insert(name); deletedUpdateP12 = true
             case .deleteProfile:
                 guard let name = profileRecord else { throw Refusal.condition("fixture: removal original missing") }
                 try Self.need(replacedP12 && !deletedProfile && before.count == 5 && after == before.subtracting([name]),
@@ -4184,6 +4339,122 @@ final class NormalAppUITests: XCTestCase {
             _ = try privateRecord(storage, input: input, label: input.initialLabel, revision: 1, assigned: false, notChecked: true)
         }
         try fixture.assertStoreUnchanged()
+    }
+
+
+    @MainActor private func updateCredentialStorage(_ window: XCUIElement, renderer: XCUIElement,
+                                                  fixture: LocalFixture) throws -> XCUIElement {
+        try press(renderer, "Open project folder", renderer: renderer)
+        let project = try nativeSheet(window, title: "Choose a mobile project folder")
+        try goToFolder(project, path: fixture.projectPath); try nativeOpen(project)
+        _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
+                            failures: ["Static observation unavailable", "Only a partial static observation is available"])
+        _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "owned update project differs")
+        try press(renderer, "Credentials", renderer: renderer)
+        let storage = try waitElement(named(renderer, "Private-input storage controls"), in: renderer)
+        try select(storage, label: "Platform", value: "iOS", renderer: renderer)
+        try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
+        try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer)
+        return storage
+    }
+    @MainActor private func finishUpdateCredentialSegment(_ app: XCUIApplication, window: XCUIElement,
+                                                           fixture: LocalFixture, segment: String) throws {
+        let sheet = try quitSheet(app, window)
+        try click(sheet.buttons.matching(identifier: "Quit"), "owned update normal affirmative Quit unavailable")
+        try completeNormalQuit(app)
+        let state = try fixture.updateState()
+        let marker: [String: Any] = ["segment": segment, "sourceCommit": fixture.updateHarnessSource,
+            "applicationSourceCommit": fixture.updateApplicationSource, "state": state, "recordRevision": 1,
+            "fixtureOriginalClosesCompleted": true, "normalQuitObserved": true, "gateReleased": true]
+        let body = try JSONSerialization.data(withJSONObject: marker, options: [.sortedKeys])
+        try require(body.count <= 8192, "owned update public marker bound")
+        try fixture.updateInputPost()
+        try fixture.closeOriginals(); ownedFixture = nil
+        try acceptFinalScenario() // Same OriginalLaunch and consuming gate close, before the marker.
+        guard let text = String(data: body, encoding: .utf8) else { throw Refusal.condition("owned update marker encoding") }
+        print("MRK_MACOS_UPDATE_CREDENTIALS=" + text)
+    }
+    @MainActor func testQualifiedP0CredentialBootstrap() throws {
+        continueAfterFailure = false; executionTimeAllowance = 300
+        try beginCase(seconds: 300)
+        let fixture = LocalFixture(); ownedFixture = fixture
+        try stage("update-p0-admission") {
+            try fixture.admitUpdateCredentials("p0-bootstrap")
+            _ = try admittedJourneyApplication(profile: .updateP0Bootstrap)
+            try fixture.prepare(.persistentCredentials)
+        }
+        try fixture.assertUpdateVaultAbsent()
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("update-p0-launch") { launched = try launchForJourney(profile: .updateP0Bootstrap) }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("owned update original launch missing") }
+        let storage = try updateCredentialStorage(window, renderer: renderer, fixture: fixture)
+        try stage("update-p0-initialize") {
+            try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "open-vault")
+            _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized"), in: storage, failures: Self.privateInputFailures)
+            try fixture.assertUpdateVaultAbsent()
+            try privateRecordCount(storage, count: 0, assigned: 0)
+            try press(storage, "Review vault initialization…", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "prepare-initialize", phase: "preview")
+            let review = try privateReview(storage, title: "Create a new encrypted vault?", target: "New encrypted private-input vault")
+            try fixture.assertUnchanged()
+            try press(review, "Create encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "initialize", mutation: true)
+            _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · unlocked"), in: storage, failures: Self.privateInputFailures)
+            try fixture.acceptStore(.initialize)
+            try privateContext(storage, renderer: renderer, explicitlySubmit: true)
+        }
+        try stage("update-p0-save-lock-and-quit") {
+            try choosePrivate(storage, window: window, renderer: renderer, fixture: fixture, input: .p12)
+            try savePrivate(storage, renderer: renderer, fixture: fixture, input: .p12, label: PrivateInput.p12.initialLabel,
+                            reviewTarget: "New \(PrivateInput.p12.rawValue.lowercased()) encrypted record")
+            try fixture.acceptStore(.saveP12)
+            _ = try privateRecord(storage, input: .p12, label: PrivateInput.p12.initialLabel, revision: 1, assigned: false, notChecked: true)
+            try privateRecordCount(storage, count: 1, assigned: 0)
+            try lockPrivateVault(storage, renderer: renderer, fixture: fixture)
+            try finishUpdateCredentialSegment(app, window: window, fixture: fixture, segment: "p0-bootstrap")
+        }
+    }
+    @MainActor func testQualifiedP1CredentialResume() throws {
+        continueAfterFailure = false; executionTimeAllowance = 300
+        try beginCase(seconds: 300)
+        let fixture = LocalFixture(); ownedFixture = fixture
+        try stage("update-p1-admission") {
+            try fixture.admitUpdateCredentials("p1-resume")
+            _ = try admittedJourneyApplication() // The P1 helper is genuinely current, no source exception.
+            try fixture.prepare(.persistentCredentials)
+            try fixture.assertStoreUnchanged()
+        }
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("update-p1-launch") { launched = try launchForJourney() }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("owned update original launch missing") }
+        let storage = try updateCredentialStorage(window, renderer: renderer, fixture: fixture)
+        try stage("update-p1-lookup-and-rebind") {
+            // Real existing login Keychain Lookup under the new signed helper.
+            // Never Initialize: the old vault/header/generation and encrypted record are original inputs.
+            try openAndUnlockPrivateVault(storage, renderer: renderer)
+            try privateContext(storage, renderer: renderer)
+            try privateRecordCount(storage, count: 1, assigned: 0)
+            _ = try privateRecord(storage, input: .p12, label: PrivateInput.p12.initialLabel, revision: 1, assigned: false, notChecked: true)
+            try fixture.assertStoreUnchanged()
+            try assignPrivate(storage, renderer: renderer, fixture: fixture, input: .p12, label: PrivateInput.p12.initialLabel, revision: 1)
+            try privateRecordCount(storage, count: 1, assigned: 1)
+        }
+        try stage("update-p1-delete-lock-and-quit") {
+            let row = try privateRecord(storage, input: .p12, label: PrivateInput.p12.initialLabel, revision: 1, assigned: true)
+            let index = try privateRecordIndex(row, input: .p12, label: PrivateInput.p12.initialLabel)
+            try press(row, "Review removal…", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "prepare-delete", phase: "preview")
+            let review = try privateReview(storage, title: "Remove this encrypted copy?",
+                target: "\(PrivateInput.p12.rawValue) · \(PrivateInput.p12.initialLabel) · item \(index) · revision 1")
+            try fixture.assertStoreUnchanged()
+            try press(review, "Remove encrypted copy", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "commit", mutation: true)
+            try fixture.acceptStore(.deleteUpdateP12) // Encrypted record only; not SecItemDelete of the wrapping-key row.
+            try privateRecordCount(storage, count: 0, assigned: 0)
+            try lockPrivateVault(storage, renderer: renderer, fixture: fixture, preservedMutation: true)
+            try finishUpdateCredentialSegment(app, window: window, fixture: fixture, segment: "p1-resume")
+        }
     }
 
     @MainActor func testSyntheticPersistentCredentials() throws {

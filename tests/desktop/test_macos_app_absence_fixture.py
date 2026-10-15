@@ -78,7 +78,7 @@ def cargo_rows(checkout, target_root, target):
              str(target_root / target / "release" / FIXTURE.FIXTURE_EXECUTABLE)),
             ("mobile_release_desktop", "src/lib.rs", ["lib"], None)):
         rows.append({"reason": "compiler-artifact",
-            "package_id": "path+" + package.as_uri() + "#mobile-release-kit-desktop@0.1.1",
+            "package_id": "path+" + package.as_uri() + "#mobile-release-kit-desktop@0.1.2",
             "manifest_path": str(package / "Cargo.toml"),
             "features": ["macos-installed-app-absence-fixture"],
             "target": {"name": name, "kind": kind, "crate_types": kind,
@@ -156,6 +156,8 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
             for where, key, value in ((0, "features", ["macos-installed-entry"]),
                                       (0, "executable", "/unrelated/fixture"),
                                       (0, "package_id", "path+file:///other#mobile-release-kit-desktop@0.1.1"),
+                                      (0, "package_id", "path+file:///other#mobile-release-kit-desktop@0.1.2"),
+                                      (0, "package_id", rows[0]["package_id"].replace("@0.1.2", "@0.1.1")),
                                       (2, "success", False)):
                 changed = copy.deepcopy(rows); changed[where][key] = value; mutations.append(changed)
             changed = copy.deepcopy(rows); changed[0]["profile"]["test"] = True; mutations.append(changed)

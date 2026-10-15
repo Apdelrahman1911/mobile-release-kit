@@ -8034,7 +8034,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         dependencies.extend([secret_service, {**deepcopy(secret_service), "kind": "dev",
             "features": ["rt-tokio-crypto-rust", "mrk-retrieval-test-support"]}])
         for name, manifest in declared.items():
-            version = "0.1.1" if name == "mobile-release-kit-desktop" else "0.1.0"
+            version = "0.1.2" if name == "mobile-release-kit-desktop" else "0.1.0"
             ids[name] = name + "@" + version
             locked.append({"name": name, "version": version})
             if name not in {"mobile-release-kit-desktop", "mrk-windows-installed-native"}:
@@ -8358,6 +8358,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         reordered["resolve"]["nodes"][0]["deps"][-1]["dep_kinds"].reverse()
         helper.windows_installed_app_graph(reordered, lock, **arguments)
         mutations = {
+            "old-root-version": lambda row: row["packages"][0].update(version="0.1.1"),
             "missing-inactive-declaration": lambda row: row["packages"][0]["dependencies"].pop(1),
             "duplicate-local-declaration": lambda row: row["packages"][0]["dependencies"].append(deepcopy(row["packages"][0]["dependencies"][0])),
             "reserved-name-registry-alias": lambda row: row["packages"][0]["dependencies"].append(
@@ -15354,7 +15355,7 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
         direct = {"getrandom": "0.3.4", "serde": "1.0.228", "serde_json": "1.0.145", "sha2": "0.10.9", "tokio": "1.48.0",
             "mrk-windows-installed-native": "0.1.0", "rfd": "0.15.4", "tauri": "2.11.5", "tauri-build": "2.6.3",
             **{name: row["version"] for name, row in WINDOWS_COMMON_PARSERS.items()}}
-        selected = {"mobile-release-kit-desktop": "0.1.1", **direct, **helper.WINDOWS_NORMAL_UI_MATERIAL_PACKAGES}
+        selected = {"mobile-release-kit-desktop": "0.1.2", **direct, **helper.WINDOWS_NORMAL_UI_MATERIAL_PACKAGES}
         ids = {name: name + "@" + version for name, version in selected.items()}
         app, native = ids["mobile-release-kit-desktop"], ids["mrk-windows-installed-native"]
         packages, nodes = [], []
@@ -15453,9 +15454,15 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
             self.assertEqual(graph["observer"], observer)
             self.assertEqual(len(graph["materialIds"]), 10)
             self.assertEqual({(row["name"], row["version"]) for row in lock["package"] if row.get("source") is None},
-                {("mobile-release-kit-desktop", "0.1.1"), ("mrk-linux-mount-observation", "0.1.0"),
+                {("mobile-release-kit-desktop", "0.1.2"), ("mrk-linux-mount-observation", "0.1.0"),
                  ("mrk-macos-installed-native", "0.1.0"), ("mrk-windows-installed-native", "0.1.0"),
                  ("secret-service", "5.2.0"), ("zbus", "5.19.0")})
+            for old_source in ("metadata", "lock"):
+                changed, wrong_lock = deepcopy(metadata), deepcopy(lock)
+                selected = changed["packages"] if old_source == "metadata" else wrong_lock["package"]
+                next(row for row in selected if row["name"] == "mobile-release-kit-desktop")["version"] = "0.1.1"
+                with self.subTest(observer=observer, old_root=old_source), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_app_graph(changed, wrong_lock, source=source, root=root, observer=observer)
             self.assertFalse({"secret-service", "zbus"} & {row["name"] for row in graph["packages"].values()})
             for name, version in (("secret-service", "5.2.0"), ("zbus", "5.19.0")):
                 for change in ("missing", "version"):

@@ -1789,7 +1789,7 @@ WINDOWS_INSTALLED_APP_LOCALS = {
 # The complete cross-platform source lock is not the active Windows graph.
 # Linux vendors stay source-bound here but must never become Windows units.
 WINDOWS_INSTALLED_APP_LOCK_LOCALS = {
-    "mobile-release-kit-desktop": "0.1.1",
+    "mobile-release-kit-desktop": "0.1.2",
     "mrk-linux-mount-observation": "0.1.0",
     "mrk-macos-installed-native": "0.1.0",
     "mrk-windows-installed-native": "0.1.0",
@@ -9134,7 +9134,7 @@ def source_slots_diagnostic_records(raw: bytes, stderr: bytes, source: str, *, o
     require(type(raw) is bytes and 0 < len(raw) <= (MAC_OBSERVER_STDOUT_LIMIT if observer else 2 * 1024 * 1024)
             and type(stderr) is bytes and len(stderr) <= 1024 * 1024,
             "SourceSlots diagnostic captures exceed their fixed stdout/stderr bounds")
-    packages = (("mobile-release-kit-desktop", "0.1.1", "desktop/src-tauri"),
+    packages = (("mobile-release-kit-desktop", "0.1.2", "desktop/src-tauri"),
                 ("mrk-macos-installed-native", "0.1.0", "desktop/native/macos-installed-native"))
     def pairs(items):
         result = {}
@@ -9249,7 +9249,7 @@ def source_slots_short_diagnostic_records(raw: bytes, stderr: bytes, source: str
     require(type(raw) is bytes and len(raw) <= 2 * 1024 * 1024
             and type(stderr) is bytes and len(stderr) <= 1024 * 1024,
             "SourceSlots short diagnostic captures exceed their fixed bounds")
-    packages = (("mobile-release-kit-desktop", "0.1.1", "desktop/src-tauri"),
+    packages = (("mobile-release-kit-desktop", "0.1.2", "desktop/src-tauri"),
                 ("mrk-macos-installed-native", "0.1.0", "desktop/native/macos-installed-native"))
     errors, paths, line_count, primary_count = [], set(), 0, 0
     for body in (raw, stderr):
@@ -15596,7 +15596,7 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
             ("crypto-common", "0.1.7", "^1.14", True, []),
             ("generic-array", "0.14.7", "^1.12", True, []))),
         ("tokio", "1.48.0", tokio_definitions, (
-            ("mobile-release-kit-desktop", "0.1.1", "=1.48.0", True,
+            ("mobile-release-kit-desktop", "0.1.2", "=1.48.0", True,
              ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"]),)),
         ("syn", "2.0.119", syn_definitions, (
             ("serde_derive", "1.0.228", "^2.0.81", False,
@@ -15606,10 +15606,10 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
         ("serde", "1.0.228", {
             "default": ["std"], "derive": ["serde_derive"],
             "serde_derive": ["dep:serde_derive"], "std": ["serde_core/std"],
-        }, (("mobile-release-kit-desktop", "0.1.1", "=1.0.228", True, ["derive"]),)),
+        }, (("mobile-release-kit-desktop", "0.1.2", "=1.0.228", True, ["derive"]),)),
         ("serde_json", "1.0.145", {
             "default": ["std"], "std": ["memchr/std", "serde_core/std"],
-        }, (("mobile-release-kit-desktop", "0.1.1", "=1.0.145", True, []),)),
+        }, (("mobile-release-kit-desktop", "0.1.2", "=1.0.145", True, []),)),
         # Parents precede core: metadata-only alloc/rc forwarding is not a
         # normal compiler grant. In this locked core manifest std does not
         # activate the alloc Cargo feature.
@@ -15653,7 +15653,7 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
             # that edge is DATA, not a normal compiler-feature grant.
             time_key, time_package = package("time", "0.3.55")
             plist_key, plist_package = package("plist", "1.10.1")
-            app_key, app_package = package("mobile-release-kit-desktop", "0.1.1", local=True)
+            app_key, app_package = package("mobile-release-kit-desktop", "0.1.2", local=True)
             library(time_package)
             library(plist_package)
             time_mapping, time_selected = feature_data(time_key, time_package)

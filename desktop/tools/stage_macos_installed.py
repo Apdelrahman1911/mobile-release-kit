@@ -1897,7 +1897,7 @@ def cargo_library(records, directory, package, name, features, *, test, opt_leve
     selected = [row for row in records if row["target"].get("name") == name]
     need(len(selected) == 1, "image-cargo-one-library")
     row = selected[0]
-    need(row.get("package_id") == "path+" + directory.as_uri() + "#" + package + ("@0.1.1" if package == "mobile-release-kit-desktop" else "@0.1.0")
+    need(row.get("package_id") == "path+" + directory.as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0")
          and row.get("manifest_path") == str(directory / "Cargo.toml")
          and row["target"].get("kind") == ["lib"] and row["target"].get("crate_types") == ["lib"]
          and row["target"].get("src_path") == str(directory / "src/lib.rs")
@@ -1967,7 +1967,7 @@ def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TA
     row = selected[0]
     cargo_target = row["target"]
     features = ["custom-protocol", "desktop-shell", "macos-installed-observation"]
-    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.1"
+    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.2"
          and row.get("manifest_path") == str(root / "Cargo.toml")
          and cargo_target.get("name") == name and cargo_target.get("kind") == ["test"]
          and cargo_target.get("crate_types") == ["bin"]
@@ -1986,7 +1986,7 @@ def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TA
     ):
         need(len(selected_library) == 1, "observer-cargo-one-library")
         item = selected_library[0]
-        need(item.get("package_id") == "path+" + directory.as_uri() + "#" + package + ("@0.1.1" if package == "mobile-release-kit-desktop" else "@0.1.0")
+        need(item.get("package_id") == "path+" + directory.as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0")
              and item.get("manifest_path") == str(directory / "Cargo.toml")
              and item["target"].get("src_path") == str(directory / "src/lib.rs")
              and item["target"].get("kind") == ["lib"] and item["target"].get("crate_types") == ["lib"]
@@ -2022,7 +2022,7 @@ def remover_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TAR
     need(len(selected) == 1, "remover-cargo-one-binary")
     row = selected[0]
     role = row["target"]
-    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.1"
+    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.2"
          and row.get("manifest_path") == str(root / "Cargo.toml") and role.get("name") == REMOVER_NAME
          and role.get("kind") == ["bin"] and role.get("crate_types") == ["bin"]
          and role.get("src_path") == str(root / "src/bin/macos_install.rs") and role.get("edition") == "2021"
@@ -3825,7 +3825,7 @@ def removal_fixture_cargo_artifact(messages, binary, target_dir, body, *, role, 
     need(len(matches) == 1, "removal-fixture-cargo-one-binary")
     row, features = matches[0], sorted(["macos-installed-remover", REMOVAL_FIXTURE_FEATURES[role]])
     kind = row["target"]
-    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.1"
+    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.2"
          and row.get("manifest_path") == str(root / "Cargo.toml") and kind.get("name") == REMOVER_NAME
          and kind.get("kind") == ["bin"] and kind.get("crate_types") == ["bin"]
          and kind.get("src_path") == str(root / "src/bin/macos_install.rs") and kind.get("edition") == "2021"
@@ -5517,8 +5517,38 @@ def update_previous_data(result, current, parsed, root_identity, expected):
          and current["current"]["release"] != retained["release"], "update-distinct-generation")
 
 
+def original_release_readback_selection(args, record):
+    # Internal fixed-carrier DATA handoff only. Artifact/native-signature
+    # authority is retained by the sole authenticated adapter, not this dict.
+    maintenance_map(record, ("schemaVersion", "purpose", "target", "release", "descriptor", "signature", "inventory"),
+                    "original-release-readback-shape")
+    target = command_target(args)
+    need(type(record["schemaVersion"]) is int and record["schemaVersion"] == 1
+         and record["purpose"] == "fixed-ce644-arm-original-release-readback"
+         and type(record["purpose"]) is str and type(record["target"]) is str
+         and record["target"] == target == ARM_TARGET, "original-release-readback-purpose")
+    release = maintenance_release_data(record["release"], target)
+    need((args.expected_source, args.expected_inventory, args.expected_manifest, args.expected_package)
+         == tuple(release[key] for key in ("sourceCommit", "inventorySha256", "runtimeManifestSha256", "packageSha256")),
+         "original-release-readback-binding")
+    for key, limit in (("descriptor", PRODUCER_DESCRIPTOR_BYTES), ("signature", PRODUCER_SIGNATURE_BYTES), ("inventory", 1024 * 1024)):
+        member = maintenance_map(record[key], ("bytes", "sha256"), "original-release-readback-member-shape")
+        need(type(member["bytes"]) is int and 0 < member["bytes"] <= limit
+             and maintenance_hex(member["sha256"], 64), "original-release-readback-member-bound")
+    need(record["inventory"]["sha256"] == args.expected_inventory, "original-release-readback-inventory-binding")
+    return selected_build(BuildSelection(target, release["packageVersion"], release["release"]))
+
+
+def original_release_readback_members(record, producer, descriptor, signed, inventory):
+    need(producer["releaseSet"]["current"] == record["release"] and not producer["releaseSet"]["acceptedPredecessors"],
+         "original-release-readback-producer-binding")
+    for key, body in (("descriptor", descriptor), ("signature", signed), ("inventory", inventory)):
+        need(type(body) is bytes and (len(body), digest(body)) == (record[key]["bytes"], record[key]["sha256"]),
+             "original-release-readback-member-binding")
+
+
 def observation_command(args, *, expected_previous=None, expected_restore_previous=None,
-                        nominated_update_predecessor=None, expected_update_previous=None, update_facts=None):
+                        nominated_update_predecessor=None, expected_update_previous=None, update_facts=None, original_release_readback=None):
     need(expected_previous is None or type(expected_previous) is dict
          and set(expected_previous) == {"invocation", "sha256"}
          and maintenance_hex(expected_previous["invocation"], 32)
@@ -5532,14 +5562,21 @@ def observation_command(args, *, expected_previous=None, expected_restore_previo
          and (nominated_update_predecessor is None) != (expected_update_previous is None)
          and type(update_facts) is dict and not update_facts, "update-exclusive-readback-purpose")
     need(update or update_facts is None, "update-exclusive-readback-purpose")
-    selection = (update_predecessor_selection(args, nominated_update_predecessor)
-                 if nominated_update_predecessor is not None else source_build_selection(command_target(args)))
+    original_release = original_release_readback is not None
+    need(not original_release or expected_previous is None and expected_restore_previous is None
+         and nominated_update_predecessor is None and expected_update_previous is None and update_facts is None,
+         "original-release-exclusive-readback-purpose")
+    selection = (original_release_readback_selection(args, original_release_readback) if original_release else
+                 update_predecessor_selection(args, nominated_update_predecessor) if nominated_update_predecessor is not None
+                 else source_build_selection(command_target(args)))
     # The same-run original Installer0 is first. No export/file can certify its
     # own future close, kernel-retained gate lifetime or original outer return.
     result, exported = installer_result_readback(args)
     producer, descriptor, signed = maintenance_producer_inputs(args, selection)
     source_inventory = read(Path(args.input) / INSTALLATION_INVENTORY_NAME, 1024 * 1024)
     observation_inventory_bytes(source_inventory, args.expected_inventory, args.expected_manifest, selection=selection)
+    if original_release:
+        original_release_readback_members(original_release_readback, producer, descriptor, signed, source_inventory)
     budget = [(len(source_inventory) + len(descriptor) + len(signed) + len(MAINTENANCE_GATE_BYTES) + len(REGISTRATION_GATE_BYTES)) * 8 + 3 * 4096]
     need(budget[0] <= MAINTENANCE_METADATA_BYTES, "maintenance-metadata-budget")
     with installer_channel_parent(INSTALL_ROOT) as (outer, name):
@@ -5566,6 +5603,10 @@ def observation_command(args, *, expected_previous=None, expected_restore_previo
                 need(result["action"] == "fresh-install" and current["intendedAction"] == "fresh-install"
                      and not current["retained"] and not current["previousEvidence"] and len(parsed) == 1,
                      "update-baseline-not-fresh")
+            if original_release:
+                need(result["action"] == "fresh-install" and current["intendedAction"] == "fresh-install"
+                     and not current["retained"] and not current["previousEvidence"] and len(parsed) == 1,
+                     "original-release-readback-not-fresh")
             names, stages = maintenance_roster_data(current, parsed, selection.target)
             need(set(os.listdir(root_fd)) == names, "maintenance-root-roster")
             stage_originals = []

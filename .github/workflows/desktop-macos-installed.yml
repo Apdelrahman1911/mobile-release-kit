@@ -60,9 +60,9 @@ jobs:
       MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}
       MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}
       # This installed verification run exercises iOS; Android keeps its separate qualification.
-      MRK_MACOS_ANDROID_UI_SCOPE: disabled
+      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'android-signed-build' || 'disabled' }}
       # SOURCE-owned: unsigned iOS archive journey only on the fixed installed verification ref.
-      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ios-unsigned-archive' || 'disabled' }}
+      MRK_MACOS_IOS_UI_SCOPE: disabled
       # A separate reviewed SOURCE change selects the targeted recovery run.
       # Default seven cases and each closed singleton are distinct native obligations.
       MRK_MACOS_SAVED_FILE_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'remaining-three' || 'ordinary-seven' }}
@@ -887,7 +887,7 @@ jobs:
             --output "$MRK_MACOS_WORK/package-format-scripts" > "$MRK_MACOS_WORK/package-format-input.json"
           [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \
-            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.1 \
+            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.2 \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package --target "$MRK_MACOS_TARGET" \
             --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/PackageFormat-original.pkg" \
@@ -1721,7 +1721,7 @@ jobs:
             --output "$MRK_MACOS_WORK/scripts-fixture" > "$MRK_MACOS_WORK/scripts-fixture-result.json"
           [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts-fixture" \
-            --identifier dev.mobile-release-kit.desktop.installed-fixture --version 0.1.1 \
+            --identifier dev.mobile-release-kit.desktop.installed-fixture --version 0.1.2 \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package --fixture --target "$MRK_MACOS_TARGET" \
             --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" \

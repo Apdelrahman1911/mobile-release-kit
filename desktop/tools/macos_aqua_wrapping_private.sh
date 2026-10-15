@@ -212,7 +212,7 @@ def admit_codec_compiler(result):
     if len(artifacts) != 1: raise ValueError("wrapping-codec-one-app-artifact")
     artifact = artifacts[0]
     target, profile = artifact.get("target"), artifact.get("profile")
-    package_id = "path+" + app.as_uri() + "#mobile-release-kit-desktop@0.1.1"
+    package_id = "path+" + app.as_uri() + "#mobile-release-kit-desktop@0.1.2"
     if (type(target) is not dict or type(profile) is not dict
             or artifact.get("package_id") != package_id or artifact.get("manifest_path") != str(app / "Cargo.toml")
             or artifact.get("features") != [] or target.get("name") != codec_library

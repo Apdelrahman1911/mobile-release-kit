@@ -504,7 +504,7 @@ try:
         matches = [r for r in targets if r.get("target", {}).get("name") == library]
         if len(matches) != 1: raise ValueError("headless-one-original-per-library")
         target = matches[0]
-        package_id = "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.1" if package == "mobile-release-kit-desktop" else "@0.1.0")
+        package_id = "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0")
         if (target.get("package_id") != package_id
                 or target.get("manifest_path") != str(checkout / directory / "Cargo.toml")
                 or target["target"].get("kind") != ["lib"]

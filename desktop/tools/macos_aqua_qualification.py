@@ -5730,7 +5730,7 @@ def shipping_gate_compiler_argv(target=ARM_TARGET):
     return argv
 
 
-SHIPPING_GATE_SOURCE_PINS = {'desktop/tools/stage_macos_installed.py': 'c53fc6eba693f16786b2d3873c8b889f2812ebabd311d93af792a3376c679f7d', 'desktop/macos-installed-inputs/build-release.json': '521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512', 'desktop/macos-installed-inputs/build-release-intel.json': '5864c0efb2a66219cf7efa41d3863721327148ef7b4c6d6f3252de3ce20596e7'}
+SHIPPING_GATE_SOURCE_PINS = {'desktop/tools/stage_macos_installed.py': '08a4609a37ea50426cfde297273b4e2ec53adc3727a86a13bdd5871988b3cfa2', 'desktop/macos-installed-inputs/build-release.json': 'c871b579f036e8776f1ae2e4e53f4772fee4b8a8bdbffe9031a438a27f57c6a2', 'desktop/macos-installed-inputs/build-release-intel.json': '4e48a8eac28bd21164b22d1d69976bdc638af2bafc23a628028cf8d204ac1b7b'}
 SHIPPING_GATE_REPORT = "shipping-gate-control.receipt.json"
 SHIPPING_GATE_STATUS = "shipping-gate-control.status"
 
@@ -5821,7 +5821,7 @@ def _gate_headless(bodies, binding, checkout, work):
     native = None
     for record, (role, directory, package, library, features, names, prefix) in zip(value["targets"], libraries):
         need(type(record) is dict, "gate-library-record")
-        package_id = "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.1" if package == "mobile-release-kit-desktop" else "@0.1.0")
+        package_id = "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0")
         expected = {"role": role, "packageId": package_id, "features": features, "names": list(names),
             "originalReturned": True, "artifactOriginalUnchanged": True, "artifactOriginalClosed": True,
             "testsPassed": True, "returncode": 0, "tests": len(names), "failed": 0, "ignored": 0, "measured": 0}

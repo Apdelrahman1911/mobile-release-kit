@@ -1825,24 +1825,46 @@ INSTALLED_NORMAL_UI_WORKFLOW_SHA256 = '63bb8945ed2650ac6997b05eb4dfde3e2c16fd581
 INSTALLED_NORMAL_UI_WORKFLOW_PREDECESSOR = '3b3530617a79c694d64fbe9f50eb67306f9928f2f44e5505f2820a5614dd9c8b'
 SHIPPING_SOURCE_WRAPPER = '        run: |\n          set -euo pipefail\n          set +x\n          set +a\n          umask 077\n          MRK_SHIPPING_SOURCE_BODY="$(\n            "$MRK_PYTHON" -I -S -B - <<\'PY_SHIPPING_SOURCE_ADMISSION\'\n          import hashlib, json, os, re, stat, sys, time\n          from pathlib import Path\n          \n          SCRIPT_PATH = \'desktop/tools/macos_shipping_image_compile.sh\'\n          SCRIPT_BYTES = 49512\n          SCRIPT_SHA256 = \'a5c8fd819a98b6a6cd6e99a3b6c6d8475924dd0ce24e0429bdccb276c724c1d9\'\n          \n          def shipping_source_bytes(checkout, work, source, run_id, run_attempt, *, clock=time.monotonic):\n              """Fixed public SOURCE admission only; no build, native owner or output file."""\n              deadline = clock() + 10\n              originals = []\n              first = None\n              result = None\n              flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK\n              def need(value):\n                  if not value: raise ValueError(\'shipping-source-admission\')\n              def cut():\n                  need(clock() < deadline)\n              def identity(info):\n                  return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,\n                          info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)\n              def opened(path, parent=None, name=None, directory=False):\n                  cut()\n                  fd = os.open(str(path) if parent is None else name,\n                               flags | (os.O_DIRECTORY if directory else 0), dir_fd=parent)\n                  row = dict(fd=fd, parent=parent, name=name, path=path, identity=None)\n                  originals.append(row)  # Same original is enrolled before fallible inspection.\n                  info = os.fstat(fd)\n                  named = os.stat(path if parent is None else name, dir_fd=parent, follow_symlinks=False)\n                  need(identity(info) == identity(named) and info.st_uid in (0, os.getuid()))\n                  if directory:\n                      need(stat.S_ISDIR(info.st_mode))\n                  else:\n                      need(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()\n                           and info.st_nlink == 1 and not info.st_mode & 0o022)\n                  row[\'identity\'] = identity(info)\n                  return row\n              def directory(path):\n                  need(type(path) is type(Path(\'/\')) and path.is_absolute()\n                       and all(part not in (\'\', \'.\', \'..\') for part in path.parts[1:]))\n                  row = opened(Path(\'/\'), directory=True)\n                  for part in path.parts[1:]:\n                      row = opened(row[\'path\'] / part, row[\'fd\'], part, True)\n                  return row\n              def post(row):\n                  cut()\n                  named = os.stat(row[\'path\'] if row[\'parent\'] is None else row[\'name\'],\n                                  dir_fd=row[\'parent\'], follow_symlinks=False)\n                  need(row[\'identity\'] == identity(os.fstat(row[\'fd\'])) == identity(named))\n              def read(parent, name, limit):\n                  row = opened(parent[\'path\'] / name, parent[\'fd\'], name)\n                  size = row[\'identity\'][6]\n                  need(0 <= size <= limit)\n                  data = bytearray()\n                  while len(data) < size:\n                      cut()\n                      block = os.pread(row[\'fd\'], min(65536, size - len(data)), len(data))\n                      need(bool(block)); data.extend(block)\n                  cut(); need(not os.pread(row[\'fd\'], 1, len(data))); post(row)\n                  return bytes(data)\n              def unique(rows):\n                  value = {}\n                  for key, item in rows:\n                      need(key not in value); value[key] = item\n                  return value\n              def document(raw):\n                  def bad(_): raise ValueError(\'shipping-source-admission\')\n                  value = json.loads(raw, object_pairs_hook=unique, parse_constant=bad)\n                  need(type(value) is dict)\n                  return value\n              try:\n                  need(type(source) is str and re.fullmatch(r\'[0-9a-f]{40}\', source) is not None\n                       and source != \'0\' * 40 and all(type(v) is str and re.fullmatch(r\'[1-9][0-9]{0,19}\', v)\n                                                    for v in (run_id, run_attempt)))\n                  checkout_parent = directory(checkout)\n                  need(not os.fstat(checkout_parent[\'fd\']).st_mode & 0o022)\n                  work_parent = directory(work)\n                  info = os.fstat(work_parent[\'fd\'])\n                  need(stat.S_IMODE(info.st_mode) == 0o700 and info.st_uid == os.getuid())\n                  binding = document(read(work_parent, \'compile-binding.json\', 16384))\n                  need(set(binding) == {\'schemaVersion\', \'source\', \'workflowSource\', \'runId\', \'runAttempt\',\n                                        \'workDirectory\', \'frontendAbsentAtAdmission\', \'pythonController\'}\n                       and type(binding[\'schemaVersion\']) is int and binding[\'schemaVersion\'] == 1\n                       and binding[\'source\'] == binding[\'workflowSource\'] == source\n                       and binding[\'runId\'] == run_id and binding[\'runAttempt\'] == run_attempt\n                       and binding[\'workDirectory\'] == [info.st_dev, info.st_ino, info.st_uid]\n                       and binding[\'frontendAbsentAtAdmission\'] is True and type(binding[\'pythonController\']) is dict)\n                  inventory = document(read(work_parent, \'source-inventory.json\', 2 * 1024 * 1024))\n                  need(set(inventory) == {\'source\', \'tree\', \'files\'} and inventory[\'source\'] == source\n                       and type(inventory[\'tree\']) is str and re.fullmatch(r\'[0-9a-f]{40}\', inventory[\'tree\']) is not None\n                       and type(inventory[\'files\']) is list and 0 < len(inventory[\'files\']) < 4096)\n                  rows = [row for row in inventory[\'files\'] if type(row) is dict and row.get(\'path\') == SCRIPT_PATH]\n                  need(len(rows) == 1 and set(rows[0]) == {\'path\', \'gitMode\', \'blob\', \'size\', \'sha256\'})\n                  row = rows[0]\n                  need(row[\'gitMode\'] == \'100644\' and type(row[\'size\']) is int and row[\'size\'] == SCRIPT_BYTES\n                       and row[\'sha256\'] == SCRIPT_SHA256 and type(row[\'blob\']) is str\n                       and re.fullmatch(r\'[0-9a-f]{40}\', row[\'blob\']) is not None)\n                  parent = checkout_parent\n                  for name in (\'desktop\', \'tools\'):\n                      parent = opened(parent[\'path\'] / name, parent[\'fd\'], name, True)\n                      need(not os.fstat(parent[\'fd\']).st_mode & 0o022)\n                  data = read(parent, \'macos_shipping_image_compile.sh\', SCRIPT_BYTES)\n                  need(len(data) == SCRIPT_BYTES and hashlib.sha256(data).hexdigest() == SCRIPT_SHA256\n                       and hashlib.sha1(b\'blob \' + str(len(data)).encode() + b\'\\0\' + data).hexdigest() == row[\'blob\']\n                       and data.endswith(b\'\\n\') and not data.endswith(b\'\\n\\n\') and b\'\\0\' not in data)\n                  for original in originals: post(original)\n                  result = data\n              except BaseException as error:\n                  first = error\n              finally:\n                  for original in reversed(originals):\n                      fd, original[\'fd\'] = original[\'fd\'], None\n                      try: os.close(fd)\n                      except BaseException:\n                          if first is None: first = ValueError(\'shipping-source-close-unknown\')\n                          else: first.add_note(\'shipping source original close unknown\')\n              if first is not None: raise first\n              cut()  # Known original closes precede code handoff and share the same deadline.\n              return result\n          \n          checkout = Path(\'/Users/runner/work/mobile-release-kit/mobile-release-kit\')\n          work = Path(os.environ[\'MRK_MACOS_WORK\'])\n          source = os.environ[\'GITHUB_SHA\']\n          ref = \'refs/heads/verify/desktop-macos-image-compile\'\n          expected = dict(GITHUB_ACTIONS=\'true\', RUNNER_ENVIRONMENT=\'github-hosted\', RUNNER_OS=\'macOS\', RUNNER_ARCH=\'ARM64\',\n                          GITHUB_EVENT_NAME=\'push\', GITHUB_REPOSITORY=\'Apdelrahman1911/mobile-release-kit\', GITHUB_REF=ref,\n                          GITHUB_WORKFLOW_REF=\'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@\' + ref,\n                          GITHUB_WORKFLOW_SHA=source, GITHUB_WORKSPACE=str(checkout), MRK_MACOS_TARGET=\'aarch64-apple-darwin\')\n          if (sys.platform != \'darwin\' or os.getuid() == 0 or os.getuid() != os.geteuid()\n                  or sys.version_info[:3] != (3, 14, 7) or not sys.flags.isolated or not sys.flags.no_site\n                  or not sys.dont_write_bytecode or os.environ.get(\'MRK_PYTHON\') != sys.executable\n                  or sys.executable != str(work / \'python-controller/bin/python3.14\')\n                  or not re.fullmatch(r\'/Users/runner/work/_temp/mrk-macos-image-compile\\.[A-Za-z0-9_]+\', str(work))\n                  or any(os.environ.get(key) != value for key, value in expected.items())):\n              raise ValueError(\'shipping-source-context\')\n          data = shipping_source_bytes(checkout, work, source, os.environ[\'GITHUB_RUN_ID\'], os.environ[\'GITHUB_RUN_ATTEMPT\'])\n          # Exact one-LF/NUL contract makes Bash command-substitution + here-string reversible.\n          if sys.stdout.buffer.write(data) != len(data): raise ValueError(\'shipping-source-handoff\')\n          sys.stdout.buffer.flush()\n          PY_SHIPPING_SOURCE_ADMISSION\n          )"\n          readonly MRK_SHIPPING_SOURCE_BODY\n          builtin source /dev/stdin <<<"$MRK_SHIPPING_SOURCE_BODY"\n'
 SHIPPING_SOURCE_WORKFLOW_BYTES = 470336
-SHIPPING_SOURCE_WORKFLOW_SHA256 = '53d6301342c526c281e6dbcdb7819a2ff154e8488738d4083cb3c955d33a541c'
-SHIPPING_SOURCE_ORIGINAL_SHA256 = '27b20038461f2eeb83ed0124a9d8464e8dda1625b7eea58fd27362c8f7450269'
+SHIPPING_SOURCE_WORKFLOW_SHA256 = '6e3ec2fce0ad68a4a4ecdbc748c7d975551e69b02cf2579909310ced3665ba80'
+SHIPPING_SOURCE_ORIGINAL_SHA256 = 'e227ab7f66b212e02759d422880a3e60fc42017b3e42aa1f2e59a0e913253fe2'
 SHIPPING_SOURCE_SCRIPT_SHA256 = 'a5c8fd819a98b6a6cd6e99a3b6c6d8475924dd0ce24e0429bdccb276c724c1d9'
 
 def without_shipping_source_extraction_workflow(source):
     """Exact tracked-script front view; never arbitrary YAML normalization."""
+    # Exact dormant P1/current installed exclusion; no monolith execution is admitted.
+    if type(source) is str and len(source.encode()) == 470673 and hashlib.sha256(source.encode()).hexdigest() == 'ca481ff5ef233bdb4124c5b2371b4320fcf83c909befaed4d901ee15733b7ef9':
+        if source.count("    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update')\n") != 1: raise AssertionError("current installed exclusion occurrence differs")
+        source = source.replace("    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update')\n", "    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update')\n", 1)
+        if len(source.encode()) != 470734 or hashlib.sha256(source.encode()).hexdigest() != '61fdb5b257602f8a8c180155f206fc4c51df727da78fcb73cf6595de6dab0fe8':
+            raise AssertionError("current installed exclusion inverse bytes differ")
+    # Exact detached one-record credential update front; no generic SOURCE exception.
+    if type(source) is str and len(source.encode()) == 482136 and hashlib.sha256(source.encode()).hexdigest() == '4743d008b42dcadc619fa3ff1f22a8f56675e7a4d616d1ab12e673f2f7a5452f':
+        for old, current, count in (('      - name: Notarize, staple and verify only the final user image\n', '      - name: Lookup and remove the one owned P0 credential through the real P1 helper\n        id: update_p1_resume_test\n        if: github.ref == \'refs/heads/verify/desktop-macos-positive-update\' && steps.package_install.outcome == \'success\' && steps.update_p0_bootstrap_summary.outcome == \'success\'\n        timeout-minutes: 10\n        shell: bash\n        env:\n          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update ]] || exit 1\n          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1\n          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || exit 1\n          # Only the authenticated package/baseline reader derives P0 application\n          # authority; no environment source/ref spoof, alternate account or vault.\n          ulimit -f 33554432\n          set +e\n          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \\\n            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \\\n            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" "GITHUB_REF=$GITHUB_REF" \\\n            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \\\n            "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \\\n            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" \\\n            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-update-p1-resume-test \\\n            > "$MRK_MACOS_WORK/normal-ui/update-p1-resume-test.stdout" 2> "$MRK_MACOS_WORK/normal-ui/update-p1-resume-test.stderr"\n          phase_status=$?\n          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/normal-ui/update-p1-resume-test.status"\n          status_saved=$?\n          set -e\n          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n          [[ "$status_saved" == 0 ]] || exit "$status_saved"\n          # Saved original0 follows all consuming fixture/output/runner closes.\n          # No wrapping-key row or whole-Keychain deletion is performed or claimed.\n\n      - name: Require one original passing p1-resume native UI summary\n        id: update_p1_resume_summary\n        if: github.ref == \'refs/heads/verify/desktop-macos-positive-update\' && steps.package_install.outcome == \'success\' && steps.update_p0_bootstrap_summary.outcome == \'success\' && steps.update_p1_resume_test.outcome == \'success\'\n        timeout-minutes: 2\n        shell: bash\n        env:\n          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update ]] || exit 1\n          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1\n          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || exit 1\n          # Only the authenticated package/baseline reader derives P0 application\n          # authority; no environment source/ref spoof, alternate account or vault.\n          ulimit -f 1048576\n          set +e\n          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \\\n            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \\\n            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" "GITHUB_REF=$GITHUB_REF" \\\n            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \\\n            "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \\\n            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" \\\n            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-update-p1-resume-summary \\\n            > "$MRK_MACOS_WORK/normal-ui/update-p1-resume-summary.stdout" 2> "$MRK_MACOS_WORK/normal-ui/update-p1-resume-summary.stderr"\n          phase_status=$?\n          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/normal-ui/update-p1-resume-summary.status"\n          status_saved=$?\n          set -e\n          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n          [[ "$status_saved" == 0 ]] || exit "$status_saved"\n          # Saved original0 follows all consuming fixture/output/runner closes.\n          # No wrapping-key row or whole-Keychain deletion is performed or claimed.\n\n      - name: Notarize, staple and verify only the final user image\n', 1), ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'\n        id: package_install\n", "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-positive-update' || steps.update_p0_bootstrap_summary.outcome == 'success')\n        id: package_install\n", 1), ('      - name: Standard Installer only is privileged; never execute the app or Python as root\n', '      - name: Save one owned synthetic credential through the genuinely qualified P0 application\n        id: update_p0_bootstrap_test\n        if: github.ref == \'refs/heads/verify/desktop-macos-positive-update\' && steps.update_baseline.outcome == \'success\' && steps.normal_ui_build.outcome == \'success\'\n        timeout-minutes: 10\n        shell: bash\n        env:\n          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update ]] || exit 1\n          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1\n          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || exit 1\n          # Only the authenticated package/baseline reader derives P0 application\n          # authority; no environment source/ref spoof, alternate account or vault.\n          ulimit -f 33554432\n          set +e\n          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \\\n            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \\\n            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" "GITHUB_REF=$GITHUB_REF" \\\n            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \\\n            "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \\\n            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" \\\n            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-update-p0-bootstrap-test \\\n            > "$MRK_MACOS_WORK/normal-ui/update-p0-bootstrap-test.stdout" 2> "$MRK_MACOS_WORK/normal-ui/update-p0-bootstrap-test.stderr"\n          phase_status=$?\n          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/normal-ui/update-p0-bootstrap-test.status"\n          status_saved=$?\n          set -e\n          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n          [[ "$status_saved" == 0 ]] || exit "$status_saved"\n          # Saved original0 follows all consuming fixture/output/runner closes.\n          # No wrapping-key row or whole-Keychain deletion is performed or claimed.\n\n      - name: Require one original passing p0-bootstrap native UI summary\n        id: update_p0_bootstrap_summary\n        if: github.ref == \'refs/heads/verify/desktop-macos-positive-update\' && steps.update_baseline.outcome == \'success\' && steps.normal_ui_build.outcome == \'success\' && steps.update_p0_bootstrap_test.outcome == \'success\'\n        timeout-minutes: 2\n        shell: bash\n        env:\n          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update ]] || exit 1\n          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1\n          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || exit 1\n          # Only the authenticated package/baseline reader derives P0 application\n          # authority; no environment source/ref spoof, alternate account or vault.\n          ulimit -f 1048576\n          set +e\n          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \\\n            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \\\n            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" "GITHUB_REF=$GITHUB_REF" \\\n            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \\\n            "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \\\n            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" \\\n            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-update-p0-bootstrap-summary \\\n            > "$MRK_MACOS_WORK/normal-ui/update-p0-bootstrap-summary.stdout" 2> "$MRK_MACOS_WORK/normal-ui/update-p0-bootstrap-summary.stderr"\n          phase_status=$?\n          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/normal-ui/update-p0-bootstrap-summary.status"\n          status_saved=$?\n          set -e\n          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n          [[ "$status_saved" == 0 ]] || exit "$status_saved"\n          # Saved original0 follows all consuming fixture/output/runner closes.\n          # No wrapping-key row or whole-Keychain deletion is performed or claimed.\n\n      - name: Standard Installer only is privileged; never execute the app or Python as root\n', 1), ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || ", "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-positive-update' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || ", 1)):
+            if source.count(current) != count: raise AssertionError("credential update inverse occurrence differs")
+            source = source.replace(current, old, count)
+        if len(source.encode()) != 470734 or hashlib.sha256(source.encode()).hexdigest() != '61fdb5b257602f8a8c180155f206fc4c51df727da78fcb73cf6595de6dab0fe8':
+            raise AssertionError("credential update inverse bytes differ")
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError('shipping SOURCE workflow bound differs')
     # Exact current installed admission only; all historical inverse stacks stay intact.
     if (len(source.encode()) == 470734 and hashlib.sha256(source.encode()).hexdigest()
-            == "93881e2e1848a3f621b1c7a4b1d7fa6894d988e535e9eb79ce3d67ba460b461f"):
+            == "61fdb5b257602f8a8c180155f206fc4c51df727da78fcb73cf6595de6dab0fe8"):
         delta = '          if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-installed":\n              # Source-admission facts for the ordinary, separately built app;\n              # never a completed launch, UI, distribution or consumer verdict.\n              value.update(instrumented=False, applicationLaunched=False,\n                           fullUIQualified=False, distributionQualified=False)\n'
         if source.count(delta) != 1:
             raise AssertionError("installed carrier exact admission delta differs")
         source = source.replace(delta, "", 1)
         if (len(source.encode()) != 470336 or hashlib.sha256(source.encode()).hexdigest()
-                != "53d6301342c526c281e6dbcdb7819a2ff154e8488738d4083cb3c955d33a541c"):
+                != "c567d262df6842350a5c1e375da898cdb748d597b6b430a53f20f5d97e5880b0"):
             raise AssertionError("installed carrier exact admission predecessor differs")
+    android_selector = "      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'android-signed-build' || 'disabled' }}\n"
+    if android_selector in source:
+        if (len(source.encode()) != 470336
+                or hashlib.sha256(source.encode()).hexdigest() != 'c567d262df6842350a5c1e375da898cdb748d597b6b430a53f20f5d97e5880b0'
+                or source.count(android_selector) != 1
+                or source.count('      MRK_MACOS_IOS_UI_SCOPE: disabled\n') != 1):
+            raise AssertionError('Android exact two-slot selected SOURCE generation differs')
+        source = source.replace(android_selector, '      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n', 1)
+        source = source.replace('      MRK_MACOS_IOS_UI_SCOPE: disabled\n', "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ios-unsigned-archive' || 'disabled' }}\n", 1)
     marker = 'MRK_SHIPPING_SOURCE_BODY'
     if marker not in source:
         return source
@@ -2095,6 +2117,7 @@ def without_ios_unsigned_reselection_workflow(source):
 
 
 def without_intel_fetch_workflow(source):
+    source = without_current_version_workflow(source)
     source = without_ios_unsigned_reselection_workflow(source)
     source = without_android_registration_workflow(source)
     source = without_ordinary_app_assembly_budget_workflow(source)
@@ -2139,6 +2162,31 @@ def without_intel_fetch_workflow(source):
         source = source.replace(current, previous, 1)
     if any(marker in source for marker in markers):
         raise AssertionError("Intel fetch workflow partial delta remains")
+    return source
+
+
+CURRENT_VERSION_WORKFLOW_INVERSE = (('name: Desktop Mac normal package and limited early preview (Aqua gate separate)', 'desktop-macos-installed.yml', 517434, '27b20038461f2eeb83ed0124a9d8464e8dda1625b7eea58fd27362c8f7450269', [('          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \\\n            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.1 \\\n            --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"\n', '          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \\\n            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.2 \\\n            --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"\n'), ('          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts-fixture" \\\n            --identifier dev.mobile-release-kit.desktop.installed-fixture --version 0.1.1 \\\n            --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg"\n', '          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts-fixture" \\\n            --identifier dev.mobile-release-kit.desktop.installed-fixture --version 0.1.2 \\\n            --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg"\n')]), ('name: Desktop macOS genuine Aqua engineering verification', 'desktop-macos-aqua.yml', 133577, '8030cab22b7c91a91506750462f74dfd8b6b29fef1bb9f269aaae7202944b4c5', [('          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \\\n            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.1 \\\n            --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"\n', '          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \\\n            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.2 \\\n            --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"\n')]))
+
+def without_current_version_workflow(source):
+    """Only the complete current generation projects to its exact current SOURCE."""
+    source = without_shipping_source_extraction_workflow(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("current version workflow SOURCE bound differs")
+    if "--version 0.1.2" not in source:
+        return source  # Old inputs retain their unchanged historical guards.
+    selected = [row for row in CURRENT_VERSION_WORKFLOW_INVERSE if source.startswith(row[0] + "\n")]
+    if len(selected) != 1:
+        raise AssertionError("current version workflow route differs")
+    _, _, size, digest, regions = selected[0]
+    if source.count("--version 0.1.2") != len(regions):
+        raise AssertionError("current version workflow command count differs")
+    for previous, current in regions:
+        if source.count(current) != 1 or previous in source:
+            raise AssertionError("current version workflow complete exact delta differs")
+    for previous, current in reversed(regions):
+        source = source.replace(current, previous, 1)
+    if len(source.encode()) != size or hashlib.sha256(source.encode()).hexdigest() != digest:
+        raise AssertionError("current version workflow whole predecessor differs")
     return source
 
 
@@ -6112,7 +6160,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             binary = target / build_target / "release/examples/macos_package_producer"
             def artifact_row(directory, package, name, source, features, kind, executable):
                 root = checkout / directory
-                return {"reason": "compiler-artifact", "package_id": "path+" + root.as_uri() + "#" + package + ("@0.1.1" if package == "mobile-release-kit-desktop" else "@0.1.0"),
+                return {"reason": "compiler-artifact", "package_id": "path+" + root.as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0"),
                     "manifest_path": str(root / "Cargo.toml"), "features": features, "executable": executable,
                     "target": {"name": name, "src_path": str(root / source), "kind": kind, "crate_types": ["bin"] if kind == ["example"] else ["lib"], "edition": "2021"},
                     "filenames": [executable] if executable else [str(target / (name + ".rlib"))], "fresh": False,
@@ -10577,7 +10625,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
     def test_both_workflows_use_one_digest_and_owned_nested_checks_around_app_signing(self):
         # Current ordinary aggregate watchdog contains four unchanged240s scopes.
-        budget_current = without_arm_only_final_image_diagnostic_workflow(without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text())))
+        budget_current = without_arm_only_final_image_diagnostic_workflow(without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text()))))
+        budget_current = without_current_version_workflow(budget_current)
         final_prefix = '      - name: Notarize, staple and verify only the final user image\n'
         final_step = final_prefix + budget_current.split(final_prefix, 1)[1].split("      - name: ", 1)[0]
         self.assertEqual(hashlib.sha256(final_step.encode()).hexdigest(), 'd6983030aa7df37ea1ce802a8bf60299095d4ad4cb37a1f15a5b2d0f1ef015b9')
@@ -10632,7 +10681,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 without_ordinary_app_assembly_budget_workflow(invalid)
         self.assertEqual(without_ordinary_app_assembly_budget_workflow("unchanged historical DATA\n"), "unchanged historical DATA\n")
         root = Path(__file__).absolute().parents[2]
-        current = without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text()))
+        current = without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())))
         restored = without_tool_enrollment_workflow(current)
         self.assertNotEqual(current, restored)
         self.assertNotIn("--github-seal", restored)
@@ -10654,7 +10703,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "^fresh G2 signing exact current nomination differs$"):
                     without_tool_signing_workflow(damaged)
         self.assertEqual(tool_job.count("purpose:"), 4)
-        actual = without_shipping_compile_workflow(without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())))
+        actual = without_shipping_compile_workflow(without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text()))))
         names = ("Prepare the fixed two-file removal package without executing it",
                  "Sign and notarize the completed removal package without executing it",
                  "Emit the genuine removal descriptor and readonly carrier without Installer",
@@ -10703,7 +10752,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             ("desktop-macos-aqua.yml", "Assemble the instrumented observation app with SOURCE-selected signing",
              "Bind this signed app and current-source runtime into fresh Installer DATA"),
         ):
-            current_workflow = without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows" / filename).read_text()))
+            current_workflow = without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows" / filename).read_text())))
             # Current routes are separate from the authenticated historical
             # projection; do not ask an old snapshot to implement newer phases.
             historical_phases = ("prepare", "verify-before", "verify-after", "package-install")
@@ -11039,7 +11088,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertLess(images.index('self.package_call(label + "-verify-signature"'), images.index('self.package_call(label + "-verify-image"'))
         self.assertIn('"package-image-credential-required"', methods["call"])
 
-        installed = without_remove_output_workflow(without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())))
+        installed = without_remove_output_workflow(without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text()))))
         aqua = without_remove_output_workflow((root / ".github/workflows/desktop-macos-aqua.yml").read_text())
         phase_name = "Notarize, staple and verify only the final user image"
         phase = workflow_step(installed, phase_name)
@@ -11101,7 +11150,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertNotIn('final_package_stapled', final)
 
         # Raw current source is checked before the exact predecessor projection.
-        app_current = without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text()))
+        app_current = without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())))
         app_predecessor = without_same_package_workflow(app_current)
         app_job = app_predecessor.split("  engineering-install:\n",1)[1].split("  shipping-image-compile:\n",1)[0]
         app_blocks = re.split(r"(?=^      - name: )",app_job,flags=re.M)[1:]
@@ -11396,9 +11445,43 @@ def channel_data(path, body=None, *, private=False):
 
 @unittest.skipUnless(TOOL is not None, "Darwin/POSIX DATA tool only")
 class MacInstalledData(unittest.TestCase):
+    def test_current_version_workflows_preserve_exact_historical_source(self):
+        root = Path(__file__).absolute().parents[2]
+        for route, filename, size, digest, regions in CURRENT_VERSION_WORKFLOW_INVERSE:
+            raw = (root / ".github/workflows" / filename).read_text()
+            self.assertTrue(raw.startswith(route + "\n"))
+            self.assertEqual(raw.count("--version 0.1.2"), len(regions))
+            for previous, current in regions:
+                self.assertEqual(raw.count(current), 1)
+                self.assertNotIn(previous, raw)
+            prior = without_current_version_workflow(raw)
+            self.assertEqual((len(prior.encode()), hashlib.sha256(prior.encode()).hexdigest()), (size, digest))
+            self.assertEqual(without_current_version_workflow(prior), prior)
+            self.assertEqual(prior.count("--version 0.1.1"), len(regions))
+            malformed = [raw + "# unrelated\n", raw.replace(route, "name: foreign", 1)]
+            for previous, current in regions:
+                malformed.extend((raw + current, raw.replace(current, "", 1),
+                    raw.replace(current, current.replace("0.1.2", "0.1.3"), 1),
+                    raw.replace(current, current.replace("--ownership recommended", "--ownership preserve"), 1)))
+                if len(regions) > 1:
+                    malformed.append(raw.replace(current, previous, 1))
+            for changed in malformed:
+                # Absence of every P1 marker is not an authenticated predecessor.
+                # Either the new exact guard rejects or the old whole pin does.
+                try:
+                    projected = without_current_version_workflow(changed)
+                except AssertionError:
+                    continue
+                self.assertNotEqual((len(projected.encode()), hashlib.sha256(projected.encode()).hexdigest()), (size, digest))
+        for invalid in (None, b"DATA", "x" * (512 * 1024 + 1)):
+            with self.assertRaises(AssertionError):
+                without_current_version_workflow(invalid)
+        self.assertEqual(without_current_version_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+
     def test_positive_update_is_unconfigured_and_reverses_to_current_recovery_source(self):
         root = Path(__file__).absolute().parents[2]
-        raw = without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text()))
+        raw = without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())))
         self.assertEqual(json.loads((root / "desktop/macos-installed-inputs/update-predecessors.json").read_text()),
                          {"schemaVersion": 1, "mode": "unconfigured"})
         self.assertEqual(raw.count("macos_android_helper_package.py update-baseline --target"), 1)
@@ -11425,8 +11508,9 @@ class MacInstalledData(unittest.TestCase):
 
     def test_intel_android_ui_target_join_precedes_historical_projection(self):
         root = Path(__file__).absolute().parents[2]
-        raw = without_installed_p0_carrier_workflow(without_arm_only_final_image_diagnostic_workflow(without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text()))))
-        # Authenticate the current fixed unsigned successor before historical projection.
+        raw = without_installed_p0_carrier_workflow(without_arm_only_final_image_diagnostic_workflow(without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())))))
+        raw = without_installed_p0_carrier_workflow(without_current_version_workflow(raw))
+        # Authenticate the unchanged unsigned predecessor after both strict projections.
         self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '3d4670e8acf2e3bcc7d6246679065357406da8402b7bfd4da9d8adba20bdcccb')
         unsigned_selected = without_installed_final_carrier_workflow(raw)
         self.assertEqual(hashlib.sha256(unsigned_selected.encode()).hexdigest(), '2c33be79764a763804c94ea0fbaa74bd4dba92ac1b0022a50f84ef378bbd9748')
@@ -11543,7 +11627,7 @@ class MacInstalledData(unittest.TestCase):
 
     def test_app_absence_fixed_route_has_exact_originals_and_current_predecessor(self):
         root = Path(__file__).absolute().parents[2]
-        raw = without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text()))
+        raw = without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())))
         raw = without_positive_update_workflow(raw)
         prior = without_app_absence_workflow(raw)
         self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), 'ce06d7acffac6e5d37b0bf2c3afbe86ab7cf58729e68b64408634908642b8f02')
@@ -12368,7 +12452,10 @@ class MacInstalledData(unittest.TestCase):
         # I intentionally has no Aqua workflow: that separately-based source
         # delta is independently composed/reviewed, not fictitiously exercised.
         path = Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml"
-        current = path.read_text(encoding="utf-8")
+        version_current = path.read_text(encoding="utf-8")
+        # Historical source contract only: exact P1 and installed-UI inverses
+        # restore the former diagnostic before its unchanged ARM/split oracles.
+        current = without_installed_normal_ui_workflow(without_current_version_workflow(version_current))
 
         # Explicit temporary diagnostic: exact ARM only, never a combined pass.
         matrix = re.search(r"^        include: \$\{\{ fromJSON\(github\.ref == '([^']+)' && '([^']+)' \|\| github\.ref == '([^']+)' && '([^']+)' \|\| '([^']+)'\) \}\}$", current, re.M)
@@ -12417,8 +12504,10 @@ class MacInstalledData(unittest.TestCase):
             ('' + compile_run, compile_run.replace('--features macos-installed-installer', '--features macos-installed-installer-fixture', 1))):
             self.assertIn(old, split_current)
             with self.assertRaises(AssertionError): without_intel_fetch_workflow(split_current.replace(old, changed, 1))
-        with self.assertRaises(AssertionError): without_intel_fetch_workflow(current.replace('      - name: ' + compile_name + '\n', '      - name: ' + compile_name + '\n      - name: ' + compile_name + '\n', 1))
-        outside = current + '# unrelated-mutated-region\n'
+        with self.assertRaises(AssertionError): without_intel_fetch_workflow(split_current.replace('      - name: ' + compile_name + '\n', '      - name: ' + compile_name + '\n      - name: ' + compile_name + '\n', 1))
+        with self.assertRaises(AssertionError):
+            without_intel_fetch_workflow(version_current + '# unrelated-mutated-region\n')
+        outside = split_current + '# unrelated-mutated-region\n'
         self.assertTrue(without_intel_fetch_workflow(outside).endswith('# unrelated-mutated-region\n'))
         selected = workflow_step(current, "Exercise one selected saved-version recovery, GitHub refusal or saved evidence through the ordinary Mac UI")
         result_block = workflow_step(current, "Bind only the selected singleton to original XCTest and the same ordinary preview package")
@@ -13018,7 +13107,7 @@ class MacInstalledData(unittest.TestCase):
 
     def test_acl_probe_gate_is_early_nonroot_and_keeps_original_statuses(self):
         root = Path(__file__).absolute().parents[2]
-        workflow = without_remove_output_workflow(without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8"))))
+        workflow = without_remove_output_workflow(without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")))))
         marker = "      - name: Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive"
         gate = workflow_step(workflow, "Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive")
         self.assertLess(workflow.index(marker), workflow.index("      - name: Build the ordinary selected-target desktop image and embedded frontend"))
@@ -14709,12 +14798,13 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
     def test_fixed_package_kind_rejects_wrong_identifier_payload_or_extra_hook(self):
         for fixture in (False, True):
             identifier = "dev.mobile-release-kit.desktop.installed" + ("-fixture" if fixture else "")
-            body = (f'<pkg-info identifier="{identifier}" version="0.1.1" install-location="/" auth="root">'
+            body = (f'<pkg-info identifier="{identifier}" version="0.1.2" install-location="/" auth="root">'
                     '<payload numberOfFiles="0"/><scripts><postinstall file="./postinstall"/></scripts></pkg-info>').encode()
             self.assertEqual(TOOL.package_info(body, fixture=fixture), identifier)
             with self.assertRaises(TOOL.Refused):
                 TOOL.package_info(body, fixture=not fixture)
-            for changed in (body.replace(identifier.encode(), b"arbitrary.package"), body.replace(b'numberOfFiles="0"', b'numberOfFiles="1"'),
+            for changed in (body.replace(b'version="0.1.2"', b'version="0.1.1"'),
+                            body.replace(identifier.encode(), b"arbitrary.package"), body.replace(b'numberOfFiles="0"', b'numberOfFiles="1"'),
                             body.replace(b'</scripts>', b'<preinstall file="other"/></scripts>')):
                 with self.assertRaises(TOOL.Refused):
                     TOOL.package_info(changed, fixture=fixture)
@@ -15869,7 +15959,32 @@ class MacInstallationMetadataData(unittest.TestCase):
         self.assertEqual(selected["packageVersion"], TOOL.PACKAGE_VERSION)
         self.assertEqual(selected["release"], TOOL.RELEASE)
         self.assertEqual(TOOL.HISTORICAL_SUPPLIER_RELEASE, "macos26-arm64-project-draft-01")
-        self.assertEqual(TOOL.RELEASE, "macos26-arm64-desktop-01")
+        self.assertEqual(TOOL.RELEASE, "macos26-arm64-desktop-02")
+        # Current verification generation, not a predecessor or release approval.
+        def source_data(relative, limit):
+            path = source / relative
+            info = path.lstat()
+            self.assertTrue(stat.S_ISREG(info.st_mode))
+            self.assertLessEqual(info.st_size, limit)
+            body = path.read_bytes()
+            self.assertEqual(len(body), info.st_size)
+            return body
+        cargo = tomllib.loads(source_data("desktop/src-tauri/Cargo.toml", 16384).decode("utf-8"))
+        tauri = json.loads(source_data("desktop/src-tauri/tauri.conf.json", 4096))
+        self.assertEqual((cargo["package"]["name"], cargo["package"]["version"], tauri["version"]),
+                         ("mobile-release-kit-desktop", "0.1.2", "0.1.2"))
+        for target, name, release in ((TOOL.ARM_TARGET, "build-release.json", "macos26-arm64-desktop-02"),
+                                      (TOOL.INTEL_TARGET, "build-release-intel.json", "macos26-x86_64-desktop-02")):
+            row = TOOL.build_release_data(source_data("desktop/macos-installed-inputs/" + name, 4096), target=target)
+            self.assertEqual(row, {"schemaVersion": 1, "packageVersion": "0.1.2", "release": release})
+        for relative in ("desktop/src-tauri/Cargo.lock", "desktop/helpers/macos-android-register/Cargo.lock",
+                         "desktop/helpers/macos-desktop-image/Cargo.lock"):
+            locked = tomllib.loads(source_data(relative, 256 * 1024).decode("utf-8"))
+            roots = [row for row in locked["package"] if row["name"] == "mobile-release-kit-desktop"]
+            self.assertEqual(len(roots), 1)
+            self.assertEqual(roots[0]["version"], "0.1.2")
+            self.assertNotIn("source", roots[0])
+            self.assertNotIn("checksum", roots[0])
         entry_info = TOOL.plistlib.loads(TOOL.source_entry_info())
         self.assertEqual(entry_info, dict(info, CFBundleIdentifier=TOOL.ENTRY_BUNDLE_ID, CFBundleExecutable="mrk-macos-entry"))
         self.assertEqual(TOOL.ANDROID_HELPER_BUNDLE_PROGRAM, "Contents/Helpers/mrk-android-register")
@@ -15916,7 +16031,12 @@ class MacInstallationMetadataData(unittest.TestCase):
                           'not(feature = "windows-runtime-publisher")'):
             self.assertIn(exclusion, shell)
         ui = (source / "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift").read_text()
-        basic = ui.split("private func launchCancelAndQuit(profile:", 1)[1].split("private struct FixtureSpec", 1)[0]
+        # Bound this assertion set to the one ordinary journey, not later
+        # removal journeys inserted before FixtureSpec.
+        basic_declaration = "    @MainActor private func launchCancelAndQuit(profile: SourceProfile) throws {\n"
+        self.assertEqual(ui.count(basic_declaration), 1)
+        basic, basic_close, _ = ui.split(basic_declaration, 1)[1].partition("\n    }\n")
+        self.assertEqual(basic_close, "\n    }\n")
         launch = ui.split("private func launchOrdinaryApplication()", 1)[1].split("private func completeNormalQuit(", 1)[0]
         terminal = ui.split("private func completeNormalQuit(", 1)[1].split("private func acceptFinalScenario()", 1)[0]
         self.assertNotIn("app.launch()", ui)
@@ -16002,7 +16122,8 @@ def current_data_fixture():
 class MacCurrentRuntimeData(unittest.TestCase):
     def test_same_package_noop_workflow_is_preview_scoped_and_exactly_reversible(self):
         root = Path(__file__).absolute().parents[2]
-        source = without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text()))
+        source = without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())))
+        source = without_current_version_workflow(source)
         owner_source = "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"
         old_owner_source = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
         self.assertEqual(source.count(owner_source), 2)
@@ -16083,6 +16204,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
             body = without_shipping_source_extraction_workflow(stream.read(512 * 1024 + 1).decode()).encode()
         self.assertLessEqual(len(body), 512 * 1024)
         source = body.decode("utf-8", "strict")
+        source = without_current_version_workflow(source)
         source = without_ios_unsigned_reselection_workflow(source)
         source = without_android_registration_workflow(source)
         source = without_ordinary_app_assembly_budget_workflow(source)
@@ -16208,7 +16330,8 @@ class MacCurrentRuntimeData(unittest.TestCase):
         root = Path(__file__).absolute().parents[2]
         before_pins = {'desktop-macos-installed.yml': {'bytes': 474760, 'sha256': '7ca1cb29075ca0f14bd829f59f826e6da9830d61bb27a2cae5dd32bdb018c8f2'}, 'desktop-macos-aqua.yml': {'bytes': 133491, 'sha256': '36b53942b31b13337875fdd47872a2f54f0a285d746e071b33a42c157f74f57d'}}
         for filename, pin in before_pins.items():
-            raw = without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows" / filename).read_text()))
+            raw = without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows" / filename).read_text())))
+            raw = without_current_version_workflow(raw)
             # Retire only current supplier/S nominations before isolating the Intel budget delta.
             raw = without_primary_owner_runtime_source_pin(without_fresh_g2_supplier_workflow(raw))
             self.assertEqual(raw.count("&& 26 || 10"), 1)
@@ -16244,7 +16367,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
             body = without_shipping_source_extraction_workflow(stream.read(512 * 1024 + 1).decode()).encode()
         self.assertLessEqual(len(body), 512 * 1024)
-        source = without_intel_fetch_workflow(body.decode("utf-8", "strict"))
+        source = without_intel_fetch_workflow(without_current_version_workflow(body.decode("utf-8", "strict")))
         # This independent Intel resident allowance is not measured completion.
         # Assert current raw callers, then retire exactly this delta before old tables.
         resident_pins = {'desktop-macos-installed.yml': {'bytes': 457018, 'sha256': '0af1bc78d9201ccd77fdde2d3969af36641f940e0cc89a4c0b6744d34f4b5f1a'}, 'desktop-macos-aqua.yml': {'bytes': 132632, 'sha256': '16829e57ec783d368c11763bf3d5a5415fdd729c876aa6eb36367eb2a16033b0'}}
@@ -16253,7 +16376,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
             with (root / ".github/workflows" / resident_filename).open("rb") as resident_stream:
                 resident_body = resident_stream.read(512 * 1024 + 1)
             self.assertLessEqual(len(resident_body), 512 * 1024)
-            resident_source = without_intel_fetch_workflow(resident_body.decode("utf-8", "strict"))
+            resident_source = without_intel_fetch_workflow(without_current_version_workflow(resident_body.decode("utf-8", "strict")))
             resident_rows = dict(INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_INVERSE)[resident_source.splitlines()[0]]
             for previous, current in resident_rows:
                 self.assertEqual(resident_source.count(current), 1)
@@ -16418,10 +16541,21 @@ class MacCurrentRuntimeData(unittest.TestCase):
                 without_public_verification_workflow(damaged)
         self.assertEqual(without_removal_public_verification_workflow("unchanged historical DATA\n"),
                          "unchanged historical DATA\n")
-        self.assertEqual(without_removal_public_verification_workflow(source + "# unrelated mutation\n"),
+        # A whole-current version predecessor cannot admit an unknown tail.
+        with self.assertRaisesRegex(AssertionError, "^current version workflow whole predecessor differs$"):
+            without_removal_public_verification_workflow(source + "# unrelated mutation\n")
+        # Authenticate the complete pre-removal chain before testing the narrow inverse.
+        predecessor = without_shipping_compile_privacy_workflow(without_intel_app_build_budget_workflow(source))
+        self.assertEqual(predecessor.count(current), 1)
+        self.assertNotIn(previous, predecessor)
+        self.assertEqual(predecessor, prior.replace("\n" + previous, "\n" + current, 1))
+        self.assertEqual(without_removal_public_verification_workflow(predecessor), prior)
+        self.assertEqual(without_removal_public_verification_workflow(predecessor + "# unrelated mutation\n"),
                          prior + "# unrelated mutation\n")
         with self.assertRaises(AssertionError):
             without_app_signature_workflow(source + "# unrelated mutation\n")
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(predecessor + "# unrelated mutation\n")
         for invalid in (None, b"DATA", "x" * (512 * 1024 + 1), "--removal-case disabled\n"):
             with self.assertRaises(AssertionError):
                 without_removal_public_verification_workflow(invalid)
@@ -17217,7 +17351,8 @@ class MacCurrentRuntimeData(unittest.TestCase):
 
     def test_ordinary_workflow_binds_reviewed_current_payload_before_normal_release(self):
         root = Path(__file__).absolute().parents[2]
-        workflow = without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")))
+        workflow = without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8"))))
+        workflow = without_current_version_workflow(workflow)
         anchors = {}
         for variable in ("MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "MRK_BUNDLED_PROTOCOL_SHA256"):
             configured = TOOL.re.findall(r"^      " + variable + r": ([0-9a-f]{64})$", workflow, TOOL.re.M)
@@ -17378,7 +17513,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         fields = (("githubPreflightToolingSha", "MRK_GITHUB_PREFLIGHT_TOOLING_SHA"),
                   ("githubReleaseToolingSha", "MRK_GITHUB_RELEASE_TOOLING_SHA"))
         for filename in ("desktop-macos-installed.yml", "desktop-macos-aqua.yml"):
-            workflow = without_remove_output_workflow(without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows" / filename).read_text())))
+            workflow = without_remove_output_workflow(without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows" / filename).read_text()))))
             admission = workflow_step(workflow, "Admit only this exact disposable-hosted source route")
             for field, variable in fields:
                 self.assertEqual(TOOL.re.findall(r"^      " + variable + r": ([0-9a-f]{40})$", workflow, TOOL.re.M), [publisher])
@@ -17397,7 +17532,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         for template in ("mobile-preflight.yml", "mobile-candidate.yml", "mobile-external-testing.yml", "mobile-production-submit.yml"):
             self.assertIn('include_str!("../../templates/workflows/' + template + '")', build)
 
-        workflow = without_remove_output_workflow(without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())))
+        workflow = without_remove_output_workflow(without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text()))))
         data_step = workflow_step(workflow, "Compile and run only fixed native DATA contracts and exact host-Python regressions")
         self.assertEqual(data_step, (
             "        id: data_contracts\n"
@@ -17487,7 +17622,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
 
     def test_ordinary_current_route_preserves_separate_installer_and_aqua_obligations(self):
         root = Path(__file__).absolute().parents[2]
-        workflow = without_remove_output_workflow(without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8"))))
+        workflow = without_remove_output_workflow(without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")))))
         normal = '"/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --manifest-path ../helpers/macos-desktop-image/Cargo.toml --lib'
         build, assembly, inputs = normal_app_steps(workflow)
         self.assertEqual(workflow.count(normal), 1)
@@ -17603,7 +17738,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # inert DATA; never execute the inline main, npm, Cargo or a dylib here.
         import math
         import re
-        actual_shipping = without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")))
+        actual_shipping = without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8"))))
         shipping = actual_shipping.split("  shipping-image-compile:\n", 1)[1]
         self.assertEqual(hashlib.sha256(without_shipping_compile_workflow(actual_shipping).encode()).hexdigest(), '03f8546fb009e0f9bc316da6e4b58ff7d851884a364af0caaaf05043602ca11d')
         self.assertEqual(actual_shipping.count("      - verify/desktop-macos-image-compile\n"), 1)
@@ -18113,7 +18248,7 @@ def normal_cargo_fixture(target=None, *, role="desktop", checkout=None, build_ta
         (desktop / "src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", app_features),
         (desktop / "native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native", native_features),
     ):
-        rows.append({"reason": "compiler-artifact", "package_id": "path+" + directory.as_uri() + "#" + package + ("@0.1.1" if package == "mobile-release-kit-desktop" else "@0.1.0"),
+        rows.append({"reason": "compiler-artifact", "package_id": "path+" + directory.as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0"),
             "manifest_path": str(directory / "Cargo.toml"), "features": features,
             "target": {"name": name, "kind": ["lib"], "crate_types": ["lib"],
                        "src_path": str(directory / "src/lib.rs"), "edition": "2021"},
@@ -18129,7 +18264,7 @@ def observer_cargo_fixture(target=None, *, build_target="aarch64-apple-darwin"):
     root = TOOL.DESKTOP / "src-tauri"
     binary = target / build_target / "debug/deps/installed_shell_observation-0123456789abcdef"
     features = ["custom-protocol", "desktop-shell", "macos-installed-observation"]
-    rows[0] = {"reason": "compiler-artifact", "package_id": "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.1",
+    rows[0] = {"reason": "compiler-artifact", "package_id": "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.2",
         "manifest_path": str(root / "Cargo.toml"), "features": list(features),
         "target": {"name": "installed-shell-observation", "kind": ["test"], "crate_types": ["bin"],
                    "src_path": str(root / "tests/installed_shell_observation.rs"), "edition": "2021"},
@@ -18148,7 +18283,7 @@ def remover_cargo_fixture(target=None, *, build_target="aarch64-apple-darwin"):
     target, _old, rows, _body = normal_cargo_fixture(target, build_target=build_target)
     root = TOOL.DESKTOP / "src-tauri"
     binary = target / build_target / "release/mrk-macos-remove"
-    rows[0] = {"reason": "compiler-artifact", "package_id": "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.1",
+    rows[0] = {"reason": "compiler-artifact", "package_id": "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.2",
         "manifest_path": str(root / "Cargo.toml"), "features": ["macos-installed-remover"],
         "target": {"name": "mrk-macos-remove", "kind": ["bin"], "crate_types": ["bin"],
                    "src_path": str(root / "src/bin/macos_install.rs"), "edition": "2021"},
@@ -18389,7 +18524,7 @@ class MacAndroidSupportData(unittest.TestCase):
         name = "Acquire and verify the two fixed Android support archives as DATA"
         for filename, assembly in (("desktop-macos-installed.yml", "Assemble the ordinary image app and sign code inside-out (never --deep)"),
                                    ("desktop-macos-aqua.yml", "Assemble the instrumented observation app with SOURCE-selected signing")):
-            raw = without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows" / filename).read_text()))
+            raw = without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows" / filename).read_text())))
             download = workflow_step(raw, "Download the fixed once-signed Android support capsule")
             admission = workflow_step(raw, name)
             self.assertIn("timeout-minutes: 3", download)
@@ -19050,7 +19185,7 @@ class MacNormalPreviewData(unittest.TestCase):
             expected_entry=TOOL.digest(intel_entry), expected_app_binary=TOOL.digest(intel_body), expected_vault_helper=TOOL.digest(intel_body),
             expected_android_helper=TOOL.digest(intel_body), expected_remover=TOOL.digest(intel_body), expected_desktop_image=TOOL.digest(intel_desktop), expected_resident_image=TOOL.digest(intel_resident)))
         source[TOOL.DESKTOP / "macos-installed-inputs/build-release-intel.json"] = TOOL.canonical({
-            "schemaVersion": 1, "packageVersion": "0.1.1", "release": intel_release})
+            "schemaVersion": 1, "packageVersion": "0.1.2", "release": intel_release})
         with (mock.patch.object(TOOL, "runtime_tree", return_value=runtime) as runtime_reader,
               mock.patch.object(TOOL, "tree", return_value=intel_app) as signed_tree,
               synthetic_android_support(support, app_seal={}),
@@ -19191,7 +19326,7 @@ class MacNormalPreviewData(unittest.TestCase):
             'self.notary_io("notary-final-input", self.stager.input_command, arguments, ticket_expectations=tickets)',
         ])
         for name in ("desktop-macos-installed.yml", "desktop-macos-aqua.yml"):
-            workflow = without_remove_output_workflow(without_installed_normal_ui_workflow((root / ".github/workflows" / name).read_text()))
+            workflow = without_remove_output_workflow(without_installed_normal_ui_workflow(without_current_version_workflow((root / ".github/workflows" / name).read_text())))
             build = workflow.index("--manifest-path desktop/helpers/macos-vault-helper/Cargo.toml")
             helper_sign = workflow.index('macos_android_helper_package.py sign-vault-helper --target "$MRK_MACOS_TARGET"', build)
             digest = workflow.index('output.write("MRK_MACOS_VAULT_HELPER_SHA256=', helper_sign)
@@ -19730,9 +19865,73 @@ class MacNormalPreviewData(unittest.TestCase):
     def test_preview_route_targets_only_unrelated_groups_and_retains_package_gates(self):
         actual_source = (Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text()
         self.assertLess(len(actual_source.encode()), 500000)
-        self.assertEqual(len(actual_source.encode()), 470734)  # Current afterimage, not historical predecessor.
-        self.assertEqual(hashlib.sha256(actual_source.encode()).hexdigest(), "93881e2e1848a3f621b1c7a4b1d7fa6894d988e535e9eb79ce3d67ba460b461f")
+        self.assertEqual(len(actual_source.encode()), 470673)  # Current afterimage, not historical predecessor.
+        self.assertEqual(hashlib.sha256(actual_source.encode()).hexdigest(), 'ca481ff5ef233bdb4124c5b2371b4320fcf83c909befaed4d901ee15733b7ef9')
         self.assertEqual(actual_source.count(SHIPPING_SOURCE_WRAPPER), 1)
+        # Exact installed monolith exclusion; future P1 maintenance is a separate unactivated lane.
+        self.assertEqual(actual_source.count("    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update')\n"), 0)
+        self.assertEqual(actual_source.count("    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update')\n"), 1)
+        self.assertEqual(actual_source.count("    if: github.event_name == 'push' && github.ref != 'refs/heads/verify/desktop-macos-installed' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update')\n"), 0)
+        purpose_root = Path(__file__).absolute().parents[2]
+        with (purpose_root / '.github/workflows/desktop-macos-p0-readonly-enrollment.yml').open('rb') as stream:
+            dormant_workflow_body = stream.read(6242)
+        self.assertEqual(len(dormant_workflow_body), 6241)
+        self.assertEqual(hashlib.sha256(dormant_workflow_body).hexdigest(), 'b6a5689574ee565a4570e30f13dad14350db4978612de2da2d88688fd6964210')
+        dormant_workflow = dormant_workflow_body.decode('utf-8')
+        with (purpose_root / 'desktop/tools/macos_p0_readonly_native.py').open('rb') as stream:
+            dormant_native_body = stream.read(63219)
+        self.assertEqual(len(dormant_native_body), 63218)
+        self.assertEqual(hashlib.sha256(dormant_native_body).hexdigest(), '36f0e43c5685041cb03e8f02b62f6931dbbd0104ca81a735ac86d0a85404476c')
+        dormant_native = dormant_native_body.decode('utf-8')
+        self.assertEqual(dormant_workflow.count('    branches: [verify/desktop-macos-p0-readonly-enrollment]\n'), 1)
+        self.assertEqual(dormant_workflow.count("    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-p0-readonly-enrollment'\n"), 1)
+        self.assertEqual(dormant_workflow.count('          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REF" == refs/heads/verify/desktop-macos-p0-readonly-enrollment ]] || exit 1\n'), 1)
+        self.assertEqual(dormant_workflow.count('          MRK_P0_NATIVE_BYTES: "63218"\n'), 1)
+        self.assertEqual(dormant_workflow.count('          MRK_P0_NATIVE_SHA256: "36f0e43c5685041cb03e8f02b62f6931dbbd0104ca81a735ac86d0a85404476c"\n'), 1)
+        self.assertEqual(dormant_native.count("ENROLLMENT_REF = 'refs/heads/verify/desktop-macos-p0-readonly-enrollment'\n"), 1)
+        self.assertNotIn('refs/heads/verify/desktop-macos-installed', dormant_workflow)
+        android_selector = "      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'android-signed-build' || 'disabled' }}\n"
+        self.assertEqual(actual_source.count(android_selector), 1)
+        self.assertEqual(actual_source.count('      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n'), 0)
+        self.assertEqual(actual_source.count('      MRK_MACOS_IOS_UI_SCOPE: disabled\n'), 1)
+        self.assertEqual(actual_source.count("      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ios-unsigned-archive' || 'disabled' }}\n"), 0)
+        raw_matrix = actual_source.split("        include: ${{ fromJSON(", 1)[1].split("\n", 1)[0]
+        self.assertNotIn(" || github.ref == 'refs/heads/verify/desktop-macos-installed' &&", raw_matrix)
+        raw_rows = json.loads(raw_matrix.rsplit(" || '", 1)[1].rsplit("') }}", 1)[0])
+        self.assertEqual([(row['target'], row['runner'], row['machine'], row['hosted_job']) for row in raw_rows],
+                         [('aarch64-apple-darwin', 'macos-26', 'arm64', 'github-hosted-macos26-arm64'),
+                          ('x86_64-apple-darwin', 'macos-26-intel', 'x86_64', 'github-hosted-macos26-x86_64')])
+        for ident, minutes in (('normal_android_inputs', 22), ('normal_android_ui_test', 23), ('normal_android_ui_result', 3)):
+            self.assertEqual(actual_source.count('        id: ' + ident + '\n'), 1)
+            raw_gate = actual_source.split('        id: ' + ident + '\n', 1)[1].split('        run:', 1)[0]
+            for required in ("github.ref == 'refs/heads/verify/desktop-macos-installed'",
+                             "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build'",
+                             "steps.package_install.outcome == 'success'", "steps.finalize_image.outcome == 'success'",
+                             "steps.p0_carrier_stage.outcome == 'success'", "steps.p0_carrier_upload.outcome == 'success'"):
+                self.assertIn(required, raw_gate)
+            self.assertIn('        timeout-minutes: ' + str(minutes) + '\n', raw_gate)
+            if ident == 'normal_android_inputs':
+                self.assertIn("steps.normal_ui_build.outcome == 'success'", raw_gate)
+            elif ident == 'normal_android_ui_test':
+                self.assertIn("steps.normal_android_inputs.outcome == 'success'", raw_gate)
+            else:
+                self.assertIn("steps.normal_android_ui_test.outcome == 'success'", raw_gate)
+        for ident in ('normal_ios_ui_test', 'normal_ios_pending_ui_test', 'normal_ui_test', 'installed_normal_data_contracts'):
+            raw_gate = actual_source.split('        id: ' + ident + '\n', 1)[1].split('        run:', 1)[0]
+            self.assertIn("env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled'", raw_gate)
+            self.assertNotIn("env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build'", raw_gate)
+        raw_retire = actual_source.split('        id: p0_carrier_retire\n', 1)[1].split('        run:', 1)[0]
+        for required in ("steps.public_evidence.outcome == 'success'", "steps.evidence.outcome == 'success'",
+                         "env.MRK_MACOS_IOS_UI_SCOPE == 'disabled'", "steps.normal_android_inputs.outcome == 'success'",
+                         "steps.normal_android_ui_test.outcome == 'success'", "steps.normal_android_ui_result.outcome == 'success'"):
+            self.assertIn(required, raw_retire)
+        for damaged_android in (actual_source + android_selector,
+                                actual_source.replace(android_selector, android_selector.replace('verify/desktop-macos-installed', 'verify/desktop-macos-other'), 1),
+                                actual_source.replace(android_selector, android_selector.replace("|| 'disabled'", "|| 'android-signed-build'"), 1),
+                                actual_source.replace('      MRK_MACOS_IOS_UI_SCOPE: disabled\n', "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ios-unsigned-archive' || 'disabled' }}\n", 1),
+                                actual_source + '# inconsistent Android generation\n'):
+            with self.assertRaises(AssertionError):
+                without_shipping_source_extraction_workflow(damaged_android)
         restored_source = without_shipping_source_extraction_workflow(actual_source)
         self.assertEqual(hashlib.sha256(restored_source.encode()).hexdigest(), SHIPPING_SOURCE_ORIGINAL_SHA256)
         for damaged in (actual_source + SHIPPING_SOURCE_WRAPPER, actual_source.replace("builtin source /dev/stdin", "builtin source ./other", 1)):
@@ -19740,10 +19939,14 @@ class MacNormalPreviewData(unittest.TestCase):
                 without_shipping_source_extraction_workflow(damaged)
         # Inspect the genuine installed successor before any historical inverse.
         ui_workflow = without_shipping_source_extraction_workflow((Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text())
-        self.assertEqual(hashlib.sha256(ui_workflow.encode()).hexdigest(), INSTALLED_NORMAL_UI_PAIRED_WORKFLOW_SHA256)
-        armed_ui_source = installed_normal_ui_historical_source(ui_workflow)
+        # Exact generation authentication is a historical SOURCE view only;
+        # raw paired selectors/step bodies/retention and version commands stay raw.
+        self.assertEqual(ui_workflow.count("--version 0.1.2"), 2)
+        version_ui_source = without_current_version_workflow(ui_workflow)
+        self.assertEqual(hashlib.sha256(version_ui_source.encode()).hexdigest(), INSTALLED_NORMAL_UI_PAIRED_WORKFLOW_SHA256)
+        armed_ui_source = installed_normal_ui_historical_source(version_ui_source)
         self.assertEqual(hashlib.sha256(armed_ui_source.encode()).hexdigest(), INSTALLED_NORMAL_UI_WORKFLOW_SHA256)
-        self.assertEqual(without_arm_only_final_image_diagnostic_workflow(armed_ui_source), ui_workflow)
+        self.assertEqual(without_arm_only_final_image_diagnostic_workflow(armed_ui_source), version_ui_source)
         self.assertEqual(ui_workflow.count(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME), 0)
         self.assertEqual(ui_workflow.count(ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT), 0)
         matrix_source = ui_workflow.split("        include: ${{ fromJSON(", 1)[1].split("\n", 1)[0]
@@ -19758,8 +19961,8 @@ class MacNormalPreviewData(unittest.TestCase):
                                armed_ui_source + ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_RUN_NAME,
                                armed_ui_source + ARM_ONLY_FINAL_IMAGE_DIAGNOSTIC_INSERT):
             with self.assertRaises(AssertionError):
-                without_installed_normal_ui_workflow(paired_damaged)
-        ui_prior = without_installed_normal_ui_workflow(ui_workflow)
+                without_installed_normal_ui_workflow(without_current_version_workflow(paired_damaged))
+        ui_prior = without_installed_normal_ui_workflow(version_ui_source)
         self.assertEqual(hashlib.sha256(ui_prior.encode()).hexdigest(), INSTALLED_NORMAL_UI_WORKFLOW_PREDECESSOR)
         self.assertEqual(without_installed_normal_ui_workflow(armed_ui_source), ui_prior)
         self.assertLess(ui_workflow.index("        id: evidence\n"), ui_workflow.index("        id: p0_carrier_retire\n"))
@@ -19772,7 +19975,7 @@ class MacNormalPreviewData(unittest.TestCase):
                         ui_workflow.replace("normal_ui_descriptor_path(os.environ.get", "normal_ui_descriptor_path_changed(os.environ.get", 1),
                         ui_workflow.replace("128 * 1024", "129 * 1024", 1),
                         ui_workflow + ui_retire):
-            with self.assertRaises(AssertionError): without_installed_normal_ui_workflow(damaged)
+            with self.assertRaises(AssertionError): without_installed_normal_ui_workflow(without_current_version_workflow(damaged))
 
         # Execute the actual passive selector, original bounded reader and its
         # original descriptor-context predicate over genuine owned DATA files.
@@ -19886,13 +20089,13 @@ class MacNormalPreviewData(unittest.TestCase):
                     if output.is_dir(): output.chmod(0o700)  # Only this genuine DATA fixture.
 
         root = Path(__file__).absolute().parents[2]
-        raw_workflow = without_installed_normal_ui_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text()))
+        raw_workflow = without_installed_normal_ui_workflow(without_current_version_workflow(without_shipping_source_extraction_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())))
         stage_name = "Stage only the finalized ordinary image as an unqualified P0 carrier input"
         upload_name = "Retain one finalized DMG and its finite descriptor for later independent P0 qualification"
         retire_name = "Retire only the known uploaded carrier export copy without touching image originals"
         stage, upload, retire = (workflow_step(raw_workflow, name) for name in (stage_name, upload_name, retire_name))
         self.assertEqual(raw_workflow.count(P0_CARRIER_WORKFLOW_BUNDLE), 1)
-        self.assertEqual(hashlib.sha256(without_installed_p0_carrier_workflow(without_arm_only_final_image_diagnostic_workflow(raw_workflow)).encode()).hexdigest(),
+        self.assertEqual(hashlib.sha256(without_installed_p0_carrier_workflow(without_arm_only_final_image_diagnostic_workflow(without_current_version_workflow(raw_workflow))).encode()).hexdigest(),
                          "3d4670e8acf2e3bcc7d6246679065357406da8402b7bfd4da9d8adba20bdcccb")
         self.assertLess(raw_workflow.index("        id: finalize_image\n"), raw_workflow.index("        id: p0_carrier_stage\n"))
         self.assertLess(raw_workflow.index("        id: p0_carrier_stage\n"), raw_workflow.index("        id: p0_carrier_upload\n"))

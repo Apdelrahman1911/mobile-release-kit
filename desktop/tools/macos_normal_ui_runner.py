@@ -32,7 +32,7 @@ ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
 PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
-LOADER_SHA = '164300e80f0cf3bf1389261565901c7fcd9f0d2abb811b16aa11d719e5e4d287'
+LOADER_SHA = 'd1ab3a83633c7e824277a4b316e2188877ecf03e8d54517a4275f931dd41290a'
 LOADER_MODULE = "mrk_normal_ui_owner_loader"
 TARGET = "MRKNormalAppUITests"
 CLASS = TARGET + "/NormalAppUITests/"
@@ -55,6 +55,15 @@ NORMAL_SELECTIONS = {
     "release-evidence-test.xcresult": (("testSyntheticProjectSavedReleaseEvidence",), 300, 420),
     "saved-version-recovery-test.xcresult": (("testSyntheticProjectSavedVersionRecovery",), 300, 420),
 }
+
+CREDENTIAL_UPDATE_SELECTIONS = {
+    "p0-bootstrap": ("testQualifiedP0CredentialBootstrap", "update-p0-bootstrap-test.xcresult"),
+    "p1-resume": ("testQualifiedP1CredentialResume", "update-p1-resume-test.xcresult"),
+}
+CREDENTIAL_UPDATE_REF = "refs/heads/verify/desktop-macos-positive-update"
+CREDENTIAL_UPDATE_WORKFLOW = ".github/workflows/desktop-macos-installed.yml"
+CREDENTIAL_UPDATE_PREFIX = b"MRK_MACOS_UPDATE_CREDENTIALS="
+
 ORIGINAL_MARKER = ("MRK_MACOS_UI_ORIGINAL=outerRequest=1;completion=1;body=1;handoff=1;"
     "payloadIdentity=1;originalTerminated=1;gateFree=1;gateClosed=1;failureCleanup=0;caseDeadlineMet=1")
 ENTRY_MARKER = ("MRK_MACOS_ENTRY_UI=ordinary-entry-payload-picker-quit-and-gate-exclusion-observed;"
@@ -378,7 +387,7 @@ class RunnerProducts:
         return False
 
 
-def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, ios_pending=False, removal_case=None):
+def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, ios_pending=False, removal_case=None, credential_segment=None):
     machine, _ = normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60)), "engineering-fixed-test-selection")
@@ -398,7 +407,12 @@ def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TAR
         need(not any((engineering, output_data, android_positive, ios_unsigned, ios_pending)) and target == ARM_TARGET
              and tuple(methods) == (selected,) and allowance == 300 and Path(result).name == basename,
              "removal-fixed-test-selection")
-    need(removal_case is not None or ios_pending or ios_unsigned or android_positive or output_data or engineering or tuple(methods) == (PACKAGED_METHOD,) or
+    if credential_segment is not None:
+        need(credential_segment in CREDENTIAL_UPDATE_SELECTIONS, "update-credential-fixed-segment")
+        selected, basename = CREDENTIAL_UPDATE_SELECTIONS[credential_segment]
+        need(not any((engineering, output_data, android_positive, ios_unsigned, ios_pending)) and removal_case is None
+             and tuple(methods) == (CLASS + selected,) and allowance == 300 and Path(result).name == basename, "update-credential-fixed-original-selection")
+    need(credential_segment is not None or removal_case is not None or ios_pending or ios_unsigned or android_positive or output_data or engineering or tuple(methods) == (PACKAGED_METHOD,) or
          any(tuple(methods) == tuple(CLASS + method for method in selection[0])
              and allowance == selection[1] for selection in NORMAL_SELECTIONS.values()),
          "fixed-test-selection")
@@ -412,7 +426,7 @@ def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TAR
         "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
 
 
-def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, ios_pending=False, removal_case=None):
+def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, ios_pending=False, removal_case=None, credential_segment=None):
     normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60 and timeout == 180)), "engineering-fixed-test-owner")
@@ -432,10 +446,16 @@ def run_admitted_test(call, derived, result, methods, allowance, timeout, *, tar
         need(not any((engineering, output_data, android_positive, ios_unsigned, ios_pending)) and target == ARM_TARGET
              and tuple(methods) == (selected,) and allowance == 300 and timeout == 420
              and Path(result).name == basename, "removal-fixed-test-owner")
+    if credential_segment is not None:
+        need(credential_segment in CREDENTIAL_UPDATE_SELECTIONS, "update-credential-fixed-segment")
+        selected, basename = CREDENTIAL_UPDATE_SELECTIONS[credential_segment]
+        need(not any((engineering, output_data, android_positive, ios_unsigned, ios_pending)) and removal_case is None
+             and tuple(methods) == (CLASS + selected,) and allowance == 300 and Path(result).name == basename and timeout == 420, "update-credential-fixed-original-selection")
     need(not os.path.lexists(result), "fresh-xcresult-required")
     with RunnerProducts(derived) as products:
         facts = products.admit(call)  # Actual generated runner, BEFORE xcodebuild can request any app.
-        command = (xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, removal_case=removal_case)
+        command = (xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, credential_segment=credential_segment)
+                   if credential_segment is not None else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, removal_case=removal_case)
                    if removal_case is not None else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, ios_pending=True)
                    if ios_pending else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, ios_unsigned=True)
                    if ios_unsigned else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, android_positive=True)
@@ -673,6 +693,14 @@ def normal_request(arguments, temporary):
     if arguments == ["--normal-build"]:
         value = dict(phase="build", derived=normal / "DerivedData", result=None,
                      methods=(), allowance=None, timeout=240, phaseSeconds=450)
+    elif arguments in (["--normal-update-p0-bootstrap-test"], ["--normal-update-p0-bootstrap-summary"],
+                       ["--normal-update-p1-resume-test"], ["--normal-update-p1-resume-summary"]):
+        testing = arguments[0].endswith("-test")
+        segment = "p0-bootstrap" if "-p0-bootstrap-" in arguments[0] else "p1-resume"
+        method, basename = CREDENTIAL_UPDATE_SELECTIONS[segment]
+        value = dict(phase="test" if testing else "summary", derived=normal / "DerivedData", result=normal / basename,
+            methods=(CLASS + method,) if testing else (), allowance=300 if testing else None,
+            timeout=420 if testing else 30, phaseSeconds=585 if testing else 90, credentialUpdate=segment)
     elif arguments in (["--normal-android-signed-build-test"], ["--normal-android-signed-build-summary"]):
         testing = arguments[0].endswith("-test")
         value = dict(phase="test" if testing else "summary", derived=normal / "DerivedData", result=normal / ANDROID_RESULT,
@@ -2460,8 +2488,568 @@ def _execute_removal_ui_phase(phase, *, case, derived, channel, source, file_lim
     return original, facts
 
 
+
+# Two literal update UI segments. This reader owns DATA originals, never a child
+# process, Installer, credential operation, repair, or a caller-selected app.
+CREDENTIAL_SOURCE_PATHS = ("desktop/tools/macos_update_verification.py", "desktop/tools/stage_macos_installed.py",
+                           "desktop/macos-installed-inputs/update-predecessors.json")
+CREDENTIAL_INPUT_ENV = "TEST_RUNNER_MRK_NORMAL_UI_UPDATE_INPUT"
+CREDENTIAL_INPUT_SHA_ENV = "TEST_RUNNER_MRK_NORMAL_UI_UPDATE_INPUT_SHA256"
+
+
+def credential_source_state(phase, source):
+    original = phase.call("update-credential-source-roster", ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null", "ls-tree", "-r", "-z", "--full-tree", source, "--", *CREDENTIAL_SOURCE_PATHS], 15, 8192)
+    need(original.returncode == 0 and original.stdout.endswith(b"\0"), "update-credential-source-roster-command")
+    facts = {}
+    for row in original.stdout.split(b"\0")[:-1]:
+        header, raw_name = row.split(b"\t", 1)
+        mode, kind, blob = header.split(b" ")
+        name = raw_name.decode("ascii", "strict")
+        need(name in CREDENTIAL_SOURCE_PATHS and name not in facts and kind == b"blob" and mode in (b"100644", b"100755"),
+             "update-credential-source-roster-entry")
+        parent = open_directory(phase.root / Path(name).parent)
+        fd, primary = None, None
+        try:
+            fd = os.open(Path(name).name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            body, identity, digest = original_body(fd, 1024 * 1024, collect=True)
+            need(hashlib.sha1(b"blob " + str(len(body)).encode("ascii") + b"\0" + body).hexdigest() == blob.decode("ascii")
+                 and full9(os.stat(Path(name).name, dir_fd=parent, follow_symlinks=False)) == identity,
+                 "update-credential-current-source-correspondence")
+            facts[name] = [decimal(identity), digest]
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            originals, fd, parent = (fd, parent), None, None
+            close_error = None
+            for item in originals:
+                if item is not None:
+                    try: os.close(item)
+                    except BaseException:
+                        if primary is not None:
+                            primary.add_note("update-credential-source-secondary-close")
+                        elif close_error is None:
+                            close_error = Refused("update-credential-source-close")
+                        else:
+                            close_error.add_note("update-credential-source-secondary-close")
+            if close_error is not None: raise close_error from None
+    need(set(facts) == set(CREDENTIAL_SOURCE_PATHS), "update-credential-source-roster-complete")
+    return facts
+
+
+def credential_update_marker(body, *, segment, source, application):
+    text = body.decode("utf-8", "strict")
+    lines = text.splitlines()
+    selected = CREDENTIAL_UPDATE_SELECTIONS[segment][0]
+    native = "-[MRKNormalAppUITests.NormalAppUITests " + selected + "]"
+    prefix = CREDENTIAL_UPDATE_PREFIX.decode("ascii")
+    markers = [line for line in lines if line.startswith(prefix)]
+    need(lines.count(ORIGINAL_MARKER) == 1 and len(markers) == 1 and len(markers[0].encode("utf-8")) <= 8192
+         and "MRK_MACOS_UI_FAILURE_CLEANUP=" not in text and lines.count("Test Case '" + native + "' started.") == 1
+         and len(re.findall(r"^Test Case '" + re.escape(native) + r"' passed \([0-9.]+ seconds\)\.$", text, re.M)) == 1
+         and "Test Case '" + native + "' failed" not in text
+         and lines.index(ORIGINAL_MARKER) < lines.index(markers[0]), "update-credential-one-original-terminal")
+    value = document(markers[0][len(prefix):].encode("utf-8"))
+    need(type(value) is dict and set(value) == {"segment", "sourceCommit", "applicationSourceCommit", "state", "recordRevision",
+        "fixtureOriginalClosesCompleted", "normalQuitObserved", "gateReleased"}
+        and value["segment"] == segment and value["sourceCommit"] == source and value["applicationSourceCommit"] == application
+        and type(value["recordRevision"]) is int and value["recordRevision"] == 1
+        and all(value[k] is True for k in ("fixtureOriginalClosesCompleted", "normalQuitObserved", "gateReleased")),
+        "update-credential-terminal-binding")
+    return value
+
+
+def credential_update_summary(body):
+    value = document(body)
+    expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+    need(type(value) is dict and all(type(value.get(k)) is int and value[k] == v for k, v in expected.items()),
+         "update-credential-one-native-summary")
+    return expected
+
+
+class CredentialUpdateInputs:
+    def __init__(self, phase, request, source, source_facts, normal_facts):
+        self.phase, self.request, self.source, self.source_facts = phase, request, source, source_facts
+        self.normal_source_sha = sha(encoded(normal_facts))
+        self.normal = request["derived"].parent
+        self.work = self.normal.parent
+        self.segment = request["credentialUpdate"]
+        self.stem = "update-" + self.segment
+        self.held, self.modules, self.closed = {}, {}, False
+        self.update = self.stager = None
+        self.root_fd = self.root_parent = None
+        self.root_identity = self.root_parent_identity = None
+        self.input_sha = None
+
+    def read(self, path, limit, *, modes=(0o600,), keep=True):
+        self.phase.clock.check()
+        path = Path(path)
+        if path in self.held:
+            self.check_one(path)
+            return self.held[path][6]
+        need(len(self.held) < 32, "update-credential-input-count")
+        parent = open_directory(path.parent)
+        fd, primary = None, None
+        try:
+            parent_identity = full9(os.fstat(parent))[:5]
+            need(stat.S_ISDIR(parent_identity[2]) and not parent_identity[2] & 0o022, "update-credential-input-parent")
+            fd = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            body, identity, digest = original_body(fd, limit, collect=True)
+            need(identity[3] == os.getuid() and identity[4] == os.getgid() and stat.S_IMODE(identity[2]) in modes
+                 and os.fstat(fd).st_flags == 0 and full9(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) == identity,
+                 "update-credential-input-original")
+            if keep:
+                self.held[path] = (fd, parent, parent_identity, identity, digest, limit, body)
+                fd = parent = None
+            self.phase.clock.check()
+            return body
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            originals, fd, parent = (fd, parent), None, None
+            close_error = None
+            for item in originals:
+                if item is not None:
+                    try: os.close(item)
+                    except BaseException:
+                        if primary is not None:
+                            primary.add_note("update-credential-input-secondary-close")
+                        elif close_error is None:
+                            close_error = Refused("update-credential-input-close")
+                        else:
+                            close_error.add_note("update-credential-input-secondary-close")
+            if close_error is not None: raise close_error from None
+
+    def check_one(self, path):
+        fd, parent, parent_identity, identity, digest, limit, body = self.held[path]
+        need(full9(os.fstat(parent))[:5] == parent_identity
+             == full9(os.stat(path.parent, follow_symlinks=False))[:5], "update-credential-input-parent-post")
+        observed, actual, checksum = original_body(fd, limit, collect=True)
+        need(actual == identity == full9(os.stat(path.name, dir_fd=parent, follow_symlinks=False))
+             and os.fstat(fd).st_flags == 0 and observed == body and checksum == digest, "update-credential-input-held-named-byte-post")
+
+    def module(self, relative, name):
+        need(relative in CREDENTIAL_SOURCE_PATHS[:2] and name not in sys.modules and name not in self.modules,
+             "update-credential-source-module-collision")
+        path = self.phase.root / relative
+        body = self.read(path, 1024 * 1024, modes=(0o644, 0o755))
+        identity, digest = self.source_facts[relative]
+        need(decimal(self.held[path][3]) == identity and sha(body) == digest, "update-credential-source-module-correspondence")
+        spec = importlib.util.spec_from_file_location(name, path)
+        need(spec is not None and spec.loader is not None, "update-credential-source-module-spec")
+        value = importlib.util.module_from_spec(spec)
+        self.modules[name] = value
+        sys.modules[name] = value
+        exec(compile(body, str(path), "exec"), value.__dict__)
+        self.check_one(path)
+        return value
+
+    def status(self, path):
+        need(self.read(path, 16) == b"0\n", "update-credential-original-zero-status")
+
+    def helper_receipt(self, name, phase):
+        body = self.read(self.work / name, 16384)
+        value = document(body)
+        context = self.request["credentialContext"]
+        need(type(value) is dict and value.get("phase") == phase and value.get("passed") is True
+             and value.get("targetRetired") is True and value.get("originalClosesKnown") is True
+             and all(value.get(k) == v for k, v in context.items()), "update-credential-package-original-finality")
+        self.status(self.work / (phase + ".status"))
+        return value, sha(body)
+
+    def baseline_inputs(self):
+        self.status(self.normal / "build.status")
+        build = document(self.read(self.normal / "build.command-admission.json", 32768))
+        need(type(build) is dict and build.get("scope") == "normal-ui-original-command-admission-only"
+             and build.get("phase") == "build" and build.get("sourceCommit") == self.source
+             and build.get("target") == self.request["target"] and build.get("originalReturncode") == 0
+             and type(build.get("originalReturncode")) is int and build.get("sourceRosterSha256") == self.normal_source_sha
+             and build.get("sourcePrePostMatched") is True and build.get("originalCommandReturned") is True,
+             "update-credential-genuine-current-harness-build")
+        self.update = self.module(CREDENTIAL_SOURCE_PATHS[0], "mrk_normal_update_credential_data")
+        self.stager = self.module(CREDENTIAL_SOURCE_PATHS[1], "mrk_normal_update_credential_stager")
+        nomination_body = self.read(self.phase.root / CREDENTIAL_SOURCE_PATHS[2], 16384, modes=(0o644,))
+        identity, digest = self.source_facts[CREDENTIAL_SOURCE_PATHS[2]]
+        need(decimal(self.held[self.phase.root / CREDENTIAL_SOURCE_PATHS[2]][3]) == identity and sha(nomination_body) == digest,
+             "update-credential-source-nomination-correspondence")
+        self.selected = self.update.nomination_data(document(nomination_body), self.request["target"], self.stager)
+        top, self.baseline_sha = self.helper_receipt("android-helper-update-baseline.json", "update-baseline")
+        self.update.phase_credit(top.get("originalCalls"), phase="update-baseline")
+        baseline = top.get("updateBaseline")
+        need(type(baseline) is dict and all(baseline.get(k) == v for k, v in self.request["credentialContext"].items())
+             and baseline.get("nominationSha256") == sha(self.stager.canonical(self.selected))
+             and baseline.get("predecessorSource") == self.selected["source"]
+             and baseline.get("qualificationEvidenceSha256") == self.selected["qualificationEvidenceSha256"]
+             and baseline.get("predecessorPackageSha256") == self.selected["package"]["sha256"]
+             and all(baseline.get(k) is True for k in ("freshCurrentBytesReadback", "originalInstallerReturnedZero", "originalMountDetached"))
+             and baseline.get("productReady") is False, "update-credential-genuine-qualified-baseline")
+        self.baseline = baseline
+        self.case = self.work / "update-baseline-case"
+        self.expected_current = self.read(self.case / "expected-current-producer.json", 16384, modes=(0o444,))
+        need(sha(self.expected_current) == baseline["expectedCurrentDescriptorSha256"], "update-credential-expected-current-descriptor")
+        for key, name, limit in (("descriptor", "producer.json", 16384), ("signature", "producer.sig", 512),
+                                  ("inventory", "input/" + self.stager.INSTALLATION_INVENTORY_NAME, 1024 * 1024)):
+            body = self.read(self.case / name, limit, modes=(0o444,))
+            need((len(body), sha(body)) == (self.selected[key]["bytes"], self.selected[key]["sha256"]),
+                 "update-credential-original-predecessor-member")
+        self.status(self.case / "installer-output.status")
+        producer = self.stager.maintenance_producer_data(self.read(self.case / "producer.json", 16384, modes=(0o444,)), target=self.request["target"])
+        need(producer["releaseSet"]["current"] == self.selected["release"]
+             and self.selected["signingPolicy"] in producer["signingPolicies"], "update-credential-predecessor-signing-policy")
+        self.application = self.selected["source"] if self.segment == "p0-bootstrap" else self.source
+        need(self.selected["source"] != self.source, "update-credential-distinct-application-generations")
+        self.application_readback()
+        self.adopt_root()
+
+    def application_readback(self):
+        from argparse import Namespace
+        target, context = self.request["target"], self.request["credentialContext"]
+        if self.segment == "p0-bootstrap":
+            release = self.selected["release"]
+            parent = self.case
+            request_id = self.baseline["requestId"]
+            input_path = parent / "input"
+            options = {"nominated_update_predecessor": self.selected}
+        else:
+            top, self.package_receipt_sha = self.helper_receipt("android-helper-package-install.json", "package-install")
+            rows = top.get("originalCalls")
+            need(type(rows) is list and rows and all(type(row) is dict and row.get("entered") is True
+                 and row.get("returned") is True and row.get("capturesSettled") is True
+                 and type(row.get("returncode")) is int and row["returncode"] == 0 for row in rows)
+                 and tuple(row.get("role") for row in rows).count("installer") == 1
+                 and tuple(row.get("role") for row in rows).count("distribution-detach") == 1,
+                 "update-credential-current-package-originals")
+            distribution, positive = top.get("distribution"), top.get("positiveUpdate")
+            need(type(distribution) is dict and distribution.get("kind") == "mrk-ordinary-package-observed-v2"
+                 and all(distribution.get(k) is True for k in ("originalInstallerReturnedZero", "sameRequestV2Readback", "originalMountDetached"))
+                 and distribution.get("productReady") is False and type(positive) is dict
+                 and all(positive.get(k) is True for k in ("rootIdentityPreserved", "generationInstancesDistinct", "previousExportUnchanged",
+                      "testedAppDataOriginalPreserved", "originalCurrentInstallerReturnedZero", "originalMountDetached", "currentPayloadReadback"))
+                 and all(positive.get(k) == v for k, v in context.items()) and positive.get("productReady") is False,
+                 "update-credential-current-update-lineage")
+            bootstrap_body = self.read(self.normal / "update-p0-bootstrap.result.json", 16384)
+            self.bootstrap = self.update.credential_bootstrap_data(document(bootstrap_body), self.baseline,
+                baseline_sha=self.baseline_sha, source=self.source, target=target, run=context["runId"],
+                attempt=context["runAttempt"], selected=self.selected)
+            self.status(self.normal / "update-p0-bootstrap-test.status")
+            self.status(self.normal / "update-p0-bootstrap-summary.status")
+            need(positive.get("credentialBootstrapSha256") == sha(bootstrap_body)
+                 and positive.get("predecessorSource") == self.selected["source"]
+                 and positive.get("predecessorQualificationEvidenceSha256") == self.selected["qualificationEvidenceSha256"]
+                 and positive.get("baselineInvocation") == self.baseline["readback"]["previous"]["invocation"],
+                 "update-credential-exact-bootstrap-handoff")
+            parent = self.work / "producer-root"
+            input_path = self.work / "input"
+            descriptor = self.read(parent / "producer.json", 16384, modes=(0o444,))
+            signed = self.read(parent / "producer.sig", 512, modes=(0o444,))
+            need(descriptor == self.expected_current and sha(descriptor) == distribution.get("descriptorSha256")
+                 and sha(signed) == distribution.get("signatureSha256"), "update-credential-current-source-producer")
+            producer = self.stager.maintenance_producer_data(descriptor, target=target)
+            release = producer["releaseSet"]["current"]
+            need(release["sourceCommit"] == self.source and release["packageSha256"] == distribution["packageSha256"],
+                 "update-credential-current-release")
+            request_id = distribution["requestId"]
+            self.status(self.work / "installer-output.status")
+            options = {"expected_update_previous": self.baseline["readback"]}
+        inventory_body = self.read(input_path / self.stager.INSTALLATION_INVENTORY_NAME, 1024 * 1024, modes=(0o444,))
+        selection = self.stager.BuildSelection(target, release["packageVersion"], release["release"])
+        inventory = self.stager.observation_inventory_bytes(inventory_body, release["inventorySha256"], release["runtimeManifestSha256"], selection=selection)
+        helper = inventory["app/" + self.stager.VAULT_HELPER]
+        need(helper["executable"] is True and 0 < helper["size"] <= 32 * 1024 * 1024, "update-credential-real-helper-inventory")
+        self.helper_sha, self.helper_bytes = helper["sha256"], helper["size"]
+        args = Namespace(target=target, fixture=False, input=input_path, expected_source=release["sourceCommit"],
+            expected_inventory=release["inventorySha256"], expected_manifest=release["runtimeManifestSha256"],
+            expected_package=release["packageSha256"], request_id=request_id, producer_descriptor=parent / "producer.json",
+            producer_signature=parent / "producer.sig", installer_status=(self.case if self.segment == "p0-bootstrap" else self.work) / "installer-output.status",
+            package=self.work / "package-mount" / self.stager.distribution_request_name(request_id), run_id=context["runId"], run_attempt=context["runAttempt"])
+        self.phase.clock.check()
+        observed, facts = None, {}
+        observed = self.stager.observation_command(args, update_facts=facts, **options)
+        self.phase.clock.check()
+        need(observed["originalInstallerReturnedZero"] is True and observed["originalInstallerResult"]["action"] ==
+             ("fresh-install" if self.segment == "p0-bootstrap" else "update"), "update-credential-real-application-readback")
+        census = self.stager.same_package_result_census()
+        if self.segment == "p0-bootstrap":
+            need(facts == self.baseline["readback"] and census == self.baseline["census"], "update-credential-baseline-not-replaced")
+        else:
+            request = self.update.census_data(self.baseline["census"], census, baseline=self.baseline["requestId"])
+            need(request == request_id and facts["previous"]["invocation"] == positive["currentInvocation"]
+                 and facts["rootIdentity"] == self.baseline["readback"]["rootIdentity"]
+                 and facts["generation"]["instance"] != self.baseline["readback"]["generation"]["instance"],
+                 "update-credential-current-not-replaced")
+        self.readback_sha = sha(encoded(facts))
+
+    def adopt_root(self):
+        path = Path("/Users/runner/Library/Application Support/dev.mobile-release-kit.desktop")
+        self.root_parent = open_directory(path.parent)
+        self.root_parent_identity = full9(os.fstat(self.root_parent))[:5]
+        self.root_fd = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.root_parent)
+        self.root_identity = full9(os.fstat(self.root_fd))[:5]
+        need(self.root_identity == tuple(self.baseline["sentinel"]["parentIdentity"]), "update-credential-only-baseline-owned-root")
+        self.sentinel_name = "mrk-update-preservation-" + self.request["credentialContext"]["runId"] + "-" + self.request["credentialContext"]["runAttempt"] + ".txt"
+        self.sentinel_body = self.read(path / self.sentinel_name, 4096)
+        need(self.sentinel_body == self.update.SENTINEL, "update-credential-sentinel-bytes")
+        info = self.held[path / self.sentinel_name][3]
+        # helper.signature has nlink BEFORE uid/gid, unlike this reader's full9.
+        signature = [info[0], info[1], info[2], info[5], info[3], info[4], info[6], info[7], info[8]]
+        need(signature == self.baseline["sentinel"]["identity"], "update-credential-original-sentinel-identity")
+
+    def root_post(self):
+        need(self.root_fd is not None and self.root_parent is not None
+             and full9(os.fstat(self.root_parent))[:5] == self.root_parent_identity
+             and full9(os.fstat(self.root_fd))[:5] == self.root_identity
+             == full9(os.stat("dev.mobile-release-kit.desktop", dir_fd=self.root_parent, follow_symlinks=False))[:5],
+             "update-credential-owned-root-held-named-post")
+
+    def leaf_snapshot(self, parent, name):
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        primary = None
+        try:
+            body, identity, digest = original_body(fd, 32768, collect=True)
+            info = os.fstat(fd)
+            need(full9(os.stat(name, dir_fd=parent, follow_symlinks=False)) == identity
+                 and info.st_flags == 0 and stat.S_IMODE(info.st_mode) == 0o600
+                 and info.st_uid == os.getuid() and info.st_gid == os.getgid(), "update-credential-owned-vault-leaf")
+            return {"facts": self.update.credential_facts(info), "bytes": len(body), "sha256": digest}
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            originals, fd = (fd,), None
+            close_error = None
+            for item in originals:
+                if item is not None:
+                    try: os.close(item)
+                    except BaseException:
+                        if primary is not None:
+                            primary.add_note("update-credential-leaf-secondary-close")
+                        elif close_error is None:
+                            close_error = Refused("update-credential-leaf-close")
+                        else:
+                            close_error.add_note("update-credential-leaf-secondary-close")
+            if close_error is not None: raise close_error from None
+
+    def snapshot(self, *, records, absent=False):
+        self.phase.clock.check(); self.root_post()
+        root_before = self.update.credential_facts(os.fstat(self.root_fd))
+        self.update.credential_fact_values(root_before, directory=True)
+        root_names = set(os.listdir(self.root_fd))
+        need(root_names == ({self.sentinel_name} if absent else {self.sentinel_name, "credential-vault-v1"}),
+             "update-credential-exact-root-transition")
+        sentinel = self.leaf_snapshot(self.root_fd, self.sentinel_name)
+        need(sentinel["sha256"] == sha(self.update.SENTINEL) and sentinel["bytes"] == len(self.update.SENTINEL),
+             "update-credential-original-sentinel-snapshot")
+        vault_value = None
+        if not absent:
+            vault = os.open("credential-vault-v1", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.root_fd)
+            primary = None
+            try:
+                directory = self.update.credential_facts(os.fstat(vault))
+                names = set(os.listdir(vault))
+                need(3 <= len(names) <= 4, "update-credential-fixed-vault-count")
+                files = {name: self.leaf_snapshot(vault, name) for name in sorted(names)}
+                need(directory == self.update.credential_facts(os.fstat(vault)) == self.update.credential_facts(
+                     os.stat("credential-vault-v1", dir_fd=self.root_fd, follow_symlinks=False)) and set(os.listdir(vault)) == names,
+                     "update-credential-original-vault-snapshot-post")
+                vault_value = {"directory": directory, "files": files}
+            except BaseException as error:
+                primary = error
+                raise
+            finally:
+                originals, vault = (vault,), None
+                close_error = None
+                for item in originals:
+                    if item is not None:
+                        try: os.close(item)
+                        except BaseException:
+                            if primary is not None:
+                                primary.add_note("update-credential-vault-secondary-close")
+                            elif close_error is None:
+                                close_error = Refused("update-credential-vault-close")
+                            else:
+                                close_error.add_note("update-credential-vault-secondary-close")
+                if close_error is not None: raise close_error from None
+        state = {"root": root_before, "sentinel": sentinel, "vault": vault_value}
+        need(root_before == self.update.credential_facts(os.fstat(self.root_fd)) and set(os.listdir(self.root_fd)) == root_names,
+             "update-credential-original-root-snapshot-post")
+        if not absent: self.update.credential_state_data(state, self.baseline["sentinel"], records=records)
+        self.root_post(); self.check(); self.phase.clock.check()
+        return state
+
+    def check(self):
+        self.phase.clock.check()
+        for path in self.held: self.check_one(path)
+        for name, module in self.modules.items():
+            need(sys.modules.get(name) is module, "update-credential-owned-module-post")
+        if self.root_fd is not None: self.root_post()
+        self.phase.clock.check()
+
+    def ui_call(self, role, argv, seconds, limit=1024 * 1024):
+        need(role in ("verify-generated-runner", "generated-runner-entitlements", "one-admitted-ui-test"),
+             "update-credential-existing-runner-role")
+        self.check()
+        environment = self.phase.environment
+        changed = dict(environment, **{CREDENTIAL_INPUT_ENV: str(self.normal / (self.stem + ".input.json")),
+            CREDENTIAL_INPUT_SHA_ENV: self.input_sha,
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": self.application})
+        self.phase.environment = changed
+        try: original = self.phase.call(role, argv, seconds, limit)
+        finally: self.phase.environment = environment
+        self.check()
+        return original
+
+    def close(self):
+        need(not self.closed, "update-credential-close-once")
+        self.closed = True
+        errors = []
+        # Consume slots BEFORE the syscall; a failed close is not retried.
+        for path in tuple(self.held):
+            fd, parent, *_ = self.held.pop(path)
+            for item in (fd, parent):
+                try: os.close(item)
+                except BaseException as error: errors.append(error)
+        for slot in ("root_fd", "root_parent"):
+            item = getattr(self, slot); setattr(self, slot, None)
+            if item is not None:
+                try: os.close(item)
+                except BaseException as error: errors.append(error)
+        for name, module in tuple(self.modules.items()):
+            self.modules.pop(name)
+            if sys.modules.get(name) is module: del sys.modules[name]
+            else: errors.append(Refused("update-credential-module-custody-lost"))
+        if errors:
+            primary = errors[0]
+            for _ in errors[1:]: primary.add_note("update-credential-secondary-consuming-close")
+            raise primary
+
+    def __enter__(self):
+        try: self.baseline_inputs(); self.check(); return self
+        except BaseException as error:
+            try: self.close()
+            except BaseException as close_error:
+                error.add_note("update-credential-consuming-close")
+                for note in getattr(close_error, "__notes__", ()):
+                    error.add_note(note)
+            raise
+
+    def __exit__(self, kind, error, traceback):
+        if kind is None:
+            try: self.check()
+            except BaseException as primary:
+                try: self.close()
+                except BaseException as close_error:
+                    primary.add_note("update-credential-consuming-close")
+                    for note in getattr(close_error, "__notes__", ()):
+                        primary.add_note(note)
+                raise
+            self.close()
+        else:
+            try: self.close()
+            except BaseException as close_error:
+                error.add_note("update-credential-consuming-close")
+                for note in getattr(close_error, "__notes__", ()):
+                    error.add_note(note)
+        return False
+
+
+def execute_credential_update_phase(phase, request, source, file_limit):
+    segment, mode, result = request["credentialUpdate"], request["phase"], request["result"]
+    need(mode in ("test", "summary") and segment in CREDENTIAL_UPDATE_SELECTIONS, "update-credential-fixed-phase")
+    normal_before = normal_source_state(phase, source)
+    source_before = credential_source_state(phase, source)
+    final = None
+    with CredentialUpdateInputs(phase, request, source, source_before, normal_before) as inputs:
+        if mode == "test":
+            initial = inputs.snapshot(records=1, absent=segment == "p0-bootstrap")
+            if segment == "p1-resume":
+                need(initial == inputs.bootstrap["state"], "update-credential-installed-handoff-unchanged")
+            binding = {"schemaVersion": 1, "scope": inputs.update.CREDENTIAL_SCOPE, "segment": segment,
+                "sourceCommit": source, "applicationSourceCommit": inputs.application, "target": request["target"],
+                "runId": request["credentialContext"]["runId"], "runAttempt": request["credentialContext"]["runAttempt"],
+                "baselineReceiptSha256": inputs.baseline_sha, "nominationSha256": inputs.baseline["nominationSha256"],
+                "helperSha256": inputs.helper_sha, "helperBytes": inputs.helper_bytes, "state": initial}
+            input_body = encoded(binding) + b"\n"
+            exclusive_output(inputs.normal / (inputs.stem + ".input.json"), input_body, 16384)
+            inputs.input_sha = sha(inputs.read(inputs.normal / (inputs.stem + ".input.json"), 16384))
+            need(inputs.input_sha == sha(input_body), "update-credential-original-input-publication")
+            original, products = run_admitted_test(inputs.ui_call, request["derived"], result, request["methods"],
+                request["allowance"], request["timeout"], target=request["target"], credential_segment=segment)
+            if original.returncode != 0: raise NativeQueryFailure(original)
+            marker = credential_update_marker(original.stdout, segment=segment, source=source, application=inputs.application)
+            state = inputs.snapshot(records=1 if segment == "p0-bootstrap" else 0)
+            need(marker["state"] == state, "update-credential-independent-native-store-post")
+            if segment == "p1-resume":
+                need(state["sentinel"] == initial["sentinel"] and state["root"][:5] == initial["root"][:5]
+                     and all(state["vault"]["files"][name] == initial["vault"]["files"][name]
+                             for name in inputs.update.CREDENTIAL_CONTROLS), "update-credential-only-owned-record-deleted")
+            exclusive_output(inputs.normal / (inputs.stem + ".stdout"), original.stdout, 1024 * 1024, allow_empty=True)
+            exclusive_output(inputs.normal / (inputs.stem + ".stderr"), original.stderr, 1024 * 1024, allow_empty=True)
+            extra = {"marker": marker, "runnerAdmission": products, "testStdoutSha256": sha(original.stdout),
+                "testStderrSha256": sha(original.stderr), "inputSha256": inputs.input_sha}
+            receipt = inputs.normal / (inputs.stem + "-test.runner-admission.json")
+        else:
+            inputs.status(inputs.normal / (inputs.stem + "-test.status"))
+            prior_body = inputs.read(inputs.normal / (inputs.stem + "-test.runner-admission.json"), 32768)
+            prior = document(prior_body)
+            need(type(prior) is dict and prior.get("scope") == inputs.update.CREDENTIAL_SCOPE and prior.get("phase") == "test"
+                 and prior.get("sourceCommit") == source and prior.get("applicationSourceCommit") == inputs.application
+                 and prior.get("segment") == segment and prior.get("target") == request["target"]
+                 and prior.get("baselineReceiptSha256") == inputs.baseline_sha
+                 and prior.get("nominationSha256") == inputs.baseline["nominationSha256"]
+                 and prior.get("helperSha256") == inputs.helper_sha and prior.get("helperBytes") == inputs.helper_bytes
+                 and all(prior.get(k) is True for k in ("sourcePrePostMatched", "inputPrePostMatched", "inputOriginalClosesCompleted", "originalCommandReturned"))
+                 and prior.get("originalReturncode") == 0 and type(prior.get("runnerAdmission")) is dict
+                 and all(prior["runnerAdmission"].get(k) is True for k in ("originalClosesCompleted", "originalProductsPrePostMatched")),
+                 "update-credential-genuine-original-test-admission")
+            stdout = inputs.read(inputs.normal / (inputs.stem + ".stdout"), 1024 * 1024)
+            stderr = inputs.read(inputs.normal / (inputs.stem + ".stderr"), 1024 * 1024)
+            need(sha(stdout) == prior.get("testStdoutSha256") and sha(stderr) == prior.get("testStderrSha256"),
+                 "update-credential-exact-original-test-output")
+            marker = credential_update_marker(stdout, segment=segment, source=source, application=inputs.application)
+            state = inputs.snapshot(records=1 if segment == "p0-bootstrap" else 0)
+            need(marker == prior.get("marker") and marker["state"] == state, "update-credential-test-state-unchanged-before-summary")
+            observed = os.stat(result, follow_symlinks=False)
+            need(stat.S_ISDIR(observed.st_mode) and observed.st_uid == os.getuid() and not observed.st_mode & 0o022,
+                 "update-credential-native-summary-directory")
+            original = phase.call("normal-ui-summary", ["/usr/bin/xcrun", "xcresulttool", "get", "test-results", "summary",
+                "--path", str(result), "--compact"], 30, 262144)
+            if original.returncode != 0: raise NativeQueryFailure(original)
+            counts = credential_update_summary(original.stdout)
+            extra = {"testAdmissionSha256": sha(prior_body), "nativeSummarySha256": sha(original.stdout), "testCounts": counts, "marker": marker}
+            receipt = inputs.normal / (inputs.stem + "-summary.command-admission.json")
+            final = {"schemaVersion": 1, "scope": inputs.update.CREDENTIAL_SCOPE, "segment": segment, "sourceCommit": source,
+                "applicationSourceCommit": inputs.application, "target": request["target"], "runId": request["credentialContext"]["runId"],
+                "runAttempt": request["credentialContext"]["runAttempt"], "nominationSha256": inputs.baseline["nominationSha256"],
+                "baselineReceiptSha256": inputs.baseline_sha, "helperSha256": inputs.helper_sha, "helperBytes": inputs.helper_bytes,
+                "state": state, "recordRevision": 1, "testAdmissionSha256": sha(prior_body), "nativeSummarySha256": sha(original.stdout),
+                "fixtureOriginalClosesCompleted": True, "normalQuitObserved": True, "gateReleased": True,
+                "originalCommandsSettled": True, "productReady": False}
+        inputs.check()
+        need(normal_source_state(phase, source) == normal_before and credential_source_state(phase, source) == source_before,
+             "update-credential-source-pre-post")
+        facts = {**extra, "schemaVersion": 1, "scope": inputs.update.CREDENTIAL_SCOPE, "phase": mode, "segment": segment,
+            "sourceCommit": source, "applicationSourceCommit": inputs.application, "target": request["target"],
+            "runId": request["credentialContext"]["runId"], "runAttempt": request["credentialContext"]["runAttempt"],
+            "baselineReceiptSha256": inputs.baseline_sha, "nominationSha256": inputs.baseline["nominationSha256"],
+            "helperSha256": inputs.helper_sha, "helperBytes": inputs.helper_bytes, "applicationReadbackSha256": inputs.readback_sha,
+            "sourcePrePostMatched": True, "inputPrePostMatched": True, "originalCommandReturned": True, "originalReturncode": original.returncode}
+    facts.update(inputOriginalClosesCompleted=True, commands=phase.records, fileLimitBytes=list(file_limit),
+        phaseClock=phase.clock.before_publication(), receiptPolicy="exclusive0600-readback-consuming-close")
+    receipt_body = encoded(facts) + b"\n"
+    exclusive_output(receipt, receipt_body, 32768); phase.clock.check()
+    if final is not None:
+        final["summaryAdmissionSha256"] = sha(receipt_body)
+        exclusive_output(request["derived"].parent / ("update-" + segment + ".result.json"), encoded(final) + b"\n", 16384)
+        phase.clock.check()  # Real receipt originals consumed; outer status is saved separately by the workflow.
+    return original
+
+
 def execute_normal_phase(phase, request, source, file_limit):
     """Original owner/source checks shared by fixed build, test and summary."""
+    if request.get("credentialUpdate") is not None:
+        return execute_credential_update_phase(phase, request, source, file_limit)
     if request.get("outputData") is True:
         return execute_output_data_phase(phase, request, source, file_limit)
     if request.get("androidPositive") is True:
@@ -3490,8 +4078,6 @@ def classify_normal_admission_failure(body):
         return unavailable
 
 
-
-
 FIXED_RESUME_WORKFLOW = '.github/workflows/desktop-macos-fixed-carrier-resume.yml'
 FIXED_RESUME_SCOPE = 'fixed-ce644-arm-carrier-ios-unsigned-only'
 FIXED_RESUME_SOURCE = 'ce644711fb6e2bea26182473441aac192d5638e1'
@@ -3612,6 +4198,20 @@ def normal_context(request, *, diagnostics=None):
                                 ANDROID_ATTEMPT_ENV: env["GITHUB_RUN_ATTEMPT"]})
         else:
             environment.update({IOS_PENDING_RUN: env["GITHUB_RUN_ID"], IOS_PENDING_ATTEMPT: env["GITHUB_RUN_ATTEMPT"]})
+    if request.get("credentialUpdate") is not None:
+        env = os.environ
+        need(sys.version_info[:3] == (3, 14, 7) and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
+             and request["credentialUpdate"] in CREDENTIAL_UPDATE_SELECTIONS and env.get("GITHUB_SHA") == source
+             == env.get("GITHUB_WORKFLOW_SHA") and env.get("GITHUB_REF") == CREDENTIAL_UPDATE_REF
+             and env.get("GITHUB_REPOSITORY") == "Apdelrahman1911/mobile-release-kit"
+             and env.get("GITHUB_EVENT_NAME") == "push" and env.get("RUNNER_ENVIRONMENT") == "github-hosted"
+             and env.get("GITHUB_WORKSPACE") == str(root) and env.get("RUNNER_OS") == "macOS"
+             and env.get("RUNNER_ARCH") == ("ARM64" if request["target"] == ARM_TARGET else "X64")
+             and env.get("GITHUB_WORKFLOW_REF") == "Apdelrahman1911/mobile-release-kit/" + CREDENTIAL_UPDATE_WORKFLOW + "@" + CREDENTIAL_UPDATE_REF
+             and all(re.fullmatch(r"[1-9][0-9]{0,19}", env.get(k, "")) for k in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
+             "update-credential-fixed-source-route")
+        request["credentialContext"] = dict(source=source, workflowSource=source, target=request["target"],
+            runId=env["GITHUB_RUN_ID"], runAttempt=env["GITHUB_RUN_ATTEMPT"])
     if diagnostics is not None:
         diagnostics["hostVersion"] = host_version
     return root, source, environment, file_limit
@@ -4223,7 +4823,7 @@ def main():
         owner = load_normal_owner(root)
         stage = "phase"
         phase = (NormalPhase(owner, environment, root, clock, retain_nonzero=True)
-                 if request.get("outputData") is True or request.get("androidPositive") is True or request.get("iosUnsigned") is True or request.get("iosPending") is True else NormalPhase(owner, environment, root, clock))
+                 if request.get("credentialUpdate") is not None or request.get("outputData") is True or request.get("androidPositive") is True or request.get("iosUnsigned") is True or request.get("iosPending") is True else NormalPhase(owner, environment, root, clock))
         records = phase.records
         try:
             stage = "execute"
@@ -4278,6 +4878,11 @@ def main():
             except BaseException:
                 pass
             return retained_intel_build.returncode  # Query/final-clock errors cannot replace original70.
+        if request is not None and request.get("credentialUpdate") is not None:
+            # This closed fixture can never repair or replace a first admitted native nonzero.
+            if phase is not None and phase.first_nonzero is not None:
+                return phase.first_nonzero.returncode
+            return 1
         if request is not None and (request.get("iosUnsigned") is True or request.get("iosPending") is True):
             code = phase.first_nonzero.returncode if phase is not None and phase.first_nonzero is not None else 1
             try:

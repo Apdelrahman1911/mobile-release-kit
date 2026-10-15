@@ -478,7 +478,7 @@ def artifact_data(body, checkout, root, target):
         need(len(matched) == 1, "app-absence-cargo-one-target")
         row = matched[0]; target_row = row["target"]; profile = row.get("profile")
         package_root = checkout / "desktop/src-tauri"
-        need(row.get("package_id") == "path+" + package_root.as_uri() + "#mobile-release-kit-desktop@0.1.1"
+        need(row.get("package_id") == "path+" + package_root.as_uri() + "#mobile-release-kit-desktop@0.1.2"
              and row.get("manifest_path") == str(package_root / "Cargo.toml")
              and row.get("features") == ["macos-installed-app-absence-fixture"]
              and target_row.get("kind") == target_row.get("crate_types") == kind

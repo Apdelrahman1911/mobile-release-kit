@@ -248,6 +248,27 @@ class FixedCarrierResumeData(unittest.TestCase):
             self.assertEqual(len(bounded['frames']), 8)
             self.assertTrue(bounded['truncated'])
             self.assertNotIn(secret.encode(), m.canonical(bounded))
+        # Mixed actual SOURCE filenames: preserve caller routing as well as
+        # the latest visited refusal frames, never an unscanned deepest claim.
+        routed = {}
+        caller_path = str(ROOT / 'desktop/tools/macos_fixed_carrier_resume.py')
+        refusal_path = str(ROOT / 'desktop/tools/macos_e2_native_fixture.py')
+        exec(compile("def refusal(n):\n    if n: return refusal(n-1)\n    raise RuntimeError('" + secret + "')\n",
+                     refusal_path, 'exec'), routed)
+        exec(compile("\n" * 10 + "def caller(depth):\n    return refusal(depth)\n", caller_path, 'exec'), routed)
+        for depth in (10, 70):
+            try: routed['caller'](depth)
+            except RuntimeError as error:
+                retained = m.failure_location(error)
+                self.assertEqual(error.args, (secret,))
+            self.assertEqual(len(retained['frames']), 8)
+            self.assertTrue(retained['truncated'])
+            self.assertEqual(retained['frames'][0],
+                             {'source': 'desktop/tools/macos_fixed_carrier_resume.py', 'line': 12})
+            self.assertEqual(retained['frames'][-1],
+                             {'source': 'desktop/tools/macos_e2_native_fixture.py', 'line': 3 if depth == 10 else 2})
+            self.assertNotIn(secret.encode(), m.canonical(retained))
+            self.assertNotIn(str(ROOT).encode(), m.canonical(retained))
         with mock.patch.object(m, 'Path', side_effect=RuntimeError(secret)):
             self.assertEqual(m.failure_location(primary), m.unavailable_location())
 
@@ -638,6 +659,264 @@ class FixedCarrierResumeData(unittest.TestCase):
                 with mock.patch.object(m.os, "close", side_effect=failed_close), self.assertRaises(m.Refused) as caught:
                     m.fixed_resume_context(request, source)
                 self.assertEqual(caught.exception.args, ("fixed-resume-native-receipt-join",))
+
+    def test_dormant_p1_hybrids_and_original_release_readback_remain_closed(self):
+        # Passive actual SOURCE units + ordinary API ports only. No native
+        # signature/Installer/Keychain/Xcode operation or qualification here.
+        import ast
+        from collections import namedtuple
+        import contextlib
+        import hashlib
+        import os
+        import platform
+        import pwd
+        import re
+        import resource
+        import stat
+        import types
+        m, r = ADAPTER, RUNNER
+        path = ROOT / "desktop/tools/stage_macos_installed.py"
+        tree = ast.parse(path.read_bytes())
+        wanted = {"Refused", "need", "sha", "digest", "canonical", "pairs", "decode", "mac_target", "command_target",
+                  "source_build_selection", "selected_build", "build_release_data", "safe_path", "directories",
+                  "maintenance_hex", "maintenance_map", "maintenance_json", "maintenance_release_data",
+                  "maintenance_producer_data", "observation_inventory_bytes", "original_release_readback_selection",
+                  "original_release_readback_members", "observation_command"}
+        definitions = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in wanted]
+        self.assertEqual({n.name for n in definitions}, wanted)
+        assignments = {t.id: n for n in tree.body if isinstance(n, ast.Assign)
+                       for t in n.targets if isinstance(t, ast.Name)}
+        constants = {n.id for definition in definitions for n in ast.walk(definition)
+                     if isinstance(n, ast.Name) and n.id.isupper()} - {"PACKAGE_VERSION", "RELEASE"}
+        constants.update({"APP_BINARY", "ARM_TARGET", "BUNDLE_ID", "CURRENT_PROTOCOL", "ENTRY_BINARY",
+                          "INSTALLATION_INVENTORY_NAME", "INTEL_TARGET", "PACKAGE_ID", "PAYLOAD_INFO", "VAULT_HELPER"})
+        constants.add("BuildSelection")
+        pending = list(constants)
+        while pending:
+            name = pending.pop()
+            if name not in assignments:
+                continue
+            for node in ast.walk(assignments[name].value):
+                if isinstance(node, ast.Call):
+                    self.assertIsInstance(node.func, ast.Name)
+                    self.assertIn(node.func.id, {"Path", "namedtuple"})
+                if isinstance(node, ast.Name) and node.id.isupper() and node.id not in constants:
+                    constants.add(node.id); pending.append(node.id)
+        namespace = dict(__file__=str(path), __name__="stagea_actual_readback_data", Path=Path, namedtuple=namedtuple,
+                         hashlib=hashlib, json=json, re=re, os=os, stat=stat)
+        selected = [n for n in tree.body if isinstance(n, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id in constants for t in n.targets)] + definitions
+        exec(compile(ast.fix_missing_locations(ast.Module(body=selected, type_ignores=[])), str(path), "exec"), namespace)
+        stage = types.SimpleNamespace(**namespace)
+        current = stage.build_release_data((ROOT / "desktop/macos-installed-inputs/build-release.json").read_bytes())
+        namespace.update(PACKAGE_VERSION=current["packageVersion"], RELEASE=current["release"])
+        self.assertEqual(stage.source_build_selection().package_version, "0.1.2")
+        manifest = "a" * 64
+        paths = {"app/" + stage.ENTRY_BINARY, "app/" + stage.APP_BINARY, "app/" + stage.VAULT_HELPER,
+                 "app/Contents/Info.plist", "app/" + stage.PAYLOAD_INFO, "runtime/python/bin/python3", "runtime/manifest.json"}
+        executable = {"app/" + stage.ENTRY_BINARY, "app/" + stage.APP_BINARY, "app/" + stage.VAULT_HELPER,
+                      "runtime/python/bin/python3"}
+        inventory = stage.canonical(dict(schemaVersion=1, release=m.ORIGIN["release"], runtimeManifestSha256=manifest,
+            files=[dict(path=p, sha256=manifest if p == "runtime/manifest.json" else "b" * 64,
+                        size=1, executable=p in executable) for p in sorted(paths)]))
+        policy = dict(schemaVersion=1, kind="mrk-macos-developer-id-code-policy-v1", teamIdentifier="ABCDE12345",
+                      leafCertificateSha1="c" * 40, leafCertificateSha256="d" * 64, hardenedRuntime=True, entitlements="empty")
+        policy_sha = m.sha(json.dumps(policy, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("ascii"))
+        release = dict(profile="fixed-macos26-arm64-maintenance-v2", packageIdentifier=stage.PACKAGE_ID,
+                       bundleIdentifier=stage.BUNDLE_ID, packageVersion=m.ORIGIN["packageVersion"], release=m.ORIGIN["release"],
+                       sourceCommit=m.ORIGIN["source"], protocolSha256=stage.CURRENT_PROTOCOL,
+                       runtimeManifestSha256=manifest, inventorySha256=m.sha(inventory), signingPolicySha256=policy_sha,
+                       packageSha256=m.ORIGIN["package"]["sha256"])
+        descriptor = stage.canonical(dict(schemaVersion=2, kind="mrk-macos-install-producer-v2",
+            domain="MobileReleaseKit-package-producer-v2", target=stage.ARM_TARGET,
+            releaseSet=dict(schemaVersion=2, current=release, acceptedPredecessors=[]),
+            signingPolicies=[dict(sha256=policy_sha, policy=policy)]))
+        producer = stage.maintenance_producer_data(descriptor, target=stage.ARM_TARGET)
+        signed = b"synthetic-signature-not-native-evidence"
+        mounted = {k: copy.deepcopy(m.ORIGIN[k]) for k in ("source", "tree", "runId", "runAttempt", "jobId", "artifactId",
+                                                         "artifactSha256", "package", "descriptor", "signature")}
+        mounted.update(target=stage.ARM_TARGET, release=release,
+                       inventory=dict(name=stage.INSTALLATION_INVENTORY_NAME, bytes=len(inventory), sha256=m.sha(inventory)),
+                       signingPolicy=dict(sha256=policy_sha, policy=policy))
+        # Explicit synthetic nomination for member bytes only. Fixed artifact
+        # metadata remains real SOURCE; this does not claim a native signature.
+        with mock.patch.dict(m.ORIGIN, descriptor=dict(name="producer.json", bytes=len(descriptor), sha256=m.sha(descriptor)),
+                             signature=dict(name="producer.sig", bytes=len(signed), sha256=m.sha(signed))):
+            mounted["descriptor"] = copy.deepcopy(m.ORIGIN["descriptor"])
+            mounted["signature"] = copy.deepcopy(m.ORIGIN["signature"])
+            record = m.original_release_readback_data(mounted, inventory, target=stage.ARM_TARGET)
+            for key in ("source", "artifactId", "artifactSha256"):
+                changed = copy.deepcopy(mounted); changed[key] = "e" * 40
+                with self.subTest(provenance=key), self.assertRaises(m.Refused):
+                    m.original_release_readback_data(changed, inventory, target=stage.ARM_TARGET)
+        self.assertEqual(set(record), {"schemaVersion", "purpose", "target", "release", "descriptor", "signature", "inventory"})
+        args = SimpleNamespace(target=stage.ARM_TARGET, expected_source=release["sourceCommit"],
+                               expected_inventory=release["inventorySha256"], expected_manifest=manifest,
+                               expected_package=release["packageSha256"], input=Path("/synthetic-readback-input"), request_id="f" * 32)
+        selection = stage.original_release_readback_selection(args, record)
+        self.assertEqual(selection.package_version, "0.1.1")
+        self.assertEqual(stage.source_build_selection().package_version, "0.1.2")
+        self.assertEqual(len(stage.observation_inventory_bytes(inventory, args.expected_inventory, manifest, selection=selection)), len(paths))
+        with self.assertRaises(stage.Refused):
+            stage.observation_inventory_bytes(inventory, args.expected_inventory, manifest)
+        stage.original_release_readback_members(record, producer, descriptor, signed, inventory)
+        for key, value in (("schemaVersion", True), ("purpose", "other"), ("target", stage.INTEL_TARGET), ("extra", False)):
+            changed = copy.deepcopy(record); changed[key] = value
+            with self.subTest(record=key), self.assertRaises(stage.Refused):
+                stage.original_release_readback_selection(args, changed)
+        for key in ("descriptor", "signature", "inventory"):
+            for field, value in (("bytes", True), ("bytes", 0), ("sha256", "0" * 63), ("extra", False)):
+                changed = copy.deepcopy(record); changed[key][field] = value
+                with self.subTest(member=key, field=field), self.assertRaises(stage.Refused):
+                    stage.original_release_readback_selection(args, changed)
+        for key in ("descriptor", "signature", "inventory"):
+            changed = copy.deepcopy(record); changed[key]["sha256"] = "0" * 64
+            with self.subTest(member_digest=key), self.assertRaises(stage.Refused):
+                stage.original_release_readback_members(changed, producer, descriptor, signed, inventory)
+        changed = copy.deepcopy(record); changed["release"]["packageVersion"] = "bad-version"
+        with self.assertRaises(stage.Refused): stage.original_release_readback_selection(args, changed)
+        for field in ("expected_source", "expected_inventory", "expected_manifest", "expected_package"):
+            altered = copy.copy(args); setattr(altered, field, "e" * (40 if field == "expected_source" else 64))
+            with self.subTest(argument=field), self.assertRaises(stage.Refused):
+                stage.original_release_readback_selection(altered, record)
+        for bodies in ((descriptor + b"x", signed, inventory), (descriptor, signed + b"x", inventory),
+                       (descriptor, signed, inventory + b"x")):
+            with self.assertRaises(stage.Refused): stage.original_release_readback_members(record, producer, *bodies)
+        changed = copy.deepcopy(producer); changed["releaseSet"]["current"]["packageVersion"] = "0.1.2"
+        with self.assertRaises(stage.Refused): stage.original_release_readback_members(record, changed, descriptor, signed, inventory)
+        events = []
+        class ReachedFreshGate(Exception): pass
+        result = dict(invocation="1" * 32, requestId=args.request_id, action="fresh-install")
+        state = dict(invocation=result["invocation"], requestId=args.request_id, intendedAction="fresh-install", retained=[], previousEvidence=[])
+        @contextlib.contextmanager
+        def parent_port(_):
+            events.append("parent"); yield 90, "fixture"
+        @contextlib.contextmanager
+        def directory_port(*_):
+            yield 91, dict(device=1)
+        def roster_port(*_):
+            events.append("fresh-gate"); raise ReachedFreshGate()
+        def producer_port(*_):
+            events.append("producer"); return producer, descriptor, signed
+        def result_port(*_):
+            events.append("installer-result"); return result, {}
+        def read_port(*_):
+            events.append("inventory"); return inventory
+        ports = dict(installer_result_readback=result_port, maintenance_producer_inputs=producer_port, read=read_port,
+                     installer_channel_parent=parent_port, maintenance_directory=directory_port,
+                     maintenance_metadata_leaf=lambda *_: b"synthetic-already-parsed-state",
+                     maintenance_state_data=lambda *_: state, maintenance_history_data=lambda *_: (state, {result["invocation"]: {}}),
+                     maintenance_roster_data=roster_port)
+        with mock.patch.dict(namespace, ports):
+            with self.assertRaises(ReachedFreshGate): stage.observation_command(args, original_release_readback=record)
+            self.assertEqual(events, ["installer-result", "producer", "inventory", "parent", "fresh-gate"])
+            for keyword, value in (("expected_previous", dict(invocation="2" * 32, sha256="c" * 64)),
+                                   ("expected_restore_previous", dict(invocation="2" * 32, sha256="c" * 64)),
+                                   ("nominated_update_predecessor", {}), ("expected_update_previous", {}), ("update_facts", {})):
+                events.clear()
+                with self.subTest(purpose=keyword), self.assertRaises(stage.Refused):
+                    stage.observation_command(args, original_release_readback=record, **{keyword: value})
+                self.assertEqual(events, [])
+            for key, value in (("action", "update"),):
+                with mock.patch.dict(result, {key: value}), self.assertRaises(stage.Refused):
+                    stage.observation_command(args, original_release_readback=record)
+            for key, value in (("intendedAction", "update"), ("retained", [{}]), ("previousEvidence", [dict(invocation="2" * 32)])):
+                with mock.patch.dict(state, {key: value}), self.assertRaises(stage.Refused):
+                    stage.observation_command(args, original_release_readback=record)
+        # Actual two runner hybrids; native/platform/owner checks use ordinary
+        # synthetic API ports and are fully restored before filesystem cleanup.
+        source = "3" * 40
+        root = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
+        derived = Path("/Users/runner/work/_temp/mrk-macos-installed.ABCDEFGH/normal-ui/DerivedData")
+        env = dict(PATH="/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", USER="runner", LOGNAME="runner",
+                   TMPDIR=str(derived.parent / "tmp") + "/", LANG="en_US.UTF-8", LC_ALL="en_US.UTF-8", TZ="UTC",
+                   DEVELOPER_DIR=r.DEVELOPER, TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=r.normal_target_data(r.ARM_TARGET)[1],
+                   TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=source, TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=source,
+                   GITHUB_SHA=source, GITHUB_WORKFLOW_SHA=source, GITHUB_REPOSITORY="Apdelrahman1911/mobile-release-kit",
+                   GITHUB_EVENT_NAME="push", RUNNER_ENVIRONMENT="github-hosted", GITHUB_WORKSPACE=str(root),
+                   RUNNER_OS="macOS", RUNNER_ARCH="ARM64", GITHUB_RUN_ID="1", GITHUB_RUN_ATTEMPT="1")
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, env, clear=True))
+            stack.enter_context(mock.patch.object(r, "__file__", str(root / "desktop/tools/macos_normal_ui_runner.py")))
+            stack.enter_context(mock.patch.object(Path, "cwd", return_value=root))
+            stack.enter_context(mock.patch.object(r.sys, "platform", "darwin"))
+            stack.enter_context(mock.patch.object(platform, "machine", return_value="arm64"))
+            stack.enter_context(mock.patch.object(platform, "mac_ver", return_value=("26.1", (), "arm64")))
+            stack.enter_context(mock.patch.object(r.sys, "version_info", (3, 14, 7)))
+            stack.enter_context(mock.patch.object(r.sys, "flags", SimpleNamespace(isolated=1, no_site=1)))
+            stack.enter_context(mock.patch.object(r.sys, "dont_write_bytecode", True))
+            for name, value in (("getuid", 501), ("geteuid", 501), ("getgid", 20), ("getegid", 20)):
+                stack.enter_context(mock.patch.object(os, name, return_value=value))
+            stack.enter_context(mock.patch.object(pwd, "getpwuid", return_value=SimpleNamespace(pw_uid=501, pw_gid=20, pw_name="runner", pw_dir="/Users/runner")))
+            stack.enter_context(mock.patch.object(os, "stat", return_value=SimpleNamespace(st_uid=501)))
+            stack.enter_context(mock.patch.object(r, "normal_file_limit", return_value=(1, 1)))
+            fixed = stack.enter_context(mock.patch.object(r, "fixed_resume_context", return_value={r.FIXED_RESUME_ENV: r.FIXED_RESUME_SCOPE}))
+            request = dict(target=r.ARM_TARGET, phase="build", derived=derived)
+            self.assertEqual(r.normal_context(request)[1], source)
+            fixed.assert_not_called()
+            with mock.patch.dict(os.environ, TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=m.ORIGIN["source"]):
+                with self.assertRaises(r.Refused): r.normal_context(request)
+            with mock.patch.dict(os.environ, {r.FIXED_RESUME_ENV: r.FIXED_RESUME_SCOPE,
+                                             "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": m.ORIGIN["source"],
+                                             "GITHUB_REF": "refs/heads/verify/desktop-macos-installed"}):
+                self.assertEqual(r.normal_context(request)[2][r.FIXED_RESUME_ENV], r.FIXED_RESUME_SCOPE)
+                mixed = dict(request, credentialUpdate="p0-bootstrap")
+                with self.assertRaises(r.Refused): r.normal_context(mixed)
+            with mock.patch.dict(os.environ, GITHUB_REF=r.CREDENTIAL_UPDATE_REF,
+                                 GITHUB_WORKFLOW_REF="Apdelrahman1911/mobile-release-kit/" + r.CREDENTIAL_UPDATE_WORKFLOW + "@" + r.CREDENTIAL_UPDATE_REF):
+                update = dict(request, credentialUpdate="p0-bootstrap")
+                self.assertEqual(r.normal_context(update)[1], source)
+                self.assertEqual(update["credentialContext"]["source"], source)
+                with mock.patch.dict(os.environ, GITHUB_REF="refs/heads/verify/desktop-macos-installed"):
+                    with self.assertRaises(r.Refused): r.normal_context(dict(request, credentialUpdate="p1-resume"))
+        token = object()
+        with mock.patch.object(r, "execute_credential_update_phase", return_value=token) as delegated:
+            req = dict(credentialUpdate="p0-bootstrap")
+            self.assertIs(r.execute_normal_phase(None, req, source, (1, 1)), token)
+            delegated.assert_called_once_with(None, req, source, (1, 1))
+        with tempfile.TemporaryDirectory() as temporary:
+            result_dir = Path(temporary) / "test.xcresult"; result_dir.mkdir(mode=0o700)
+            original = SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+            phase = SimpleNamespace(environment={r.FIXED_RESUME_ENV: r.FIXED_RESUME_SCOPE}, records=[],
+                                    call=mock.Mock(return_value=original),
+                                    clock=SimpleNamespace(before_publication=lambda: {}, check=mock.Mock()))
+            request = dict(target=r.ARM_TARGET, phase="summary", derived=Path(temporary) / "DerivedData", result=result_dir)
+            with mock.patch.object(r, "normal_source_state", return_value={"source": source}), mock.patch.object(r, "exclusive_output") as output:
+                self.assertIs(r.execute_normal_phase(phase, request, source, (1, 1)), original)
+                facts = json.loads(output.call_args.args[1])
+                self.assertEqual(facts["applicationSourceCommit"], m.ORIGIN["source"])
+                self.assertTrue(facts["sourcePrePostMatched"])
+                self.assertFalse(facts["currentProductQualified"])
+                self.assertFalse(facts["p0Qualified"])
+                self.assertFalse(facts["intelQualified"])
+                phase.call.assert_called_once()
+                phase.clock.check.assert_called_once()
+            with mock.patch.object(r, "normal_source_state", side_effect=[{}, {"changed": True}]), mock.patch.object(r, "exclusive_output") as output:
+                with self.assertRaises(r.Refused): r.execute_normal_phase(phase, request, source, (1, 1))
+                output.assert_not_called()
+        swift = (ROOT / "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift").read_text()
+        self.assertEqual(swift.count("private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, updateP0Bootstrap }"), 1)
+        self.assertEqual(swift.count("case .fixedCarrierResume:"), 1)
+        self.assertEqual(swift.count("case .updateP0Bootstrap:"), 1)
+        picker = swift[swift.index("private func goToFolder("):swift.index("@MainActor private func nativeOpen(")]
+        self.assertEqual(picker.count('sheet.buttons.matching(identifier: "Cancel")'), 1)
+        self.assertNotIn("cancel.click()", picker)
+        self.assertLess(picker.index("path.hasPrefix"), picker.index('identifier: "Cancel"'))
+        self.assertLess(picker.index("cancel.isHittable"), picker.index('sheet.typeKey("g"'))
+        self.assertIn("pathField.value as? String == path", picker)
+        self.assertIn("owned", picker)
+        workflow = (ROOT / ".github/workflows/desktop-macos-installed.yml").read_text()
+        ordinary_if = workflow.splitlines()[23]
+        self.assertNotIn("github.ref == 'refs/heads/verify/desktop-macos-installed'", ordinary_if)
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-positive-update'", ordinary_if)
+        fixed_workflow = (ROOT / ".github/workflows/desktop-macos-fixed-carrier-resume.yml").read_text()
+        self.assertIn(m.sha((ROOT / "desktop/tools/macos_fixed_carrier_resume.py").read_bytes()), fixed_workflow)
+        pins = next(ast.literal_eval(n.value) for n in ast.parse((ROOT / "desktop/tools/macos_android_dependency_preparation.py").read_bytes()).body
+                    if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "PINS" for t in n.targets))
+        body = (ROOT / "desktop/tools/macos_normal_ui_runner.py").read_bytes()
+        self.assertEqual(pins["desktop/tools/macos_normal_ui_runner.py"], [len(body), m.sha(body)])
+        self.assertEqual(m.SOURCE_PINS["desktop/tools/stage_macos_installed.py"], (path.stat().st_size, m.sha(path.read_bytes())))
+
 
 
 if __name__ == "__main__":
