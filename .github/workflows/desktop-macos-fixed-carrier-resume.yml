@@ -22,8 +22,8 @@ jobs:
     env:
       MRK_MACOS_TARGET: aarch64-apple-darwin
       MRK_MACOS_HOSTED_JOB: github-hosted-macos26-arm64
-      MRK_FIXED_RESUME_BYTES: "109504"
-      MRK_FIXED_RESUME_SHA256: "4a9521f1a947cd32bf7689016906aacdabbdb50bf9badc30781802d4be7ac61c"
+      MRK_FIXED_RESUME_BYTES: "110030"
+      MRK_FIXED_RESUME_SHA256: "50efc27c7b72e3053417bf2cf38a15c3dfed09b01ad8797466daf1be8d0884db"
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

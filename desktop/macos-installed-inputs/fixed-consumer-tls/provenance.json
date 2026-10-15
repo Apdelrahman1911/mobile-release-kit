@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Fixed verification consumer TLS roots only; not product runtime/signing/Store trust",
+  "upstreamRepository": "https://github.com/certifi/python-certifi",
+  "upstreamCommit": "69494a764d0a08f90838d53d4b0fefd3e84045d6",
+  "upstreamCommitDate": "2026-10-14T10:23:17Z",
+  "upstreamPath": "certifi/cacert.pem",
+  "bundleBytes": 240216,
+  "bundleSha256": "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f",
+  "bundleGitBlob": "9a40f439e0d77f3733b76489ae3bb42eaaf021d6",
+  "license": "Mozilla Public License 2.0; exact upstream LICENSE alongside",
+  "unmodifiedCompleteBundle": true,
+  "tlsPolicy": "Verified original bytes via cadata; hostname/CERT_REQUIRED and TLS>=1.2; no system/environment/proxy fallback",
+  "documentation": "https://docs.python.org/3.14/library/ssl.html"
+}

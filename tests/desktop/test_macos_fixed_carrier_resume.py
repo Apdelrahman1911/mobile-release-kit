@@ -919,5 +919,55 @@ class FixedCarrierResumeData(unittest.TestCase):
 
 
 
+    def test_pinned_tls_roots_require_source_authentication_and_strict_tls(self):
+        m = ADAPTER
+        pem = (ROOT / m.TLS_CA_PATH).read_bytes()
+        self.assertEqual((len(pem), m.sha(pem)), (m.TLS_CA_BYTES, m.TLS_CA_SHA256))
+        class DataQuota:
+            def __init__(self, body=pem, failure=None):
+                self.body, self.failure, self.calls = body, failure, []
+            def call(self, book, role, path, limit, **kwargs):
+                self.calls.append((book, role, path, limit, kwargs))
+                if self.failure is not None:
+                    raise self.failure
+                return {"path": path}, self.body  # Explicit DATA port, not native custody.
+        def session(body=pem, failure=None):
+            value = m.Resume.__new__(m.Resume)
+            value.root, value.outer, value.quota = ROOT, object(), DataQuota(body, failure)
+            value.sources, value.ca_path, value.ca_sha = [], None, None
+            return value
+        with mock.patch.object(m.ssl, "get_default_verify_paths", side_effect=AssertionError("no shared CA fallback")):
+            value = session()
+            body = m.admit_pinned_tls_roots(value)  # Calls the actual Resume.source digest guard.
+            self.assertIs(body, pem)
+            self.assertEqual(value.ca_path, str(ROOT / m.TLS_CA_PATH))
+            self.assertEqual(value.ca_sha, m.TLS_CA_SHA256)
+            self.assertEqual(value.quota.calls, [(value.outer, "file", ROOT / m.TLS_CA_PATH,
+                                                 m.TLS_CA_BYTES, {"uid": m.os.getuid()})])
+            self.assertEqual(len(value.sources), 1)
+            context = m.tls_context(body)  # Real local SSL constructor, no socket/network.
+            self.assertTrue(context.check_hostname)
+            self.assertEqual(context.verify_mode, m.ssl.CERT_REQUIRED)
+            self.assertGreaterEqual(context.minimum_version, m.ssl.TLSVersion.TLSv1_2)
+            self.assertGreater(context.cert_store_stats()["x509_ca"], 0)
+            self.assertIsNone(context.keylog_filename)
+            for bad in (pem[:-1], bytes([pem[0] ^ 1]) + pem[1:]):
+                value = session(bad)
+                with self.subTest(kind="changed-or-short"), self.assertRaises(m.Refused):
+                    m.admit_pinned_tls_roots(value)
+                self.assertEqual((value.ca_path, value.ca_sha, value.sources), (None, None, []))
+            value = session(failure=m.Refused("original-read-unknown"))
+            with self.assertRaises(m.Refused):
+                m.admit_pinned_tls_roots(value)
+            self.assertEqual((value.ca_path, value.ca_sha, value.sources), (None, None, []))
+        good = {"caPath": str(ROOT / m.TLS_CA_PATH), "caSha256": m.TLS_CA_SHA256}
+        m.pinned_ca_request_data(good, ROOT)
+        for key, bad in (("caPath", "/shared/default-ca.pem"), ("caPath", None), ("caSha256", "0" * 64)):
+            changed = dict(good, **{key: bad})
+            with self.subTest(key=key), self.assertRaises(m.Refused):
+                m.pinned_ca_request_data(changed, ROOT)
+
+
+
 if __name__ == "__main__":
     unittest.main()

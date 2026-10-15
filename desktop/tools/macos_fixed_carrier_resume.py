@@ -54,6 +54,9 @@ ORIGIN = {'source': 'ce644711fb6e2bea26182473441aac192d5638e1', 'tree': 'e5c4c43
 SOURCE_PINS = {'desktop/tools/macos_e2_native_fixture.py': (390457, 'bcfbaf9ec8a8ae3253ef0ac91a1e73256de00a9adb6a9d280f64127b340cd51e'), 'desktop/tools/stage_macos_installed.py': (388486, '08a4609a37ea50426cfde297273b4e2ec53adc3727a86a13bdd5871988b3cfa2'), 'desktop/tools/macos_public_verification_evidence.py': (209883, '05ff6cf585f45601909afd14e7038df89adb8b56ee7411cb49428a0e8524a863'), 'desktop/tools/macos_aqua_qualification.py': (463990, 'd1ab3a83633c7e824277a4b316e2188877ecf03e8d54517a4275f931dd41290a'), 'desktop/tools/macos_xcode_host_preparation.py': (96477, 'd03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376'), 'src/mobile_release/owned_process.py': (9127, 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59'), 'src/mobile_release/_command_process.py': (177438, 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43'), 'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'), 'src/mobile_release/cancellation.py': (32351, 'eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a'), 'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'), 'src/mobile_release/errors.py': (749, '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'), 'src/mobile_release/_lifetime_evidence.py': (19514, 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'), 'src/mobile_release/_store_lane_contract.py': (9500, '8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e'), 'src/mobile_release/_store_lane_evidence.py': (17638, 'bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872'), 'desktop/packaging/macos-install-producer-certificates/leaf.der': (1490, 'e5ba1d05f136fbef3ca5816f0efb1e946cb2cfb81819b745d9f914e7e9256d72')}
 
 RESUME_WORKFLOW_BYTES = 58017
+TLS_CA_PATH = 'desktop/macos-installed-inputs/fixed-consumer-tls/cacert.pem'
+TLS_CA_BYTES = 240216
+TLS_CA_SHA256 = '9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f'
 
 HOST_FILES = ('pyvenv.cfg', 'bin/python', 'bin/python3', 'bin/python3.14',
               'bin/activate', 'bin/activate.csh', 'bin/activate.fish', 'bin/Activate.ps1')
@@ -721,6 +724,18 @@ def preview_data(body, stager):
          and stager.maintenance_hex(value.get('installerInventorySha256'), 64), 'resume-preview-inventory-bindings')
     return value
 
+def pinned_ca_request_data(cfg, root):
+    need(type(cfg['caPath']) is str and cfg['caPath'] == str(root / TLS_CA_PATH)
+         and cfg['caSha256'] == TLS_CA_SHA256, 'p0-pinned-ca-route')
+
+
+def tls_context(ca):
+    context = ssl.create_default_context(cadata=ca.decode('ascii', 'strict'))
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    need(context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED, 'p0-tls-policy')
+    return context
+
+
 def acquisition_main():
     """Fixed child; parent supplies exact retained SOURCE via authenticated -c.
 
@@ -740,6 +755,7 @@ def acquisition_main():
     phase, response, ca_fd, root_fd, output_fd = 'trust', None, None, None, None
     errors, primary = [], None
     try:
+        pinned_ca_request_data(cfg, Path(__file__).absolute().parents[2])
         ca_fd = os.open(cfg['caPath'], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         ca_before = identity(os.fstat(ca_fd))
         need(stat.S_ISREG(ca_before[2]) and ca_before[3] in (0, os.getuid()) and ca_before[5] == 1
@@ -748,9 +764,7 @@ def acquisition_main():
         ca = os.pread(ca_fd, ca_before[6] + 1, 0)
         need(len(ca) == ca_before[6] and sha(ca) == cfg['caSha256']
              and identity(os.fstat(ca_fd)) == ca_before, 'p0-ca-pin')
-        context = ssl.create_default_context(cadata=ca.decode('ascii', 'strict'))
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        need(context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED, 'p0-tls-policy')
+        context = tls_context(ca)
         consumed, ca_fd = ca_fd, None; os.close(consumed)
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(), urllib.request.HTTPSHandler(context=context))
         root_fd = os.open(cfg['work'], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -1205,6 +1219,16 @@ class Resume:
         STATE['privateOutputsRetired'] = True
 
 
+def admit_pinned_tls_roots(session):
+    # The existing SOURCE book retains every ancestor and the original leaf.
+    # No shared default store, configuration lookup or unchecked root fallback.
+    body = session.source(TLS_CA_PATH, TLS_CA_BYTES, TLS_CA_SHA256)
+    need(len(body) == TLS_CA_BYTES, 'resume-pinned-ca-size')
+    session.ca_path = str(session.root / TLS_CA_PATH)
+    session.ca_sha = TLS_CA_SHA256
+    return body
+
+
 def main():
     env = os.environ
     started = env.get('MRK_FIXED_RESUME_STARTED_NS', '')
@@ -1284,13 +1308,8 @@ def main():
             modules['macos_xcode_host_preparation.py'], session.host, clock, os.getuid()))
         sudo.acquire(session.quota)
         admit_tool('/usr/sbin/installer')
-        ca = ssl.get_default_verify_paths().cafile
-        need(type(ca) is str and os.path.isabs(ca), 'resume-stock-ca')
-        session.ca_path = os.path.realpath(ca)
-        ca_uid = os.stat(session.ca_path, follow_symlinks=False).st_uid
-        need(ca_uid in (0, os.getuid()), 'resume-ca-owner')
-        entry, ca_body = session.quota.call(session.outer, 'file', Path(session.ca_path), 2 << 20, uid=ca_uid, modes=(0o444, 0o644))
-        session.ca_sha = sha(ca_body); session.token = env.get('GITHUB_TOKEN'); request_headers(authenticated=True, token=session.token)
+        ca_body = admit_pinned_tls_roots(session)
+        session.token = env.get('GITHUB_TOKEN'); request_headers(authenticated=True, token=session.token)
         session.environment = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LANG': 'C', 'LC_ALL': 'C', 'TZ': 'UTC',
                                'HOME': '/Users/runner', 'TMPDIR': str(work) + '/'}
         leaf = next(content for entry, content in session.sources if str(entry['path']).endswith('/macos-install-producer-certificates/leaf.der'))
@@ -1437,7 +1456,7 @@ def project_main():
 # Closed first-party SOURCE locations only. These exact leaves are compiled only
 # after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
 # traceback rendering, error args/notes/locals or private filenames are used.
-FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6023, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 1665}
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6023, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 1684}
 FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
 
 
