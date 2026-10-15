@@ -53,7 +53,7 @@ ORIGIN = {'source': 'ce644711fb6e2bea26182473441aac192d5638e1', 'tree': 'e5c4c43
  'packageVersion': '0.1.1', 'release': 'macos26-arm64-desktop-01'}
 SOURCE_PINS = {'desktop/tools/macos_e2_native_fixture.py': (390457, 'bcfbaf9ec8a8ae3253ef0ac91a1e73256de00a9adb6a9d280f64127b340cd51e'), 'desktop/tools/stage_macos_installed.py': (385322, 'c53fc6eba693f16786b2d3873c8b889f2812ebabd311d93af792a3376c679f7d'), 'desktop/tools/macos_public_verification_evidence.py': (209883, '05ff6cf585f45601909afd14e7038df89adb8b56ee7411cb49428a0e8524a863'), 'desktop/tools/macos_aqua_qualification.py': (463990, '164300e80f0cf3bf1389261565901c7fcd9f0d2abb811b16aa11d719e5e4d287'), 'desktop/tools/macos_xcode_host_preparation.py': (96477, 'd03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376'), 'src/mobile_release/owned_process.py': (9127, 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59'), 'src/mobile_release/_command_process.py': (177438, 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43'), 'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'), 'src/mobile_release/cancellation.py': (32351, 'eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a'), 'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'), 'src/mobile_release/errors.py': (749, '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'), 'src/mobile_release/_lifetime_evidence.py': (19514, 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'), 'src/mobile_release/_store_lane_contract.py': (9500, '8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e'), 'src/mobile_release/_store_lane_evidence.py': (17638, 'bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872'), 'desktop/packaging/macos-install-producer-certificates/leaf.der': (1490, 'e5ba1d05f136fbef3ca5816f0efb1e946cb2cfb81819b745d9f914e7e9256d72')}
 
-RESUME_WORKFLOW_BYTES = 58016
+RESUME_WORKFLOW_BYTES = 58017
 
 HOST_FILES = ('pyvenv.cfg', 'bin/python', 'bin/python3', 'bin/python3.14',
               'bin/activate', 'bin/activate.csh', 'bin/activate.fish', 'bin/Activate.ps1')
@@ -1318,6 +1318,63 @@ def project_main():
     return result
 
 
+
+# Closed first-party SOURCE locations only. These exact leaves are compiled only
+# after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
+# traceback rendering, error args/notes/locals or private filenames are used.
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 5982, 'desktop/tools/macos_public_verification_evidence.py': 3082, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 1550}
+FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
+
+
+def unavailable_location():
+    return {'state': 'unavailable', 'exceptionClass': None, 'frames': [],
+            'truncated': False, 'foreignFramesExcluded': False}
+
+
+def location_data(value):
+    """Strict finite failure-only DATA, never an authorization or cleanup proof."""
+    empty = unavailable_location()
+    if type(value) is not dict or set(value) != set(empty): return empty
+    if (value['state'] not in ('observed', 'unavailable')
+        or value['exceptionClass'] is not None and value['exceptionClass'] not in FAULT_CLASSES
+        or type(value['truncated']) is not bool or type(value['foreignFramesExcluded']) is not bool
+        or type(value['frames']) is not list or len(value['frames']) > 8): return empty
+    frames = []
+    for row in value['frames']:
+        if (type(row) is not dict or set(row) != {'source', 'line'}
+            or type(row['source']) is not str or row['source'] not in FAULT_SOURCE_LINES
+            or type(row['line']) is not int or not 0 < row['line'] <= FAULT_SOURCE_LINES[row['source']]): return empty
+        frames.append({'source': row['source'], 'line': row['line']})
+    if (value['state'] == 'observed') != bool(frames): return empty
+    return dict(value, frames=frames)
+
+
+def failure_location(error):
+    """Standard traceback API; at most64 scanned /8 retained SOURCE frames."""
+    try:
+        result = unavailable_location()
+        name = type(error).__name__
+        result['exceptionClass'] = name if name in FAULT_CLASSES else 'other'
+        root = Path(__file__).absolute().parents[2]
+        lookup = {str(root / p): p for p in FAULT_SOURCE_LINES}
+        tb = error.__traceback__; scanned = 0
+        while tb is not None and scanned < 64:
+            relative = lookup.get(tb.tb_frame.f_code.co_filename)
+            line = tb.tb_lineno
+            if relative is not None and type(line) is int and 0 < line <= FAULT_SOURCE_LINES[relative]:
+                result['frames'].append({'source': relative, 'line': line})
+                if len(result['frames']) > 8:
+                    del result['frames'][0]; result['truncated'] = True
+            else: result['foreignFramesExcluded'] = True
+            tb = tb.tb_next; scanned += 1
+        result['truncated'] = result['truncated'] or tb is not None
+        if result['frames']: result['state'] = 'observed'
+        return location_data(result)
+    except BaseException:
+        # Diagnostic failure must not replace the original error/finality state.
+        return unavailable_location()
+
+
 def finite_failure_data(native, statuses, ui):
     """Non-authorizing fixed observations, never raw JSON/error text forwarding."""
     need(type(statuses) is dict and set(statuses)=={'installer','harness','ios','summary','result'}, 'resume-diagnostic-status-roster')
@@ -1325,13 +1382,14 @@ def finite_failure_data(native, statuses, ui):
     for role,value in statuses.items():
         need(value is None or type(value)is int and 0<=value<=255,'resume-diagnostic-status-value')
         rows[role]={'state':'unavailable' if value is None else 'observed','returncode':value}
-    native_row={'state':'unavailable','phase':None,'originalClosesKnown':None,'workloadsKnownSettled':None,'privateOutputsRetired':None}
+    native_row={'state':'unavailable','phase':None,'originalClosesKnown':None,'workloadsKnownSettled':None,'privateOutputsRetired':None,'failureLocation':unavailable_location()}
     allowed=('admission','initial-source','attach','producer-signature','installer','readback','detach-finality',
              'resource-admission','acquire-carrier','complete')
     if type(native)is dict and native.get('schemaVersion')==1 and native.get('scope')==SCOPE and native.get('accepted')is False:
         phase=native.get('firstFailurePhase') or native.get('phase')
         if phase in allowed and type(phase)is str:
             native_row['state']='observed-failure';native_row['phase']=phase
+            native_row['failureLocation']=location_data(native.get('failureLocation'))
             for key in ('originalClosesKnown','workloadsKnownSettled','privateOutputsRetired'):
                 native_row[key]=native.get(key) if type(native.get(key))is bool else None
     stages={'state':'unavailable','events':[]};owner={'dispatched':None,'contained':None,'cleanupComplete':None}
@@ -1480,10 +1538,11 @@ if __name__ == '__main__':
     else:
         try:
             result = main()
-        except BaseException:
+        except BaseException as error:
             # Fixed finite state only; no paths, tokens, inputs/captures or exception text.
             sys.stdout.buffer.write(canonical({'schemaVersion': 1, 'scope': SCOPE, 'accepted': False,
                 'phase': STATE['phase'], 'firstFailurePhase': STATE['firstFailurePhase'],
+                'failureLocation': failure_location(error),
                 'originalClosesKnown': STATE['originalClosesKnown'],
                 'workloadsKnownSettled': STATE['workloadsKnownSettled'], 'privateOutputsRetired': STATE['privateOutputsRetired'],
                 'productReady': False, 'p0Qualified': False, 'intelQualified': False}) + b'\n')

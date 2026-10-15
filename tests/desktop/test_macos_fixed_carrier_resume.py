@@ -203,6 +203,44 @@ class FixedCarrierResumeData(unittest.TestCase):
         with self.assertRaises(m.Refused):
             m.finite_failure_data(native, {**statuses, "ios": True}, ui)
 
+        # Real Python traceback objects, synthetic exception only: no native work.
+        secret = 'private-error-value-never-export'
+        namespace = {}
+        exec(compile("def fault():\n    raise ValueError('" + secret + "')\n",
+                     str(ROOT / 'desktop/tools/macos_fixed_carrier_resume.py'), 'exec'), namespace)
+        try: namespace['fault']()
+        except ValueError as error:
+            primary = error
+            location = m.failure_location(error)
+            self.assertIs(error, primary)
+            self.assertEqual(error.args, (secret,))
+        self.assertEqual(location['state'], 'observed')
+        self.assertEqual(location['exceptionClass'], 'ValueError')
+        self.assertEqual(location['frames'], [{'source': 'desktop/tools/macos_fixed_carrier_resume.py', 'line': 2}])
+        self.assertTrue(location['foreignFramesExcluded'])
+        self.assertFalse(location['truncated'])
+        native['failureLocation'] = location
+        projected = m.finite_failure_data(native, statuses, ui)
+        self.assertEqual(projected['native']['failureLocation'], location)
+        self.assertNotIn(secret.encode(), m.canonical(projected))
+        self.assertNotIn(str(ROOT).encode(), m.canonical(projected))
+        for key, value in (('exceptionClass', secret), ('truncated', 1), ('frames', [{'source': secret, 'line': 2}]),
+                           ('frames', [{'source': 'desktop/tools/macos_fixed_carrier_resume.py', 'line': True}]),
+                           ('frames', [{'source': 'desktop/tools/macos_fixed_carrier_resume.py', 'line': 100000}])):
+            with self.subTest(location_key=key):
+                changed = dict(location); changed[key] = value
+                self.assertEqual(m.location_data(changed), m.unavailable_location())
+        nested = {}; path = str(ROOT / 'desktop/tools/macos_fixed_carrier_resume.py')
+        exec(compile("def recurse(n):\n    if n: return recurse(n-1)\n    raise RuntimeError('" + secret + "')\n", path, 'exec'), nested)
+        for depth in (10, 70):
+            try: nested['recurse'](depth)
+            except RuntimeError as error: bounded = m.failure_location(error)
+            self.assertEqual(len(bounded['frames']), 8)
+            self.assertTrue(bounded['truncated'])
+            self.assertNotIn(secret.encode(), m.canonical(bounded))
+        with mock.patch.object(m, 'Path', side_effect=RuntimeError(secret)):
+            self.assertEqual(m.failure_location(primary), m.unavailable_location())
+
     def test_cleanup_retires_only_owned_outputs_and_refuses_symlink_before_deletion(self):
         m = ADAPTER
         for symlink in (False, True):
