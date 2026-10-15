@@ -45,41 +45,230 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
+          early_phase=shell-context
+          early_python_started=0
+          early_failure_report() {
+              python3 -I -S -B - "$early_phase" <<'PY_RESUME_EARLY_SHELL'
+          import hashlib,json,os,pathlib,stat,sys
+          EARLY_PHASES=('shell-context','shell-work-create','shell-work-directories','shell-work-export','shell-unknown','version-flags','python-path','python-open','python-metadata','python-read','python-post','python-close','work-state','work-binding-open','work-binding-write','work-binding-sync','work-binding-readback','work-binding-close','publish-environment','publish-root','complete')
+          EARLY_CLASSES=('SystemExit','ValueError','TypeError','AttributeError','KeyError','OSError','FileNotFoundError','PermissionError','AssertionError','RuntimeError','KeyboardInterrupt','shell-failure','other')
+          EARLY_KEYS=('versionExpected','isolatedFlag','noSiteFlag','dontWriteBytecode','fileRegular','fileOwnerTrusted','fileSingleLink','fileWriteBitsClear','fileSizeBound','readLengthMatched','logicalEofEmpty','heldPostMatched','namedPostMatched','pythonCloseCompleted','workStatRead','normalStatRead','workBindingOpened','workBindingWriteMatched','workBindingSynced','workBindingReadbackMatched','workBindingCloseCompleted','environmentPublished','rootPublished','runnerTempFixed','workflowSourceJoined','fixedInstalledRef')
+          
+          def _publish_early(value):
+              # One fixed ordinary receipt; never a mutable work/root path or raw payload.
+              slots={'parent':None,'report':None};primary=None
+              def need(ok):
+                  if not ok:raise ValueError('resume-early-finite-publication')
+              def ident(v):return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
+              def directory(v):return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid)
+              def consume(name):
+                  fd=slots[name];slots[name]=None
+                  if fd is not None:os.close(fd)
+              try:
+                  need(type(value)is dict and set(value)=={'schemaVersion','kind','admissionPassed','failurePhase','failureCondition','exceptionClass','predicates','diagnosticOnly','nativeSuccessInferred','rawTextExported','envValuesExported','binaryContentsExported','productReady'})
+                  need(type(value['schemaVersion'])is int and value['schemaVersion']==1 and value['kind']=='mrk-fixed-resume-early-admission-v1'
+                       and type(value['admissionPassed'])is bool and value['failurePhase']in (None,*EARLY_PHASES)
+                       and value['failureCondition']in (None,*EARLY_KEYS) and value['exceptionClass']in (None,*EARLY_CLASSES)
+                       and value['diagnosticOnly']is True and all(value[k]is False for k in ('nativeSuccessInferred','rawTextExported','envValuesExported','binaryContentsExported','productReady')))
+                  need(type(value['predicates'])is dict and set(value['predicates'])==set(EARLY_KEYS)
+                       and all(v is None or type(v)is bool for v in value['predicates'].values()))
+                  body=json.dumps(value,sort_keys=True,separators=(',',':')).encode('ascii')+b'\n';need(0<len(body)<=4096)
+                  parent='/Users/runner/work/_temp';name='fixed-carrier-early-admission.json'
+                  slots['parent']=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+                  before=directory(os.fstat(slots['parent']));need(before==directory(os.stat(parent,follow_symlinks=False)) and before[3]in (0,os.getuid()))
+                  slots['report']=os.open(name,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=slots['parent'])
+                  opened=ident(os.fstat(slots['report']));need(stat.S_ISREG(opened[2]) and stat.S_IMODE(opened[2])==0o600 and opened[3:7]==(os.getuid(),os.getgid(),1,0)
+                       and opened==ident(os.stat(name,dir_fd=slots['parent'],follow_symlinks=False)))
+                  need(os.write(slots['report'],body)==len(body));os.fsync(slots['report'])
+                  after=ident(os.fstat(slots['report']));need(after[:6]==opened[:6] and after[6]==len(body)
+                       and after==ident(os.stat(name,dir_fd=slots['parent'],follow_symlinks=False))
+                       and os.pread(slots['report'],len(body)+1,0)==body and not os.pread(slots['report'],1,len(body)))
+                  need(ident(os.fstat(slots['report']))==after==ident(os.stat(name,dir_fd=slots['parent'],follow_symlinks=False))
+                       and directory(os.fstat(slots['parent']))==before==directory(os.stat(parent,follow_symlinks=False)))
+                  consume('report');consume('parent')
+                  # Mint only after the receipt's consuming closes. Never upload an unknown
+                  # preexisting/colliding file merely because its fixed pathname exists.
+                  with open(os.environ['GITHUB_OUTPUT'],'a')as out:
+                      if out.write('early_report_ready=true\n')!=24:raise ValueError('resume-early-output-marker')
+              except BaseException as error:primary=error;raise
+              finally:
+                  failures=[]
+                  for name in ('report','parent'):
+                      try:consume(name)
+                      except BaseException:failures.append(name)
+                  if failures:
+                      if primary is None:raise ValueError('resume-early-publication-close')from None
+                      BaseException.add_note(primary,'resume-early-publication-close')
+          
+          try:
+              label=sys.argv[1] if len(sys.argv)==2 and sys.argv[1]in EARLY_PHASES else 'shell-unknown'
+              value={'schemaVersion':1,'kind':'mrk-fixed-resume-early-admission-v1','admissionPassed':False,'failurePhase':label,'failureCondition':None,'exceptionClass':'shell-failure','predicates':dict.fromkeys(EARLY_KEYS),'diagnosticOnly':True,'nativeSuccessInferred':False,'rawTextExported':False,'envValuesExported':False,'binaryContentsExported':False,'productReady':False}
+              value['predicates']['runnerTempFixed']=os.environ.get('RUNNER_TEMP')=='/Users/runner/work/_temp'
+              source=os.environ.get('GITHUB_SHA');workflow=os.environ.get('GITHUB_WORKFLOW_SHA')
+              if type(source)is str and type(workflow)is str:
+                  joined=source==workflow;value['predicates']['workflowSourceJoined']=joined
+                  # Respect the original source-join AND fixed-ref short-circuit.
+                  if joined:
+                      ref=os.environ.get('GITHUB_REF')
+                      if type(ref)is str:value['predicates']['fixedInstalledRef']=ref=='refs/heads/verify/desktop-macos-installed'
+              if label=='shell-context':
+                  for key in ('workflowSourceJoined','fixedInstalledRef'):
+                      if value['predicates'][key]is False:value['failureCondition']=key;break
+              _publish_early(value)
+          except BaseException:
+              print('::error::MRK_RESUME_EARLY_DIAGNOSTIC_UNAVAILABLE')
+              raise SystemExit(1)from None
+          PY_RESUME_EARLY_SHELL
+          }
+          early_exit() {
+              early_status=$?
+              trap - EXIT
+              if (( early_status != 0 && early_python_started == 0 )); then early_failure_report || true; fi
+              exit "$early_status"
+          }
+          trap early_exit EXIT
           [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed ]] || exit 1
+          early_phase=shell-work-create
           work=$(mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
+          early_phase=shell-work-directories
           mkdir -m 700 "$work/normal-ui" "$work/normal-ui/tmp"
+          early_phase=shell-work-export
           export MRK_MACOS_WORK="$work"
+          early_python_started=1
           python3 -I -S -B - <<'PY_RESUME_PYTHON'
           import hashlib,json,os,pathlib,stat,sys
-          if sys.version_info[:3]!=(3,14,7) or not sys.flags.isolated or not sys.flags.no_site or not sys.dont_write_bytecode:raise SystemExit(1)
-          path=pathlib.Path(sys.executable).resolve();fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC);first=None
-          try:
-              before=os.fstat(fd)
-              ident=lambda v:(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
-              if not stat.S_ISREG(before.st_mode) or before.st_uid not in (0,os.getuid()) or before.st_nlink!=1 or before.st_mode&0o022 or not 0<before.st_size<=64<<20:raise ValueError('resume-python-original')
-              data=os.pread(fd,before.st_size+1,0)
-              if len(data)!=before.st_size or os.pread(fd,1,before.st_size) or ident(os.fstat(fd))!=ident(before) or ident(os.stat(path,follow_symlinks=False))!=ident(before):raise ValueError('resume-python-post')
-          except BaseException as error:first=error;raise
+          EARLY_PHASES=('shell-context','shell-work-create','shell-work-directories','shell-work-export','shell-unknown','version-flags','python-path','python-open','python-metadata','python-read','python-post','python-close','work-state','work-binding-open','work-binding-write','work-binding-sync','work-binding-readback','work-binding-close','publish-environment','publish-root','complete')
+          EARLY_CLASSES=('SystemExit','ValueError','TypeError','AttributeError','KeyError','OSError','FileNotFoundError','PermissionError','AssertionError','RuntimeError','KeyboardInterrupt','shell-failure','other')
+          EARLY_KEYS=('versionExpected','isolatedFlag','noSiteFlag','dontWriteBytecode','fileRegular','fileOwnerTrusted','fileSingleLink','fileWriteBitsClear','fileSizeBound','readLengthMatched','logicalEofEmpty','heldPostMatched','namedPostMatched','pythonCloseCompleted','workStatRead','normalStatRead','workBindingOpened','workBindingWriteMatched','workBindingSynced','workBindingReadbackMatched','workBindingCloseCompleted','environmentPublished','rootPublished','runnerTempFixed','workflowSourceJoined','fixedInstalledRef')
+          
+          def _publish_early(value):
+              # One fixed ordinary receipt; never a mutable work/root path or raw payload.
+              slots={'parent':None,'report':None};primary=None
+              def need(ok):
+                  if not ok:raise ValueError('resume-early-finite-publication')
+              def ident(v):return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
+              def directory(v):return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid)
+              def consume(name):
+                  fd=slots[name];slots[name]=None
+                  if fd is not None:os.close(fd)
+              try:
+                  need(type(value)is dict and set(value)=={'schemaVersion','kind','admissionPassed','failurePhase','failureCondition','exceptionClass','predicates','diagnosticOnly','nativeSuccessInferred','rawTextExported','envValuesExported','binaryContentsExported','productReady'})
+                  need(type(value['schemaVersion'])is int and value['schemaVersion']==1 and value['kind']=='mrk-fixed-resume-early-admission-v1'
+                       and type(value['admissionPassed'])is bool and value['failurePhase']in (None,*EARLY_PHASES)
+                       and value['failureCondition']in (None,*EARLY_KEYS) and value['exceptionClass']in (None,*EARLY_CLASSES)
+                       and value['diagnosticOnly']is True and all(value[k]is False for k in ('nativeSuccessInferred','rawTextExported','envValuesExported','binaryContentsExported','productReady')))
+                  need(type(value['predicates'])is dict and set(value['predicates'])==set(EARLY_KEYS)
+                       and all(v is None or type(v)is bool for v in value['predicates'].values()))
+                  body=json.dumps(value,sort_keys=True,separators=(',',':')).encode('ascii')+b'\n';need(0<len(body)<=4096)
+                  parent='/Users/runner/work/_temp';name='fixed-carrier-early-admission.json'
+                  slots['parent']=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+                  before=directory(os.fstat(slots['parent']));need(before==directory(os.stat(parent,follow_symlinks=False)) and before[3]in (0,os.getuid()))
+                  slots['report']=os.open(name,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=slots['parent'])
+                  opened=ident(os.fstat(slots['report']));need(stat.S_ISREG(opened[2]) and stat.S_IMODE(opened[2])==0o600 and opened[3:7]==(os.getuid(),os.getgid(),1,0)
+                       and opened==ident(os.stat(name,dir_fd=slots['parent'],follow_symlinks=False)))
+                  need(os.write(slots['report'],body)==len(body));os.fsync(slots['report'])
+                  after=ident(os.fstat(slots['report']));need(after[:6]==opened[:6] and after[6]==len(body)
+                       and after==ident(os.stat(name,dir_fd=slots['parent'],follow_symlinks=False))
+                       and os.pread(slots['report'],len(body)+1,0)==body and not os.pread(slots['report'],1,len(body)))
+                  need(ident(os.fstat(slots['report']))==after==ident(os.stat(name,dir_fd=slots['parent'],follow_symlinks=False))
+                       and directory(os.fstat(slots['parent']))==before==directory(os.stat(parent,follow_symlinks=False)))
+                  consume('report');consume('parent')
+                  # Mint only after the receipt's consuming closes. Never upload an unknown
+                  # preexisting/colliding file merely because its fixed pathname exists.
+                  with open(os.environ['GITHUB_OUTPUT'],'a')as out:
+                      if out.write('early_report_ready=true\n')!=24:raise ValueError('resume-early-output-marker')
+              except BaseException as error:primary=error;raise
+              finally:
+                  failures=[]
+                  for name in ('report','parent'):
+                      try:consume(name)
+                      except BaseException:failures.append(name)
+                  if failures:
+                      if primary is None:raise ValueError('resume-early-publication-close')from None
+                      BaseException.add_note(primary,'resume-early-publication-close')
+          
+          state={'schemaVersion':1,'kind':'mrk-fixed-resume-early-admission-v1','admissionPassed':False,'failurePhase':None,'failureCondition':None,'exceptionClass':None,'predicates':dict.fromkeys(EARLY_KEYS),'diagnosticOnly':True,'nativeSuccessInferred':False,'rawTextExported':False,'envValuesExported':False,'binaryContentsExported':False,'productReady':False}
+          phase='version-flags';condition=None
+          state['predicates']['runnerTempFixed']=os.environ.get('RUNNER_TEMP')=='/Users/runner/work/_temp'
+          # The unchanged shell AND guard admitted both before this original invocation.
+          state['predicates']['workflowSourceJoined']=True
+          state['predicates']['fixedInstalledRef']=True
+          def _stage(value):
+              global phase,condition
+              phase=value;condition=None
+          def _failed(key,read):
+              global condition
+              condition=key;value=read();state['predicates'][key]=not bool(value);return value
+          def _observed(key,read):
+              global condition
+              condition=key
+              try:value=read()
+              except BaseException:state['predicates'][key]=False;raise
+              state['predicates'][key]=True;return value
+          def _observed_close(key,fd):
+              return _observed(key,lambda:os.close(fd))
+          def _capture_error(error):
+              if state['failurePhase']is None:
+                  state['failurePhase']=phase;state['failureCondition']=condition
+                  label=type(error).__name__;state['exceptionClass']=label if label in EARLY_CLASSES else 'other'
+          
+          def _admit_host():
+              if _failed('versionExpected',lambda:sys.version_info[:3]!=(3,14,7)) or _failed('isolatedFlag',lambda:not sys.flags.isolated) or _failed('noSiteFlag',lambda:not sys.flags.no_site) or _failed('dontWriteBytecode',lambda:not sys.dont_write_bytecode):raise SystemExit(1)
+              _stage('python-path')
+              path=pathlib.Path(sys.executable).resolve()
+              _stage('python-open')
+              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC);first=None
+              try:
+                  _stage('python-metadata')
+                  before=os.fstat(fd)
+                  ident=lambda v:(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
+                  if _failed('fileRegular',lambda:not stat.S_ISREG(before.st_mode)) or _failed('fileOwnerTrusted',lambda:before.st_uid not in (0,os.getuid())) or _failed('fileSingleLink',lambda:before.st_nlink!=1) or _failed('fileWriteBitsClear',lambda:before.st_mode&0o022) or _failed('fileSizeBound',lambda:not 0<before.st_size<=64<<20):raise ValueError('resume-python-original')
+                  _stage('python-read')
+                  data=os.pread(fd,before.st_size+1,0)
+                  _stage('python-post')
+                  if _failed('readLengthMatched',lambda:len(data)!=before.st_size) or _failed('logicalEofEmpty',lambda:os.pread(fd,1,before.st_size)) or _failed('heldPostMatched',lambda:ident(os.fstat(fd))!=ident(before)) or _failed('namedPostMatched',lambda:ident(os.stat(path,follow_symlinks=False))!=ident(before)):raise ValueError('resume-python-post')
+              except BaseException as error:first=error;_capture_error(error);raise
+              finally:
+                  _stage('python-close')
+                  try:_observed_close('pythonCloseCompleted',fd)
+                  except BaseException:
+                      if first is None:raise
+                      BaseException.add_note(first,'resume-python-close')
+              _stage('work-state')
+              work=pathlib.Path(os.environ['MRK_MACOS_WORK']);normal=work/'normal-ui'
+              identity=lambda v:(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid)
+              binding={'schemaVersion':1,'source':os.environ['GITHUB_SHA'],'runId':os.environ['GITHUB_RUN_ID'],'runAttempt':os.environ['GITHUB_RUN_ATTEMPT'],
+                       'workIdentity':list(identity(_observed('workStatRead',lambda:os.stat(work,follow_symlinks=False)))),'normalIdentity':list(identity(_observed('normalStatRead',lambda:os.stat(normal,follow_symlinks=False))))}
+              body=json.dumps(binding,sort_keys=True,separators=(',',':')).encode()+b'\n'
+              _stage('work-binding-open')
+              outfd=_observed('workBindingOpened',lambda:os.open(normal/'consumer-work-binding.json',os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600))
+              try:
+                  _stage('work-binding-write')
+                  if _failed('workBindingWriteMatched',lambda:os.write(outfd,body)!=len(body)):raise ValueError('resume-work-binding-short-write')
+                  _stage('work-binding-sync')
+                  _observed('workBindingSynced',lambda:os.fsync(outfd))
+                  _stage('work-binding-readback')
+                  if _failed('workBindingReadbackMatched',lambda:os.pread(outfd,len(body)+1,0)!=body):raise ValueError('resume-work-binding-readback')
+              except BaseException as error:_capture_error(error);raise
+              finally:
+                  _stage('work-binding-close')
+                  _observed_close('workBindingCloseCompleted',outfd)
+              # This is the trusted setup action's real host executable, not an
+              # unverified installed app interpreter. Native admission holds it again.
+              _stage('publish-environment')
+              with open(os.environ['GITHUB_ENV'],'a') as out:out.write('MRK_PYTHON='+str(path)+'\nMRK_MACOS_WORK='+os.environ['MRK_MACOS_WORK']+'\n')
+              state['predicates']['environmentPublished']=True
+              _stage('publish-root')
+              with open(os.environ['GITHUB_OUTPUT'],'a') as out:out.write('root='+os.environ['MRK_MACOS_WORK']+'\n')
+              state['predicates']['rootPublished']=True
+              _stage('complete')
+              state['admissionPassed']=True
+          try:_admit_host()
+          except BaseException as error:_capture_error(error);raise
           finally:
-              try:os.close(fd)
+              try:_publish_early(state)
               except BaseException:
-                  if first is None:raise
-                  BaseException.add_note(first,'resume-python-close')
-          work=pathlib.Path(os.environ['MRK_MACOS_WORK']);normal=work/'normal-ui'
-          identity=lambda v:(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid)
-          binding={'schemaVersion':1,'source':os.environ['GITHUB_SHA'],'runId':os.environ['GITHUB_RUN_ID'],'runAttempt':os.environ['GITHUB_RUN_ATTEMPT'],
-                   'workIdentity':list(identity(os.stat(work,follow_symlinks=False))),'normalIdentity':list(identity(os.stat(normal,follow_symlinks=False)))}
-          body=json.dumps(binding,sort_keys=True,separators=(',',':')).encode()+b'\n'
-          outfd=os.open(normal/'consumer-work-binding.json',os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
-          try:
-              if os.write(outfd,body)!=len(body):raise ValueError('resume-work-binding-short-write')
-              os.fsync(outfd)
-              if os.pread(outfd,len(body)+1,0)!=body:raise ValueError('resume-work-binding-readback')
-          finally:os.close(outfd)
-          # This is the trusted setup action's real host executable, not an
-          # unverified installed app interpreter. Native admission holds it again.
-          with open(os.environ['GITHUB_ENV'],'a') as out:out.write('MRK_PYTHON='+str(path)+'\nMRK_MACOS_WORK='+os.environ['MRK_MACOS_WORK']+'\n')
-          with open(os.environ['GITHUB_OUTPUT'],'a') as out:out.write('root='+os.environ['MRK_MACOS_WORK']+'\n')
+                  print('::error::MRK_RESUME_EARLY_DIAGNOSTIC_UNAVAILABLE')
           PY_RESUME_PYTHON
       - name: Import only the fixed authenticated carrier and execute our fresh Installer and readback originals
         id: installer
@@ -430,3 +619,12 @@ jobs:
               raise SystemExit(1) from None
           exec(code,{'__file__':str(path),'__name__':'__main__'})
           PY_RESUME_CLEANUP
+      - name: Upload only the authenticated finite early host admission report
+        if: always() && steps.work.outputs.early_report_ready == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: fixed-arm-carrier-early-admission-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /Users/runner/work/_temp/fixed-carrier-early-admission.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
