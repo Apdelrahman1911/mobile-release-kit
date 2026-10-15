@@ -4072,10 +4072,10 @@ final class NormalAppUITests: XCTestCase {
         try require(first.exists && (!enabled || first.isEnabled), "expected UI condition disappeared", line: line)
         return first
     }
-    @MainActor private func waitGone(_ element: XCUIElement, timeout: TimeInterval = 5) throws {
+    @MainActor private func waitGone(_ element: XCUIElement, timeout: TimeInterval = 5, line: UInt = #line) throws {
         let wait = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
         try require(XCTWaiter.wait(for: [wait], timeout: try remaining(timeout)) == .completed,
-                    "owned UI did not dismiss in " + journeyStage)
+                    "owned UI did not dismiss in " + journeyStage, line: line)
     }
     @MainActor private func reveal(_ element: XCUIElement, in renderer: XCUIElement) throws {
         // Scroll only the original renderer; never an arbitrary screen position,
@@ -4212,7 +4212,30 @@ final class NormalAppUITests: XCTestCase {
         pathField.click()
         pathField.typeKey("a", modifierFlags: .command)
         pathField.typeText(path)
-        try require(pathField.value as? String == path, "native Go to Folder did not retain the exact fixture path")
+        // One original AX value snapshot. These first-failure sites describe
+        // only closed relations to the expected synthetic path, never its text
+        // or a guessed explanation. No alternate spelling is accepted.
+        let typedValue = pathField.value as? String
+        if typedValue == nil {
+            try require(false, "native navigation value is not a String")
+        } else if let value = typedValue, value != path {
+            if value.isEmpty {
+                try require(false, "native navigation value is empty")
+            } else if value == path + "/" {
+                try require(false, "native navigation value has one trailing folder separator")
+            } else if value == "/tmp/" + String(path.dropFirst("/private/tmp/".count)) {
+                try require(false, "native navigation value uses the tmp prefix spelling")
+            } else if path.hasPrefix(value) {
+                try require(false, "native navigation value is a strict expected prefix")
+            } else if value.hasPrefix(path) {
+                try require(false, "native navigation value has an extra suffix")
+            } else if path.hasSuffix(value) {
+                try require(false, "native navigation value is a strict expected suffix")
+            } else {
+                try require(false, "native navigation value has another mismatch")
+            }
+        }
+        try require(typedValue == path, "native Go to Folder did not retain the exact fixture path")
         pathField.typeKey("\r", modifierFlags: [])
         try waitGone(pathField)
     }
