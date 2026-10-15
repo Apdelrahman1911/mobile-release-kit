@@ -22,7 +22,6 @@ jobs:
     env:
       MRK_MACOS_TARGET: aarch64-apple-darwin
       MRK_MACOS_HOSTED_JOB: github-hosted-macos26-arm64
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
       MRK_FIXED_RESUME_BYTES: "90436"
       MRK_FIXED_RESUME_SHA256: "f7a735cbd2d391fe88e78795356dc180b6cd9bb8e976cad74953c4eb512b646f"
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
