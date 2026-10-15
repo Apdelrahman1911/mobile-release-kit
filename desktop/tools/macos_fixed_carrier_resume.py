@@ -210,7 +210,8 @@ def constant(_):
     raise Refused('p0-json-number')
 
 
-def decode(body):
+def decode(body, *, allow_finite_floats=False):
+    need(type(allow_finite_floats) is bool, 'p0-json-float-policy')
     need(type(body) is bytes and len(body) <= 256 << 10, 'p0-json-size')
     value = json.loads(body, object_pairs_hook=pairs, parse_constant=constant)
     pending, count = [(value, 0)], 0
@@ -226,7 +227,9 @@ def decode(body):
         elif type(item) is str:
             need(len(item) <= 16384, 'p0-json-string')
         else:
-            need(item is None or type(item) in (bool, int), 'p0-json-scalar')
+            need(item is None or type(item) in (bool, int)
+                 or allow_finite_floats and type(item) is float and -sys.float_info.max <= item <= sys.float_info.max,
+                 'p0-json-scalar')
     return value
 
 
@@ -1553,7 +1556,7 @@ def normal_family_projection_data(install, build, test, summary, summary_body, b
          and test.get('reSignedOrRepaired') is False, 'resume-normal-generated-products-finality')
     expected = {'totalTestCount':count,'passedTests':count,'failedTests':0,'skippedTests':0,'expectedFailures':0}
     need(type(summary_body) is bytes and 0 < len(summary_body) <= 262144, 'resume-normal-summary-body')
-    counts = decode(summary_body)
+    counts = decode(summary_body, allow_finite_floats=True)
     need(type(counts) is dict and all(type(counts.get(k)) is int and counts[k] == v for k,v in expected.items()),
          'resume-normal-counts')
     need(summary['commands'][1]['stdoutBytes'] == len(summary_body)
@@ -1748,7 +1751,16 @@ def installer_observation_data(code, stdout, stderr):
         return None  # No diagnostic error can replace the known failed Installer.
 
 
-def normal_failure_data(native,batch,statuses,passed,harness_status):
+def normal_projection_failure_data(value, batch, statuses):
+    if type(value) is not dict or set(value) != {'family','failureLocation'}: return None
+    family = value['family']
+    if type(family) is not str or family not in {r[0] for r in NORMAL_FAMILIES[batch]}: return None
+    status = statuses[family]['result']
+    if type(status) is not int or not 1 <= status <= 255: return None
+    return {'family':family,'failureLocation':location_data(value['failureLocation'])}
+
+
+def normal_failure_data(native,batch,statuses,passed,harness_status, *, projection_failure=None):
     need(type(batch) is str and batch in NORMAL_FAMILIES, 'resume-normal-diagnostic-batch')
     expected = {row[0] for row in NORMAL_FAMILIES[batch]}
     need(type(statuses) is dict and set(statuses) == expected and type(passed) is set and passed <= expected,
@@ -1779,6 +1791,7 @@ def normal_failure_data(native,batch,statuses,passed,harness_status):
             for key in ('originalClosesKnown','workloadsKnownSettled','privateOutputsRetired'):
                 native_row[key] = native.get(key) if type(native.get(key)) is bool else None
     return {'schemaVersion':1,'scope':NORMAL_SCOPE,'normalBatch':batch,'families':rows,
+            'projectionFailure':normal_projection_failure_data(projection_failure,batch,statuses),
             'harnessReturncode':harness_status,'native':native_row,'purpose':'finite-current-consumer-observation-only',
             'successInferred':False,'unknownStateNotConvertedToCleanup':True,'rawTextExported':False,
             'currentProductQualified':False,'p0Qualified':False,'intelQualified':False,'productReady':False}
@@ -1804,11 +1817,21 @@ def normal_diagnostic_main():
         body = optional(name,16)
         return int(body) if body is not None and re.fullmatch(rb'(0|[1-9][0-9]{0,2})\n',body) and int(body) <= 255 else None
     try:
-        statuses = {}; passed = set(); ui = None
+        statuses = {}; passed = set(); ui = None; projection_failure = None
         for bundle,test_stem,summary_stem,_,_ in NORMAL_FAMILIES[batch]:
             values = {'test':status(test_stem+'.status'),'summary':status(summary_stem+'.status'),
                       'result':status('fixed-normal-'+test_stem+'.status')}
             statuses[bundle] = values
+            if projection_failure is None and type(values['result']) is int and values['result'] != 0:
+                body = optional('fixed-normal-'+test_stem+'.json',4096)
+                try: candidate = decode(body) if body else None
+                except ValueError: candidate = None # Optional JSON only; original read/POST/close still fail closed.
+                keys = {'schemaVersion','scope','normalBatch','accepted','phase','productReady','currentProductQualified','p0Qualified','intelQualified','failureLocation'}
+                if (type(candidate) is dict and set(candidate) == keys and type(candidate['schemaVersion']) is int
+                    and candidate['schemaVersion'] == 1 and candidate['scope'] == NORMAL_SCOPE
+                    and candidate['normalBatch'] == batch and candidate['phase'] == 'projection'
+                    and all(candidate[k] is False for k in ('accepted','productReady','currentProductQualified','p0Qualified','intelQualified'))):
+                    projection_failure = {'family':bundle,'failureLocation':location_data(candidate['failureLocation'])}
             if all(type(v) is int and v == 0 for v in values.values()):
                 try:
                     expected = normal_project_main(bundle)
@@ -1827,7 +1850,7 @@ def normal_diagnostic_main():
             ui = candidate
         body = optional('fixed-carrier-install.json',16384)
         native = decode(body) if body else None
-        result = normal_failure_data(native,batch,statuses,passed,status('build.status'))
+        result = normal_failure_data(native,batch,statuses,passed,status('build.status'), projection_failure=projection_failure)
         admission = finite_failure_data(None,{k:None for k in ('installer','harness','ios','summary','result')},ui)
         result.update(admissionExceptionClass=admission['admissionExceptionClass'],
                       admissionStage=admission['admissionStage'],ownerFailure=admission['ownerFailure'],
@@ -2081,7 +2104,8 @@ def project_main():
             need(read(name,16)==b'0\n','resume-projection-caller-status')
         names=('fixed-carrier-install.json','build.command-admission.json','ios-unsigned-archive-test.runner-admission.json',
             'ios-unsigned-archive-summary.command-admission.json','ios-unsigned-archive-summary.json','ios-unsigned-archive.facts.json')
-        rows=[decode(read(name,262144 if name=='ios-unsigned-archive-summary.json' else 32768)) for name in names]
+        rows=[decode(read(name,262144 if name=='ios-unsigned-archive-summary.json' else 32768),
+                     allow_finite_floats=name=='ios-unsigned-archive-summary.json') for name in names]
         result=projection_data(*rows,env['GITHUB_SHA'],env['GITHUB_RUN_ID'],env['GITHUB_RUN_ATTEMPT'])
         for fd,path,before in originals:
             need(identity(os.fstat(fd))==before==identity(os.stat(path,follow_symlinks=False)), 'resume-projection-held-post')
@@ -2103,7 +2127,7 @@ def project_main():
 # Closed first-party SOURCE locations only. These exact leaves are compiled only
 # after existing workflow/bootstrap/SOURCE_PINS authentication. No new I/O,
 # traceback rendering, error args/notes/locals or private filenames are used.
-FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3090, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2405}
+FAULT_SOURCE_LINES = {'desktop/tools/macos_e2_native_fixture.py': 6118, 'desktop/tools/stage_macos_installed.py': 6041, 'desktop/tools/macos_public_verification_evidence.py': 3090, 'desktop/tools/macos_aqua_qualification.py': 6640, 'desktop/tools/macos_xcode_host_preparation.py': 1870, 'src/mobile_release/owned_process.py': 189, 'src/mobile_release/_command_process.py': 3653, 'src/mobile_release/_native_process.py': 1354, 'src/mobile_release/cancellation.py': 731, 'src/mobile_release/__init__.py': 7, 'src/mobile_release/errors.py': 25, 'src/mobile_release/_lifetime_evidence.py': 431, 'src/mobile_release/_store_lane_contract.py': 230, 'src/mobile_release/_store_lane_evidence.py': 344, 'desktop/tools/macos_fixed_carrier_resume.py': 2430}
 FAULT_CLASSES = ('Refused', 'AttributeError', 'TypeError', 'ValueError', 'ImportError', 'ModuleNotFoundError', 'OSError', 'FileNotFoundError', 'PermissionError', 'RuntimeError', 'KeyError', 'AssertionError', 'KeyboardInterrupt', 'SystemExit', 'ProcessError', 'ProcessInterrupted', 'SyntaxError', 'IndentationError', 'TabError', 'other')
 
 
@@ -2378,9 +2402,10 @@ if __name__ == '__main__':
             result = (normal_project_main(sys.argv[2]+'.xcresult') if sys.argv[1] == 'project-normal' else
                       normal_batch_project_main() if sys.argv[1] == 'project-normal-batch' else
                       normal_diagnostic_main() if sys.argv[1] == 'diagnostic-normal' else normal_cleanup_main())
-        except BaseException:
+        except BaseException as error:
             sys.stdout.buffer.write(canonical({'schemaVersion':1,'scope':scope,'normalBatch':batch,'accepted':False,
                 'phase':'finite-observation-or-cleanup' if sys.argv[1] in ('diagnostic-normal','cleanup-normal') else 'projection',
+                **({'failureLocation':failure_location(error)} if sys.argv[1] in ('project-normal','project-normal-batch') else {}),
                 'productReady':False,'currentProductQualified':False,'p0Qualified':False,'intelQualified':False})+b'\n')
             raise SystemExit(1) from None
         sys.stdout.buffer.write(canonical(result)+b'\n')

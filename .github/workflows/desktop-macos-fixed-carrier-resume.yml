@@ -31,8 +31,8 @@ jobs:
     env:
       MRK_MACOS_TARGET: aarch64-apple-darwin
       MRK_MACOS_HOSTED_JOB: github-hosted-macos26-arm64
-      MRK_FIXED_RESUME_BYTES: "159488"
-      MRK_FIXED_RESUME_SHA256: "a55857e9ba28e3d1ceb9e079422a0feadcf6bc83c302ce65ab986a2d46d9856d"
+      MRK_FIXED_RESUME_BYTES: "161748"
+      MRK_FIXED_RESUME_SHA256: "a904a2bd6dfc62e6bca562d6bb2d3159bdb143da28491a261c029022ee40fea1"
       TEST_RUNNER_MRK_NORMAL_UI_FIXED_CARRIER_RESUME: fixed-ce644-arm-carrier-normal-local-batch-v1
       TEST_RUNNER_MRK_NORMAL_UI_FIXED_NORMAL_BATCH: ${{ matrix.normalBatch }}
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer

@@ -490,6 +490,54 @@ class FixedCarrierResumeData(unittest.TestCase):
                 self.assertIs(session.installer_zero,code==0)
                 self.assertIs(ports['original'],original)
 
+        batch='launch-project'; bundle='test.xcresult'
+        statuses={row[0]:dict(test=None,summary=None,result=None) for row in m.NORMAL_FAMILIES[batch]}
+        statuses[bundle]=dict(test=0,summary=0,result=1)
+        location=dict(state='observed',exceptionClass='Refused',frames=[dict(source='desktop/tools/macos_fixed_carrier_resume.py',line=1)],truncated=False,foreignFramesExcluded=False)
+        projected=dict(family=bundle,failureLocation=location)
+        self.assertEqual(m.normal_failure_data(None,batch,statuses,set(),0,projection_failure=projected)['projectionFailure'],projected)
+        for invalid in (None,{**projected,'private':'synthetic-secret'},dict(family='../private',failureLocation=location)):
+            self.assertIsNone(m.normal_failure_data(None,batch,statuses,set(),0,projection_failure=invalid)['projectionFailure'])
+        for status in (None,0):
+            statuses[bundle]['result']=status
+            self.assertIsNone(m.normal_failure_data(None,batch,statuses,set(),0,projection_failure=projected)['projectionFailure'])
+        statuses[bundle]['result']=True
+        with self.assertRaises(m.Refused):
+            m.normal_failure_data(None,batch,statuses,set(),0,projection_failure=projected)
+        statuses[bundle]['result']=1
+        malformed=dict(projected,failureLocation={**location,'private':'synthetic-secret'})
+        self.assertEqual(m.normal_failure_data(None,batch,statuses,set(),0,projection_failure=malformed)['projectionFailure']['failureLocation'],m.unavailable_location())
+        # Exercise actual original reads, consuming closes and first-failure
+        # routing with synthetic task files; no native command or receipt pass.
+        failure=dict(schemaVersion=1,scope=m.NORMAL_SCOPE,normalBatch=batch,accepted=False,phase='projection',
+            productReady=False,currentProductQualified=False,p0Qualified=False,intelQualified=False,failureLocation=location)
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)
+            records={'build.status':b'0\n','test.status':b'0\n','summary.status':b'0\n','fixed-normal-test.status':b'1\n',
+                'project-test.status':b'0\n','project-summary.status':b'0\n','fixed-normal-project-test.status':b'1\n',
+                'fixed-normal-test.json':m.canonical(failure)+b'\n','fixed-normal-project-test.json':m.canonical(failure)+b'\n'}
+            for name,body in records.items():
+                path=root/name;path.write_bytes(body);path.chmod(0o600)
+            context=({'GITHUB_SHA':'a'*40,'GITHUB_RUN_ID':'2','GITHUB_RUN_ATTEMPT':'1'},batch,root)
+            with mock.patch.object(m,'normal_projection_context',return_value=context):
+                observed=m.normal_diagnostic_main()
+            self.assertEqual(observed['projectionFailure'],projected)
+            self.assertFalse(observed['successInferred'])
+            self.assertNotIn(b'synthetic-secret',m.canonical(observed))
+            for invalid in (b'{',b'not-json-synthetic-secret',b'{"v":NaN}'):
+                (root/'fixed-normal-test.json').write_bytes(invalid)
+                with mock.patch.object(m,'normal_projection_context',return_value=context):
+                    fallback=m.normal_diagnostic_main()
+                self.assertEqual(fallback['projectionFailure'],dict(projected,family='project-test.xcresult'))
+                self.assertFalse(fallback['successInferred'])
+                self.assertNotIn(b'synthetic-secret',m.canonical(fallback))
+        module=ast.parse((ROOT/'desktop/tools/macos_fixed_carrier_resume.py').read_bytes())
+        handlers=[n for n in ast.walk(module) if isinstance(n,ast.ExceptHandler) and n.name=='error'
+                  and 'project-normal-batch' in ast.unparse(n)]
+        self.assertEqual(len(handlers),1)
+        self.assertIn('failure_location(error)',ast.unparse(handlers[0]))
+
+
     def test_fixed_sudo_originals_preserve_quota_snapshot_and_finality(self):
         # Synthetic protocol only: no Darwin syscall, descriptor or command.
         m = ADAPTER
@@ -826,7 +874,8 @@ class FixedCarrierResumeData(unittest.TestCase):
             normal_install = {**self.receipt(source, "2", "1"), "scope": m.NORMAL_SCOPE, "normalBatch": batch}
             fixtures[batch] = []
             for bundle, test_stem, summary_stem, count, seconds in families:
-                summary_body = m.canonical(dict(totalTestCount=count, passedTests=count, failedTests=0, skippedTests=0, expectedFailures=0))
+                summary_body = m.canonical(dict(totalTestCount=count, passedTests=count, failedTests=0, skippedTests=0, expectedFailures=0,
+                    startTime=1700000000.125, finishTime=1700000001.875))
                 normal_rows = [normal_row(batch, phase, budget, result, summary_body)
                     for phase, budget, result in (("build", 450, None), ("test", seconds, bundle), ("summary", 90, bundle))]
                 inputs = (normal_install, *normal_rows, summary_body)
@@ -838,8 +887,39 @@ class FixedCarrierResumeData(unittest.TestCase):
                     self.assertEqual(projected["familyResult"], "passed")
                     self.assertTrue(all(projected[k] is False for k in ("rawTextExported", "currentProductQualified", "p0Qualified", "intelQualified", "productReady")))
                 fixtures[batch].append((bundle, test_stem, summary_stem, inputs, projected))
+        # Real native summaries may include fractional timestamps. No other
+        # receipt/config decoder or the exact integer-count contract is relaxed.
+        fractional = b'{"startTime":1700000000.125,"nested":[0.5]}'
+        with self.assertRaises(m.Refused): m.decode(fractional)
+        self.assertEqual(m.decode(fractional, allow_finite_floats=True)['nested'], [0.5])
+        for bad in (b'{"v":NaN}',b'{"v":Infinity}',b'{"v":-Infinity}',b'{"v":1e999}',b'{"v":-1e999}',
+                    b'{"v":0.5,"v":0.6}',b'['*22+b'0.5'+b']'*22,b' '*((256<<10)+1)):
+            with self.subTest(summaryJSON=bad[:30]), self.assertRaises(m.Refused):
+                m.decode(bad, allow_finite_floats=True)
+        with self.assertRaises(m.Refused): m.decode(b'{}', allow_finite_floats=1)
+        import ast
+        tree = ast.parse((ROOT/'desktop/tools/macos_fixed_carrier_resume.py').read_bytes())
+        legacy = next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='project_main')
+        selection = next(n for n in ast.walk(legacy) if isinstance(n,ast.ListComp))
+        observed = []
+        def read(name, cap):
+            observed.append((name, cap))
+            return fractional if name=='ios-unsigned-archive-summary.json' else b'{"value":1}'
+        names=('fixed-carrier-install.json','ios-unsigned-archive-summary.json','ios-unsigned-archive.facts.json')
+        parsed=eval(compile(ast.Expression(selection),str(ROOT/'desktop/tools/macos_fixed_carrier_resume.py'),'eval'),
+                    dict(names=names,decode=m.decode,read=read))
+        self.assertEqual(parsed[1]['startTime'],1700000000.125)
+        self.assertEqual(observed,[(names[0],32768),(names[1],262144),(names[2],32768)])
         batch = "launch-project"
         bundle, test_stem, summary_stem, inputs, expected = fixtures[batch][0]
+        for field in ('totalTestCount','passedTests','failedTests','skippedTests','expectedFailures'):
+            for invalid in (True, 1.0):
+                changed = copy.deepcopy(inputs)
+                counts = json.loads(changed[-1]); counts[field] = invalid
+                changed = (*changed[:-1], m.canonical(counts))
+                changed[3]['commands'][1].update(stdoutBytes=len(changed[-1]), stdoutSha256=m.sha(changed[-1]))
+                with self.subTest(summaryCount=(field, invalid)), self.assertRaises(m.Refused):
+                    m.normal_family_projection_data(*changed, batch, bundle, source, '2', '1')
         for index, key, value in ((0, "producerSource", source), (0, "consumerRunId", "1"),
                                  (0, "originalClosesKnown", None), (0, "productReady", True),
                                  (1, "sourceCommit", m.ORIGIN["source"]), (2, "sourceRosterSha256", "c" * 64),
