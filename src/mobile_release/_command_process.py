@@ -740,6 +740,17 @@ class CommandCallEvidence:
                           False, PRIVATE_OUTPUT_LIMIT, 15 * 60)
         return argv
 
+    def _cap_store_prepare(self, source, *, timeout: int) -> None:
+        from ._desktop_store_prepare_control import StorePrepareInput
+        self._owner(source.guard)
+        _require(type(source) is StorePrepareInput and source.guard._saved_command_input() is source
+                 and self._engine is None and not self._desktop_readback_capped
+                 and not self._used and self._expected is not None and self._expected[5]==3600 and self._lane_reservation is not None
+                 and self._reservation is None and self._lane_timing is not None
+                 and source.require_operation().require_lane_evidence(self,timeout))
+        self._desktop_readback_capped=True
+        self._expected=(*self._expected[:-1],timeout)
+
     def _cap_store_preflight(self, source, *, timeout: int) -> None:
         """Tighten this original readback once, never alter its command seal."""
         from ._desktop_store_preflight_control import StorePreflightInput

@@ -377,6 +377,12 @@ class DefaultCancellation:
         return source if source.domain is SavedCommandDomain.LocalStorePreflight else None
 
     @property
+    def _store_prepare_source(self):
+        source=self._saved_command_input()
+        from ._desktop_saved_command_control import SavedCommandDomain
+        return source if source is not None and source.domain is SavedCommandDomain.LocalStorePrepare else None
+
+    @property
     def _local_history_source(self) -> Any:
         source = self._saved_command_input()
         from ._desktop_saved_command_control import SavedCommandDomain

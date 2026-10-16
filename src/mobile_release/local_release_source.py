@@ -107,7 +107,9 @@ class LocalSourceObservation:
     this exact original owner's live invocation and reobserves before use.
     """
     def __init__(self, invocation, configuration_bytes, version_bytes, endpoint, execution_source):
-        _need(type(invocation) is InvocationCustody and invocation.mode == "build"
+        prepare=getattr(invocation.cancellation,"_store_prepare_source",None) if type(invocation) is InvocationCustody else None
+        _need(type(invocation) is InvocationCustody and (invocation.mode == "build" or
+              invocation.mode=="store" and prepare is not None and prepare.require_operation().invocation is invocation)
               and invocation.project_owner is not None, "owner")
         self.invocation, self.guard = invocation, invocation.cancellation
         self.project = invocation.project_owner

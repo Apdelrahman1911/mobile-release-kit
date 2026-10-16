@@ -235,7 +235,7 @@ def _store_environment(
     tooling_root: Path,
     *, material: SelectedStoreMaterial, invocation: InvocationCustody,
     lane_evidence: StoreLaneCallEvidence, source_environment: Mapping[str, str],
-    authority: Mapping[str, object],
+    authority: Mapping[str, object] | None,
 ) -> dict[str, str]:
     material.require_store(config=config, platform=request.platform, invocation=invocation,
                            lane_evidence=lane_evidence)
@@ -278,9 +278,14 @@ def _store_environment(
         env["MOBILE_RELEASE_RECOVERY_RUN_ID"] = request.recovery_run_id
     if request.recovery_confirmation:
         env["MOBILE_RELEASE_RECOVERY_CONFIRMATION"] = request.recovery_confirmation
-    env["MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON"] = json.dumps(
-        authority, sort_keys=True, separators=(",", ":")
-    )
+    if authority is None:
+        local=getattr(invocation.cancellation,"_store_prepare_source",None)
+        if local is None or not local.require_operation().local_environment(request,lane_evidence):
+            raise StoreOperationError("Local preparation authority is unavailable")
+    else:
+        env["MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON"] = json.dumps(
+            authority, sort_keys=True, separators=(",", ":")
+        )
     if request.platform == "android":
         if request.stage == "candidate":
             # Public validation inputs only. Missing/stale tools must block a
@@ -621,8 +626,9 @@ def _run_store_lane(
     # Retain its original private ancestry on the encompassing resource stack
     # through the command, terminal read, file disposal and final scope checks.
     # A point-in-time mkdir (or chmod of existing state) is not that custody.
+    local=getattr(cancellation,"_store_prepare_source",None)
     namespace = resources.enter_context(_app_private_directory(
-        receipt_path.parent, app_root=config.root, cancellation=cancellation))
+        receipt_path.parent, app_root=config.root, cancellation=cancellation,exclusive=local is not None))
     if namespace is None:
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         _repository_path(config, receipt_path, "Store output path")
@@ -649,9 +655,10 @@ def _run_store_lane(
         argv = record.seal_command(runner=tooling_root / "fastlane/run_lane.rb", cwd=files.cwd,
                                    environ=environment, cancellation=cancellation)
         try:
-            completed = run_owned(argv, cwd=files.cwd, environ=environment, capture=False,
-                timeout=3600, cancellation=cancellation,
-                _evidence=record.command_evidence(cancellation=cancellation))
+            with local.require_operation().command(local.require_operation().runtime,argv,capture=False) if local is not None else nullcontext():
+                completed = run_owned(argv, cwd=files.cwd, environ=environment, capture=False,
+                    timeout=3600, cancellation=cancellation,
+                    _evidence=record.command_evidence(cancellation=cancellation))
         except BaseException as error:
             primary = error
             record._remember(error)
@@ -734,7 +741,13 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
                      operation_intent: Mapping[str, object] | None,
                      lane_evidence: StoreLaneCallEvidence | None,
                      cancellation: DefaultCancellation | None,
-                     invocation: InvocationCustody | None) -> dict[str, object] | StoreLaneReadback:
+                     invocation: InvocationCustody | None, _local_prepare=None) -> dict[str, object] | StoreLaneReadback:
+    if _local_prepare is not None:
+        from .local_store_prepare import LocalStorePrepareRun
+        if type(_local_prepare) is not LocalStorePrepareRun or not _local_prepare.admit_store(config,release,request,lane_evidence,cancellation,invocation):
+            raise StoreOperationError("Local preparation requires its original owner")
+    elif cancellation is not None and getattr(cancellation,"_store_prepare_source",None) is not None:
+        raise StoreOperationError("Local preparation cannot use the CI route")
     borrowed = lane_evidence is not None
     if invocation is not None and not borrowed:
         raise StoreLaneEvidenceError(attempted=False)
@@ -776,17 +789,18 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
                     readback = _raw_readback(record=record, cancellation=guard, config=config, release=release,
                                              request=request, operation_intent=operation_intent)
                 else:
-                    source_environment = dict(os.environ)
-                    authority = workflow_authority(request.stage)
-                    tooling_root = resolve_tooling_root()
+                    source_environment = dict(os.environ) if _local_prepare is None else _local_prepare.runtime.environment()
+                    authority = workflow_authority(request.stage) if _local_prepare is None else None
+                    tooling_root = resolve_tooling_root() if _local_prepare is None else _local_prepare.runtime.tooling_root
                     if tooling_root is None or not _complete_tooling_root(tooling_root):
                         raise StoreOperationError("Pinned shared Fastlane/Gem tooling is unavailable or incomplete")
                     _require_fastlane_bundle(tooling_root, cancellation=guard,
-                                             source_environment=source_environment)
+                        **({"source_environment":source_environment} if _local_prepare is None else {"runtime_context":_local_prepare.runtime}))
                     material = resources.enter_context(_selected_store_material(config,
-                        values=credential_values_from_environment(source_environment), platforms=(request.platform,),
+                        values=credential_values_from_environment(source_environment) if _local_prepare is None else _local_prepare.material_values(), platforms=(request.platform,),
                         stage="production" if request.stage == "production-submit" else request.stage,
-                        invocation=invocation, cancellation=guard, lane_evidence=record))
+                        invocation=invocation, cancellation=guard, lane_evidence=record,
+                        **({} if _local_prepare is None else {"scratch_parent":_local_prepare.home._path})))
                     findings = material.validate()
                     if any(item.status in FAILING_STATUSES for item in findings):
                         raise StoreOperationError("Selected Store credential material is missing or invalid")

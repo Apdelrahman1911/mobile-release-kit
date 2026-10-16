@@ -32,6 +32,7 @@ class SavedCommandDomain(Enum):
     GitHubHistory = "github-history"
     LocalStorePreflight = "local-store-preflight"
     LocalReleaseHistory = "local-release-history"
+    LocalStorePrepare = "local-store-prepare"
 
 
 def _protocol(domain: SavedCommandDomain):
@@ -57,6 +58,9 @@ def _protocol(domain: SavedCommandDomain):
     if domain is SavedCommandDomain.LocalStorePreflight:
         from . import _desktop_store_preflight_protocol
         return _desktop_store_preflight_protocol
+    if domain is SavedCommandDomain.LocalStorePrepare:
+        from . import _desktop_store_prepare_protocol
+        return _desktop_store_prepare_protocol
     if domain is SavedCommandDomain.LocalReleaseHistory:
         from . import _desktop_local_history_protocol
         return _desktop_local_history_protocol
@@ -86,6 +90,9 @@ def source_domain(source: object) -> SavedCommandDomain:
     from ._desktop_store_preflight_control import StorePreflightInput
     if type(source) is StorePreflightInput and source.domain is SavedCommandDomain.LocalStorePreflight:
         return SavedCommandDomain.LocalStorePreflight
+    from ._desktop_store_prepare_control import StorePrepareInput
+    if type(source) is StorePrepareInput and source.domain is SavedCommandDomain.LocalStorePrepare:
+        return SavedCommandDomain.LocalStorePrepare
     from ._desktop_local_history_control import LocalHistoryInput
     if type(source) is LocalHistoryInput and source.domain is SavedCommandDomain.LocalReleaseHistory:
         return SavedCommandDomain.LocalReleaseHistory
@@ -155,7 +162,7 @@ class _SavedCommandInput:
         if self.domain is SavedCommandDomain.OfflinePreflight:
             if self.budget is not None:
                 self.budget.checkpoint()
-        elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight):
+        elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalStorePrepare):
             self.require_operation().checkpoint()
         else:
             self._require(False)
@@ -177,7 +184,7 @@ class _SavedCommandInput:
             if capture:
                 output_limit = budget.capture(output_limit)
             return timeout, output_limit
-        if self.domain in (SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight):
+        if self.domain in (SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalStorePrepare):
             # The exact operation admits only its fixed inspector role before
             # this existing run_owned callback. No caller role/argv is authority.
             self._require(type(capture) is bool and type(output_limit) is int and output_limit > 0)
@@ -222,7 +229,7 @@ class _SavedCommandInput:
         if time.monotonic() >= self.work_end:
             self.stop("timed-out")
             return
-        material_phase = self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory) and self.material_pending
+        material_phase = self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory, SavedCommandDomain.LocalStorePrepare) and self.material_pending
         active = self.active and not material_phase
         if active and self.buffer:
             self.stop()
@@ -239,6 +246,7 @@ class _SavedCommandInput:
                            SavedCommandDomain.ArtifactInspection: "Original artifact inspection input changed",
                            SavedCommandDomain.GitHubHistory: "Original History input changed",
                            SavedCommandDomain.LocalStorePreflight: "Original Store access-check input changed",
+                           SavedCommandDomain.LocalStorePrepare: "Original Store preparation input changed",
                            SavedCommandDomain.LocalReleaseHistory: "Original local history input changed"}[self.domain]
                 raise _protocol(self.domain).ProtocolError(message)
             if material_phase and (not self.material_receiving or self.buffer):
@@ -246,6 +254,9 @@ class _SavedCommandInput:
                 # another read. A large body is not a large public JSON frame.
                 return
             limit = 1 if active else min(64 * 1024, _protocol(self.domain).REQUEST_LIMIT + 1 - len(self.buffer))
+            if material_phase and self.domain is SavedCommandDomain.LocalStorePrepare and self.reading:
+                self._require(type(self.read_remaining) is int and 1<=self.read_remaining<=2048)
+                limit=min(limit,self.read_remaining)
             if material_phase and self.domain is SavedCommandDomain.AndroidBuild:
                 candidate=getattr(self,"candidate_input",None)
                 if candidate is not None and candidate.reading:

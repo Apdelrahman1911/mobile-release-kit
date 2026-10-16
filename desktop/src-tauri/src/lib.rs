@@ -112,6 +112,8 @@ mod local_release_history_protocol;
 mod local_release_history_owner;
 mod local_store_preflight_protocol;
 mod local_store_preflight_owner;
+mod local_store_prepare_protocol;
+mod local_store_prepare_owner;
 mod artifact_inspection_protocol;
 mod offline_preflight_owner;
 mod android_build_protocol;

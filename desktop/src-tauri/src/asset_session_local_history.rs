@@ -70,11 +70,11 @@ impl DocumentBinding {
     fn local_history_gate(&self,state:&DocumentState)->wire::Availability{
         use wire::Availability;
         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
-            || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled() || self.inner.bridge.local_store.disabled()
+            || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled() || (self.inner.bridge.local_store.disabled() || self.inner.bridge.local_store_prepare.disabled())
             || self.inner.bridge.android_build.disabled() || self.inner.bridge.project_recovery.disabled()
             || self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled(){return Availability::CleanupUnknown;}
         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
-            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || self.inner.bridge.local_store.stopping()
+            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.local_store.stopping() || self.inner.bridge.local_store_prepare.stopping())
             || self.inner.bridge.android_build.stopping() || self.inner.bridge.project_recovery.stopping()
             || self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping(){return Availability::Shutdown;}
         if wire::Profile::current().is_none(){return Availability::UnsupportedPlatform;}
@@ -85,7 +85,7 @@ impl DocumentBinding {
             || state.slot.as_ref().is_some_and(|slot|slot.phase!=Phase::Idle||!slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
-            || self.inner.bridge.local_store.busy() || self.inner.bridge.android_build.busy() || self.inner.bridge.project_recovery.busy()
+            || (self.inner.bridge.local_store.busy() || self.inner.bridge.local_store_prepare.busy()) || self.inner.bridge.android_build.busy() || self.inner.bridge.project_recovery.busy()
             || self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy(){return Availability::Busy;}
         Availability::Available
     }

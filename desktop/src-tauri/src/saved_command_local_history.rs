@@ -195,7 +195,7 @@ pub(super) struct State {route:Mutex<Route>,changed:Notify,
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     native:Mutex<native::State>,
 }
-enum PhaseEvent {History(history_wire::Event),Candidate(android_wire::CandidateEvent)}
+enum PhaseEvent {Prepare(prepare_wire::Event),History(history_wire::Event),Candidate(android_wire::CandidateEvent)}
 struct Route {original:Option<(String,String)>,received:u8,completed:u8,pending:Option<PhaseEvent>,reply_writing:bool,failed:bool}
 impl Route {
     fn candidate_replies_complete(&self)->bool{
@@ -208,6 +208,7 @@ impl State {
         native:Mutex::new(native::State::new()),}}
     pub(super) fn receive(&self,event:history_wire::Event)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::History(event),3)}
     pub(super) fn receive_candidate(&self,event:android_wire::CandidateEvent)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::Candidate(event),4)}
+    pub(super) fn receive_prepare(&self,event:prepare_wire::Event)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::Prepare(event),4)}
     fn receive_phase(&self,event:PhaseEvent,limit:u8)->Result<(),BridgeError>{
         let mut r=self.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
         if r.failed||r.original.is_none()||r.pending.is_some()||!(r.received==r.completed||r.reply_writing&&r.received==r.completed+1)||r.received>=limit{
@@ -310,4 +311,42 @@ mod candidate_route_tests {
         route.completed=4;assert!(!route.candidate_replies_complete());route.reply_writing=false;assert!(route.candidate_replies_complete());
         route.failed=true;assert!(!route.candidate_replies_complete());route.failed=false;route.original=None;assert!(!route.candidate_replies_complete());
     }
+}
+
+// Local Prepare shares original lease/helper ownership, never History's runtime.
+pub(super) fn decode_prepare(owner:&Session,decoder:&mut prepare_wire::Decoder,bytes:&[u8])->Result<prepare_wire::Frame,BridgeError>{
+    let Context::LocalStorePrepare(context)=&owner.context else{return Err(BridgeError::protocol());};
+    let route=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if route.failed{return Err(BridgeError::protocol());}
+    let(nonce,digest)=route.original.as_ref().ok_or_else(BridgeError::protocol)?;
+    decoder.decode(bytes,&owner.id,&owner.generation,context,nonce,digest)
+}
+pub(super) fn prepare_request(owner:&Session,runtime:&VerifiedRuntime)->Result<Vec<u8>,BridgeError>{
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    {native::prepare_request(owner,runtime)}
+    #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
+    {let _=(owner,runtime);Err(BridgeError::protocol())}
+}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(super) fn acquire_prepare_sources(owner:&Session,runtime:&Arc<Mutex<StoreRuntimeSlots>>)->Result<(),BridgeError>{
+    #[cfg(not(feature="macos-android-registration-helper"))]{native::acquire_prepare_sources(owner,runtime)}
+    #[cfg(feature="macos-android-registration-helper")]{let _=(owner,runtime);Err(BridgeError::protocol())}
+}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(super) fn prepare_child(owner:&Session,command:&mut Command)->Result<(),BridgeError>{native::child_command(owner,command)?;native::check_source(owner)}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(super) fn prepare_source_post(owner:&Session)->Result<(),BridgeError>{native::check_source(owner)}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(super) fn finish_prepare_sources(owner:&Session)->bool{native::finish_sources(owner)}
+pub(super) fn prepare_complete(owner:&Session)->bool{
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    {owner.domain==SavedCommandDomain::LocalStorePrepare&&owner.history.route.try_lock().is_ok_and(|r|r.candidate_replies_complete())&&native::prepare_helpers_complete(owner)}
+    #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
+    {let _=owner;false}
+}
+pub(super) async fn write_prepare(owner:&Arc<Session>,writer:&mut ChildStdin,material:&PrivateSigningMaterial,header:&[u8])->Result<CandidateWrite,BridgeError>{
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    {native::write_prepare(owner,writer,material,header).await}
+    #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
+    {let _=(owner,writer,material,header);Err(BridgeError::protocol())}
 }

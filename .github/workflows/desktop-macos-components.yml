@@ -324,8 +324,22 @@ jobs:
               local_release_history_protocol::local_release_history_cleanup_tests::local_release_history_healthy_cleanup_does_not_manufacture_failure \
               saved_command_owner::local_history::native::tests::local_release_history_pre_admission_refusal_has_no_worker_to_join \
               installed_runtime::local_history_runtime_audit_requires_original_claim_and_cleanup_clock \
+              local_store_prepare_protocol::tests::local_prepare_requires_exact_candidate_consent_not_access_or_execute \
+              local_store_prepare_protocol::tests::local_prepare_decoder_requires_original_order_and_final_checkpoint \
+              local_store_prepare_protocol::tests::local_prepare_success_binds_candidate_version_ledger_and_known_closes \
+              local_store_prepare_protocol::tests::local_prepare_known_failed_prefix_never_requires_or_fakes_settlement_phase \
+              saved_command_owner::store_prepare::tests::local_prepare_uses_original_store_clock_and_separate_frame_reason_limits \
+              saved_command_owner::local_history::native::prepare_tests::local_prepare_helper_plan_never_enrolls_or_omits_a_checkpoint \
+              asset_session::store_material::tests::local_prepare_comparison_and_private_bytes_do_not_mint_document_grant \
+              local_store_preflight_protocol::tests::local_consent_is_closed_and_terminal_cannot_hide_unknown_ownership \
+              asset_session::store_material::tests::store_command_loan_binds_canonical_context_and_retains_private_writer_bytes \
+              asset_session::store_material::tests::local_loan_uses_original_private_bytes_and_rejects_stale_context_or_assignment \
+              saved_command_owner::store::tests::local_store_failed_post_or_unknown_close_never_becomes_complete \
+              saved_command_owner::store::tests::local_store_original_clock_and_private_backing_are_bounded \
+              installed_runtime::store_runtime::tests::store_cleanup_points_ignore_work_stop_but_keep_original_expiry_and_failures \
+              installed_runtime::store_runtime::tests::store_slots_do_not_lend_uninspected_or_settled_sources \
               --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
-            grep -Eq '^test result: ok\. 20 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 34 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
             exit 0
           fi
           # The same Mac Store implementation is in the headless library graph.

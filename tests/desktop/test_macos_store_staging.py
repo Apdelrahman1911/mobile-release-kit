@@ -79,7 +79,23 @@ class StoreStaging(unittest.TestCase):
             TOOL.decode(b'{"files":[],"files":[]}',byte_limit=TOOL.INVENTORY_BYTES,node_limit=150000)
         with self.assertRaises(TOOL.Refused):
             TOOL.decode(b' '*(TOOL.INVENTORY_BYTES+1),byte_limit=TOOL.INVENTORY_BYTES,node_limit=150000)
-        self.assertEqual(TOOL.FRESH_SUPPLIER_FILES,2032)
+        # Supplier capacity reserves every current bootstrap, core, CA and the
+        # final manifest; adding a bootstrap must not grow the legacy envelope.
+        from test_macos_fresh_python_consumer import fixture_data, encoded_receipt
+        _, lock, supplier = fixture_data()
+        rows = supplier["files"]
+        rows.extend({"path":f"python/inert/{index:05}","size":1,"sha256":"a"*64,"mode":0o444}
+                    for index in range(TOOL.FRESH_SUPPLIER_FILES-len(rows)))
+        rows.sort(key=lambda row: row["path"])
+        raw, pin = encoded_receipt(supplier)
+        _, accepted = TOOL.fresh_supplier_receipt(raw, pin, lock)
+        complete = set(accepted) | TOOL.CURRENT_BOOTSTRAPS | {"core.zip", "github-ca.pem", "manifest.json"}
+        self.assertEqual(len(complete), 2048)
+        self.assertEqual(TOOL.LEGACY_MAX_FILES, 2048)
+        rows.append({"path":"python/overflow","size":1,"sha256":"a"*64,"mode":0o444})
+        rows.sort(key=lambda row: row["path"])
+        raw, pin = encoded_receipt(supplier)
+        with self.assertRaises(TOOL.Refused): TOOL.fresh_supplier_receipt(raw, pin, lock)
         self.assertEqual(TOOL.MAX_BYTES,512*1024*1024)
 
     def test_combined_directory_entries_refuse_one_over_without_alias_relaxation(self):

@@ -732,7 +732,7 @@ class FiniteScratch:
             operation = android.require_operation()
             _need(operation.signing is not None and layout == "build", "Android scratch requires its signing child")
             operation.signing.bind_scratch(self)
-        store = getattr(guard, "_store_preflight_source", None)
+        store = getattr(guard, "_store_preflight_source", None) or getattr(guard, "_store_prepare_source", None)
         if store is not None:
             store.require_operation().bind_scratch(self)
         if lane_evidence is not None:
@@ -1776,6 +1776,8 @@ class InvocationCustody:
             guard._local_history_source.require_operation().bind_invocation(self)
         elif getattr(guard, "_store_preflight_source", None) is not None:
             guard._store_preflight_source.require_operation().bind_invocation(self)
+        elif getattr(guard, "_store_prepare_source", None) is not None:
+            guard._store_prepare_source.require_operation().bind_invocation(self)
 
     def _owner(self, *, cleanup: bool = False) -> None:
         _need(self.pid == os.getpid() and self.thread is threading.current_thread(),
@@ -1836,7 +1838,9 @@ class InvocationCustody:
     @contextmanager
     def project(self, *, signing_lease: SigningLease | None) -> Iterator[None]:
         self._owner()
-        _need(self.mode == "build" and not self.project_started and self.project_owner is None,
+        prepare=getattr(self.cancellation,"_store_prepare_source",None)
+        admitted=self.mode=="build" or (self.mode=="store" and prepare is not None and prepare.require_operation().invocation is self)
+        _need(admitted and not self.project_started and self.project_owner is None,
               "project admission is not available")
         if signing_lease is not None:
             from .local_signing import SigningLease
@@ -1853,7 +1857,7 @@ class InvocationCustody:
             _need(operation.invocation is self, "iOS project requires its original invocation")
             expected = operation.request.native["rootIdentity"]
             expected_root = (int(expected["device"]), int(expected["inode"]), expected["mode"], expected["uid"], expected["gid"])
-        local = getattr(self.cancellation, "_local_history_source", None)
+        local = getattr(self.cancellation, "_local_history_source", None) or getattr(self.cancellation,"_store_prepare_source",None)
         if local is not None:
             operation = local.require_operation()
             _need(operation.invocation is self, "local history requires original invocation")
@@ -2186,6 +2190,8 @@ class _Project:
         return _directory(os.fstat(self.fd))
 
     def check(self) -> None:
+        prepare=getattr(self.guard,"_store_prepare_source",None)
+        if prepare is not None:prepare.borrow_project(self)
         android=getattr(self.guard,"_android_build_source",None)
         candidate=getattr(android,"candidate_input",None) if android is not None else None
         if candidate is not None:
@@ -2224,7 +2230,7 @@ class _Project:
         self.rename = _rename_function()
         try:
             with self.guard.deferred(check_on_exit=False):
-                local = getattr(self.guard, "_local_history_source", None)
+                local = getattr(self.guard, "_local_history_source", None) or getattr(self.guard,"_store_prepare_source",None)
                 android=getattr(self.guard,"_android_build_source",None)
                 candidate=getattr(android,"candidate_input",None) if android is not None else None
                 if candidate is not None:
@@ -2259,7 +2265,8 @@ class _Project:
 
     def ensure_meta(self) -> int:
         _need(getattr(self.guard, "_artifact_inspection_source", None) is None
-              and getattr(self.guard, "_local_history_source", None) is None,
+              and getattr(self.guard, "_local_history_source", None) is None
+              and getattr(self.guard, "_store_prepare_source", None) is None,
               "observation cannot create project metadata")
         self.check()
         source = getattr(self.guard, "_android_build_source", None)

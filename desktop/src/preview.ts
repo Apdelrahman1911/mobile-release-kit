@@ -1,3 +1,4 @@
+import { localStorePrepareError } from './localStorePrepareProtocol.ts';
 import { localHistoryError } from './localReleaseHistoryProtocol.ts';
 import { localStoreError } from './localStorePreflightProtocol.ts';
 import { publicationError } from './githubPublicationProtocol.ts';
@@ -225,6 +226,11 @@ export const previewApi: DesktopApi = {
   localReleaseHistoryStatus:async()=>{throw localHistoryError();},
   cancelLocalReleaseHistory:async()=>{throw localHistoryError();},
   subscribeLocalReleaseHistory:async()=>{throw localHistoryError();},
+  prepareLocalStorePrepare:async()=>{throw localStorePrepareError();},
+  startLocalStorePrepare:async()=>{throw localStorePrepareError();},
+  localStorePrepareStatus:async()=>{throw localStorePrepareError();},
+  cancelLocalStorePrepare:async()=>{throw localStorePrepareError();},
+  subscribeLocalStorePrepare:async()=>{throw localStorePrepareError();},
   prepareLocalStorePreflight:async()=>{throw localStoreError();},
   startLocalStorePreflight:async()=>{throw localStoreError();},
   localStorePreflightStatus:async()=>{throw localStoreError();},

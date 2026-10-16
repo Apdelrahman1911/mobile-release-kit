@@ -3,9 +3,9 @@ use super::*;
 
 impl Inner {
     pub(super) fn store_installed_selected(&self) -> bool {
-        self.domain==SavedCommandDomain::LocalStorePreflight && cfg!(all(feature="desktop-shell",feature="custom-protocol",
+        matches!(self.domain,SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare) && cfg!(all(feature="desktop-shell",feature="custom-protocol",
             not(feature="development-runtime"),not(feature="macos-installed-installer"),not(feature="macos-android-registration-helper"),target_os="macos"))
-            && store_wire::Profile::current().is_some() && self.runtime.local_store_preflight_installed_profile_available()
+            && store_wire::Profile::current().is_some() && if self.domain==SavedCommandDomain::LocalStorePrepare{self.runtime.local_store_prepare_installed_profile_available()}else{self.runtime.local_store_preflight_installed_profile_available()}
     }
 }
 impl SavedCommandOwner {
@@ -59,14 +59,14 @@ pub(super) fn installed_final(book: &Resources) -> bool {
 }
 
 pub(super) fn closure_ready(r: &Registry, owner: &Session, claimed: bool, direct_returned: bool) -> bool {
-    direct_returned && owner.domain == SavedCommandDomain::LocalStorePreflight && original_session(r, owner)
+    direct_returned && matches!(owner.domain,SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare) && original_session(r, owner)
         && (!claimed || r.active.as_ref().is_some_and(|a| a.accepted && a.terminal
-            && matches!(a.projection.result.as_ref(), Some(Terminal::LocalStorePreflight(t)) if t.lifetime.settled())))
+            && match a.projection.result.as_ref(){Some(Terminal::LocalStorePreflight(t))=>owner.domain==SavedCommandDomain::LocalStorePreflight&&t.lifetime.settled(),Some(Terminal::LocalStorePrepare(t))=>owner.domain==SavedCommandDomain::LocalStorePrepare&&t.lifetime.settled(),_=>false}))
 }
 
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(super) fn claim_clear(inner: &Inner, r: &Registry, owner: &Session, now: Instant) -> bool {
-    owner.domain == SavedCommandDomain::LocalStorePreflight && inner.store_installed_selected()
+    matches!(owner.domain,SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare) && inner.store_installed_selected()
         && inner.qualified(owner.android_selection.as_ref())
         && final_clock_clear(r, owner, now) && !inner.poisoned.load(Ordering::SeqCst)
         && !r.stopping && !r.document_lost && !*owner.stop.borrow() && now < owner.clocks.work
@@ -88,7 +88,7 @@ pub(super) fn transfer_installed(book: &Resources, inner: &Inner, owner: &Sessio
 }
 
 pub(super) async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Session>) {
-    if owner.domain != SavedCommandDomain::LocalStorePreflight { return; }
+    if !matches!(owner.domain,SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare) { return; }
     #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { let _ = (book, inner, owner); }
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -125,7 +125,9 @@ pub(super) async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, o
                     let post = if slots.no_child_effect() { Ok(()) } else { slots.check_claimed_before_settlement(&mut |first|original_owner.native_cleanup_expired(first)) };
                     if let Err(failure)=post { original_owner.publish_native_failure(Some((failure,Instant::now()))); }
                     let closed=slots.settle_originals(&mut |first| original_owner.native_cleanup_expired(first));
-                    checked_close_outcome(post.is_ok(),closed)
+                    // Independent consuming close even after Store POST/close failure.
+                    let source_ok=original_owner.domain!=SavedCommandDomain::LocalStorePrepare||local_history::finish_prepare_sources(&original_owner);
+                    checked_close_outcome(post.is_ok()&&source_ok,closed)
                 }
                 #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { slots.settle_originals() }
@@ -146,7 +148,8 @@ pub(super) async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, o
 
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(super) fn acquire_installed(inner:&Inner,owner:&Session,native:&Arc<Mutex<StoreRuntimeSlots>>){
-    if owner.domain!=SavedCommandDomain::LocalStorePreflight || !inner.store_installed_selected(){inner.stop(owner,Reason::RuntimeUnavailable);return;}
+    if !matches!(owner.domain,SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare) || !inner.store_installed_selected(){inner.stop(owner,Reason::RuntimeUnavailable);return;}
+    if owner.domain==SavedCommandDomain::LocalStorePrepare&&local_history::prepare_source_post(owner).is_err(){inner.stop(owner,Reason::ContextChanged);return;}
     let mut slots=match native.lock(){Ok(slots)=>slots,Err(_)=>{inner.unknown(owner);return;}};
     let mut loan=match slots.prepare_loan(&mut |first|owner.publish_native_failure(first)){
         Ok(loan)=>loan,Err(failure)=>{owner.publish_native_failure(Some((failure,Instant::now())));inner.stop(owner,Reason::RuntimeUnavailable);return;}
@@ -155,6 +158,7 @@ pub(super) fn acquire_installed(inner:&Inner,owner:&Session,native:&Arc<Mutex<St
     let mut command=Command::new(&selected.python);
     command.args(["-I","-S","-B"]).arg(&selected.bootstrap).arg(&selected.core).current_dir(&selected.cwd)
         .env_clear().env("LANG","C").env("LC_ALL","C").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    if owner.domain==SavedCommandDomain::LocalStorePrepare&&local_history::prepare_child(owner,&mut command).is_err(){loan.record_closed_spawn_gate();inner.stop(owner,Reason::ContextChanged);return;}
     if crate::runtime::macos_installed_environment(&mut command).is_err(){loan.record_closed_spawn_gate();inner.stop(owner,Reason::RuntimeUnavailable);return;}
     if let Err(failure)=loan.check_before_or_after_use(){
         loan.record_closed_spawn_gate();owner.publish_native_failure(Some((failure,Instant::now())));inner.stop(owner,Reason::RuntimeUnavailable);return;
@@ -168,8 +172,12 @@ pub(super) fn acquire_installed(inner:&Inner,owner:&Session,native:&Arc<Mutex<St
     startup.attempted=true;drop(r);
     match command.spawn(){
         Ok(child)=>{startup.child=Some(child);startup.returned=true;},
-        Err(_)=>{startup.failed=true;owner.resource_unknown.store(true,Ordering::SeqCst);drop(startup);inner.stop(owner,Reason::RuntimeUnavailable);inner.unknown(owner);}
+        Err(_)=>{startup.failed=true;owner.resource_unknown.store(true,Ordering::SeqCst);drop(startup);inner.stop(owner,Reason::RuntimeUnavailable);inner.unknown(owner);return;}
     }
+    // Drop the pre_exec Arc loan held inside Command, retaining the actual
+    // child first. Original source POST is still before writer GO publication.
+    drop(command);drop(startup);
+    if owner.domain==SavedCommandDomain::LocalStorePrepare&&local_history::prepare_source_post(owner).is_err(){inner.stop(owner,Reason::ContextChanged);}
     // Lexical borrow ends, not ownership: the same claimed Book remains in
     // Session.resources until original child/writer/reader/task joins and POST.
 }

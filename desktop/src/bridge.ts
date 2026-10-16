@@ -1,3 +1,5 @@
+import { STORE_PREPARE_EVENT, encodeLocalStorePrepareRequest, parseLocalStorePrepareStatus, localStorePrepareError, type StorePrepareCommand } from './localStorePrepareProtocol.ts';
+import type { LocalStorePrepareStatus } from './localStorePrepareTypes.ts';
 import { LOCAL_HISTORY_EVENT, encodeLocalHistoryRequest, parseLocalHistoryStatus, localHistoryError } from './localReleaseHistoryProtocol.ts';
 import type { LocalHistoryCommand } from './localReleaseHistoryProtocol.ts';
 import type { LocalHistoryStatus } from './localReleaseHistoryTypes.ts';
@@ -76,7 +78,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -227,6 +229,12 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if(!body)throw localHistoryError();const status=parseLocalHistoryStatus(await invoke<unknown>(command,body));
       if(!status)throw localHistoryError();return status;
     }catch(error){throw localHistoryError(error);}
+  };
+  const storePrepareCall = async (command:StorePrepareCommand,value:unknown):Promise<LocalStorePrepareStatus>=>{
+    try{if(mode!=='native')throw localStorePrepareError();const body=encodeLocalStorePrepareRequest(command,value);
+      if(!body)throw localStorePrepareError();const status=parseLocalStorePrepareStatus(await invoke<unknown>(command,body));
+      if(!status)throw localStorePrepareError();return status;
+    }catch(error){throw localStorePrepareError(error);}
   };
   const storeCall = async (command:StoreCommand,value:unknown):Promise<LocalStoreStatus>=>{
     try{if(mode!=='native')throw localStoreError();const body=encodeLocalStoreRequest(command,value);
@@ -542,6 +550,14 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     subscribeLocalReleaseHistory:async onStatus=>{
       if(mode!=='native'||!listen)throw localHistoryError();
       return await listen(LOCAL_HISTORY_EVENT,value=>onStatus(parseLocalHistoryStatus(value)));
+    },
+    prepareLocalStorePrepare:request=>storePrepareCall('prepare_local_store_prepare',request),
+    startLocalStorePrepare:request=>storePrepareCall('start_local_store_prepare',request),
+    localStorePrepareStatus:()=>storePrepareCall('local_store_prepare_status',{}),
+    cancelLocalStorePrepare:(operationId,ownerGeneration)=>storePrepareCall('cancel_local_store_prepare',{operationId,ownerGeneration}),
+    subscribeLocalStorePrepare:async onStatus=>{
+      if(mode!=='native'||!listen)throw localStorePrepareError();
+      return await listen(STORE_PREPARE_EVENT,value=>onStatus(parseLocalStorePrepareStatus(value)));
     },
     prepareLocalStorePreflight:request=>storeCall('prepare_local_store_preflight',request),
     startLocalStorePreflight:request=>storeCall('start_local_store_preflight',request),

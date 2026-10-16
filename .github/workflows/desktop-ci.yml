@@ -78,6 +78,7 @@ jobs:
           # explicit module names avoid the historical native/package suite.
           python -B -m unittest \
             unit.test_desktop_store_preflight \
+            test_local_store_prepare test_local_release_history test_local_candidate_inputs \
             test_macos_store_consumer test_macos_store_paths \
             test_macos_candidate_consumer test_macos_candidate_bootstrap test_macos_candidate_ui \
             test_macos_notary_submit_diagnostic \

@@ -367,6 +367,9 @@ class StoreLaneFiles(_Owner):
             label = wire.clock_label()
             run = time.monotonic_ns() + wire.RUN_NS
             self.timing = wire.Timing(label, run, run + wire.CLEANUP_NS)
+            local=getattr(self.guard,"_store_prepare_source",None)
+            if local is not None:
+                self.timing=local.require_operation().lane_timing(self,label)
             wire.need(self.timing.hard <= wire.MAX_TIME)
             result.update({
                 wire.PREFIX + "NONCE": self.record._nonce.hex(),

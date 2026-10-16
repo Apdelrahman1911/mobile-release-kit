@@ -12,7 +12,7 @@ import unittest
 from unittest import mock
 
 from test_macos_launcher_staging import TOOL
-from test_macos_store_staging import StoreStaging
+import test_macos_store_staging as store_staging
 
 
 @contextlib.contextmanager
@@ -33,7 +33,7 @@ def fixture(*, target=TOOL.ARM_TARGET):
                   TOOL.CURRENT_CA_SOURCE: b"synthetic CA, not usable TLS material\n",
                   TOOL.CURRENT_HELPER_SOURCE: helper,
                   "desktop/macos-installed-inputs/build-release-intel.json": intel_release, **tooling}
-        inputs.update({"desktop/" + name: b"# inert bootstrap\n" for name in TOOL.CURRENT_BOOTSTRAPS | {"local_store_preflight_bootstrap.py"}})
+        inputs.update({"desktop/" + name: b"# inert bootstrap\n" for name in TOOL.CURRENT_BOOTSTRAPS | {"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py"}})
         for name, body in inputs.items():
             path = checkout / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,7 +44,7 @@ def fixture(*, target=TOOL.ARM_TARGET):
             "sourceManifestSha256": None, "targets": {TOOL.ARM_TARGET: None, TOOL.INTEL_TARGET: None}}))
         component = root / "component"
         component.mkdir()
-        component_files = StoreStaging().fixture(target)
+        component_files = store_staging.StoreStaging().fixture(target)
         component_files.update({"store/tooling/" + name: (body, 0o444) for name, body in tooling.items()})
         component_files["store/tooling/fastlane/run_lane.rb"] = (b"# obsolete runner\n", 0o444)
         component_files["store/tooling/obsolete.rb"] = (b"# not part of current core\n", 0o444)
@@ -88,6 +88,7 @@ class StoreComposition(unittest.TestCase):
             for name, body in f.tooling.items():
                 self.assertEqual(output["store/tooling/" + name], (body, 0o444))
             self.assertEqual(output["local_store_preflight_bootstrap.py"], (b"# inert bootstrap\n", 0o444))
+            self.assertEqual(output["local_store_prepare_bootstrap.py"], (b"# inert bootstrap\n", 0o444))
             self.assertNotIn("store/tooling/obsolete.rb", output)
             self.assertEqual((f.component / "tooling/fastlane/run_lane.rb").read_bytes(), b"# obsolete runner\n")
             self.assertEqual(output["python/bin/python3"], f.supplier["python/bin/python3"])
@@ -112,6 +113,7 @@ class StoreComposition(unittest.TestCase):
             files = TOOL.tree(selection.work / "runtime", current_root_mode=0o700)
             self.assertFalse(any(name.startswith("store/") for name in files))
             self.assertNotIn("local_store_preflight_bootstrap.py", files)
+            self.assertNotIn("local_store_prepare_bootstrap.py", files)
             captured, _, _ = TOOL.current_source()
             self.assertTrue(set(f.tooling).isdisjoint(captured))
             rejected = args(f, "historical")

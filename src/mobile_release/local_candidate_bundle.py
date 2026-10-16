@@ -64,8 +64,10 @@ def manifest_data(raw, *, operation_id, enrollment, pending):
 class CandidateBundleReview:
     def __init__(self, owner, *, operation_id, enrollment, pending, candidate_sha256):
         from .local_release_history import LocalHistoryRun
-        need(type(owner) is LocalHistoryRun and owner.bundle is None and not owner._close_claimed
-             and owner.request.context["action"]=="review-inputs"
+        from .local_store_prepare import LocalStorePrepareRun
+        admitted=(type(owner) is LocalHistoryRun and owner.request.context["action"]=="review-inputs"
+                  or type(owner) is LocalStorePrepareRun and owner.request.context["operation"]=="local-store-prepare")
+        need(admitted and owner.bundle is None and not owner._close_claimed
              and owner.request.context["candidateOperationId"]==operation_id
              and _uuid(operation_id) and _sha(candidate_sha256))
         self.owner,self.operation_id,self.enrollment,self.pending=owner,operation_id,enrollment,pending

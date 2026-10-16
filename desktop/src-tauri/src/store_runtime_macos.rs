@@ -69,13 +69,14 @@ impl StoreRuntimeSlots {
         let (end, stop) = (originals.end, originals.stop.clone());
         self.inner.inspect_once(profile, end, &stop)
     }
-    pub(crate) fn inspect_preflight_once(&mut self, profile: runtime::LocalStorePreflightInstalledProfile)
-        -> std::result::Result<VerifiedRuntime, BridgeError> {
+    pub(crate) fn inspect_preflight_once(&mut self,profile:runtime::LocalStorePreflightInstalledProfile)->std::result::Result<VerifiedRuntime,BridgeError>{self.inspect_selected(profile.selection()?)}
+    pub(crate) fn inspect_prepare_once(&mut self,profile:runtime::LocalStorePrepareInstalledProfile)->std::result::Result<VerifiedRuntime,BridgeError>{self.inspect_selected(profile.selection()?)}
+    fn inspect_selected(&mut self,selected:VerifiedRuntime)->std::result::Result<VerifiedRuntime,BridgeError>{
         if self.inner.settlement || self.inner.selection.is_some() || self.inner.acquisition.is_some()
             || !self.inner.inspection.as_ref().is_some_and(Book::inspection_ready) { return Err(BridgeError::cleanup_unknown()); }
         let originals = self.inner.inspection.as_ref().and_then(|book| book.store.as_ref()).ok_or_else(BridgeError::cleanup_unknown)?;
         let (end, stop) = (originals.end, originals.stop.clone());
-        self.inner.selection = Some(profile.selection()?);
+        self.inner.selection = Some(selected);
         let selection = self.inner.selection.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
         let book = self.inner.inspection.as_mut().ok_or_else(BridgeError::cleanup_unknown)?;
         book.inspect(selection, end, &stop).map_err(|_| BridgeError::unavailable("The installed Store runtime failed original custody inspection."))?;
