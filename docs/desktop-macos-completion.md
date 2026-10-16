@@ -1,0 +1,177 @@
+# macOS completion plan and working status
+
+Updated: 2026-10-16. **NOT READY; not delivered or approved for public release.**
+
+## Agreed target
+
+Standalone macOS 26+ application for Apple Silicon **and** Intel. Preserve the
+Rust/Tauri application and shared Python release engine. Normal operation must
+not require a terminal, separately installed Python/Rust/Ruby, or manual copying
+of credentials/assets into internal directories. Xcode, Android SDKs and other
+genuine consumer build prerequisites remain explicit doctor/setup requirements.
+
+Both GitHub-backed release workflows and **direct Mac-to-Store operations** are
+required. Direct Store execution is new scope: the existing CI-only mutation
+guard must not be disabled, relaxed or supplied with fabricated GitHub context.
+Android production remains draft preparation; Apple submission retains manual
+public release. Main changes, public Desktop distribution and live Store
+mutations require separate owner approval.
+
+## Completion milestones
+
+1. **One integrated Mac candidate.** Preserve the handoff and older staged work;
+   integrate accepted changes deliberately. Fix native project/picker navigation
+   and verify the actual bundled runtime on both architectures. Enabled controls
+   and successful compilation do not establish installed functionality.
+2. **Everyday UI.** Discovery, initialization, explicit target selection,
+   configuration preview/save, metadata/locales/images/version persistence,
+   native file/folder/multiple selection, contextual field help, progress,
+   actionable errors, history and domain-specific recovery. Preserve unrelated
+   files and reject changed originals instead of silently overwriting them.
+3. **Credentials and local builds.** Finish signing and read-only online checks;
+   verify Keychain persistence/replacement/restart/update behavior, doctor,
+   Android build/sign/inspect and real iOS archive/export/recovery. Format
+   assessment is not successful signing or account access.
+4. **Complete GitHub setup.** Reviewed workflow Apply plus scoped commit/push/PR;
+   complete App Review and commitment input mappings; configure and read back
+   required secrets/variables/environments/protection without replacing custom
+   rules. Complete release dispatch, tracking, history and reconciliation.
+5. **Direct Store route.** Explicit project opt-in and clean observed local Git
+   source; typed local authorization; durable original intents; existing shared
+   Store transitions; build-once promotion and conservative recovery. Local
+   evidence stays separate from GitHub authentication. Reject cross-origin
+   promotion/recovery initially. Bundle locked Ruby/Bundler/Fastlane and native
+   dependencies for both architectures; do not require a user gem installation.
+6. **Installation and distribution.** Normal discoverable Applications entry
+   without moving the protected runtime; coherent Desktop/package versions;
+   enrolled two-generation updates; preservation of projects/credentials/history;
+   guided safe uninstall; approved Developer ID/Installer signatures, notarized
+   and stapled distribution artifacts, installation and launch verification.
+
+## API and compatibility boundaries
+
+- UI calls typed Rust application commands and the existing core, not CLI-text
+  parsing or duplicate release logic.
+- Credential verification and local preflight use selected native private inputs.
+- Local release prepare/start/status/cancel/reconcile have explicit authority,
+  original-operation identity and durable settlement. Parsing a draft does not
+  grant permission or prove source, credentials, artifacts or Store state.
+- Python and Ruby must agree on GitHub versus local execution identity. Existing
+  GitHub evidence readers and CI authorization remain compatible and enforced.
+- Repository publication and removal expose reviewable operations, not arbitrary
+  shell commands, force-push or unrestricted deletion.
+
+## Verification and resource policy
+
+Use ordinary focused Python/Rust/TypeScript/Ruby tests, then real Mac XCTest and
+native integration checks. Fast Linux checks precede relevant hosted work. Build
+and sign a changed package once; independent installed feature groups reuse that
+same immutable artifact. Harness-only fixes must not rebuild/notarize the app.
+Retain artifact/signature/provenance safety checks, not redundant source-hash
+snapshots or copied implementation tests. A skipped/unexecuted check is not a pass.
+
+Required journeys include fresh install/launch/edit/restart/quit; picker cancel
+and reselection; credential persistence and denied access; both native build/sign
+paths; GitHub setup and lifecycle; local release policy and evidence separation;
+timeouts/network ambiguity/partial recovery; update/reinstall/uninstall integrity.
+Use fixtures for Store mutations unless the owner separately authorizes a real
+test. Read-only authenticated service checks still require suitable credentials.
+
+All available four slots may now be used (primary plus three subagents), with
+disjoint edits and independent reviews for important boundaries. Serialize heavy
+builds where necessary, stop only task-owned workers and remove only disposable
+task-owned outputs. Do not delete shared caches, dependencies needed next, or
+required artifacts/evidence.
+
+## Current evidence and remaining work
+
+- Reference `handoff/2026-09-08` remains clean at `ae6a973de8cbebb22c64ce1c689c1568669b9ec7`.
+- Active integration started at `0d7a050b`: CI simplification already has focused
+  local verification recorded in `desktop-ci.md`; it is not complete Mac acceptance.
+- Older ARM application source `ce644711fb6e2bea26182473441aac192d5638e1` has retained
+  signing/notarization, installation and basic launch/quit evidence. The latest
+  old harness run `38817185242/1` failed project navigation. Neither that package
+  nor an updated harness establishes current feature completeness or Intel parity.
+- Picker correction `75c3c36f` has independent implementation source acceptance.
+  Actual Mac run `38831920863/1`, job `116752397422`, passed fresh installation,
+  XCTest compilation and launch/cancel/quit (1/1), but failed both project-open
+  journeys. Both typed paths now read back exactly; navigation completion is
+  still unverified. Follow-up `8dfcc59e`, run `38833645811/1`, again passed
+  installation, harness compilation and launch/cancel/quit but failed project
+  navigation: one test observed the parent panel ready only after the shared
+  five-second interval; the other reported a typed-value mismatch. This does
+  not prove autocomplete caused the mismatch. `57a6c215` now uses the standard
+  Paste action for the synthetic path and ordinary 15-second UI expectations
+  within the unchanged whole-case deadline. Original panel, exact path, final
+  Open and project/file readbacks remain required. Run `38835494056/1` again
+  passed basic launch but both project paths remained empty after Paste.
+  Source inspection then found the application replaced the native menu with
+  File/Quit only. Commit `e6771bc0` restores standard AppKit Edit actions.
+  That product fix needs a newly built application; rerunning the unchanged
+  signed carrier cannot verify it. Only small sanitized UI artifacts were
+  downloaded locally, never the signed application carrier.
+- Desktop npm version alignment is implemented and statically checked against
+  the existing app/package `0.1.2`; the Python core remains `0.3.0`.
+- Initial local Store draft validation `c9c96314` passed independent source review
+  and 8 pure tests (0 failures/errors/skips). It is not authenticated intent,
+  executable local Store support or a completed milestone.
+- A minimal nonprivileged Applications launcher component is implemented and
+  independently source-reviewed. Native run `38834106254/1` at `c969ef283a7b6c9dd13a3173ede0c900410992df`
+  passed Swift compilation, plist and architecture checks on Apple Silicon
+  (job `116759213883`) and Intel (`116759214327`); both cleanup steps passed.
+  The prior compile failed on an unavailable Security constant; the fix uses
+  public SDK flags without weakening signature/Team ID checks or claiming
+  offline OS trust evaluation. Signed installation/lifecycle integration and
+  actual launcher invocation remain pending.
+- App Review contact/demo and operation-commitment credential records and
+  GitHub mappings are integrated (`6f5fee5c`): original private borrowing,
+  exact key/version pairing, no double Base64 encoding. Focused Python and
+  frontend tests and TypeScript checks passed. The combined headless Rust gate
+  passed 29 tests. Installed Mac credential journeys remain necessary.
+- Signed iOS preparation previously could not assign a required private
+  dependency token in its original signing context. Commit `03f6f55a` fixes
+  that narrow applicability mismatch without changing the shared core's
+  requiredness or borrowing identity. Python assessment tests: 30 passed;
+  focused Rust assessment tests: 24 passed. Real Apple Distribution/profile
+  signing remains distinct from these tests.
+- Signed Applications-launcher staging (`6bc13979`) passed five filesystem
+  tests; strict inventory/lifecycle decisions (`2946444b`) passed three Rust
+  tests. Native component run `38835805273/1` also confirmed both architectures
+  compile with system-only linkage and no rpath. Native install/update/removal
+  enrollment and actual launcher invocation remain unfinished.
+- The private Ruby/Bundler/Fastlane builder has independent source review.
+  The optional Intel-only `terminal-notifier` executable is excluded from this
+  fixed-lane runtime; wrapper/licenses remain. Both native jobs in
+  `38837216127/1` compiled Ruby/OpenSSL/libyaml, then failed because the new
+  Bundler tried to replace Ruby's default launcher. `b1f5714a` uses a separate
+  private launcher directory and copies the core's complete tooling roster.
+  No final runtime smoke passed in that run. Compilation and gem assembly are
+  being separated so failed assembly can reuse a verified native base.
+- Explicit local preparation policy (`4998f3ad`) is available through the
+  existing guided settings editor. It defaults off, preserves actual branch
+  policy, and does not grant mutation authority. The focused draft/config/help
+  gate passed 31 tests, including unchanged CI-only mutation refusal.
+- GitHub local workflow Apply and remote settings exist, but creating a scoped
+  setup branch/draft PR is a genuine missing feature. Its implementation is
+  underway, reusing existing connection and process ownership; local Apply
+  must not be labeled repository publication.
+- The previously authorized Mac SSH route timed out again on 2026-10-16.
+  No build or worker was started there. Native verification continues through
+  GitHub macOS runners rather than blocking independent work.
+
+Important local logs are retained under
+`/dev/shm/mrk-ci-simplification-results-20261015/`; compiler targets and test
+scratch were removed after their final consumer. The task-owned Cargo download
+cache is retained for imminent checks, not a running build worker.
+
+All six milestones remain open. Remaining external inputs may include an actual
+iOS test project and Apple Distribution profile/key, authorized Store test apps
+and credentials, and a controlled GitHub repository. Desktop Developer ID and
+notary credentials are not substitutes for mobile application signing inputs.
+No specifically physical-Mac-only blocker is currently established.
+
+Final acceptance requires working major features on both installed Mac builds,
+no unresolved security/data-loss/recovery/signing blocker, accurate limitations,
+and signed/notarized installers. Do not describe a compile, draft or preview as
+feature-complete. The preliminary full-scope estimate is 2–4 engineering weeks;
+native failures, credentials and the newly added direct Store route affect it.
