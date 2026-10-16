@@ -247,3 +247,151 @@ class NotarySubmitDiagnosticTests(unittest.TestCase):
                           ("returned", False), ("capturesSettled", False), ("stderrSha256", "a" * 64)):
             bad = dict(row, **{key: item})
             self.assertEqual(PUBLIC.project_calls([bad])["calls"][0]["notarySubmitDiagnostic"]["receiptState"], "refused")
+
+
+class InstallerFailureDiagnosticTests(unittest.TestCase):
+    def operation(self, *, code=1, publish_error=False):
+        self.publications = {}
+        self.invocations = []
+        self.capture = (b'MRK_MACOS_POSTINSTALL_PHASE=pre-exec\n'
+            b'MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role=input-directory;phase=acl-entry-present;'
+            b'result=1;call=0;errno=0;freeCall=0;freeErrno=0\n'
+            b'MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=' + b'a' * 64 +
+            b';exit=1;originals=1;native=0;timely=1;unknown=1\n')
+        def owned(argv, **kwargs):
+            self.invocations.append(tuple(argv))
+            return subprocess.CompletedProcess(argv, code, self.capture, PRIVATE)
+        def publish(name, body):
+            if publish_error and name == 'installer-output.txt':
+                raise RuntimeError('synthetic-publication-failure')
+            self.publications[name] = body
+        op = object.__new__(HELPER.Operation)
+        op.__dict__.update(phase='package-install', credential_known=lambda: True,
+            credential_failed=False, credential_active=None, removal_final_active=lambda: False,
+            errors=[], stager_io_pending=None, android_support=None, store_signing=None,
+            app_absence=None, update=None, removal=False, removal_recorded_role=lambda role: role,
+            owner=SimpleNamespace(run_owned=owned), work=Path('/synthetic-unopened-work'),
+            checkout=Path('/synthetic-unopened-source'), publish=publish,
+            calls=[{'role': role, 'entered': True, 'returned': True, 'capturesSettled': True, 'returncode': 0}
+                   for role in HELPER._PACKAGE_DIAGNOSTIC_ROLES[:13]],
+            receipt={}, credential_calls=[], credential_contexts=[], installer_entered=False,
+            installer_zero=False, installation_readback=False)
+        return op
+
+    def invoke(self, op, role='installer'):
+        return HELPER.Operation.call(op, role, ['fixed-' + role], {}, cwd=op.work, timeout=20, limit=256*1024)
+
+    def test_actual_installer_and_diagnostic_statuses_stay_distinct(self):
+        for code in (0, 1):
+            with self.subTest(code=code):
+                op = self.operation(code=code)
+                if code:
+                    with self.assertRaises(HELPER.Refused) as failure:
+                        self.invoke(op)
+                    self.assertEqual(HELPER.failure_exception(failure.exception)['reason'], 'original-nonzero-installer')
+                else:
+                    self.invoke(op)
+                    op.installer_zero = True  # Same assignment as the package owner, not diagnostic inference.
+                op.owner.run_owned = lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, b'', PRIVATE)
+                self.invoke(op, 'installer-log-capture')
+                value = HELPER.failure_diagnostic(HELPER.Refused('helper-package-incomplete'),
+                    phase='package-install', operation=op)
+                slots = value['packageInstall']['calls']
+                self.assertEqual(slots['installer']['returncode'], code)
+                self.assertEqual(slots['installer']['index'], 14)
+                self.assertEqual(slots['installer-log-capture']['returncode'], 1)
+                self.assertEqual(value['lastRecordedNative']['role'], 'installer-log-capture')
+                self.assertEqual(slots['installer']['capturesSettled'], True)
+                self.assertEqual(self.publications['installer-output.status'], str(code).encode() + b'\n')
+                if code:
+                    self.assertEqual(slots['installer']['markers']['phases'], ['pre-exec'])
+                    self.assertEqual(slots['installer']['markers']['acl'][0]['phase'], 'acl-entry-present')
+                    self.assertEqual(slots['installer']['markers']['parent'][0]['exit'], 1)
+                else:
+                    self.assertIsNone(slots['installer']['markers'])
+                self.assertFalse(value['packageInstall']['systemServiceExitClaimed'])
+                self.assertNotIn(PRIVATE.decode(), json.dumps(value))
+                self.assertNotIn('a' * 64, json.dumps(value))
+
+    def test_failed_publication_or_parser_does_not_replace_original_failure(self):
+        from unittest import mock
+        op = self.operation(publish_error=True)
+        with self.assertRaisesRegex(RuntimeError, 'synthetic-publication-failure'):
+            self.invoke(op)
+        self.assertFalse(op.calls[-1]['capturesSettled'])
+        self.assertNotIn('installerMarkers', op.calls[-1])
+        op = self.operation()
+        with mock.patch.object(HELPER, 'installer_markers', side_effect=KeyboardInterrupt):
+            with self.assertRaises(HELPER.Refused) as failure:
+                self.invoke(op)
+        self.assertEqual(str(failure.exception), 'original-nonzero-installer')
+        self.assertTrue(op.calls[-1]['capturesSettled'])
+        self.assertNotIn('installerMarkers', op.calls[-1])
+
+    def test_revalidation_omits_duplicate_wrong_slot_and_private_fields(self):
+        op = self.operation()
+        with self.assertRaises(HELPER.Refused): self.invoke(op)
+        original = copy.deepcopy(op.calls)
+        mutations = (
+            lambda: op.calls.append(dict(op.calls[-1])),
+            lambda: op.calls.insert(0, {}),
+            lambda: op.calls[-1].update(returncode=0),
+            lambda: op.calls[-1].update(capturesSettled=False),
+            lambda: op.calls[-1]['installerMarkers'].update(path=PRIVATE.decode()),
+            lambda: op.calls[-1]['installerMarkers']['acl'][0].update(role=PRIVATE.decode()),
+        )
+        for mutate in mutations:
+            op.calls = copy.deepcopy(original); mutate()
+            projected = HELPER.failure_diagnostic(HELPER.Refused('helper-package-incomplete'), operation=op)
+            slot = projected['packageInstall']['calls']['installer']
+            self.assertTrue(slot is None or slot['markers'] is None)
+            self.assertNotIn(PRIVATE.decode(), json.dumps(projected))
+        for raw in (b'x' * (256*1024+1), PRIVATE.decode()):
+            self.assertIsNone(HELPER.installer_markers(raw, b''))
+        malformed = b'MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role=input-directory;phase=acl-entry-present;result=1\n'
+        self.assertEqual(HELPER.installer_markers(malformed, b'')['acl'], [])
+
+    def test_existing_log_authority_is_observed_without_raw_selected_output(self):
+        stager = load('installer_log_stager_data', 'stage_macos_installed.py')
+        op = self.operation()
+        op.stager = stager
+        op.package_settled = lambda: True
+        op.package_clock = lambda: None
+        op.target = HELPER.ARM_TARGET
+        op.calls = op.calls[:12]
+        document = {'authority': stager.LOG_AUTHORITY, 'state': 'unknown',
+            'reason': 'log-incomplete-boundary', 'selectedOutputState': 'not-created',
+            'binding': PRIVATE.decode(), 'logPath': PRIVATE.decode()}
+        op.owner.run_owned = lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, json.dumps(document).encode(), b'')
+        op.package_call = lambda role, argv, **kwargs: HELPER.Operation.call(op, role, argv, {}, cwd=op.work, **kwargs)
+        args = SimpleNamespace(package=Path('/synthetic-unopened-package'), request_id='1'*32,
+            expected_source='2'*40, expected_inventory='3'*64, expected_manifest='4'*64, run_id='1', run_attempt='1')
+        HELPER.Operation.package_diagnostic(op, args, capture=False)
+        value = HELPER.failure_diagnostic(HELPER.Refused('helper-package-incomplete'), operation=op)
+        self.assertEqual(value['packageInstall']['calls']['installer-log-cursor']['log'],
+            {'state': 'unknown', 'reason': 'log-incomplete-boundary', 'selection': 'not-created'})
+        self.assertNotIn(PRIVATE.decode(), json.dumps(value))
+        op.calls = op.calls[:12]
+        document['authority'] = PRIVATE.decode()
+        with self.assertRaisesRegex(HELPER.Refused, 'installer-diagnostic-original-output'):
+            HELPER.Operation.package_diagnostic(op, args, capture=False)
+        self.assertNotIn('installerLog', op.calls[-1])
+
+    def test_emitted_line_is_bounded_and_does_not_mutate_original_diagnostics(self):
+        op = self.operation()
+        with self.assertRaises(HELPER.Refused): self.invoke(op)
+        op.calls[-1]['installerMarkers'] = HELPER.installer_markers(self.capture*3, PRIVATE)
+        self.assertTrue(op.calls[-1]['installerMarkers']['omitted'])
+        op.receipt = {'failure': {'stage': 'standard-original-installer', 'reason': 'original-nonzero-installer'}}
+        before = copy.deepcopy(op.calls)
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            HELPER.emit_failure_diagnostic(HELPER.Refused('helper-package-incomplete'), phase='package-install',
+                target=HELPER.ARM_TARGET, main_stage='operation-execute', operation=op)
+        encoded = output.getvalue()
+        value = json.loads(encoded)
+        self.assertLessEqual(len(encoded), 4096)
+        self.assertEqual(value['originalFailure']['stage'], 'standard-original-installer')
+        self.assertEqual(value['originalFailure']['reason'], 'original-nonzero-installer')
+        self.assertEqual(op.calls, before)
+        self.assertNotIn(PRIVATE.decode(), encoded)

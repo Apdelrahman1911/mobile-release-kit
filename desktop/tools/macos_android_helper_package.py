@@ -1478,7 +1478,124 @@ _FAILURE_NOTARY_REASONS = (
     *("original-nonzero-" + role for role in notary_roles(True)),
 )
 
+# These are observations, not Installer success or package-service finality.
+_PACKAGE_DIAGNOSTIC_ROLES = (
+    'producer-tests', 'producer-build', 'producer-emitter', 'distribution-create',
+    'distribution-sign', 'distribution-verify-signature', 'distribution-verify-image',
+    'observation-create', 'observation-sign', 'observation-verify-signature',
+    'observation-verify-image', 'distribution-attach', 'installer-log-cursor',
+    'installer', 'installer-log-capture', 'distribution-detach',
+)
+_INSTALLER_PHASES = ('entry', 'target-ok', 'relative-entry', 'absolute-entry', 'cwd-ok', 'pre-exec')
+_INSTALLER_REFUSALS = ('target', 'entry', 'cwd')
+_INSTALLER_ACL_ROLES = ('input-directory', 'input-inventory', 'system-root', 'system-library',
+                        'system-support', 'other-protected-object')
+_INSTALLER_ACL_PHASES = ('filesec-allocation', 'fstatx-snapshot', 'snapshot-owner', 'snapshot-group',
+    'snapshot-mode', 'acl-presence', 'acl-conversion', 'acl-object', 'acl-validation',
+    'acl-first-entry', 'acl-entry-present', 'acl-free', 'ffi-output')
+_INSTALLER_LOG_REASONS = frozenset((
+    'log-input-binding', 'log-file-policy', 'log-file-identity', 'log-cursor-shape', 'log-cursor-binding',
+    'log-cursor-offset', 'log-anchor-rewritten', 'log-truncated', 'log-incomplete-boundary',
+    'log-interval-bound', 'log-line-bound', 'log-selected-bound', 'log-metadata-bound',
+    'log-no-project-lines', 'log-read-incomplete', 'log-output-readback', 'original-close-unknown',
+    'ancestor-close-unknown', 'log-output-unavailable', 'log-input-or-capture-unavailable',
+))
+
+
+def installer_markers_data(value):
+    """Revalidate only finite failure diagnostics, never arbitrary marker payloads."""
+    if type(value) is not dict or set(value) != {'phases', 'refusals', 'acl', 'parent', 'omitted'}:
+        return None
+    if type(value['omitted']) is not bool:
+        return None
+    for key, choices in (('phases', _INSTALLER_PHASES), ('refusals', _INSTALLER_REFUSALS)):
+        rows = value[key]
+        if (type(rows) is not list or len(rows) > len(choices)
+                or any(type(v) is not str or v not in choices for v in rows)
+                or rows != [v for v in choices if v in rows]):
+            return None
+    for key in ('acl', 'parent'):
+        rows = value[key]
+        if type(rows) is not list or len(rows) > 2:
+            return None
+        for row in rows:
+            if key == 'acl':
+                fields = {'role', 'phase', 'result', 'call', 'errno', 'freeCall', 'freeErrno'}
+                if (type(row) is not dict or set(row) != fields
+                        or type(row['role']) is not str or row['role'] not in _INSTALLER_ACL_ROLES
+                        or type(row['phase']) is not str or row['phase'] not in _INSTALLER_ACL_PHASES
+                        or any(type(row[k]) is not int or not -9999999999 <= row[k] <= 9999999999
+                               for k in fields - {'role', 'phase'})):
+                    return None
+            elif (type(row) is not dict or set(row) != {'exit', 'originals', 'native', 'timely', 'unknown'}
+                    or type(row['exit']) is not int or row['exit'] not in (1, 20)
+                    or any(type(row[k]) is not bool for k in ('originals', 'native', 'timely', 'unknown'))):
+                return None
+    return {'phases': list(value['phases']), 'refusals': list(value['refusals']),
+            'acl': [dict(v) for v in value['acl']], 'parent': [dict(v) for v in value['parent']],
+            'omitted': value['omitted']}
+
+
+def installer_markers(stdout, stderr):
+    """Same-owned nonzero Installer captures only; no file reads or raw text export.
+
+    Uses the existing fixed-consumer marker grammar, with a smaller package-only
+    projection. Kept local so bootstrap acquisition need not load another owner.
+    """
+    try:
+        if type(stdout) is not bytes or type(stderr) is not bytes or len(stdout) + len(stderr) > 256 * 1024:
+            return None
+        value = {'phases': [], 'refusals': [], 'acl': [], 'parent': [], 'omitted': False}
+        patterns = (
+            ('phases', re.compile(rb'(?<![A-Za-z0-9_])MRK_MACOS_POSTINSTALL_PHASE=(' + b'|'.join(v.encode() for v in _INSTALLER_PHASES) + rb')(?![A-Za-z0-9_-])'), 6),
+            ('refusals', re.compile(rb'(?<![A-Za-z0-9_])MRK_MACOS_POSTINSTALL_REFUSED=(' + b'|'.join(v.encode() for v in _INSTALLER_REFUSALS) + rb')(?![A-Za-z0-9_-])'), 3),
+            ('acl', re.compile(rb'(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role=(' + b'|'.join(v.encode() for v in _INSTALLER_ACL_ROLES) + rb');phase=(' + b'|'.join(v.encode() for v in _INSTALLER_ACL_PHASES) + rb');result=(-?[0-9]{1,10});call=(-?[0-9]{1,10});errno=(-?[0-9]{1,10});freeCall=(-?[0-9]{1,10});freeErrno=(-?[0-9]{1,10})(?=\r?\n$)'), 2),
+            ('parent', re.compile(rb'(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=[0-9a-f]{64};exit=(1|20);originals=([01]);native=([01]);timely=([01]);unknown=([01])(?=\r?\n$)'), 2),
+        )
+        for body in (stdout, stderr):
+            for line in body.splitlines(keepends=True):
+                if len(line) > 16384:
+                    value['omitted'] = True
+                    continue
+                for key, pattern, cap in patterns:
+                    for match in pattern.finditer(line):
+                        parts = match.groups()
+                        if key == 'acl':
+                            row = dict(zip(('role', 'phase', 'result', 'call', 'errno', 'freeCall', 'freeErrno'),
+                                [parts[0].decode('ascii'), parts[1].decode('ascii'), *[int(p) for p in parts[2:]]]))
+                        elif key == 'parent':
+                            row = dict(zip(('exit', 'originals', 'native', 'timely', 'unknown'),
+                                [int(parts[0]), *[p == b'1' for p in parts[1:]]]))
+                        else:
+                            row = parts[0].decode('ascii')
+                        if len(value[key]) == cap or row in value[key]:
+                            value['omitted'] = True
+                        else:
+                            value[key].append(row)
+        for key, choices in (('phases', _INSTALLER_PHASES), ('refusals', _INSTALLER_REFUSALS)):
+            value[key] = [v for v in choices if v in value[key]]
+        return installer_markers_data(value)
+    except BaseException:
+        return None
+
+
+def installer_log_diagnostic_data(value):
+    if type(value) is not dict or set(value) != {'state', 'reason', 'selection'}:
+        return None
+    if (type(value['state']) is not str or value['state'] not in ('observed', 'observed-project-correlated', 'unknown')
+            or value['reason'] is not None and (type(value['reason']) is not str or value['reason'] not in _INSTALLER_LOG_REASONS)
+            or value['selection'] is not None and (type(value['selection']) is not str or value['selection'] not in
+                ('not-created', 'write-or-close-unknown-preserve-original'))):
+        return None
+    return dict(value)
+
+
 _FAILURE_REASONS = frozenset((*_FAILURE_NOTARY_REASONS, *FINAL_IMAGE_STAPLE_REASONS, *DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,
+    *( 'original-nonzero-' + role for role in _PACKAGE_DIAGNOSTIC_ROLES),
+    'package-group-clock', 'package-io-finality-unknown', 'package-compiled-bindings',
+    'package-source-signing-selection', 'package-final-audit-original', 'package-output-readback',
+    'installer-original-clock-reserve', 'installer-diagnostic-original-status', 'installer-diagnostic-original-output',
+    'producer-original-clock-reserve', 'producer-exact-descriptor-emission',
     'producer-tests-bound', 'producer-tests-framing', 'producer-tests-roster', 'producer-tests-result',
     'original-nonzero-producer-tests',
     'same-package-baseline-export', 'same-package-case', 'same-package-census', 'same-package-final-carrier', 'same-package-final-carrier-bytes', 'same-package-final-carrier-root', 'same-package-final-carrier-roster', 'same-package-finalizer-original', 'same-package-fixed-purpose', 'same-package-fresh-baseline', 'same-package-immediate-predecessor', 'same-package-input-', 'same-package-inventory', 'same-package-inventory-binding', 'same-package-inventory-input', 'same-package-live-readback', 'same-package-noop', 'same-package-notary-source', 'same-package-original-boundary', 'same-package-original-input', 'same-package-originals-unknown', 'same-package-parent-entry-bound', 'same-package-previous-shape', 'same-package-readback', 'same-package-readonly-mount', 'same-package-result-delta', 'same-package-result-namespace', 'same-package-result-post', 'same-package-source-scope', 'same-package-status-absence', 'same-package-status-post', 'same-package-status-purpose',
@@ -1545,7 +1662,9 @@ _FAILURE_REASONS = frozenset((*_FAILURE_NOTARY_REASONS, *FINAL_IMAGE_STAPLE_REAS
 _FAILURE_STAGES = (
     *FINAL_IMAGE_STAPLE_STAGES, *FINAL_IMAGE_INPUT_STAGES,
     *notary_roles(True), 'notary-preflight-input', 'notary-final-input', 'notary-known-private-retirement',
-    "package-producer-tests",
+    "package-producer-tests", "package-final-audit", "package-explicit-producer-compiler",
+    "package-producer-emission", "package-readonly-attach", "standard-original-installer",
+    "package-nonroot-v2-readback",
     "same-package-noop",
     "owned-directory-admission", "source-image-binding", "resident-dependency-fetch", "separate-resident-image-compiler",
     "compiler-original-copy", "resident-image-source-selected-signing", "resident-image-verify-signed",
@@ -1825,11 +1944,42 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
               + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES
               + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
     pending = receipt.get("directStagerIOPending")
+    package = None
+    if state.get("phase") == "package-install":
+        calls = state.get("calls")
+        slots = {}
+        for role in _PACKAGE_DIAGNOSTIC_ROLES[12:15]:
+            matches = ([i for i, r in enumerate(calls) if type(r) is dict and r.get("role") == role]
+                       if type(calls) is list and len(calls) <= 4096 else [])
+            index = _PACKAGE_DIAGNOSTIC_ROLES.index(role)
+            original_row = calls[index] if matches == [index] else None
+            slots[role] = None if original_row is None else {
+                "index": index + 1,
+                **{key: flag(original_row.get(key)) for key in ("entered", "returned", "capturesSettled")},
+                "returncode": integer(original_row.get("returncode"), -65536, 65535),
+            }
+            if original_row is not None:
+                if role == "installer":
+                    known_failed = (original_row.get("entered") is True and original_row.get("returned") is True
+                        and original_row.get("capturesSettled") is True
+                        and type(original_row.get("returncode")) is int and original_row["returncode"] != 0)
+                    slots[role]["markers"] = installer_markers_data(original_row.get("installerMarkers")) if known_failed else None
+                else:
+                    slots[role]["log"] = installer_log_diagnostic_data(original_row.get("installerLog")) if (
+                        original_row.get("entered") is True and original_row.get("returned") is True
+                        and original_row.get("capturesSettled") is True
+                        and type(original_row.get("returncode")) is int and original_row["returncode"] in (0, 1)) else None
+        package = {"calls": slots,
+            "installerEntered": flag(state.get("installer_entered")),
+            "installerZeroLatched": flag(state.get("installer_zero")),
+            "installationReadback": flag(state.get("installation_readback")),
+            "systemServiceExitClaimed": False}
     return {
         "schemaVersion": 1, "kind": "android-helper-failure", "outcome": "failure",
         "diagnosticOnly": True, "productReady": False,
         "phase": token(phase, phases), "target": token(target, (ARM_TARGET, INTEL_TARGET)),
         "mainStage": token(main_stage, _FAILURE_MAIN_STAGES), "terminal": failure_exception(error, stager),
+        "packageInstall": package,
         "compiler": compiler_diagnostic_data(state.get("compiler_failure")),
         "notaryIssues": notary_failure_summary_data(state.get("notary_issue_diagnostic")),
         "originalFailure": {
@@ -1840,7 +1990,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
             "errno": integer(captured.get("errno", original.get("errno")), 1, 65535),
         },
         "lastRecordedNative": {
-            "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES + notary_roles(True)),
+            "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES + notary_roles(True) + _PACKAGE_DIAGNOSTIC_ROLES),
             **{key: flag(native.get(key)) for key in ("entered", "returned", "capturesSettled", "dispatched", "contained", "cleanup_complete")},
             "returncode": integer(native.get("returncode"), -65536, 65535),
             "originalFailure": {"available": flag(owned.get("available")),
@@ -1879,6 +2029,15 @@ def emit_failure_diagnostic(error, **context):
             value["notaryIssues"]["rows"].pop()
             value["notaryIssues"]["rowsOmitted"] = True
             body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+        package = value["packageInstall"]
+        installer = package["calls"]["installer"] if package is not None else None
+        markers = installer.get("markers") if installer is not None else None
+        if markers is not None:
+            for key in ("acl", "parent", "phases", "refusals"):
+                while len(body) > 4096 and markers[key]:
+                    markers[key].pop()
+                    markers["omitted"] = True
+                    body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
         if body.isascii() and len(body) <= 4096:
             written = sys.stderr.write(body)
             if type(written) is int and written == len(body):
@@ -2615,6 +2774,11 @@ class Operation:
         if self.phase == "package-install" and role == "installer":
             self.publish("installer-output.txt", result.stdout + result.stderr)
         record["capturesSettled"] = True  # All original output/readback/closes returned.
+        if self.phase == "package-install" and role == "installer" and result.returncode != 0:
+            try:
+                record["installerMarkers"] = installer_markers(result.stdout, result.stderr)
+            except BaseException:
+                pass  # Diagnostics cannot change the original result or cleanup.
         if self.phase == "notarize-payload" and role == "payload-submit" and result.returncode != 0:
             try:
                 record["notarySubmitDiagnostic"] = notary_submit_diagnostic(result.stderr)
@@ -7934,6 +8098,15 @@ class Operation:
              "installer-diagnostic-original-output")
         self.publish(command + ".json", result.stdout)
         self.publish(command + ".status", (str(result.returncode) + "\n").encode("ascii"))
+        try:
+            # These already-owned captures passed the authority check above.
+            # Retain no log paths, requests, selected bytes, offsets or hashes.
+            observed = installer_log_diagnostic_data({"state": document.get("state"),
+                "reason": document.get("reason"), "selection": document.get("selectedOutputState")})
+            if self.calls and self.calls[-1].get("role") == command:
+                self.calls[-1]["installerLog"] = observed
+        except BaseException:
+            pass
         self.package_clock()
 
     def finish(self):
