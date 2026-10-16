@@ -762,13 +762,30 @@ mod installer {
             self.clock() // Deadline refusal never rewrites a positive close.
         }
         fn read(&self, n: usize, size: u64, collect: bool) -> Result<(String, Vec<u8>)> {
-            check(size <= 512*1024*1024 && (!collect || size <= 1024*1024)
+            self.read_context(n, size, collect.then_some(1024*1024))
+        }
+        // Only trusted inventory callers select the existing larger metadata
+        // bound. Ordinary collected controls retain their original 1MiB cap.
+        fn read_collect_bounded(&self, n: usize, size: u64, limit: usize) -> Result<(String, Vec<u8>)> {
+            self.read_context(n, size, Some(limit))
+        }
+        fn read_context(&self, n: usize, size: u64, collect_limit: Option<usize>) -> Result<(String, Vec<u8>)> {
+            check(size <= installation_record::PAYLOAD_LIMIT
+                && collect_limit.is_none_or(|limit| limit > 0 && limit <= installation_record::INVENTORY_LIMIT
+                    && size <= limit as u64)
                 && self.identity(n)?.size >= 0 && self.identity(n)?.size as u64 == size, "read-bound")?;
-            let mut bytes = Vec::new(); let mut hash = Sha256::new(); let mut count = 0u64; let mut block = [0u8;65536];
+            self.clock()?;
+            let mut bytes = Vec::new();
+            if collect_limit.is_some() {
+                let capacity = usize::try_from(size).map_err(|_| "read-bound")?;
+                bytes.try_reserve_exact(capacity).map_err(|_| "read-bound")?;
+                check(bytes.capacity() == capacity, "read-bound")?;
+            }
+            let mut hash = Sha256::new(); let mut count = 0u64; let mut block = [0u8;65536];
             loop {
                 self.clock()?; let used = unistd::read(self.fd(n)?, &mut block).map_err(|_| "read-refused")?;
                 if used == 0 { break; } count = count.checked_add(used as u64).ok_or("read-bound")?;
-                check(count <= size, "size-changed")?; hash.update(&block[..used]); if collect { bytes.extend_from_slice(&block[..used]); }
+                check(count <= size, "size-changed")?; hash.update(&block[..used]); if collect_limit.is_some() { bytes.extend_from_slice(&block[..used]); }
             }
             check(count == size, "size-changed")?; self.check_name(n, true)?;
             Ok((hash.finalize().iter().map(|b| format!("{b:02x}")).collect(), bytes))
@@ -997,7 +1014,7 @@ mod installer {
             let manifest = self.open(Some(input), "install-inventory.json", false)?; self.protected_as(manifest, false, Some(0o444), AclRole::InputInventory)?;
             native::no_xattrs(self.fd(manifest)?.as_fd()).map_err(|_| "inventory-attributes")?;
             let size = u64::try_from(self.identity(manifest)?.size).map_err(|_| "inventory-size")?;
-            let (digest, bytes) = self.read(manifest, size, true)?;
+            let (digest, bytes) = self.read_collect_bounded(manifest, size, installation_record::INVENTORY_LIMIT)?;
             check(Some(digest.as_str()) == option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256"), "inventory-anchor")?;
             let inventory = Inventory::parse(&bytes,
                 option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256").ok_or("inventory-binding")?)?;
@@ -9855,7 +9872,9 @@ mod installer {
             let original = stat::fstat(book.fd(reader)?).map_err(|_| "maintenance-record-stat")?;
             let size = usize::try_from(original.st_size).map_err(|_| "maintenance-record-size")?;
             check(original.st_flags == 0 && size > 0 && size <= limit, "maintenance-record-size")?;
-            let bytes = book.read(reader, size as u64, true)?.1;
+            let bytes = if name == installation_record::INVENTORY_NAME {
+                book.read_collect_bounded(reader, size as u64, limit)?.1
+            } else { book.read(reader, size as u64, true)?.1 };
             let post = stat::fstat(book.fd(reader)?).map_err(|_| "maintenance-record-stat")?;
             check(post.st_flags == 0 && Identity::of(&post) == book.identity(reader)?, "maintenance-record-post")?;
             removal_snapshot_metadata(book,reader,&bytes)?;
@@ -22231,6 +22250,95 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
     }
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn collected_inventory_uses_original_reader_with_exact_bound_and_post() {
+            use super::*;
+            use std::{fs::{self, OpenOptions}, io::Write, os::unix::fs::{DirBuilderExt, OpenOptionsExt}};
+            // This exercises the real Mac Install book/FD/read/name/close path
+            // as the ordinary test user. It never enters Installer main or any
+            // administrator/protection/signature/publication role.
+            let parent = std::env::temp_dir().canonicalize().expect("test temporary parent");
+            let directory = parent.join(format!("mrk-install-reader-{}", std::process::id()));
+            fs::DirBuilder::new().mode(0o700).create(&directory).expect("exclusive test directory");
+            let create_leaf = |name: &str, body: &[u8]| -> Result<()> {
+                let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600)
+                    .open(directory.join(name)).map_err(|_| "test-create")?;
+                let written = file.write_all(body).map_err(|_| "test-write");
+                let closed = unistd::close(OwnedFd::from(file)).map_err(|_| "test-writer-close");
+                written?; closed
+            };
+            let manifest = "a".repeat(64);
+            let mut raw = format!("{{\"schemaVersion\":1,\"release\":\"{}\",\"runtimeManifestSha256\":\"{manifest}\",\"files\":[", paths::RELEASE);
+            for n in 0..8_622 {
+                if n != 0 { raw.push(','); }
+                raw.push_str(&format!("{{\"path\":\"runtime/data/file-{n:05}\",\"sha256\":\"{manifest}\",\"size\":1,\"executable\":false}}"));
+            }
+            raw.push_str("]}\n");
+            let bytes = raw.as_bytes();
+            assert!(bytes.len() > 1024*1024 && bytes.len() < installation_record::INVENTORY_LIMIT);
+            assert_eq!(Inventory::parse(bytes, &manifest).expect("real inventory DATA").files.len(), 8_622);
+            create_leaf(installation_record::INVENTORY_NAME, bytes).expect("inventory writer settled");
+            create_leaf("control", b"ok").expect("control writer settled");
+            let mut book = Install::new();
+            let tested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut root = book.open(None, "/", true).expect("original root");
+                for component in directory.components().skip(1) {
+                    root = book.open(Some(root), component.as_os_str().to_str().expect("test component"), true)
+                        .expect("original parent");
+                }
+                let reader = book.open(Some(root), installation_record::INVENTORY_NAME, false).expect("original inventory");
+                let size = bytes.len() as u64;
+                let position = |book: &Install, n| unistd::lseek(book.fd(n).unwrap(), 0, unistd::Whence::SeekCur).unwrap();
+                // Every refusal occurs before dispatch and leaves the same OFD
+                // at zero. No seek/reset/adoption supplies the successful read.
+                assert_eq!(book.read(reader, size, true).unwrap_err(), "read-bound");
+                for limit in [0, bytes.len()-1, installation_record::INVENTORY_LIMIT+1] {
+                    assert_eq!(book.read_collect_bounded(reader, size, limit).unwrap_err(), "read-bound");
+                    assert_eq!(position(&book, reader), 0);
+                }
+                assert_eq!(book.read_collect_bounded(reader, size-1, installation_record::INVENTORY_LIMIT)
+                    .unwrap_err(), "read-bound");
+                assert_eq!(position(&book, reader), 0);
+                let (digest, returned) = book.read_collect_bounded(reader, size, installation_record::INVENTORY_LIMIT)
+                    .expect("bounded original inventory read");
+                assert_eq!(digest, format!("{:x}", Sha256::digest(bytes)));
+                assert_eq!(returned, bytes);
+                assert_eq!(returned.capacity(), bytes.len());
+                assert_eq!(position(&book, reader), size as i64);
+                assert_eq!(Inventory::parse(&returned, &manifest).unwrap().files.len(), 8_622);
+                book.check_name(reader, true).expect("same held and named inventory");
+                book.forward_close(reader, "test-reader-close").expect("original reader close");
+                drop(returned);
+                let streamed = book.open(Some(root), installation_record::INVENTORY_NAME, false).unwrap();
+                let (stream_digest, uncollected) = book.read(streamed, size, false).unwrap();
+                assert_eq!(stream_digest, digest); assert!(uncollected.is_empty());
+                book.forward_close(streamed, "test-stream-close").unwrap();
+                let control = book.open(Some(root), "control", false).unwrap();
+                assert_eq!(book.read(control, 2, true).unwrap().1, b"ok");
+                book.forward_close(control, "test-control-close").unwrap();
+                // A replaced name does not authorize the still-held old FD,
+                // even when both files contain byte-for-byte identical DATA.
+                let replaced = book.open(Some(root), installation_record::INVENTORY_NAME, false).unwrap();
+                fs::rename(directory.join(installation_record::INVENTORY_NAME), directory.join("held-inventory")).unwrap();
+                create_leaf(installation_record::INVENTORY_NAME, bytes).expect("replacement writer settled");
+                assert_eq!(book.read_collect_bounded(replaced, size, installation_record::INVENTORY_LIMIT)
+                    .unwrap_err(), "original-correspondence");
+                book.forward_close(replaced, "test-replaced-close").unwrap();
+                let expired = book.open(Some(root), "control", false).unwrap();
+                book.end = Instant::now();
+                assert_eq!(book.read(expired, 2, true).unwrap_err(), "deadline-or-unknown");
+                assert_eq!(position(&book, expired), 0);
+            }));
+            // Consuming closes also run after assertion failure/expiry. Preserve
+            // the exact fixture on failure or Unknown; never retry unknown FDs.
+            let settled = book.settle_originals();
+            assert!(settled && book.originals_settled(), "test original closes");
+            if let Err(error) = tested { std::panic::resume_unwind(error); }
+            for name in [installation_record::INVENTORY_NAME, "held-inventory", "control"] {
+                fs::remove_file(directory.join(name)).expect("exact test leaf retirement");
+            }
+            fs::remove_dir(&directory).expect("empty test directory retirement");
+        }
         #[test]
         fn original_final_deadline_vetoes_late_known_closes_without_erasing_first_error() {
             assert!(super::close_deadline_policy_table());

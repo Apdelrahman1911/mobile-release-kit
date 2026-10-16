@@ -178,8 +178,9 @@ jobs:
             rustup run 1.98.1 cargo check --locked --no-default-features \
               --features macos-installed-remover --bin mrk-macos-remove
           fi
-          # Only named launcher, path and recovery byte/data tests run. The
-          # Installer main, live filesystem adapter and remover do not run.
+          # Named launcher/path/recovery DATA tests and one original-reader
+          # test on exclusive user-owned temporary files. No Installer main,
+          # root destination, signing or remover execution.
           tests=(installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality
                  installer::maintenance::noop_recovery::tests::preserved_prefix_transport_is_closed_without_relaxing_ordinary_controls
                  installer::maintenance::noop_recovery::tests::completed_recovery_snapshot_rehome_requires_receipt_bound_originals_and_prefixes)
@@ -189,8 +190,9 @@ jobs:
           if [[ "$INSTALLER_CHECKS" != installer-recovery && "$INSTALLER_CHECKS" != installer-frames ]]; then
             tests+=(installer::applications::tests::
                     installer::maintenance::store_path_tests::contextual_store_paths_keep_copy_recovery_and_removal_scoped
-                    installer::maintenance::restore_recovery::)
-            expected_tests=16
+                    installer::maintenance::restore_recovery::
+                    installer::tests::collected_inventory_uses_original_reader_with_exact_bound_and_post)
+            expected_tests=17
           fi
           if [[ "$INSTALLER_CHECKS" == installer-frames ]]; then
             tests=(installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality)

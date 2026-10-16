@@ -1501,6 +1501,7 @@ _INSTALLER_PARENT_REASONS = {
     'deadline-or-unknown': 'deadline-or-ownership-unknown',
     'export-deadline-or-unknown': 'deadline-or-ownership-unknown',
     'directory-bound': 'directory-policy-or-bound',
+    'read-bound': 'original-read-bound',
     'acl-refused': 'acl-refusal', 'export-acl-refused': 'acl-refusal',
     'worker-self-image': 'worker-image-refusal',
 }
