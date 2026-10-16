@@ -200,6 +200,8 @@ class StoreComponent(unittest.TestCase):
                                  (SOURCE, 1, 300, False))
                 self.assertFalse((root / 'restored/artifact.zip').exists())
                 with self.assertRaises(FileExistsError): TOOL.restore_runtime(root / 'restored', 100, SOURCE, 'arm64', 300)
+                self.assertEqual((root / 'restored/store-runtime.tar.gz').read_bytes(), archive.getvalue())
+                self.assertEqual(receipt['archiveSha256'], hashlib.sha256(archive.getvalue()).hexdigest())
                 with mock.patch.object(TOOL, 'native_inputs', return_value={'recipe': 'changed'}):
                     with self.assertRaises(ValueError): TOOL.restore_runtime(root / 'changed-input', 100, SOURCE, 'arm64', 300)
                 self.assertFalse((root / 'changed-input/extracted').exists())

@@ -80,6 +80,8 @@ FINAL_IMAGE_VERIFY_STAGES = frozenset(
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
+STORE_SIGNING_PHASES = ("sign-store-runtime",)
+STORE_SIGNING_REF = "refs/heads/verify/desktop-macos-store-signing"
 SUPPORT_PHASES = ("android-support-shipping",)
 SUPPORT_REF = "refs/heads/verify/desktop-macos-android-support-signing"
 SUPPORT_IDENTIFIERS = tuple("dev.mobile-release-kit.desktop.android-support." + role
@@ -1129,7 +1131,7 @@ def build_profile(target):
 
 def entrypoint(argv):
     need(type(argv) is list and len(argv) in (2, 4) and all(type(value) is str for value in argv)
-         and argv[1] in (APP_SIGNATURE_SUMMARY,) + PHASES + SUPPORT_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
+         and argv[1] in (APP_SIGNATURE_SUMMARY,) + PHASES + SUPPORT_PHASES + STORE_SIGNING_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
     target = ARM_TARGET if len(argv) == 2 else argv[3]
     build_profile(target)
     return argv[1], target
@@ -1717,8 +1719,8 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
     credential = last(state.get("credential_calls"), 64)
     context = last(state.get("credential_contexts"), 64)
     purposes = ("python", "resident-image", "helper", "producer", "installer", "observer-program",
-                "distribution-image", "observation-image") + SIGNING_PHASES + TOOL_SIGNING_PHASES
-    phases = ((APP_SIGNATURE_SUMMARY,) + PHASES + SUPPORT_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES
+                "distribution-image", "observation-image") + SIGNING_PHASES + TOOL_SIGNING_PHASES + STORE_SIGNING_PHASES
+    phases = ((APP_SIGNATURE_SUMMARY,) + PHASES + SUPPORT_PHASES + STORE_SIGNING_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES
               + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES
               + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
     pending = receipt.get("directStagerIOPending")
@@ -2056,7 +2058,7 @@ class Operation:
     """Custody for this one fixed packaging operation and its finite outputs."""
 
     def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET, support_started=None):
-        need(phase in PHASES + SUPPORT_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES, "closed-phase")
+        need(phase in PHASES + SUPPORT_PHASES + STORE_SIGNING_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES, "closed-phase")
         self.arch, self.runner_arch, self.release_input = build_profile(target)
         self.target = target
         self.owner, self.checkout, self.work = owner, checkout, work
@@ -2148,6 +2150,7 @@ class Operation:
         self.installer_entered = self.installer_zero = self.installation_readback = False
         self.removal_package_complete = False
         self.android_support = self.android_support_module = None
+        self.store_signing = self.store_signing_module = None
         self.support_started = support_started
         self.app_absence = self.app_absence_module = self.app_absence_api = None
         self.update = self.update_module = self.update_api = None
@@ -2171,6 +2174,19 @@ class Operation:
         if phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             self.receipt.update(notaryAuthentication={"created": False, "closed": False, "retired": False},
                                 toolchain=None, helperIdentifier=None)
+
+    def store_signing_load(self):
+        entry = self.source_original("desktop/tools/macos_store_signing.py", "source-store-signing", 65536)
+        body = self.read(entry)
+        path = self.checkout / "desktop/tools/macos_store_signing.py"
+        spec = importlib.util.spec_from_file_location("mrk_store_signing", path)
+        module = importlib.util.module_from_spec(spec)
+        exec(compile(body, str(path), "exec"), module.__dict__)
+        module.Refused = Refused
+        need(self.read(entry) == body, "store-signing-source-post")
+        self.package_sources.append((entry, body))
+        self.store_signing_module = module
+        module.start(self, sys.modules[__name__], self.support_started)
 
     def android_support_load(self):
         entry = self.source_original("desktop/tools/macos_android_support_signing.py", "source-support-adapter", 65536)
@@ -2223,6 +2239,10 @@ class Operation:
         if self.app_absence is not None or self.update is not None:
             need(len(self.entries) <= 24576 and sum(e["fd"] is not None for e in self.entries) <= 96,
                  "app-absence-original-ledger-bound")
+        if self.store_signing is not None:
+            need(len(self.entries) <= self.store_signing_module.ORIGINAL_LIMIT
+                 and sum(e["fd"] is not None for e in self.entries) <= 128,
+                 "store-original-ledger-bound")
         self.entry_registry[id(entry)] = entry  # History retains the FD if this insertion raises.
         return entry
 
@@ -2333,6 +2353,8 @@ class Operation:
         need(os.pread(fd, len(data) + 1, 0) == data, "output-readback")
         if self.android_support is not None:
             self.android_support_module.output_record(self, name, entry)
+        if self.store_signing is not None:
+            self.store_signing_module.output_record(self, name, entry)
         self.close(entry)
         need(entry["closed"], "output-close-unknown")
 
@@ -2403,6 +2425,8 @@ class Operation:
             self.tool_clock()
         if self.android_support is not None:
             self.android_support_module.dispatch(self, role)
+        if self.store_signing is not None:
+            self.store_signing_module.dispatch(self, role)
         if self.app_absence is not None:
             self.app_absence_module.dispatch(self, role)
         if self.update is not None:
@@ -2460,7 +2484,7 @@ class Operation:
              and type(result.args) in (list, tuple) and tuple(result.args) == tuple(argv)
              and type(result.stdout) is bytes and type(result.stderr) is bytes
              and len(result.stdout) + len(result.stderr) <= limit, "original-return-contract")
-        need(self.android_support is None or 0 <= result.returncode <= 255, "support-native-return-unknown")
+        need(self.android_support is None and self.store_signing is None or 0 <= result.returncode <= 255, "support-native-return-unknown")
         if self.phase == "package-install" and role == "installer":
             # Save the actual original status before any diagnostics/readback.
             self.publish("installer-output.status", (str(result.returncode) + "\n").encode("ascii"))
@@ -2510,7 +2534,9 @@ class Operation:
         need(type(now) is int and context["observed"] <= now < context["endpoint"] - (0 if cleanup else 30_000_000_000),
              "credential-original-deadline")
         context["observed"] = now
-        if self.android_support is not None:
+        if self.store_signing is not None:
+            self.store_signing_module.clock(self, work=not cleanup)
+        elif self.android_support is not None:
             self.android_support_module.clock(self, work=not cleanup)
         elif self.phase in PYTHON_PHASES:
             self.python_clock(work=not cleanup)
@@ -2526,7 +2552,9 @@ class Operation:
         now = time.monotonic_ns()
         need(type(now) is int, "credential-original-clock")
         endpoint = now + 240_000_000_000
-        if self.android_support is not None:
+        if self.store_signing is not None:
+            endpoint = self.store_signing_module.credential_endpoint(self)
+        elif self.android_support is not None:
             _observed, outer = self.android_support_module.clock(self)
             endpoint = min(endpoint, outer)
         elif self.phase in PYTHON_PHASES:
@@ -2636,7 +2664,7 @@ class Operation:
                  and type(result.args) in (tuple, list) and tuple(result.args) == tuple(argv)
                  and type(result.stdout) is bytes and type(result.stderr) is bytes
                  and len(result.stdout) + len(result.stderr) <= 16384, "credential-original-return")
-            need(self.android_support is None or 0 <= result.returncode <= 255, "support-credential-return-unknown")
+            need(self.android_support is None and self.store_signing is None or 0 <= result.returncode <= 255, "support-credential-return-unknown")
             record.update(returned=True, settled=True, status=result.returncode)
             self.removal_credential_records_post()
             self.credential_clock(context, cleanup=context["retiring"])
@@ -2761,7 +2789,10 @@ class Operation:
                  "installer": ("final-package-sign",), "observer-program": ("program-sign", "program-verify"), **IMAGE_CREDENTIAL_ROLES,
                  **{phase: (phase, phase + "-verify") for phase in SIGNING_PHASES + TOOL_SIGNING_PHASES},
                  **{role: (role + "-sign", role + "-verify") for role in ("bundletool-aapt2", "bundletool-jna", "agp-aapt2")}}
-        need((purpose == "python" and self.phase in PYTHON_PHASES or purpose in ("resident-image", "helper") and self.phase == "prepare"
+        if self.store_signing is not None:
+            pairs["sign-store-runtime"] = self.store_signing_module.ROLES
+        need((purpose == "sign-store-runtime" and self.phase in STORE_SIGNING_PHASES and self.store_signing is not None
+              or purpose == "python" and self.phase in PYTHON_PHASES or purpose in ("resident-image", "helper") and self.phase == "prepare"
               or purpose in ("producer", "distribution-image", "observation-image") and self.phase == "package-install"
               or purpose in ("producer", "distribution-image") and self.phase == "package-remove"
               or purpose == "installer" and self.phase in FINAL_PACKAGE_PHASES
@@ -2808,7 +2839,11 @@ class Operation:
                 self.credential_unknown = True
                 raise Refused("credential-created-searchlist")
             expected_list = observed
-            self.credential_call(context, "settings", ["/usr/bin/security", "set-keychain-settings", "-l", "-u", "-t", "240", keychain])
+            # security(1): -u locks after the -t interval in seconds. The fixed
+            # Store batch alone needs its original aggregate hard interval;
+            # existing short scopes retain240s, and sleep-lock stays enabled.
+            lock_interval = str(self.store_signing_module.HARD_SECONDS) if self.store_signing is not None else "240"
+            self.credential_call(context, "settings", ["/usr/bin/security", "set-keychain-settings", "-l", "-u", "-t", lock_interval, keychain])
             self.credential_call(context, "unlock", ["/usr/bin/security", "unlock-keychain", "-p", password, keychain])
             if purpose == "producer":
                 need(type(producer) is tuple and len(producer) == 3 and re.fullmatch(r"[0-9a-f]{40}", producer[2]),
@@ -2874,7 +2909,9 @@ class Operation:
             context["retiring"] = True
             try:
                 need(self.credential_known() and context["pending"] is None and not self.errors
-                     and self.stager_io_pending is None and not self.python_mutation_pending and not self.signing_mutation_pending
+                     and self.stager_io_pending is None and not self.python_mutation_pending
+                     and (not self.signing_mutation_pending or self.store_signing is not None
+                          and self.store_signing_module.credential_cleanup_ready(self))
                      and all(row["returned"] and row.get("capturesSettled") is True for row in self.calls),
                      "credential-unwind-original-unknown")
                 self.credential_clock(context, cleanup=True)
@@ -7684,6 +7721,11 @@ class Operation:
         self.package_clock()
 
     def finish(self):
+        if self.store_signing is not None:
+            try:
+                self.store_signing_module.retire(self)
+            except BaseException as error:
+                self.errors.append({"stage": "store-retirement", "type": type(error).__name__})
         if self.android_support is not None:
             try:
                 self.android_support_module.retire(self)
@@ -7695,6 +7737,7 @@ class Operation:
             except BaseException as error:
                 self.errors.append({"stage": "tool-retirement-clock", "type": type(error).__name__})
         if (not self.removal_cleanup_ready()
+                or self.store_signing is not None and not self.store_signing_module.finish_ready(self)
                 or self.android_support is not None and not self.android_support_module.finish_ready(self)
                 or self.app_absence is not None and not self.app_absence_module.finish_ready(self)
                 or self.update is not None and not self.update_module.finish_ready(self)):
@@ -7801,6 +7844,8 @@ class Operation:
                 self.python_clock()
                 self.receipt.update(toolchain=None, helperIdentifier=None, pythonIdentifier=PYTHON_IDENTIFIER)
             self.open()
+            if self.phase in STORE_SIGNING_PHASES:
+                self.store_signing_load()
             if self.phase in SUPPORT_PHASES:
                 self.android_support_load()
             if self.environment.get("GITHUB_REF") == UPDATE_REF and self.phase in (UPDATE_PHASE, "package-install"):
@@ -7813,11 +7858,13 @@ class Operation:
             self.producer_profile_entry = self.source_original(PRODUCER_PROFILE, "source-producer-profile", 1024)
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
-                allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
+                allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + STORE_SIGNING_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
                 and self.environment.get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF))
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
-            if self.phase in SUPPORT_PHASES:
+            if self.phase in STORE_SIGNING_PHASES:
+                self.store_signing_module.prepare(self)
+            elif self.phase in SUPPORT_PHASES:
                 self.android_support_module.prepare(self)
             elif self.phase in PYTHON_PHASES:
                 self.python_prepare()
@@ -7856,7 +7903,7 @@ class Operation:
                     self.verify_staged(expected, self.environment.get("MRK_MACOS_RESIDENT_IMAGE_SHA256"))
             need(self.read(self.profile_entry) == self.service_profile
                  and self.read(self.producer_profile_entry) == self.producer_profile, "source-signing-profile-changed")
-            if self.phase not in SUPPORT_PHASES + PYTHON_PHASES + TOOL_SIGNING_PHASES:
+            if self.phase not in SUPPORT_PHASES + STORE_SIGNING_PHASES + PYTHON_PHASES + TOOL_SIGNING_PHASES:
                 need(self.read(self.release_entry) == release_body, "source-image-release-changed")
         except BaseException as error:
             try:
@@ -7894,7 +7941,8 @@ class Operation:
                 except BaseException as error:
                     self.errors.append({"stage": "removal-pre-ui-retained", "type": type(error).__name__})
             self.finish()
-        roles = (self.android_support_module.ROLES if self.android_support is not None else
+        roles = (self.store_signing_module.ROLES if self.store_signing is not None else
+                 self.android_support_module.ROLES if self.android_support is not None else
                  UPDATE_ROLES if self.phase == UPDATE_PHASE else
                  self.app_absence_module.roles(self) if self.app_absence is not None else
                  SAME_PACKAGE_ROLES if self.phase == SAME_PACKAGE_PHASE else
@@ -7932,11 +7980,13 @@ class Operation:
                                         and self.notary_result is not None and self.notary_key is None
                                         and not self.credential_calls and not self.credential_contexts
                                         and self.receipt["notaryAuthentication"] == {"created": True, "closed": True, "retired": True})
-                                  and ((self.phase in SUPPORT_PHASES and self.android_support is not None
+                                  and ((self.phase in STORE_SIGNING_PHASES and self.store_signing is not None
+                                        and self.store_signing_module.success(self))
+                                       or (self.phase in SUPPORT_PHASES and self.android_support is not None
                                         and self.android_support_module.success(self))
                                        or (self.phase in PYTHON_PHASES and self.python_signed is not None and self.python_known())
                                        or (self.phase in TOOL_SIGNING_PHASES and self.tool_complete and self.tool_quote_ready)
-                                       or (self.phase not in SUPPORT_PHASES + PYTHON_PHASES + TOOL_SIGNING_PHASES
+                                       or (self.phase not in SUPPORT_PHASES + STORE_SIGNING_PHASES + PYTHON_PHASES + TOOL_SIGNING_PHASES
                                             and (self.phase in ("package-install", "package-remove", SAME_PACKAGE_PHASE, UPDATE_PHASE) + REMOVAL_OWNER_PHASES + APP_ABSENCE_PHASES or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
                                                  or self.phase in SIGNING_PHASES and self.fixed_sign_complete)
                                            and self.image_source is not None and self.image_release is not None
@@ -7993,6 +8043,8 @@ class Operation:
             self.app_absence_module.clock(self, work=False)
         if self.phase in SUPPORT_PHASES and self.receipt["passed"]:
             self.android_support_module.publish_final(self)
+        if self.phase in STORE_SIGNING_PHASES and self.receipt["passed"]:
+            self.store_signing_module.publish_final(self)
         if self.phase == UPDATE_PHASE and self.update is not None:
             self.update_module.clock(self, work=False)
         need(self.receipt["passed"], "helper-package-incomplete")
@@ -8009,6 +8061,8 @@ class Operation:
             receipt.update(nativeCalls=len(self.calls), credentialCalls=len(self.credential_calls),
                            credentialContexts=len(self.credential_contexts), productReady=False,
                            failure=self.receipt.get("failure", {"stage": self.stage, "type": "Incomplete"}))
+        if self.store_signing is not None:
+            receipt = self.store_signing_module.summary(self)
         body = (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
         need(len(body) <= 16384, "receipt-bound")
         if self.phase in PYTHON_PHASES:
@@ -8081,6 +8135,11 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
         need(support_phase and ref == SUPPORT_REF and target == ARM_TARGET
              and not any(k in environment for k in INSTALLER_CREDENTIAL_VARIABLES + (NOTARY_KEY_VARIABLE,)),
              "support-fixed-purpose-ref")
+    store_phase = phase in STORE_SIGNING_PHASES
+    if store_phase or ref == STORE_SIGNING_REF:
+        need(store_phase and ref == STORE_SIGNING_REF
+             and not any(k in environment for k in INSTALLER_CREDENTIAL_VARIABLES + (NOTARY_KEY_VARIABLE,)),
+             "store-fixed-purpose-ref")
     tool_phase = phase in TOOL_SIGNING_PHASES
     if tool_phase:
         need(ref == TOOL_REF, "closed-tool-purpose-ref")
@@ -8089,7 +8148,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
         need(ref == "refs/heads/verify/desktop-macos-python-runtime-signing-" + phase[len("python-"):],
              "closed-python-purpose-ref")
     workflow = ("desktop-macos-android-support-signing.yml" if support_phase else
-                "desktop-macos-python-runtime-signing.yml" if python_phase or tool_phase else
+                "desktop-macos-python-runtime-signing.yml" if python_phase or tool_phase or store_phase else
                 "desktop-macos-aqua.yml" if ref == "refs/heads/verify/desktop-macos-aqua" else
                 "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF) else None)
     need(workflow is not None, "closed-workflow-route")
@@ -8101,7 +8160,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
                 "MRK_EXPECTED_SHA": sha, "MRK_MACOS_INSTALL_SOURCE_COMMIT": sha,
                 "MRK_MACOS_PACKAGE_ROLE": "installed-shell-observation" if workflow == "desktop-macos-aqua.yml" else "ordinary-image",
                 "RUSTUP_TOOLCHAIN": rust_toolchain(target), "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET": "26.0"}
-    if python_phase or tool_phase or support_phase:
+    if python_phase or tool_phase or support_phase or store_phase:
         del required["MRK_MACOS_PACKAGE_ROLE"]
         del required["RUSTUP_TOOLCHAIN"]
         need(environment.get("MRK_MACOS_PACKAGE_ROLE") is None, "python-no-install-package-role")
@@ -8111,7 +8170,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     if workflow == "desktop-macos-aqua.yml":
         need(environment.get("MRK_MACOS_AQUA_SCOPE") in PACKAGE_SCOPES, "full-package-scope-only")
     work = Path(environment.get("MRK_MACOS_WORK", ""))
-    prefix = "mrk-macos-android-support-signing" if support_phase else "mrk-macos-tool-signing" if tool_phase else "mrk-macos-python-signing" if python_phase else "mrk-macos-aqua" if workflow == "desktop-macos-aqua.yml" else "mrk-macos-installed"
+    prefix = "mrk-macos-store-signing" if store_phase else "mrk-macos-android-support-signing" if support_phase else "mrk-macos-tool-signing" if tool_phase else "mrk-macos-python-signing" if python_phase else "mrk-macos-aqua" if workflow == "desktop-macos-aqua.yml" else "mrk-macos-installed"
     need(work.parent == WORK_PARENT and re.fullmatch(re.escape(prefix) + r"\.[A-Za-z0-9]{8}", work.name), "owned-work-route")
     return work
 
@@ -8476,7 +8535,7 @@ def main():
     main_stage = "entrypoint"
     try:
         phase, target = entrypoint(sys.argv)
-        support_started = time.monotonic_ns() if phase in SUPPORT_PHASES else None
+        support_started = time.monotonic_ns() if phase in SUPPORT_PHASES + STORE_SIGNING_PHASES else None
         if phase in TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES:
             main_stage = "data-phase"
             return tool_data_main(phase, target)
@@ -8502,7 +8561,7 @@ def main():
                  "update-qualified-predecessor-unconfigured")
         main_stage = "profile-check"
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
-                                     allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
+                                     allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + STORE_SIGNING_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
                                      and os.environ.get("GITHUB_REF") != APP_SIGNATURE_REF)
         if phase in FINAL_PACKAGE_PHASES or phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             need(installer_profile(stager.read(CHECKOUT / INSTALLER_PROFILE, 1024)) is not None, "installer-source-unconfigured")
@@ -8511,7 +8570,7 @@ def main():
         owner = qualification.load_owner(CHECKOUT)
         main_stage = "operation-create"
         if support_started is not None:
-            need(type(support_started) is int and support_started <= time.monotonic_ns() < support_started + 960_000_000_000,
+            need(type(support_started) is int and support_started <= time.monotonic_ns() < support_started + (1620 if phase in STORE_SIGNING_PHASES else 960) * 1_000_000_000,
                  "support-admission-deadline")
         operation = Operation(owner, CHECKOUT, work, phase, os.environ, stager, target=target, support_started=support_started)
         main_stage = "operation-execute"

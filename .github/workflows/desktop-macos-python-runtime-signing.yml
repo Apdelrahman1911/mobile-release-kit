@@ -6,6 +6,7 @@ on:
       - verify/desktop-macos-python-runtime-signing-engineering
       - verify/desktop-macos-python-runtime-signing-shipping
       - verify/desktop-macos-github-tool-signing
+      - verify/desktop-macos-store-signing
 
 permissions:
   contents: read
@@ -272,4 +273,125 @@ jobs:
             ${{ env.MRK_MACOS_WORK }}/${{ matrix.name }}
             ${{ env.MRK_MACOS_WORK }}/tool-signed-receipt.json
           if-no-files-found: error
+          retention-days: 7
+
+  signed-store:
+    name: Store signing (${{ matrix.machine }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-store-signing'
+    environment: macos-developer-id
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-26
+            architecture: ARM64
+            machine: arm64
+            supplier_artifact: '12022417782'
+          - target: x86_64-apple-darwin
+            runner: macos-26-intel
+            architecture: X64
+            machine: x86_64
+            supplier_artifact: '12022823630'
+    env:
+      MRK_EXPECTED_SHA: ${{ github.sha }}
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      MRK_STORE_TARGET: ${{ matrix.target }}
+      MRK_RUNNER_ARCH: ${{ matrix.architecture }}
+      MRK_NATIVE_MACHINE: ${{ matrix.machine }}
+    steps:
+      - name: Admit only this native source and configured Store signing purpose
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == "$MRK_RUNNER_ARCH" ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-store-signing ]] || exit 1
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-python-runtime-signing.yml@$GITHUB_REF" ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == "$MRK_NATIVE_MACHINE" && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/id -u)" != 0 && "$RUNNER_TEMP" == /Users/runner/work/_temp ]] || exit 1
+      - name: Check out exact source without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select owner Python, never execute the Store supplier
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Reserve exclusive private work
+        id: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-store-signing.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_MACOS_WORK=%s\n' "$root" >> "$GITHUB_ENV"
+      - name: Restore only the exact successful unsigned Store assembly
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_STORE_ARTIFACT: ${{ matrix.supplier_artifact }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$MRK_PYTHON" -I -B desktop/tools/macos_store_component.py restore-runtime \
+            "$MRK_MACOS_WORK/store-original" --source 0039f79baa54318d58d87606335492f7ef2a90dd \
+            --arch "$MRK_NATIVE_MACHINE" --run-id 38844616192 --artifact-id "$MRK_STORE_ARTIFACT"
+          /bin/chmod 400 "$MRK_MACOS_WORK/store-original/store-runtime.tar.gz" "$MRK_MACOS_WORK/store-original/runtime-origin.json"
+      - name: Sign and verify every native member with one original credential scope
+        id: sign
+        timeout-minutes: 28
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          set +x
+          set +a
+          ulimit -c 0
+          ulimit -n 1024
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-store-runtime --target "$MRK_STORE_TARGET"
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+      - name: Preserve only bounded signing facts
+        if: always() && (steps.sign.outcome == 'success' || steps.sign.outcome == 'failure')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: store-signing-facts-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/android-helper-sign-store-runtime.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Keep the signed component on Actions only after original zero exit
+        if: success() && steps.sign.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: store-signed-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/store-signed.tar.gz
+            ${{ steps.work.outputs.root }}/store-signed-receipt.json
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 7

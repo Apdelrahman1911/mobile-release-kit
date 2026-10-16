@@ -8,11 +8,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
+from types import SimpleNamespace
 import tarfile
 import zipfile
 
@@ -231,16 +234,141 @@ def restore_runtime(output, run_id, source, arch, artifact_id):
         raise ValueError('Runtime original native inputs differ')
     archive = output / 'store-runtime.tar.gz'
     runtime = _extract_component(archive, output / 'extracted', 'runtime')
+    with archive.open('rb') as stream:
+        archive_digest = hashlib.file_digest(stream, 'sha256').hexdigest()
     # Keep the original base provenance verbatim. The independent assembly
     # source and service binding are descriptive reuse facts, not signing proof.
     (output / 'runtime-origin.json').write_text(json.dumps({
         'schema': 1, 'source': source, 'arch': arch, 'runId': run_id,
         'runAttempt': attempt, 'artifactId': artifact_id,
         'artifactDigest': artifact['digest'], 'signed': False,
+        'archiveSha256': archive_digest,
     }, sort_keys=True) + '\n')
     transport.unlink()
-    archive.unlink()
+    # Retain the exact service-authenticated compressed PRE for the signing
+    # owner's held input. The extracted copy is never used as signing authority.
     print(f'Restored unsigned {arch} runtime artifact {artifact_id}, source {source}, attempt {attempt}.')
+    return runtime
+
+
+def restore_signed(output, run_id, source, arch, artifact_id):
+    """Project one exact successful signing job, without executing its payload.
+
+    Ordinary packaging selects these identifiers from its source input. This
+    service/content boundary is not a new keychain or native-signature owner.
+    """
+    checked_source(source)
+    if (arch not in ('arm64', 'x86_64')
+            or any(type(v) is not int or v <= 0 for v in (run_id, artifact_id))):
+        raise ValueError('Expected exact signed component source/run/artifact')
+    target = 'aarch64-apple-darwin' if arch == 'arm64' else 'x86_64-apple-darwin'
+    run = api(f'actions/runs/{run_id}')
+    workflow = api('actions/workflows/desktop-macos-python-runtime-signing.yml')
+    artifact = api(f'actions/artifacts/{artifact_id}')
+    matched = re.fullmatch(re.escape(f'store-signed-{target}-{run_id}-') + r'([1-9][0-9]*)', artifact.get('name', ''))
+    if (run.get('id') != run_id or run.get('repository', {}).get('full_name') != REPOSITORY
+            or run.get('head_repository', {}).get('full_name') != REPOSITORY
+            or run.get('head_branch') != 'verify/desktop-macos-store-signing' or run.get('event') != 'push'
+            or run.get('head_sha') != source or workflow.get('path') != '.github/workflows/desktop-macos-python-runtime-signing.yml'
+            or run.get('workflow_id') != workflow.get('id') or matched is None
+            or artifact.get('id') != artifact_id or artifact.get('expired') is not False
+            or artifact.get('workflow_run', {}).get('id') != run_id
+            or artifact.get('workflow_run', {}).get('head_sha') != source
+            or type(artifact.get('size_in_bytes')) is not int or not 0 < artifact['size_in_bytes'] <= LIMIT + 1024 * 1024
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}', artifact.get('digest', ''))):
+        raise ValueError('Signed Store service origin differs')
+    attempt = int(matched[1])
+    jobs = api(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
+    if type(jobs.get('total_count')) is not int or not 0 < jobs['total_count'] <= 100:
+        raise ValueError('Signed Store job roster differs')
+    selected = [row for row in jobs['jobs'] if row.get('name') == f'Store signing ({arch})']
+    if (len(selected) != 1 or selected[0].get('run_id') != run_id or selected[0].get('run_attempt') != attempt
+            or selected[0].get('head_sha') != source or selected[0].get('status') != 'completed'
+            or selected[0].get('conclusion') != 'success'):
+        raise ValueError('Original signed Store producer did not pass')
+    output.mkdir(mode=0o700)
+    transport = output / 'artifact.zip'
+    with transport.open('xb') as stream:
+        subprocess.run(['gh', 'api', f'repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip'],
+                       stdout=stream, check=True, timeout=180)
+    with transport.open('rb') as stream:
+        if (transport.stat().st_size != artifact['size_in_bytes']
+                or 'sha256:' + hashlib.file_digest(stream, 'sha256').hexdigest() != artifact['digest']):
+            raise ValueError('Signed Store transport differs')
+    with zipfile.ZipFile(transport) as zipped:
+        entries = zipped.infolist()
+        if len(entries) != 2 or {r.filename for r in entries} != {'store-signed.tar.gz', 'store-signed-receipt.json'}:
+            raise ValueError('Signed Store transport roster differs')
+        for row in entries:
+            maximum = 256 * 1024 if row.filename.endswith('.json') else LIMIT
+            if row.flag_bits & 1 or not 0 < row.file_size <= maximum:
+                raise ValueError('Signed Store transport bounds differ')
+            with zipped.open(row) as original, (output / row.filename).open('xb') as destination:
+                shutil.copyfileobj(original, destination, 1024 * 1024)
+    # Only fixed first-party DATA parsers. None invokes main or payload code.
+    modules = {}
+    for filename in ('macos_store_signing.py', 'stage_macos_installed.py',
+                     'macos_cpython_orchestrator.py', 'macos_android_helper_package.py'):
+        label = '_mrk_store_restore_' + filename[:-3]
+        spec = importlib.util.spec_from_file_location(label, ROOT / 'desktop/tools' / filename)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[label] = module
+        spec.loader.exec_module(module)
+        modules[filename] = module
+    signing, stager, matcher, helper = (modules[name] for name in
+        ('macos_store_signing.py', 'stage_macos_installed.py', 'macos_cpython_orchestrator.py', 'macos_android_helper_package.py'))
+    archive = output / 'store-signed.tar.gz'
+    archive_body = archive.read_bytes()
+    receipt_body = (output / 'store-signed-receipt.json').read_bytes()
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result: raise ValueError('Duplicate signed Store receipt key')
+            result[key] = value
+        return result
+    receipt = json.loads(receipt_body, object_pairs_hook=pairs)
+    producer = (ROOT / 'desktop/packaging/macos-install-producer-signing.profile').read_bytes()
+    service = (ROOT / 'desktop/packaging/macos-android-service-signing.profile').read_bytes()
+    selected_identity = stager.packaging_signing_data(producer, service)
+    identity = stager.service_signing_data(service)
+    expected_signer = {'teamIdentifier': identity[0], 'certificateSha1': identity[1],
+                      'producerProfileSha256': selected_identity.producer_sha256,
+                      'serviceProfileSha256': selected_identity.service_sha256}
+    context = receipt.get('credentialContexts') if type(receipt) is dict else None
+    if (type(receipt) is not dict or type(receipt.get('schemaVersion')) is not int or receipt['schemaVersion'] != 1
+            or receipt.get('kind') != 'macos-store-signed-v1' or receipt.get('source') != source
+            or receipt.get('runId') != str(run_id) or receipt.get('runAttempt') != str(attempt)
+            or receipt.get('workflow') != REPOSITORY + '/.github/workflows/desktop-macos-python-runtime-signing.yml@refs/heads/verify/desktop-macos-store-signing'
+            or receipt.get('target') != target or receipt.get('signer') != expected_signer
+            or any(receipt.get(k) is not True for k in ('originalsClosed', 'sourcePost', 'inputPost', 'nonNativeUnchanged', 'outerExitRequired'))
+            or receipt.get('nativeCallCount') != len(signing.ROLES) or receipt.get('credentialCallCount') != 19
+            or type(context) is not list or len(context) != 1 or context[0].get('purpose') != signing.PHASE
+            or any(context[0].get(k) is not True for k in ('closed', 'retired', 'searchRestored', 'defaultUnchanged'))
+            or receipt.get('signedArchiveSha256') != signing.sha(archive_body)
+            or type(receipt.get('signedArchiveBytes')) is not int or receipt['signedArchiveBytes'] != len(archive_body)):
+        raise ValueError('Signed Store original completion/identity differs')
+    current = SimpleNamespace(stager=stager, target=target, arch=arch)
+    rows = signing.archive_scan(archive_body, lambda body, name: signing.native_policy(body, name, current, matcher))
+    native_rows = receipt.get('nativeMembers')
+    if (receipt.get('signedInventorySha256') != signing.sha(signing.canonical(rows))
+            or type(native_rows) is not list or len(native_rows) != signing.NATIVE_COUNT
+            or len({row.get('path') for row in native_rows if type(row) is dict}) != signing.NATIVE_COUNT):
+        raise ValueError('Signed Store complete inventory differs')
+    by_name = {row['path']: row for row in native_rows}
+    with tarfile.open(fileobj=io.BytesIO(archive_body), mode='r:gz') as contents:
+        for entry, row in zip(contents, rows, strict=True):
+            if not row['native']: continue
+            expected = by_name.get(row['path'], {})
+            with contents.extractfile(entry) as stream: body = stream.read(signing.FILE_LIMIT + 1)
+            flags = helper.python_code_flags(body, arch, 'python-shipping', matcher)
+            if (expected.get('signedSha256') != row['sha256'] or expected.get('signedBytes') != row['bytes']
+                    or expected.get('identifier') != signing.identifier(row['path']) or expected.get('codeDirectoryFlags') != flags):
+                raise ValueError('Signed Store native member differs')
+    runtime = _extract_component(archive, output / 'extracted', 'runtime')
+    (output / 'signed-origin.json').write_text(json.dumps({'schema': 1, 'source': source, 'target': target,
+        'runId': run_id, 'runAttempt': attempt, 'artifactId': artifact_id, 'artifactDigest': artifact['digest'],
+        'receiptSha256': hashlib.sha256(receipt_body).hexdigest(), 'archiveSha256': receipt['signedArchiveSha256']}, sort_keys=True) + '\n')
+    transport.unlink()
     return runtime
 
 
@@ -331,7 +459,10 @@ def main():
     runtime = sub.add_parser('restore-runtime', help='Restore an exact successful unsigned assembly, without executing it')
     runtime.add_argument('output', type=Path)
     runtime.add_argument('--artifact-id', required=True)
-    for item in (pack, get, runtime):
+    signed = sub.add_parser('restore-signed', help='Project one exact signed Store producer artifact, without execution')
+    signed.add_argument('output', type=Path)
+    signed.add_argument('--artifact-id', required=True)
+    for item in (pack, get, runtime, signed):
         item.add_argument('--source', required=True)
         item.add_argument('--arch', choices=['arm64', 'x86_64'], required=True)
         item.add_argument('--run-id', required=True)
@@ -342,6 +473,8 @@ def main():
     elif args.command == 'archive':
         archive_base(args.base, args.output, checked_source(args.source), args.arch,
                      positive(args.run_id), positive(args.attempt))
+    elif args.command == 'restore-signed':
+        restore_signed(args.output, positive(args.run_id), checked_source(args.source), args.arch, positive(args.artifact_id))
     elif args.command == 'restore-runtime':
         restore_runtime(args.output, positive(args.run_id), checked_source(args.source), args.arch,
                         positive(args.artifact_id))
