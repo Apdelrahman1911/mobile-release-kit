@@ -73,7 +73,7 @@ jobs:
             test_workflow_edit_protocol test_workflow_recovery_engine \
             test_offline_preflight test_project_recovery test_macos_workflow_admission \
             test_macos_android_ui_result test_local_release_intent test_local_release_source test_local_release_candidate \
-            test_local_candidate_composition test_local_output_freshness test_local_release_metadata
+            test_local_candidate_composition test_local_output_freshness test_local_release_metadata test_local_release_journal
           # Own process for the finite private-input/stdio failure fixtures;
           # explicit module names avoid the historical native/package suite.
           python -B -m unittest \
