@@ -27,7 +27,7 @@ from . import local_signing_persistent_fixture as fixture
 from . import local_signing_semantic_catalog as semantic_catalog
 from . import local_signing_semantic_fixture as semantic_fixture
 from . import run_local_signing_matrix as runner
-from .workflow_harness import load_workflow
+from .workflow_harness import evaluate_condition, load_workflow
 
 
 def event(number):
@@ -1195,7 +1195,14 @@ class MatrixContractTests(unittest.TestCase):
         self.assertNotIn("env", job)
         self.assertNotIn("environment", job)
         self.assertNotIn("outputs", job)
-        self.assertEqual(job["if"], "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}")
+        self.assertEqual(job["needs"], "changes")
+        for event in ("pull_request", "push", "workflow_dispatch"):
+            for target in ("full", "signing-matrix-canary", "linux", "signing-adapter", "unknown"):
+                for core in ("true", "false"):
+                    context = {"github": {"event_name": event}, "inputs": {"verification_target": target},
+                               "needs": {"changes": {"outputs": {"core": core}}}}
+                    self.assertEqual(evaluate_condition(job["if"], context, success=True, cancelled=False),
+                                     core == "true" and (event != "workflow_dispatch" or target in {"full", "signing-matrix-canary"}))
         self.assertNotIn("continue-on-error", job)
         commands = [step["run"] for step in job["steps"] if "run" in step]
         self.assertEqual(len(commands), 3)  # Hosted guard, Linux provider preparation, fixed controller.
@@ -1208,10 +1215,11 @@ class MatrixContractTests(unittest.TestCase):
             self.assertNotIn("run_local_signing_matrix.py", command)
             self.assertNotIn("pip wheel", command)
             self.assertNotIn("Popen", command)
-        self.assertEqual(aggregate["needs"], ["test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix"])
-        self.assertIn('"$MATRIX_RESULT" == success', aggregate["steps"][0]["run"])
-        self.assertIn('"$NATIVE_RESULT" == success', aggregate["steps"][0]["run"])
-        self.assertIn('"$NATIVE_SUPPORT_RESULT" == success', aggregate["steps"][0]["run"])
+        self.assertEqual(set(aggregate["needs"]), {"changes", "test-linux", "test-native-profiles",
+            "test-native-support", "test-signing-matrix", "test-signing-adapter"})
+        # CIWorkflowIsolationTests executes the actual aggregate for each target
+        # and failed prerequisite; here protect the separate artifact handoff.
+        self.assertEqual(aggregate["steps"][0]["env"]["MATRIX_RESULT"], "${{ needs.test-signing-matrix.result }}")
         uploads = [step for step in job["steps"] if "local-signing-matrix-proof-" in step.get("with", {}).get("name", "")]
         self.assertEqual(len(uploads), 1)
         self.assertNotIn("if", uploads[0])
@@ -1225,9 +1233,18 @@ class MatrixContractTests(unittest.TestCase):
         reducers = [step for step in aggregate["steps"] if "--reduce" in step.get("run", "")]
         self.assertEqual(len(reducers), 1)
         self.assertNotIn("--local-reduction", reducers[0]["run"])
+        self.assertNotIn("if", aggregate["steps"][0])
         for step in aggregate["steps"]:
-            self.assertNotIn("if", step)
             self.assertNotIn("continue-on-error", step)
+        for event in ("pull_request", "push", "workflow_dispatch"):
+            for target in ("full", "signing-matrix-canary", "linux", "signing-adapter"):
+                for core in ("true", "false"):
+                    context = {"github": {"event_name": event}, "inputs": {"verification_target": target},
+                               "needs": {"changes": {"outputs": {"core": core}}}}
+                    full = core == "true" and (event != "workflow_dispatch" or target == "full")
+                    for step in (downloads[0], reducers[0]):
+                        self.assertEqual(evaluate_condition(step.get("if"), context, success=True, cancelled=False), full)
+                        self.assertFalse(evaluate_condition(step.get("if"), context, success=False, cancelled=False))
 
 
 class MatrixPhaseAdmissionTests(unittest.TestCase):

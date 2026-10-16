@@ -2,7 +2,6 @@
 // native processes, tools, Store, recovery or platform qualification evidence.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import guideResource from '../../src/mobile_release/api/data/release-version-help-v1.json' with { type: 'json' };
 import { parseSavedTextRecoveryView, parseSavedTextRecoveryProjection, savedTextRecoveryEffect, savedTextRecoverySucceeded } from '../src/savedTextRecovery.ts';
@@ -385,16 +384,6 @@ test('local fields reject non-ASCII line separators without changing the retaine
     assert.equal(h.controller.selectedEntry().revision, revision);
   }
   assert.equal(h.count('prepare'), 0); assert.equal(h.count('apply'), 0);
-});
-
-test('App explicitly fans every version save boundary into passive/read/build/offline consent retirement', () => {
-  // Source obligation only; this is not a DOM/native/process-finality proof.
-  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  assert.match(app, /onSaveBoundary:[\s\S]*?releaseVersion\.saveIntent\(\);[\s\S]*?releaseInputs\.saveIntent\(\);[\s\S]*?androidBuildControllerRef\.current\?\.versionIntent\(\);[\s\S]*?offlinePreflightControllerRef\.current\?\.versionIntent\(\)/);
-  const action = app.indexOf('versionEditControllerRef.current?.beforeWorkspaceAction(action)');
-  assert.ok(action >= 0); assert.ok(action < app.indexOf('workspaceReducer(', action));
-  assert.match(app, /versionEdit\.snapshotIntent\(projectId\)/);
-  assert.match(app, /versionEdit\.beginConnection\(\)/);
 });
 
 // Fresh-process recovery transport/controller DATA only. No journal is created

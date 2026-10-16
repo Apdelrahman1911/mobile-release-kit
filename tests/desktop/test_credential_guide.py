@@ -55,8 +55,8 @@ class CredentialGuideTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in resource["states"]], list(guide.STATE_IDS))
         self.assertEqual(sum(len(item["fields"]) for item in resource["kinds"]), 15)
         self.assertFalse(result["assurance"]["credentialsRead"])
-        self.assertEqual(METHODS, ("capabilities", "catalog", "project.snapshot", "config.validate",
-                                   "config.suggest", "config.preview", "github.setup.propose", "credentials.assess"))
+        self.assertEqual(tuple(method for method in METHODS if method.startswith("credentials.")),
+                         ("credentials.assess",))
         self.assertTrue(all(not item["available"] for item in execute("capabilities", {})["actions"]))
         # Pure supplied-input policy is additive; no native/vault action or
         # general credential operation becomes a method through guide loading.

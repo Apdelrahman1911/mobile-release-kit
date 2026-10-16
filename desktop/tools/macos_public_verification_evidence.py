@@ -458,9 +458,6 @@ DATA_CONTRACT_TEST_IDS = (
     'test_github_release.GitHubReleasePolicyTests.test_selection_is_closed_original_data_never_current_version_substitution',
     'test_github_release.GitHubReleasePolicyTests.test_single_dispatch_latches_uncertainty_and_refuses_replacement_source',
     'test_github_release.GitHubReleasePolicyTests.test_original_attempt_observation_requires_stage_jobs_not_build_repetition',
-    'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_observes_original_complete_report_and_settled_projection',
-    'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result',
-    'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_saved_offline_and_empty_recovery_use_original_gui_only',
     'test_android_build_tools.MacToolAdmissionDataTests.test_mac_commands_use_exact_contents_home_private_environment_and_inspection_only',
     'test_android_build_tools.OwnerAndCommandDataTests.test_bundletool_requires_original_native_borrow_and_exact_snapshot',
 )
@@ -920,7 +917,7 @@ def project_data_contract_failure(value, context, statuses, inventory_paths):
         need(closed and value["phase"] == "python" and type(python) is dict and set(python) == set(counts) | {
             "actualHostBeforeAndAfter", "failureTests", "classifiedTestCount", "omittedTestCount", "unclassifiedTestCount"})
         for name in counts:
-            integer(python[name], 84 if name == "testsRun" else 65535)
+            integer(python[name], len(DATA_CONTRACT_TEST_IDS) if name == "testsRun" else 65535)
         boolean(python["actualHostBeforeAndAfter"])
         rows = python["failureTests"]
         need(type(rows) is list and len(rows) <= 16)

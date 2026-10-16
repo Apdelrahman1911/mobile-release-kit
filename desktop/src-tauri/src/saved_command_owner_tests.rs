@@ -50,31 +50,6 @@ fn ios_mode_gate_keeps_matched_non_ios_pass_through_and_exact_mode_selection() {
         assert_eq!(ios.inner.ios_mode_qualified(&selected, None), modes.supports(operation));
     }
     assert!(!ios.inner.ios_mode_qualified(&context(SavedCommandDomain::OfflinePreflight), None));
-    // Linux deliberately has no iOS profile. Check the actual native gate's
-    // busy branch in SOURCE, rather than inventing platform qualification.
-    let source = include_str!("asset_session.rs");
-    let gate = source.split_once("    fn ios_archive_gate(").unwrap().1
-        .split_once("    pub(crate) fn ios_archive_subscribe").unwrap().0;
-    let peer_contract = |value: &str| {
-        let calls = ["self.inner.bridge.artifact_inspection.disabled()",
-            "self.inner.bridge.artifact_inspection.stopping()",
-            "self.inner.bridge.artifact_inspection.busy()"];
-        if calls.iter().any(|call| value.matches(*call).count() != 1) { return false; }
-        let disabled = value.find(calls[0]).unwrap();
-        let stopping = value.find(calls[1]).unwrap();
-        let busy = value.find(calls[2]).unwrap();
-        let Some(platform) = value.find("ios_archive_document_gate(state,") else { return false; };
-        disabled < stopping && stopping < platform && platform < busy
-            && value[disabled..stopping].contains("return Availability::CleanupUnknown;")
-            && value[stopping..platform].contains("return Availability::Shutdown;")
-            && value[busy..].contains("return Availability::Busy;")
-    };
-    assert!(peer_contract(gate));
-    for call in ["self.inner.bridge.artifact_inspection.disabled()",
-        "self.inner.bridge.artifact_inspection.stopping()",
-        "self.inner.bridge.artifact_inspection.busy()"] {
-        assert!(!peer_contract(&gate.replacen(call, "false", 1)));
-    }
     assert_eq!((modes.unsigned, modes.signed, modes.recovery),
         (ios.inner.ios_installed_selected(), ios.inner.ios_installed_selected(), ios.inner.ios_installed_selected()));
 }
@@ -623,25 +598,49 @@ fn android_normal_selection_requires_first_owner_and_original_live_document_with
 #[test]
 fn android_actual_document_gate_preserves_original_until_duplicate_main_latches_loss() {
     let (bridge, document) = bound_document_model();
+    let saved = bridge.android_build.original_for_test();
+    let control = bridge.android_build.registration_control();
+    let original_identity = saved.inner.android_document.lock().unwrap().as_ref().unwrap().clone();
+    let assert_original_idle = || {
+        assert!(saved.inner.android_document.lock().unwrap().as_ref().unwrap().ptr_eq(&original_identity));
+        let registry = saved.inner.lock();
+        assert!(registry.active.is_none() && registry.prepared.is_none() && registry.last.is_none());
+    };
     let original = document.android_build_status().unwrap().availability;
     assert_ne!(original, android_wire::Availability::DocumentLost);
+    assert_ne!(original, android_wire::Availability::CleanupUnknown);
+    assert!(!control.is_unknown());
+    assert_eq!(saved.observed_document_lost_for_test(), Some(false));
+    assert_original_idle();
     let other = crate::asset_session::DocumentBinding::new(bridge.clone());
-    // Initial Finished is pending: construction reports Busy, not original loss.
-    assert_eq!(other.android_build_status().unwrap().availability, android_wire::Availability::Busy);
-    assert_eq!(document.clone().android_build_status().unwrap().availability, original);
-    // A second completed main lifetime is real loss, not harmless construction.
+    // The second saved-registration identity poisons the shared control before
+    // Finished. Unknown outranks pending/lost without rebinding the original.
+    assert!(control.is_unknown());
+    assert_eq!(other.android_build_status().unwrap().availability, android_wire::Availability::CleanupUnknown);
+    assert_eq!(document.clone().android_build_status().unwrap().availability, android_wire::Availability::CleanupUnknown);
+    assert!(original_identity.upgrade().is_some());
+    assert_eq!(saved.observed_document_lost_for_test(), Some(false));
+    assert_original_idle();
+    // A second completed main lifetime also latches real document loss; it
+    // cannot downgrade the already retained Unknown to a lesser public gate.
     other.hook_installed();
     other.observe(|lifetime| lifetime.started(true));
     other.observe(|lifetime| lifetime.finished(true));
-    assert_eq!(other.android_build_status().unwrap().availability, android_wire::Availability::DocumentLost);
-    assert_eq!(document.clone().android_build_status().unwrap().availability, android_wire::Availability::DocumentLost);
+    assert_eq!(saved.observed_document_lost_for_test(), Some(true));
+    assert_eq!(other.android_build_status().unwrap().availability, android_wire::Availability::CleanupUnknown);
+    assert_eq!(document.clone().android_build_status().unwrap().availability, android_wire::Availability::CleanupUnknown);
+    assert_original_idle();
     drop(document);
-    assert_eq!(other.android_build_status().unwrap().availability, android_wire::Availability::DocumentLost);
-    let later = crate::asset_session::DocumentBinding::new(bridge);
+    assert!(original_identity.upgrade().is_none());
+    assert_eq!(other.android_build_status().unwrap().availability, android_wire::Availability::CleanupUnknown);
+    let later = crate::asset_session::DocumentBinding::new(bridge.clone());
     later.hook_installed();
     later.observe(|lifetime| lifetime.started(true));
     later.observe(|lifetime| lifetime.finished(true));
-    assert_eq!(later.android_build_status().unwrap().availability, android_wire::Availability::DocumentLost);
+    assert_eq!(later.android_build_status().unwrap().availability, android_wire::Availability::CleanupUnknown);
+    assert!(control.is_unknown() && original_identity.upgrade().is_none());
+    assert_eq!(saved.observed_document_lost_for_test(), Some(true));
+    assert_original_idle();
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -860,7 +859,15 @@ async fn late_inspection_data_is_cleanup_only_and_cannot_rearm_acquisition() {
         Ok(VerifiedRuntime { python: "/unopened/python".into(), bootstrap: "/unopened/bootstrap".into(),
             core: "/unopened/core".into(), cwd: "/unopened".into() })
     }));
-    application.inner.advance_locked(&mut application.inner.lock(), &owner, owner.clocks.finality);
+    // Latch an actual stop before simulating expired finality. Later real
+    // callbacks must not renew it; they are not earlier than a future-only
+    // work-deadline observation made by this fixture.
+    let first_stop = Instant::now();
+    {
+        let mut registry = application.inner.lock();
+        application.inner.stop_locked(&mut registry, &owner, Reason::TimedOut, first_stop);
+        application.inner.advance_locked(&mut registry, &owner, owner.clocks.finality);
+    }
     release.send(()).unwrap();
     continue_original(&application.inner, &owner).await;
     start_original(&application.inner, &owner).await;
@@ -871,7 +878,7 @@ async fn late_inspection_data_is_cleanup_only_and_cannot_rearm_acquisition() {
     assert!(owner.request.lock().await.is_none());
     let r = application.inner.lock(); let active = r.active.as_ref().unwrap();
     assert!(Arc::ptr_eq(&active.owner, &owner) && active.unknown && r.last.is_none());
-    assert_eq!(active.first_stop, Some(owner.clocks.work));
+    assert_eq!(active.first_stop, Some(first_stop));
     assert!(active.projection.public().result.is_none());
 }
 

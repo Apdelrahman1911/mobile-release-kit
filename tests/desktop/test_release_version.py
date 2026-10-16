@@ -321,7 +321,7 @@ class ReleaseVersionTests(unittest.TestCase):
                                ("source-encoding-close-fails", "cleanup_unknown"),
                                ("config-appears-close-fails", "cleanup_unknown"), ("missing-source-close-fails", "cleanup_unknown")]:
             root_fact, selected_fact, release_fact, file_fact = facts(1, directory=True), facts(2, directory=True), facts(3, directory=True), facts(4)
-            current, opened, closed = {"changed": False}, [], []
+            current, opened, closed, reads = {"changed": False}, [], [], []
             missing = "mobile-release.json" if case.startswith("config-appears") else "version.properties" if case in {"source-appears", "missing-source-close-fails"} else None
 
             def open_fake(name, _flags, *, dir_fd=None):
@@ -338,8 +338,10 @@ class ReleaseVersionTests(unittest.TestCase):
                     raise FileNotFoundError()
                 return file_fact
 
-            def read_fake(parent, name, relative, inventory, *, limit, receipts, binary=False):
+            def read_fake(parent, name, relative, inventory, *, limit, receipts, binary=False, held_leaves=None):
                 self.assertIs(binary, True)
+                self.assertIsNone(held_leaves)
+                reads.append(name)
                 receipts.append((parent, name, snapshot._named_identity(file_fact)))
                 if name == "mobile-release.json":
                     if case.startswith("config-encoding"):
@@ -368,6 +370,10 @@ class ReleaseVersionTests(unittest.TestCase):
                 with self.assertRaises(ApiError) as caught:
                     execute("release.version.observe", {"root": "/selected"})
                 self.assertEqual(caught.exception.code, "release_version_" + expected)
+                expected_reads = [] if case.startswith("config-appears") else ["mobile-release.json"]
+                if case.startswith(("invalid-source", "source-encoding")):
+                    expected_reads.append("version.properties")
+                self.assertEqual(reads, expected_reads)
             self.assertEqual(closed[-2:], [20, 10])
             self.assertEqual(len(closed), len(set(closed)))
 

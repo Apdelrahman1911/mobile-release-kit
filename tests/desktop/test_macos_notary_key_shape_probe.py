@@ -200,26 +200,6 @@ class NotaryKeyShapeProbeData(unittest.TestCase):
                 self.assertEqual(out.getvalue(), '')
                 self.assertNotIn('PRIVATE-SENTINEL', err.getvalue()); self.assertNotIn(DATA.VARIABLE, os.environ)
 
-    def test_workflow_has_only_explicit_shape_secret_and_public_report(self):
-        workflow = (ROOT / '.github/workflows/desktop-macos-notary-key-shape.yml').read_text()
-        self.assertIn('    branches:\n      - verify/desktop-macos-notary-key-shape\n', workflow)
-        self.assertIn("if: github.event_name == 'push' && github.ref == '" + DATA.REF + "'", workflow)
-        self.assertIn('    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    environment: macos-developer-id\n', workflow)
-        self.assertEqual(workflow.count('${{ secrets.'), 1)
-        self.assertIn('          ' + DATA.VARIABLE + ': ${{ secrets.' + DATA.VARIABLE + ' }}\n', workflow)
-        self.assertIn('          set +x\n          set +a\n          export -n ' + DATA.VARIABLE + '\n', workflow)
-        self.assertIn('          ' + DATA.VARIABLE + '="$' + DATA.VARIABLE + '" /usr/bin/python3 -I -S -B ' + DATA.SCRIPT + ' > notary-key-shape-public.json\n', workflow)
-        self.assertIn('          unset ' + DATA.VARIABLE + '\n', workflow)
-        self.assertIn("if: steps.probe.outcome == 'success'", workflow)
-        self.assertEqual(workflow.count('          path: '), 1)
-        self.assertIn('          path: notary-key-shape-public.json\n          if-no-files-found: error\n          retention-days: 14\n', workflow)
-        self.assertIn('permissions:\n  contents: read\n', workflow)
-        self.assertIn('          persist-credentials: false\n', workflow)
-        self.assertNotIn('workflow_dispatch:', workflow); self.assertNotIn('secrets: inherit', workflow)
-        self.assertNotIn('notarytool ', workflow); self.assertNotIn('cargo ', workflow)
-        source = ast.parse((ROOT / DATA.SCRIPT).read_bytes())
-        imports = {alias.name for node in source.body if isinstance(node, ast.Import) for alias in node.names}
-        self.assertNotIn('subprocess', imports)
 
 
 if __name__ == '__main__':

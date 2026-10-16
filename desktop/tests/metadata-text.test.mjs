@@ -858,17 +858,6 @@ test('metadata_text recovery refusal/failure/unknown or altered original plans c
   }
 });
 
-test('metadata recovery UI uses separate frozen confirmation and reuses App consent/intent boundaries', () => {
-  const ui = readFileSync(new URL('../src/components/MetadataTextEditor.tsx', import.meta.url), 'utf8');
-  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  assert.match(ui, /function RecoveryConfirmation/); assert.match(ui, /confirmation !== 'RECOVER'/);
-  assert.match(ui, /mounted.current && dialog.current\?\.isConnected && dialog.current.open/);
-  assert.match(ui, /binding=\{confirmation\}/); assert.match(ui, /canApply\(confirmation\) && onApply\(confirmation\)/);
-  assert.match(app, /metadataControllerRef\.current\?\.beforeWorkspaceAction\(action\)/);
-  assert.match(app, /metadataText\.setVisible\(next === 'metadata'\)/); assert.match(app, /metadataText\.snapshotIntent\(projectId\)/);
-  assert.match(app, /onRecoveryBoundary:[\s\S]*?releaseVersion\.saveIntent\(\);[\s\S]*?releaseInputs\.saveIntent\(\);[\s\S]*?androidBuildControllerRef/);
-});
-
 
 test('metadata_text recovery completion covers only older exact-context known replies and never newer attention', async () => {
   const failedCore = { effect: 'committed', journal: 'recovery_required', resources: 'settled', reason: 'filesystem_error' };

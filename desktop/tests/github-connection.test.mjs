@@ -245,14 +245,6 @@ test('subscribe precedes first status; observation port and preview have no cred
   assert.equal(preview.calls.length, 0); assert.equal(preview.controller.refresh(), false); assert.equal(preview.controller.disconnect(), false);
   assert.equal('connectToken' in preview.port, false);
   assert.equal(preview.controller.connectToken(SECRET, preview.handoff), false); assert.equal(preview.calls.length, 0);
-  const source = readFileSync(new URL('../src/components/GitHubConnection.tsx', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /dangerouslySetInnerHTML|\bfetch\(|\binvoke\(|window\.open|localStorage|sessionStorage/);
-  assert.match(source, /entryReady\s*=\s*GITHUB_CONNECTION_ENTRY_AVAILABLE/);
-  assert.match(source, /\{entryReady && <form/);
-  assert.match(source, /ref=\{tokenInput\}[^\n]*type="password"/);
-  assert.match(source, /finally \{ clearToken\(\); \}/);
-  assert.match(source, /useLayoutEffect/);
-  assert.match(source, /Connect · unavailable/);
 });
 
 test('Busy refuses a second Refresh but not retained Status or immediate Disconnect', async () => {

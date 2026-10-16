@@ -2,8 +2,14 @@
 
 No arbitrary URL/tool/project selectors. Anchors remain SOURCE-owned and
 unconfigured until independent genuine original qualification is available.
-The ordinary CLI is not used: native commands use the existing C/A/W owner.
+The ordinary CLI delegates native commands to the existing C/A/W owner.
 """
+import time
+
+# Start once at CLI entry, before the remaining imports. The acquisition child
+# still consumes its parent request endpoint; this sample cannot renew it.
+_ENTRY_STARTED_NS = time.monotonic_ns() if __name__ == '__main__' else None
+
 import ctypes
 import hashlib
 import importlib.util
@@ -16,7 +22,6 @@ import re
 import stat
 import struct
 import sys
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,7 +43,25 @@ PUBLIC_NAMES = ('arm64-installation-inventory.json', 'arm64-enrollment.json',
                 'intel-installation-inventory.json', 'intel-enrollment.json', 'enrollment-native.json')
 STATE = {'phase': 'admission', 'lastRole': None, 'originalClosesKnown': False,
          'privateOutputsRetired': False, 'workloadsKnownSettled': False}
-SOURCE_PINS = {'desktop/tools/macos_e2_native_fixture.py': (390457, 'bcfbaf9ec8a8ae3253ef0ac91a1e73256de00a9adb6a9d280f64127b340cd51e'), 'desktop/tools/stage_macos_installed.py': (389653, '15896e062c2e23e47158adeea3fe0856b97955bafeda87616b92a889232ec190'), 'desktop/tools/macos_public_verification_evidence.py': (210552, 'b38c75e9246c35adb85ca583a004934f24f5667f4a964a523baceffd3ea06bc5'), 'desktop/tools/macos_aqua_qualification.py': (463990, '95587646a468cea1ad1b212ec7a0aeac39d903eb68deef3ee29b1f889cc4d9f5'), 'desktop/tools/macos_xcode_host_preparation.py': (96477, 'd03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376'), 'desktop/tools/macos_update_verification.py': (47996, '62bcf71974f6793f82f6ff3a48e045abe36af08c661085b564d58523fac51619'), 'src/mobile_release/owned_process.py': (9127, 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59'), 'src/mobile_release/_command_process.py': (177438, 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43'), 'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'), 'src/mobile_release/cancellation.py': (32351, 'eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a'), 'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'), 'src/mobile_release/errors.py': (749, '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'), 'src/mobile_release/_lifetime_evidence.py': (19514, 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'), 'src/mobile_release/_store_lane_contract.py': (9500, '8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e'), 'src/mobile_release/_store_lane_evidence.py': (17638, 'bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872'), 'desktop/tools/macos_p0_readonly_enrollment.py': (15931, 'c82994197e689cd5fe803d07202f8a8f2aa00ab469896098ed9171bdbd8e7485')}
+SOURCE_FILES = (
+    'desktop/tools/macos_e2_native_fixture.py',
+    'desktop/tools/stage_macos_installed.py',
+    'desktop/tools/macos_public_verification_evidence.py',
+    'desktop/tools/macos_aqua_qualification.py',
+    'desktop/tools/macos_xcode_host_preparation.py',
+    'desktop/tools/macos_update_verification.py',
+    'src/mobile_release/owned_process.py',
+    'src/mobile_release/_command_process.py',
+    'src/mobile_release/_native_process.py',
+    'src/mobile_release/cancellation.py',
+    'src/mobile_release/__init__.py',
+    'src/mobile_release/errors.py',
+    'src/mobile_release/_lifetime_evidence.py',
+    'src/mobile_release/_store_lane_contract.py',
+    'src/mobile_release/_store_lane_evidence.py',
+    'desktop/tools/macos_p0_readonly_enrollment.py',
+)
+MODULE_SOURCE_LIMIT = 1 << 20
 
 
 class Refused(ValueError):
@@ -811,17 +834,16 @@ def load_module(name, path, body):
 
 
 def bootstrap_originals(root):
-    # Only this SOURCE-authenticated passive class must precede its own book.
+    # This bounded checkout class must precede its own original-file book.
     relative = 'desktop/tools/macos_e2_native_fixture.py'
-    size, expected = SOURCE_PINS[relative]
     fd = os.open(root / relative, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     primary = None
     try:
         before = identity(os.fstat(fd))
         need(stat.S_ISREG(before[2]) and before[3] == os.getuid() and before[5] == 1 and not before[2] & 0o022
-             and before[6] == size, 'p0-bootstrap-original')
-        body = os.pread(fd, size + 1, 0)
-        need(len(body) == size and sha(body) == expected and identity(os.fstat(fd)) == before
+             and 0 < before[6] <= MODULE_SOURCE_LIMIT, 'p0-bootstrap-original')
+        body = os.pread(fd, before[6] + 1, 0)
+        need(len(body) == before[6] and identity(os.fstat(fd)) == before
              == identity(os.stat(root / relative, follow_symlinks=False)), 'p0-bootstrap-source')
     except BaseException as error:
         primary = error
@@ -838,9 +860,8 @@ def bootstrap_originals(root):
 
 def main():
     environment = os.environ
-    raw_start = environment.get('MRK_P0_TASK_STARTED_NS', '')
-    need(re.fullmatch(r'[1-9][0-9]{0,19}', raw_start), 'p0-original-start')
-    clock = Deadline(started=int(raw_start))
+    need(type(_ENTRY_STARTED_NS) is int and _ENTRY_STARTED_NS > 0, 'p0-original-start')
+    clock = Deadline(started=_ENTRY_STARTED_NS)
     need(sys.platform == 'darwin' and platform.machine() == 'x86_64' and os.getuid() != 0 and os.getuid() == os.geteuid()
          and os.getgid() == os.getegid() and environment.get('RUNNER_OS') == 'macOS'
          and environment.get('RUNNER_ARCH') == 'X64' and environment.get('RUNNER_ENVIRONMENT') == 'github-hosted'
@@ -857,22 +878,17 @@ def main():
     # One fixed exclusive task root. Existing paths/collisions are never removed.
     os.mkdir(work, 0o700)
     quota = OriginalQuota()
-    quota.reserve(1)  # Before opening the SOURCE-authenticated bootstrap original.
+    quota.reserve(1)  # Before opening the bounded checkout bootstrap original.
     session, primary = None, None
     try:
         session = Enrollment(root, work, clock, bootstrap_originals(root), quota=quota)
         STATE['phase'] = 'source'
-        head = session.source('.git/HEAD', 64)
-        need(head == (environment['GITHUB_SHA'] + '\n').encode('ascii'), 'p0-detached-source')
-        expected_size, expected_sha = environment.get('MRK_P0_NATIVE_BYTES', ''), environment.get('MRK_P0_NATIVE_SHA256', '')
-        need(re.fullmatch(r'[1-9][0-9]{0,5}', expected_size) and 0 < int(expected_size) <= SOURCE_LIMIT
-             and re.fullmatch(r'[0-9a-f]{64}', expected_sha), 'p0-initial-source-binding')
-        session.script = session.source('desktop/tools/macos_p0_readonly_native.py', int(expected_size), expected_sha)
-        need(len(session.script) == int(expected_size), 'p0-initial-source-binding')
+        session.script = session.source('desktop/tools/macos_p0_readonly_native.py', SOURCE_LIMIT)
+        need(0 < len(session.script) <= SOURCE_LIMIT, 'p0-initial-source-binding')
         session.source('.github/workflows/desktop-macos-p0-readonly-enrollment.yml', 16384)
         modules = {}
-        for relative, (size, digest) in SOURCE_PINS.items():
-            body = session.source(relative, size, digest)
+        for relative in SOURCE_FILES:
+            body = session.source(relative, MODULE_SOURCE_LIMIT)
             if relative.startswith('desktop/tools/') and relative.endswith('.py'):
                 name = Path(relative).name
                 if name == 'macos_e2_native_fixture.py': continue
@@ -889,7 +905,7 @@ def main():
         session.expected_public = tuple(name for target in selected_targets for name in
             (('arm64' if target == TARGETS[0] else 'intel') + '-installation-inventory.json',
              ('arm64' if target == TARGETS[0] else 'intel') + '-enrollment.json')) + ('enrollment-native.json',)
-        # Exact owner loader and source pins, not an alternate process engine.
+        # Existing owner from the same checkout, not an alternate process engine.
         aqua = modules['macos_aqua_qualification.py']
         session.owner = aqua.load_owner(root)
         session.host = modules['macos_xcode_host_preparation.py'].DarwinAPI(clock, target=TARGETS[1])

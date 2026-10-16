@@ -179,7 +179,6 @@ import { ArtifactInspectionController, artifactInspectionOwnerReason } from '../
 import { parseArtifactInspectionStatus, copyArtifactInspectionRequest, ARTIFACT_INSPECTION_EVENT } from '../src/artifactInspectionProtocol.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { initialWorkspace, workspaceReducer } from '../src/drafts.ts';
-import { readFileSync } from 'node:fs';
 const OP='a'.repeat(32),OWNER='b'.repeat(32),CONTENT={bytes:123,sha256:hash};
 const copy=value=>structuredClone(value);
 const flush=async()=>{for(let i=0;i<16;i++)await Promise.resolve();};
@@ -302,17 +301,4 @@ test('artifact late replies expiry discard and unknown preserve the original own
   void stopped.controller.pick('artifact');const reusedPick=stopped.calls.at(-1);assert.equal(reusedPick.kind,'pick');
   const reused=idle(stopped.current.statusRevision+1,3);reused.selection={generation:3,projectId:'fixture',format:'aab',phase:'ready',reason:'none',operation:null,items:[{selectionId:'1'.repeat(32),role:'artifact',label:'fixture.aab',kind:'file'}]};
   stopped.reply(reusedPick,reused);await flush();assert.equal(stopped.state.integrityFailed,true,'discard never frees consumed native IDs for reuse');
-});
-
-test('artifact App uses one existing screen and reciprocal initialization asset and saved-owner guards',()=>{
-  const source=name=>readFileSync(new URL(`../src/${name}`,import.meta.url),'utf8');
-  const app=source('App.tsx'),page=source('pages/Artifacts.tsx'),component=source('components/ArtifactInspection.tsx');
-  assert.match(app,/const savedCommandBusy[^\n]*=> artifactBusy\(\)/);
-  assert.match(app,/otherOperationReason: \(\) => preflightBusy\(\) \?\? androidBusy\(\) \?\? recoveryBusy\(\) \?\? iosBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
-  assert.ok(app.indexOf('artifactInspectionControllerRef.current?.beforeWorkspaceAction(action)')<app.indexOf('const next = workspaceReducer(previous, action)'));
-  for(const seam of ['artifactInspection.beginConnection()','artifactInspection.connect(connection)','artifactInspection.dispose()','artifactInspection.snapshotIntent(projectId)','artifactInspection.selectionIntent()','artifactInspection.setSelectionPending(true)','artifactInspection.setSelectionPending(false)'])assert.ok(app.includes(seam),seam);
-  assert.match(page,/<ArtifactInspection state=\{inspectionState\}/);assert.match(page,/<ReleaseEvidence /);
-  const preview=source('preview.ts');
-  for(const name of ['pickArtifactInspection','prepareArtifactInspection','startArtifactInspection','cancelArtifactInspection','artifactInspectionStatus','discardArtifactInspection','subscribeArtifactInspection'])assert.ok(preview.includes(`${name}: artifactInspectionUnavailable`));
-  assert.match(component,/<HelpButton content=\{artifactInspectionHelp\}/);assert.match(component,/native panel’s Cancel/);assert.match(component,/No path is entered as text/);
 });

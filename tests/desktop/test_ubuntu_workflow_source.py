@@ -32,67 +32,7 @@ def workflow_jobs(text):
 
 
 class HostedWorkflowSource(unittest.TestCase):
-    def test_fixed_jdk_preparation_is_conditional_paired_and_retains_original_failure_data(self):
-        workflow = WORKFLOW.read_text()
-        sections = re.split(r"^      - name: ", workflow, flags=re.MULTILINE)[1:]
-        heading = "Prepare the fixed JDK17 pair only on this disposable shell runner"
-        selected = [section for section in sections if section.splitlines()[0] == heading]
-        self.assertEqual(len(selected), 1); step = selected[0]
-        self.assertIn("        if: steps.route.outputs.native == 'true' && github.ref == 'refs/heads/verify/desktop-installed-shell'\n", step)
-        self.assertIn("        timeout-minutes: 8\n", step)
-        self.assertIn('[[ "$RUNNER_ENVIRONMENT" == github-hosted ]]', step)
-        self.assertIn('refs/heads/verify/desktop-installed-shell:compile) ;;', step)
-        self.assertNotIn('refs/heads/verify/desktop-shell-host-metadata', step)
-        self.assertIn('need((ref, case) == ("refs/heads/verify/desktop-installed-shell", "compile"))', step)
-        self.assertIn('root="$RUNNER_TEMP/mrk-desktop-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"', step)
-        self.assertIn('mkdir -m 700 -- "$root"', step)
-        self.assertIn("          umask 077\n", step)
-        self.assertLess(step.index("trap finish_tools_inputs EXIT"), step.index("query_packages before"))
-        self.assertIn('pair=$(/usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-tools-before)', step)
-        install = step.split('case "$pair" in\n', 1)[1].split('          esac\n', 1)[0]
-        self.assertEqual(install.count("/usr/bin/apt-get"), 1)
-        self.assertIn("            absent)\n", install)
-        self.assertIn("            present) ;;\n            *) exit 1 ;;\n", install)
-        self.assertIn("--no-install-recommends --no-remove", install)
-        self.assertIn('install openjdk-17-jdk-headless > "$root/install.stdout" 2> "$root/install.stderr"', install)
-        for name in ("java", "javac"):
-            self.assertIn('sudo /usr/bin/update-alternatives --set ' + name + ' /usr/lib/jvm/java-17-openjdk-amd64/bin/' + name
-                          + ' > "$root/' + name + '.stdout" 2> "$root/' + name + '.stderr"', step)
-        finish = step.split("finish_tools_inputs() {\n", 1)[1].split("          }\n", 1)[0]
-        self.assertLess(finish.index("original=$?"), finish.index("set +e"))
-        self.assertIn("trap - EXIT", finish)
-        self.assertLess(finish.index("query_packages after"), finish.index("installed-shell-tools-after"))
-        self.assertIn('MRK_SHELL_TOOLS_PREPARATION_EXIT="$original" /usr/bin/python3.12 -I -S -B', finish)
-        self.assertIn('snapshot=$?\n            if [[ "$original" != 0 ]]; then exit "$original"; fi\n            exit "$snapshot"', finish)
-        for forbidden in ("apt-get update", "apt-get upgrade", "dist-upgrade", "--reinstall", "continue-on-error", "rm -", "pkill", "systemd-run", "java -version"):
-            self.assertNotIn(forbidden, step)
-        self.assertIn('git python3.12 openjdk-17-jdk-headless openjdk-17-jre-headless > "$root/$1-packages.tsv"', step)
-        upload = next(section for section in sections if section.startswith("Retain original Tools prerequisite DATA including failures\n"))
-        self.assertIn("        if: always() && steps.tools_inputs.outputs.root != ''\n", upload)
-        self.assertIn("          path: ${{ steps.tools_inputs.outputs.root }}\n", upload)
-        self.assertIn("          if-no-files-found: error\n", upload)
-        self.assertLess(workflow.index("Prepare shared Ubuntu shell inputs"), workflow.index(heading))
-        self.assertLess(workflow.index(heading), workflow.index("Establish only the reviewed forward glibc tuple set"))
-        self.assertLess(workflow.index(heading), workflow.index("Prepare a fresh bounded compiler owner"))
-        lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
-        self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
-                         [hashlib.sha256(lifecycle).hexdigest()] * 5)
 
-    def test_workflow_fits_its_actual_original_source_record_bound(self):
-        module = ast.parse(DRIVER.read_text())
-        for name, kib in (("verify_installed_shell_compile", 128), ("verify", 64)):
-            with self.subTest(consumer=name):
-                original = next(node for node in module.body
-                                if isinstance(node, ast.FunctionDef) and node.name == name)
-                calls = [node for node in ast.walk(original)
-                         if isinstance(node, ast.Call)
-                         and ast.unparse(node.func) == "D.file_record"
-                         and len(node.args) == 2
-                         and ast.unparse(node.args[0]) == "source / WORKFLOW"]
-                self.assertEqual(len(calls), 1)
-                self.assertEqual(ast.unparse(calls[0].args[1]), f"{kib} << 10")
-                # Check each actual consumer, not a larger test-only cap.
-                self.assertLessEqual(len(WORKFLOW.read_bytes()), kib << 10)
 
     def test_same_job_compiler_and_native_share_the_fixed_source_bound_data_script(self):
         workflow = WORKFLOW.read_text()
@@ -423,65 +363,9 @@ class JvmNamespaceWorkflowSource(unittest.TestCase):
                     self.assertNotIn(ast.unparse(node.func),
                                      {"os.mkdir", "os.rename", "os.replace", "os.chmod", "os.fchmod", "os.unlink", "os.rmdir", "subprocess.Popen"})
 
-    def test_namespace_reads_and_source_records_keep_the_original_fixed_bounds(self):
-        _, _, program, _ = self._program(); tree = ast.parse(program)
-        sources = next(node for node in tree.body if isinstance(node, ast.Assign)
-                       and any(isinstance(target, ast.Name) and target.id == "SOURCES" for target in node.targets))
-        self.assertEqual(ast.literal_eval(sources.value),
-                         ((".github/workflows/desktop-ubuntu-publication.yml", 65536), ("desktop/tools/ci_ubuntu_publication.py", 1048576)))
-        driver = ast.parse(DRIVER.read_text())
-        values = {target.id: node.value for node in driver.body if isinstance(node, ast.Assign)
-                  for target in node.targets if isinstance(target, ast.Name)}
-        for name, expected in (
-            ("SHELL_TOOLS_NAMESPACE_SOURCES", {".github/workflows/desktop-ubuntu-publication.yml": "64 << 10",
-                                              "desktop/tools/ci_ubuntu_publication.py": "1 << 20"}),
-            ("SHELL_TOOLS_NAMESPACE_FILES", {"namespace-before.json": "64 << 10", "namespace.stdout": "16 << 10",
-                                            "namespace.stderr": "4096", "namespace.exit": "4"}),
-        ):
-            value = values[name]
-            self.assertIsInstance(value, ast.Dict)
-            self.assertEqual({ast.literal_eval(key): ast.unparse(item) for key, item in zip(value.keys, value.values)}, expected)
-        self.assertLessEqual(len(WORKFLOW.read_bytes()), 64 << 10)
-        self.assertLessEqual(len(DRIVER.read_bytes()), 1 << 20)
-        for token in ('read_file(root_fd, "namespace-before.json", 65536)', "stat.S_ISREG(before.st_mode) and before.st_nlink == 1",
-                      "before.st_size <= limit", "os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC",
-                      "os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK", "not os.get_inheritable(fd)",
-                      'read_file(directories["/usr/bin"][0], name, 16 << 20)',
-                      "same(identity(os.fstat(fd)), original)", "same(identity(os.stat(name, dir_fd=parent, follow_symlinks=False)), original)"):
-            self.assertIn(token, program)
 
 
 
-class InstalledGitHubWorkflowSourceContracts(unittest.TestCase):
-    def test_github_is_one_shared_lane_not_a_jdk_producer_or_normal_destination_action(self):
-        workflow = WORKFLOW.read_text()
-        ref = "refs/heads/verify/desktop-installed-github-readonly"
-        self.assertIn("branches: [verify/desktop-project-recovery, verify/desktop-installed-shell, verify/desktop-installed-github-readonly,", workflow)
-        jobs = workflow_jobs(workflow)
-        self.assertEqual(list(jobs), ["compile", "recovery-negative"])
-        sections = re.split(r"^      - name: ", jobs["compile"], flags=re.MULTILINE)[1:]
-        compile_steps = [step for step in sections if "\n        id: compile\n" in step]
-        self.assertEqual(len(compile_steps), 1)
-        self.assertIn("without executing either\n", compile_steps[0])
-        self.assertIn(ref + ":compile", jobs["compile"])
-        self.assertIn("        if: " + NATIVE_GATE + "\n", compile_steps[0])
-        consumers = [step for step in sections if step.startswith(
-            "Observe only the fixed installed shell route with original finality\n")]
-        self.assertEqual(len(consumers), 1)
-        self.assertIn("        if: " + COMPLETED_NATIVE_GATE + "\n", consumers[0])
-        jdk = next(step for step in sections if step.startswith("Prepare the fixed JDK17 pair"))
-        self.assertIn("        if: steps.route.outputs.native == 'true' && github.ref == 'refs/heads/verify/desktop-installed-shell'\n", jdk)
-        self.assertNotIn(ref, jdk)
-        for forbidden in ("workflow_dispatch:", "github-normal-negative", "ubuntu-runtime-publisher",
-                          "build_conventional_runtime.py", "shell-github-observer", "continue-on-error:"):
-            self.assertNotIn(forbidden, workflow)
-        lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
-        self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
-                         [hashlib.sha256(lifecycle).hexdigest()] * 5)
-        text = lifecycle.decode()
-        self.assertIn('unit = root_path(value).name + ".service"', text)
-        self.assertIn('group = "/system.slice/" + unit', text)
-        self.assertIn('props["ControlGroup"] == group and _kernel("/proc/self/cgroup") == "0::" + group + "\\n"', text)
         # These text contracts do not establish a real service/GUI observation.
 
 

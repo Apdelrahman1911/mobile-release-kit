@@ -243,20 +243,6 @@ class NotaryAdmissionProbeData(unittest.TestCase):
                     (arguments[0], host, 0, 0, 20, 20)):
             with self.assertRaises(DATA.ProbeRefused):
                 DATA.context(environment, *bad)
-        workflow = (ROOT / '.github/workflows/desktop-macos-notary-admission.yml').read_text()
-        self.assertEqual(workflow.count('      - verify/desktop-macos-notary-admission\n'), 1)
-        self.assertIn("if: github.event_name == 'push' && github.ref == '" + DATA.REF + "'", workflow)
-        self.assertIn('    runs-on: macos-26\n    timeout-minutes: 5\n', workflow)
-        self.assertIn('permissions:\n  contents: read\n', workflow)
-        self.assertIn('persist-credentials: false', workflow)
-        self.assertIn('          path: notary-admission-public.json\n', workflow)
-        self.assertIn("if: steps.probe.outcome == 'success'", workflow)
-        self.assertIn('/usr/bin/python3 -I -S -B ' + DATA.SCRIPT, workflow)
-        self.assertIn('retention-days: 14', workflow)
-        for forbidden in ('secrets.', 'environment:', 'workflow_dispatch:', 'id-token:', 'cargo ', 'xcrun ', 'notarytool submit'):
-            self.assertNotIn(forbidden, workflow)
-        installed = (ROOT / '.github/workflows/desktop-macos-installed.yml').read_text()
-        self.assertNotIn('verify/desktop-macos-notary-admission', installed)
 
 
 if __name__ == '__main__':

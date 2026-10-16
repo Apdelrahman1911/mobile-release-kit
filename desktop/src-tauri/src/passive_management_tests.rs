@@ -345,7 +345,11 @@ async fn incomplete_roster_locks_prevent_even_fast_originals_from_retiring() {
 #[test]
 fn same_clock_latches_once_and_does_not_self_notify_after_expiry() {
     let rig = rig();
-    let endpoint = lock(&rig.owner.state).endpoint;
+    // Expire work before the real fail() observation below. Advancing into
+    // the future and then reading the real clock would instead report an
+    // earlier failure, which must legitimately shorten cleanup.
+    let endpoint = Instant::now() - Duration::from_millis(1);
+    lock(&rig.owner.state).endpoint = endpoint;
     assert_eq!(rig.owner.advance_clock(&rig.supervisor.inner, endpoint), Some(endpoint + CLEANUP_TIME));
     rig.owner.fail(BridgeError::shutdown());
     let first = lock(&rig.owner.state).cleanup_endpoint;

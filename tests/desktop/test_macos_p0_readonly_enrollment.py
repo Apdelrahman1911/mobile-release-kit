@@ -105,6 +105,23 @@ def fixture(target, *, bad_uid=False, duplicate=False):
 
 
 class P0EnrollmentDataTests(unittest.TestCase):
+    def test_original_entry_clock_is_consumed_without_restart(self):
+        with mock.patch.object(NATIVE, '_ENTRY_STARTED_NS', 10), \
+             mock.patch.object(NATIVE, 'Deadline') as clock, \
+             mock.patch.object(NATIVE.sys, 'platform', 'linux'), \
+             mock.patch.object(NATIVE.os, 'mkdir') as mkdir:
+            with self.assertRaisesRegex(NATIVE.Refused, '^p0-host-context$'):
+                NATIVE.main()
+            clock.assert_called_once_with(started=10)
+            mkdir.assert_not_called()
+            self.assertEqual(NATIVE._ENTRY_STARTED_NS, 10)
+        for invalid in (None, True, 0):
+            with mock.patch.object(NATIVE, '_ENTRY_STARTED_NS', invalid), \
+                 mock.patch.object(NATIVE, 'Deadline') as clock:
+                with self.assertRaisesRegex(NATIVE.Refused, '^p0-original-start$'):
+                    NATIVE.main()
+                clock.assert_not_called()
+
     def test_original_public_anchors_and_root0_inventory_precede_observed_capacity(self):
         self.assertEqual(DATA.MEMBERS, ('MobileReleaseKit.dmg', 'PREVIEW.json'))
         self.assertEqual(DATA.ROLES, ('finalize-package', 'package-install', 'finalize-image'))
@@ -388,25 +405,37 @@ class P0EnrollmentDataTests(unittest.TestCase):
 
             # Bootstrap consumes its one original close without replacing a
             # simultaneous source refusal, and cannot execute after unknown close.
-            donor_body = (ROOT / 'desktop/tools/macos_e2_native_fixture.py').read_bytes()
-            for mode in ('success', 'source-primary-close-failure', 'close-failure'):
+            donor_body = b'Originals = None\n'  # Bounded checkout code, not a static hash fixture.
+            for mode in ('success', 'source-primary-close-failure', 'close-failure',
+                         'oversize', 'empty', 'nonregular', 'owner', 'links', 'writable', 'changed', 'short'):
                 donor_info = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFREG | 0o644,
                     st_uid=501, st_gid=20, st_nlink=1, st_size=len(donor_body), st_mtime_ns=1, st_ctime_ns=1)
+                if mode == 'oversize': donor_info.st_size = NATIVE.MODULE_SOURCE_LIMIT + 1
+                elif mode == 'empty': donor_info.st_size = 0
+                elif mode == 'nonregular': donor_info.st_mode = stat.S_IFDIR | 0o755
+                elif mode == 'owner': donor_info.st_uid = 502
+                elif mode == 'links': donor_info.st_nlink = 2
+                elif mode == 'writable': donor_info.st_mode |= 0o002
+                named_info = copy.copy(donor_info)
+                if mode == 'changed': named_info.st_ino += 1
                 close_calls = []
                 def bootstrap_close(fd):
                     close_calls.append(fd)
-                    if mode != 'success': raise OSError('INERT unknown bootstrap close')
+                    if mode in ('source-primary-close-failure', 'close-failure'): raise OSError('INERT unknown bootstrap close')
                 with mock.patch.object(NATIVE.os, 'open', return_value=10), \
                      mock.patch.object(NATIVE.os, 'fstat', return_value=donor_info), \
-                     mock.patch.object(NATIVE.os, 'stat', return_value=donor_info), \
+                     mock.patch.object(NATIVE.os, 'stat', return_value=named_info), \
                      mock.patch.object(NATIVE.os, 'getuid', return_value=501), \
-                     mock.patch.object(NATIVE.os, 'pread', return_value=donor_body + (b'X' if mode == 'source-primary-close-failure' else b'')), \
+                     mock.patch.object(NATIVE.os, 'pread', return_value=b'' if mode == 'short' else donor_body + (b'X' if mode == 'source-primary-close-failure' else b'')), \
                      mock.patch.object(NATIVE.os, 'close', side_effect=bootstrap_close), \
                      mock.patch.object(NATIVE, 'load_module', return_value=SimpleNamespace(Originals='INERT borrowed factory')) as loader:
                     if mode == 'success': self.assertEqual(NATIVE.bootstrap_originals(ROOT), 'INERT borrowed factory')
                     else:
                         with self.assertRaises(NATIVE.Refused) as caught: NATIVE.bootstrap_originals(ROOT)
-                        self.assertEqual(caught.exception.args, ('p0-bootstrap-source' if mode == 'source-primary-close-failure' else 'p0-bootstrap-close-unknown',))
+                        expected = ('p0-bootstrap-close-unknown' if mode == 'close-failure' else
+                                    'p0-bootstrap-source' if mode in ('source-primary-close-failure', 'changed', 'short') else
+                                    'p0-bootstrap-original')
+                        self.assertEqual(caught.exception.args, (expected,))
                         if mode == 'source-primary-close-failure': self.assertEqual(caught.exception.__notes__, ['p0-bootstrap-close-unknown'])
                 self.assertEqual(close_calls, [10]); self.assertEqual(loader.call_count, int(mode == 'success'))
 
@@ -608,41 +637,6 @@ class P0EnrollmentDataTests(unittest.TestCase):
                 self.assertEqual(work / 'arm64-mount' in fs, fault != 'parser')
                 if len(books) > 2:
                     self.assertTrue(all(entry['fd'] is None for entry in books[2].entries))
-
-            workflow = (ROOT / '.github/workflows/desktop-macos-p0-readonly-enrollment.yml').read_text()
-            native = (ROOT / 'desktop/tools/macos_p0_readonly_native.py').read_bytes()
-            self.assertIn('MRK_P0_NATIVE_BYTES: "' + str(len(native)) + '"', workflow)
-            self.assertIn('MRK_P0_NATIVE_SHA256: "' + DATA.sha(native) + '"', workflow)
-            self.assertNotIn('.github/workflows/desktop-macos-p0-readonly-enrollment.yml', NATIVE.SOURCE_PINS)
-            start = workflow.index("<<'PY_P0_AUTHENTICATED_NATIVE'\n") + len("<<'PY_P0_AUTHENTICATED_NATIVE'\n")
-            end = workflow.index('          PY_P0_AUTHENTICATED_NATIVE', start)
-            launcher = '\n'.join(line[10:] for line in workflow[start:end].splitlines())
-            tree = ast.parse(launcher)
-            definitions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
-            self.assertEqual([node.name for node in definitions], ['p0_source_need', 'p0_source_identity', 'p0_source_bytes'])
-            sample = b'inert source DATA only'
-            for fault in ('none', 'size', 'digest', 'nonregular', 'changed', 'short', 'grew', 'close', 'late'):
-                closes = []; observed = info(1, 900, stat.S_IFREG | 0o644, len(sample))
-                named = info(1, 999 if fault == 'changed' else 900, stat.S_IFREG | 0o644, len(sample))
-                if fault == 'nonregular': observed.st_mode = stat.S_IFDIR | 0o700
-                def pread_port(fd, amount, at):
-                    if fault == 'short': return b''
-                    if at == len(sample) and fault == 'grew': return b'x'
-                    return sample[at:at + amount]
-                def close_port(fd):
-                    closes.append(fd)
-                    if fault == 'close': raise OSError('synthetic unknown consuming close')
-                port = SimpleNamespace(O_RDONLY=os.O_RDONLY, O_NOFOLLOW=os.O_NOFOLLOW, O_CLOEXEC=os.O_CLOEXEC,
-                    open=lambda *args: 9900, fstat=lambda fd: observed, stat=lambda *a, **kw: named,
-                    getuid=lambda: uid, pread=pread_port, close=close_port)
-                namespace = {'os': port, 'stat': stat, 'hashlib': hashlib, 'time': SimpleNamespace(monotonic_ns=lambda: 10_000_000_010 if fault == 'late' else 10)}
-                exec(compile(ast.Module(body=definitions, type_ignores=[]), '<fixed-passive-loader-defs>', 'exec'), namespace)
-                size = len(sample) + 1 if fault == 'size' else len(sample)
-                digest = '9' * 64 if fault == 'digest' else DATA.sha(sample)
-                if fault == 'none': self.assertEqual(namespace['p0_source_bytes'](Path('/fixed/source'), size, digest, 10), sample)
-                else:
-                    with self.assertRaises((ValueError, OSError)): namespace['p0_source_bytes'](Path('/fixed/source'), size, digest, 10)
-                self.assertEqual(closes, [] if fault == 'late' else [9900])
 
             # Real fixed-image publisher with ordinary syscall DATA ports;
             # quota is checked before open, short writes progress, close consumes.

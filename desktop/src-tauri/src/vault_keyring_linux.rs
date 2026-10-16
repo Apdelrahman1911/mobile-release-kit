@@ -2814,11 +2814,28 @@ mod tests {
                 book.session_path = Some(Arc::new(OwnedObjectPath::try_from("/session".to_owned()).unwrap()));
             }
             let polls = Arc::new(AtomicUsize::new(0)); let drops = Arc::new(AtomicUsize::new(0)); let ready = Arc::new(AtomicBool::new(false));
-            book.admit_with(step, Instant::now(), |_, _| Ok(held(&polls, &drops, &ready, Ok(reply(BUS, &())), false))).unwrap();
+            let expired = Instant::now();
+            book.admit_with(step, expired, |_, _| Ok(held(&polls, &drops, &ready, Ok(reply(BUS, &())), false))).unwrap();
             assert!(tick(&mut book, DataTurn::Idle).is_pending());
             assert_eq!(polls.load(Ordering::SeqCst), 0);
             assert_eq!(drops.load(Ordering::SeqCst), 1);
-            assert_eq!(book.phase, if matches!(step, Step::RemoveMatch | Step::AddMatch) { Phase::Holding } else { Phase::Admit(Step::RemoveMatch) });
+            if step.cleanup() {
+                // An expired remote-cleanup budget cannot admit another RPC.
+                // A timely refused CloseSession is covered separately above.
+                assert!(book.cleanup_cutoff_seen);
+                assert_eq!(book.call_end, Some(expired));
+                assert_eq!(book.problem(), Some(Problem::CleanupUnknown));
+                assert_eq!(book.phase, Phase::Holding);
+                let mut successors = 0;
+                assert!(book.admit_with(Step::RemoveMatch, data_deadline(), |_, _| {
+                    successors += 1; Ok(Box::pin(std::future::pending()))
+                }).is_err());
+                assert_eq!(successors, 0);
+            } else {
+                assert!(!book.cleanup_cutoff_seen);
+                assert_eq!(book.problem(), Some(Problem::Interrupted));
+                assert_eq!(book.phase, if step == Step::AddMatch { Phase::Holding } else { Phase::Admit(Step::RemoveMatch) });
+            }
             assert!(!book.resources_settled());
         }
         let mut book = data_book(); book.phase = Phase::Admit(Step::RemoveMatch); book.registration = Registration::Registered;
@@ -2866,12 +2883,20 @@ mod tests {
         assert_eq!(drops.load(Ordering::SeqCst), 0);
 
         let polls = Arc::new(AtomicUsize::new(0)); let drops = Arc::new(AtomicUsize::new(0));
-        let mut book = LookupBook::cleanup_data(data_deadline(), held(&polls, &drops, &ready, Ok(reply(BUS, &())), false));
-        let shorter_end = Instant::now() + std::time::Duration::from_secs(30);
+        let outer_end = data_deadline();
+        let mut book = LookupBook::cleanup_data(outer_end, held(&polls, &drops, &ready, Ok(reply(BUS, &())), false));
+        // Admission already reserves the latter half for independent local stop.
+        // Contract the retained cutoff, not a fresh timestamp that could be later.
+        let original_cutoff = book.call_end.unwrap();
+        assert!(original_cutoff < outer_end);
+        let shorter_end = original_cutoff - std::time::Duration::from_secs(1);
+        assert!(Instant::now() < shorter_end);
         assert!(matches!(book.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPoll)));
         book.first_poll(&mut cx, Ok(shorter_end));
         assert!(matches!(book.pending, Some(Pending::Rpc { dispatch_end, .. }) if dispatch_end == shorter_end));
+        assert_eq!(book.call_end, Some(shorter_end));
         book.first_poll(&mut cx, Ok(data_deadline())); // The one-use readiness is spent.
+        assert_eq!(book.call_end, Some(shorter_end));
         assert_eq!(polls.load(Ordering::SeqCst), 1);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         assert!(book.idle_data_turn(&mut cx).is_pending()); // Still drive this already-polled original.

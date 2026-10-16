@@ -214,7 +214,8 @@ class MetadataTextPolicyTests(unittest.TestCase):
     def test_original_cli_codes_status_messages_and_json_position_stay_unchanged(self):
         root = Path("/inert/store")
         selected = SimpleNamespace(section=lambda _name: {"root": "store"}, project_path=lambda _value: root,
-                                   enabled_platforms=(), platform_enabled=lambda _platform: False)
+                                   enabled_platforms=(), platform_enabled=lambda _platform: False,
+                                   _preflight_budget=None)
         path = root / "broken.json"
         with no_io(), patch.object(Path, "is_dir", return_value=True), \
                 patch.object(Path, "read_text", return_value="TODO\x00 password=private-fixture-marker"), \
@@ -333,7 +334,9 @@ class MetadataTextObservationTests(unittest.TestCase):
                 raise FileNotFoundError()
             return current_file
 
-        def read(parent_fd, name, relative, inventory, *, limit, receipts):
+        def read(parent_fd, name, relative, inventory, *, limit, receipts, binary=False, held_leaves=None):
+            self.assertIs(binary, False)
+            self.assertIsNone(held_leaves)
             receipts.append((parent_fd, name, snapshot._named_identity(file)))
             return "{}"
 

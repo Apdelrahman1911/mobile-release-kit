@@ -17,7 +17,7 @@ from unittest.mock import Mock, patch
 
 
 BOOTSTRAP = Path(__file__).resolve().parents[2] / "desktop" / "config_edit_bootstrap.py"
-DOMAINS = ("github_workflows", "metadata_text", "release_version", "metadata_images")
+DOMAINS = ("github_workflows", "metadata_text", "release_version", "metadata_images", "project_initialization")
 
 
 class MacWorkflowBootstrapAdmissionTests(unittest.TestCase):
@@ -59,10 +59,10 @@ class MacWorkflowBootstrapAdmissionTests(unittest.TestCase):
             engine.assert_not_called()
             self.assertEqual(data.path, ["/inert/bootstrap-directory"])
 
-    def test_darwin_edit_domains_share_fixed_engine_but_images_stay_closed(self):
+    def test_darwin_edit_domains_share_the_fixed_engine(self):
         for domain in (None, *DOMAINS):
             with self.subTest(domain=domain):
-                self.assert_admission("darwin", domain, domain != "metadata_images")
+                self.assert_admission("darwin", domain, True)
 
     def test_existing_linux_domains_and_unsupported_platforms_keep_their_boundary(self):
         for domain in (None, *DOMAINS):

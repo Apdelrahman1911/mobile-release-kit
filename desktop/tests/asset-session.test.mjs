@@ -2,7 +2,6 @@
 // service, process fixture, storage, real credential or engine is accessed.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
 import { AssetSessionController, assetCancellationReason, assetContextReason, assetImageOperationPending, assetIntentPending, assetSessionReason, assetStorageReason } from '../src/assetSessionController.ts';
 import { ASSET_KINDS, ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetJsonFits, assetLabelFits, assetRequestFits, assetStorageWritable, isAssetFileKind, parseAssetStatus } from '../src/assetSessionProtocol.ts';
 import { createNativeApi } from '../src/bridge.ts';
@@ -853,34 +852,6 @@ test('live session help explains actual collection and does not promise restored
   assert.deepEqual(guide, original);
 });
 
-test('Android, Apple and ASC UI reuse the original write-only lifetime without file-path or browser-storage collection', () => {
-  const component = readFileSync(new URL('../src/components/CredentialSession.tsx', import.meta.url), 'utf8');
-  assert.match(component, /type="password".*autoComplete="new-password"/);
-  assert.ok(component.includes("state.selectionKind === 'apple-p12' ? { password: fields.password ?? null }"));
-  assert.ok(component.includes("state.selectionKind === 'asc-p8' ? { keyId: fields.keyId ?? null, issuerId: fields.issuerId ?? null }"));
-  assert.ok(component.includes("if (onPrepare(fields, encrypted ? proposedLabel : null)) { setValues({}); setLabel(''); }"));
-  assert.ok(component.includes('state.entryGeneration'));
-  assert.match(component, /P12 envelope only: the password has not been tested/);
-  assert.match(component, /CMS envelope only: this does not establish an Apple issuer/);
-  assert.match(component, /P8 envelope and EC\/P-256 identifiers only: no mathematical private-key validity.*Store access has been verified/);
-  assert.match(component, /state\.selectionKind === 'android-keystore' \?\s*\{ storePassword: fields\.storePassword \?\? null, keyAlias: fields\.keyAlias \?\? null, keyPassword: fields\.keyPassword \?\? null \}/u);
-  assert.match(component, /Project dependency access<\/strong> rather than Android or iOS/);
-  assert.match(component, /Admitted Linux or Apple-silicon Mac sessions can collect supported Android inputs and ASC P8/);
-  assert.match(component, /Windows import and binary plist are unavailable/);
-  assert.doesNotMatch(component, /Windows import, ASC P8 and binary plist are unavailable/);
-  assert.match(component, /Encrypted storage availability for this exact build is shown above; Windows encrypted storage is unavailable/);
-  assert.doesNotMatch(component, /Mac\/Windows encrypted storage (?:is|are) unavailable/);
-  for (const label of ['Private-input storage controls', 'Original private-input operation',
-    'Private-input operation action', 'Private-input operation phase', 'Private-input operation settlement',
-    'Private-input storage effect', 'Private-input storage durability', 'Private-input storage cleanup',
-    'Private-input review target', 'Private-input record revision']) {
-    assert.ok(component.includes(`aria-label="${label}"`), `ordinary accessibility missing: ${label}`);
-  }
-  assert.ok(component.includes('aria-label={`Private input · ${recordLabel}`}'));
-  assert.match(component, /role="group" aria-label="Explicit private-input review"/);
-  assert.doesNotMatch(component, /type="file"|\blocalStorage\b|\bsessionStorage\b|\bindexedDB\b/);
-});
-
 test('an overtaking event cannot replace the review carried by the original command reply', async () => {
   const h = harness();
   try {
@@ -1385,20 +1356,6 @@ test('image retirement is monotone, unknown stays blocked and idle never supplie
     assert.equal(h.controller.discard(), false); assert.equal(h.controller.lock(), false);
     assert.equal(h.calls.some((row) => row.command === 'discard' || row.command === 'lock'), false);
   } finally { h.controller.dispose(); }
-});
-
-test('CredentialSession renders choose-images only as passive status without a second Stop or private form', () => {
-  const component = readFileSync(new URL('../src/components/CredentialSession.tsx', import.meta.url), 'utf8');
-  const start = component.indexOf('imageOperation ? <div'), end = component.indexOf(': projectPathOperation ?', start);
-  assert.ok(start >= 0 && end > start);
-  const passive = component.slice(start, end);
-  assert.ok(passive.includes('Original image selection status'));
-  assert.ok(passive.includes('passive busy and retirement display'));
-  assert.ok(passive.includes('original image operation in Metadata'));
-  assert.doesNotMatch(passive, /onClick=|controller\.(discard|lock|choose)|selectionToken|assessment|preview\.token/);
-  assert.ok(component.includes('nativeAvailable && writable && guide && !projectPathActive && !imageActive'));
-  assert.equal((component.match(/disabled=\{!!state\.busy \|\| projectPathActive \|\| imageActive \|\| installationActive\}/g) ?? []).length, 2);
-  assert.ok(component.includes('nativeBusyReason !== null || imageActive'));
 });
 
 test('image retirement never auto-submits a deferred credential context even with a writable storage observation', async () => {

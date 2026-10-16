@@ -492,16 +492,8 @@ pub(crate) fn assert_project_path_command_contracts() {
 
 #[cfg(test)]
 pub(crate) fn assert_project_path_wiring_contract() {
-    // Fixed source DATA only. Handler registration alone does not grant Tauri
-    // command permission: AppManifest and the main/local ACL must agree too.
-    fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
-        source.split_once(start).expect("source start").1.split_once(end).expect("source end").0
-    }
-    let commands = section(include_str!("../build.rs"), "const COMMANDS: &[&str] = &[", "];");
-    let handlers = section(include_str!("shell.rs"), "tauri::generate_handler![", "];");
+    // Actual local capability DATA; source spelling is not a runtime contract.
     let capability: Value = serde_json::from_str(include_str!("../capabilities/main.json")).expect("fixed main capability DATA");
-    assert_eq!(commands.matches("\"choose_project_path\"").count(), 1);
-    assert_eq!(handlers.split(',').filter(|name| name.trim() == "choose_project_path").count(), 1);
     assert_eq!(capability["local"], true);
     assert_eq!(capability["windows"], serde_json::json!(["main"]));
     assert!(capability.get("remote").is_none());
@@ -551,15 +543,11 @@ mod tests {
         }
     }
     #[test]
-    fn vault_handlers_manifest_and_local_acl_agree_without_filesystem_grants() {
-        let manifest = include_str!("../build.rs").split_once("const COMMANDS: &[&str] = &[").unwrap().1.split_once("];").unwrap().0;
-        let handlers = include_str!("shell.rs").split_once("tauri::generate_handler![").unwrap().1.split_once("];").unwrap().0;
+    fn vault_commands_have_explicit_local_capabilities_without_filesystem_grants() {
         let capability: Value = serde_json::from_str(include_str!("../capabilities/main.json")).unwrap();
         let permissions = capability["permissions"].as_array().unwrap();
         for command in ["vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "vault_prepare_delete",
             "vault_commit", "vault_bind", "vault_discard", "vault_lock"] {
-            assert_eq!(manifest.matches(&format!("\"{command}\"")).count(), 1);
-            assert_eq!(handlers.split(',').filter(|value| value.trim() == command).count(), 1);
             let permission = format!("allow-{}", command.replace('_', "-"));
             assert_eq!(permissions.iter().filter(|value| value.as_str() == Some(permission.as_str())).count(), 1);
         }

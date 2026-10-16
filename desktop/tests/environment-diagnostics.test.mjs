@@ -2,7 +2,6 @@
 // No host tool, native owner, browser/GUI, timer, network or finality evidence.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { EnvironmentDiagnosticsController, diagnosticsOwnerReason } from '../src/environmentDiagnosticsController.ts';
@@ -497,33 +496,4 @@ test('browser, artifact-validation, missing listener and another original owner 
   await offline.controller.checkStatus(); assert.equal(offline.state.initialized, true); assert.equal(offline.state.listening, false); assert.equal(offline.controller.start(), false);
   offline.controller.beginConnection(); await offline.controller.connect(previewApi); assert.equal(offline.controller.start(), false); assert.equal(offline.calls.length, 0);
   await assert.rejects(previewApi.environmentDiagnosticsStatus()); await assert.rejects(previewApi.startEnvironmentDiagnostics(request())); offline.controller.dispose();
-});
-
-test('source integration keeps explicit native controls, truthful budgets, core help, and both small contextual-help fixes', () => {
-  // These are wiring/copy guards, not an executed component or GUI test.
-  const source = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8');
-  const app = source('App.tsx'), page = source('pages/Environment.tsx'), panel = source('components/EnvironmentDiagnostics.tsx');
-  assert.ok(app.includes('diagnosticsControllerRef.current?.syncProject()'));
-  assert.ok(app.indexOf('diagnostics.beginConnection()') < app.indexOf('const connection = await desktopApi()'));
-  assert.ok(app.includes("diagnostics.setVisible(next === 'environment')")); assert.ok(app.includes('diagnostics.setSelectionPending(true)'));
-  assert.ok(app.includes("page !== 'environment' && <EnvironmentDiagnostics"));
-  assert.ok(page.includes('diagnosticsController.setContext(platform, operation)')); assert.ok(page.includes('Load draft requirements'));
-  assert.ok(panel.includes('Check build tools') && panel.includes('Cancel observed run') && panel.includes('Read native status'));
-  for (const text of ['6-second work limit', '10-second total finality cutoff', '16 KiB aggregate stdout + stderr',
-    'Complete means the finite check roster finished', 'Core result received; native settlement is still pending', '<p>{row.help}</p>',
-    'Workflow reference · not a local compatibility rule', 'does not mean globally absent']) assert.ok(panel.includes(text));
-  assert.equal(panel.includes('writesPerformed'), false);
-  assert.ok(panel.includes("!compact && !active && attempt?.projection?.finality === 'settled' && attempt.projection.result === null"));
-  assert.ok(panel.includes('The original check ended without a tool report. Native reason: {attempt.projection.reason}'));
-  const github = source('pages/GitHub.tsx'), credentials = source('pages/Credentials.tsx');
-  assert.ok(github.includes('credentialHelp?.find((entry) => entry.name === requirement.name)'));
-  assert.ok(github.includes('HelpButton content={{ ...help, label: help.name }}'));
-  assert.ok(github.includes('No substitute credential policy is supplied here'));
-  assert.ok(app.includes('credentialHelp={catalog?.credentials ?? null} onHelp={setHelp}'));
-  assert.ok(credentials.includes('!state.blocked && !state.observationFailed && nativeBusyReason === null'));
-  assert.ok(credentials.includes('The session importer is currently unavailable. Read its status and reason above'));
-  const session = source('components/CredentialSession.tsx');
-  assert.ok(session.includes('const baseReason = nativeBusyReason ?? assetSessionReason(state)'));
-  assert.ok(session.includes('const cancellationReason = assetCancellationReason(state)'));
-  assert.ok(session.includes("disabled={state.mode !== 'native' || state.observing}"));
 });

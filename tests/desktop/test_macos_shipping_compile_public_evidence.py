@@ -9,37 +9,28 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / '.github/workflows/desktop-macos-installed.yml'
-NORMALIZERS = ('tests/desktop/test_macos_installed_staging.py',
-               'tests/desktop/test_macos_normal_diagnostics_source.py')
 SOURCE, RUN_ID, ATTEMPT = 'a' * 40, '123', '1'
 
 
-SHIPPING_SOURCE_FRONT_NAMES = ('SHIPPING_SOURCE_ORIGINAL_SHA256', 'SHIPPING_SOURCE_SCRIPT_SHA256', 'SHIPPING_SOURCE_WORKFLOW_BYTES', 'SHIPPING_SOURCE_WORKFLOW_SHA256', 'SHIPPING_SOURCE_WRAPPER', 'without_shipping_source_extraction_workflow')
 
 
-def shipping_source_view():
-    names = set(SHIPPING_SOURCE_FRONT_NAMES)
-    raw = (ROOT / NORMALIZERS[0]).read_text()
-    selected = []
-    for node in ast.parse(raw).body:
-        name = node.name if isinstance(node, ast.FunctionDef) else (
-            node.targets[0].id if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) else None)
-        if name in names: selected.append(node)
-    assert len(selected) == len(names)
-    namespace = dict(hashlib=hashlib, Path=Path, __file__=str(ROOT / NORMALIZERS[0]))
-    exec(compile(ast.Module(body=selected, type_ignores=[]), '<exact-shipping-source-front>', 'exec'), namespace)
-    return namespace['without_shipping_source_extraction_workflow']
 
 
 def programs():
-    workflow = shipping_source_view()(WORKFLOW.read_text())
+    # Exercise the actual current reducers, not a reconstructed historical YAML.
+    workflow = WORKFLOW.read_text()
+    script = (ROOT / "desktop/tools/macos_shipping_image_compile.sh").read_text()
     result = []
-    for marker in ('PY_SHIPPING_COMPILE_ADMIT', 'PY_SHIPPING_IMAGE_COMPILE'):
-        opening = " <<'" + marker + "'\n"
-        assert workflow.count(opening) == 1
-        body = workflow.split(opening, 1)[1].split('          ' + marker + '\n', 1)[0]
-        assert all(not line.strip() or line.startswith('          ') for line in body.splitlines())
-        result.append(''.join(line[10:] if line.startswith('          ') else line for line in body.splitlines(True)))
+    for source, marker, indent in (
+        (workflow, "PY_SHIPPING_COMPILE_ADMIT", "          "),
+        (script, "PY_SHIPPING_IMAGE_COMPILE", ""),
+    ):
+        opening = "<<'" + marker + "'\n"
+        assert source.count(opening) == 1
+        body = source.split(opening, 1)[1].split(indent + marker + "\n", 1)[0]
+        assert all(not line.strip() or line.startswith(indent) for line in body.splitlines())
+        result.append("".join(line[len(indent):] if line.startswith(indent) else line
+                              for line in body.splitlines(True)))
     return workflow, result
 
 
@@ -69,19 +60,6 @@ def receipt():
     return value
 
 
-def normalizer(path):
-    raw = (ROOT / path).read_bytes()
-    names = {'SHIPPING_COMPILE_PRIVACY_INVERSE', 'without_shipping_compile_privacy_workflow'}
-    selected = []
-    for node in ast.parse(raw).body:
-        name = node.name if isinstance(node, ast.FunctionDef) else (
-            node.targets[0].id if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) else None)
-        if name in names:
-            selected.append(node)
-    assert len(selected) == 2
-    namespace = {}
-    exec(compile(ast.Module(body=selected, type_ignores=[]), '<exact-shipping-privacy-inverse>', 'exec'), namespace)
-    return namespace
 
 
 class ShippingCompilePublicEvidenceData(unittest.TestCase):
@@ -102,30 +80,6 @@ class ShippingCompilePublicEvidenceData(unittest.TestCase):
         observed = [project(value, SOURCE, RUN_ID, ATTEMPT) for project in self.projectors]
         self.assertEqual(observed[0], observed[1])
         return observed[0]
-
-    def test_two_current_serializers_keep_one_closed_artifact_and_original_captures(self):
-        definitions = []
-        for program in self.programs:
-            nodes = ast.parse(program).body
-            node = next(node for node in nodes if isinstance(node, ast.FunctionDef) and node.name == 'compile_public_data')
-            definitions.append(ast.get_source_segment(program, node))
-        self.assertEqual(definitions[0], definitions[1])
-        self.assertIn("publish_preparation('compile-receipt.json', compile_public_data(failure, source, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']), cleanup=True)", self.programs[0])
-        self.assertIn("publish('compile-receipt.json', (json.dumps(compile_public_data(receipt, source, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']),", self.programs[1])
-        shipping = self.workflow.split('  shipping-image-compile:\n', 1)[1]
-        artifact = shipping.split('      - name: Preserve only bounded public compile evidence; upload is not qualification\n', 1)[1]
-        self.assertEqual(re.findall(r'^            \$\{\{ steps.compile_work.outputs.root \}\}/([^\n]+)$', artifact, re.M), ['compile-receipt.json'])
-        for name in ('source-inventory.json', 'npm-ci.stdout', 'npm-ci.stderr', 'frontend-build.stdout',
-                     'frontend-build.stderr', 'shipping-image-build.stdout', 'shipping-image-build.stderr'):
-            self.assertNotIn(name, artifact)
-        self.assertIn("outputs[role + '.stdout'] = result.stdout; outputs[role + '.stderr'] = result.stderr", self.programs[1])
-        self.assertIn('for name, raw in outputs.items(): publish(name, raw, CAPTURE)', self.programs[1])
-        self.assertIn("receipt['shippingGraphCompiled'] = passed_data(receipt)", self.programs[1])
-        self.assertIn('work_end, hard_end = start + 1320, start + 1440', self.programs[1])
-        self.assertEqual(self.programs[1].count('owner.run_owned('), 1)
-        self.assertIn('except BaseException:\n            # Never replace an original child failure or retry a partial public file.\n            raise SystemExit(failure_status)', self.programs[1])
-        for forbidden in ('secrets.', '    environment:', 'notarytool', 'codesign', '/usr/sbin/installer'):
-            self.assertNotIn(forbidden, shipping)
 
     def test_full_success_keeps_genuine_compile_closure_and_hashes_only(self):
         value = receipt()
@@ -268,31 +222,3 @@ class ShippingCompilePublicEvidenceData(unittest.TestCase):
         self.assertLessEqual(len((json.dumps(observed, sort_keys=True, separators=(',', ':'), allow_nan=False)+'\n').encode('ascii')), 16384)
         value['failure']['ownerDiagnostic']['typedFacts'].append(copy.deepcopy(owner_row))
         with self.assertRaises(ValueError): self.project(value)
-
-    def test_exact_historical_privacy_inverse_is_mirrored_and_fail_closed(self):
-        loaded = [normalizer(path) for path in NORMALIZERS]
-        self.assertEqual(loaded[0]['SHIPPING_COMPILE_PRIVACY_INVERSE'], loaded[1]['SHIPPING_COMPILE_PRIVACY_INVERSE'])
-        for ns in loaded:
-            inverse = ns['without_shipping_compile_privacy_workflow']
-            prior = inverse(self.workflow)
-            self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), 'c96991d26b9c318b6c87c138a22baaf1f6ac36db95a71b22bafea89cd4c15863')
-            self.assertEqual(inverse(prior), prior)
-            transforms = ns['SHIPPING_COMPILE_PRIVACY_INVERSE']
-            reconstructed = prior
-            for before, after in transforms:
-                self.assertEqual(reconstructed.count(before), 1)
-                reconstructed = reconstructed.replace(before, after, 1)
-            self.assertEqual(reconstructed, self.workflow)
-            for before, after in transforms:
-                with self.subTest(before=before[:40]), self.assertRaises(AssertionError):
-                    inverse(self.workflow.replace(after, before, 1))
-                with self.assertRaises(AssertionError):
-                    inverse(self.workflow.replace(after, after+after, 1))
-            with self.assertRaises(AssertionError):
-                inverse(self.workflow.replace('          def compile_public_data(', '         def compile_public_data(', 1))
-            with self.assertRaises(AssertionError):
-                inverse(self.workflow + '\n          def compile_public_data(')
-            for path in NORMALIZERS:
-                program = ast.parse((ROOT / path).read_bytes())
-                node = next(node for node in program.body if isinstance(node, ast.FunctionDef) and node.name == 'without_shipping_compile_workflow')
-                self.assertEqual(ast.unparse(node.body[0]), 'source = without_shipping_compile_privacy_workflow(source)')

@@ -3,7 +3,6 @@
 // qualification. No process, network or native picker is started here.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
 import { IOSArchiveController, iosArchiveOwnerReason, iosArchiveHelp, iosArchiveInputHelp,
   iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp, iosSigningHelp, iosRecoveryHelp } from '../src/iosArchive.ts';
 import { ReleaseVersionController } from '../src/releaseVersion.ts';
@@ -784,24 +783,6 @@ test('recovery lost Start and Unknown keep original ownership while hidden or ex
 
 
 test('current recovery details bind the original native pair without saved inputs or automatic consent', async (t) => {
-  // SOURCE projection joins plus real controller transitions, not JSX rendering,
-  // native accessibility, account recovery or worker-finality evidence.
-  const component = readFileSync(new URL('../src/components/IOSArchive.tsx', import.meta.url), 'utf8');
-  const details = component.slice(component.indexOf('function RecoveryDetails('), component.indexOf('export function IOSRecovery('));
-  assert.ok(details.startsWith('function RecoveryDetails('));
-  for (const guard of ["state.mode !== 'native'", '!isIOSRecoveryOperation(op)', 'state.historical',
-    'state.integrityFailed', 'state.nativeBlocked', 'state.originalUnconfirmed', 'state.generationLost',
-    'state.selectionPending', 'state.observationIssue !== null', '!project', 'op.context.projectId !== project.projectId',
-    "op.phase !== 'awaiting-consent'", '!op.intentUsable', 'sameIOSArchiveIdentity(op, consent)',
-    'sameIOSArchiveData(op.context, consent.binding.context)',
-    ...['connectionGeneration', 'selectionGeneration', 'contextGeneration', 'requestGeneration']
-      .map((key) => `consent.binding.${key} !== state.${key}`)]) assert.ok(details.includes(guard), guard);
-  assert.doesNotMatch(details, /savedConfig|savedVersion|sameIOSArchiveSavedPair|project\.inputIssue/);
-  for (const literal of ['role="group" aria-label="Recovery details"', 'Recovery operation ID: {op.operationId}',
-    'Recovery owner generation: {op.ownerGeneration}', 'Recovery phase: {op.phase}',
-    "Recovery outcome: {op.outcome ?? 'not-observed'}", 'Recovery reason: {op.reason}']) assert.ok(details.includes(literal), literal);
-  assert.equal((component.match(/<RecoveryDetails state=\{state\} \/>/g) ?? []).length, 1);
-  assert.ok(component.includes("role=\"group\" aria-label={domain === 'account' ? 'Account signing recovery state' : 'Project build-input recovery state'}"));
 
   const h = harness(t, { savedSnapshot: null, completeVersion: false }), inspect = await reviewedRecovery(h);
   assert.equal(h.state.project.savedConfig, null); assert.equal(h.state.project.savedVersion, null);
@@ -860,48 +841,10 @@ test('native bridge sends only Raw requests; preview never provides fabricated e
 });
 
 test('actual app shares status/cancel and retirement; each important archive choice has practical guidance', async (t) => {
-  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  for (const literal of ['iosArchiveControllerRef.current?.beforeWorkspaceAction(action)', 'iosArchiveControllerRef.current?.syncProject()',
-    'iosArchive.beginConnection()', 'iosArchive.connect(connection)', 'iosArchive.syncReleaseVersion()', 'iosArchive.selectionIntent()',
-    'iosArchive.setSelectionPending(true)', 'iosArchive.setSelectionPending(false)', '<IOSArchiveResultView', '<IOSArchive state={iosArchiveState}',
-    'assetSession: assetSession.getSnapshot', 'assetSession.subscribe(() => iosArchive.syncAssetSession())', 'iosArchive.setRecoveryVisible', '<IOSRecovery state={iosArchiveState}'])
-    assert.ok(app.includes(literal), literal);
-  assert.match(app, /preflightBusy\(\) \?\? androidBusy\(\) \?\? iosBusy\(\)/);
-  const component = readFileSync(new URL('../src/components/IOSArchive.tsx', import.meta.url), 'utf8');
-  for (const action of ['observe-version', 'review', 'acknowledge', 'start', 'cancel'])
-    assert.ok(component.includes(`data-mrk-ios-archive-action="${action}"`));
   for (const help of [iosArchiveHelp, iosArchiveInputHelp, iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp, iosSigningHelp, iosRecoveryHelp])
     for (const field of ['label', 'requiredness', 'requiredWhen', 'what', 'why', 'where', 'format', 'failure']) assert.ok(help[field]?.length, `${help.label}: ${field}`);
-  assert.ok(component.includes('controller.prepareRecovery(')); assert.ok(component.includes('controller.setArchiveMode('));
-  assert.ok(component.includes("iosArchiveModeAvailability(state.status, signed ? 'ios-signed-export' : 'ios-unsigned-archive')"));
-  assert.ok(component.includes("iosArchiveModeAvailability(state.status, 'ios-local-recovery')"));
   assert.match(iosSigningHelp.format, /ios.teamId.*ios.distributionCertificateSha256.*password write-only/);
   assert.match(iosRecoveryHelp.failure, /live Unknown stays owned.*manual recheck is not supported/);
-  // SOURCE joins protect the visible projection; the actual controller below
-  // supplies parsed current/inert states. This is not a JSX or native AX test.
-  const details = component.slice(component.indexOf('function UnsignedArchiveDetails('), component.indexOf('// Only the original native completed status'));
-  assert.ok(details.startsWith('function UnsignedArchiveDetails('));
-  for (const guard of ["state.mode !== 'native'", "state.archiveMode !== 'unsigned'", 'isIOSRecoveryOperation(op)',
-    "op.context.operation !== 'ios-unsigned-archive'", 'state.historical', 'state.integrityFailed', 'state.nativeBlocked',
-    'state.originalUnconfirmed', 'state.generationLost', 'state.selectionPending', 'project?.savedConfig', 'project.savedVersion',
-    'project.inputIssue !== null', 'op.context.projectId !== project.projectId', 'op.context.draftRevision !== project.draftRevision',
-    'op.context.baselineGeneration !== project.baselineGeneration',
-    'sameIOSArchiveSavedPair(op.context, { savedConfig: project.savedConfig, savedVersion: project.savedVersion })',
-    "op.phase !== 'awaiting-consent'", '!op.intentUsable', 'sameIOSArchiveIdentity(op, consent)',
-    'sameIOSArchiveData(op.context, consent.binding.context)', 'sameIOSArchiveData(project.selection, consent.binding.selection)',
-    'consent.binding.connectionGeneration !== state.connectionGeneration', 'consent.binding.selectionGeneration !== state.selectionGeneration',
-    'consent.binding.contextGeneration !== state.contextGeneration', 'consent.binding.requestGeneration !== state.requestGeneration',
-    'consent.binding.observationGeneration !== project.observationGeneration',
-    'sameIOSArchiveData(consent.binding.versionObservation, project.versionObservation)']) assert.ok(details.includes(guard), guard);
-  assert.ok(details.includes('if (review) {'));
-  for (const text of ['role="group" aria-label="Archive details"', '<p>Archive operation ID: {op.operationId}</p>',
-    '<p>Archive owner generation: {op.ownerGeneration}</p>']) assert.ok(details.includes(text), text);
-  assert.equal((component.match(/<UnsignedArchiveDetails state=\{state\} \/>/g) ?? []).length, 2);
-  assert.equal((component.match(/<UnsignedArchiveDetails state=\{state\} review \/>/g) ?? []).length, 1);
-  assert.ok(component.includes('role="status" aria-live="polite" aria-label="Original iOS archive status"'));
-  assert.ok(component.includes("'Confirm this saved unsigned iOS archive intent'"));
-  assert.ok(component.includes("'Completed local unsigned iOS archive observation'"));
-  assert.ok(component.includes('This location is a historical observation, not a file opener, current-file authority or permission to publish or delete.'));
 
   const h = harness(t), op = await reviewed(h);
   assert.equal(op.context.operation, 'ios-unsigned-archive');

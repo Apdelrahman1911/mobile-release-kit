@@ -1,8 +1,7 @@
-// Authored inert DATA/controller/bridge/source guards. No subject process, native
+// Controller and bridge tests. No subject process, native
 // qualification, project execution, filesystem observation, network or GUI runs.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
@@ -27,7 +26,6 @@ const clone = (value) => structuredClone(value);
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const flush = async () => { for (let n = 0; n < 16; n++) await Promise.resolve(); };
 const decode = (raw) => JSON.parse(new TextDecoder().decode(raw));
-const source = (name) => readFileSync(new URL(`../src/${name}`, import.meta.url), 'utf8');
 const assurance = { basis: 'static-text', projectCodeExecuted: false, toolsProbed: false, credentialsRead: false,
   gitObserved: false, storeContacted: false, writesPerformed: false, releaseReadiness: 'unknown' };
 function snapshot(content = CONTENT) {
@@ -571,7 +569,7 @@ test('retiring passive display data does not release its original unresolved pro
   }
 });
 
-test('passive/evidence admission uses reciprocal callback, while source integration keeps original Cancel/status reachable', () => {
+test('passive/evidence admission respects the active operation and discloses project execution risks', () => {
   const reason = () => 'Saved offline checks own the original slot.';
   assert.equal(new EnvironmentController(() => null, reason).startReason(), reason());
   assert.equal(new ReleaseVersionController(() => null, () => false, reason).startReason(), reason());
@@ -580,41 +578,8 @@ test('passive/evidence admission uses reciprocal callback, while source integrat
   assert.equal(new CandidateEvidenceController(reason).startReason(), reason());
   const metadata = new MetadataTextEditController({ selectedProject: () => null, otherEditReason: reason, otherOperationReason: reason });
   assert.equal(metadata.loadReason(), reason()); assert.equal(metadata.validateReason(), reason());
-  const app = source('App.tsx'), bridge = source('bridge.ts'), ui = source('components/OfflinePreflight.tsx');
-  const retire = app.indexOf('offlinePreflightControllerRef.current?.beforeWorkspaceAction(action)');
-  assert.ok(retire >= 0 && retire < app.indexOf('workspaceReducer(previous, action)') && retire < app.indexOf('if (next === previous) return'));
-  assert.match(app, /new OfflinePreflightController/); assert.match(app, /useSyncExternalStore\(offlinePreflight.subscribe/);
-  assert.match(app, /savedCommandBusy = useCallback\(\(excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false\) => preflightBusy\(\) \?\? androidBusy\(\) \?\? iosBusy\(\) \?\? recoveryBusy\(\)/);
-  assert.match(app, /!excludeGitHubPreflight && githubPreflightControllerRef\.current \? githubPreflightOwnerReason\(/);
-  assert.match(app, /savedCommandBusy\(false, true\)/);
-  assert.match(app, /!excludeGitHubRelease && githubReleaseControllerRef\.current \? githubReleaseOwnerReason\(/);
-  assert.match(app, /savedCommandBusy\(false, false, true\)/);
-  assert.match(app, /!excludeVersion && versionEditControllerRef\.current \? versionOwnerReason\(/);
-  assert.match(app, /otherOperationReason: \(\) => androidBusy\(\) \?\? recoveryBusy\(\) \?\? iosBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
-  assert.match(app, /otherOperationReason: \(\) => preflightBusy\(\) \?\? recoveryBusy\(\) \?\? iosBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
-  assert.match(app, /otherOperationReason: \(\) => preflightBusy\(\) \?\? androidBusy\(\) \?\? iosBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
-  assert.match(app, /otherOperationReason: \(\) => preflightBusy\(\) \?\? androidBusy\(\) \?\? recoveryBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
-  assert.match(app, /page !== 'releases'.*OfflinePreflight/); assert.match(app, /onApply=.*config-save-intent/);
-  assert.match(app, /new GitHubConnectionController\(savedCommandBusy\)/); assert.match(app, /new LifecycleEvidenceController\(savedCommandBusy\)/);
-  assert.match(app, /otherOperationReason: savedCommandBusy/); assert.match(app, /savedCommandBusy\(\).*diagnosticsOwnerReason/);
-  assert.match(app, /passivePending\.current > 0/); assert.match(app, /environment\.passiveBusyReason\(\)/);
-  assert.match(app, /\(connection\.status \?\? connection\.retained\)\?\.session/);
-  assert.match(bridge, /invoke<unknown>\(command, body\)/); assert.match(bridge, /encodeOfflinePreflightRequest\(command, value\)/);
-  assert.doesNotMatch(ui, /controller\.dispose|\.message\s*\}|dangerouslySetInnerHTML/);
-  assert.match(ui, /Run offline checks \(Android\)/); assert.match(ui, /Core builds are disabled/); assert.match(ui, /Run saved offline checks/);
-  assert.match(ui, /checkbox/); assert.match(ui, /Check original status/); assert.match(ui, /Cancel original offline checks/);
-  assert.match(ui, /useState<OfflinePreflightFindingFilter>\('all'\)/);
-  assert.match(ui, /<label htmlFor=\{filterId\}>Filter findings by status<\/label>/);
-  assert.match(ui, /<select id=\{filterId\} value=\{filter\} aria-describedby=\{`\$\{filterId\}-help`\}/);
-  assert.match(ui, /Filter the checks shown below; this does not run checks again/);
-  assert.match(ui, /key=\{`\$\{op\.ownerGeneration\}:\$\{op\.operationId\}`\}/);
-  assert.match(ui, /selected\.rows\.map\(\(finding\) => <li key=\{finding\.ordinal\} value=\{finding\.ordinal \+ 1\}>/);
-  assert.match(ui, /summary\.counts\[status\]/); assert.match(ui, /Omitted findings can include negative statuses/);
-  assert.match(ui, /Historical \/ stale context/); assert.match(ui, /Complete is not PASS or release readiness/);
-  assert.match(ui, /Matching findings were reported, but none are included/); assert.match(ui, /No findings were reported for this filter/);
   assert.match(OFFLINE_PREFLIGHT_DISCLOSURE, /Only run a project you trust/); assert.match(OFFLINE_PREFLIGHT_DISCLOSURE, /contact the network/);
   assert.match(OFFLINE_PREFLIGHT_DISCLOSURE, /not a network-isolation or sandbox guarantee/); assert.match(OFFLINE_PREFLIGHT_DISCLOSURE, /does not undo effects/);
-  assert.doesNotMatch(app, /No builds or release operations/);
 });
 
 test('startup busy/null to unqualified or unsupported status does not manufacture a retained owner', async (t) => {

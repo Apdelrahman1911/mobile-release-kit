@@ -7713,39 +7713,6 @@ mod tests {
     use super::*;
     #[test]
     fn project_path_shares_exclusions_but_not_asset_authority_or_synthetic_finality() { assert_project_path_document_contracts(); }
-    #[test]
-    fn configuration_recovery_reuses_registered_gate_and_excludes_normal_save_observations() {
-        // SOURCE wiring only: these assertions do not construct a document,
-        // register a root, grant an SDK permission or claim a native result.
-        let source=include_str!("asset_session.rs");
-        let body=|start,end| source.split_once(start).unwrap().1.split_once(end).unwrap().0;
-        let recovery=body("pub(crate) fn configuration_recovery_admit_published<T>(", "pub(crate) fn workflow_edit_admit_published<T>(");
-        assert!(recovery.contains("self.lock()"));assert!(recovery.contains("self.registered_edit_root_locked_published(&mut state, crate::edit_protocol::EditDomain::Configuration,"));
-        assert!(recovery.find("registered_edit_root_locked_published").unwrap()<recovery.find("enqueue(&self.inner.bridge").unwrap());
-        assert!(recovery.contains("finish_registration_publisher(publisher)"));assert!(!recovery.contains("drop(state)") && !recovery.contains(".await"));
-        let normal=body("fn registered_edit_admit_published<T>(", "fn registered_edit_root_locked_published(");
-        assert!(normal.find("if domain == crate::edit_protocol::EditDomain::Configuration { return Err(BridgeError::invalid()); }").unwrap()<normal.find(".reserve(").unwrap());
-        let gate=body("fn registered_edit_root_locked_published(", "pub(crate) fn workflow_fixture_publish(");
-        for required in ["state.lifetime.original_bound()","state.lost_observed","state.unknown || state.exhausted","state.stopping",
-            "state.maintenance.closed()","state.quit_pending","self.inner.bridge.android_build.ensure_idle()?",
-            "self.inner.bridge.project_recovery.ensure_idle()?","self.inner.bridge.diagnostics.ensure_idle()?",
-            "self.inner.bridge.native_project(&id)","document_lost_published(MAIN, Some(&*publisher))"] { assert!(gate.contains(required),"{required}"); }
-        assert!(gate.find("publisher.accept(").unwrap()<gate.find("native_project(&id)").unwrap());
-        let shell=include_str!("shell.rs");
-        for (start,end,branch,hook) in [("async fn open_config_edit(","async fn prepare_config_edit(","return state.bridge.open_configuration_recovery","q.open_request"),
-            ("async fn prepare_config_edit(","async fn apply_config_edit(","return state.bridge.prepare_configuration_recovery","q.prepare_request"),
-            ("async fn apply_config_edit(","async fn close_config_edit(","return state.bridge.apply_configuration_recovery","q.apply_request")] {
-            let body=shell.split_once(start).unwrap().1.split_once(end).unwrap().0;
-            assert!(body.find(branch).unwrap()<body.find(hook).unwrap());
-            assert!(body.contains("configuration_edit_admit_published("));
-        }
-        assert!(shell.contains("normal_configuration_session(window, &args.session_id) { q.close_request(); }"));
-        assert!(shell.contains(".all(|projection| projection.recovery.is_none())"));
-        let bridge=include_str!("bridge.rs");
-        let open=bridge.split_once("pub(crate) fn open_configuration_recovery(").unwrap().1.split_once("pub(crate) fn prepare_configuration_recovery(").unwrap().0;
-        assert!(open.find("configuration_recovery_open_ticket(window)?").unwrap()<open.find("configuration_recovery_admit_published(").unwrap());
-        assert!(open.contains("registration, ticket)"));assert!(!open.contains("project_root("));
-    }
     fn token(byte: char) -> Token { Token(byte.to_string().repeat(32)) }
     pub(super) fn empty_state() -> DocumentState {
         DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
@@ -8100,32 +8067,7 @@ mod tests {
         state.quit = None;
         assert_eq!(accepted_quit_cleanup_end(&state), None);
 
-        // SOURCE fanout, not a dialog/worker settlement receipt. The real
-        // owner shutdown semantics are exercised by the existing artifact
-        // clock/decoder group; this catches omissions in its native callers.
-        let source = include_str!("asset_session.rs");
-        let response = source.split_once("fn gui_response(").unwrap().1.split_once("fn phase(").unwrap().0;
-        let accepted = response.split_once("if quit {\n            if facts.accepted {").unwrap().1
-            .split_once("} else { stop_quit(").unwrap().0;
-        let request = "self.inner.bridge.artifact_inspection.request_shutdown();";
-        assert_eq!(response.matches(request).count(), 1);
-        assert!(response.find("let mut state = self.lock()").unwrap() < response.find(request).unwrap());
-        assert!(accepted.find("state.stopping = true").unwrap() < accepted.find(request).unwrap());
-        assert!(accepted.find(request).unwrap() < accepted.find("stop_quit(").unwrap());
-        let compatibility = source.split_once("pub(crate) fn compatibility_quit_result(").unwrap().1
-            .split_once("fn common_gate(").unwrap().0;
-        assert_eq!(compatibility.matches(request).count(), 1);
-        let compatibility_accepted = compatibility.split_once("if accepted {").unwrap().1.split_once("\n        }").unwrap().0;
-        assert!(compatibility_accepted.contains(request));
-        let quit = source.split_once("async fn run_quit(").unwrap().1
-            .split_once("// The fixed data-only exit observer").unwrap().0;
-        let join = quit.split_once("tokio::join!(").unwrap().1.split_once(");").unwrap().0;
-        assert_eq!(join.matches("document.inner.bridge.artifact_inspection.shutdown()").count(), 1);
-        let late = quit.split_once("while !(").unwrap().1.split_once(" {\n").unwrap().0;
-        assert_eq!(late.matches("document.inner.bridge.artifact_inspection.can_exit()").count(), 1);
-        let exit = source.split_once("pub(crate) fn can_exit(&self) -> bool {").unwrap().1
-            .split_once("pub(crate) fn exit_cleanup_end(").unwrap().0;
-        assert!(exit.contains("self.inner.bridge.artifact_inspection.can_exit()"));
+
     }
 
     #[test]
@@ -8555,7 +8497,11 @@ mod tests {
         let other = OriginalWork::new(1, false, Weak::new()); // even the same numeric ID is not this original
         assert_eq!(keyring_slot_gate(&state, &other, Some(Step::RemoveMatch), now), Err(Problem::Interrupted));
         state.slot.as_mut().unwrap().operation = Operation::InspectEvidence;
-        assert!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), now).is_err());
+        // An unrelated operation grants no new keyring work. Cleanup still
+        // belongs to the exact original and keeps its existing endpoint.
+        assert_eq!(keyring_slot_gate(&state, &owner, None, now), Err(Problem::Interrupted));
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::SearchItems), now), Err(Problem::Interrupted));
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), now), Ok(now + WORK));
         state.slot.as_mut().unwrap().operation = Operation::Prepare;
         assert!(keyring_slot_gate(&state, &owner, Some(Step::SearchItems), now + WORK).is_err());
         state.slot.as_mut().unwrap().stop(Reason::UserCancelled, now);

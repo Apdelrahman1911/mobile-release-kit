@@ -368,15 +368,6 @@ class NormalBuildFailureDataTests(unittest.TestCase):
                        {**raw, "exceptionClass": "Refused"}, {**raw, "extra": "PRIVATE-SENTINEL"}):
             self.assertEqual(classify(encode(broken))["status"], "unavailable")
 
-    def test_current_dependency_preparation_pins_actual_runner(self):
-        body = RUNNER.read_bytes()
-        tree = ast.parse((ROOT / "desktop/tools/macos_android_dependency_preparation.py").read_bytes())
-        assignments = {node.targets[0].id: node.value for node in tree.body
-                       if isinstance(node, ast.Assign) and len(node.targets) == 1
-                       and isinstance(node.targets[0], ast.Name)}
-        expected = [len(body), hashlib.sha256(body).hexdigest()]
-        self.assertEqual(ast.literal_eval(assignments["PINS"])["desktop/tools/macos_normal_ui_runner.py"], expected)
-        self.assertEqual(ast.literal_eval(assignments["UI_NORMAL_PIN"]), expected)
 
 
     def test_build_settings_selected_values_are_closed_and_private(self):

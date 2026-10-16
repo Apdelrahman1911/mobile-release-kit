@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       verification_target:
-        description: Full verification, Linux/macOS-only evidence, Store-native macOS, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)
+        description: Full verification or a targeted check (targeted runs do not satisfy the protected full-CI status)
         type: choice
         required: true
         default: full
@@ -25,8 +25,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Select affected core checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      core: ${{ steps.changed.outputs.core }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: changed
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_BASE: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          CI_HEAD: ${{ github.sha }}
+        run: python3 -I -B .github/scripts/ci_changes.py
   test-linux:
-    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'linux') }}
+    needs: changes
+    if: ${{ needs.changes.outputs.core == 'true' && (github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'linux')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -101,7 +119,8 @@ jobs:
             --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
             --java-home "$JAVA_HOME_21_X64" --summary "$GITHUB_STEP_SUMMARY"
   test-native-profiles:
-    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos') }}
+    needs: changes
+    if: ${{ needs.changes.outputs.core == 'true' && (github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos')) }}
     runs-on: macos-26
     timeout-minutes: 60
     permissions:
@@ -166,7 +185,8 @@ jobs:
             --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
             --scope native-python --summary "$GITHUB_STEP_SUMMARY"
   test-native-support:
-    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos' || inputs.verification_target == 'store-lane-macos') }}
+    needs: changes
+    if: ${{ needs.changes.outputs.core == 'true' && (github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos' || inputs.verification_target == 'store-lane-macos')) }}
     runs-on: macos-26
     timeout-minutes: 60
     permissions:
@@ -232,8 +252,9 @@ jobs:
             --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
             --scope "$MRK_SCOPE" --summary "$GITHUB_STEP_SUMMARY"
   test-signing-matrix:
+    needs: changes
     name: test-signing-matrix (${{ matrix.os }}, ${{ matrix.shard }})
-    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}
+    if: ${{ needs.changes.outputs.core == 'true' && (github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary')) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     permissions:
@@ -337,7 +358,8 @@ jobs:
           if-no-files-found: error
           retention-days: 90
   test-signing-adapter:
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.verification_target == 'signing-adapter' || inputs.verification_target == 'signing-adapter-linux' || inputs.verification_target == 'signing-adapter-macos') }}
+    needs: changes
+    if: ${{ needs.changes.outputs.core == 'true' && (github.event_name == 'workflow_dispatch' && (inputs.verification_target == 'signing-adapter' || inputs.verification_target == 'signing-adapter-linux' || inputs.verification_target == 'signing-adapter-macos')) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     permissions:
@@ -430,30 +452,65 @@ jobs:
             verifier_args+=(--java-home "$JAVA_HOME_21_X64")
           fi
           sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 "${verifier_args[@]}"
-  # Preserve the protected status name. Both fixed macOS owners, every matrix
-  # source/wheel cell and the strict same-run two-OS union are required.
+  # Only full verification may publish the protected test status. A manual
+  # targeted run reports its own result without masquerading as full CI.
   test:
-    needs: [test-linux, test-native-profiles, test-native-support, test-signing-matrix]
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.verification_target != 'full' && format('Targeted core check ({0})', inputs.verification_target) || 'test' }}
+    needs: [changes, test-linux, test-native-profiles, test-native-support, test-signing-matrix, test-signing-adapter]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
     steps:
-      - name: Require every verification job to succeed
+      - name: Require every selected job to succeed
         env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_TARGET: ${{ inputs.verification_target || 'full' }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CORE_CHANGED: ${{ needs.changes.outputs.core }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
           NATIVE_RESULT: ${{ needs.test-native-profiles.result }}
           NATIVE_SUPPORT_RESULT: ${{ needs.test-native-support.result }}
           MATRIX_RESULT: ${{ needs.test-signing-matrix.result }}
+          ADAPTER_RESULT: ${{ needs.test-signing-adapter.result }}
         run: |
           set -euo pipefail
-          [[ "$LINUX_RESULT" == success && "$NATIVE_RESULT" == success && "$NATIVE_SUPPORT_RESULT" == success && "$MATRIX_RESULT" == success ]]
+          [[ "$CHANGES_RESULT" == success ]] || { echo 'Core change selection failed.'; exit 1; }
+          jobs=(linux native-profiles native-support signing-matrix signing-adapter)
+          results=("$LINUX_RESULT" "$NATIVE_RESULT" "$NATIVE_SUPPORT_RESULT" "$MATRIX_RESULT" "$ADAPTER_RESULT")
+          expected=(skipped skipped skipped skipped skipped)
+          [[ "$CI_EVENT" == workflow_dispatch ]] || CI_TARGET=full
+          if [[ "$CORE_CHANGED" == true ]]; then
+            case "$CI_TARGET" in
+              full) expected=(success success success success skipped) ;;
+              linux) expected[0]=success ;;
+              macos) expected[1]=success; expected[2]=success ;;
+              store-lane-macos) expected[2]=success ;;
+              signing-matrix-canary) expected[3]=success ;;
+              signing-adapter|signing-adapter-linux|signing-adapter-macos) expected[4]=success ;;
+              *) echo 'Unknown verification target.'; exit 1 ;;
+            esac
+          elif [[ "$CORE_CHANGED" != false || "$CI_EVENT" == workflow_dispatch ]]; then
+            echo 'Invalid core change-selection result.'; exit 1
+          fi
+          for index in "${!jobs[@]}"; do
+            if [[ "${results[$index]}" != "${expected[$index]}" ]]; then
+              echo "${jobs[$index]}: expected ${expected[$index]}, received ${results[$index]}"; exit 1
+            fi
+          done
+          if [[ "$CORE_CHANGED" == false ]]; then
+            echo 'Core inputs unchanged; all core jobs correctly skipped.'
+          elif [[ "$CI_TARGET" != full ]]; then
+            echo "Targeted verification passed: $CI_TARGET. This is not full CI."
+          fi
       - name: Check out the exact aggregate source
+        if: needs.changes.outputs.core == 'true' && (github.event_name != 'workflow_dispatch' || inputs.verification_target == 'full')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Download separate current-run matrix proof directories
+        if: needs.changes.outputs.core == 'true' && (github.event_name != 'workflow_dispatch' || inputs.verification_target == 'full')
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: local-signing-matrix-proof-*
@@ -461,6 +518,7 @@ jobs:
           merge-multiple: false
           digest-mismatch: error
       - name: Require the actual complete source and wheel union on both operating systems
+        if: needs.changes.outputs.core == 'true' && (github.event_name != 'workflow_dispatch' || inputs.verification_target == 'full')
         shell: bash
         run: |
           set -euo pipefail

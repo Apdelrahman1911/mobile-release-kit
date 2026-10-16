@@ -140,10 +140,10 @@ def data_failure_python(raw, names):
         counts = ("testsRun", "failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")
         extra = ("failureTests", "classifiedTestCount", "omittedTestCount", "unclassifiedTestCount")
         if (type(value) is not dict or set(value) != set(counts + extra + ("testIds", "actualHostBeforeAndAfter"))
-                or value["testIds"] != names or len(names) != 84 or len(set(names)) != 84
+                or value["testIds"] != names or not 0 < len(names) <= 256 or len(set(names)) != len(names)
                 or type(value["actualHostBeforeAndAfter"]) is not bool):
             return None
-        if any(type(value[key]) is not int or not 0 <= value[key] <= (84 if key == "testsRun" else 65535) for key in counts):
+        if any(type(value[key]) is not int or not 0 <= value[key] <= (len(names) if key == "testsRun" else 65535) for key in counts):
             return None
         rows = value["failureTests"]
         if type(rows) is not list or len(rows) > 16:
@@ -400,11 +400,10 @@ def ci_data_admission(request_raw, context_raw, environment, root_before, now_ns
     inventory = request.get("inventory")
     selected = context["macCompile"].get("data")
     if (type(inventory) is not dict or set(inventory) != {"files"} or type(inventory["files"]) is not list
-            or len(inventory["files"]) != 78 or type(selected) is not dict
-            or set(selected) != {"sourceCount", "sourceInventorySha256", "scriptSha256", "pythonCount", "selectionSha256"}
-            or type(selected["sourceCount"]) is not int or selected["sourceCount"] != 78
-            or type(selected["pythonCount"]) is not int or selected["pythonCount"] != 84
-            or selected["selectionSha256"] != "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94"):
+            or not 0 < len(inventory["files"]) <= 256 or type(selected) is not dict
+            or set(selected) != {"sourceCount", "sourceInventorySha256", "scriptSha256", "pythonCount"}
+            or type(selected["sourceCount"]) is not int or selected["sourceCount"] != len(inventory["files"])
+            or type(selected["pythonCount"]) is not int or not 0 < selected["pythonCount"] <= 256):
         raise ValueError("ci-data-selection")
     rows, total, names = inventory["files"], 0, []
     for row in rows:
@@ -526,7 +525,6 @@ source_names = (
     "templates/workflows/mobile-candidate.yml",
     "templates/workflows/mobile-external-testing.yml",
     "templates/workflows/mobile-production-submit.yml",
-    "tests/desktop/test_macos_normal_diagnostics_source.py",
     "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift",
     "desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-project-v1.json",
     "desktop/src/components/EnvironmentDiagnostics.tsx",
@@ -654,15 +652,11 @@ names = [
     "test_github_release.GitHubReleasePolicyTests.test_selection_is_closed_original_data_never_current_version_substitution",
     "test_github_release.GitHubReleasePolicyTests.test_single_dispatch_latches_uncertainty_and_refuses_replacement_source",
     "test_github_release.GitHubReleasePolicyTests.test_original_attempt_observation_requires_stage_jobs_not_build_repetition",
-    "test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_observes_original_complete_report_and_settled_projection",
-    "test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result",
-    "test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_saved_offline_and_empty_recovery_use_original_gui_only",
     "test_android_build_tools.MacToolAdmissionDataTests.test_mac_commands_use_exact_contents_home_private_environment_and_inspection_only",
     "test_android_build_tools.OwnerAndCommandDataTests.test_bundletool_requires_original_native_borrow_and_exact_snapshot",
 ]
-if len(names) != 84 or len(set(names)) != 84: raise ValueError("fixed selection")
-if hashlib.sha256(json.dumps(names, separators=(",", ":")).encode()).hexdigest() != "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94":
-    raise ValueError("fixed selected IDs digest")
+if not names or len(names) > 256 or len(set(names)) != len(names): raise ValueError("fixed selection")
+if ci_mode and ci_context["macCompile"]["data"]["pythonCount"] != len(names): raise ValueError("selected tests changed")
 data = (root / "target" if ci_mode else root) / "data-contracts"
 os.mkdir(data, 0o700)
 temporary = data / "tmp"
@@ -697,10 +691,10 @@ for name in NAMES:
     if module not in ("test_workflow_transaction_profile", "test_candidate_evidence", "test_lifecycle_evidence",
                       "test_metadata_images_edit", "test_metadata_images_recovery",
                       "test_github_preflight_frames", "test_github_preflight", "test_github_release",
-                      "test_macos_normal_diagnostics_source", "test_android_build_tools") or not method.startswith("test_"):
+                      "test_android_build_tools") or not method.startswith("test_"):
         raise ValueError("fixed selected method required")
     suite.addTest(getattr(importlib.import_module(module), cls)(method))
-if suite.countTestCases() != 84 or [case.id() for case in suite] != NAMES:
+if suite.countTestCases() != len(NAMES) or [case.id() for case in suite] != NAMES:
     raise ValueError("exact original test IDs/count required")
 def data_failed_test_rows(failures, errors, names):
     # Only exact roster IDs; subtest labels/tracebacks never enter public DATA.
@@ -728,7 +722,7 @@ try:
 except BaseException:
     pass
 print(json.dumps(facts, sort_keys=True, separators=(",", ":")), flush=True)
-raise SystemExit(0 if result.wasSuccessful() and facts["testsRun"] == 84 and facts["actualHostBeforeAndAfter"]
+raise SystemExit(0 if result.wasSuccessful() and facts["testsRun"] == len(NAMES) and facts["actualHostBeforeAndAfter"]
                  and not any(facts[key] for key in ("failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")) else 1)
 '''
 receipt = {"schemaVersion": 1, "scope": ("ci-observer-fixed-data-and-selected-host-python-regressions" if ci_mode
@@ -745,9 +739,8 @@ receipt = {"schemaVersion": 1, "scope": ("ci-observer-fixed-data-and-selected-ho
                              "MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "MRK_BUNDLED_PROTOCOL_SHA256",
                              "MRK_MACOS_INSTALL_SOURCE_COMMIT", "MRK_GITHUB_PREFLIGHT_TOOLING_SHA",
                              "MRK_GITHUB_RELEASE_TOOLING_SHA", "MACOSX_DEPLOYMENT_TARGET", "DEVELOPER_DIR")}),
-           "pythonTestIds": names, "pythonExpectedCount": 84, "workflowFilesystemCount": 2, "imageFilesystemCount": 18, "evidenceReaderCount": 37,
-           "githubActionCount": 22, "normalDiagnosticsSourceCount": 3, "androidBuildToolsCallerCount": 2,
-           "frozenSelectionSha256": "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94",
+           "pythonTestIds": names, "pythonExpectedCount": len(names), "workflowFilesystemCount": 2, "imageFilesystemCount": 18, "evidenceReaderCount": 37,
+           "githubActionCount": 22, "androidBuildToolsCallerCount": 2,
            "aggregate": {"name": "observer_data_checks", "count": 1, "harness": False, "libtestCount": None,
                          "sourceSha256": hashlib.sha256((start + aggregate).encode()).hexdigest(), "directSourceContractCalls": contract_calls},
            "commands": [], "passed": False, "nativeVaultTestsExecuted": False, "uiExecutedByThisBatch": False,
@@ -927,7 +920,7 @@ try:
             if ci_mode: receipt["ciAggregatePassed"] = True
         else:
             counts = json.loads(raw)
-            if (counts.get("testsRun") != 84 or counts.get("testIds") != names or counts.get("actualHostBeforeAndAfter") is not True
+            if (counts.get("testsRun") != len(names) or counts.get("testIds") != names or counts.get("actualHostBeforeAndAfter") is not True
                     or any(type(counts.get(key)) is not int or counts[key] != 0
                            for key in ("failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses"))):
                 raise ValueError("exact native Python original counts required")
@@ -967,5 +960,5 @@ finally:
             pass
     put("result.json", (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
 if failure is not None: raise SystemExit(1)
-print("One native aggregate and 84 exact host-Python tests passed; no UI, TLS or ignored vault-test qualification.")
+print(f"One native aggregate and {len(names)} host-Python tests passed; no UI, TLS or ignored vault-test qualification.")
 PY_DATA_CONTRACTS

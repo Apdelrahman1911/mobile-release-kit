@@ -152,19 +152,11 @@ _PYTHON_SINGLETON_FIXTURES = _PYTHON_POISON_FIXTURES + _PYTHON_FRESH_FIXTURES
 HOSTED_GUARD = '''set -euo pipefail
 [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted ]]
 '''
-LINUX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'linux') }}"
-NATIVE_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos') }}"
-NATIVE_SUPPORT_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos' || inputs.verification_target == 'store-lane-macos') }}"
 STORE_NATIVE_SCOPE = "${{ github.event_name == 'workflow_dispatch' && inputs.verification_target == 'store-lane-macos' && 'store-lane' || 'native-support' }}"
-MATRIX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}"
 MATRIX_SHARD_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47]') }}"
 MATRIX_INCLUDE_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":20},{\"os\":\"ubuntu-24.04\",\"shard\":28},{\"os\":\"macos-26\",\"shard\":1},{\"os\":\"macos-26\",\"shard\":12},{\"os\":\"macos-26\",\"shard\":37}]' || '[]') }}"
-ADAPTER_TARGET_CONDITION = "${{ github.event_name == 'workflow_dispatch' && (inputs.verification_target == 'signing-adapter' || inputs.verification_target == 'signing-adapter-linux' || inputs.verification_target == 'signing-adapter-macos') }}"
 ADAPTER_OS_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-linux' && '[\"ubuntu-24.04\"]' || github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-macos' && '[\"macos-26\"]' || '[\"ubuntu-24.04\",\"macos-26\"]') }}"
 VERIFICATION_CONCURRENCY = "release-kit-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.verification_target || 'full' }}"
-AGGREGATE_GUARD = '''set -euo pipefail
-[[ "$LINUX_RESULT" == success && "$NATIVE_RESULT" == success && "$NATIVE_SUPPORT_RESULT" == success && "$MATRIX_RESULT" == success ]]
-'''
 LINUX_TOOL_SETUP = '''set -euo pipefail
 if [[ ! -x /usr/bin/bwrap ]]; then
   sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \\
@@ -244,100 +236,78 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(workflow["permissions"], {"contents": "read"})
         self.assertEqual(workflow["env"], {"PYTHONSAFEPATH": "1"})
         self.assertNotIn("defaults", workflow)
-        # The pinned Psych loader parses YAML's unquoted `on` as true; JSON
-        # serializes that mapping key as "true". Do not invent a second parser.
-        self.assertEqual(workflow["true"], {
-            "pull_request": None, "push": {"branches": ["main"]},
-            "workflow_dispatch": {"inputs": {"verification_target": {
-                "description": "Full verification, Linux/macOS-only evidence, Store-native macOS, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)",
-                "type": "choice", "required": True, "default": "full", "options": ["full", "linux", "macos", "store-lane-macos", "signing-adapter", "signing-adapter-linux", "signing-adapter-macos", "signing-matrix-canary"],
-            }}},
-        })
-        self.assertEqual(workflow["concurrency"], {"group": VERIFICATION_CONCURRENCY, "cancel-in-progress": True})
-        self.assertEqual(set(workflow["jobs"]), {"test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix", "test-signing-adapter", "test"})
-        text = CI.read_text(encoding="utf-8")
-        self.assertNotIn("secrets.", text)
-        self.assertNotIn("id-token:", text)
+        self.assertEqual(set(workflow["jobs"]), {"changes", "test", "test-linux", "test-native-profiles",
+                                                "test-native-support", "test-signing-matrix", "test-signing-adapter"})
+        events = workflow["true"]  # Existing Psych loader's YAML boolean key.
+        self.assertIn("pull_request", events)
+        self.assertEqual(events["push"]["branches"], ["main"])
+        self.assertNotIn("paths", events["push"])
+        self.assertIsNone(events["pull_request"])
+        self.assertEqual(events["workflow_dispatch"]["inputs"]["verification_target"]["default"], "full")
+        self.assertNotIn("secrets.", CI.read_text(encoding="utf-8"))
+        for name, job in workflow["jobs"].items():
+            with self.subTest(job=name):
+                self.assertEqual(job.get("permissions", workflow["permissions"]), {"contents": "read"})
+                for forbidden in ("continue-on-error", "environment", "container", "services"):
+                    self.assertNotIn(forbidden, job)
+                for step in job["steps"]:
+                    self.assertNotIn("continue-on-error", step)
+                    if "uses" in step:
+                        self.assertRegex(step["uses"], r"^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+@[0-9a-f]{40}$")
+                    if step.get("uses", "").startswith("actions/checkout@"):
+                        self.assertIs(step["with"]["persist-credentials"], False)
         for platform, name, image in (("linux", "test-linux", "ubuntu-24.04"),
                                       ("macos", "test-native-profiles", "macos-26"),
                                       ("macos", "test-native-support", "macos-26")):
             with self.subTest(job=name):
                 job = workflow["jobs"][name]
                 self.assertEqual(job["runs-on"], image)
-                self.assertEqual(job["timeout-minutes"], 60)
-                if platform == "linux":
-                    self.assertEqual(job["if"], LINUX_TARGET_CONDITION)
-                elif name == "test-native-support":
-                    self.assertEqual(job["if"], NATIVE_SUPPORT_TARGET_CONDITION)
-                else:
-                    self.assertEqual(job["if"], NATIVE_TARGET_CONDITION)
-                for forbidden in ("continue-on-error", "environment", "container", "services", "strategy", "defaults", "env"):
+                self.assertEqual(job["needs"], "changes")
+                for forbidden in ("defaults", "env", "strategy"):
                     self.assertNotIn(forbidden, job)
-                self.assertEqual(job.get("permissions", workflow["permissions"]), {"contents": "read"})
+                self.assertLessEqual(job["timeout-minutes"], 60)
                 steps = job["steps"]
-                self.assertEqual(len(steps), 9 if platform == "linux" else 8)
+                self.assertEqual(steps[0]["run"], HOSTED_GUARD)
+                self.assertEqual(steps[0]["env"], {
+                    "MOBILE_RELEASE_RUNNER_ENVIRONMENT": "${{ runner.environment }}"})
                 for step in steps:
                     self.assertNotIn("if", step)
-                    self.assertNotIn("continue-on-error", step)
-                self.assertEqual(steps[0]["run"], HOSTED_GUARD)
-                self.assertEqual(set(steps[0]), {"name", "shell", "env", "run"})
-                self.assertEqual(steps[0]["shell"], "bash")
-                self.assertEqual(steps[0]["env"], {
-                    "MOBILE_RELEASE_RUNNER_ENVIRONMENT": "${{ runner.environment }}",
-                })
-                self.assertEqual(steps[1]["uses"], "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1")
-                self.assertEqual(set(steps[1]), {"name", "uses", "with"})
-                self.assertEqual(steps[1]["with"], {"persist-credentials": False})
-                self.assertEqual(steps[2]["id"], "python")
-                self.assertEqual(set(steps[2]), {"name", "id", "uses", "with"})
-                self.assertEqual(steps[2]["uses"], "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97")
-                self.assertEqual(steps[2]["with"], {"python-version": "3.11"})
-                for index, line in enumerate(("312", "313", "314"), start=3):
-                    self.assertEqual(set(steps[index]), {"name", "id", "uses", "with"})
-                    self.assertEqual(steps[index]["id"], "python" + line)
-                    self.assertEqual(steps[index]["uses"], steps[2]["uses"])
-                    self.assertEqual(steps[index]["with"], {"python-version": "3." + line[1:]})
-                self.assertEqual(steps[6]["uses"], "ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b")
-                self.assertEqual(set(steps[6]), {"name", "uses", "with"})
-                self.assertEqual(steps[6]["with"], {
-                    "ruby-version": "3.3.12", "bundler": "none", "bundler-cache": False,
-                })
-                for step in steps[1:7]:
-                    self.assertNotIn("run", step)
-                    self.assertNotIn("env", step)
-                if platform == "linux":
-                    self.assertEqual(set(steps[7]), {"name", "shell", "run"})
-                    self.assertEqual(steps[7]["shell"], "bash")
-                    self.assertEqual(steps[7]["run"], LINUX_TOOL_SETUP)
-                    self.assertNotIn("env", steps[7])
-                owner = steps[-1]
-                self.assertEqual(set(owner), {"name", "shell", "env", "run"})
-                self.assertEqual(owner["env"], {
+                runtimes = {step.get("id"): step for step in steps
+                            if step.get("uses", "").startswith("actions/setup-python@")}
+                self.assertEqual({key: value["with"]["python-version"] for key, value in runtimes.items()},
+                                 {"python": "3.11", "python312": "3.12", "python313": "3.13", "python314": "3.14"})
+                ruby = [step for step in steps if step.get("uses", "").startswith("ruby/setup-ruby@")]
+                self.assertEqual(len(ruby), 1)
+                self.assertEqual(ruby[0]["with"]["bundler"], "none")
+                self.assertIs(ruby[0]["with"]["bundler-cache"], False)
+                owners = [step for step in steps if "verify_ci.py" in step.get("run", "")]
+                self.assertEqual(len(owners), 1)
+                self.assertIs(owners[0], steps[-1])
+                self.assertEqual(owners[0]["shell"], "bash")
+                self.assertEqual(owners[0]["env"], {
                     "MRK_PYTHON": "${{ steps.python.outputs.python-path }}",
                     "MRK_PYTHON_312": "${{ steps.python312.outputs.python-path }}",
                     "MRK_PYTHON_313": "${{ steps.python313.outputs.python-path }}",
                     "MRK_PYTHON_314": "${{ steps.python314.outputs.python-path }}",
-                    **({"MRK_SCOPE": STORE_NATIVE_SCOPE} if name == "test-native-support" else {}),
-                })
-                self.assertEqual(owner["shell"], "bash")
-                self.assertEqual(owner["run"], coordinator_shell(
+                    **({"MRK_SCOPE": STORE_NATIVE_SCOPE} if name == "test-native-support" else {})})
+                # Actual shell behavior/exit propagation is tested separately with
+                # inert sudo/command functions. Do not execute a controller here.
+                self.assertEqual(owners[0]["run"], coordinator_shell(
                     platform, scope="native-support" if name == "test-native-support" else None))
-        self.assertEqual(coordinator_shell("macos"), coordinator_shell("macos", scope="native-python"))
+                other_commands = [step["run"] for step in steps[1:-1] if "run" in step]
+                self.assertEqual(other_commands, [LINUX_TOOL_SETUP] if platform == "linux" else [])
         for platform, scope in (("unknown", None), ("linux", "native-python"),
                                 ("linux", "native-support"), ("linux", "platform"),
                                 ("macos", "platform"), ("macos", "store-lane"), ("macos", "unknown")):
             with self.subTest(unsupported_coordinator=(platform, scope)), self.assertRaises(ValueError):
                 coordinator_shell(platform, scope=scope)
 
+
     def test_manual_native_candidate_routing_and_protected_aggregate_remain_fail_closed(self):
         workflow = load_workflow(CI)
         linux, native, support, aggregate = (workflow["jobs"][name] for name in
                                             ("test-linux", "test-native-profiles", "test-native-support", "test"))
-        self.assertEqual(linux["if"], LINUX_TARGET_CONDITION)
-        self.assertEqual(native["if"], NATIVE_TARGET_CONDITION)
-        self.assertEqual(support["if"], NATIVE_SUPPORT_TARGET_CONDITION)
         matrix = workflow["jobs"]["test-signing-matrix"]
-        self.assertEqual(matrix["if"], MATRIX_TARGET_CONDITION)
         selection = matrix["strategy"]["matrix"]["shard"]
         self.assertEqual(selection, MATRIX_SHARD_SELECTION)
         # The exact expression above admits just two literal JSON operands.
@@ -367,7 +337,8 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                            "SIGNING-ADAPTER-LINUX", "signing-adapter-linux ",
                            "SIGNING-MATRIX-CANARY", "signing-matrix-canary ", "[0]", "macos "):
                 with self.subTest(candidate_route=(event, target)):
-                    context = {"github": {"event_name": event, "ref": ref}}
+                    context = {"github": {"event_name": event, "ref": ref},
+                               "needs": {"changes": {"outputs": {"core": "true"}}}}
                     # For this one pinned comparison and fixed ASCII fixture,
                     # model Actions' case-insensitive string equality explicitly.
                     # The shared restricted interpreter remains unchanged.
@@ -407,42 +378,64 @@ class CIWorkflowIsolationTests(unittest.TestCase):
 
         # This is the existing fixed job, not a synthesized cross-run status.
         # Pin every field before the harmless shell can be executed below.
-        self.assertEqual({key: value for key, value in aggregate.items() if key != "steps"}, {
-            "needs": ["test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix"], "if": "${{ always() }}",
-            "runs-on": "ubuntu-24.04", "timeout-minutes": 5, "permissions": {"contents": "read"},
-        })
-        self.assertEqual(aggregate["steps"][0], {"name": "Require every verification job to succeed", "env": {
-            "LINUX_RESULT": "${{ needs.test-linux.result }}", "NATIVE_RESULT": "${{ needs.test-native-profiles.result }}",
-            "NATIVE_SUPPORT_RESULT": "${{ needs.test-native-support.result }}",
-            "MATRIX_RESULT": "${{ needs.test-signing-matrix.result }}",
-        }, "run": AGGREGATE_GUARD})
-        self.assertEqual(len(aggregate["steps"]), 4)
-        self.assertIn("--reduce", aggregate["steps"][-1]["run"])
-        self.assertEqual(workflow["jobs"]["test-signing-matrix"]["if"], MATRIX_TARGET_CONDITION)
+        jobs = ("test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix", "test-signing-adapter")
+        variables = ("LINUX_RESULT", "NATIVE_RESULT", "NATIVE_SUPPORT_RESULT", "MATRIX_RESULT", "ADAPTER_RESULT")
+        self.assertEqual(set(aggregate["needs"]), {"changes", *jobs})
         self.assertTrue(evaluate_condition(aggregate["if"], {}, success=False, cancelled=True))
-        states = ["failure", "cancelled", "skipped", "queued", "unavailable", "", None]
-        results = [("success", "success", "success", "success")]
-        for state in states:
-            results.extend(((state, "success", "success", "success"), ("success", state, "success", "success"),
-                            ("success", "success", state, "success"), ("success", "success", "success", state),
-                            (state, state, state, state)))
-        body = aggregate["steps"][0]["run"]
-        for linux_result, native_result, support_result, matrix_result in results:
-            with self.subTest(protected_results=(linux_result, native_result, support_result, matrix_result)):
-                env = {"PATH": "/usr/bin:/bin"}
-                if linux_result is not None:
-                    env["LINUX_RESULT"] = linux_result
-                if native_result is not None:
-                    env["NATIVE_RESULT"] = native_result
-                if support_result is not None:
-                    env["NATIVE_SUPPORT_RESULT"] = support_result
-                if matrix_result is not None:
-                    env["MATRIX_RESULT"] = matrix_result
-                result = subprocess.run(["bash", "--noprofile", "--norc", "-c", body],
-                                        env=env, capture_output=True, timeout=5)
-                self.assertEqual(result.returncode == 0,
-                                 linux_result == native_result == support_result == matrix_result == "success")
-                self.assertEqual(result.stdout, b"")
+        guard, *proof_steps = aggregate["steps"]
+        self.assertEqual(guard["env"], {
+            "CI_EVENT": "${{ github.event_name }}", "CI_TARGET": "${{ inputs.verification_target || 'full' }}",
+            "CHANGES_RESULT": "${{ needs.changes.result }}", "CORE_CHANGED": "${{ needs.changes.outputs.core }}",
+            **{variable: "${{ needs." + job + ".result }}" for variable, job in zip(variables, jobs)}})
+        self.assertTrue(any("--reduce" in step.get("run", "") for step in proof_steps))
+        # This is the actual builtins-only workflow guard, executed without any
+        # controller, sudo, installer, network call, or native adapter.
+        def run_guard(env):
+            return subprocess.run(["bash", "--noprofile", "--norc", "-c", guard["run"]],
+                                  env={"PATH": "/usr/bin:/bin", **env}, capture_output=True, timeout=5).returncode
+
+        selected = {"full": {0, 1, 2, 3}, "linux": {0}, "macos": {1, 2},
+                    "store-lane-macos": {2}, "signing-matrix-canary": {3},
+                    "signing-adapter": {4}, "signing-adapter-linux": {4}, "signing-adapter-macos": {4}}
+        name = aggregate["name"].removeprefix("${{").removesuffix("}}").strip()
+        condition, label = name.rsplit(" && ", 1)
+        self.assertEqual(label, "format('Targeted core check ({0})', inputs.verification_target) || 'test'")
+        for event in ("pull_request", "push", "workflow_dispatch"):
+            for target in selected:
+                for core in ("true", "false"):
+                    context = {"github": {"event_name": event}, "inputs": {"verification_target": target},
+                               "needs": {"changes": {"outputs": {"core": core}}}}
+                    effective = target if event == "workflow_dispatch" else "full"
+                    states = ["success" if core == "true" and i in selected[effective] else "skipped" for i in range(5)]
+                    env = {"CI_EVENT": event, "CI_TARGET": target, "CHANGES_RESULT": "success", "CORE_CHANGED": core,
+                           **dict(zip(variables, states))}
+                    valid = core == "true" or event != "workflow_dispatch"
+                    with self.subTest(event=event, target=target, core=core):
+                        self.assertEqual(run_guard(env) == 0, valid)
+                        for i, job in enumerate(jobs):
+                            self.assertEqual(evaluate_condition(workflow["jobs"][job]["if"], context,
+                                success=True, cancelled=False), states[i] == "success")
+                        self.assertEqual(evaluate_condition(condition, context, success=True, cancelled=False),
+                                         event == "workflow_dispatch" and target != "full")
+                        for step in proof_steps:
+                            self.assertEqual(evaluate_condition(step.get("if"), context, success=True, cancelled=False),
+                                             core == "true" and effective == "full")
+                            self.assertFalse(evaluate_condition(step.get("if"), context, success=False, cancelled=False))
+                    if valid and (event == "workflow_dispatch" or target == "full"):
+                        for variable in variables:
+                            for wrong in ("failure", "cancelled", "queued", "unavailable", "", None,
+                                          "skipped" if env[variable] == "success" else "success"):
+                                bad = dict(env)
+                                if wrong is None: bad.pop(variable)
+                                else: bad[variable] = wrong
+                                with self.subTest(target=effective, core=core, variable=variable, wrong=wrong):
+                                    self.assertNotEqual(run_guard(bad), 0)
+                        for result in ("failure", "cancelled", "skipped", ""):
+                            self.assertNotEqual(run_guard({**env, "CHANGES_RESULT": result}), 0)
+        baseline = {"CI_EVENT": "workflow_dispatch", "CI_TARGET": "full", "CORE_CHANGED": "true",
+                    "CHANGES_RESULT": "success", **dict(zip(variables, ("success",) * 4 + ("skipped",)))}
+        self.assertNotEqual(run_guard({**baseline, "CI_TARGET": "unknown"}), 0)
+        self.assertNotEqual(run_guard({**baseline, "CORE_CHANGED": ""}), 0)
 
         group = workflow["concurrency"]["group"]
         self.assertEqual(group, VERIFICATION_CONCURRENCY)
@@ -468,7 +461,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
     def test_signing_adapter_smoke_is_explicit_two_os_and_cannot_publish_matrix_proof(self):
         workflow = load_workflow(CI)
         job = workflow["jobs"]["test-signing-adapter"]
-        self.assertEqual(job["if"], ADAPTER_TARGET_CONDITION)
+        self.assertEqual(job["needs"], "changes")
         self.assertEqual(job["runs-on"], "${{ matrix.os }}")
         self.assertEqual(job["strategy"], {"fail-fast": False, "max-parallel": 2,
                                            "matrix": {"os": ADAPTER_OS_SELECTION}})
@@ -500,7 +493,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertIn('PYTHONSAFEPATH=1 "${verifier_args[@]}"', owner)
         for forbidden in ("--shard", "--local", "run_local_signing_matrix.py", "pip wheel", "continue-on-error"):
             self.assertNotIn(forbidden, owner)
-        self.assertNotIn("test-signing-adapter", workflow["jobs"]["test"]["needs"])
+        self.assertIn("test-signing-adapter", workflow["jobs"]["test"]["needs"])
 
     def test_actual_guard_rejects_non_hosted_or_missing_runner_identity(self):
         workflow = load_workflow(CI)

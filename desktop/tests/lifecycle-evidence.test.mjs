@@ -222,94 +222,6 @@ test('unavailable controller performs no folder/read/cancel work', async (t) => 
   await h.controller.choose(); await h.controller.observe(); await h.controller.cancel(); await h.controller.check();
   assert.equal(h.state.status, null); assert.deepEqual(h.calls, []); assert.equal(h.timers.size, 0);
 });
-test('SOURCE integration shares one controller and keeps Recovery alerts independent without an auto-read', () => {
-  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  const source = readFileSync(new URL('../src/components/ReleaseEvidence.tsx', import.meta.url), 'utf8');
-  const future = readFileSync(new URL('../src/pages/Future.tsx', import.meta.url), 'utf8');
-  const artifacts = readFileSync(new URL('../src/pages/Artifacts.tsx', import.meta.url), 'utf8');
-  assert.equal((app.match(/new LifecycleEvidenceController/g) ?? []).length, 1); assert.doesNotMatch(app, /new CandidateEvidenceController/);
-  assert.match(app, /\['choosing', 'observing', 'stopping', 'unknown'\]\.includes\(evidence.status.phase\)/);
-  assert.match(app, /<Releases[^\n]*evidence={<ReleaseEvidence state={evidenceState} controller={releaseEvidence}/);
-  assert.match(app, /<Recovery[^\n]*evidenceGuidance={<ReleaseEvidenceGuidance state={evidenceState}/);
-  assert.match(artifacts, /<ReleaseEvidence state={state} controller={controller}/);
-  for (const text of ['Source project:', 'Evidence folder:', 'unchanged by evidence selection', 'Choose evidence folder', 'Inspect documents', 'Check operation status', 'Request stop',
-    'Previous observation · stale', 'Document status and technical details', 'Stages recorded in this folder', 'Not supplied:', 'Project recovery remains unassessed']) assert.ok(source.includes(text), text);
-  assert.match(source, /const current = !state.pending && !state.uncertain && !state.integrityFailed/);
-  assert.match(source, /\['authorizedBy', 'executedBy', 'producedBy'\]/);
-  assert.doesNotMatch(source, /useEffect|\bhref\s*=|\bfetch\s*\(|chooseProject|saveDraft|discardDraft/);
-  for (const text of ['File-edit alerts from this session', 'Earlier alerts stay visible', 'Other recovery remains unassessed', 'This is not a clean-state check']) assert.ok(future.includes(text), text);
-  assert.equal(SAVED_EVIDENCE_WARNING, 'Saved documents only, not live Store status or retry approval.');
-  assert.match(releaseEvidenceHelp.where, /Download and extract.*protected release workflow.*final evidence folder, not your project or ZIP.*nested folders unchanged/);
-});
-test('SOURCE catalogs, shell permissions and purpose-gated reconciliation include only the new fixed family', () => {
-  const source = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
-  const quoted = (value) => [...value.matchAll(/"([^"\n]+)"/g)].map((match) => match[1]);
-  const core = source('../../src/mobile_release/api/__init__.py');
-  const observer = source('../src-tauri/src/installed_shell_observation.rs');
-  const methods = quoted(core.split('METHODS = (', 2)[1].split(')\n_FUTURE_ACTIONS', 1)[0]);
-  const installed = observer.match(/const METHODS: \[&str; (\d+)\] = \[([^\]]+)\];/);
-  assert.ok(installed); assert.equal(Number(installed[1]), 13);
-  assert.equal(methods.length, 14); assert.equal(new Set(methods).size, 14);
-  assert.deepEqual(quoted(installed[2]), methods.filter((method) => method !== 'credentials.assess'));
-  const runtime = source('../src-tauri/src/runtime.rs');
-  const mac = runtime.split('fn macos_installed_passive_method', 2)[1].split('fn linux_installed_passive_method', 1)[0];
-  const linux = runtime.split('fn linux_installed_passive_method', 2)[1].split('fn installed_passive_method', 1)[0];
-  assert.doesNotMatch(mac, /release\.evidence\.observe/); assert.match(linux, /"release\.evidence\.observe"/);
-  assert.match(observer, /"Inspect selected local release documents"/);
-  assert.match(source('../src/pages/Environment.tsx'), /'release\.evidence\.observe': 'Inspect selected local release documents'/);
-  const shell = source('../src-tauri/src/shell.rs'), build = source('../src-tauri/build.rs');
-  const permissions = JSON.parse(source('../src-tauri/capabilities/main.json')).permissions;
-  for (const suffix of ['choose', 'status', 'observe', 'cancel']) {
-    const command = 'release_evidence_' + suffix;
-    assert.equal((build.match(new RegExp('"' + command + '"', 'g')) ?? []).length, 1);
-    assert.equal(permissions.filter((name) => name === 'allow-' + command.replaceAll('_', '-')).length, 1);
-    const body = shell.split('async fn ' + command + '(', 2)[1].split('\n#[tauri::command', 1)[0];
-    assert.match(body, /fixture_command!\(state, Forbidden/); assert.match(body, /edit_window\(&webview\)\?/);
-    assert.doesNotMatch(body, /q\.evidence_/); // No conversion of the legacy installed witness into lifecycle evidence.
-    assert.match(shell, new RegExp(command + '[,\\s]'));
-  }
-  const owner = source('../src-tauri/src/asset_session.rs');
-  const reconcile = owner.split('fn reconcile_scope(', 2)[1].split('\n    fn publish(', 1)[0];
-  assert.ok(reconcile.indexOf('evidence_route_gate(&state, family)') < reconcile.indexOf('self.expire(&mut state'));
-  for (const [prefix, family] of [['artifact', 'false'], ['release', 'true']]) for (const suffix of ['status', 'choose', 'observe']) {
-    const body = owner.split('pub(crate) fn ' + prefix + '_evidence_' + suffix + '(', 2)[1].split('\n    pub(crate) fn ', 1)[0];
-    assert.ok(body.includes('self.reconcile_scope(Some(' + family + '))'));
-    assert.ok(body.indexOf('evidence_route_gate(&state, ' + family + ')?') < body.indexOf('self.expire(&mut state'));
-  }
-});
-test('SOURCE installed lifecycle witness uses actual routes, once-only native refusal and STOP-specific finality', () => {
-  const source = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
-  const observer = source('../src-tauri/src/installed_shell_observation.rs'), shell = source('../src-tauri/src/shell.rs');
-  const owner = source('../src-tauri/src/asset_session.rs');
-  assert.match(source('../src-tauri/tests/installed_shell_observation.rs'), /#\[path = "\.\.\/src\/lifecycle_evidence_protocol.rs"\] mod lifecycle_evidence_protocol;/);
-  for (const suffix of ['choose', 'status', 'observe', 'cancel']) {
-    const body = shell.split('async fn release_evidence_' + suffix + '(', 2)[1].split('\n#[tauri::command', 1)[0];
-    assert.match(body, new RegExp('q\\.lifecycle_evidence_' + suffix + '_request\\(body\\)'));
-    assert.match(body, new RegExp('q\\.lifecycle_evidence_' + suffix + '_result\\(&result\\)'));
-    assert.equal((body.match(/#\[cfg\(all\(test, debug_assertions/g) ?? []).length, 2);
-  }
-  const probe = owner.split('pub(crate) fn installed_observation_lifecycle_opposite(', 2)[1].split('pub(crate) fn installed_observation_lifecycle_stopped(', 1)[0];
-  assert.equal((probe.match(/self\.artifact_evidence_status\(\)/g) ?? []).length, 1);
-  assert.equal((probe.match(/self\.artifact_evidence_cancel\(/g) ?? []).length, 1);
-  assert.equal((probe.match(/self\.lifecycle_stop_owner_unchanged\(project, original\)/g) ?? []).length, 3);
-  assert.match(probe, /original\.binding\.operation_id\.to_string\(\)/); assert.match(probe, /original\.binding\.selection_id\.clone\(\)/);
-  assert.doesNotMatch(probe, /self\.lock\(|self\.reconcile|self\.expire|\.stop\(/);
-  const tick = observer.split('if step == Step::EvidenceReplacementReady {', 2)[1].split('if matches!(step, Step::EvidenceCancelled', 1)[0];
-  assert.equal((tick.match(/installed_observation_lifecycle_opposite\(/g) ?? []).length, 1);
-  assert.match(tick, /r\.lifecycle\.opposite_reserved = true; r\.pending = Some\(Pending::LifecycleOpposite\)/);
-  assert.ok(tick.indexOf('let project = {') < tick.indexOf('project.clone()'));
-  assert.ok(tick.indexOf('project.clone()') < tick.indexOf('installed_observation_lifecycle_stop_owner(&project)'));
-  assert.ok(tick.indexOf('r.pending = Some(Pending::LifecycleOpposite);\n            }') < tick.indexOf('installed_observation_lifecycle_opposite(&project, &original)'));
-  assert.match(tick, /r\.pending\.take\(\) != Some\(Pending::LifecycleOpposite\)/); assert.match(tick, /Instant::now\(\) >= self\.end/);
-  const stopped = observer.split('fn stopped_evidence_picker(', 2)[1].split('\nfn ', 1)[0];
-  assert.match(stopped, /p\.created && p\.responded && p\.disposal && p\.destroyed && p\.released/);
-  assert.match(stopped, /!p\.selected && !p\.activated && !p\.filename && !p\.returned/);
-  const response = observer.split('pub(super) fn lifecycle_evidence_stop_response(', 2)[1].split('fn evidence_gtk_returned(', 1)[0];
-  assert.match(response, /!owner_stopped_delete/); assert.match(response, /r\.lifecycle\.stop_requests != 1/);
-  assert.match(response, /p\.responded = true; p\.disposal = true/); assert.doesNotMatch(response, /p\.(activated|returned|filename) = true/);
-  assert.match(observer, /MRK_INSTALLED_SHELL_LIFECYCLE_DOCUMENTS=/); assert.doesNotMatch(observer, /MRK_INSTALLED_SHELL_CANDIDATE_DOCUMENTS=/);
-  assert.match(owner, /quit\.id == 7 && quit\.resources_settled\(\)/);
-});
 test('SOURCE exact positive observer JS bodies compile with their actual shared lifecycle helpers without DOM execution', () => {
   const source = readFileSync(new URL('../src-tauri/src/installed_shell_observation.rs', import.meta.url), 'utf8');
   const fn = source.split('fn script(step: Step, case: Case)', 2)[1].split('\nfn assert_recent_files_suppression_contract()', 1)[0];
@@ -324,4 +236,10 @@ test('SOURCE exact positive observer JS bodies compile with their actual shared 
     });
     assert.doesNotThrow(() => new Script(script), 'exact positive body ' + index);
   }
+});
+
+test('saved release evidence guidance does not promise live Store status or retry approval', () => {
+  assert.equal(SAVED_EVIDENCE_WARNING, 'Saved documents only, not live Store status or retry approval.');
+  assert.match(releaseEvidenceHelp.where,
+    /Download and extract.*protected release workflow.*final evidence folder, not your project or ZIP.*nested folders unchanged/);
 });

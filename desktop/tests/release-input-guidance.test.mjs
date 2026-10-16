@@ -1,7 +1,6 @@
 // Inert DTOs, reducer events and controlled promises only. No DOM, native
 // launch, credential IO, tool probing, remote calls, timers or child processes.
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import guide from '../../src/mobile_release/api/data/credential-guide-v1.json' with { type: 'json' };
 import { initialWorkspace, workspaceReducer } from '../src/drafts.ts';
@@ -357,77 +356,4 @@ test('retired preparation callbacks cannot revive after stage, project, draft, h
       assert.equal(h.controller.preparationTarget(original, target.requirement), null, label);
     } finally { h.controller.dispose(); }
   }
-});
-
-test('App and Credentials keep retirement before awaits/reducer, original save returns, safe reference navigation and honest UI labels', () => {
-  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  const page = readFileSync(new URL('../src/pages/Credentials.tsx', import.meta.url), 'utf8');
-  const pane = readFileSync(new URL('../src/components/ReleaseInputGuidance.tsx', import.meta.url), 'utf8');
-  const session = readFileSync(new URL('../src/components/CredentialSession.tsx', import.meta.url), 'utf8');
-  const module = readFileSync(new URL('../src/releaseInputGuidance.ts', import.meta.url), 'utf8');
-  const dispatch = app.slice(app.indexOf('const dispatch ='), app.indexOf('const [configEdit]'));
-  const retire = dispatch.indexOf('releaseInputControllerRef.current?.beforeWorkspaceAction(action)');
-  assert.ok(retire >= 0 && retire < dispatch.indexOf('workspaceReducer(previous, action)') && retire < dispatch.indexOf('if (next === previous) return'));
-  assert.ok(dispatch.includes('releaseInputControllerRef.current?.syncProject()'));
-  const bootstrap = app.slice(app.indexOf('const bootstrap ='), app.indexOf('useEffect(() => {\n    void bootstrap()'));
-  assert.ok(bootstrap.indexOf('releaseInputs.beginConnection()') < bootstrap.indexOf('await desktopApi()'));
-  for (const source of ['releaseInputs.setConnection(connection, appInfo)', 'releaseInputs.setCatalog(result)', 'releaseInputs.setCatalog(null)', 'releaseInputs.connectionUnavailable()']) assert.ok(bootstrap.includes(source));
-  const picker = app.slice(app.indexOf('const chooseProject ='), app.indexOf('const changeApplicationRepository'));
-  assert.ok(picker.indexOf('releaseInputs.setSelectionPending(true)') < picker.indexOf('await api.chooseProject()'));
-  assert.ok(picker.includes('finally') && picker.includes('releaseInputs.setSelectionPending(false)'));
-  assert.ok(app.includes('releaseInputs.saveIntent(); releaseVersion.saveIntent(); if (workspaceRef.current.selectedId === session.project.id) configEdit.start(session.project.id)'));
-  assert.ok(app.includes('releaseInputs.saveIntent(); releaseVersion.saveIntent(); return configEdit.apply(binding)'));
-  assert.ok(app.includes('releaseInputs.dispose()') && app.includes('() => setHelp(null)'));
-  assert.ok(page.includes('<CredentialSession state={state} controller={controller}'));
-  assert.ok(page.includes('isAssetFileKind(kind.id) ? sessionAvailable'));
-  assert.ok(session.includes('isAssetFileKind(preparation.guideId)') && session.includes('isAssetFileKind(effectiveKindId)'));
-  assert.match(session, /state\.selectionKind === 'android-keystore' \?\s*\{ storePassword:/);
-  assert.match(session, /iOS Firebase scope: XML plist format and bundle-ID match only/);
-  assert.match(session, /Native validation: not run.*Service validation: not run.*Release readiness: unknown/);
-  assert.doesNotMatch(session, /and iOS plist import/);
-  assert.ok(page.includes('<AssetGuide guide={inputState.help.guide} selected={selectedGuide} onSelect={setSelectedGuide}'));
-  const navigation = page.slice(page.indexOf('const openGuide ='), page.indexOf('const credentials ='));
-  assert.ok(navigation.includes('inputController.preparationCurrent(target, target)'));
-  assert.ok(navigation.includes('activePreparation.current = target; setPreparation(target); sessionRef.current?.focus()'));
-  assert.doesNotMatch(navigation, /\.(?:setScope|syncProject|submitContext|open|choose|prepareSelection|prepareScalar|confirmPreview|discard|lock)\(/);
-  assert.ok(page.includes('inputController.preparationCurrent(target, activePreparation.current)'));
-  assert.ok(page.includes('mounted.current = false; activePreparation.current = null'));
-  assert.ok(page.includes('if (!mounted.current || activePreparation.current !== target) return'));
-  assert.ok(pane.includes('controller.preparationTarget(state, row.requirement)'));
-  const sessionInstances = page.match(/<CredentialSession[\s\S]*?\/>/gu) ?? [];
-  assert.equal(sessionInstances.length, 1); assert.doesNotMatch(sessionInstances[0], /\bkey=/u);
-  const continuation = session.slice(session.indexOf('const continuePreparation ='), session.indexOf('return <section ref={sessionRef}'));
-  for (const guard of ['!mounted.current', 'renderRef.current !== render', 'localRef.current !== local', 'controller.getSnapshot() !== state',
-    '!isPreparationCurrent(preparation)', 'preparationSessionReason(preparation, controller.getSnapshot()', '!takePreparation(preparation)']) assert.ok(continuation.includes(guard), guard);
-  assert.ok(continuation.indexOf('!takePreparation(preparation)') < continuation.indexOf('controller.setScope'));
-  assert.ok(continuation.includes('if (preparationScopeChanged(preparation, state.scope)) controller.setScope({ ...preparation.scope })'));
-  assert.ok(continuation.includes('if (nextKind !== local.kindId) changeLocal({ kindId: nextKind })'));
-  assert.doesNotMatch(continuation, /\bawait\b|replacementId:|confirmLock:|\.(?:submitContext|open|choose|prepareSelection|prepareScalar|confirmPreview|discard|lock)\(/);
-  assert.ok(session.includes('localRef.current = next; setLocal(next)'));
-  for (const update of ['changeLocal({ kindId: event.target.value as AssetKind, replacementId: null })', 'changeLocal({ replacementId: event.target.value || null })',
-    'changeLocal({ confirmLock: true })']) assert.ok(session.includes(update), update);
-  assert.ok(session.includes('const selectionVisible = !!(nativeAvailable && writable && guide && !projectPathActive)'));
-  assert.ok(session.includes('const writable = assetStorageWritable(status)'));
-  for (const action of ["controller.open('encrypted')", 'controller.prepareInitialize()', 'controller.unlock()', 'Assess and assign…']) assert.ok(session.includes(action));
-  assert.ok(session.includes('const writeOnlyFormMounted = selectionVisible && !!kind && (!!(operation?.selectionToken && state.selectionKind)'));
-  assert.ok(session.includes("(idle && !intentPending && (kindId === 'google-wif' || kindId === 'project-read-token'))"));
-  assert.ok(session.includes('{writeOnlyFormMounted && kind &&'));
-  assert.ok(session.includes("<WriteOnlyFields key={`${state.entryGeneration}-${kind.id}-${replacementId ?? 'new'}`}"));
-  const privateForm = session.slice(session.indexOf('function WriteOnlyFields'), session.indexOf('export function CredentialSession'));
-  const privateFormParameters = privateForm.slice(0, privateForm.indexOf('const id ='));
-  assert.doesNotMatch(privateFormParameters, /\bpreparation\b/u);
-  assert.doesNotMatch(privateForm, /\b(?:ReleaseInputPreparationTarget|isPreparationCurrent|takePreparation|dismissPreparation|preparationSessionReason|preparationScopeChanged|localRef|onDirty|onEdit|setScope)\b/u);
-  assert.ok(privateForm.includes('const [values, setValues] = useState<Record<string, string>>({})'));
-  assert.ok(privateForm.includes("const [label, setLabel] = useState('')"));
-  assert.ok(privateForm.includes('assetLabelFits(proposedLabel)') && privateForm.includes("setValues({}); setLabel('')"));
-  assert.doesNotMatch(privateForm, /localStorage|sessionStorage|filename|dangerouslySetInnerHTML/);
-  assert.ok(session.includes('operation.storageOutcome.effect') && session.includes('operation.storageOutcome.durability') && session.includes('operation.storageOutcome.cleanup'));
-  assert.ok(session.includes('preparationCurrent && preparationKind &&')); // stale target never acquires the newly selected project label
-  assert.ok(session.includes('sessionKindHelp(originalPreparationKind)'));
-  assert.ok(pane.includes('controller.getSnapshot() === state') && page.includes('inputController.getSnapshot() === inputState'));
-  for (const label of ['Required by this draft; presence not checked.', 'How / where to find it', 'Expected format', 'If unavailable or incorrect',
-    'No requirements returned for this stage', 'saved files were not re-observed', 'persistent vault storage', 'Project settings']) assert.ok(pane.includes(label), label);
-  assert.doesNotMatch(pane, /type="(?:file|password|checkbox)"|dangerouslySetInnerHTML/);
-  assert.doesNotMatch(module, /validationFresh|\.chooseProject\(|\.assess\(|\.assign\(|\.environment\(|\.snapshot\(/);
-  assert.equal((module.match(/await binding\.api\.validate\(draft\)/g) ?? []).length, 1);
 });

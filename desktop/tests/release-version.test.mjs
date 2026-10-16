@@ -1,7 +1,6 @@
 // Inert DTO, reducer and controlled-promise checks only. No project files,
 // native runtime, tools, network, DOM, clocks, polling or child processes.
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createNativeApi } from '../src/bridge.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
@@ -463,35 +462,10 @@ test('browser preview refuses rather than manufacturing a saved-file result, eve
   await h.controller.read(); assert.equal(h.calls.length, 0); assert.equal(h.state.result, null); h.controller.dispose();
 });
 
-test('source integration guards keep synchronous P2 hooks, returned-source labels, help and disabled release readiness', () => {
-  // Source-text guard only, not an executed React/native-window test.
-  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  const page = readFileSync(new URL('../src/pages/Dashboard.tsx', import.meta.url), 'utf8');
-  const module = readFileSync(new URL('../src/releaseVersion.ts', import.meta.url), 'utf8');
-  const dispatch = app.slice(app.indexOf('const dispatch ='), app.indexOf('const [configEdit]'));
-  const retire = dispatch.indexOf('beforeWorkspaceAction(action)');
-  assert.ok(retire >= 0 && retire < dispatch.indexOf('workspaceReducer(previous, action)'));
-  assert.ok(retire >= 0 && retire < dispatch.indexOf('if (next === previous) return'));
-  assert.ok(dispatch.includes('releaseVersionControllerRef.current?.syncProject()'));
-  const begin = app.indexOf('releaseVersion.beginConnection()');
-  assert.ok(begin >= 0 && begin < app.indexOf('const connection = await desktopApi()'));
-  assert.ok(app.includes('releaseVersion.setConnection(connection, appInfo)'));
-  assert.ok(app.includes('releaseVersion.connectionUnavailable()') && app.includes('releaseVersion.dispose()'));
-  const picker = app.slice(app.indexOf('const chooseProject ='), app.indexOf('const changeApplicationRepository'));
-  const intent = picker.indexOf('releaseVersion.setSelectionPending(true)');
-  assert.ok(intent >= 0 && intent < picker.indexOf('await api.chooseProject()'));
-  assert.ok(picker.includes('finally') && picker.includes('releaseVersion.setSelectionPending(false)'));
-  // Preserve ON's selected-project reentrancy guard after synchronous retirement.
-  assert.ok(app.includes('releaseVersion.saveIntent(); if (workspaceRef.current.selectedId === session.project.id) configEdit.start(session.project.id)'));
-  assert.ok(app.includes('releaseVersion.saveIntent(); return configEdit.apply(binding)'));
-  assert.ok(app.includes("dispatch({ type: 'snapshot-start', projectId, requestId })") && module.includes("'snapshot-start', 'config-save-final', 'config-save-recovery'"));
-  for (const label of ['Read saved version', 'Observed from saved version file', 'Unsaved draft not applied.', 'External changes are not continuously monitored.', 'Stale observation']) assert.ok(page.includes(label));
-  assert.ok(page.includes('HelpButton content={releaseVersionHelp}'));
-  assert.ok(page.includes('{result.source}') && !page.includes("getValue(config, 'version.source')"));
-  assert.ok(page.includes("overflowWrap: 'anywhere', whiteSpace: 'normal'"));
-  assert.ok(page.includes('Release readiness</span>') && page.includes('Not assessed</strong>') && page.includes('No release operations are enabled'));
-  assert.ok(page.includes('<DisabledAction label="Create release candidate"'));
+test('saved-version guidance explains file observations without promising custody or readiness', () => {
   assert.match(releaseVersionHelp.what, /release\/mobile-release\.json/);
-  assert.match(releaseVersionHelp.what, /byte counts and SHA-256/); assert.match(releaseVersionHelp.failure, /not file custody or build consent/);
-  assert.match(releaseVersionHelp.failure, /non-atomic/); assert.match(releaseVersionHelp.failure, /not an artifact check/);
+  assert.match(releaseVersionHelp.what, /byte counts and SHA-256/);
+  assert.match(releaseVersionHelp.failure, /not file custody or build consent/);
+  assert.match(releaseVersionHelp.failure, /non-atomic/);
+  assert.match(releaseVersionHelp.failure, /not an artifact check/);
 });

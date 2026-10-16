@@ -4,7 +4,6 @@
 // qualification. Real ReleaseVersionController is used with a fake passive API.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
 import { AndroidBuildController, androidBuildOwnerReason, androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildCancelHelp, androidBuildSignatureHelp } from '../src/androidBuild.ts';
 import { ReleaseVersionController } from '../src/releaseVersion.ts';
 import { createNativeApi } from '../src/bridge.ts';
@@ -521,14 +520,6 @@ test('actual native bridge sends four raw copied Android bodies, rejects bad cal
 });
 
 test('component shares native-terminal-only output with Artifacts and provides real input/output/cancel help, not a file action', async (t) => {
-  const source = readFileSync(new URL('../src/components/AndroidBuild.tsx', import.meta.url), 'utf8');
-  assert.match(source, /export function AndroidBuildResultView/);
-  assert.match(source, /state\.mode !== 'native' \|\| op\?\.phase !== 'terminal' \|\| op\.outcome !== 'complete'/);
-  assert.match(source, /<AndroidBuildResultView state=\{state\}/);
-  assert.match(source, /if \(compact && !owned\) return null/); assert.match(source, /controller\.canCancel\(\)/);
-  assert.match(source, /controller\.versionIntent\(\); onReadVersion\(\)/);
-  assert.match(source, /post-run bytes may be reused\/stale/); assert.match(source, /signer is not inspected/);
-  assert.doesNotMatch(source, /(?:window\.open|href=|download=|controller\.dispose\()/);
   for (const help of [androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildCancelHelp, androidBuildSignatureHelp]) {
     for (const key of ['label', 'what', 'why', 'where', 'format', 'failure', 'requiredWhen']) assert.ok(help[key].length > 12, `${help.label}.${key}`);
   }
@@ -536,26 +527,6 @@ test('component shares native-terminal-only output with Artifacts and provides r
   assert.match(androidBuildOutputHelp.failure, /Ordinary inspection completion may contain FAIL/);
   assert.match(androidBuildOutputHelp.failure, /local signing requires all final checks to pass/);
   assert.match(androidBuildCancelHelp.failure, /Unknown cleanup is sticky/);
-
-  // The ordinary visible identity comes only from the controller's parsed
-  // current Status, not the displayed project, a result field or test props.
-  const details = source.slice(source.indexOf('function AndroidBuildDetails('), source.indexOf('// Shared by Releases'));
-  assert.match(details, /const op = state\.status\?\.operation, consent = state\.consent/);
-  assert.match(details, /state\.mode !== 'native' \|\| !op \|\| state\.historical \|\| state\.integrityFailed \|\| state\.nativeBlocked/);
-  assert.match(details, /\|\| state\.originalUnconfirmed\) return null/);
-  assert.match(details, /review && \(op\.phase !== 'awaiting-consent' \|\| !op\.intentUsable \|\| !consent/);
-  assert.match(details, /consent\.operationId !== op\.operationId \|\| consent\.ownerGeneration !== op\.ownerGeneration/);
-  assert.match(details, /role="group" aria-label="Build details"/);
-  assert.ok(details.includes('<p>{`Build operation ID: ${op.operationId}`}</p>'));
-  assert.ok(details.includes('<p>{`Build owner generation: ${op.ownerGeneration}`}</p>'));
-  assert.doesNotMatch(details, /(?:controller\.|result\.|project\.|operationId:|ownerGeneration:|aria-hidden|data-testid)/);
-  assert.equal((source.match(/<AndroidBuildDetails state=\{state\}(?: review)? \/>/g) ?? []).length, 3);
-  const resultView = source.slice(source.indexOf('export function AndroidBuildResultView'), source.indexOf('export function AndroidBuild({'));
-  assert.equal((resultView.match(/<AndroidBuildDetails state=\{state\} \/>/g) ?? []).length, 1);
-  const review = source.slice(source.indexOf('aria-label="Confirm this saved Android-build intent"'), source.indexOf('{state.error &&'));
-  assert.equal((review.match(/<AndroidBuildDetails state=\{state\} review \/>/g) ?? []).length, 1);
-  const originalStatus = source.slice(source.indexOf('aria-label="Original Android build status"'), source.indexOf('Leaving Releases keeps a started run'));
-  assert.equal((originalStatus.match(/<AndroidBuildDetails state=\{state\} \/>/g) ?? []).length, 1);
 
   // Existing real controller and protocol, with inert native replies. Review,
   // running and terminal data preserve the same pair; foreign IDs/generations
@@ -659,10 +630,6 @@ test('signature help distinguishes upload and Play signing certificates without 
   assert.match(androidBuildSignatureHelp.where, /App signing key certificate/);
   assert.match(androidBuildSignatureHelp.format, /64 hexadecimal characters without colons/);
   assert.match(androidBuildSignatureHelp.what, /does not sign or upload/);
-  const source = readFileSync(new URL('../src/components/AndroidBuild.tsx', import.meta.url), 'utf8');
-  assert.match(source, /Also verify upload signature/);
-  assert.match(source, /Signature integrity:/); assert.match(source, /Saved upload certificate:/);
-  assert.match(source, /controller.setVerifyUploadSignature/);
 });
 
 test('prerequisite guidance distinguishes an unqualified gate from a missing SDK and limits Tools diagnostics', () => {

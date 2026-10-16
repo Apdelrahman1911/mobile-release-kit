@@ -804,7 +804,6 @@ MAC_OBSERVER_MODE = "observer-only"
 MAC_OBSERVER_DATA_MODE = "observer-data"
 MAC_OBSERVER_DATA_EVIDENCE = "desktop-macos-observer-data-v1"
 MAC_OBSERVER_DATA_SCRIPT = "desktop/tools/macos_installed_data_contracts.sh"
-MAC_OBSERVER_DATA_SELECTION_SHA256 = "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94"
 MAC_OBSERVER_DATA_PHASES = ("mount", "apfs", "build", "rust", "python")
 # The exact 21 distinct SOURCE producer codes plus its existing unknown code.
 MAC_OBSERVER_DATA_GUARDS = (
@@ -3229,7 +3228,7 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
             selected_data = mac_observer_data_binding(mac.get("data"))
             expected["scope"] = MAC_OBSERVER_DATA_EVIDENCE
             if phase == "compile":
-                expected["dataResult"] = validate_mac_observer_data_result(value.get("dataResult"))
+                expected["dataResult"] = validate_mac_observer_data_result(value.get("dataResult"), selected=selected_data)
                 require(expected["dataResult"]["sourceInventorySha256"] == selected_data["sourceInventorySha256"],
                         "Observer DATA receipt source differs")
     if context["executionScope"] == ENGINEERING_COMPILE_SCOPE:
@@ -7367,7 +7366,7 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                 and context.get("macCompile", {}).get("mode") == MAC_OBSERVER_DATA_MODE and node == NODE
                 and compiled is None and main_compiled is None and source_slots_result is None and mac_history_result is None,
                 "Unexpected observer DATA result")
-        value["dataResult"] = validate_mac_observer_data_result(mac_observer_result)
+        value["dataResult"] = validate_mac_observer_data_result(mac_observer_result, selected=context["macCompile"]["data"])
     if source_slots_result is not None:
         require(context.get("executionScope") == SOURCE_SLOTS_SCOPE and name == "compile"
                 and node is None and compiled is None and main_compiled is None, "Unexpected SourceSlots DATA result")
@@ -9691,17 +9690,16 @@ def mac_observer_data_selection(raw: bytes) -> tuple[str, tuple[str, ...], tuple
                 require(name not in assignments, "Observer DATA SOURCE roster is repeated")
                 assignments[name] = ast.literal_eval(node.value)
     sources, tests = assignments.get("source_names"), assignments.get("names")
-    require(type(sources) is tuple and len(sources) == 78
+    require(type(sources) is tuple and 0 < len(sources) <= 256
             and all(type(name) is str and len(name) <= 240
                     and re.fullmatch(r"[A-Za-z0-9_./+-]+", name) is not None
                     and not name.startswith("/") and not any(part in {"", ".", ".."} for part in name.split("/"))
-                    for name in sources) and len(set(sources)) == 78
+                    for name in sources) and len(set(sources)) == len(sources)
             and MAC_OBSERVER_DATA_SCRIPT in sources,
             "Observer DATA SOURCE roster differs")
-    require(type(tests) is list and len(tests) == 84 and all(type(name) is str for name in tests)
-            and len(set(tests)) == 84
-            and hashlib.sha256(json.dumps(tests, separators=(",", ":")).encode()).hexdigest()
-                == MAC_OBSERVER_DATA_SELECTION_SHA256,
+    require(type(tests) is list and 0 < len(tests) <= 256 and all(type(name) is str for name in tests)
+            and len(set(tests)) == len(tests)
+            and all(re.fullmatch(r"test_[A-Za-z0-9_]+\.[A-Za-z0-9_]+\.test_[A-Za-z0-9_]+", name) for name in tests),
             "Observer DATA fixed selection differs")
     return body, sources, tuple(tests)
 
@@ -9764,28 +9762,36 @@ def mac_observer_data_inputs(source: Path) -> tuple[dict, bytes, list[dict], tup
             "Observer DATA selected SOURCE changed its bound")
     inventory = canonical_json({"files": rows}) + b"\n"
     require(len(inventory) <= 128 * 1024, "Observer DATA inventory exceeds its bound")
-    selected = {"sourceCount": 78, "sourceInventorySha256": hashlib.sha256(inventory).hexdigest(),
-                "scriptSha256": hashlib.sha256(raw).hexdigest(), "pythonCount": 84,
-                "selectionSha256": MAC_OBSERVER_DATA_SELECTION_SHA256}
+    selected = {"sourceCount": len(names), "sourceInventorySha256": hashlib.sha256(inventory).hexdigest(),
+                "scriptSha256": hashlib.sha256(raw).hexdigest(), "pythonCount": len(tests)}
     require(next(row for row in rows if row["path"] == MAC_OBSERVER_DATA_SCRIPT)["sha256"] == selected["scriptSha256"],
             "Observer DATA original script changed")
     return selected, body.encode("utf-8"), rows, tests
 
 
+def mac_observer_data_roster():
+    # The trusted checkout already supplies executable code. Read its current
+    # fixed test list, rather than duplicating it or freezing its code digest.
+    with Path(__file__).with_name("macos_installed_data_contracts.sh").open("rb") as source:
+        raw = source.read(128 * 1024 + 1)
+    _, sources, tests = mac_observer_data_selection(raw)
+    return sources, tests
+
+
 def mac_observer_data_binding(value: object) -> dict:
-    closed_object(value, {"sourceCount", "sourceInventorySha256", "scriptSha256", "pythonCount", "selectionSha256"},
+    closed_object(value, {"sourceCount", "sourceInventorySha256", "scriptSha256", "pythonCount"},
                   "Observer DATA input binding shape differs")
-    require(type(value["sourceCount"]) is int and value["sourceCount"] == 78
-            and type(value["pythonCount"]) is int and value["pythonCount"] == 84
-            and sha256_value(value["sourceInventorySha256"]) and sha256_value(value["scriptSha256"])
-            and value["selectionSha256"] == MAC_OBSERVER_DATA_SELECTION_SHA256,
+    sources, tests = mac_observer_data_roster()
+    require(type(value["sourceCount"]) is int and value["sourceCount"] == len(sources)
+            and type(value["pythonCount"]) is int and value["pythonCount"] == len(tests)
+            and sha256_value(value["sourceInventorySha256"]) and sha256_value(value["scriptSha256"]),
             "Observer DATA input binding differs")
     return value
 
 
-def validate_mac_observer_data_result(value: object) -> dict:
+def validate_mac_observer_data_result(value: object, *, selected: dict | None = None) -> dict:
     """Only complete fixed DATA can join a positive compiler cleanup receipt."""
-    keys = {"schemaVersion", "wrapperReturnCode", "sourceInventorySha256", "sourceCount", "selectionSha256",
+    keys = {"schemaVersion", "wrapperReturnCode", "sourceInventorySha256", "sourceCount",
             "pythonExpectedCount", "commands", "artifact", "aggregatePassed", "pythonCounts", "sourcePost",
             "temporaryEmpty", "rustPanic", "guardCode", "pythonFailure", "nativeVaultTestsExecuted", "uiExecutedByThisBatch", "nativeTlsQualified",
             "allWorkerFinalityEstablished"}
@@ -9795,10 +9801,15 @@ def validate_mac_observer_data_result(value: object) -> dict:
     require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
             and type(value["wrapperReturnCode"]) is int and value["wrapperReturnCode"] == 0
             and sha256_value(value["sourceInventorySha256"])
-            and type(value["sourceCount"]) is int and value["sourceCount"] == 78
-            and value["selectionSha256"] == MAC_OBSERVER_DATA_SELECTION_SHA256
-            and type(value["pythonExpectedCount"]) is int and value["pythonExpectedCount"] == 84,
+            and integer_between(value["sourceCount"], 1, 256)
+            and integer_between(value["pythonExpectedCount"], 1, 256),
             "Observer DATA source/selection/original return differs")
+    if selected is not None:
+        selected = mac_observer_data_binding(selected)
+        require(value["sourceCount"] == selected["sourceCount"]
+                and value["pythonExpectedCount"] == selected["pythonCount"]
+                and value["sourceInventorySha256"] == selected["sourceInventorySha256"],
+                "Observer DATA result selection differs")
     require(type(value["commands"]) is list and len(value["commands"]) == 5,
             "Observer DATA original command roster differs")
     for phase, row in zip(MAC_OBSERVER_DATA_PHASES, value["commands"]):
@@ -9815,7 +9826,7 @@ def validate_mac_observer_data_result(value: object) -> dict:
             "Observer DATA artifact did not settle")
     counts = closed_object(value["pythonCounts"], {"testsRun", "failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses"},
                            "Observer DATA Python counts differ")
-    require(type(counts["testsRun"]) is int and counts["testsRun"] == 84
+    require(type(counts["testsRun"]) is int and counts["testsRun"] == value["pythonExpectedCount"]
             and all(type(counts[key]) is int and counts[key] == 0 for key in counts if key != "testsRun")
             and value["aggregatePassed"] is True and value["sourcePost"] is True and value["temporaryEmpty"] is True
             and value["rustPanic"] is None and value.get("rustPanicDiagnostic") is None
@@ -9835,12 +9846,11 @@ def mac_observer_data_result(value: object, context: dict, wrapper_returncode: i
             and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1
             and value.get("sourceCommit") == context["sourceSha"] and value.get("sourceTree") == context["sourceTree"]
             and value.get("sourceInventorySha256") == selected["sourceInventorySha256"]
-            and value.get("frozenSelectionSha256") == MAC_OBSERVER_DATA_SELECTION_SHA256
-            and type(value.get("pythonExpectedCount")) is int and value["pythonExpectedCount"] == 84
+            and type(value.get("pythonExpectedCount")) is int and value["pythonExpectedCount"] == selected["pythonCount"]
             and value.get("ciContext") == {key: context[key] for key in ("workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")},
             "Observer DATA private result context differs")
     source_rows = value.get("sourceRows")
-    require(type(source_rows) is list and len(source_rows) == 78,
+    require(type(source_rows) is list and len(source_rows) == selected["sourceCount"],
             "Observer DATA private SOURCE roster differs")
     source_names = []
     for row in source_rows:
@@ -9851,19 +9861,17 @@ def mac_observer_data_result(value: object, context: dict, wrapper_returncode: i
                 and integer_between(row["size"], 1, 2 * 1024 * 1024) and sha256_value(row["sha256"]),
                 "Observer DATA private SOURCE row differs")
         source_names.append(row["path"])
-    require(len(set(source_names)) == 78 and sum(row["size"] for row in source_rows) <= 32 * 1024 * 1024
+    require(len(set(source_names)) == selected["sourceCount"] and sum(row["size"] for row in source_rows) <= 32 * 1024 * 1024
             and hashlib.sha256(canonical_json({"files": sorted(source_rows, key=lambda row: row["path"])}) + b"\n").hexdigest()
                 == selected["sourceInventorySha256"], "Observer DATA private SOURCE inventory differs")
     names = value.get("pythonTestIds")
-    require(type(names) is list and len(names) == 84 and all(type(name) is str for name in names)
-            and len(set(names)) == 84
-            and hashlib.sha256(json.dumps(names, separators=(",", ":")).encode()).hexdigest() == MAC_OBSERVER_DATA_SELECTION_SHA256,
+    require(type(names) is list and names == list(mac_observer_data_roster()[1]),
             "Observer DATA private Python selection differs")
     commands = value.get("commands")
     require(type(commands) is list and 0 <= len(commands) <= 5, "Observer DATA private command roster differs")
     result = {"schemaVersion": 1, "wrapperReturnCode": wrapper_returncode,
-              "sourceInventorySha256": selected["sourceInventorySha256"], "sourceCount": 78,
-              "selectionSha256": MAC_OBSERVER_DATA_SELECTION_SHA256, "pythonExpectedCount": 84,
+              "sourceInventorySha256": selected["sourceInventorySha256"], "sourceCount": selected["sourceCount"],
+              "pythonExpectedCount": selected["pythonCount"],
               "commands": [], "artifact": None, "aggregatePassed": None, "pythonCounts": None,
               "sourcePost": None, "temporaryEmpty": None, "rustPanic": None, "guardCode": None, "pythonFailure": None,
               "nativeVaultTestsExecuted": False, "uiExecutedByThisBatch": False,
@@ -9894,7 +9902,7 @@ def mac_observer_data_result(value: object, context: dict, wrapper_returncode: i
                 "Observer DATA private Python counts differ")
         result["pythonCounts"] = {}
         for key in ("testsRun", "failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses"):
-            require(integer_between(counts.get(key), 0, 84), "Observer DATA private Python count differs")
+            require(integer_between(counts.get(key), 0, selected["pythonCount"]), "Observer DATA private Python count differs")
             result["pythonCounts"][key] = counts[key]
     for old, new in (("ciAggregatePassed", "aggregatePassed"), ("ciSourcePost", "sourcePost"), ("ciTemporaryEmpty", "temporaryEmpty")):
         item = value.get(old)
@@ -9967,7 +9975,7 @@ def mac_observer_data_result(value: object, context: dict, wrapper_returncode: i
             count_keys = ("testsRun", "failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")
             extra = ("actualHostBeforeAndAfter", "failureTests", "classifiedTestCount", "omittedTestCount", "unclassifiedTestCount")
             closed_object(python, set(count_keys + extra), "Observer DATA Python diagnostic shape differs")
-            require(all(integer_between(python[key], 0, 84 if key == "testsRun" else 65535) for key in count_keys)
+            require(all(integer_between(python[key], 0, selected["pythonCount"] if key == "testsRun" else 65535) for key in count_keys)
                     and type(python["actualHostBeforeAndAfter"]) is bool
                     and type(python["failureTests"]) is list and len(python["failureTests"]) <= 16,
                     "Observer DATA Python diagnostic counts differ")
@@ -9994,7 +10002,7 @@ def mac_observer_data_result(value: object, context: dict, wrapper_returncode: i
     if wrapper_returncode == 0:
         require(value["passed"] is True and value.get("failure") is None,
                 "Observer DATA wrapper returned zero without a positive original result")
-        validate_mac_observer_data_result(result)
+        validate_mac_observer_data_result(result, selected=selected)
     return result
 
 
@@ -10067,7 +10075,7 @@ def mac_observer_data_checks(cargo, root, source, environment, remaining, contex
         require(returned_code == 0 and projected is not None, "Observer DATA original result unavailable")
         remaining(30)
         require(same_compile_json(mac_observer_data_inputs(source)[0], selected), "Observer DATA SOURCE changed after originals")
-        return validate_mac_observer_data_result(projected)
+        return validate_mac_observer_data_result(projected, selected=selected)
     except BaseException as error:
         first = primary if primary is not None else error
         failure = {"schemaVersion": 1, "scope": MAC_OBSERVER_DATA_EVIDENCE, "phase": "compile",

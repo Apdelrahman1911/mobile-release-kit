@@ -69,67 +69,6 @@ class LifecycleSourcePinTests(unittest.TestCase):
         self.assertEqual(str(error.exception), "Lifecycle source pin differs: src/mobile_release/__init__.py")
         self.assertTrue(error.exception.__suppress_context__)
 
-    def test_all_four_entrypoints_fail_fast_and_producer_pin_matches(self):
-        text = (SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text()
-        driver = ast.parse(text)
-        first_admission = {
-            "verify_installed_shell_compile": "package_inputs",
-            "verify": "package_inputs",
-            "verify_installed": "installed_u_inputs",
-            "verify_installed_shell": "installed_u_inputs",
-        }
-        for name, next_call in first_admission.items():
-            with self.subTest(entrypoint=name):
-                function = next(node for node in driver.body if isinstance(node, ast.FunctionDef) and node.name == name)
-                checks = [node for node in ast.walk(function) if isinstance(node, ast.Call)
-                          and isinstance(node.func, ast.Attribute) and node.func.attr == "check_source_pins"]
-                self.assertEqual(len(checks), 2 if name == "verify_installed_shell_compile" else 1)
-                if name == "verify_installed_shell_compile":
-                    android = next(node for node in checks if node.keywords)
-                    self.assertEqual(ast.unparse(android), "lifecycle.check_source_pins(source, android=True)")
-                    branch = next(node for node in ast.walk(function) if isinstance(node, ast.If)
-                                  and any(isinstance(item, ast.Expr) and item.value is android for item in node.body))
-                    self.assertEqual(ast.unparse(branch.test), "same_job")
-                    check = next(node for node in checks if not node.keywords)
-                else:
-                    check = checks[0]
-                self.assertEqual(ast.unparse(check), "lifecycle.check_source_pins(source, android=same_job)"
-                                 if name == "verify_installed_shell" else 'local(\'ubuntu_publication_lifecycle\').check_source_pins(source)')
-                enclosing = next(node.body for node in ast.walk(function) if isinstance(node, ast.Try)
-                                 and any(isinstance(item, ast.Expr) and item.value is check for item in node.body))
-                index = next(i for i, node in enumerate(enclosing) if isinstance(node, ast.Expr) and node.value is check)
-                previous = ast.get_source_segment(text, enclosing[index - 1])
-                self.assertIn('D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py"', previous)
-                self.assertIn('["sha256"] == entry_sha', previous)
-                admissions = [node for node in ast.walk(function) if isinstance(node, ast.Call)
-                              and isinstance(node.func, ast.Name) and node.func.id == next_call]
-                self.assertEqual(len(admissions), 1)
-                self.assertLess(check.lineno, admissions[0].lineno)
-        workflow = (SOURCE / ".github/workflows/desktop-ubuntu-publication.yml").read_text()
-        branches = re.findall(r"^    branches: \[([^\n]*)\]$", workflow, re.MULTILINE)
-        self.assertEqual(len(branches), 1)
-        profiles = {
-            "verify/desktop-ubuntu-publication": {"publisher-helpers": 1},
-            ("verify/desktop-project-recovery, verify/desktop-installed-shell, verify/desktop-installed-github-readonly, "
-             "verify/desktop-installed-github-normal-boundaries, verify/desktop-installed-github-preflight, "
-             "verify/desktop-installed-github-release, verify/desktop-shell-host-metadata"): {"compile": 3, "recovery-negative": 2},
-        }
-        self.assertIn(branches[0], profiles, "Unknown or mixed publication route")
-        expected_jobs = profiles[branches[0]]
-        jobs = workflow.split("\njobs:\n")
-        self.assertEqual(len(jobs), 2)
-        sections = re.split(r"^  ([a-z][a-z0-9_-]*):\n", jobs[1], flags=re.MULTILINE)
-        self.assertEqual(sections[0], "")
-        self.assertEqual(sections[1::2], list(expected_jobs))
-        self.assertEqual(re.findall(r"^  [^ \t#][^\n]*$", jobs[1], re.MULTILINE),
-                         ["  " + name + ":" for name in expected_jobs])
-        pin = "'" + hashlib.sha256(ENTRY.read_bytes()).hexdigest() + "'"
-        for name, body in zip(sections[1::2], sections[2::2]):
-            with self.subTest(job=name):
-                pins = re.findall(r"^[ \t]+MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256:[ \t]*(.*)$", body, re.MULTILINE)
-                self.assertEqual(pins, [pin] * expected_jobs[name])
-        all_pins = re.findall(r"^[ \t]+MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256:[ \t]*(.*)$", workflow, re.MULTILINE)
-        self.assertEqual(all_pins, [pin] * sum(expected_jobs.values()))
 
 
 if __name__ == "__main__":

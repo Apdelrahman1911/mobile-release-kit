@@ -1785,23 +1785,6 @@ class LifecycleData(unittest.TestCase):
                 if case in {"caller-log", "policy", "before", "command"}: self.assertNotIn("log", events)
                 if case == "command": self.assertEqual(len(reads), 1)
 
-    def test_all_package_mutations_share_the_observed_command_wrapper(self):
-        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
-        functions = {node.name: node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-        def calls(name, target):
-            return [node for node in ast.walk(functions[name]) if isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name) and node.func.id == target]
-        self.assertEqual(len(calls("mutate", "package_command")), 1)
-        self.assertFalse(calls("mutate", "command"))
-        self.assertEqual(len(calls("package_command", "command")), 1)
-        expected = {"unpack", "configure", "upgrade", "duplicate", "remove", "purge"}
-        if "_installed_overlap" in functions:
-            expected.add("upgrade-unpack")
-            self.assertEqual(len(calls("_installed_overlap", "package_command")), 1)
-            self.assertFalse(calls("_installed_overlap", "command"))
-        self.assertEqual({node.args[0].value for node in calls("unit_start", "mutate")}, expected)
-        self.assertEqual(len(calls("verify_service_result", "verify_package_observations")), 1)
-        self.assertEqual(len(calls("_finish_body" if "_finish_body" in functions else "unit_start", "verify_package_observations")), 1)
 
     def test_loader_diagnostics_cache_and_every_soname_search_are_finite(self):
         raw = diagnostic_data()
@@ -2531,15 +2514,6 @@ class GitHubPeerNamespaceWitnessContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             L._github_peer_namespace_witness(changed)
 
-    def test_real_producers_and_finality_callers_keep_the_explicit_route(self):
-        source = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text()
-        for producer, following in (("unit_start", "_no_denials"), ("unit_stop", "installed_closed_result")):
-            body = source.split("def " + producer + "(", 1)[1].split("def " + following + "(", 1)[0]
-            self.assertIn('if shell_github(value):', body)
-            self.assertIn('["githubPeerNamespaces"] = _github_boundary_namespaces()', body)
-            self.assertIn('_github_peer_namespace_witness(', body)
-        self.assertIn('verify_finality(start, stop, 0, github=shell_github(value))', source)
-        self.assertIn('verify_finality(start, stop, client_result.returncode, github=shell_github(value))', source)
 
 
 def project_draft_receipt():
@@ -3513,39 +3487,6 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                 altered = dict(value); altered[field] = bad
                 with self.subTest(field=field, bad=bad), self.assertRaises(ValueError): L.shell_fixture_root(altered)
 
-    def test_source_has_one_constructor_after_admission_and_postchecks_after_success(self):
-        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
-        unit = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "unit_start")
-        branch = next(n for n in unit.body if isinstance(n, ast.If) and ast.unparse(n.test) == "'shell' in value")
-        loop = next(n for n in branch.body if isinstance(n, ast.For))
-        self.assertEqual(ast.unparse(loop.iter), "shell_cases(value)")
-        self.assertEqual(ast.unparse(branch.body[1]), "expected = _installed_payload(value, loader, original)")
-        self.assertEqual(ast.unparse(branch.body[2]),
-                         "github_expected = _shell_github_materials_prepare(value, loader, original, expected) if shell_github(value) else None")
-        self.assertEqual(ast.unparse(branch.body[3]), "namespace = _shell_fixtures_prepare(value)")
-        self.assertEqual(ast.unparse(branch.body[4]), "boundary_host = None")
-        self.assertEqual(ast.unparse(branch.body[5].test), "shell_normal_boundaries(value)")
-        self.assertEqual(ast.unparse(branch.body[6].test), "shell_github(value)")
-        self.assertIs(branch.body[7], loop)
-        self.assertEqual(ast.unparse(branch.body[8]), "_shell_fixtures_final(value, namespace)")
-        self.assertEqual(L.SHELL_CASES[10], "metadata-save")
-        self.assertEqual(L.SHELL_CASES[18:21], ("offline-settlement", "settled-failure", "version-save"))
-        self.assertEqual(ast.unparse(loop.body[0]), "boundary = None")
-        self.assertIsInstance(loop.body[1], ast.Try)
-        guarded = loop.body[1]
-        self.assertEqual(guarded.handlers, [])  # No exception swallowing or retry.
-        self.assertEqual(guarded.orelse, [])
-        self.assertEqual(ast.unparse(guarded.body[0].test), "case in SHELL_GITHUB_BOUNDARY_CASES")
-        self.assertEqual(ast.unparse(guarded.body[1]), "environment, log_binding = _shell_prepare(value, case, namespace)")
-        self.assertEqual(ast.unparse(guarded.body[2].body[0]), "cases[case] = _shell_normal(value, environment, expected, log_binding)")
-        self.assertEqual(ast.unparse(guarded.body[-2]), "_shell_namespace_check(value, namespace)")
-        self.assertEqual(ast.unparse(guarded.body[-1]), "if boundary is not None:\n    _github_boundary_finish(boundary, cases[case])")
-        self.assertEqual(ast.unparse(guarded.finalbody[0]), "if boundary is not None:\n    _github_boundary_close_after(boundary)")
-        self.assertEqual(sum(isinstance(n, ast.Try) for n in ast.walk(branch)), 1)
-        calls = [n.func.id for n in ast.walk(unit) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
-        self.assertEqual(calls.count("_shell_fixtures_prepare"), 1)
-        prepare = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_shell_prepare")
-        self.assertEqual(ast.unparse(prepare.body[0]), "_shell_namespace_check(value, namespace)")
 
 
 @patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)

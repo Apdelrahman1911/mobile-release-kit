@@ -1,0 +1,133 @@
+name: Desktop CI
+
+on:
+  pull_request:
+    paths:
+      - desktop/**
+      - src/**
+      - tests/desktop/**
+      - tests/native_desktop*.py
+      - templates/**
+      - schemas/**
+      - fastlane/**
+      - Gemfile
+      - Gemfile.lock
+      - pyproject.toml
+      - .github/workflows/desktop-ci.yml
+  push:
+    branches: [main]
+    paths:
+      - desktop/**
+      - src/**
+      - tests/desktop/**
+      - tests/native_desktop*.py
+      - templates/**
+      - schemas/**
+      - fastlane/**
+      - Gemfile
+      - Gemfile.lock
+      - pyproject.toml
+      - .github/workflows/desktop-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Fast desktop checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      artifact-id: ${{ steps.frontend.outputs.artifact-id }}
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install Python test dependencies
+        working-directory: .
+        run: python -m pip install --disable-pip-version-check -e '.[test]'
+      - name: Test desktop API, policy, protocols, and recovery behavior
+        working-directory: .
+        env:
+          PYTHONPATH: src:tests:tests/desktop
+        run: |
+          python -B -m unittest \
+            test_api test_credential_guide test_credential_policy test_environment \
+            test_github_connection test_github_connection_transport \
+            test_github_preflight test_github_preflight_frames test_github_release \
+            test_github_setup test_github_setup_variables \
+            test_metadata_text test_metadata_text_protocol \
+            test_metadata_images test_metadata_images_protocol test_release_version \
+            test_workflow_edit_protocol test_workflow_recovery_engine \
+            test_offline_preflight test_project_recovery test_macos_workflow_admission \
+            test_macos_android_ui_result
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.20.0'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - run: npm run build
+      - name: Share this run's frontend with native builds
+        id: frontend
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-frontend-${{ github.sha }}-${{ github.run_attempt }}
+          path: desktop/dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  native:
+    name: Native tests and build (${{ matrix.os }})
+    needs: frontend
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26, macos-26-intel, windows-2025]
+    defaults:
+      run:
+        shell: bash
+        working-directory: desktop/src-tauri
+    env:
+      RUSTUP_TOOLCHAIN: '1.98.0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download only the frontend artifact produced by this run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.frontend.outputs.artifact-id }}
+          path: desktop/dist
+          merge-multiple: true
+      - name: Install Linux native libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev
+      - name: Set the supported macOS deployment target
+        if: runner.os == 'macOS'
+        run: echo 'MACOSX_DEPLOYMENT_TARGET=26.0' >> "$GITHUB_ENV"
+      - name: Install the Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+      - name: Run native library tests
+        run: cargo test --locked --lib --no-default-features
+      - name: Build the development shell
+        run: cargo build --locked --bin mobile-release-kit-desktop --no-default-features --features desktop-shell,development-runtime
+      - name: Build the embedded-frontend shell
+        run: cargo build --locked --bin mobile-release-kit-desktop --no-default-features --features desktop-shell,custom-protocol

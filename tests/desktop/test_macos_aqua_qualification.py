@@ -380,338 +380,55 @@ def inert_created_directory(gid=GID):
 
 class AquaDataTests(unittest.TestCase):
     def test_current_owner_pins_match_checkout_and_refuse_stale_before_import(self):
-        root = PATH.parents[2]
-        names = ("owned_process.py", "_command_process.py", "_native_process.py", "cancellation.py")
-        self.assertEqual(tuple(M.OWNER_PINS), names)
-        for name, expected in M.OWNER_PINS.items():
-            path = root / "src" / "mobile_release" / name
-            info = path.lstat()
-            self.assertTrue(stat.S_ISREG(info.st_mode), name)
-            self.assertLessEqual(info.st_size, 256 * 1024, name)
-            self.assertEqual(M.digest(path.read_bytes()), expected, name)
-
-        # Follow the live parent pins as SOURCE DATA, without importing helpers.
-        def assigned(tree, name):
-            values = [node.value for node in tree.body
-                      if isinstance(node, ast.Assign) and len(node.targets) == 1
-                      and isinstance(node.targets[0], ast.Name)
-                      and node.targets[0].id == name]
-            self.assertEqual(len(values), 1, name)
-            return values[0]
-
-        # The update reader extends only the fixed stager. Bind its genuine
-        # final bytes and exact existing-loader bound; ordinary UI/result schema
-        # is not replaced by an update-specific shortcut or another owner.
-        stager_relative = "desktop/tools/stage_macos_installed.py"
-        stager_body = (root / stager_relative).read_bytes()
-        loader_body = (root / "desktop/tools/macos_aqua_qualification.py").read_bytes()
-        loader_tree = ast.parse(loader_body)
-        stager_pins = ast.literal_eval(assigned(loader_tree, "SHIPPING_GATE_SOURCE_PINS"))
-        self.assertIs(type(stager_pins), dict)
-        self.assertIs(type(stager_pins[stager_relative]), str)
-        self.assertEqual(stager_pins[stager_relative], M.digest(stager_body))
-        self.assertIn(('limit = ' + str(len(stager_body)) + ' if relative == "' + stager_relative + '"').encode(), loader_body)
-        self.assertIn(b"expected_update_previous=None, update_facts=None", stager_body)
-        loader_relative = "desktop/tools/macos_aqua_qualification.py"
-        runner_relative = "desktop/tools/macos_normal_ui_runner.py"
-        runner_tree = ast.parse((root / runner_relative).read_bytes())
-        self.assertEqual(ast.literal_eval(assigned(runner_tree, "LOADER")), loader_relative)
-        self.assertEqual(ast.literal_eval(assigned(runner_tree, "LOADER_SHA")),
-                         M.digest((root / loader_relative).read_bytes()))
-
-        # Current-only downstream source bindings form one exact DAG. Parse
-        # their literal DATA; never import another runner or invoke its owner.
-        def bounded_source(relative):
-            source_path = root / relative
-            source_info = source_path.lstat()
-            self.assertTrue(stat.S_ISREG(source_info.st_mode), relative)
-            self.assertLessEqual(source_info.st_size, 1024 * 1024, relative)
-            body = source_path.read_bytes()
-            self.assertEqual(len(body), source_info.st_size, relative)
-            return body
-
-        intel_tree = ast.parse(bounded_source("desktop/tools/macos_intel_os_providers.py"))
-        intel_pins = ast.literal_eval(assigned(intel_tree, "SOURCE_PINS"))
-        self.assertEqual(len(intel_pins), 11)
-        for relative, (source_size, source_digest) in intel_pins.items():
-            body = bounded_source(relative)
-            self.assertEqual((len(body), M.digest(body)), (source_size, source_digest), relative)
-        seal_tree = ast.parse(bounded_source("desktop/tools/macos_github_seal_build.py"))
-        reuse_pins = ast.literal_eval(assigned(seal_tree, "REUSE_PINS"))
-        loader_body = bounded_source(loader_relative)
-        self.assertEqual(reuse_pins["macos_aqua_qualification.py"],
-                         (len(loader_body), M.digest(loader_body)))
-        dependency_tree = ast.parse(bounded_source("desktop/tools/macos_android_dependency_preparation.py"))
-        dependency_pins = ast.literal_eval(assigned(dependency_tree, "PINS"))
-        runner_body = bounded_source(runner_relative)
-        runner_pin = [len(runner_body), M.digest(runner_body)]
-        self.assertEqual(dependency_pins[runner_relative], runner_pin)
-        self.assertEqual(ast.literal_eval(assigned(dependency_tree, "UI_NORMAL_PIN")), runner_pin)
-
-        # The positive check above reads only DATA. The actual loader is entered
-        # only with the known stale pin, under a blocker installed before entry.
-        def core_modules():
-            return {name: module for name, module in sys.modules.items()
-                    if name == "mobile_release" or name.startswith("mobile_release.")}
-        before_modules, before_path, before_pins = core_modules(), sys.path, dict(M.OWNER_PINS)
-        before_path_values = list(before_path)
-        self.assertEqual(before_modules, {})  # Never delete preexisting modules to make this pass.
-        attempted_imports = []
-        original_import = __import__
-
-        def no_core_import(name, globals=None, locals=None, fromlist=(), level=0):
-            package = globals.get("__package__") if type(globals) is dict else None
-            if (name == "mobile_release" or name.startswith("mobile_release.")
-                    or level and type(package) is str
-                    and (package == "mobile_release" or package.startswith("mobile_release."))):
-                attempted_imports.append(name)
-                raise AssertionError("core import attempted before stale owner refusal")
-            return original_import(name, globals, locals, fromlist, level)
-
-        # Contexts restore the original dictionaries/path even if an assertion
-        # fails; the inner assertions detect drift before that restoration.
-        with patch.dict(sys.modules), patch.object(sys, "path", list(before_path)):
-            with patch("builtins.__import__", no_core_import), patch.dict(M.OWNER_PINS, {
-                    "_command_process.py": "075fa6e9838017feb6a1716ab3a75074e3a65dffe8b217613aff7e87c0201f68"}):
-                with self.assertRaisesRegex(M.Refused, "^owner-source-pin$") as refused:
-                    M.load_owner(root)
-                self.assertIs(type(refused.exception), M.Refused)
-                self.assertEqual(attempted_imports, [])
-                self.assertEqual(sys.path, before_path_values)
-                self.assertEqual(core_modules(), before_modules)
-            self.assertEqual(M.OWNER_PINS, before_pins)
-        self.assertIs(sys.path, before_path)
-        self.assertEqual(sys.path, before_path_values)
-        self.assertEqual(core_modules(), before_modules)
-        self.assertEqual(M.OWNER_PINS, before_pins)
-
-        workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        label = "      - name: Check current owner pins before native preparation\n"
-        self.assertEqual(workflow.count(label), 1)
-        position = workflow.index(label)
-        self.assertLess(workflow.index("      - name: Bind the complete reviewed first-party checkout before compilation\n"), position)
-        # The reviewed fresh supplier route is DATA-only and precedes the
-        # native owner preflight; it does not reuse the removed M-download step.
-        previous = workflow.index("      - name: Bind the complete reviewed first-party checkout before compilation\n")
-        for earlier in ("Admit only a fresh independently pinned Python transport destination",
-                        "Download the independently accepted fresh Python transport",
-                        "Project the pinned fresh Python transport without executing it",
-                        "Prepare the current payload from the independently accepted fresh Python supplier"):
-            supplier_label = "      - name: " + earlier + "\n"
-            self.assertEqual(workflow.count(supplier_label), 1)
-            current = workflow.index(supplier_label)
-            self.assertLess(previous, current)
-            self.assertLess(current, position)
-            previous = current
-        self.assertNotIn("      - name: Download only the exact accepted M archive (no rebuild or fallback)\n", workflow)
-        for later in ("Compile headless Mac libraries and run the exact selected DATA regressions first",
-                      "Fail fast on native Scripts ownership and package format (never Installer)",
-                      "Compile the fixed debug actual-main observer and normal embedded frontend once",
-                      "Application installation uses only standard privileged Installer; app and Python stay nonroot"):
-            self.assertLess(position, workflow.index("      - name: " + later + "\n"))
-        step = workflow.split(label, 1)[1].split("\n      - name:", 1)[0]
-        for required in (
-                "timeout-minutes: 1", '"$MRK_PYTHON" -I -S -B -',
-                'path = pathlib.Path("tests/desktop/test_macos_aqua_qualification.py").absolute()',
-                'module.AquaDataTests("test_current_owner_pins_match_checkout_and_refuse_stale_before_import")',
-                'module.IOSAquaDataTests("test_normal_macos_selection_is_original_bound_without_observer_grants")',
-                'module.CurrentIOSAquaDataTests("test_current_reports_are_closed_bounded_and_do_not_claim_successful_signing")',
-                'module.CurrentIOSAquaDataTests("test_file_originals_and_retained_signing_records_cannot_be_substituted")',
-                'module.ProjectFieldsAquaDataTests("test_complete_project_fields_report_is_bounded_and_fail_closed")',
-                'module.ProjectFieldsAquaDataTests("test_original_fixture_restoration_has_only_two_ctime_exceptions")',
-                'roster_path = pathlib.Path("tests/desktop/test_installed_shell_ci.py").absolute()',
-                'roster_spec = importlib.util.spec_from_file_location("_mrk_macos_observer_roster_preflight", roster_path)',
-                'roster_spec.loader.exec_module(roster_module)',
-                'roster_module.InstalledShellCompilerContracts("test_observer_module_roster_matches_production_supported_platforms")',
-                "unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)",
-                "result.testsRun != 7", "not result.wasSuccessful()",
-                "result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses",
-                "raise SystemExit(1)"):
-            self.assertIn(required, step)
-        self.assertNotIn("discover(", step)
-        self.assertNotIn("loadTestsFrom", step)
-
-        headless_label = "      - name: Compile headless Mac libraries and run the exact selected DATA regressions first\n"
-        self.assertEqual(workflow.count(headless_label), 1)
-        self.assertLess(workflow.index(headless_label), workflow.index(
-            "      - name: Fail fast on native Scripts ownership and package format (never Installer)\n"))
-        headless = aqua_headless_source()
-        self.assertLess(headless.index("cd desktop/src-tauri"), headless.index('"/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --locked --no-default-features'))
-        self.assertEqual(headless.count('"/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test '), 1)
-        self.assertIn("--package mobile-release-kit-desktop --package mrk-macos-installed-native", headless)
-        self.assertIn("--lib --no-run --message-format=json", headless)
-        self.assertNotIn("--manifest-path", headless)
-        raw_compiler = headless.split('"$MRK_PYTHON" -I -S -B -', 1)[0]
-        self.assertNotIn("--features", raw_compiler)
-        self.assertIn('if shipping_gate:\n                      compiler_argv += ["--features", "mrk-macos-installed-native/installed-observation"]', headless)
-        self.assertIn('cwd="desktop" if name in ("rustc", "cargo") else None', workflow)
-        names = headless.split("          names = (\n", 1)[1].split("          )\n", 1)[0]
-        self.assertCountEqual(M.re.findall(r'"([^"]+)"', names), (
-            "asset_source::macos::tests::private_asset_suffixes_admit_android_without_broadening_apple_formats",
-            "asset_source::macos::tests::root_aliases_are_exact_and_physical_protection_is_not_path_text",
-            "asset_source::macos::tests::entered_native_checks_remain_uncertain_after_descriptor_book_retirement",
-            "asset_source::macos::tests::protected_objects_are_recognized_even_from_another_firmlink_parent_role",
-            "asset_source::macos::tests::complete_alias_rosters_are_bounded_before_any_native_acquisition",
-            "asset_source::macos::tests::project_fields_are_strict_descendant_data_not_credential_capture",
-            "asset_source::macos::tests::project_spellings_are_bounded_without_canonicalization",
-            "asset_source::macos::tests::only_local_ownership_aware_apfs_is_admitted",
-            "ios_toolchain::tests::fixed_alias_is_only_one_sibling_not_a_path_traversal_or_second_lookup",
-            "asset_session::tests::macos_input_context_matrix_keeps_platform_kinds_and_ios_signing_separate",
-            "asset_session::tests::macos_cached_record_preview_publication_and_old_context_cannot_bypass_kind_gate",
-            "asset_session::vault::tests::explicit_vault_loans_supply_two_signing_inputs_and_preserve_actual_borrowed_backing_on_lock",
-            "asset_session::vault::tests::bound_loan_publication_refuses_changed_lineage_or_unsettled_original_without_taking_payload",
-            "asset_session::vault::tests::loan_currentness_rejects_equal_counter_replacement_new_context_registry_and_reassignment",
-            "asset_session::vault::tests::reassigned_loan_census_is_not_refunded_before_off_lock_retirement_and_restore_preserves_it",
-            "asset_session::vault::tests::schema_three_advertises_storage_modes_without_opening_or_probing_a_vault",
-            "asset_session::vault::tests::encrypted_projection_redacts_locked_read_only_and_mutating_authority",
-            "runtime::persistence_selection_keeps_original_document_and_fixed_helper_pin_bounds",
-            "asset_session::vault::tests::boxed_loan_cells_are_charged_once_each_while_arc_backing_deduplicates",
-            "asset_session::vault::tests::prospective_loan_pointee_preserves_resident_boundary_and_checked_overlap",
-            "asset_session::vault::tests::refused_new_or_replacement_loan_keeps_loaded_and_original_box_unchanged",
-            "asset_session::images::persistent_memory::tests::image_fixed_partition_boundary_overflow_and_incomplete_heap_refuse",
-            "asset_session::images::persistent_memory::tests::image_identity_set_keeps_distinct_allocations_and_refuses_the_148th",
-            "asset_session::images::persistent_memory::tests::image_record_assignment_payload_and_context_capacities_share_one_census",
-            "asset_session::images::persistent_memory::tests::image_stored_heap_charges_spare_capacity_not_its_inline_cell_twice",
-        ))
-        native_names = headless.split("          native_names = (\n", 1)[1].split("          )\n", 1)[0]
-        self.assertCountEqual(M.re.findall(r'"([^"]+)"', native_names), (
-            "tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches",
-            "tests::only_explicit_user_appkit_responses_can_be_accept_or_decline",
-        ))
-        self.assertIn('scope = "twenty-five-main-and-two-native-macos-headless-data-regressions"', headless)
-        self.assertIn('"scope": scope', headless)
-        table = headless.split("          libraries = (\n", 1)[1].split("          )\n", 1)[0]
-        self.assertEqual(table,
-            '              ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, main_count, "headless"),\n'
-            '              ("native", "desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native",\n'
-            '               ["default", "installed-observation"] if shipping_gate else ["default"], native_names, native_count, "headless-native"),\n')
-        for required in ("if len(targets) != 2:", "for role, directory, package, library, features, test_names, count, prefix in libraries:",
-                         'r.get("target", {}).get("name") == library', "if len(matches) != 1:",
-                         'package_id = "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0")',
-                         'target.get("package_id") != package_id',
-                         'target.get("manifest_path") != str(checkout / directory / "Cargo.toml")',
-                         'target["target"].get("kind") != ["lib"]', 'target["target"].get("crate_types") != ["lib"]',
-                         'target["target"].get("src_path") != str(checkout / directory / "src/lib.rs")',
-                         'target.get("profile", {}).get("test") is not True', 'target.get("features") != features',
-                         'binary.parent != expected', 're.fullmatch(re.escape(library) + r"-[0-9a-f]+", binary.name)',
-                         "for binary, test_names, count, prefix, record in admitted:"):
-            self.assertIn(required, headless)
-        execution_label = "\n              for binary, test_names, count, prefix, record in admitted:\n"
-        settlement_label = "\n          finally:\n"
-        self.assertEqual(headless.count(execution_label), 1)
-        self.assertEqual(headless.count(settlement_label), 1)
-        self.assertLess(headless.index("admitted.append("), headless.index(execution_label))
-        # The catalogue helper and compiler have their own reviewed original
-        # calls; neither is the later, fully admitted library-test execution.
-        self.assertEqual(headless.count("owner.run_owned("), 3)
-        execution = headless.split(execution_label, 1)[1].split(settlement_label, 1)[0]
-        self.assertEqual(execution.count("owner.run_owned("), 1)
-        for required in ('[str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty", *test_names]',
-                         "cwd=work, timeout=30, capture=True, text=False, output_limit=64 * 1024",
-                         "type(result) is not subprocess.CompletedProcess", "type(result.stdout) is not bytes",
-                         "type(result.stderr) is not bytes", "len(result.stdout) + len(result.stderr) > 64 * 1024",
-                         "len(test_names) != count", "len(expected_rows) != count", "len(lines) != count + 2",
-                         'heading = f"running {count} " + ("test" if count == 1 else "tests")', 'lines[0] != heading',
-                         "len(set(lines[1:-1])) != count", "set(lines[1:-1]) != expected_rows",
-                         "{count} passed; 0 failed; 0 ignored; 0 measured;"):
-            self.assertIn(required, execution)
-        reject = execution.index('if result.returncode != 0 or result.stderr:')
-        for output in ("stdout", "stderr", "status"):
-            self.assertLess(execution.index('publish(prefix + "-tests.' + output + '"'), reject)
-        self.assertLess(execution.index("originals.append(original)"), execution.index("before = os.fstat(binary_fd)"))
-        self.assertIn('os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)', execution)
-        for required in ('sig(before) != sig(os.fstat(binary_fd))', 'sig(before) != sig(binary.lstat())',
-                         'os.pread(binary_fd, min(before.st_size - offset, 1024 * 1024), offset)',
-                         'os.pread(binary_fd, 1, before.st_size)', 'return digest.hexdigest()'):
-            self.assertIn(required, execution)
-        digest_checks = [item.start() for item in M.re.finditer(M.re.escape('if original_digest() != digest:'), execution)]
-        self.assertEqual(len(digest_checks), 2)
-        self.assertLess(digest_checks[0], execution.index("result = owner.run_owned("))
-        self.assertGreater(digest_checks[1], execution.index('publish(prefix + "-tests.status"'))
-        self.assertLess(execution.index('raise ValueError("headless-original-return-contract")'), execution.index("home.rmdir()"))
-        settlement = headless.split(settlement_label, 1)[1]
-        self.assertNotIn(".rmdir()", settlement)
-        for required in ('descriptor, original["fd"] = original["fd"], None',
-                         'original["record"]["artifactOriginalClosed"] = True',
-                         'close_errors.append({"role": original["record"]["role"], "type": type(error).__name__})',
-                         'if close_errors: receipt["closeErrors"] = close_errors',
-                         'receipt[key] = len(receipt["targets"]) == 2 and all(row[key] for row in receipt["targets"])',
-                         'receipt["passed"] = ("failure" not in receipt and not close_errors',
-                         'and receipt["originalReturned"] and receipt["artifactOriginalUnchanged"] and receipt["artifactOriginalClosed"]',
-                         'and all(row["testsPassed"] for row in receipt["targets"]))',
-                         'if receipt["passed"]: receipt.update(tests=len(names) + len(native_names), failed=0, ignored=0, measured=0)',
-                         'if close_errors and "failure" not in receipt: raise ValueError("headless-original-close-unconfirmed")'):
-            self.assertIn(required, settlement)
-        self.assertEqual(settlement.count("os.close(descriptor)"), 1)
-        self.assertLess(settlement.index("os.close(descriptor)"), settlement.index('receipt["passed"] ='))
-        self.assertLess(settlement.index('receipt["passed"] ='), settlement.index('publish("headless-tests.receipt.json", data)'))
-        exporter = workflow.split("      - name: Export bounded diagnostics without altering original command evidence\n", 1)[1]
-        for required in ('("headless-build.jsonl", "headless-build.status", 4 * 1024 * 1024, "headless-build.admitted.jsonl", False)',
-                         '("headless-build.stderr", "headless-build.status", 64 * 1024, "headless-build.stderr.tail.txt", True)',
-                         '"unavailable-original-status-missing-or-invalid"'):
-            self.assertIn(required, exporter)
-        self.assertLess(exporter.index("status, status_meta = snapshot(status_name, 4)"),
-                        exporter.index("data, metadata = snapshot(original, limit, tail)"))
-        upload = workflow.split("      - name: Preserve bounded Android lifecycle results and original workflow exit evidence\n", 1)[1].split("      - name:", 1)[0]
-        assert_public_verification_upload(self, upload)
-        for unbounded in ("headless-build.jsonl\n", "headless-build.stderr\n", "cargo-target", "*", "**"):
-            self.assertNotIn(unbounded, upload)
+        # Keep this historical selected-method name, but exercise the actual
+        # trusted-checkout import boundaries rather than static source snapshots.
+        self.assertEqual(M.OWNER_FILES,
+            ("owned_process.py", "_command_process.py", "_native_process.py", "cancellation.py"))
+        core_names = lambda: {name for name in sys.modules
+            if name == "mobile_release" or name.startswith("mobile_release.")}
+        self.assertFalse(core_names())  # Never remove another task's imports.
+        before_path = list(sys.path)
+        for fault in (None, "missing", "symlink", "oversize", "import", "origin"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="mrk-owner-import-") as temporary, \
+                 patch.dict(sys.modules), patch.dict(sys.path_importer_cache), \
+                 patch.object(sys, "dont_write_bytecode", True):
+                root = Path(temporary)
+                package = root / "src/mobile_release"
+                package.mkdir(parents=True)
+                (package / "__init__.py").write_text("")
+                for name in M.OWNER_FILES:
+                    (package / name).write_text("CHECKOUT_VALUE = 17\n")
+                target = package / "_native_process.py"
+                if fault == "missing": target.unlink()
+                elif fault == "symlink":
+                    target.unlink(); target.symlink_to(package / "cancellation.py")
+                elif fault == "oversize": target.write_bytes(b"#" * (256 * 1024 + 1))
+                elif fault == "import":
+                    (package / "owned_process.py").write_text("raise ValueError('inert import failure')\n")
+                elif fault == "origin":
+                    (package / "owned_process.py").write_text("__file__ = '/not-the-current-checkout.py'\n")
+                if fault is None:
+                    owner = M.load_owner(root)
+                    self.assertEqual(owner.CHECKOUT_VALUE, 17)
+                    self.assertEqual(Path(owner.__file__), package / "owned_process.py")
+                    self.assertIs(sys.modules["mobile_release.owned_process"], owner)
+                else:
+                    expected = FileNotFoundError if fault == "missing" else ValueError if fault == "import" else M.Refused
+                    with self.assertRaises(expected): M.load_owner(root)
+                    if fault in ("missing", "symlink", "oversize"):
+                        self.assertFalse(core_names())  # No import before admission.
+                self.assertEqual(sys.path, before_path)
+            self.assertFalse(core_names())
+        for foreign in (None, object()):
+            with patch.dict(sys.modules, {"mobile_release.foreign": foreign}), \
+                 patch.object(Path, "lstat", side_effect=AssertionError("collision must precede source access")):
+                with self.assertRaisesRegex(M.Refused, "^owner-already-imported$"):
+                    M.load_owner(PATH.parents[2])
+                self.assertIs(sys.modules["mobile_release.foreign"], foreign)
+        self.assertEqual(sys.path, before_path)
 
 
-    def test_directory_link_metadata_never_widens_ordinary_rosters_or_source_acquisition(self):
-        root = PATH.parents[2]
-        native = (root / "desktop/native/macos-installed-native/src/native.m").read_text()
-        decoder = native.split("int mrk_decode_directory_entries(", 1)[1].split("int mrk_entries(", 1)[0]
-        self.assertIn("(kind != VREG && kind != VDIR && kind != VLNK)) return EIO;", decoder)
-        self.assertIn("out[written + 8] = kind == VDIR ? DT_DIR : (kind == VLNK ? DT_LNK : DT_REG);", decoder)
-        self.assertEqual(decoder.count("*used ="), 2)
-        self.assertLess(decoder.index("*used = 0;"), decoder.index("for (int n = 0; n < count; ++n)"))
-        self.assertLess(decoder.index("offset += length;"), decoder.index("*used = written;"))
-        self.assertIn("if (capacity - written < 11 || name_length > capacity - written - 11) return EOVERFLOW;", decoder)
-        for forbidden in ("open(", "openat(", "readlink(", "stat(", "getattrlistbulk("):
-            self.assertNotIn(forbidden, decoder)
-        entries = native.split("int mrk_entries(", 1)[1].split("int mrk_sync(", 1)[0]
-        self.assertIn("getattrlistbulk(fd, &request, block, sizeof(block), 0)", entries)
-        self.assertIn("return mrk_decode_directory_entries(block, sizeof(block), count, out, capacity, used);", entries)
-        runtime = (root / "desktop/src-tauri/src/installed_runtime_macos.rs").read_text()
-        walk = runtime.split("    fn walk(", 1)[1].split("    fn inspect(", 1)[0]
-        guard = "if !matches!(buffer[offset+8], nix::libc::DT_DIR | nix::libc::DT_REG) { return Err(AdmissionFailure::Inventory); }"
-        self.assertEqual(walk.count(guard), 1)
-        self.assertLess(walk.index("if used - offset < 11"), walk.index(guard))
-        for after in ('if name == "."', 'if path == "manifest.json"', "self.open(Some(parent)"):
-            self.assertLess(walk.index(guard), walk.index(after))
-        installer = (root / "desktop/src-tauri/src/bin/macos_install.rs").read_text()
-        roster = installer.split("        fn roster(", 1)[1].split("        fn copy_file(", 1)[0]
-        guard = 'check(matches!(block[offset+8], nix::libc::DT_DIR | nix::libc::DT_REG), "directory-roster")?;'
-        self.assertEqual(roster.count(guard), 1)
-        self.assertLess(roster.index('check(used-offset >= 11,"directory-record")?;'), roster.index(guard))
-        for after in ('if name == "."', "found.insert("):
-            self.assertLess(roster.index(guard), roster.index(after))
-        for ordinary in (walk, roster):
-            self.assertNotIn("DT_LNK", ordinary)
-        observer = (root / "desktop/src-tauri/src/installed_shell_observation_macos.rs").read_text()
-        rosters = observer.split("fn directory_rosters(", 1)[1].split("struct Fixture {", 1)[0]
-        for required in ('if alternate.is_some() && linked.is_some() { return Err(()); }',
-                         'if linked.is_some_and(|name| name != "linked.p12" || !entries.contains(&name)) { return Err(()); }',
-                         'kind == nix::libc::DT_LNK && linked == Some(name)',
-                         '!directory_roster_matches(&actual, entries, alternate)'):
-            self.assertIn(required, rosters)
-        self.assertIn("directory_with_link(path, uid, mode, entries, None)", observer)
-        source = (root / "desktop/src-tauri/src/asset_source_macos.rs").read_text()
-        child = source.split("    fn child(", 1)[1].split("    fn chain(", 1)[0]
-        acquisition = child.index("self.slots[index].state = OriginalState::Acquiring;")
-        self.assertLess(child.index("AtFlags::AT_SYMLINK_NOFOLLOW"), child.index("let expected = identity(&before, file)?;"))
-        self.assertLess(child.index("let expected = identity(&before, file)?;"), acquisition)
-        self.assertLess(acquisition, child.index("fcntl::openat("))
-        self.assertIn("OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK", child)
-        self.assertIn("if file { file_identity(stat).map(Identity::File) }", source)
-        self.assertIn("if stat.st_mode & SFlag::S_IFMT.bits() != SFlag::S_IFREG.bits() { return Err(Reason::SourceRefused); }", source)
-        session = (root / "desktop/src-tauri/src/installed_shell_observation_macos_session.rs").read_text()
-        self.assertIn('4 | 5 => Some(("refused", "source-refused"))', session)
-        self.assertIn('root.join("linked.p12")', session)
-        self.assertIn('self.link.as_ref().map(|_| "linked.p12")', session)
-        self.assertIn('std::fs::read_link(path).map_err(|_| ())? != Path::new("synthetic.p12")', session)
-        self.assertIn('link_fact(&root.join("linked.p12"), uid)?.identity != original.identity', session)
+
 
 
     def test_new_directory_group_normalization_precedes_widening(self):
@@ -916,26 +633,6 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(M._result_location(("saveSessions", 63, "files", 0, "beforeBytes")),
                          "saveSessions[63].files[0].beforeBytes")
 
-    def test_review_ignore_bound_uses_the_exact_native_fixture_roster(self):
-        # Source/DATA regression only; real DOM execution remains a macOS gate.
-        observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
-        fixture = M.re.search(r"const IGNORE_LINES: \[&str; ([0-9]+)\] = \[(.*?)\];", observer, M.re.S)
-        self.assertIsNotNone(fixture)
-        expected = M.IGNORE_RULES.decode("ascii").splitlines()
-        self.assertEqual(int(fixture.group(1)), len(expected))
-        self.assertEqual(M.re.findall(r'"([^"]+)"', fixture.group(2)), expected)
-        script = observer.split("fn script(case: Case, step: Step)", 1)[1].split("\n}\n", 1)[0] + "\n}"
-        self.assertIn("if let Step::Session(step) = step { return session::script(step); }", script)
-        self.assertEqual(script.count("if(ignore.length>{ignore_limit}||counts.length!==3)throw 0;"), 1,
-                         "review-ignore-count-bound")
-        self.assertEqual(script.count('Some(format!(r#"'), 1)
-        self.assertTrue(script.rstrip().endswith('"#, ignore_limit = IGNORE_LINES.len()))\n}'),
-                        "review-ignore-count-argument")
-        native = observer.split("    fn review_sample(", 1)[1].split("\n    pub(super) fn open_request(", 1)[0]
-        self.assertIn("!view.ignore_additions.iter().map(String::as_str).eq(if create { IGNORE_LINES.as_slice() } else { &[] }.iter().copied())", native)
-        body = observer.split("    fn dom_body(", 1)[1].split("    pub(super) fn relay_joined", 1)[0]
-        self.assertIn('s.live_review() && s.review.as_ref() == v.get("review")', body)
-        self.assertIn('v["project"].as_str() != self.project_path.to_str()', body)
 
     def test_strict_result_rejects_missing_extra_wrong_type_or_wrong_finality(self):
         good = M.expected_result(BINDING, "first-save")
@@ -1302,26 +999,6 @@ class AquaDataTests(unittest.TestCase):
         for bad in variants:
             self.assertIsNone(M.failure_context(context_row(bad), b""))
 
-    def test_project_chooser_diagnostics_use_existing_original_and_unchanged_bounds(self):
-        observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
-        labels = observer.split("const CHOOSER_REASON_FAMILIES: &[&str] = &[", 1)[1].split("];", 1)[0]
-        self.assertEqual(set(M.re.findall(r'"([a-z-]+)"', labels)), M.DOM_CHOOSER_REASONS)
-        self.assertIn('if r.evaluations >= 160 { self.fail_with("dom-evaluation-budget"); return; }', observer)
-        self.assertIn('else { 45 }', observer)
-        self.assertIn('bounded_failure_context(failure_context(&self), self.press_timing(),', observer)
-        self.assertIn('(frame.len() <= 8448).then_some(frame)', observer)
-        self.assertIn("self.dom = None;", observer.split("fn at_expiry(", 1)[1].split("fn frame(", 1)[0])
-        body = observer.split("    fn dom_body(", 1)[1].split("    pub(super) fn relay_joined", 1)[0]
-        self.assertLess(body.index("project_chooser_sample(original, &v)"), body.index("r.last_project_chooser = Some(sample)"))
-        self.assertIn('if v["state"] == "wait" && object.len() == 1 { return; }', body)
-        self.assertIn('if !project_chooser_data_checks() { return false; }', observer)
-        chooser = observer.split("Step::ChooseCancel|Step::ChooseProject =>", 1)[1].split("Step::ReadCancelled =>", 1)[0]
-        self.assertIn("document.getElementById('project-choose-reason')", chooser)
-        self.assertIn("??'other'", chooser)
-        self.assertEqual(chooser.count("b.click()"), 1)
-        self.assertLess(chooser.index("if(!b||b.disabled)return {state:'wait',projectChooser}"), chooser.index("b.click()"))
-        self.assertIn("return {state:'ready',projectChooser}", chooser)
-        self.assertNotIn("projectChooser.reason=reasonText;", chooser)
 
     def test_original_window_success_requires_the_returned_positive_witness(self):
         for case in M.CASES:
@@ -1591,42 +1268,6 @@ class AquaDataTests(unittest.TestCase):
                              "accessibility.pressDiagnostic." + key)
         self.assertIsNone(M._result_location(("accessibility", "pressDiagnostic", "INERT_PRIVATE")))
 
-    def test_press_timing_source_reuses_admission_and_preserves_baseline(self):
-        # Source invariants complement real callback/JSON DATA checks in the
-        # already-required native entry; they are not native execution evidence.
-        root = PATH.parents[1]
-        rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
-        observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
-        helper = PATH.read_text()
-        callback = rust.split('unsafe extern "C" fn open_admission<', 1)[1].split('unsafe extern "C" fn open_recheck<', 1)[0]
-        ordered = ("context.press.first_return_attempt(after)", "if !matches!(after, 0 | 1)",
-                   "(context.admit)(after == 1)", "let now = Instant::now();",
-                   "context.press.returned_at = Some(now)", "context.end.saturating_duration_since(now)",
-                   "if remaining.is_zero()", "if !allowed", "if after == 0 && required_ns > 0",
-                   "context.press.permit = Some((required_ns, now))")
-        self.assertEqual([callback.index(item) for item in ordered], sorted(callback.index(item) for item in ordered))
-        self.assertEqual(callback.count("Instant::now()"), 1)
-        capture = rust.split("struct OpenPressCapture", 1)[1].split("pub struct OpenInputReturn", 1)[0]
-        self.assertNotIn("Instant::now()", capture)
-        self.assertIn("if after == 1 { self.after_attempted = true; }", capture)
-        self.assertIn("checked_duration_since(permitted_at)", capture)
-        self.assertIn("u64::try_from(duration.as_nanos()).ok()", capture)
-        returned = rust.split("pub fn installed_prompt_button<", 1)[1].split("pub fn installed_accessibility_trusted", 1)[0]
-        self.assertLess(returned.index("returned.report = open_return("), returned.index("context.press.timing(returned.report)"))
-        self.assertIn("if !press_timing_data_check(failed_press) { return false; }", rust)
-        self.assertIn('if !cfg!(panic = "unwind") { return false; }', rust)
-        sample = observer.split("impl OpenInputSample", 1)[1].split("struct IdentitySample", 1)[0]
-        self.assertIn("self.press_timing = body.native.and_then(|n| n.press_timing);", sample)
-        self.assertNotIn("pressDiagnostic", sample.split("fn value(self)", 1)[1])
-        encoded = observer.split("fn bounded_failure_context(", 1)[1].split("fn failure_context(", 1)[0]
-        self.assertLess(encoded.index("let baseline = edit::bounded(&value, 8192)"), encoded.index("timing.and_then(press_diagnostic_value)"))
-        self.assertIn("total <= 8448", encoded)
-        self.assertIn("unwrap_or(baseline)", encoded)
-        self.assertNotIn(".clone()", encoded)
-        self.assertIn("if !press_diagnostic_data_check(full) { return false; }", observer)
-        self.assertEqual(helper.count("allow_press_diagnostic=True"), 1)
-        self.assertIn("allow_press_diagnostic=False", helper)
-        self.assertIn('value["mechanism"] == mechanism', helper)
 
     def test_ax_failure_source_preserves_original_calls_and_first_status(self):
         # Source and bounded scalar DATA, not an AX emulator, native CaseReturn,
@@ -2850,108 +2491,6 @@ class AquaDataTests(unittest.TestCase):
         for forbidden in ("installed_original_window(", ".ns_window()", ".value()", "run_on_main_thread"):
             self.assertNotIn(forbidden, checks)
 
-    def test_observer_reason_catalog_and_readiness_call_contract(self):
-        source_root = PATH.parents[1] / "src-tauri" / "src"
-        observer = (source_root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
-        adapter = (source_root / "shell_macos_dialog.rs").read_text(encoding="utf-8")
-        errors = (source_root / "asset_commands.rs").read_text(encoding="utf-8")
-        document = (source_root / "asset_session.rs").read_text(encoding="utf-8")
-        shared = document.split("fn common_document_gate(", 1)[1].split("fn ordinary_asset_platform_gate(", 1)[0]
-        self.assertNotIn("cfg!", shared)
-        self.assertNotIn("UnsupportedPlatform", shared)
-        ordinary = document.split("fn gate(&self,", 1)[1].split("fn project_path_gate(", 1)[0]
-        self.assertLess(ordinary.index("self.common_gate(state, session)?"), ordinary.index("ordinary_asset_platform_gate()?"))
-        self.assertLess(ordinary.index("ordinary_asset_platform_gate()?"), ordinary.index("self.native_qualified()"))
-        predicate = document.split("fn ordinary_asset_platform_gate()", 1)[1].split("fn session_kind_gate(", 1)[0]
-        self.assertIn('cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),', predicate)
-        self.assertIn('all(target_os = "macos", target_arch = "aarch64"),\n        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))', predicate)
-        self.assertIn("Reason::UnsupportedPlatform", predicate)
-        kinds = document.split("fn session_kind_gate(", 1)[1].split("fn preflight_document_gate(", 1)[0]
-        self.assertIn('cfg!(all(target_os = "macos", target_arch = "aarch64"))', kinds)
-        mac_kind_policy = document.split("fn macos_session_kind(", 1)[1].split("fn session_kind_gate(", 1)[0]
-        self.assertIn("&& !macos_session_kind(context.platform, context.stage, context.purpose, kind)", kinds)
-        for arm in (
-            "Platform::Android => matches!(kind, Kind::AndroidKeystore | Kind::AndroidFirebase | Kind::GoogleWif),",
-            "Platform::Project => kind == Kind::ProjectReadToken,",
-            "Purpose::Full | Purpose::Store => kind == Kind::AscP8,",
-            "Purpose::Signing => matches!(kind, Kind::AppleP12 | Kind::AppleProfile | Kind::IosFirebase | Kind::ProjectReadToken),",
-        ):
-            self.assertIn(arm, mac_kind_policy)
-        self.assertIn("Reason::UnsupportedFormat", kinds)
-        contract = document.split("pub(crate) fn assert_project_selection_gate_contract()", 1)[1].split("pub(crate) fn assert_installed_evidence_gate_contract()", 1)[0]
-        self.assertIn("assert_eq!(reason(&ready), None)", contract)
-        self.assertIn("ordinary_asset_platform_gate().err().map(|error| error.reason), platform", contract)
-        self.assertIn("assert!(common_document_gate(&ready, false, || Ok(())).is_ok())", document)
-        checks = observer.split("fn observer_data_checks()", 1)[1].split("pub(crate) fn main()", 1)[0]
-        self.assertIn("crate::asset_session::assert_project_selection_gate_contract();", checks)
-        self.assertIn("crate::runtime::RuntimeConfig::packaged(", checks)
-        self.assertIn("!profile.project_selection_profile_available() || profile.project_path_selection_profile_available()", checks)
-        self.assertIn("|| !profile.evidence_selection_profile_available() { return false; }", checks)
-        self.assertNotIn(".resolve(", checks)
-        main = observer.split("pub(crate) fn main()", 1)[1]
-        for native_entry in ("Fixture::capture(", "Observation::new(", "observe(&q)"):
-            self.assertLess(main.index("if !observer_data_checks()"), main.index(native_entry))
-        observation = observer.split("fn observe(q: &Arc<Observation>)", 1)[1].split("pub(crate) fn main()", 1)[0]
-        self.assertEqual(main.count("observe(&q)"), 1)
-        self.assertEqual(observer.count("super::run_builder("), 1)
-        self.assertEqual(observation.count("super::run_builder("), 1)
-        self.assertLess(observation.index("installed_accessibility_trusted()"), observation.index("if trusted != Ok(true)"))
-        self.assertLess(observation.index("if trusted != Ok(true)"), observation.index("super::run_builder("))
-        self.assertLess(observation.index("if !q.timely() { return None; }"), observation.index("super::run_builder("))
-        reasons = observer.split("const FAILURE_REASONS: &[&str] = &[", 1)[1].split("];", 1)[0]
-        labels = M.re.findall(r'"([a-z_-]+)"', reasons)
-        self.assertEqual(len(labels), len(set(labels)))
-        self.assertEqual(set(labels), M.FAILURE_REASONS)
-        closed_codes = set(M.re.findall(r'=> "((?:asset_|assessment_)[a-z_]+)"', errors))
-        self.assertTrue(closed_codes <= M.FAILURE_REASONS)
-        self.assertTrue(set(M.re.findall(r'=> "(adapter-[a-z-]+)"', adapter)) <= M.FAILURE_REASONS)
-        self.assertIn("if !observer_data_checks()", observer)
-        readiness = observer.split("fn panel_readiness(", 1)[1].split("const METHODS", 1)[0]
-        self.assertNotIn("observe_panel_action(", readiness)
-        self.assertNotIn("Instant::now()", readiness)
-        self.assertIn('if ever_attached { return Err("native-attachment-lost"); }', readiness)
-        self.assertIn("if preconfigured { !native.directory_bound || !native.directory_returned }", readiness)
-        self.assertIn("else { native.directory_bound || native.directory_returned || native.directory_ready }", readiness)
-        self.assertIn("if same_action_returned || unexpected_setup", readiness)
-        action = observer.split("fn native_step(", 1)[1].split("pub(super) fn close_prevented", 1)[0]
-        for attachment in ("r.panel_attached[self.case.panel_index(step).ok_or(\"native-step\")?] = true",
-                           "r.file_attached[usize::from(i)] = true"):
-            self.assertLess(action.index("if !panel_readiness("), action.index(attachment))
-            self.assertLess(action.index(attachment), action.index("observe_panel_action(id,action)"))
-        self.assertIn('if let Err(reason) = result { self.fail_with(reason); }', action)
-        self.assertNotIn("r.pending.take()", action)
-        self.assertLess(action.index("let timely = self.timely()"), action.index("let result = self.native_step_body("))
-        self.assertLess(action.index("let result = self.native_step_body(step, timely, &mut action_diagnostic,"), action.index("native.returned = true"))
-        body = action.split("fn native_step_body(", 1)[1]
-        entry = "if !native_step_entry(std::thread::current().id() == self.main, timely)? { return Ok(false); }"
-        self.assertLess(body.index(entry), body.index("observed_panel()"))
-        quit = observer.split("fn quit_id(self)", 1)[1].split("fn inputs(self)", 1)[0]
-        self.assertIn("if let Self::Ios(case) = self { if case.inputs() { return session::quit_original(case); } }", quit)
-        self.assertIn("if self == Self::ProjectFields { 12 } else if self == Self::FirstSave { 4 } else { 2 }", quit)
-        session = (source_root / "installed_shell_observation_macos_session.rs").read_text(encoding="utf-8")
-        self.assertIn("pub(super) fn quit_original(case: Case) -> u32 { case.session_final_original().unwrap_or(0) }", session)
-        for branch in ("Step::OpenProject => (self.case.selected_id(),PanelKind::Project)",
-                       'Step::Session(session::Step::Native(i)) => (self.case.input_id(i).ok_or("native-step")?,PanelKind::File)',
-                       "Step::Quit => (self.quit_id(),PanelKind::Quit)",
-                       "Step::CancelProject => PanelAction::ProjectCancel",
-                       "Step::Session(session::Step::Native(i)) if self.case.input_id(i).is_some() && !self.case.input_accepted(i) => PanelAction::FileCancel"):
-            self.assertIn(branch, body)
-        admission = observer.split("fn native_step_entry(", 1)[1].split("fn retire_returned_native(", 1)[0]
-        self.assertLess(admission.index('if !on_main { return Err("native-wrong-thread"); }'), admission.index("Ok(timely)"))
-        self.assertIn('if matches!(result, Err("native-wrong-thread" | "native-pending-custody")) { return; }', action)
-        self.assertIn('(false, false, Err("native-wrong-thread"))', observer)
-        self.assertIn('(false, true, Err("native-wrong-thread"))', observer)
-        self.assertIn('(true, false, Ok(false))', observer)
-        self.assertIn("retire_returned_native(&mut original", observer)
-        self.assertIn("installed_observation_flags_data_check()", observer)
-        native_root = PATH.parents[1] / "native" / "macos-installed-native" / "src"
-        native = (native_root / "native.m").read_text(encoding="utf-8")
-        rust = (native_root / "lib.rs").read_text(encoding="utf-8")
-        self.assertIn("uint32_t attachment = mrk_observation_attachment(s);", native)
-        self.assertIn("attachment == MRK_ATTACHMENT_ALL ? 2u : 0u", native)
-        self.assertIn("if (!mrk_observation_attached(s)) MRK_ACTION_RETURN(EAGAIN);", native)
-        self.assertIn("flags & !0x1fffff == 0", rust)
-        self.assertIn("(parent_present && panel_present).then_some", rust)
 
     def test_native_action_source_keeps_original_calls_status_and_closed_decoder(self):
         native_root = PATH.parents[1] / "native" / "macos-installed-native" / "src"
@@ -3332,555 +2871,15 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("button.cleanup_returned && w.released != w.owned", wire)
         self.assertIn("r.triggered == Some(false) && w.ax_error == 0", wire)
 
-    def test_preconfigured_source_binds_once_before_presentation_and_exact_completion(self):
-        desktop = PATH.parents[1]
-        native = (desktop / "native/macos-installed-native/src/native.m").read_text(encoding="utf-8")
-        rust = (desktop / "native/macos-installed-native/src/lib.rs").read_text(encoding="utf-8")
-        adapter = (desktop / "src-tauri/src/shell_macos_dialog.rs").read_text(encoding="utf-8")
-        observer = (desktop / "src-tauri/src/installed_shell_observation_macos.rs").read_text(encoding="utf-8")
-        arm = native.split("int mrk_panel_observe_arm_open_identity(", 1)[1].split("void mrk_panel_observe_identity_data(", 1)[0]
-        for bound in ("capacity != 4097", "s->attempted || s->unknown || s->observationIdentity.flags",
-                      "!mrk_target_path((const char *)target)", "i < capacity; ++i) if (target[i]) return EINVAL"):
-            self.assertIn(bound, arm)
-        self.assertEqual(native.count("memcpy(s->observationTarget, target, capacity)"), 1)
-        for forbidden in ("setDirectoryURL:", "beginSheet", "[NS", "dispatch_", "s->selected", "s->response"):
-            self.assertNotIn(forbidden, arm)
-        construct = adapter.split("fn construct(", 1)[1].split("fn tick(", 1)[0]
-        for binding in ("q.open_identity_scope(owner.id, choice)", "Arc::ptr_eq(&bound_call, call)",
-                        "Arc::ptr_eq(&bound_owner, &owner)", "bound_owner.interrupted()", "!q.timely()"):
-            self.assertLess(construct.index(binding), construct.index("panel.installed_arm_open_identity(target)"))
-        self.assertLess(construct.index("q.open_identity_target(owner.id, choice)"), construct.index("panel.installed_arm_open_identity(target)"))
-        self.assertLess(construct.index("panel.installed_arm_open_identity(target)"), construct.index("panel.start(choice)"))
-        self.assertLess(construct.index("panel.installed_arm_open_identity(target)"), construct.index("panel.start_project_field(choice, root)"))
-        scope = observer.split("pub(super) fn open_identity_scope(", 1)[1].split("pub(super) fn completion_returned(", 1)[0]
-        self.assertIn("self.case != Case::PickerLoss && id == self.case.selected_id()", scope)
-        self.assertIn("PanelKind::Project => self.case != Case::PickerLoss && id == self.case.selected_id()", scope)
-        self.assertIn("PanelKind::File => self.case.file_index(id).is_some_and(|i| self.case.input_accepted(i))", scope)
-        self.assertIn("fn input_accepted(self, i: u8) -> bool { matches!(self, Self::Ios(case) if session::accepted(case,i)) }", observer)
-        self.assertIn("PanelKind::Quit => false", scope)
-        self.assertIn("self.project_path.as_path()", scope)
-        configured = native.split("static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {", 1)[1].split("static BOOL mrk_original_eligible(", 1)[0]
-        # Three disjoint purposes, not three competing ways to publish a choice:
-        # historical Project/File identity; ordinary P2 initial root; one-use
-        # synthetic P2 navigation after that root/options were observed.
-        production = native.split("static int mrk_panel_initial_directory(", 1)[1].split("static int mrk_panel_start_inner(", 1)[0]
-        navigation = native.split("int mrk_panel_observe_project_field(", 1)[1].split("enum { MRK_OPEN_ENTRY", 1)[0]
-        self.assertEqual(native.count("setDirectoryURL:"), 3)
-        for purpose in (configured, production, navigation):
-            self.assertEqual(purpose.count("setDirectoryURL:"), 1)
-        historical = configured.split("d->site = MRK_ID_DIRECTORY_URL;", 1)[1]
-        self.assertLess(historical.index("MRK_ID_DIRECTORY_ENTERED"), historical.index("setDirectoryURL:url]"))
-        self.assertLess(historical.index("setDirectoryURL:url]"), historical.index("MRK_ID_DIRECTORY_RETURNED"))
-        self.assertLess(historical.index("MRK_ID_DIRECTORY_RETURNED"), historical.index("MRK_ID_CONFIG_COMPLETE"))
-        self.assertIn("!mrk_target_path(s->observationTarget) || s->observationDirectoryReturned", configured)
-        start = native.split("static int mrk_panel_start_inner(", 1)[1].split("int mrk_panel_start(", 1)[0]
-        self.assertIn("#ifdef MRK_INSTALLED_OBSERVATION\n        if ((s->observationIdentity.flags & MRK_ID_ARMED)", start)
-        self.assertLess(start.index("mrk_panel_configure_open_identity(s)"), start.index("beginSheetModalForWindow:"))
-        for options in ("[panel setCanChooseFiles:kind == 3 || kind == 4]", "[panel setCanChooseDirectories:kind == 1 || (kind >= 5 && kind <= 7)]",
-                        "[panel setAllowsMultipleSelection:NO]", "[panel setResolvesAliases:NO]"):
-            self.assertIn(options, start)
-        action = native.split("int mrk_panel_observe_action(", 1)[1].split("#undef MRK_ACTION_RETURN", 1)[0]
-        self.assertIn("action != 1 && action != 4 && action != 5 && action != 6", action)
-        self.assertNotIn("setDirectoryURL:", action)
-        # Do not restore the old mandatory-URL/generic row selector. The new
-        # kind4-only typed selection is not an ordinary picker/Project fallback.
-        for retired in ("mrk_ax_row_target(", "mrk_ax_select_row(", "kAXURLAttribute"):
-            self.assertFalse(retired in native, "retired row route: " + retired)
-        ordinary = native.split("static BOOL mrk_ax_control_roster(", 1)[1].split("static BOOL mrk_ax_original(", 1)[0]
-        for selecting in ("kAXRowsAttribute", "AXUIElementIsAttributeSettable(", "AXUIElementSetAttributeValue("):
-            self.assertNotIn(selecting, ordinary)
-        for retired in ("Step::SetProject", "PanelAction::ProjectDirectory", "selected_native"):
-            self.assertFalse(retired in observer, "retired action bookkeeping: " + retired)
-        self.assertIn("native_actions_returned: [bool; 4]", observer)
-        self.assertIn("r.native_actions_returned[1] = true; r.step = Step::ProjectSettled;", observer)
-        prepared = adapter.split("pub(crate) fn prepare_open_input(", 1)[1].split("pub(crate) fn open_release_data_check(", 1)[0]
-        self.assertLess(prepared.index("identity.targets(target)"), prepared.index("OpenRelease::new()"))
-        ready = native.split("static BOOL mrk_observation_directory_ready(", 1)[1].split("static BOOL mrk_observation_selection_parent(", 1)[0]
-        self.assertIn("!s->observationDirectoryReturned", ready)
-        self.assertIn("[(NSOpenPanel *)s->window directoryURL]", ready)
-        self.assertIn("strcmp(path, s->observationTarget) == 0", ready)
-        recheck = native.split("void mrk_panel_observe_open_recheck(", 1)[1].split("enum { MRK_PROMPT_CALLS", 1)[0]
-        self.assertIn("memcmp(target, s->observationTarget, target_capacity)", recheck)
-        self.assertIn("s->observationRechecks = stage;", recheck)
-        self.assertIn("r.error = mrk_original_proof(s, &r.proof, NO, stage == 0)", recheck)
-        for forbidden in (" URLs]", "setDirectoryURL:", "setNameFieldStringValue:", "memcpy(s->selected", "sleep("):
-            self.assertNotIn(forbidden, recheck)
-        callback = start.split("s->completion = Block_copy", 1)[1].split("beginSheetModalForWindow:", 1)[0]
-        ordinary = ('NSURL *url = [(NSOpenPanel *)s->window URL];\n'
-                    '                        const char *path = url && [url isFileURL] ? [url fileSystemRepresentation] : NULL;\n'
-                    "                        if (!path || path[0] != '/' || strnlen(path, sizeof(s->selected)) >= sizeof(s->selected)) s->unknown = YES;\n"
-                    '                        else memcpy(s->selected, path, strlen(path) + 1);')
-        self.assertIn(ordinary, callback)  # The ordinary selected output stays authoritative.
-        self.assertLess(callback.index("MRK_COMPLETION_DUPLICATE"), callback.index(ordinary))
-        self.assertLess(callback.index(ordinary), callback.index("if (observed) mrk_panel_completion_selection(s)"))
-        self.assertLess(callback.index("mrk_panel_completion_selection(s)"), callback.index("MRK_COMPLETION_RETURNED"))
-        self.assertLess(callback.index("MRK_COMPLETION_RETURNED"), callback.index("s->callbackActive = NO"))
-        self.assertIn("@catch (NSException *e) { (void)e; s->unknown = YES; }", callback)
-        completed = native.split("static void mrk_panel_completion_selection(MRKInstalledPanel *s) {", 1)[1].split("static BOOL mrk_observation_directory_ready(", 1)[0]
-        # One original completion read is independent of kind4 readiness.
-        self.assertEqual(completed.count("[(NSOpenPanel *)s->window URLs]"), 1)
-        self.assertEqual(ready.count("[(NSOpenPanel *)s->window URLs]"), 1)
-        self.assertEqual(native.count("[(NSOpenPanel *)s->window URLs]"), 2)
-        self.assertLess(completed.index("if (d->flags & MRK_COMPLETION_URLS_ENTERED)"), completed.index("d->flags |= MRK_COMPLETION_URLS_ENTERED"))
-        self.assertLess(completed.index("d->flags |= MRK_COMPLETION_URLS_ENTERED"), completed.index("[(NSOpenPanel *)s->window URLs]"))
-        self.assertLess(completed.index("[(NSOpenPanel *)s->window URLs]"), completed.index("d->flags |= MRK_COMPLETION_URLS_RETURNED"))
-        self.assertLess(completed.index("d->flags |= MRK_COMPLETION_URLS_RETURNED"), completed.index("if (!urls)"))
-        for gate in ("[urls isKindOfClass:[NSArray class]]", "if (!count)", "else if (count != 1)",
-                     "[urls objectAtIndex:0]", "[url isKindOfClass:[NSURL class]] && [url isFileURL]",
-                     "!mrk_target_path(path)", "strcmp(path, s->observationTarget) != 0", "strcmp(path, s->selected) != 0"):
-            self.assertIn(gate, completed)
-        for outcome in ("EMPTY", "MALFORMED", "MULTIPLE", "DIFFERENT", "DISAGREES", "MATCH"):
-            self.assertIn("MRK_SELECTION_" + outcome, completed)
-        self.assertEqual(native.count("memcpy(s->selected, path, strlen(path) + 1)"), 1)
-        for forbidden in ("setDirectoryURL:", "setNameFieldStringValue:", "beginSheet", "memcpy(s->selected",
-                          "s->response =", "s->unknown = NO", "dispatch_", "sleep(", "ok:"):
-            self.assertNotIn(forbidden, completed)
-        configuration = rust.split("fn identity_configuration(", 1)[1].split("pub(super) fn identity_start_return(", 1)[0]
-        for gate in ("w.flags & !4095", "let base_flags = w.flags & 511", "(8, 2 | 14) => base_flags == 111",
-                     "(9, 14) => base_flags == 239", "(5, 0) => base_flags == 511 && c.complete()",
-                     "10 => file_flags == (512 | 1024) && base_flags == 495 && w.error == 14",
-                     "11 => file_flags == (512 | 1024 | 2048) && base_flags == 495 && matches!(w.error, 13 | 14)"):
-            self.assertIn(gate, configuration)
-        identity_checks = rust.split("fn identity_data_check()", 1)[1].split("struct CompletionWire", 1)[0]
-        for gate in ("IdentityWire { flags: 511, parent, prompt: 2, site: 5", "c.complete() && !c.file_panel",
-                     "IdentityWire { flags: 4095, ..configured }", "c.file_name_setter_entered && c.file_name_setter_returned",
-                     "[(2031, 10, 14), (4079, 11, 14), (4079, 11, 13)]"):
-            self.assertIn(gate, identity_checks)
-        for rejected in ("flags: 127", "flags: 255", "flags: 1023"):
-            self.assertIn(rejected, identity_checks)
 
     def test_completion_source_captures_original_poll_errors_before_release_without_guards(self):
-        desktop = PATH.parents[1]
-        native = (desktop / "native/macos-installed-native/src/native.m").read_text(encoding="utf-8")
-        rust = (desktop / "native/macos-installed-native/src/lib.rs").read_text(encoding="utf-8")
-        adapter = (desktop / "src-tauri/src/shell_macos_dialog.rs").read_text(encoding="utf-8")
-        observer = (desktop / "src-tauri/src/installed_shell_observation_macos.rs").read_text(encoding="utf-8")
-        qualification = PATH.read_text(encoding="utf-8")
-        self.assertIn("sizeof(MRKCompletionWire) == 12", native)
-        self.assertIn("std::mem::size_of::<CompletionWire>() != 12", rust)
-        self.assertIn("struct CompletionWire { flags: u32, response: u32, selection: u32 }", rust)
-        decoder = rust.split("fn completion_selection(", 1)[1].split("fn completion_poll_return(", 1)[0]
-        for gate in ("w.flags & !63 != 0", "!r.callback_entered && (w.flags & !32 != 0", "r.urls_read_entered && r.response != Some(\"accept\")",
-                     "r.urls_read_returned && !r.urls_read_entered", "r.selection.is_some() && !r.urls_read_returned",
-                     "r.duplicate && !r.native_unknown", "!r.native_unknown && (!r.callback_entered || !r.callback_returned"):
-            self.assertIn(gate, decoder)
-        returned = rust.split("fn completion_poll_return(", 1)[1].split("fn completion_data_check()", 1)[0]
-        self.assertIn("if status == 0 && w == CompletionWire::default() { return None; }", returned)
-        for state in ("showing", "responded", "closed", "error", "invalid-return"):
-            self.assertIn('"' + state + '"', returned)
-        self.assertEqual(returned.count("mrk_panel_observe_completion_data(original.as_ptr(), &mut wire)"), 1)
-        self.assertNotIn("mrk_panel_poll(", returned)
-        poll = rust.split("pub fn poll(&mut self)", 1)[1].split("pub fn close_once(", 1)[0]
-        self.assertEqual(poll.count("mrk_panel_poll("), 1)
-        self.assertLess(poll.index("mrk_panel_poll("), poll.index("observation::completion_return(self.original, state)"))
-        self.assertLess(poll.index("observation::completion_return(self.original, state)"), poll.index("match state"))
-        self.assertIn("self.observation_identity_armed && !self.observation_completion_captured", poll)
-        self.assertLess(poll.index("if let Some(returned) = observation::completion_return"), poll.index("self.observation_completion_captured = true"))
-        self.assertIn("_ => { self.unknown = true; Err(io::ErrorKind::Other.into()) }", poll)
-        take = rust.split("pub fn take_installed_completion_return(", 1)[1].split("pub fn installed_open_identity(", 1)[0]
-        self.assertIn("self.observation_completion.take()", take)
-        self.assertNotIn("self.usable()", take); self.assertNotIn("self.observation_completion_captured =", take)
-        saved = native.split("void mrk_panel_observe_completion_data(", 1)[1].split("static BOOL mrk_identity_tag(", 1)[0]
-        self.assertIn("memcpy(data, &s->observationCompletion, sizeof(*data))", saved)
-        self.assertIn("if (s->unknown) data->flags |= MRK_COMPLETION_UNKNOWN", saved)
-        for forbidden in ("mrk_panel_poll(", " URLs]", "s->unknown =", "s->observationCompletion =", "release]", "dispatch_"):
-            self.assertNotIn(forbidden, saved)
-        tick = adapter.split("fn tick(", 1)[1].split("pub(crate) async fn run_owned_dialog", 1)[0]
-        for gate in ("observation::body_busy(id)", "!r.release_ready()", "observation::original(entry)",
-                     "Arc::ptr_eq(&bound_call, call)", "bound_owner.id != id"):
-            self.assertLess(tick.index(gate), tick.index("let polled = panel.poll()"))
-        self.assertLess(tick.index("let polled = panel.poll()"), tick.index("panel.take_installed_completion_return()"))
-        self.assertLess(tick.index("panel.take_installed_completion_return()"), tick.index("match polled"))
-        self.assertLess(tick.index("panel.take_installed_completion_return()"), tick.index("panel.close_once()"))
-        self.assertLess(tick.index("panel.take_installed_completion_return()"), tick.index("original.release()"))
-        self.assertIn("*completion_return = panel.take_installed_completion_return().map(|data| (id, data))", tick)
-        self.assertIn("Err(_) => return Err(()), // No close/release native work after uncertainty.", tick)
-        publish = adapter.split("let result = tick(&observing", 1)[1].split("}).is_err()", 1)[0]
-        self.assertLess(publish.index("&mut completion_return"), publish.index("q.completion_returned(id, data)"))
-        self.assertLess(publish.index("q.completion_returned(id, data)"), publish.index("done.send(result)"))
-        for forbidden in ("PANEL.with", ".facts()", "panel.poll()", "panel.release()", "panel.close_once()"):
-            self.assertNotIn(forbidden, publish)
-        once = observer.split("fn publish_completion(", 1)[1].split("struct NativeDispatch", 1)[0]
-        self.assertIn("if !case.accepted_id(id) || slot.is_some()", once)
-        accepted = observer.split("fn accepted_id(self, id: u32)", 1)[1].split("fn kind_name(", 1)[0]
-        self.assertIn(
-            "self != Self::PickerLoss && (id == self.selected_id() || self.file_index(id).is_some_and(|i| self.input_accepted(i))\n"
-            "            || self.field_index(id).is_some_and(project_fields::accepts))",
-            accepted,
-        )
-        for route in (
-            "fn file_index(self, id: u32) -> Option<u8> { match self { Self::Ios(case) => session::file_index(case,id), _ => None } }",
-            "fn input_accepted(self, i: u8) -> bool { matches!(self, Self::Ios(case) if session::accepted(case,i)) }",
-            "fn field_index(self, id: u32) -> Option<u8> { (self == Self::ProjectFields).then(|| project_fields::index(id)).flatten() }",
-        ):
-            self.assertIn(route, observer)
-        self.assertLess(once.index('return Err("native-completion-custody")'), once.index("*slot = Some(CompletionSample"))
-        published = observer.split("pub(super) fn completion_returned(", 1)[1].split("pub(super) fn identity_start_returned(", 1)[0]
-        self.assertIn("let timely = Instant::now() < self.end", published)
-        self.assertIn('matches!(returned.poll_result, "error" | "invalid-return")', published)
-        self.assertIn("returned.facts.is_some_and(|f| f.native_unknown || f.duplicate)", published)
-        for forbidden in ("self.end =", "panel.poll", "selected_path(", ".release(", "refuse_original_at("):
-            self.assertNotIn(forbidden, published)
-        snapshot = observer.split("impl FailureSnapshot {", 1)[1].split("fn failure_context(", 1)[0]
-        self.assertIn("completion_selection: r.completion_selection", snapshot)
-        self.assertIn("self.completion_selection = None", snapshot)
-        gate = observer.split('if response.operation_id != self.case.selected_id()', 1)[1].split("Step::PickerPending =>", 1)[0]
-        for required in ("response.response != NativeResponse::Accept", "response.selected.as_deref() != Some(self.project_path.as_path())",
-                         "!response.callback_returned", "!r.completion_selection.is_some_and(|s| s.succeeded(self.case.selected_id()))"):
-            self.assertLess(gate.index(required), gate.index("r.project_settled = true"))
-        self.assertIn('self.fail_with("native-completion-selection")', gate)
-        finish = observer.split("fn finish(&self)", 1)[1].split("fn observe(q:", 1)[0]
-        self.assertIn("r.completion_selection.is_none()", finish)
-        self.assertIn("let project_open = r.project_open();", finish)
-        self.assertIn("let completion_selection = project_open.map(|p| p.2);", finish)
-        self.assertIn("completion_selection.is_some_and(|sample| sample.succeeded(self.case.selected_id()))", finish)
-        self.assertIn('"projectCompletionSelection":completion_selection.map(CompletionSample::value)', finish)
-        history = observer.split("fn project_open(&self)", 1)[1].split("fn open_sample(&self)", 1)[0]
-        self.assertIn("if let Some(original) = self.panel_history.first()", history)
-        self.assertIn("original.sample.reconciled(original.progress.snapshot()), original.identity, original.completion", history)
-        self.assertIn("Some((self.open_sample()?, self.identity_binding?, self.completion_selection?))", history)
-        for gate in ("self.panel_history.len() >= if self.project_field_record.is_some() { 9 } else { 7 }", "self.panel_history.iter().any(|p| p.sample.id == id)",
-                     "self.pending.is_some() || self.prepared_open.is_some()", "!sample.succeeded() || sample.id != id",
-                     '!identity.input_bound(id) || !completion.succeeded(id) || progress.snapshot().state != "retired"'):
-            self.assertIn(gate, history)
-        self.assertIn("accessibility.is_some_and(|s| s.id == self.case.selected_id() && s.succeeded())", finish)
-        self.assertIn("identity_binding.is_some_and(|sample| sample.input_bound(self.case.selected_id()))", finish)
-        self.assertIn("!completion_ownership_data_check()", observer)
-        for bound in ("MRK_PROMPT_CALLS = 512", "MRK_PROMPT_CF = 256", "MRK_CONTROL_NODES = 17", "MRK_CONTROL_DEPTH = 8"):
-            self.assertIn(bound, native)
-        self.assertIn("let end = Instant::now() + Duration::from_secs(if matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else { 45 });", observer)
-        self.assertIn("let end = self.end.min(Instant::now() + Duration::from_secs(2));", observer)
-        self.assertIn("timeout=case_timeout(case), capture=True, text=False, output_limit=OUTPUT_LIMIT", qualification)
         self.assertEqual([M.case_timeout(case) for case in M.CASES], [60] * 4)
         self.assertEqual([M.case_timeout(case) for case in M.IOS_CASES], [325] * 5)
-        self.assertIn('len(data.encode("ascii")) <= (40 * 1024 if project_fields else 24 * 1024)', qualification)
 
-    def test_semantic_timeout_uses_independent_relay_and_retains_original_receiver(self):
-        desktop = PATH.parents[1]
-        observer = (desktop / "src-tauri/src/installed_shell_observation_macos.rs").read_text(encoding="utf-8")
-        relay = observer.split("fn accessibility_step(", 1)[1].split("fn native_step(", 1)[0]
-        self.assertIn("worker: Option<std::thread::JoinHandle<OpenWorkerReturn>>", observer)
-        self.assertIn("returned: Option<OpenActionReceipt>", observer)
-        self.assertIn("open_custody: Mutex<Option<OpenFlight>>", observer)
-        self.assertLess(relay.index("*custody = Some(OpenFlight"), relay.index('.name("mrk-aqua-open".into()).spawn('))
-        self.assertLess(relay.index('.name("mrk-aqua-open".into()).spawn('), relay.index("flight.worker = Some(handle)"))
-        self.assertLess(relay.index("flight.worker = Some(handle)"), relay.index("let end = self.end.min("))
-        self.assertLess(relay.index("let end = self.end.min("), relay.index("sender.try_send(Some(end))"))
-        self.assertLess(relay.index("OpenRecheckSlot { receipt: Some(first_receipt)"), relay.index('.name("mrk-aqua-open".into()).spawn('))
-        timed = relay.split("let end = self.end.min(", 1)[1]
-        for forbidden in ("self.record()", ".admitted(", ".lock()", ".spawn("):
-            self.assertNotIn(forbidden, timed)
-        loop = timed.split("        loop {", 1)[1].split("        if flight.returned.is_none()", 2)
-        deadline = loop[0]
-        self.assertIn("token.expire(); self.fail_with(\"native-default-deadline\")", deadline)
-        self.assertIn("if now >= self.end", deadline)
-        self.assertIn("let mut deadline_observed = false;", timed)
-        self.assertIn("deadline_observed = true;", deadline)
-        self.assertLess(timed.index("if now >= end && !deadline_observed"), timed.index("flight.receipt.try_recv()"))
-        self.assertLess(timed.index("if now >= end && !deadline_observed"), timed.index("handle.is_finished()"))
-        self.assertLess(timed.index("handle.is_finished()"), timed.index('.expect("positively finished original").join()'))
-        self.assertIn("let wait_end = if token.expired() { self.end } else { end };", timed)
-        self.assertLess(timed.index("flight.worker_returned = Some(returned)"), timed.index("let rechecks_settled ="))
-        self.assertLess(timed.index("let rechecks_settled ="), timed.index("let joined = known && token.joined()"))
-        self.assertLess(timed.index("let joined = known && token.joined()"), timed.index("let retired = joined && token.retire()"))
-        no_go = timed.split("if !go_published && flight.worker_returned == Some(OpenWorkerReturn::NoGo)", 1)[1]
-        self.assertIn("flight.returned.is_none()", no_go)
-        self.assertIn("flight.input.no_entry(true)", no_go)
-        returned = relay.split("let Some(receipt) = flight.returned.as_ref()", 1)[1]
-        self.assertIn("let returned_at = receipt.returned_at", returned)
-        self.assertIn("token.same(&receipt.token)", returned)
-        self.assertIn("let known = worker_retirement_ready(flight.worker_returned, same, rechecks_settled, body.custody_known(), token.state())", returned)
-        ready = observer.split("fn worker_retirement_ready(", 1)[1].split("struct OpenFlight", 1)[0]
-        self.assertIn("worker == Some(OpenWorkerReturn::Body) && same_receipt && rechecks_settled == Some(true)", ready)
-        self.assertIn('body_known && state == "returned"', ready)
-        self.assertNotIn("native", ready)  # A known late nonentry can settle without a native action.
-        self.assertIn("first_failure_reason(&self.failure_reason) == Some(\"native-default-input\")", returned)
-        self.assertIn("let stop_at = if deadline_first { end } else { returned_at.min(end) };", returned)
-        self.assertIn("if failed && token.refuse_original_at(stop_at, reason).is_err()", returned)
-        for earlier, later in (("token.retire()", "!retire_returned_open("),
-                               ("!retire_returned_open(", "if Instant::now() >= end"),
-                               ("if Instant::now() >= end", "drop(r); *custody = None; drop(custody);"),
-                               ("drop(r); *custody = None; drop(custody);", "token.refuse_original_at(")):
-            self.assertLess(returned.index(earlier), returned.index(later))
-        worker = observer.split("fn action_worker(", 1)[1].split("fn open_unknown(", 1)[0]
-        self.assertLess(worker.index("go.recv()"), worker.index("token.enter()"))
-        self.assertLess(worker.index("token.enter()"), worker.index("installed_prompt_button("))
-        self.assertLess(worker.index("installed_prompt_button("), worker.index("token.returned()"))
-        self.assertLess(worker.index("token.returned()"), worker.index("done.try_send(receipt)"))
-        self.assertNotIn("self.record()", worker)
-        self.assertNotIn(".join()", worker)
-        main = observer.split("fn action_recheck_main(", 1)[1].split("fn worker_admission(", 1)[0]
-        self.assertLess(main.index("token.recheck("), main.index("let receipt = OpenRecheckReceipt"))
-        self.assertLess(main.index("let receipt = OpenRecheckReceipt"), main.index("done.try_send(receipt)"))
-        permit = observer.split("fn worker_admission(", 1)[1].split("fn worker_recheck(", 1)[0]
-        self.assertIn("Instant::now() >= self.end", permit)
-        self.assertIn("return None;", permit)
-        for forbidden in ("self.record()", ".lock()", ".admitted(", "PANEL.with", "run_on_main_thread"):
-            self.assertNotIn(forbidden, permit)
-        recheck = observer.split("fn worker_recheck(", 1)[1].split("fn action_worker(", 1)[0]
-        self.assertLess(recheck.index("slot.dispatched = true"), recheck.index("app.run_on_main_thread("))
-        self.assertIn("slot.uncertain = true", recheck)
-        self.assertIn("slot.settled(token, stage, self.end)", recheck)
-        self.assertIn("receiver.recv_timeout(self.end.saturating_duration_since(Instant::now()))", recheck)
-        self.assertIn("[OpenRecheckSlot; 3]", recheck)
-        self.assertIn("slot.receipt.take()", recheck)
-        self.assertIn("std::mem::ManuallyDrop::new(receiver)", recheck)
-        self.assertIn("slot.receipt = Some(std::mem::ManuallyDrop::into_inner(receiver))", recheck)
-        self.assertLess(recheck.index("}; // NO ledger/Record/GuiFacts lock"), recheck.index("app.run_on_main_thread("))
-        unlocked = recheck.split("}; // NO ledger/Record/GuiFacts lock", 1)[1].split("let Ok(mut ledger) = rechecks.try_lock()", 1)[0]
-        for retained_lock in (".lock()", ".try_lock()", "self.record()"):
-            self.assertNotIn(retained_lock, unlocked)
-        for name in ("parent_receipt", "first_receipt", "final_receipt"):
-            self.assertLess(relay.index(f"receipt: Some({name})"), relay.index('.name("mrk-aqua-open".into()).spawn('))
-        report = observer.split("fn report_failure(", 1)[1].split("pub(super) fn attach(", 1)[0]
-        self.assertLess(report.index("drop(r)"), report.index("self.diagnostic.submit(snapshot.frame(reason))"))
-        expiry = report.split("fn report_expiry(", 1)[1]
-        for forbidden in ("stderr()", "stdout()", "self.record", "self.open_custody", ".lock()", "write_all", "writeln!"):
-            self.assertNotIn(forbidden, expiry)
-        self.assertIn("snapshot.at_expiry(progress).frame(reason)", expiry)
-        snapshot = observer.split("struct FailureSnapshot", 1)[1].split("fn failure_context(", 1)[0]
-        self.assertIn('self.source = "prearm-open-progress"', snapshot)
-        self.assertIn("8192", snapshot)
-        self.assertIn("context.is_ascii()", snapshot)
-        writer = observer.split("struct DiagnosticWriter", 1)[1]
-        self.assertIn("pub(crate) struct Observation", writer)
-        writer = writer.split("pub(crate) struct Observation", 1)[0]
-        self.assertEqual(writer.count(".spawn(move ||"), 1)
-        self.assertEqual(writer.count("stderr().lock()"), 1)
-        self.assertIn("sync_channel::<Option<Vec<u8>>>(1)", writer)
-        self.assertIn("compare_exchange(0, choice", writer)
-        self.assertIn("self.sender.try_send(frame)", writer)
-        self.assertLess(writer.index("is_finished()"), writer.index(".join()"))
-        self.assertIn("owner.returned = Some(returned)", writer)
-        self.assertIn("end.saturating_duration_since(Instant::now())", writer)
-        self.assertNotIn("Duration::from_secs(", writer)
-        self.assertNotIn("OpenAction", writer)
-        observe = observer.split("fn observe(q:", 1)[1].split("pub(crate) fn main()", 1)[0]
-        self.assertIn("q.finish()", observe)
-        self.assertIn("edit::bounded(&report", observe)
-        completion = observer.split("let report = observe(&q);", 1)[1]
-        self.assertLess(completion.index("q.diagnostic.finish(q.end)"), completion.index("!q.timely()"))
-        self.assertIn("q.open_custody.try_lock().map(|custody| custody.is_none()).unwrap_or(false)", completion)
-        retain = completion.split("if returned.is_none() || !input_clear {", 1)[1].split("let returned = returned.expect(", 1)[0]
-        self.assertLess(retain.index("std::mem::forget(q)"), retain.index("return std::process::ExitCode::FAILURE"))
-        self.assertLess(completion.index("!q.timely()"), completion.index("stdout().lock()"))
-        self.assertIn("std::mem::forget(q)", completion)
-        self.assertNotIn("super::diagnostic", completion)
-        self.assertNotIn("q.report_failure()", completion.split("q.diagnostic.finish(q.end)", 1)[1])
-        close = observer.split("pub(super) fn close_prevented(", 1)[1].split("fn failure_shutdown(", 1)[0]
-        self.assertNotIn("r.pending.take()", close)
-        self.assertLess(close.index("let Some(Pending::Close(request))"), close.index("r.pending = None"))
 
-    def test_semantic_reentrancy_defers_poll_close_and_release_until_actual_join(self):
-        shell = (PATH.parents[1] / "src-tauri/src/shell_macos_dialog.rs").read_text(encoding="utf-8")
-        tick = shell.split("fn tick(call:", 1)[1].split("pub(crate) async fn run_owned_dialog", 1)[0]
-        self.assertLess(tick.index("observation::body_busy(id)"), tick.index("PANEL.with("))
-        self.assertLess(tick.index("!r.release_ready()"), tick.index("panel.poll()"))
-        self.assertLess(tick.index("panel.poll()"), tick.index("panel.close_once()"))
-        self.assertIn("enum OpenPhase { Prepared, Requested, Queued, Entered, Returned, Joined, Retired, Unknown }", shell)
-        self.assertIn("progress: AtomicU16", shell)
-        self.assertIn("let bits = self.progress.load(Ordering::SeqCst)", shell)
-        self.assertIn("self.progress.fetch_or(OpenPhase::Unknown as u16", shell)
-        self.assertIn("self.progress.fetch_or(OPEN_EXPIRED", shell)
-        self.assertIn("queued.snapshot() != (OpenProgress", shell)
-        self.assertIn("OpenPhase::Joined, OpenPhase::Retired", shell)
-        recheck = shell.split("pub(crate) fn recheck(", 1)[1].split("pub(crate) fn prepare_open_input(", 1)[0]
-        self.assertLess(recheck.index("!native::main_thread()"), recheck.index("OpenBodyGuard::enter(self)"))
-        self.assertLess(recheck.index("OpenBodyGuard::enter(self)"), recheck.index("PANEL.with("))
-        for same in ("Arc::ptr_eq(&call, &self.call)", "Arc::ptr_eq(&owner, &self.owner)", "Arc::ptr_eq(r, &self.release)"):
-            self.assertIn(same, recheck)
-        self.assertEqual(recheck.count("panel.installed_open_recheck(&self.identity, stage)"), 1)
-        self.assertLess(recheck.index("panel.installed_open_recheck("), recheck.index("let after = admit(true)"))
-        for forbidden in ("installed_prompt_button(", "observe_panel_action", "self.returned()", "self.retire()"):
-            self.assertNotIn(forbidden, recheck)
-        refusal = shell.split("pub(crate) fn refuse_original_at(", 1)[1].split("pub(crate) fn identity(", 1)[0]
-        self.assertEqual(refusal.count('self.state() != "retired"'), 2)
-        self.assertIn("original_admitted(self.id, &self.call, &self.owner, true) != Some(true)", refusal)
-        self.assertIn("Reason::SourceRefused | Reason::Deadline", refusal)
-        self.assertLess(refusal.index('self.state() != "retired"'), refusal.index("self.call.failed_at(reason, at)"))
-        self.assertEqual(refusal.count("self.call.failed_at("), 1)
-        for forbidden in ("Instant::now", "PANEL.with", ".installed_", "observe_panel_action", "set_endpoint", ".retire()"):
-            self.assertNotIn(forbidden, refusal)
-        asset = (PATH.parents[1] / "src-tauri/src/asset_session.rs").read_text(encoding="utf-8")
-        failed = asset.split("pub(crate) fn failed(&self,", 1)[1].split("pub(crate) fn begin_response(", 1)[0]
-        self.assertIn("self.failed_at(reason, Instant::now());", failed)
-        self.assertLess(failed.index("let mut state = document.lock()"), failed.index("fail_gui_original_locked("))
-        self.assertLess(failed.index("fail_gui_original_locked("), failed.index("document.bump(&mut state); self.changed();"))
-        self.assertNotIn("drop(state)", failed)  # Existing intra-document notification order.
-        transition = asset.split("fn fail_gui_original_locked(", 1)[1].split("struct Slot", 1)[0]
-        self.assertIn("Arc::ptr_eq(&slot.owner, owner)", transition)
-        self.assertIn("Arc::ptr_eq(quit, owner)", transition)
-        self.assertLess(transition.index("facts.refusal"), transition.index("slot.stop(reason, at)"))
-        self.assertLess(transition.index("slot.stop(reason, at)"), transition.index("stop_quit(state, at)"))
-        self.assertLess(transition.index("stop_quit(state, at)"), transition.index("owner.stop()"))
-        for forbidden in ("Instant::now", "not_created(", "begin_response(", "selected_path(", "owner.id ==", "state.unknown = false"):
-            self.assertNotIn(forbidden, transition)
-        native = (PATH.parents[1] / "native/macos-installed-native/src/native.m").read_text(encoding="utf-8")
-        release = native.split("int mrk_panel_release(", 1)[1].split("#ifdef MRK_INSTALLED_OBSERVATION\n// No separate window lookup:", 1)[0]
-        self.assertIn("s->unknown || s->callbackActive || !s->closed", release)
-        self.assertLess(release.index("Block_release(s->completion)"), release.index("[s->window release]"))
-        self.assertNotIn("observationDefaultElement", release)
-        callback = native.split("s->completion = Block_copy", 1)[1].split("beginSheetModalForWindow:", 1)[0]
-        self.assertIn("s->callbackActive = YES", callback)
-        self.assertIn("s->callbackActive = NO", callback)
-        self.assertNotIn("observationConfirm", callback)
-        rust = (PATH.parents[1] / "native/macos-installed-native/src/lib.rs").read_text(encoding="utf-8")
-        self.assertNotIn("AxProjection", rust)
-        self.assertNotIn("DefaultPacket", rust)
-        self.assertIn("fn semantic_data_check()", rust)
-        self.assertNotIn("Duration::from_secs(2)", rust)
 
-    def test_dom_callback_custody_wraps_only_the_original_returned_body(self):
-        # Source controls only: the actual Rust DATA entry and native callback
-        # are executed by the reviewed macOS qualification, not these tests.
-        observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
-        dispatch = observer.split("if r.evaluations >= 160", 1)[1].split("fn action_original(", 1)[0]
-        self.assertLess(dispatch.index("r.evaluations += 1"), dispatch.index("sequence: r.evaluations"))
-        self.assertIn("r.pending = Some(Pending::Dom(original)); original", dispatch)
-        self.assertIn("if r.pending == Some(Pending::Dom(original)) { r.pending = None; }", dispatch)
-        self.assertIn("q.dom(original,&value)", dispatch)
-        refused = dispatch.split("if window.eval_with_callback", 1)[1]
-        self.assertIn('self.fail_with("dom-dispatch-refused")', refused)
-        self.assertNotIn("r.pending = None", refused)
-        entry = observer.split("fn dom_step_entry(", 1)[1].split("// Only the wrapper", 1)[0]
-        self.assertIn("(1..=160).contains(&original.sequence)", entry)
-        self.assertIn("current == original.step && pending == Some(Pending::Dom(original))", entry)
-        retirement = observer.split("fn retire_returned_dom(", 1)[1].split("#[derive", 1)[0]
-        self.assertIn("*pending != Some(Pending::Dom(original)) { return false; }", retirement)
-        self.assertNotIn("current", retirement)
-        self.assertNotIn("take()", retirement)
-        wrapper = observer.split("    fn dom(", 1)[1].split("    fn dom_body(", 1)[0]
-        self.assertIn("let Some(mut r) = self.record() else { return; };", wrapper)
-        authenticated = 'if !dom_step_entry(r.pending, r.step, original) { self.fail_with("dom-pending-custody"); return; }'
-        self.assertLess(wrapper.index(authenticated), wrapper.index("self.dom_body(&mut r, original, raw)"))
-        self.assertLess(wrapper.index("self.dom_body(&mut r, original, raw)"), wrapper.index("retire_returned_dom(&mut r.pending, original)"))
-        self.assertEqual(wrapper.count("self.record()"), 1)
-        for forbidden in ("catch_unwind", "drop(r)", "r.pending.take()", "r.step !="):
-            self.assertNotIn(forbidden, wrapper)
-        body = observer.split("    fn dom_body(", 1)[1].split("    pub(super) fn relay_joined", 1)[0]
-        for forbidden in ("self.record()", "r.pending", "catch_unwind", "failed.store", "self.end ="):
-            self.assertNotIn(forbidden, body)
-        self.assertEqual(body.count("if !self.timely() { return; }"), 5)
-        for label in ("dom-callback-size", "dom-callback-json", "dom-callback-object", "dom-callback-state"):
-            self.assertIn(f'self.fail_with("{label}")', body)
-        # Legacy, iOS and session branches retain the original DOM wrapper/cutoff.
-        # iOS validates a comparison-DATA candidate; only a timely commit may
-        # publish ready flags, and it never clones owner/native custody.
-        ios = body.split("if let Step::Ios(step) = step {", 1)[1].split("let review_round =", 1)[0]
-        self.assertIn("let mut observed = record.clone();", ios)
-        self.assertEqual(ios.count("r.ios_record = Some(observed)"), 2)
-        next_commit, final_commit = ios.split("Ok(None) =>", 1)
-        for commit in (next_commit, final_commit):
-            self.assertLess(commit.index("if !self.timely() { return; }"), commit.index("r.ios_record = Some(observed)"))
-        session = body.split("if let Step::Session(step) = step {", 1)[1].split("let review_round =", 1)[0]
-        self.assertIn("let mut observed = session.clone();", session)
-        self.assertIn("Ok(next) if self.timely() => { r.session_record = Some(observed); r.step = Step::Session(next); }", session)
-        before_transition = body.split("let review_round =", 1)[1].split("r.step = match step", 1)[0]
-        self.assertTrue(before_transition.rstrip().endswith("if !self.timely() { return; }"))
-        self.assertNotRegex(before_transition, r"r\.[a-z_]+\s*(?:\+=|=(?!=))")
-        shutdown = observer.split("fn failure_shutdown(", 1)[1].split("    fn dom(", 1)[0]
-        self.assertIn("if r.pending.is_some() || r.failure_quit_attempted { return; }", shutdown)
-        context = observer[observer.index("fn failure_context("):]
-        context = context[:context.index("\n}\n") + 3]
-        self.assertIn('Pending::Dom(original) => ("dom", Some(original.step))', context)
-        self.assertNotIn("sequence", context)
 
-    def test_picker_result_routes_errors_without_admitting_early_success(self):
-        observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
-        route = observer.split("fn project_return_route(", 1)[1].split("fn native_step_entry(", 1)[0]
-        self.assertLess(route.index("if reload_requested && case == Case::PickerLoss"), route.index("match result"))
-        self.assertIn('if project_returned || result.as_ref().is_ok_and(Option::is_some) { return Err("observer-invariant"); }', route)
-        self.assertIn("case == Case::FirstSave && matches!(step, Step::CancelProject | Step::CancelSettled)", route)
-        self.assertLess(route.index('if cancel && cancel_returned { return Err("cancel-duplicate-result"); }'), route.index("match result"))
-        self.assertIn("Err(error) => Err(crate::asset_commands::AssetError::new(error.reason).code)", route)
-        self.assertIn("Ok(None) if cancel => Ok(ProjectReturn::Cancelled)", route)
-        self.assertIn('Ok(Some(_)) if cancel => Err("cancel-unexpected-project")', route)
-        self.assertIn("Ok(Some(_)) if matches!(step, Step::OpenProject | Step::ProjectSettled) => Ok(ProjectReturn::Selected)", route)
-        self.assertIn('_ => Err("picker-unexpected-result")', route)
-        for forbidden in ("error.code", "error.message", "project_calls", "r.step =", "observe_panel_action"):
-            self.assertNotIn(forbidden, route)
-        handler = observer.split("pub(super) fn project_result(", 1)[1].split("pub(super) fn snapshot_request(", 1)[0]
-        self.assertLess(handler.index("match project_return_route("), handler.index("let Ok(Some(project))"))
-        self.assertIn("Err(reason) => { self.fail_with(reason); return; }", handler)
-        self.assertIn('let Ok(Some(project)) = result else { self.fail_with("project-result-shape"); return; };', handler)
-        classified = "selected_project_failure(r.step, r.project.is_some(), project, &self.project_path, self.case.name())"
-        self.assertLess(handler.index(classified), handler.index("r.project_returned = true; r.project = Some(project.clone());"))
-        classifier = observer.split("fn selected_project_failure(", 1)[1].split("fn snapshot_error_reason(", 1)[0]
-        predicates = ("!matches!(step, Step::OpenProject | Step::ProjectSettled) || already_selected",
-                      "Path::new(&project.path) != expected_path", "project.name != expected_name", "!crate::protocol::valid_id(&project.id)")
-        self.assertEqual(sorted(classifier.index(value) for value in predicates), [classifier.index(value) for value in predicates])
-        for label in ("order", "name", "id"):
-            self.assertIn(f'return Some("project-result-{label}")', classifier)
-        self.assertIn('if Path::new(&project.path) != expected_path { return Some(project_path_mismatch_reason(Path::new(&project.path), expected_path)); }', classifier)
-        self.assertNotIn("project_calls", handler)
-        self.assertNotIn("r.step =", handler)
 
-    def test_project_selection_capture_is_immediate_original_data_not_later_success(self):
-        source_root = PATH.parents[1] / "src-tauri" / "src"
-        asset = (source_root / "asset_session.rs").read_text(encoding="utf-8")
-        shell = (source_root / "shell.rs").read_text(encoding="utf-8")
-        observer = (source_root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
-        result = asset.split("pub(crate) async fn project_result(", 1)[1].split("pub(crate) fn choose_project_path(", 1)[0]
-        self.assertEqual(result.count("loop {"), 1)
-        self.assertEqual(result.count("self.reconcile();"), 1)
-        self.assertEqual(result.count("tokio::time::sleep(Duration::from_millis(50)).await"), 1)
-        original = result.split("async fn project_result_original(", 1)[1]
-        for predicate in ("let state = self.lock();", "slot.owner.id == id", "if state.unknown",
-                          "slot.phase == Phase::Idle && slot.owner.resources_settled()",
-                          "slot.reason == Reason::None || slot.reason == Reason::UserCancelled"):
-            self.assertLess(original.index(predicate), original.index("capture_project_selection(&self.inner, id, slot, project)"))
-        self.assertLess(original.index("capture_project_selection(&self.inner, id, slot, project)"), original.index("return Ok(slot.project.clone());"))
-        self.assertIn("return Err(AssetError::new(slot.reason));", original)
-        capture = asset.split("pub(super) fn capture_project_selection(", 1)[1].split("pub(crate) fn selection_saved_data_checks()", 1)[0]
-        for required in ("slot.operation == Operation::ChooseProject", "slot.owner.id == id", "original_call(document, &slot.owner)",
-                         "same_project(saved, project)", "slot.owner.gui.installed_native_response()", "document.bridge.native_project(&project.id)"):
-            self.assertIn(required, capture)
-        for forbidden in ("installed_macos_project(", "completed(", ".ended.load", "resources_settled(", ".edits", "registry_result(",
-                          "native_roster(", ".reconcile(", ".join", ".poll", ".await", "Record", "self.record(", "metadata("):
-            self.assertNotIn(forbidden, capture)
-        projection = asset.split("fn recorded_identity(", 1)[1].split("fn saved_project_selection(", 1)[0]
-        for required in ("root.identity.posix().ok()?.preflight_identity()", "identity.device.parse().ok()?", "identity.inode.parse().ok()?",
-                         "u64::from(identity.mode)", "u64::from(identity.uid)", "u64::from(identity.gid)"):
-            self.assertIn(required, projection)
-        for forbidden in ("metadata(", "std::fs", "as f64", "unwrap_or(0)", "canonicalize"):
-            self.assertNotIn(forbidden, projection)
-        saved = asset.split("fn saved_project_selection(", 1)[1].split("pub(crate) fn selection_saved_data_checks()", 1)[0]
-        self.assertIn("saved.operation_id == id && saved.response == NativeResponse::Accept", saved)
-        self.assertIn("!saved.callback_returned", saved)
-        self.assertIn("*generation != 2", saved)
-        self.assertIn("same_project(project, returned)", saved)
-        checks = asset.split("pub(crate) fn selection_saved_data_checks()", 1)[1].split("pub(crate) struct ProjectWitness", 1)[0]
-        self.assertIn("owner.gui.installed_native_response()", checks)
-        self.assertIn("!owner.resources_settled() || owner.ended.load(Ordering::SeqCst)", checks)
-        self.assertIn("book.receipt == JoinReceipt::New", checks)
-        self.assertIn("owner.ended.load(Ordering::SeqCst) || owner.project_path_settled(true)", checks)
-        self.assertIn("data.for_result(2, &project) != (SelectionCustody::Bound", checks)
-        completed = asset.split("fn completed(document:", 1)[1].split("fn same_project(", 1)[0]
-        self.assertIn("!owner.ended.load(Ordering::SeqCst) || !owner.resources_settled()", completed)
-        self.assertIn("book.receipt == if probed { JoinReceipt::Returned } else { JoinReceipt::New }", completed)
-        command = shell.split("async fn choose_project(webview:", 1)[1].split("async fn choose_project_path(", 1)[0]
-        self.assertEqual(command.count("state.document.installed_macos_project_result(id, &mut selection).await"), 1)
-        self.assertEqual(command.count("state.document.project_result(id).await"), 1)  # Ordinary/Linux return is unchanged.
-        self.assertIn("q.project_result(&result);", command)  # Linux/Windows hook signature is unchanged.
-        one_arg_gate = command.split("if let Some(q) = &state.observation { q.project_result(&result); }", 1)[0].rsplit("#[cfg(", 1)[1]
-        self.assertIn('target_os = "linux"', one_arg_gate)
-        self.assertIn('target_os = "windows"', one_arg_gate)
-        self.assertNotIn('target_os = "macos"', one_arg_gate)
-        two_arg_gate = command.split("if let Some(q) = &state.observation { q.project_result(&result, selection.as_ref()); }", 1)[0].rsplit("#[cfg(", 1)[1]
-        self.assertIn('target_os = "macos"', two_arg_gate)
-        self.assertNotIn('target_os = "linux"', two_arg_gate)
-        self.assertNotIn('target_os = "windows"', two_arg_gate)
-        self.assertLess(command.index("}.await;"), command.index("q.project_result(&result, selection.as_ref())"))
-        for source in (result, command):
-            self.assertIn('feature = "macos-installed-observation"', source)
-            self.assertIn('not(feature = "macos-installed-installer")', source)
-            self.assertIn('target_os = "macos", target_arch = "aarch64"', source)
-        handler = observer.split("pub(super) fn project_result(", 1)[1].split("pub(super) fn snapshot_request(", 1)[0]
-        self.assertLess(handler.index("selected_project_failure("), handler.index("ProjectSelectionSample::from_data("))
-        self.assertLess(handler.index("if project_selection_failure_reason(reason)"), handler.index("latch_project_selection("))
-        self.assertLess(handler.index("latch_project_selection("), handler.index("r.project_returned = true; r.project = Some(project.clone());"))
-        for forbidden in ("state.document", "installed_macos_project(", "r.project_witness =", "observe_panel", "metadata("):
-            self.assertNotIn(forbidden, handler)
 
     def test_navigation_observer_cfg_preserves_all_platform_callbacks(self):
         shell = (PATH.parents[1] / "src-tauri/src/shell.rs").read_text(encoding="utf-8")
@@ -4048,7 +3047,7 @@ class AquaDataTests(unittest.TestCase):
                         M.validate_snapshot(original, item, case, True, UID, GID)
         original = initial_snapshot("noop-stale")
         final = final_snapshot("noop-stale", original)
-        self.assertEqual(final[".gitignore"].identity[6], 365)
+        self.assertEqual(final[".gitignore"].identity[6], len(M.IGNORE_PREFIX + M.IGNORE_RULES + M.STALE))
         identity = list(final[".gitignore"].identity); identity[1] += 1000
         final[".gitignore"] = replace(final[".gitignore"], identity=tuple(identity))
         with self.assertRaises(M.Refused):
@@ -5307,12 +4306,6 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertEqual(fixtures.before, [])
         self.assertEqual(fixtures.reads, [])
         self.assertFalse(fixtures.inflight)
-        source = (PATH.parents[1] / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
-        route = source.split("fn route(case: Case)", 1)[1].split("fn native_recheck_data_check()", 1)[0]
-        self.assertIn('let suffix = if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" } else { "" };', route)
-        self.assertIn('format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}")', route)
-        self.assertIn("directory_rosters(&root,uid,0o700,CURRENT_IOS_ROSTER,ios_alternate_roster(case),None)", route)
-        self.assertIn('directory(&root,uid,0o700,&[project_fields::NAME,"state"])', route)
 
     def test_complete_project_fields_report_is_bounded_and_fail_closed(self):
         case = "project-fields"
@@ -6025,79 +5018,6 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertEqual(len(M.re.findall(r'"([A-Za-z]+)":', serialized)), 20)
 
     def test_content_readiness_uses_original_owner_wait_budgets_and_bounded_filter_diagnostics(self):
-        # SOURCE/closed scalar DATA only. Sleep return is not readiness, source
-        # checks are not native execution, and these frames are not receipts.
-        root = PATH.parents[1]
-        native = (root / "native/macos-installed-native/src/native.m").read_text()
-        rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
-        observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
-        wait = native.split("static BOOL mrk_ax_content_wait(", 1)[1].split("static BOOL mrk_ax_next_content_sample(", 1)[0]
-        advance = native.split("static BOOL mrk_ax_next_content_sample(", 1)[1].split("static BOOL mrk_ax_select_entry(", 1)[0]
-        action = native.split("static void mrk_ax_open(", 1)[1].split("void mrk_observation_prompt_press(", 1)[0]
-        roster = native.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_content_wait(", 1)[0]
-        write = native.split("static BOOL mrk_ax_select_entry(", 1)[1].split("static void mrk_ax_open(", 1)[0]
-        for guard in ("s->result.error", "s->result.selection_checks != 1", "s->result.selection_matches",
-                      "s->result.selection_flags", "s->result.flags", "s->result.selection_wait",
-                      "s->result.selection_sample >= MRK_SELECT_SAMPLES"):
-            self.assertIn(guard, wait)
-        self.assertEqual(wait.count("nanosleep("), 1)
-        self.assertEqual(wait.count("mrk_ax_admit("), 2)
-        ordering = ("mrk_ax_admit(s, 50000000u, 0, NULL)", "s->result.selection_wait = 1u",
-                    "nanosleep(&interval, NULL)", "s->result.selection_wait = status == 0 ? 2u : 3u",
-                    "mrk_ax_fail(s, MRK_OPEN_OTHER)", "mrk_ax_admit(s, 0, 0, NULL)")
-        positions = [wait.index(value) for value in ordering]
-        self.assertEqual(positions, sorted(positions))
-        self.assertIn("return returned && admitted;", wait)
-        for forbidden in ("while (", "for (", "dispatch_", "pthread_create", "Instant::", "CFRelease(", "mrk_ax_projection"):
-            self.assertNotIn(forbidden, wait)
-        self.assertIn("s->result.selection_sample = ordinal + 1", advance)
-        self.assertIn("s->result.selection_pending[ordinal - 1] = (MRKContentPending)", advance)
-        self.assertLess(advance.index("s->result.selection_pending[ordinal - 1] ="),
-                        advance.index("s->result.selection_sample = ordinal + 1"))
-        self.assertIn("s->result.selection_calls_before = s->result.calls", advance)
-        self.assertIn("s->result.selection_cf_before = s->count", advance)
-        for forbidden in ("s->result.error =", "s->result.calls =", "s->count =", "s->result.selection_flags =",
-                          "s->result.flags =", "CFRelease(", "memset(", "s->selection["):
-            self.assertNotIn(forbidden, advance)
-        self.assertEqual(native.count("s->result.selection_pending[ordinal - 1] ="), 1)
-        self.assertIn("MRK_SELECT_SAMPLES = 8, MRK_SELECT_PENDING = MRK_SELECT_SAMPLES - 1", native)
-        self.assertIn("MRK_SELECT_TOTAL_CALLS = MRK_SELECT_SAMPLES * MRK_SELECT_CALLS", native)
-        self.assertIn("MRK_SELECT_TOTAL_CF = MRK_SELECT_SAMPLES * MRK_SELECT_CF", native)
-        self.assertIn("sizeof(MRKContentPending) == 64", native)
-        for field, offset in (("selection_sample", 160), ("selection_pending", 176)):
-            self.assertIn(f"offsetof(MRKOpenResult, {field}) == {offset}", native)
-            self.assertIn(f"std::mem::offset_of!(OpenWire, {field}) != {offset}", rust)
-        self.assertIn("s->result.selection_sample == MRK_SELECT_SAMPLES", action)
-        self.assertLess(action.index("if (s->result.selection_matches == 1) break;"),
-                        action.index("mrk_ax_content_wait(s)"))
-        self.assertLess(action.index("mrk_ax_content_wait(s)"), action.index("mrk_ax_next_content_sample(s)"))
-        self.assertEqual(action.count("mrk_ax_original(s, s->result.selection_mode ? 0 : 1)"), 1)
-        self.assertEqual(action.count("mrk_ax_select_entry("), 1)
-        self.assertEqual(action.count("AXUIElementPerformAction("), 1)
-        self.assertIn("MRKSelectionPass *p = &s->selection[s->result.selection_sample - 1];", roster)
-        self.assertIn("if (p->nodes[0])", roster)
-        self.assertIn("MRKSelectionPass *p = &s->selection[s->result.selection_sample - 1];", write)
-        self.assertEqual(native.count("AXUIElementSetAttributeValue("), 1)
-        self.assertIn("if (s->result.selection_matches > 1) return mrk_ax_fail(s, MRK_OPEN_AMBIGUOUS);", roster)
-        self.assertIn("if (s->result.selection_matches == 1) s->result.selection_checks |= 2u;", roster)
-        self.assertIn("rows || list ? MRK_SELECT_ROWS : 16, at != 0", roster)  # Empty root is unsupported, not pending.
-        self.assertIn("required_ns > 100_000_000", rust)
-        self.assertIn("remaining.as_nanos() < u128::from(required_ns)", rust)
-        self.assertIn("context.end.saturating_duration_since(Instant::now())", rust)
-        self.assertIn("self.end.min(Instant::now() + Duration::from_secs(2))", observer)
-        self.assertIn("edit::bounded(&failure_context(&self), 8192)", observer)
-        self.assertIn("(frame.len() <= 8448).then_some(frame)", observer)
-        filter_source = native.split("static BOOL mrk_panel_observe_file_filter(", 1)[1].split("int mrk_panel_observe_project_field(", 1)[0]
-        for getter in ("[panel allowedContentTypes]", "[panel allowsOtherFileTypes]"):
-            self.assertEqual(filter_source.count(getter), 1)
-        self.assertIn("if (s->observationFileFilter) return NO;", filter_source)
-        for forbidden in ("setAllowed", "setAllows", "UTF8String", "for (", "while (", " retain]", " release]"):
-            self.assertNotIn(forbidden, filter_source)
-        navigation = native.split("int mrk_panel_observe_project_field(", 1)[1].split("int mrk_panel_observe_version_source_name(", 1)[0]
-        self.assertLess(navigation.index("s->observationProjectField != 511u || !mrk_panel_observe_file_filter"),
-                        navigation.index("[panel setDirectoryURL:"))
-        self.assertIn("*filter = s->observationFileFilter; return result;", navigation)
-        self.assertIn('file_filter: filter_valid.then_some(filter)', rust)
         good = M.expected_result(BINDING, "project-fields")
         for flags, allowed, other in ((1, None, None), (3, None, None), (7, "unrestricted", None),
                                        (11, "restricted", None), (23, "unrestricted", False),
@@ -6451,156 +5371,6 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             {"tableRoles", "outlineRoles", "listRoles", "entryRoots", "titlePresent", "titleAbsent", "valuePresent", "outsideEntryRoleMask",
              "fixtureLabelMask", "expectedLabelRelations", "expectedLabelRoleMask"})
 
-    def test_typed_selection_source_keeps_one_bounded_input_and_both_full_url_proofs(self):
-        root = PATH.parents[1]
-        native = (root / "native/macos-installed-native/src/native.m").read_text()
-        rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
-        observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
-        roles = native.split("static unsigned mrk_ax_selection_role(", 1)[1].split("static BOOL mrk_ax_selection_label(", 1)[0]
-        for role, code in (("Column", "COLUMN"), ("List", "LIST"), ("Row", "ROW"), ("Cell", "CELL"),
-                           ("Image", "IMAGE"), ("StaticText", "TEXT"), ("TextField", "FIELD")):
-            self.assertIn(f"if (CFEqual(role, kAX{role}Role)) return MRK_SELECT_{code};", roles)
-        label = native.split("static BOOL mrk_ax_selection_label(", 1)[1].split("static BOOL mrk_ax_selection_roster(", 1)[0]
-        self.assertIn("CFEqual(value, expected)", label)
-        self.assertIn("unsigned entry = p->entries[at]", label)
-        self.assertLess(label.index("if (!p->matches[entry])"), label.index("s->result.selection_matches++"))
-        self.assertIn("p->candidate = entry; p->label = at; p->label_attribute = attribute", label)
-        roster = native.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_content_wait(", 1)[0]
-        for condition in ("other != at && p->nodes[other] && CFEqual(node, p->nodes[other])",
-                          "mrk_ax_selection_pair(s, node, p->nodes[p->parents[at]])",
-                          "kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE", "kind == MRK_SELECT_LIST",
-                          "rows ? kind != MRK_SELECT_ROW", "kind == MRK_ROLE_SHEET || kind == MRK_ROLE_GROUP",
-                          "kind == MRK_ROLE_SPLIT_GROUP", "kind == MRK_ROLE_SCROLL_AREA", "kind == MRK_ROLE_BROWSER",
-                          "kind == MRK_SELECT_COLUMN", "kind == MRK_SELECT_TEXT || kind == MRK_SELECT_FIELD",
-                          "kAXValueAttribute, NO, expected", "kAXTitleAttribute, YES, expected",
-                          "rows ? kAXRowsAttribute : kAXChildrenAttribute", "rows || list ? MRK_SELECT_ROWS : 16",
-                          "p->depths[at] == MRK_CONTROL_DEPTH", "(unsigned)count > MRK_SELECT_NODES - queued",
-                          "p->entries[queued] = rows || list ? queued : entry", "s->result.selection_matches > 1"):
-            self.assertIn(condition, roster)
-        self.assertLess(roster.index("for (unsigned at = 0; at < queued; ++at)"), roster.index("s->result.selection_checks |= 1u"))
-        self.assertLess(roster.index("s->result.selection_checks |= 1u"), roster.index("s->result.selection_matches > 1"))
-        pair = native.split("static CFTypeRef mrk_ax_selection_pair(", 1)[1].split("static BOOL mrk_ax_projection(", 1)[0]
-        self.assertIn("const void *names[] = { kAXParentAttribute, kAXRoleAttribute };", pair)
-        self.assertIn("CFArrayCreate(NULL, names, 2, &kCFTypeArrayCallBacks)", pair)
-        self.assertLess(pair.index("MRKPromptOwned *attributes = mrk_ax_slot(s)"), pair.index("CFArrayCreate("))
-        self.assertLess(pair.index("mrk_ax_type(s, attributes->value, CFArrayGetTypeID())"),
-                        pair.index("s->selection_attributes = attributes->array"))
-        batch_call = "AXUIElementCopyMultipleAttributeValues(element, s->selection_attributes,\n" \
-                     "        kAXCopyMultipleAttributeOptionStopOnError, &slot->array)"
-        self.assertEqual(pair.count(batch_call), 1)
-        self.assertLess(pair.index("MRKPromptOwned *slot = mrk_ax_slot(s)"), pair.index(batch_call))
-        self.assertLess(pair.index("mrk_ax_before(s, element)"), pair.index("s->result.calls++"))
-        self.assertLess(pair.index("s->result.calls++"), pair.index(batch_call))
-        self.assertLess(pair.index(batch_call), pair.index("mrk_ax_status(s, status, MRK_AX_OP_COPY_MULTIPLE_ATTRIBUTE_VALUES, MRK_AX_ATTR_NONE)"))
-        self.assertLess(pair.index(batch_call), pair.index("admitted = mrk_ax_admit(s, 0, 0, NULL)"))
-        self.assertIn("if (!copied || !admitted || !mrk_ax_type(s, slot->value, CFArrayGetTypeID())) return NULL;", pair)
-        self.assertIn("if (CFArrayGetCount(slot->array) != 2) { mrk_ax_fail(s, MRK_OPEN_MALFORMED); return NULL; }", pair)
-        self.assertLess(pair.index("CFArrayGetCount(slot->array) != 2"), pair.index("CFArrayGetValueAtIndex(slot->array, 0)"))
-        self.assertLess(pair.index("mrk_ax_type(s, parent, s->elementType)"), pair.index("CFEqual(parent, expected_parent)"))
-        self.assertIn("if (!CFEqual(parent, expected_parent)) { mrk_ax_fail(s, MRK_OPEN_CHANGED); return NULL; }", pair)
-        self.assertLess(pair.index("CFEqual(parent, expected_parent)"), pair.index("CFArrayGetValueAtIndex(slot->array, 1)"))
-        self.assertIn("return mrk_ax_type(s, role, CFStringGetTypeID()) ? role : NULL;", pair)
-        for forbidden in ("mrk_ax_copy(", "mrk_ax_array(", "AXValueGet", "CFRelease(", "while (", "for (",
-                          "kAXTitleAttribute", "kAXValueAttribute", "kAXChildrenAttribute", "kAXRowsAttribute"):
-            self.assertNotIn(forbidden, pair)
-        self.assertIn("CFTypeRef role = at ? mrk_ax_selection_pair(s, node, p->nodes[p->parents[at]])\n"
-                      "            : mrk_ax_copy(s, node, kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE);", roster)
-        for effect in ("AXUIElementSetAttributeValue", "AXUIElementPerformAction"):
-            self.assertNotIn(effect, label + roster)
-        write = native.split("static BOOL mrk_ax_select_entry(", 1)[1].split("static void mrk_ax_open(", 1)[0]
-        for original in ("s->result.selection_checks != 3", "for (unsigned at = p->label;; at = p->parents[at])",
-                         "at ? p->nodes[p->parents[at]] : parent", "mrk_ax_selection_role(role) != p->roles[at]",
-                         "p->nodes[p->label], p->label_attribute, expected", "p->entries[p->label] != p->candidate",
-                         "kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE ? kAXSelectedRowsAttribute",
-                         "kind == MRK_SELECT_LIST ? kAXSelectedChildrenAttribute : NULL",
-                         "mrk_ax_array(s, container, attribute, MRK_SELECT_ROWS, NO, attribute_code)",
-                         "CFArrayGetCount(actual) != 1", "CFEqual(value, entry)"):
-            self.assertIn(original, write)
-        self.assertLess(write.index("AXUIElementIsAttributeSettable(container, attribute, &settable)"), write.index("if (!settable)"))
-        self.assertLess(write.index("if (!settable)"), write.index("MRKPromptOwned *selected = mrk_ax_slot(s)"))
-        self.assertLess(write.index("mrk_ax_slot(s)"), write.index("CFArrayCreate(NULL, entries, 1, &kCFTypeArrayCallBacks)"))
-        setter = "AXUIElementSetAttributeValue(container, attribute, selected->array)"
-        self.assertEqual(native.count("AXUIElementSetAttributeValue("), 1)
-        self.assertLess(write.index("s->result.selection_flags |= 1u"), write.index(setter))
-        self.assertLess(write.index(setter), write.index("s->result.selection_flags |= 2u"))
-        self.assertLess(write.index("s->result.selection_flags |= 2u"), write.index("mrk_ax_array(s, container, attribute"))
-        self.assertLess(write.index("CFEqual(value, entry)"), write.index("s->result.selection_checks |= 16u"))
-        action = native.split("static void mrk_ax_open(", 1)[1].split("void mrk_observation_prompt_press(", 1)[0]
-        order = ["mrk_ax_original(s, s->result.selection_mode ? 0 : 1)", "mrk_ax_projection(",
-                 "mrk_ax_selection_roster(", "mrk_ax_select_entry(", "mrk_ax_original(s, 1)",
-                 "mrk_ax_control_roster(", "mrk_ax_original(s, 2)", "AXUIElementPerformAction(button, kAXPressAction)"]
-        positions = [action.index(value) for value in order]
-        self.assertEqual(positions, sorted(positions))
-        proof = native.split("static int mrk_original_proof(", 1)[1].split("int mrk_panel_observe_open_identity(", 1)[0]
-        self.assertEqual(proof.count("selection_parent ? mrk_observation_selection_parent(s) : mrk_observation_directory_ready(s, NULL, NULL, NULL)"), 2)
-        identity = native.split("int mrk_panel_observe_open_identity(", 1)[1].split("void mrk_panel_observe_open_recheck(", 1)[0]
-        self.assertLess(identity.index("s->observationSelectionSample = 0"), identity.index("original != selectionSample"))
-        self.assertLess(identity.index("s->observationSelectionBound = YES"), identity.index("mrk_original_proof(s, p, YES, selection)"))
-        observe = native.split("int mrk_panel_observe(", 1)[1].split("// Closed DATA from this one original return.", 1)[0]
-        self.assertIn("*flags == 0x5f00fu || *flags == 0x7f01fu", observe)
-        self.assertIn("mrk_version_source_name_state(s, s->observationSample, MRK_NAME_ALL)", observe)
-        self.assertIn("*flags |= MRK_VERSION_SOURCE_SELECTION_READY", observe)
-        self.assertIn("MRK_SELECT_NODES = 256, MRK_SELECT_ROWS = 32", native)
-        self.assertIn("MRKSelectionPass selection[MRK_SELECT_SAMPLES];", native)
-        for forbidden in ("kAXURLAttribute", "kAXFilenameAttribute", "kAXPressAction", "setNameFieldStringValue", "setDirectoryURL",
-                          "CGEvent", "NSPasteboard", "sleep(", "dispatch_", "pthread_create", "CFRelease("):
-            self.assertNotIn(forbidden, label + roster + write)
-        self.assertIn('pub fn matched(self) -> bool { self.purpose == "full-open"', rust)
-        self.assertIn('pub fn selection_parent_matched(self) -> bool { self.purpose == "selection-parent"', rust)
-        self.assertIn("stage as usize != context.next_recheck", rust)
-        self.assertIn("next_recheck: if identity.selection { 0 } else { 1 }", rust)
-        self.assertIn("context.rechecks[stage as usize] = Some(returned)", rust)
-        recheck = observer.split("    fn worker_recheck(", 1)[1].split("    fn action_worker(", 1)[0]
-        self.assertNotIn("stage as usize - 1", recheck)
-        self.assertNotIn("sync_channel", recheck)
-        self.assertLess(recheck.index("slot.receipt = Some(std::mem::ManuallyDrop::into_inner(receiver))"),
-                        recheck.index("if !slot.settled(token, stage, self.end)"))
-        self.assertIn('value["selectionInput"] = p.sample.reconciled(p.progress.snapshot()).value()', observer)
-        self.assertIn('value["selectionBinding"] = p.identity.value()', observer)
-        self.assertIn('value["selectionCompletion"] = p.completion.value()', observer)
-
-        # The new failure snapshot copies one original return, never AppKit/AX.
-        diagnostic = observer.split("fn received_input(self,", 1)[1].split("    fn frame(", 1)[0]
-        for required in ("token.same(&receipt.token)", "input_return_time_matches(receipt.returned_at, now, end)",
-                         "project_field_return_scope(case, self.step, token.id)", "sample.step != self.step",
-                         "token.identity().selects_version_source()", "self.pending != Some(Pending::Accessibility(token.id))",
-                         "snapshot.input_body_admission = Some(receipt.body.admitted)", 'snapshot.source = "prearm-open-return"'):
-            self.assertIn(required, diagnostic)
-        projected = observer.split("fn received_input_sample(", 1)[1].split("#[derive(Clone, Copy)]\nstruct FailureSnapshot", 1)[0]
-        for required in ("let native = body.native?; let report = native.report?;",
-                         "report.selection_mode != sample.selection", "sample.timely = progress.expired.then_some(false)",
-                         "sample.worker_joined = worker_joined", "body.succeeded()", "progress.joined || progress.retired"):
-            self.assertIn(required, projected)
-        for forbidden in ("sample.complete(", "Some(true); // timely", "installed_prompt_button(", ".recheck(",
-                          "std::thread", "run_on_main_thread", "mrk_", "Some(\"admission\")"):
-            self.assertNotIn(forbidden, diagnostic + projected)
-        generic = observer.split("    fn report_failure(&self)", 1)[1].split("    fn report_expiry(", 1)[0]
-        for required in ('reason == "native-default-input"', "Instant::now() < self.end", "r.prepared_open.is_none()",
-                         "r.pending == Some(Pending::Accessibility(sample.id))", "sample.native_entered.is_none()",
-                         "input_publication_live(progress.snapshot())"):
-            self.assertIn(required, generic)
-        live = observer.split("fn input_publication_live(", 1)[1].split("fn input_return_time_matches(", 1)[0]
-        self.assertIn('"entered" => !progress.returned, "returned" => progress.returned, _ => false', live)
-        self.assertIn("!progress.joined && !progress.retired", live)
-        worker = observer.split("    fn action_worker(", 1)[1].split("    fn open_unknown(", 1)[0]
-        self.assertLess(worker.index('self.fail_with("native-default-input")'), worker.index("if !token.returned()"))
-        self.assertLess(worker.index("if !token.returned()"), worker.index("done.try_send(receipt)"))
-        relay = observer.split("    fn accessibility_step(", 1)[1].split("    fn native_step(", 1)[0]
-        loop = relay.split("        let mut deadline_observed = false;", 1)[1]
-        first = loop.split("if flight.worker.as_ref()", 1)[0]
-        self.assertLess(first.index('token.expire(); self.fail_with("native-default-deadline")'),
-                        first.index("flight.receipt.try_recv()"))
-        self.assertLess(first.index("if now >= self.end"), first.index("flight.receipt.try_recv()"))
-        self.assertLess(first.index("flight.receipt.try_recv()"), first.index("self.report_open_return(flight, expiry_report)"))
-        late = loop.split("flight.worker_returned = Some(returned)", 1)[1].split("                break;", 1)[0]
-        self.assertLess(late.index('token.expire(); self.fail_with("native-default-deadline")'),
-                        late.index("flight.receipt.try_recv()"))
-        self.assertLess(late.index("Instant::now() < self.end"), late.index("flight.receipt.try_recv()"))
-        self.assertLess(late.index("flight.receipt.try_recv()"), late.index("self.report_open_return(flight, true)"))
-        report = observer.split("    fn report_open_return(", 1)[1].split("    pub(super) fn attach(", 1)[0]
-        self.assertIn("if expiry { self.report_expiry(flight.baseline, flight.token.progress()); }", report)
-        self.assertIn("return; // A refused/oversized frame still spends the same one-shot writer.", report)
-        self.assertNotIn("recv_timeout", report + diagnostic)
 
     def test_original_fixture_restoration_has_only_two_ctime_exceptions(self):
         case = "project-fields"
@@ -6694,46 +5464,6 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         with self.assertRaisesRegex(M.Refused, "^owner-return-contract$"):
             M.run_cases(BINDING, fixtures, foreign, UID, "runner", emitted.append, case)
         self.assertTrue(fixtures.inflight); self.assertEqual(fixtures.reads, [])
-        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        self.assertIn('"project-fields": ("one-project-fields-Aqua-engineering-case", ["project-fields"])', workflow)
-        self.assertIn('"scope": scope_label', workflow)
-        self.assertIn('"scopes": selected_scopes, "caseNames": case_names', workflow)
-        self.assertIn('"ios-current-synthetic": ("nine-current-ios-Aqua-engineering-cases", [' + ", ".join('"' + name + '"' for name in M.IOS_CURRENT_CASES) + "])", workflow)
-        self.assertEqual(workflow.count("macos_aqua_qualification.py --scope project-fields"), 1)
-        self.assertEqual(workflow.count("macos_aqua_qualification.py --scope android-inputs"), 1)
-        self.assertEqual(workflow.count("macos_aqua_qualification.py --scope ios-current-synthetic"), 1)
-        self.assertNotIn("--scope ios-unsigned-archive", workflow)
-        p2_label = "      - name: One project-field Aqua journey through the reviewed original invocation owner\n"
-        ios_label = "      - name: Nine serial current-iOS Aqua cases through the reviewed original invocation owner\n"
-        self.assertLess(workflow.index(p2_label), workflow.index(ios_label))
-        p2_step = workflow.split(p2_label, 1)[1].split("\n      - name:", 1)[0]
-        ios_step = workflow.split(ios_label, 1)[1].split("\n      - name:", 1)[0]
-        self.assertIn("timeout-minutes: 3", p2_step)
-        self.assertIn("timeout-minutes: 50", ios_step)
-        android_step = workflow.split("      - name: One Android-input Aqua journey through the reviewed original invocation owner\n", 1)[1].split("\n      - name:", 1)[0]
-        for step, prefix, scope in ((p2_step, "aqua-project-fields", "project-fields"),
-                                   (android_step, "aqua-android-inputs", "android-inputs"),
-                                   (ios_step, "aqua", "ios-current-synthetic")):
-            selection = "env.MRK_MACOS_AQUA_SCOPE == " + repr(scope)
-            if scope in ("project-fields", "android-inputs"):
-                selection = "(" + selection + " || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs')"
-            self.assertEqual([line.strip() for line in step.splitlines() if line.strip().startswith("if:")],
-                             ["if: success() && " + selection])
-            for required in ("set -euo pipefail", "set -o noclobber", "umask 077", "status=$?", "[[ $status == 0 ]]"):
-                self.assertIn(required, step)
-            self.assertIn('> "$MRK_MACOS_WORK/' + prefix + '-results.jsonl" 2> "$MRK_MACOS_WORK/' + prefix + '-failure.jsonl"', step)
-            status_write = 'printf \'%s\\n\' "$status" > "$MRK_MACOS_WORK/' + prefix + '.status"'
-            self.assertLess(step.index("status=$?"), step.index(status_write))
-            self.assertLess(step.index(status_write), step.index("[[ $status == 0 ]]"))
-            for unsafe in ("continue-on-error", "rm -", "|| true"):
-                self.assertNotIn(unsafe, step)
-        uploads = workflow.split("      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n", 1)[1].split("      - name:", 1)[0]
-        assert_public_verification_upload(self, uploads)
-        for preserved in ("Bind the complete reviewed first-party checkout before compilation",
-                          "Prepare only the fixed disposable Xcode ancestor before any worker",
-                          "Reuse accepted Mac supplier and prepare only the current source payload",
-                          "Application installation uses only standard privileged Installer; app and Python stay nonroot"):
-            self.assertIn(preserved, workflow)
 
     @staticmethod
     def _readiness_failure_data():
@@ -7066,101 +5796,6 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIn('v["validation"]["valid"] == false', fields)
         self.assertIn('rows.len() == 1 && rows[0]["code"] == "config.invalid"', fields)
 
-    def test_production_initial_root_and_later_navigation_have_separate_one_use_custody(self):
-        root = PATH.parents[1]
-        native = (root / "native/macos-installed-native/src/native.m").read_text()
-        rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
-        adapter = (root / "src-tauri/src/shell_macos_dialog.rs").read_text()
-        observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
-        fields = (root / "src-tauri/src/installed_shell_observation_macos_project_fields.rs").read_text()
-        start = native.split("static int mrk_panel_start_inner(", 1)[1].split("int mrk_panel_start(", 1)[0]
-        self.assertLess(start.index("length > 4096"), start.index("s->attempted = YES"))
-        self.assertLess(start.index("mrk_panel_configure_open_identity(s)"), start.index("mrk_panel_initial_directory(s, initial, length)"))
-        self.assertLess(start.index("mrk_panel_initial_directory(s, initial, length)"), start.index("MRK_ID_CONFIG_COMPLETE"))
-        self.assertLess(start.index("MRK_ID_CONFIG_COMPLETE"), start.index("beginSheetModalForWindow:"))
-        for fact in ("[panel setCanChooseFiles:kind == 3 || kind == 4]",
-                     "[panel setCanChooseDirectories:kind == 1 || (kind >= 5 && kind <= 7)]",
-                     "[panel setTreatsFilePackagesAsDirectories:kind >= 5 && kind <= 7]",
-                     "[panel setAllowsMultipleSelection:NO]", "[panel setCanCreateDirectories:NO]", "[panel setResolvesAliases:NO]"):
-            self.assertIn(fact, start)
-        production = native.split("static int mrk_panel_initial_directory(", 1)[1].split("static int mrk_panel_start_inner(", 1)[0]
-        navigation = native.split("int mrk_panel_observe_project_field(", 1)[1].split("int mrk_panel_observe_version_source_name(", 1)[0]
-        name = native.split("int mrk_panel_observe_version_source_name(", 1)[1].split("// Main-only original proof", 1)[0]
-        state = native.split("static BOOL mrk_version_source_name_state(", 1)[1].split("static BOOL mrk_observation_directory_ready(", 1)[0]
-        self.assertNotIn("observationTarget", production)
-        self.assertIn("memcpy(s->observationInitialRoot, bytes, length)", production)
-        for temporary in ("initialDirectory", "initialPath"):
-            release = f"[s->{temporary} release]; s->{temporary} = nil;"
-            self.assertEqual(production.count(release), 1)
-            self.assertEqual(navigation.count(release), 1)
-        self.assertIn("if (s->observationProjectField) return EALREADY", navigation)
-        self.assertLess(navigation.index("strcmp(path, s->observationInitialRoot)"), navigation.index("[panel setDirectoryURL:"))
-        self.assertLess(navigation.index("s->observationProjectField |= 512u"), navigation.index("[panel setDirectoryURL:"))
-        self.assertLess(navigation.index("[panel setDirectoryURL:"), navigation.index("s->observationProjectField |= 1024u"))
-        self.assertNotIn("setNameFieldStringValue:", navigation)
-        self.assertNotIn("[s->observationFieldName release]", navigation)
-        self.assertIn("s->kind == 4", state)
-        for fact in ("s->observationProjectField == 6143u", "s->observationNamePhase == phase", "s->observationSample == sample",
-                     "!s->unknown", "!s->responded", "!s->callbackActive", "!s->closeAttempted", "!s->closed",
-                     "!s->observationActionAttempted", "!s->observationActionReturned"):
-            self.assertIn(fact, state)
-        self.assertLess(name.index("s->observationParentSample = 0"), name.index("sample != granted"))
-        self.assertIn("if (s->observationNamePhase) return EALREADY", name)
-        self.assertLess(name.index("s->observationNamePhase = MRK_NAME_PHASE_ENTERED"), name.index("mrk_observation_attached(s)"))
-        self.assertEqual(name.count("mrk_observation_attached(s)"), 1)
-        self.assertEqual(name.count("setNameFieldStringValue:"), 1)
-        self.assertLess(name.index("MRK_NAME_SET_ENTERED"), name.index("setNameFieldStringValue:"))
-        self.assertLess(name.index("setNameFieldStringValue:"), name.index("MRK_NAME_SET_RETURNED"))
-        self.assertLess(name.index("[s->observationFieldName release]"), name.index("MRK_NAME_RETIRED"))
-        self.assertIn("s->observationFieldName = nil", name)
-        self.assertIn("result == 0 && !mrk_version_source_name_state(s, sample, MRK_NAME_ALL)", name)
-        self.assertEqual(name.count("@catch (NSException *e)"), 2)
-        for forbidden in ("directoryURL]", "setDirectoryURL:", "nameFieldStringValue]", "return EAGAIN",
-                          "dispatch_", "sleep(", "AXUIElement", "s->selected", "s->response =", "s->completion(", "beginSheet", "performClick", "cancel:nil"):
-            self.assertNotIn(forbidden, name)
-        for forbidden in ("s->selected", "s->response =", "s->completion(", "beginSheet", "performClick", "cancel:nil"):
-            self.assertNotIn(forbidden, navigation)
-        prepare = adapter.split("pub(crate) fn prepare_project_field(", 1)[1].split("// Retained by", 1)[0]
-        prepare_name = adapter.split("pub(crate) fn prepare_version_source_name(", 1)[1].split("pub(crate) fn prepare_project_field(", 1)[0]
-        for fact in ("original(entry)?", "entry.open_release.is_some()", "!allowed(&call, &owner)?", "owner.interrupted()"):
-            self.assertIn(fact, prepare)
-            self.assertIn(fact, prepare_name)
-        self.assertIn(".installed_project_field(kind, navigate, returned)", prepare)
-        for fact in ("panel.id != id", "entry.id == id", "!panel.action_allowed", "!panel.native.version_source_name_ready()",
-                     "panel.native.version_source_parent_ready", ".installed_version_source_name(sample, returned)"):
-            self.assertIn(fact, prepare_name)
-        self.assertNotIn("observed_panel(", prepare_name)
-        method = rust.split("pub fn installed_version_source_name(", 1)[1].split("pub fn installed_project_field(", 1)[0]
-        self.assertIn("version_source_parent_matches(&sample, self.original)", method)
-        self.assertIn("sample.sample, &mut facts", method)
-        self.assertIn("Ok(()) if data.succeeded()", method)
-        self.assertIn("Err(error) => { self.unknown = true; Err(error) }", method)
-        self.assertNotIn("Ok(false)", method)
-        self.assertIn("flags & !6143 == 0", rust)
-        self.assertIn("flags & !31 == 0", rust)
-        self.assertIn("self.navigation_prepared(i)", fields)
-        self.assertIn("if needs_name(i) { r.name_preparation.is_some_and(|p| p.succeeded()) }", fields)
-        record_name = fields.split("pub(super) fn name_preparation(&mut self", 1)[1].split("pub(super) fn preparation_sample(", 1)[0]
-        self.assertIn("if !self.name_pending(i) { return false; }", record_name)
-        self.assertIn("row.name_preparation = Some(value)", record_name)
-        self.assertIn("value.succeeded()", record_name)
-        dispatch = observer.split("fn native_step(&self", 1)[1].split("fn native_step_body(", 1)[0]
-        for publication in ("record.preparation(i, returned)", "record.name_preparation(i, returned)"):
-            self.assertLess(dispatch.index("self.native_step_body("), dispatch.index(publication))
-            self.assertLess(dispatch.index("native.returned = true"), dispatch.index(publication))
-        self.assertIn("native.step == step && native.entered && native.returned", dispatch)
-        body = observer.split("fn native_step_body(", 1)[1].split("    fn ", 1)[0]
-        phase = body.split("            if !prepared {", 1)[1].split("        if open &&", 1)[0]
-        for fact in ("record.name_pending(i)", "r.pending != Some(Pending::Native(step)) || r.step != step", "self.timely()"):
-            self.assertIn(fact, phase)
-        for forbidden in ("observed_panel(", "Instant::", "Duration::", "dispatch", "spawn", "sleep"):
-            self.assertNotIn(forbidden, phase)
-        self.assertIn("enum { MRK_PROMPT_ORIGINALS = 9 };", native)
-        self.assertIn("project_field_data_check()", rust.split("pub fn installed_observation_flags_data_check()", 1)[1])
-        self.assertIn("version_source_name_data_check()", rust.split("fn project_field_data_check()", 1)[1])
-        pure = rust.split("fn version_source_name_data_check()", 1)[1].split('unsafe extern "C"', 1)[0]
-        for forbidden in ("Panel::", "mrk_panel_", "thread::spawn", "std::fs::"):
-            self.assertNotIn(forbidden, pure)
 
 
 class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
@@ -7530,82 +6165,14 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         self.assertIn("not 1 <= a[0] <= 47", private)
 
     def test_paired_native_scopes_share_one_compile_but_not_original_owners(self):
-        import ast
-        import textwrap
-        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        steps = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
-        names = list(steps)
-        compiler = "Compile the fixed debug actual-main observer and normal embedded frontend once"
-        p2 = "One project-field Aqua journey through the reviewed original invocation owner"
-        android = "One Android-input Aqua journey through the reviewed original invocation owner"
-        helper = "Three serial shipping-helper journeys through the original document and invocation owner"
-        installation = "One installation-inspection Aqua journey through the reviewed original invocation owner"
-        self.assertLess(names.index(compiler), names.index(p2))
-        self.assertLess(names.index(p2), names.index(android))
-        self.assertLess(names.index(compiler), names.index(helper))
-        self.assertLess(names.index(helper), names.index(installation))
-        for once in (compiler, 'Assemble the instrumented observation app with SOURCE-selected signing',
-                     "Build the fixed one-shot root Installer and scripts-only package",
-                     "Application installation uses only standard privileged Installer; app and Python stay nonroot"):
-            self.assertEqual(workflow.count("      - name: " + once + "\n"), 1)
-        build = steps[compiler]
-        self.assertEqual(build.count('"/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --locked'), 1)
-        self.assertEqual(build.count("npm run build"), 1)
-        recorded = 'printf \'%s\\n\' "$status" > "$MRK_MACOS_WORK/observer-build.status"'
-        rejected = 'if [[ "$status" != 0 ]]; then'
-        self.assertLess(build.index(recorded), build.index(rejected))
-        self.assertLess(build.index(rejected), build.index('exit "$status"'))
-        self.assertLess(build.index('exit "$status"'), build.index("<<'PY_BUILD'"))
         self.assertNotEqual(BINDING.root(project_fields=True), BINDING.root())
         self.assertNotEqual(BINDING.root(vault_helper=True), BINDING.root(installation_inspection=True))
         self.assertEqual(M.case_timeout("installation-inspection"), 95)
         self.assertEqual(M.case_timeout("project-fields"), 60)
         self.assertEqual(M.case_timeout("android-inputs"), 60)
-        for name, scope, prefix, paired, minutes in (
-                (p2, "project-fields", "aqua-project-fields", "project-fields-android-inputs", 3),
-                (android, "android-inputs", "aqua-android-inputs", "project-fields-android-inputs", 3),
-                (helper, "vault-helper-shipping", "aqua-vault-helper", "vault-helper-shipping-installation-inspection", 8),
-                (installation, "installation-inspection", "aqua-installation-inspection", "vault-helper-shipping-installation-inspection", 3)):
-            step = steps[name]
-            self.assertIn("timeout-minutes: " + str(minutes), step)
-            self.assertIn("if: success() && (env.MRK_MACOS_AQUA_SCOPE == " + repr(scope)
-                          + " || env.MRK_MACOS_AQUA_SCOPE == " + repr(paired) + ")", step)
-            self.assertEqual(step.count("macos_aqua_qualification.py --scope " + scope), 1)
-            for forbidden in ("continue-on-error", "|| true", "--timeout", "rm -"):
-                self.assertNotIn(forbidden, step)
-            status_write = 'printf \'%s\\n\' "$status" > "$MRK_MACOS_WORK/' + prefix + '.status"'
-            self.assertLess(step.index("status=$?"), step.index(status_write))
-            self.assertLess(step.index(status_write), step.index("[[ $status == 0 ]]"))
-            for leaf in (prefix + "-results.jsonl", prefix + "-failure.jsonl", prefix + ".status"):
-                self.assertIn('${{ steps.work.outputs.root }}/' + leaf + "\n", workflow)
         for paired in ("project-fields-android-inputs", "vault-helper-shipping-installation-inspection"):
-            with self.assertRaises(M.Refused):
-                M.argument_scope(["--scope", paired])
-            with self.assertRaises(M.Refused):
-                M.selected_cases(paired)
-        binding = steps["Record exact source and actual tool bindings only after route admission"]
-        script = binding.split("<<'PY'\n", 1)[1].rsplit("\n          PY", 1)[0]
-        tree = ast.parse(textwrap.dedent(script))
-        tables = [node for node in tree.body if isinstance(node, ast.Assign)
-                  and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
-                  and node.targets[0].id == "scope_cases"]
-        self.assertEqual(len(tables), 1)
-        cases = ast.literal_eval(tables[0].value)
-        self.assertEqual(set(cases), {"project-fields", "android-inputs", "ios-current-synthetic", "project-fields-android-inputs", M.VAULT_HELPER_SCOPE, "installation-inspection", "vault-helper-shipping-installation-inspection", M.RECOVERY_CASE, M.IOS_ACCOUNT_CASE, "doctor-preflight2", "local-edits3"})
-        self.assertEqual(cases["doctor-preflight2"][1], list(M.LOCAL_CHECK_CASES))
-        self.assertEqual(cases["local-edits3"][1], list(M.LOCAL_EDIT_CASES))
-        self.assertEqual(cases["project-fields-android-inputs"][1], ["project-fields", "android-inputs"])
-        self.assertEqual(cases["installation-inspection"][1], ["installation-inspection"])
-        self.assertEqual(cases["vault-helper-shipping-installation-inspection"][1], [*M.VAULT_HELPER_CASES, "installation-inspection"])
-        self.assertEqual(cases[M.RECOVERY_CASE][1], [M.RECOVERY_CASE])
-        selection = 'selected_scopes = ["project-fields", "android-inputs"] if aqua_scope == "project-fields-android-inputs" else ["vault-helper-shipping", "installation-inspection"] if aqua_scope == "vault-helper-shipping-installation-inspection" else [aqua_scope]'
-        diagnostic = steps["Export bounded diagnostics without altering original command evidence"]
-        for step in (binding, diagnostic):
-            self.assertIn(selection, step)
-            self.assertIn('"unselectedScopes": [scope for scope in native_scopes if scope not in selected_scopes]', step)
-        xcode = steps["Prepare only the fixed disposable Xcode ancestor before any worker"]
-        self.assertEqual([line.strip() for line in xcode.splitlines() if line.strip().startswith("if:")],
-                         ["if: success() && env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic'"])
+            with self.assertRaises(M.Refused): M.argument_scope(["--scope", paired])
+            with self.assertRaises(M.Refused): M.selected_cases(paired)
 
 
 class BeforeItemStopWorkflowTests(unittest.TestCase):
@@ -9999,104 +8566,6 @@ class AndroidRegistrationLifecycleWorkflowTests(unittest.TestCase):
         body = headless.split("<<'PY_HEADLESS'\n", 1)[1].split("          PY_HEADLESS", 1)[0]
         return workflow, blocks, headless, ast.parse("\n".join(line[10:] for line in body.splitlines()))
 
-    def test_exact_twelve_route_excludes_app_suppliers_and_preserves_original_test_results(self):
-        workflow, blocks, headless, tree = self.source()
-        actual_source = workflow + aqua_headless_source() + aqua_wrapping_source()
-        selected = next(node for node in tree.body if isinstance(node, ast.If)
-                        and isinstance(node.test, ast.Name) and node.test.id == "android_lifecycle"
-                        and any(isinstance(child, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "names"
-                                for t in child.targets) for child in node.body))
-        values = {target.id: ast.literal_eval(node.value) for node in selected.body if isinstance(node, ast.Assign)
-                  for target in node.targets if isinstance(target, ast.Name) and target.id in ("names", "native_names")}
-        self.assertEqual(values["names"], (
-            "saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::callback_stamp_needs_exclusive_capture_return_then_original_owner_finality",
-            "saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::deferred_reuses_only_same_private_owner_action_serial_and_unadmitted_cell",
-            "saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::main_gate_only_defers_at_admission_and_preserves_actual_f_on_short_lock_contention",
-            "saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::register_observation_failure_is_at_real_return_and_stop_keeps_original_deadlines",
-            "saved_command_owner::android_registration::client::tests::enqueued_busy_and_processed_are_distinct_and_finish_never_precedes_its_ack",
-            "saved_command_owner::android_registration::client::tests::ack_rejects_wrong_account_nonce_sequence_payload_and_earlier_failure",
-            "saved_command_owner::android_registration::client::tests::same_original_ready_reproof_and_current_gates_precede_transfer",
-            "saved_command_owner::android_registration::client::tests::mismatched_reproof_lost_go_and_earlier_failure_close_original_barriers",
-            "saved_command_owner::android_registration::client::tests::finish_requires_the_actual_source_handle_consumption_not_worker_return",
-            "saved_command_owner::android_registration::client::tests::go_loss_and_peer_failure_still_run_preparation_and_independent_native_release",
-            "saved_command_owner::android_registration::client::tests::native_clock_preserves_bidirectional_earliest_f_without_echo_or_renewal",
-        ))
-        self.assertEqual(values["native_names"], (
-            "android_registration::tests::never_started_client_retires_its_actual_signal_without_arming_or_native_entry",
-        ))
-        self.assertEqual(len(set(values["names"] + values["native_names"])), 12)
-        for text in ('main_count, native_count = 11, 1', 'main_count, native_count = 25, 2',
-                     '"--jobs", "1"', '"--lib", "--no-run", "--message-format=json"',
-                     'timeout=480', 'output_limit=4 * 1024 * 1024',
-                     'calls_entered == calls_returned == 3', 'if android_lifecycle and not receipt["passed"]',
-                     'len(expected_rows) != count', 'set(lines[1:-1]) != expected_rows',
-                     '0 failed; 0 ignored; 0 measured;', 'shutil.rmtree.avoids_symlink_attacks',
-                     'os.mkdir("cargo-target", 0o700, dir_fd=work_fd)',
-                     'shutil.rmtree("cargo-target", dir_fd=work_fd)', 'target_fd = work_fd = None'):
-            self.assertIn(text, headless)
-        self.assertLess(headless.index('calls_entered += 1'), headless.index('compiler = owner.run_owned('))
-        self.assertEqual(headless.count('compiler = owner.run_owned('), 1)
-        self.assertEqual(headless.count('receipt["compilerOriginalReturned"] = True'), 1)
-        compiler_start = headless.index('compiler = owner.run_owned(')
-        compiler_end = headless.index('receipt["compilerOriginalReturned"] = True', compiler_start)
-        compiler_span = headless[compiler_start:compiler_end]
-        self.assertEqual(compiler_span.count('headless-original-compiler-return-contract'), 1)
-        self.assertEqual(compiler_span.count('calls_returned += 1'), 1)
-        self.assertLess(compiler_span.index('headless-original-compiler-return-contract'),
-                        compiler_span.index('calls_returned += 1'))
-        self.assertLess(headless.index('os.close(descriptor)'), headless.index('shutil.rmtree("cargo-target"'))
-        for name in ("Select fixed frontend compiler", "Record exact source and actual tool bindings only after route admission",
-                     "Check current owner pins before native preparation", "Fail fast on native Scripts ownership and package format (never Installer)",
-                     "Acquire and verify the two fixed Android support archives as DATA",
-                     "Download the fixed once-signed Android support capsule",
-                     "Select the fixed configured signed runtime before any payload download",
-                     "Download only the configured signed Python capsule",
-                     "Project the configured capsule as DATA without executing it",
-                     "Admit only a fresh independently pinned Python transport destination",
-                     "Download the independently accepted fresh Python transport",
-                     "Project the pinned fresh Python transport without executing it",
-                     "Prepare the current payload from the independently accepted fresh Python supplier",
-                     "Build and sign the separate fixed vault helper before binding the app",
-                     "Compile the fixed debug actual-main observer and normal embedded frontend once",
-                     "Application installation uses only standard privileged Installer; app and Python stay nonroot",
-                     "Compile native wrapping variants once and run fixed cohorts and creator-reader pair",
-                     "Verify source stayed unchanged; retire only disposable owned build output"):
-            gate = next(line for line in blocks[name].splitlines() if line.startswith("        if:"))
-            self.assertNotIn("android-registration-lifecycle", gate)
-        export = blocks["Export bounded diagnostics without altering original command evidence"]
-        self.assertIn('if aqua_scope == "android-registration-lifecycle": streams = streams[:2]', export)
-        upload = blocks["Preserve bounded Android lifecycle results and original workflow exit evidence"]
-        paths = [line.strip().split("/", 1)[1] for line in upload.splitlines() if "${{ steps.work.outputs.root }}/" in line]
-        self.assertEqual(paths, ["source-inventory.json", "headless-build.admitted.jsonl", "headless-build.stderr.tail.txt", "headless-build.status",
-            "headless-tests.stdout", "headless-tests.stderr", "headless-tests.status", "headless-native-tests.stdout",
-            "headless-native-tests.stderr", "headless-native-tests.status", "headless-tests.receipt.json", "bounded-diagnostics.json"])
-        self.assertIn("if-no-files-found: error", upload)
-        for forbidden in ("workflow_dispatch", "continue-on-error: true"):
-            self.assertNotIn(forbidden, actual_source)
-        compiler_argv = next(node for node in ast.walk(tree) if isinstance(node, ast.Assign)
-                             and any(isinstance(target, ast.Name) and target.id == "compiler_argv" for target in node.targets))
-        expected_argv = ast.parse('[rust_bin + "/cargo", "test", "--locked", "--no-default-features", "--jobs", "1",'
-                                  '"--target", build_target, "--package", "mobile-release-kit-desktop",'
-                                  '"--package", "mrk-macos-installed-native", "--lib", "--no-run", "--message-format=json"]', mode="eval").body
-        self.assertEqual(ast.dump(compiler_argv.value, include_attributes=False), ast.dump(expected_argv, include_attributes=False))
-        self.assertNotIn("--features", [node.value for node in compiler_argv.value.elts if isinstance(node, ast.Constant)])
-        feature_branches = [node for node in ast.walk(tree) if isinstance(node, ast.If)
-                            and any(isinstance(child, ast.AugAssign) and isinstance(child.target, ast.Name)
-                                    and child.target.id == "compiler_argv" for child in node.body)]
-        self.assertEqual(len(feature_branches), 1)
-        self.assertIsInstance(feature_branches[0].test, ast.Name)
-        self.assertEqual(feature_branches[0].test.id, "shipping_gate")
-        for forbidden in ("npm", "codesign", "installer", "run_cases("):
-            self.assertNotIn(forbidden, headless)
-
-        self.assertNotIn("MRK_MACOS_DEVELOPER_ID_", headless + upload)
-        for body in blocks.values():
-            if "secrets.MRK_MACOS_DEVELOPER_ID_" in body:
-                gate = next(line for line in body.splitlines() if line.startswith("        if:"))
-                self.assertNotIn("android-registration-lifecycle", gate)
-        environment_line = next(line for line in workflow.splitlines() if line.startswith("    environment: "))
-        self.assertNotIn("android-registration-lifecycle", environment_line)
-        self.assertTrue(environment_line.endswith("|| 'macos-engineering' }}"))
 
     def test_actual_finalizer_needs_all_owned_returns_and_keeps_each_cleanup_failure(self):
         # Execute ONLY the actual finally statements and pure directory shape
@@ -10143,7 +8612,7 @@ class AndroidRegistrationLifecycleWorkflowTests(unittest.TestCase):
                     "shutil": SimpleNamespace(rmtree=remove), "stat": stat, "json": json,
                     "work": SimpleNamespace(lstat=lambda: root_info), "work_fd": 19, "target_fd": 20,
                     "work_original": (7, 101, root_info.st_mode, 501, 20), "target_original": (7, 102, target_info.st_mode, 501, 20),
-                    "android_lifecycle": True, "owned_headless": True, "shipping_gate": False,
+                    "android_lifecycle": True, "owned_headless": True, "shipping_gate": False, "catalogue_gate": False,
                     "calls_entered": 1 if not targets else 3,
                     "calls_returned": 0 if case == "owner-unknown" else 1 if not targets else 3,
                     "receipt": receipt, "originals": originals, "cleanup_errors": [], "publish": publish,
@@ -10343,51 +8812,6 @@ def shipping_gate_installation_data(stage, binding=BINDING, *, action="fresh-ins
 
 
 class ShippingGateControlWiringDataTests(unittest.TestCase):
-    def test_fixed_shipping_feature_graph_thirteen_and_installed_control_phase_order(self):
-        workflow, blocks, headless, tree = AndroidRegistrationLifecycleWorkflowTests.source()
-        branches = [node for node in tree.body if isinstance(node, ast.If) and isinstance(node.test, ast.Name)
-                    and node.test.id == "shipping_gate" and any(isinstance(child, ast.Assign)
-                    and any(isinstance(target, ast.Name) and target.id == "names" for target in child.targets) for child in node.body)]
-        self.assertEqual(len(branches), 1)
-        values = {target.id: ast.literal_eval(node.value) for node in branches[0].body if isinstance(node, ast.Assign)
-                  for target in node.targets if isinstance(target, ast.Name) and target.id in ("names", "native_names")}
-        self.assertEqual(values["names"], M.SHIPPING_GATE_MAIN_TESTS)
-        self.assertEqual(values["native_names"], M.SHIPPING_GATE_NATIVE_TESTS)
-        self.assertEqual([name.rsplit("::", 1)[1] for name in values["names"] + values["native_names"]], [
-            "a_known_native_failure_projection_does_not_invent_cleanup_uncertainty",
-            "participant_never_uses_terminal_or_missing_child_as_exit_finality",
-            "failed_pipe_close_publishes_first_before_the_next_original_consume",
-            "refusal_never_fabricates_driver_return_join_native_cleanup_or_refund",
-            "cleanup_projection_observes_a_stop_arriving_during_original_settlement",
-            "an_unknown_original_projection_cannot_reopen_cleanup_on_a_later_callback",
-            "prearm_and_pre_go_stop_have_no_native_allocation", "parent_pre_stop_retires_only_an_inert_gate_and_cannot_reenter",
-            "prepare_and_spawn_are_distinct_one_shot_state_claims", "code_settlement_never_implies_gate_postcheck_or_unknown_close_finality",
-            "even_a_closed_spawned_gate_requires_its_actual_postcheck", "cleanup_gate_correspondence_does_not_erase_a_previous_failure",
-            "an_entered_unreturned_native_arm_is_never_empty_or_settled"])
-        self.assertIn('main_count, native_count = 6, 7', headless)
-        self.assertIn('["default", "installed-observation"] if shipping_gate else ["default"]', headless)
-        self.assertEqual(headless.count('compiler_argv += ["--features", "mrk-macos-installed-native/installed-observation"]'), 1)
-        self.assertIn('if (shipping_gate or catalogue_gate) and calls_entered != calls_returned:', headless)
-        self.assertIn('required-follow-on-build-and-gate-control', headless)
-        self.assertIn('"headless-shipping-gate-finality-unconfirmed"', headless)
-        self.assertNotIn('"--ignored"', headless)
-        label = "One installed no-GO shipping-helper gate-custody control before any Aqua entry"
-        control = blocks[label]
-        self.assertLess(workflow.index('      - name: Application installation uses only standard privileged Installer; app and Python stay nonroot'), workflow.index("      - name: " + label))
-        self.assertLess(workflow.index("      - name: " + label), workflow.index("      - name: One project-field Aqua journey"))
-        self.assertIn("env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection'", control)
-        self.assertIn('RUNNER_ENVIRONMENT: ${{ runner.environment }}', control.split('        run: |', 1)[0])
-        self.assertIn('qualification.shipping_gate_control_main(target=os.environ["MRK_MACOS_TARGET"])', control)
-        self.assertIn('[[ "$status" == 0 && "$saved" == 0 ]]', control)
-        for name in (M.SHIPPING_GATE_REPORT, M.SHIPPING_GATE_STATUS):
-            self.assertIn('${{ steps.work.outputs.root }}/' + name, workflow)
-        source = PATH.read_text()
-        main = source.rsplit('\ndef main():\n', 1)[1]
-        self.assertLess(main.index('shipping_gate = require_shipping_gate_receipt('), main.index('fixtures.prepare()'))
-        self.assertIn('shippingGateControl=shipping_gate', main)
-        self.assertNotIn('workflow_dispatch', workflow)
-        self.assertIn(
-            "        include:\n          - scope: wrapping-keychain-private\n            target: aarch64-apple-darwin\n            runner: macos-26\n            supplier_receipt: '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d'\n            supplier_tar: 'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695'\n            supplier_source: '158cdff422e3837f7ab5e6192af76a578faf6fab'\n            supplier_run: '37467019389'\n            supplier_attempt: '1'\n            supplier_artifact: '11415902210'\n    runs-on: ${{ matrix.runner }}\n", workflow)
 
     def test_actual_shipping_headless_finalizer_retains_required_target_and_unknown_originals(self):
         _, _, _, tree = AndroidRegistrationLifecycleWorkflowTests.source()
@@ -10422,7 +8846,7 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                     'shutil': SimpleNamespace(rmtree=lambda *args, **kwargs: self.fail('shipping target must not be retired before follow-on work')),
                     'work': SimpleNamespace(lstat=lambda: root), 'work_fd': 19, 'target_fd': 20,
                     'work_original': (7, 100, root.st_mode, UID, GID), 'target_original': (7, 101, target.st_mode, UID, GID),
-                    'android_lifecycle': False, 'shipping_gate': True, 'owned_headless': True,
+                    'android_lifecycle': False, 'shipping_gate': True, 'owned_headless': True, 'catalogue_gate': False,
                     'calls_entered': 3, 'calls_returned': 2 if outcome == 'owner-unknown' else 3,
                     'receipt': receipt, 'originals': originals, 'cleanup_errors': [], 'publish': publish,
                     'names': tuple(range(6)), 'native_names': tuple(range(7))}
@@ -10883,7 +9307,7 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                 def source_file(fixture, name, parent, limit):
                     relative = Path(name).relative_to(PATH.parents[2]).as_posix()
                     self.assertIsNone(parent)
-                    self.assertEqual(limit, 376224 if relative == 'desktop/tools/stage_macos_installed.py' else 256 * 1024)
+                    self.assertEqual(limit, 1024 * 1024 if relative == 'desktop/tools/stage_macos_installed.py' else 256 * 1024)
                     raw = Path(name).read_bytes()
                     self.assertLessEqual(len(raw), limit)
                     row = {'name': name, 'sha256': M.digest(raw)}; held.append(row)
@@ -10895,25 +9319,28 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                     loaded, selected = M._gate_load_stager(SimpleNamespace(), PATH.parents[2], target=M.INTEL_TARGET)
                 self.assertEqual(selected.target, M.INTEL_TARGET)
                 self.assertTrue(selected.release.startswith('macos26-x86_64-'))
-                self.assertEqual([row['name'] for row in held], [str(PATH.parents[2] / name) for name in M.SHIPPING_GATE_SOURCE_PINS])
+                self.assertEqual([row['name'] for row in held], [str(PATH.parents[2] / name) for name in ('desktop/tools/stage_macos_installed.py', *M.SHIPPING_GATE_DATA_PINS)])
                 self.assertEqual(len(held), 3); self.assertEqual(posts, held)
                 self.assertIs(sys.modules['_mrk_shipping_gate_stager'], loaded)
             self.assertEqual(set(sys.modules), set(previous))
             self.assertTrue(all(sys.modules[name] is original for name, original in previous.items()))
 
-            # Wrong SOURCE is refused before import; an original POST failure
-            # after import still refuses rather than granting a usable stager.
-            held, posts = [], []
-            def changed_source_file(fixture, name, parent, limit):
-                raw, row = source_file(fixture, name, parent, limit)
-                self.assertEqual(len(raw), 376224)
-                return bytes([raw[0] ^ 1]) + raw[1:], row
-            with patch.dict(sys.modules), patch.object(M, '_gate_file', changed_source_file), \
-                 patch.object(importlib.util, 'spec_from_file_location') as attempted_import:
-                with self.assertRaisesRegex(M.Refused, '^gate-stager-source-pin$'):
-                    M._gate_load_stager(SimpleNamespace(), PATH.parents[2], target=M.INTEL_TARGET)
-                attempted_import.assert_not_called()
-            self.assertEqual(len(held), 1); self.assertEqual(posts, [])
+            # Release DATA still requires its reviewed digest before import;
+            # changed code originals after import still veto the loaded stager.
+            for changed in M.SHIPPING_GATE_DATA_PINS:
+                held, posts = [], []
+                def changed_data_file(fixture, name, parent, limit):
+                    raw, row = source_file(fixture, name, parent, limit)
+                    if Path(name).relative_to(PATH.parents[2]).as_posix() == changed:
+                        return bytes([raw[0] ^ 1]) + raw[1:], row
+                    return raw, row
+                with patch.dict(sys.modules), patch.object(M, '_gate_file', changed_data_file), \
+                     patch.object(importlib.util, 'spec_from_file_location') as attempted_import:
+                    with self.assertRaisesRegex(M.Refused, '^gate-stager-data-pin$'):
+                        M._gate_load_stager(SimpleNamespace(), PATH.parents[2], target=M.INTEL_TARGET)
+                    attempted_import.assert_not_called()
+                self.assertEqual(len(held), 2 + list(M.SHIPPING_GATE_DATA_PINS).index(changed))
+                self.assertEqual(posts, [])
             held, posts = [], []
             def changed_source_post(row, capture=False):
                 body, _digest = post(row, capture)
@@ -10927,25 +9354,24 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
             self.assertEqual(set(sys.modules), set(previous))
             self.assertTrue(all(sys.modules[name] is original for name, original in previous.items()))
 
-            # The existing real reader admits the exact accepted SOURCE size,
-            # not 256KiB, and refuses one additional byte before capture/import.
-            # These are private regular-file DATA originals, not native work.
-            stager_body = PATH.with_name('stage_macos_installed.py').read_bytes()
-            self.assertEqual(len(stager_body), 376224)
+            # The real reader enforces a general code bound, not an obsolete
+            # version's exact byte count. Inert DATA is never imported here.
+            code_limit = 1024 * 1024
+            bounded_body = b'x' * code_limit
             for extra in (b'', b'\n'):
                 with tempfile.TemporaryDirectory(prefix='mrk-gate-source-bound-') as temporary:
                     selected = Path(temporary) / 'stage_macos_installed.py'
-                    selected.write_bytes(stager_body + extra); selected.chmod(0o600)
+                    selected.write_bytes(bounded_body + extra); selected.chmod(0o600)
                     fixture = M.Fixtures(BINDING, M.os.getuid(), M.os.getgid(), M.VAULT_HELPER_SCOPE)
                     try:
                         if extra:
                             with self.assertRaisesRegex(M.Refused, '^gate-original-file$'):
-                                M._gate_file(fixture, str(selected), None, 376224)
+                                M._gate_file(fixture, str(selected), None, code_limit)
                             self.assertEqual(fixture.gate_files, [])
                         else:
-                            body, original = M._gate_file(fixture, str(selected), None, 376224)
-                            self.assertEqual(body, stager_body)
-                            self.assertEqual(original['sha256'], M.SHIPPING_GATE_SOURCE_PINS['desktop/tools/stage_macos_installed.py'])
+                            body, original = M._gate_file(fixture, str(selected), None, code_limit)
+                            self.assertEqual(body, bounded_body)
+                            self.assertEqual(original['sha256'], M.digest(bounded_body))
                             M._gate_recheck(fixture)
                     finally:
                         fixture.close()
@@ -11596,29 +10022,6 @@ class PendingProjectRecoveryAquaDataTests(unittest.TestCase):
             self.assertEqual(rename.argtypes, [fake.c_int, fake.c_char_p, fake.c_int, fake.c_char_p, fake.c_uint])
             self.assertIs(rename.restype, fake.c_int)
 
-    def test_workflow_support_is_targeted_and_keeps_the_selected_matrix(self):
-        root = PATH.parents[2]
-        workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        header = workflow.split("    runs-on:", 1)[0]
-        matrix = header.split("      matrix:\n", 1)[1]
-        self.assertEqual(matrix, "        include:\n          - scope: wrapping-keychain-private\n            target: aarch64-apple-darwin\n            runner: macos-26\n            supplier_receipt: '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d'\n            supplier_tar: 'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695'\n            supplier_source: '158cdff422e3837f7ab5e6192af76a578faf6fab'\n            supplier_run: '37467019389'\n            supplier_attempt: '1'\n            supplier_artifact: '11415902210'\n")
-        selected = [line.strip()[len("- scope: "):] for line in matrix.splitlines() if line.strip().startswith("- scope: ")]
-        # Recovery stays implemented but unselected; only the fixed ARM private cohort runs.
-        self.assertEqual(selected, ["wrapping-keychain-private"])
-        blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
-        step = blocks["One real pending iOS build-input recovery through ordinary Inspect and explicit Recover"]
-        self.assertIn("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending'", step)
-        self.assertIn("timeout-minutes: 7", step)
-        self.assertEqual(step.count("macos_aqua_qualification.py --scope project-recovery-pending"), 1)
-        self.assertIn("[[ $status == 0 ]]", step)
-        self.assertNotIn("continue-on-error", step)
-        for name in ("aqua-project-recovery-results.jsonl", "aqua-project-recovery-failure.jsonl", "aqua-project-recovery.status"):
-            self.assertIn("${{ steps.work.outputs.root }}/" + name, workflow)
-        for name in ("recovery-initial.json", "recovery-generated.json", "recovery-before.json", "recovery-after.json"):
-            self.assertNotIn(name, workflow)
-        for name, body in blocks.items():
-            if "xcode-installed-classification" in name.lower() or "wrapping" in name.lower():
-                self.assertNotIn("--scope project-recovery-pending", body)
 
 
 class ShippingCapacityDataWiringTests(unittest.TestCase):
@@ -11628,13 +10031,6 @@ class ShippingCapacityDataWiringTests(unittest.TestCase):
                  'source_heap_formula_keeps_fourth_alias_string_and_checked_limits',
                  'observed_sha_text_has_exact_charged_capacity')
         self.assertEqual(M.SHIPPING_CAPACITY_TESTS, tuple(prefix + name for name in names))
-        source = (PATH.parents[2] / 'desktop/src-tauri/src/android_registration_source_macos.rs').read_text()
-        for name in names:
-            self.assertIn('fn ' + name + '()', source)
-        ordinary = (PATH.parents[2] / 'desktop/src-tauri/src/installed_runtime_macos.rs').read_text()
-        self.assertIn('#[cfg(not(feature = "macos-android-registration-helper"))]\n#[path = "android_registration_source_macos.rs"]\nmod android_registration_source;', ordinary)
-        main = (PATH.parents[2] / 'desktop/src-tauri/src/lib.rs').read_text()
-        self.assertIn('#[cfg(all(target_os = "macos", target_arch = "aarch64"))]\n#[path = "installed_runtime_macos.rs"]\nmod installed_runtime;', main)
         checkout, work, bodies, _receipt, _rows = shipping_gate_headless_data()
         receipt, _native = M._gate_headless(bodies, BINDING, checkout, work)
         self.assertEqual((len(M.SHIPPING_GATE_MAIN_TESTS), len(M.SHIPPING_GATE_NATIVE_TESTS)), (6, 7))
@@ -12468,121 +10864,8 @@ class LocalEditsAquaDataTests(unittest.TestCase):
                 with self.assertRaisesRegex(M.Refused, "^fixture-local-replacement$"):
                     M.validate_snapshot(before, changed, case, True, UID, GID)
 
-    def test_local_edit_callbacks_and_finality_are_same_domain_source_bound(self):
-        rust = PATH.parents[1] / "src-tauri/src"
-        child = (rust / "installed_shell_observation_macos_local_edits.rs").read_text()
-        parent = (rust / "installed_shell_observation_macos.rs").read_text()
-        shell = (rust / "shell.rs").read_text()
-        owner = (rust / "edit_owner.rs").read_text()
-        for domain, prefix in (("Workflow", "workflow"), ("Metadata", "metadata"), ("Version", "version")):
-            self.assertIn(f"Installed{domain}Finality", child)
-            self.assertIn(f"installed_{prefix}_observation_final(id)", child)
-            self.assertIn(f"pub(crate) struct Installed{domain}Finality", owner)
-            self.assertIn(f"pub(crate) fn installed_{prefix}_observation_final", owner)
-        for fact in ("inspection_joined", "acquisition_joined", "child_waited_success", "stdin_closed", "stdout_eof_closed",
-                     "stderr_eof_closed", "io_joined", "driver_joined", "watchdog_joined", "manager_joined",
-                     "runtime_ledger_settled", "runtime_settlement_joined"):
-            self.assertIn("f." + fact, child)
-        for token in ('["domain","projectId","sessionId","ownerGeneration"]', 'p["sessionId"]==f.session_id',
-                      's.finality.as_ref().is_some_and(|f|f.matches(&s.projection))', 'r.local_edits.as_ref().is_some_and(local_edits::Record::stale_ready)',
-                      'f.after(&root,uid,index,proposal)', 'r.fixture.verify(true)', '!local_edits::data_checks()'):
-            self.assertIn(token, child + parent)
-        for hook in ("workflow_open_request", "workflow_prepare_request", "workflow_apply_request", "workflow_close_request",
-                     "metadata_open_request", "metadata_prepare_request", "metadata_apply_request",
-                     "version_open_request", "version_prepare_request", "version_apply_request",
-                     "local_release_version_request", "local_release_version"):
-            self.assertIn(hook, shell)
-        component = (PATH.parents[1] / "src/components/MetadataTextEditor.tsx").read_text()
-        self.assertIn('<option value="" disabled>No enabled configured locale</option>', component)
-        self.assertIn('<optgroup label="Current saved configuration">{state.choices.map', component)
-        for token in ("options.length!==3", "options[0].value!==''", "!options[0].disabled",
-                      "text(options[0])!=='No enabled configured locale'", "options[0].parentElement!==s",
-                      "options.slice(1).some", "options[1].value===options[2].value",
-                      "s.selectedIndex!==1", "s.value!==options[1].value"):
-            self.assertIn(token, child)
-        self.assertIn('s.selectedIndex=2;s.dispatchEvent(new Event(\'change\',{bubbles:true}))', child)
-        self.assertNotIn("options.length!==2||options.some", child)
-        self.assertIn("Current saved configuration", child)
-        self.assertIn("s.finality.is_none()", child)
-        self.assertIn("self.sessions[..2].iter().all(Session::complete)", child)
-        self.assertIn("held[..6]!=original.identity[..6]", child)
-        self.assertIn("file.sync_all()", child)
-        self.assertIn("nix::unistd::close(std::os::fd::OwnedFd::from(file))", child)
-        self.assertIn('"physicalDropdownGestureQualified":false', child)
-        for name in ("mismatched_or_out_of_order_original_is_refused", "incomplete_finality_cannot_finish_or_authorize_stale_append"):
-            self.assertIn("fn " + name + "()", child)
-        # New paths observe the ordinary wrappers, never call IPC directly or
-        # create new process/native owners or writer grants.
-        for forbidden in ("__TAURI__", "__TAURI_INTERNALS__", "invoke(", "std::process::Command", "thread::spawn", "tokio::spawn",
-                          "INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED = true"):
-            self.assertNotIn(forbidden, child)
-        self.assertIn('all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol"', owner)
-        self.assertIn('target_os = "macos", target_arch = "aarch64"', owner)
 
     def test_local_edits_workflow_scope_is_opt_in(self):
-        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        matrix = workflow.split("      matrix:\n", 1)[1].split("    runs-on:", 1)[0]
-        self.assertEqual(matrix, "        include:\n          - scope: wrapping-keychain-private\n            target: aarch64-apple-darwin\n            runner: macos-26\n            supplier_receipt: '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d'\n            supplier_tar: 'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695'\n            supplier_source: '158cdff422e3837f7ab5e6192af76a578faf6fab'\n            supplier_run: '37467019389'\n            supplier_attempt: '1'\n            supplier_artifact: '11415902210'\n")
-        self.assertEqual(matrix.count("- scope: wrapping-keychain-private\n"), 1)
-        self.assertNotIn("workflow_dispatch:", workflow.split("permissions:", 1)[0])
-        self.assertIn('"local-edits3": ("three-local-edit-Aqua-engineering-cases", ["local-metadata-text", "local-release-version", "local-github-apply"])', workflow)
-        self.assertEqual(workflow.count("|| env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')"), 26)
-        runner = workflow.split("      - name: Three serial local-edit Aqua journeys", 1)[1].split("      - name:", 1)[0]
-        for required in ("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'local-edits3'", "timeout-minutes: 9", "set -o noclobber", "umask 077",
-                         "RUNNER_ENVIRONMENT: ${{ runner.environment }}", "git -c core.fsmonitor=false diff --exit-code HEAD",
-                         'macos_aqua_qualification.py --scope local-edits3 --target "$MRK_MACOS_TARGET"', "status=$?", '[[ $status == 0 ]] || exit "$status"'):
-            self.assertIn(required, runner)
-        for suffix in ("results.jsonl", "failure.jsonl", "status"):
-            self.assertIn("${{ steps.work.outputs.root }}/aqua-local-edits3-" + suffix if suffix != "status"
-                          else "${{ steps.work.outputs.root }}/aqua-local-edits3.status", workflow)
-        admission = workflow.split("      - name: Admit only this exact disposable-hosted source route\n", 1)[1].split("      - name:", 1)[0]
-        self.assertEqual(workflow.count("      MRK_MACOS_TARGET: ${{ matrix.target }}\n"), 1)
-        self.assertEqual(workflow.count("      MRK_MACOS_RUNNER: ${{ matrix.runner }}\n"), 1)
-        self.assertIn('case "$MRK_MACOS_TARGET" in', admission)
-        self.assertIn("*) exit 1 ;;", admission)
-        source_pin = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
-        self.assertEqual(workflow.count("      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + source_pin + "\n"), 1)
-        self.assertEqual(admission.count('"$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + source_pin), 1)
-        expected_suppliers = (('aarch64-apple-darwin', 'macos-26', 'arm64', 'ARM64', '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d', 'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695', '158cdff422e3837f7ab5e6192af76a578faf6fab', '37467019389', '1', '11415902210'), ('x86_64-apple-darwin', 'macos-26-intel', 'x86_64', 'X64', 'a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b', '739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd', '079ab2a2c8fef88f01bf909e7669c685f07e1375', '37476532238', '1', '11419502465'))
-        fields = (('SHA256', 'supplier_receipt'), ('TAR_SHA256', 'supplier_tar'), ('SOURCE_COMMIT', 'supplier_source'), ('RUN_ID', 'supplier_run'), ('RUN_ATTEMPT', 'supplier_attempt'), ('ARTIFACT_ID', 'supplier_artifact'))
-        for target, runner_label, machine, runner_arch, *pins in expected_suppliers:
-            branch = admission.split("            " + target + ")\n", 1)[1].split("              ;;", 1)[0]
-            for expected in ('"$MRK_MACOS_RUNNER" == ' + runner_label, '"$RUNNER_ARCH" == ' + runner_arch,
-                             '"$(/usr/bin/uname -m)" == ' + machine):
-                self.assertIn(expected, branch)
-            if target == "x86_64-apple-darwin":
-                self.assertEqual(
-                    [line.strip() for line in branch.splitlines() if line.lstrip().startswith("[[ ")],
-                    ['[[ ( "$MRK_MACOS_AQUA_SCOPE" == local-edits3 || '
-                     '"$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic || '
-                     '"$MRK_MACOS_AQUA_SCOPE" == ios-recovery-pending ) && '
-                     '"$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && '
-                     '"$(/usr/bin/uname -m)" == x86_64 ]] || exit 1'])
-            for (suffix, key), value in zip(fields, pins):
-                self.assertEqual(branch.count("expected_" + key + "=" + value + "\n"), 1)
-                self.assertEqual(workflow.count("      MRK_MACOS_PYTHON_SUPPLIER_" + suffix + ": ${{ matrix." + key + " }}\n"), 1)
-                self.assertEqual(admission.count('"$MRK_MACOS_PYTHON_SUPPLIER_' + suffix + '" == "$expected_' + key + '"'), 1)
-        selection = workflow.split("      - name: Select the fixed configured signed runtime before any payload download\n", 1)[1].split("      - name:", 1)[0]
-        self.assertIn('"runtimeManifestSha256": "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"', selection)
-        self.assertIn("desktop/tools/stage_macos_installed.py runtime-signing-selection", selection)
-        self.assertIn('value["state"] != "configured"', selection)
-        self.assertIn('value["target"] != os.environ["MRK_MACOS_TARGET"]', selection)
-        self.assertIn('--target "$MRK_MACOS_TARGET"', selection)
-        self.assertNotIn("      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256:", workflow)
-        runtime = workflow.split("      - name: Prepare the current payload from the independently accepted fresh Python supplier\n", 1)[1].split("      - name:", 1)[0]
-        self.assertIn("--configured-signing", runtime)
-        self.assertIn('--expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"', runtime)
-        self.assertNotIn("pending-independent-current-", workflow)
-        self.assertNotIn("pending-independent-supplier-", workflow)
-        source = PATH.read_text()
-        run = source.split("def run_cases(", 1)[1].split("def recovery_supplier_route", 1)[0]
-        self.assertEqual(run.count("result = run_owned(argv,"), 1)
-        for required in ('type(result) is subprocess.CompletedProcess', 'need(result.returncode == 0, "app-return")',
-                         'report = parse_result', 'readback = fixtures.readback_ios', '"fixture-local-readback"'):
-            self.assertIn(required, run)
-        self.assertLess(run.index('need(result.returncode == 0, "app-return")'), run.index('report = parse_result'))
-        self.assertLess(run.index('report = parse_result'), run.index('"fixture-local-readback"'))
-        self.assertLess(run.index('"fixture-local-readback"'), run.index('emit({"schemaVersion": 1'))
         # Parser DATA continuity only; the matrix and signed-package barrier stay unchanged.
         for target in (M.ARM_TARGET, M.INTEL_TARGET):
             binding = M.Binding(BINDING.source, BINDING.run, BINDING.attempt, target).checked()
@@ -12776,97 +11059,8 @@ class LocalChecksAquaDataTests(unittest.TestCase):
             with self.assertRaises(M.Refused): M.validate_snapshot(before, changed, case, True, UID, GID)
 
     def test_local_checks_ui_workflow_and_same_original_source_bindings(self):
-        root = PATH.parents[2]; rust = root / 'desktop/src-tauri/src'
-        child = (rust / 'installed_shell_observation_macos_checks.rs').read_text()
-        parent = (rust / 'installed_shell_observation_macos.rs').read_text()
-        shell = (rust / 'shell.rs').read_text()
-        environment = (root / 'desktop/src/pages/Environment.tsx').read_text()
-        controller = (root / 'desktop/src/environment.ts').read_text()
-        tool_ui = (root / 'desktop/src/components/EnvironmentDiagnostics.tsx').read_text()
-        offline_ui = (root / 'desktop/src/components/OfflinePreflight.tsx').read_text()
-        fields = (root / 'desktop/src/components/Fields.tsx').read_text()
-        help_data = json.loads((root / 'src/mobile_release/api/data/field-help.json').read_text())
-        # Bind the real two-option Environment control, not the three-option
-        # Metadata editor's disabled placeholder or a reducer shortcut.
-        self.assertIn('<option value="android">Android</option><option value="ios">iOS</option>', environment)
-        self.assertIn("s.options.length!==2", child)
-        self.assertIn("s.selectedIndex=1;s.dispatchEvent(new Event('change',{bubbles:true}))", child)
-        self.assertIn('diagnosticsController.setContext(platform, operation)', environment)
-        context_body = controller.split('  setContext(', 1)[1].split('  private current(', 1)[0]
-        self.assertIn('this.invalidate({ platform, operation', context_body)
-        self.assertNotIn('refresh()', context_body)
-        self.assertIn('controller.start()', tool_ui)
-        self.assertIn('Complete means the finite check roster finished, not that every tool matched.', tool_ui)
-        self.assertIn('acknowledged original Start', child)
-        self.assertIn('Earlier / stale tool observations', child)
-        self.assertIn('Core resource observations — provisional, not native finality', tool_ui)
-        self.assertIn('controller.prepare()', offline_ui)
-        self.assertIn('controller.start(consent.operationId, consent.ownerGeneration)', offline_ui)
-        self.assertIn('Unsaved draft changes are NOT used.', child + offline_ui)
-        self.assertIn('Complete is not PASS or release readiness.', child + offline_ui)
-        self.assertIn("document.execCommand('insertText',false,'public-offline-draft')", child)
-        self.assertIn('onChange', fields)
-        # The actual catalogue, not a guessed display-name selector.
-        self.assertIn('Candidate branch', json.dumps(help_data))
-        for text in ('Discard draft changes', 'Discard this in-memory draft?', 'Discard draft', "draft('main',false)"):
-            self.assertIn(text, child)
-        for action, actual in (('checks_tools_request(value);', 'state.document.start_environment_diagnostics(args)'),
-                              ('checks_prepare_request(&value);', 'state.document.prepare_offline_preflight(args)'),
-                              ('checks_start_request(&value);', 'state.document.start_offline_preflight(args)')):
-            start = shell.index(action); end = shell.index(actual, start)
-            self.assertGreater(end, start)
-            self.assertNotIn('return', shell[start:end]); self.assertNotIn('?', shell[start:end])
-        late = child.split('fn observe(&mut self,elapsed:Duration)', 1)[1].split('struct ToolRun', 1)[0]
-        self.assertLess(late.index('self.observed=true'), late.index('if self.late'))
-        self.assertIn('self.late=elapsed>Duration::from_secs(30)', late)
-        self.assertIn('assert!(late.observed&&late.late)', child)
-        self.assertIn('checks::Record::new(c,started)', parent)
-        self.assertIn('let end = started + Duration::from_secs', parent)
-        self.assertIn('if record.waiting(wait){return;}', parent)
-        self.assertIn('r.fixture.verify(true)', parent)
-        self.assertIn('r.native_actions_returned==[false,true,false,true]', parent)
-        self.assertIn('record.readback().is_err()', parent)
-        self.assertIn('p["finality"]=="settled"', child)
-        self.assertIn('p["phase"]=="terminal"', child)
-        self.assertIn('same(old,p,"operationId")', child)
-        self.assertIn('same(&run.projection,p,"runId")', child)
-        for name in ('environment_diagnostics_owner.rs', 'saved_command_owner.rs'):
-            owner = (rust / name).read_text()
-            self.assertIn('let Poll::Ready(result) = Pin::new(handle).poll', owner)
-            self.assertIn('record_join(&owner.watchdog_return, result)', owner)
-            self.assertIn('final_clock_clear(', owner)
-            self.assertIn('Arc::ptr_eq(&active.owner, &owner)', owner)
-            if name == 'environment_diagnostics_owner.rs':
-                self.assertIn('id: nonce()?, generation: nonce()?', owner)
-                self.assertIn('last.run_id == ticket.id || last.owner_generation == ticket.generation', owner)
-                self.assertIn('r.projection["ownerGeneration"]==p["ownerGeneration"]', child)
-        for forbidden in ('__TAURI__', '__TAURI_INTERNALS__', 'invoke(', 'std::process::Command', 'thread::spawn', 'tokio::spawn',
-                          '.start_offline_preflight(', '.start_environment_diagnostics(', '.cancel_offline_preflight(', '.cancel_environment_diagnostics('):
-            self.assertNotIn(forbidden, child)
-        workflow = (root / '.github/workflows/desktop-macos-aqua.yml').read_text()
-        matrix = workflow.split('      matrix:\n', 1)[1].split('    runs-on:', 1)[0]
-        self.assertNotIn('doctor-preflight2', matrix)
-        self.assertEqual(matrix, "        include:\n          - scope: wrapping-keychain-private\n            target: aarch64-apple-darwin\n            runner: macos-26\n            supplier_receipt: '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d'\n            supplier_tar: 'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695'\n            supplier_source: '158cdff422e3837f7ab5e6192af76a578faf6fab'\n            supplier_run: '37467019389'\n            supplier_attempt: '1'\n            supplier_artifact: '11415902210'\n")
-        self.assertIn("timeout-minutes: ${{ matrix.scope == 'doctor-preflight2' && 212 || contains(fromJSON('[\"project-fields\",\"ios-current-synthetic\",\"android-inputs\",\"project-fields-android-inputs\",\"vault-helper-shipping\",\"installation-inspection\",\"vault-helper-shipping-installation-inspection\",\"project-recovery-pending\",\"ios-recovery-pending\",\"doctor-preflight2\",\"local-edits3\"]'), matrix.scope) && 137 || 75 }}", workflow)
-        self.assertEqual(workflow.count("|| env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' ||"), 26)
-        step = workflow.split('      - name: Two serial doctor and saved offline Aqua journeys', 1)[1].split('      - name:', 1)[0]
-        for required in ("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2'", 'timeout-minutes: 35',
-                         'set -o noclobber', 'umask 077', 'RUNNER_ENVIRONMENT: ${{ runner.environment }}',
-                         'macos_aqua_qualification.py --scope doctor-preflight2 --target "$MRK_MACOS_TARGET"', '[[ $status == 0 ]] || exit "$status"'):
-            self.assertIn(required, step)
-        self.assertIn('"doctor-preflight2": ("two-doctor-preflight-Aqua-engineering-cases", ["local-tool-observations", "local-saved-offline"])', workflow)
-        for name in ('results.jsonl', 'failure.jsonl'):
-            self.assertIn('${{ steps.work.outputs.root }}/aqua-doctor-preflight2-' + name, workflow)
-        self.assertIn('${{ steps.work.outputs.root }}/aqua-doctor-preflight2.status', workflow)
-        self.assertNotIn('workflow_dispatch:', workflow.split('permissions:', 1)[0])
-        source = PATH.read_text()
-        run = source.split('def run_cases(', 1)[1].split('def recovery_supplier_route', 1)[0]
-        self.assertEqual(run.count('result = run_owned(argv,'), 1)
-        self.assertLess(run.index('need(result.returncode == 0, "app-return")'), run.index('report = parse_result'))
-        self.assertLess(run.index('report = parse_result'), run.index('readback["localChecks"]'))
-        self.assertLess(run.index('readback["localChecks"]'), run.index('emit({"schemaVersion": 1'))
-        for name in ('actual_context_and_terminal_are_required', 'complete_report_never_promotes_readiness'):
-            self.assertIn('fn ' + name + '()', child)
+        help_data = json.loads((PATH.parents[2] / "src/mobile_release/api/data/field-help.json").read_text())
+        self.assertIn("Candidate branch", json.dumps(help_data))
 
 if __name__ == "__main__":
     unittest.main()

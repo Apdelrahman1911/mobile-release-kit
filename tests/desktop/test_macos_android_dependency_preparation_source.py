@@ -98,17 +98,13 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         self.assertEqual(helper.ui_roster_match([row],dirs,expected,sealed=True),3)
         for changed in (dict(row,sha256='e'*64),dict(row,path='dir/foreign'),dict(row,bytes=4)):
             with self.assertRaises(helper.Refused): helper.ui_roster_match([changed],dirs,expected,sealed=True)
-        body=(ROOT/'desktop/tools/macos_normal_ui_runner.py').read_bytes()
-        pin=[len(body),hashlib.sha256(body).hexdigest()]
-        self.assertEqual(helper.PINS['desktop/tools/macos_normal_ui_runner.py'],pin)
-        self.assertEqual(helper.UI_NORMAL_PIN,pin)
 
     def test_fixed_preparation_owner_resources_scope_and_budgets(self):
         source = (ROOT / 'desktop/tools/macos_android_dependency_preparation.py').read_text()
         tree = ast.parse(source)
         constants = {n.targets[0].id: ast.literal_eval(n.value) for n in tree.body
                      if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
-                     and n.targets[0].id in ('ARCHIVES', 'PINS', 'RESOURCES', 'SDK_CURRENT_USE', 'RUN_SCOPE', 'SDK_METADATA')}
+                     and n.targets[0].id in ('ARCHIVES', 'RESOURCES', 'SDK_CURRENT_USE', 'RUN_SCOPE', 'SDK_METADATA')}
         self.assertEqual(constants['SDK_CURRENT_USE']['image'], {'ImageOS': 'macos26', 'ImageVersion': '20260907.0351.1'})
         self.assertEqual(constants['SDK_CURRENT_USE']['productVersion'], '26.6.2')
         self.assertEqual(len(constants['SDK_CURRENT_USE']['files']), 5)
@@ -639,7 +635,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         helper = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_sdk_load_data')
         scratch = Path(os.environ['TMPDIR'])
         self.assertEqual(stat.S_IMODE(scratch.stat().st_mode), 0o700)
-        old_source, old_pins, old_read = helper.SOURCE, helper.PINS, helper.read
+        old_source, old_files, old_read = helper.SOURCE, helper.SOURCE_FILES, helper.read
         name = '_mrk_sdk_authenticated_synthetic_module'
         self.assertNotIn(name, sys.modules)
         try:
@@ -647,10 +643,13 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 source = Path(temporary)
                 path = source / 'fixed.py'
                 helper.SOURCE = source
+                helper.SOURCE_FILES = ('fixed.py',)
                 def body(raw):
                     path.write_bytes(raw)
                     path.chmod(0o600)
-                    helper.PINS = {'fixed.py': [len(raw), hashlib.sha256(raw).hexdigest()]}
+                for invalid in ('foreign.py', '../fixed.py', None):
+                    with self.assertRaisesRegex(helper.Refused, '^source-module-route$'):
+                        helper.load(name, invalid)
                 body(b"TOKEN = 'authenticated-source'\n")
                 loaded = helper.load(name, 'fixed.py')
                 self.assertEqual(loaded.TOKEN, 'authenticated-source')
@@ -694,7 +693,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                     helper.load(name, 'fixed.py')
                 self.assertIs(sys.modules[name], sentinel)
         finally:
-            helper.SOURCE, helper.PINS, helper.read = old_source, old_pins, old_read
+            helper.SOURCE, helper.SOURCE_FILES, helper.read = old_source, old_files, old_read
             sys.modules.pop(name, None)
 
         # Early main failure is exercised with real retained work descriptors and

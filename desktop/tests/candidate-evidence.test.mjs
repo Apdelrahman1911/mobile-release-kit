@@ -811,15 +811,3 @@ test('evidence help is complete optional guidance about documents, not provenanc
   assert.match(evidenceHelp.digests.format, /integrity field excluded, not the SHA-256 of the raw JSON file/);
   assert.match(evidenceHelp.digests.failure, /does not authenticate.*forged set can still be locally consistent/);
 });
-
-test('v1 facade stays strict while the App shares the lifecycle controller instead of a second polling owner', () => {
-  const source = readFileSync(new URL('../src/candidateEvidence.ts', import.meta.url), 'utf8');
-  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  assert.match(source, /class CandidateEvidenceController extends EvidenceController<EvidenceStatus>/);
-  assert.match(source, /super\(otherOperationReason, 'candidate', parseEvidenceStatus\)/);
-  assert.doesNotMatch(app, /new CandidateEvidenceController/);
-  assert.deepEqual([...app.matchAll(/new LifecycleEvidenceController\(([^)]*)\)/g)].map((m) => m[1]), ['savedCommandBusy']);
-  assert.match(app, /releaseEvidence\.beginConnection\(\)/);
-  assert.match(app, /releaseEvidence\.connect\(connection\)/);
-  assert.match(app, /releaseEvidence\.dispose\(\)/);
-});

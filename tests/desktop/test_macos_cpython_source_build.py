@@ -8621,6 +8621,84 @@ class MacPythonSourceBuildTests(unittest.TestCase):
         self.assertIs(BUILD.DATA, original_data)
         self.assertEqual(vars(original_data), original_fields)
 
+    def test_seal_checkout_code_loading_keeps_bounds_post_and_provider_data_pins(self):
+        name, builder_name = "_mrk_seal_checkout_test", "_mrk_seal_existing_build"
+        self.assertNotIn(name, sys.modules)
+        self.assertNotIn(builder_name, sys.modules)
+        seal = load(name, "macos_github_seal_build.py")
+        try:
+            with tempfile.TemporaryDirectory(prefix="mrk-seal-checkout-") as temporary:
+                root = Path(temporary)
+                path = root / "desktop/tools/macos_cpython_source_build.py"
+                path.parent.mkdir(parents=True)
+                seal.CHECKOUT = root
+                for value, body in ((1, b"VALUE = 1\n"), (2, b"VALUE = 2  # changed checkout code\n")):
+                    path.write_bytes(body)
+                    seal.bootstrap_builder()
+                    self.assertEqual(seal.B.VALUE, value)
+                    self.assertIs(sys.modules.pop(builder_name), seal.B)
+                with patch.object(seal, "CODE_SOURCE_LIMIT", 1):
+                    with self.assertRaisesRegex(ValueError, "^builder-source-kind$"):
+                        seal.bootstrap_builder()
+                sentinel = object()
+                sys.modules[builder_name] = sentinel
+                with self.assertRaisesRegex(ValueError, "^builder-already-loaded$"):
+                    seal.bootstrap_builder()
+                self.assertIs(sys.modules.pop(builder_name), sentinel)
+                original_read = seal.os.read
+                changed = False
+                def changing_read(fd, count):
+                    nonlocal changed
+                    result = original_read(fd, count)
+                    if not changed:
+                        changed = True
+                        path.write_bytes(b"VALUE = 3\n")
+                    return result
+                with patch.object(seal.os, "read", side_effect=changing_read):
+                    with self.assertRaisesRegex(ValueError, "^builder-source-post$"):
+                        seal.bootstrap_builder()
+                self.assertNotIn(builder_name, sys.modules)
+                original_close = seal.os.close
+                closes = []
+                def uncertain_close(fd):
+                    closes.append(fd)
+                    original_close(fd)
+                    raise OSError("inert unknown consuming close")
+                with patch.object(seal.os, "close", side_effect=uncertain_close):
+                    with self.assertRaisesRegex(OSError, "inert unknown consuming close"):
+                        seal.bootstrap_builder()
+                self.assertEqual(len(closes), 1)
+                self.assertNotIn(builder_name, sys.modules)
+
+                # Actual snapshot reads tiny checkout files; DATA pins remain mandatory.
+                seal.B = BUILD
+                (root / "src/mobile_release").mkdir(parents=True)
+                records = (("provider/record.json", (3, BUILD.digest(b"{}\n"))),)
+                files = {seal.WORKFLOW, "desktop/tools/macos_github_seal_build.py",
+                         *("desktop/tools/" + leaf for leaf in seal.REUSE_FILES), records[0][0]}
+                for relative in files:
+                    leaf = root / relative
+                    leaf.parent.mkdir(parents=True, exist_ok=True)
+                    leaf.write_bytes(b"{}\n" if relative == records[0][0] else b"# checkout code\n")
+                with patch.object(seal, "provider_fact_records", return_value=records), \
+                     patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    first = seal.source_snapshot(lambda: None, provider=True, capsule=True)
+                    self.assertEqual(set(first), files)
+                    aqua = root / "desktop/tools/macos_aqua_qualification.py"
+                    aqua.write_bytes(b"# newer checkout code\n")
+                    second = seal.source_snapshot(lambda: None, provider=True, capsule=True)
+                    self.assertNotEqual(first[aqua.relative_to(root).as_posix()]["sha256"],
+                                        second[aqua.relative_to(root).as_posix()]["sha256"])
+                    with patch.object(seal, "CODE_SOURCE_LIMIT", 1):
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^ordinary-input-size$"):
+                            seal.source_snapshot(lambda: None, provider=True, capsule=True)
+                    (root / records[0][0]).write_bytes(b"[]\n")
+                    with self.assertRaisesRegex(BUILD.BuildRefused, "^provider-record-pin$"):
+                        seal.source_snapshot(lambda: None, provider=True, capsule=True)
+        finally:
+            sys.modules.pop(builder_name, None)
+            self.assertIs(sys.modules.pop(name), seal)
+
     def test_canonical_seal_generated_alias_is_exact_and_never_source_authority(self):
         # Only a tiny generated-work alias is exercised. No source archive,
         # compiler, crypto, native child or complete build owner is entered.

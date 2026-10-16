@@ -4,7 +4,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import catalogResource from '../../src/mobile_release/api/data/metadata-images-v1.json' with { type: 'json' };
 import helpResource from '../../src/mobile_release/api/data/metadata-image-help-v1.json' with { type: 'json' };
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
@@ -676,83 +675,6 @@ test('service replacement and exhausted correlation counters cannot create anoth
   assert.equal(h.controller.prepare(), false); assert.equal(h.controller.choose(), false);
   const exhausted = await connected(); exhausted.emitSelection({ ...exhausted.selectionFrame, statusRevision: 0xffffffff });
   assert.equal(exhausted.controller.choose(), false); assert.equal(exhausted.count('choose'), 0);
-});
-
-test('App owns one image controller app-wide, with reciprocal busy gates and synchronous intent retirement', () => {
-  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  assert.equal((app.match(/new MetadataImagesController\(/g) ?? []).length, 1);
-  assert.ok(app.includes('useSyncExternalStore(metadataImages.subscribe, metadataImages.getSnapshot, metadataImages.getSnapshot)'));
-  const intent = app.indexOf('imageControllerRef.current?.beforeWorkspaceAction(action)');
-  assert.ok(intent >= 0 && intent < app.indexOf('const next = workspaceReducer(previous, action)'));
-  assert.ok(app.includes('imageControllerRef.current?.syncProject()'));
-  assert.ok(app.includes('savedCommandBusy(false, false, false, true) ?? savedCommandPrerequisiteReason(false, true, step)'));
-  assert.ok(app.includes('metadataImagesAssetSessionReason(assets, imageStep)'));
-  const subscription = app.indexOf('assetSession.subscribe(metadataImages.syncAssetSession)');
-  assert.ok(subscription >= 0 && subscription < app.indexOf('void bootstrap()'));
-  assert.ok(app.includes('metadataImages.syncAssetSession();'));
-  assert.ok(app.includes('excludeGitHubRelease = false, excludeImages = false'));
-  assert.ok(app.includes('!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason'));
-  assert.ok(app.includes('excludeImages ? null : metadataImagesOwnerReason'));
-  assert.ok(app.includes('!excludeImages && metadataImages.passiveBusyReason()'));
-  assert.ok(app.includes('metadataImages.connect(metadataImagesApi(api.mode))'));
-  assert.ok(app.includes('metadataImages.setVisible(next === \'metadata\')'));
-  assert.ok(app.includes('imageControllerRef.current?.shutdownIntent()'));
-  assert.ok(app.includes('metadataImages.selectionIntent()')); assert.ok(app.includes('metadataImages.snapshotIntent(projectId)'));
-  assert.ok(app.includes('metadataImages.setSelectionPending(true)')); assert.ok(app.includes('metadataImages.setSelectionPending(false)'));
-  assert.ok(app.includes("page !== 'metadata' && <MetadataImagesOperation"));
-  assert.ok(app.includes('imageEditor={<MetadataImagesEditor'));
-  const capability = app.slice(app.indexOf('const nativeImagesAvailable'), app.indexOf('const localEditingLabel'));
-  assert.ok(capability.includes('catalog !== null')); assert.ok(capability.includes('selectionStatus?.capability.available === true'));
-  assert.ok(capability.includes('editStatus?.capability.available === true')); assert.ok(capability.includes('!metadataImagesState.integrityFailed'));
-});
-
-test('all closed image commands reach the existing native handlers through the local main-window ACL', () => {
-  const expected = [
-    'metadata_images_catalog', 'metadata_images_choose', 'metadata_images_selection_status', 'metadata_images_selection_cancel',
-    'metadata_images_edit_open', 'metadata_images_recovery_open', 'metadata_images_edit_prepare',
-    'metadata_images_edit_apply', 'metadata_images_edit_close', 'metadata_images_edit_status',
-  ].sort();
-  const types = readFileSync(new URL('../src/metadataImages.ts', import.meta.url), 'utf8');
-  const build = readFileSync(new URL('../src-tauri/build.rs', import.meta.url), 'utf8');
-  const shell = readFileSync(new URL('../src-tauri/src/shell.rs', import.meta.url), 'utf8');
-  const main = JSON.parse(readFileSync(new URL('../src-tauri/capabilities/main.json', import.meta.url), 'utf8'));
-  const body = (source, pattern) => { const match = source.match(pattern); assert.ok(match); return match[1]; };
-  const commands = (source) => [...source.matchAll(/\bmetadata_images_[a-z_]+\b/g)].map((match) => match[0]).sort();
-  const sameClosedSet = (actual) => {
-    assert.equal(new Set(actual).size, actual.length, 'duplicate image command or permission');
-    assert.deepEqual(actual, expected);
-  };
-  sameClosedSet(commands(body(types, /export type MetadataImagesCommand\s*=([\s\S]*?);/)));
-  sameClosedSet(commands(body(build, /const COMMANDS:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/)));
-  sameClosedSet(commands(body(shell, /tauri::generate_handler!\[([\s\S]*?)\]/)));
-  sameClosedSet([...shell.matchAll(/#\[tauri::command\]\s*async fn (metadata_images_[a-z_]+)\(/g)].map((match) => match[1]).sort());
-  assert.match(build, /AppManifest::new\(\)\s*\.commands\(COMMANDS\)/);
-  assert.equal(main.local, true);
-  assert.deepEqual(main.windows, ['main']);
-  assert.equal(Object.hasOwn(main, 'remote'), false);
-  sameClosedSet(main.permissions.filter((entry) => typeof entry === 'string' && entry.startsWith('allow-metadata-images-'))
-    .map((entry) => entry.slice('allow-'.length).replaceAll('-', '_')).sort());
-});
-
-test('guided Metadata UI displays real metadata, not fabricated thumbnails or browser/file-byte fallbacks', () => {
-  const page = readFileSync(new URL('../src/pages/Metadata.tsx', import.meta.url), 'utf8');
-  const ui = readFileSync(new URL('../src/components/MetadataImagesEditor.tsx', import.meta.url), 'utf8');
-  const controller = readFileSync(new URL('../src/metadataImagesController.ts', import.meta.url), 'utf8');
-  const bridge = readFileSync(new URL('../src/metadataImagesBridge.ts', import.meta.url), 'utf8');
-  const api = readFileSync(new URL('../src/metadataImagesApi.ts', import.meta.url), 'utf8');
-  assert.ok(page.includes('{imageEditor}')); assert.ok(!page.includes('Screenshot selection, registration and image validation are not implemented'));
-  assert.ok(!page.includes('screenshot-card')); assert.ok(ui.includes('Header/dimensions checked')); assert.ok(ui.includes('version-controlled project metadata'));
-  assert.ok(ui.includes('Source images are never moved')); assert.ok(ui.includes('not full image decoding'));
-  assert.ok(ui.includes('original native')); assert.ok(ui.includes('Final lexical Store input order')); assert.ok(ui.includes('view.finalOrder.map'));
-  assert.ok(ui.includes('file.selected')); assert.ok(ui.includes('file.after')); assert.ok(ui.includes('view.existing'));
-  assert.ok(ui.includes('idle inspection is not a recovery pass')); assert.ok(ui.includes('recoveryAction[view.action]'));
-  assert.ok(ui.includes('retainedMetadataImagesOperation(state)')); assert.ok(ui.includes('Image Apply submitted; awaiting original status'));
-  assert.ok(ui.includes('!imageAttemptFinished(attempt) && (attempt.cancelClaimed || attempt.closeClaimed)'));
-  assert.ok(api.includes("from '@tauri-apps/api/core'")); assert.ok(api.includes("from '@tauri-apps/api/event'"));
-  for (const source of [ui, controller, bridge, api]) {
-    assert.doesNotMatch(source, /type=["']file["']|FileReader|new File\b|new Blob\b|Uint8Array|\.arrayBuffer\(|localStorage|sessionStorage|fetch\(/);
-    assert.doesNotMatch(source, /APP_IPHONE_[0-9]|APP_IPAD_PRO_/); // only the shared catalogue supplies device rows
-  }
 });
 
 

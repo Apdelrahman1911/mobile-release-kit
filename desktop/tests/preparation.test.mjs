@@ -2,7 +2,6 @@
 // DTO fixtures, not policy implementations or evidence of core/native execution.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
 import { blockingAncestor, getValue, sameJson, setValue } from '../src/catalog.ts';
 import { canUndoRemoval, initialWorkspace, isDirty, reviewFresh, suggestionFresh, validationFresh, workspaceReducer as reduce } from '../src/drafts.ts';
 import { methodReason } from '../src/certainty.ts';
@@ -483,18 +482,6 @@ test('Save, unchanged dispatch, switch-away-and-back and service changes retire 
     ...['revision', 'baselineGeneration'].map((key) => [{ ...workspace, projects: { ...workspace.projects,
       a: { ...workspace.projects.a, [key]: workspace.projects.a[key] + 1 } } }, service]),
   ]) assert.equal(finishProjectPath(picker, binding, changed, generation, { reply: pathReply(binding) }).edit, null);
-  // SOURCE integration guard only, not a mounted React/native test.
-  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  const dispatch = app.slice(app.indexOf('const dispatch ='), app.indexOf('const [configEdit]'));
-  const retire = dispatch.indexOf('retirePathPicker()');
-  assert.ok(retire >= 0 && retire < dispatch.indexOf('workspaceReducer(previous, action)'));
-  assert.ok(retire < dispatch.indexOf('if (next === previous) return'));
-  assert.match(app, /onPrepareSave=.*dispatch\(\{ type: 'config-save-intent'/);
-  assert.match(app, /workspaceRef.current.projects\[session.project.id\] !== session/);
-  const finish = app.slice(app.indexOf('const finish = (outcome:'), app.indexOf('const draftRetained'));
-  const consumed = finish.indexOf('publishPathPicker(completion.state)'), edit = finish.indexOf('edit(completion.edit.field, completion.edit.value)');
-  assert.ok(consumed >= 0 && consumed < edit);
-  assert.match(app, /preflightBusy\(\) \?\? androidBusy\(\) \?\? projectPathOwnerReason\(pathPickerRef.current\)/);
 });
 
 test('Cancel and refusals preserve drafts; malformed replies and CleanupUnknown retain a non-retryable original witness', () => {

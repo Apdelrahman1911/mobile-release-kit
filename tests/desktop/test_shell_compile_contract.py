@@ -434,13 +434,12 @@ def observer_data_fixture():
     bound["macCompile"].update(mode="observer-data", execution="compile-and-fixed-data",
         graphs=[["mac-observer-fixed-data", "desktop/src-tauri/Cargo.toml", "test",
                  "desktop-shell,custom-protocol,macos-installed-observation", "installed-shell-observation"]],
-        data={"sourceCount": 78, "sourceInventorySha256": helper.hashlib.sha256(inventory).hexdigest(),
-              "scriptSha256": helper.hashlib.sha256(raw).hexdigest(), "pythonCount": 84,
-              "selectionSha256": "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94"})
+        data={"sourceCount": len(sources), "sourceInventorySha256": helper.hashlib.sha256(inventory).hexdigest(),
+              "scriptSha256": helper.hashlib.sha256(raw).hexdigest(), "pythonCount": len(tests)})
     private = {"schemaVersion": 1, "scope": "ci-observer-fixed-data-and-selected-host-python-regressions",
         "sourceCommit": bound["sourceSha"], "sourceTree": bound["sourceTree"],
         "sourceInventorySha256": bound["macCompile"]["data"]["sourceInventorySha256"],
-        "frozenSelectionSha256": bound["macCompile"]["data"]["selectionSha256"], "pythonExpectedCount": 84,
+        "pythonExpectedCount": len(tests),
         "ciContext": {key: bound[key] for key in ("workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")},
         "sourceRows": rows, "pythonTestIds": list(tests),
         "commands": [{"phase": phase, "originalReturned": True, "returnCode": 0, "outputComplete": True,
@@ -448,7 +447,7 @@ def observer_data_fixture():
                      for phase in ("mount", "apfs", "build", "rust", "python")],
         "artifact": {"sha256": "5" * 64, "identity": [1, 2, 0o100700, 1000, 1000, 1, 64, 3, 4],
                      "unchangedAfterRun": True, "originalClosed": True},
-        "pythonCounts": {"testsRun": 84, "failures": 0, "errors": 0, "skipped": 0,
+        "pythonCounts": {"testsRun": len(tests), "failures": 0, "errors": 0, "skipped": 0,
                          "expectedFailures": 0, "unexpectedSuccesses": 0, "testIds": list(tests), "actualHostBeforeAndAfter": True},
         "ciAggregatePassed": True, "ciSourcePost": True, "ciTemporaryEmpty": True, "passed": True, "failure": None}
     return raw, body, bound, private
@@ -472,10 +471,7 @@ class ShellCompileContractTests(unittest.TestCase):
         raw, body, bound, private = observer_data_fixture()
         selected_body, sources, tests = helper.mac_observer_data_selection(raw)
         self.assertEqual(selected_body, body)
-        self.assertEqual((len(sources), len(tests)), (78, 84))
         self.assertEqual(tuple(private["pythonTestIds"]), tests)
-        self.assertEqual(helper.hashlib.sha256(json.dumps(list(tests), separators=(",", ":")).encode()).hexdigest(),
-                         "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94")
         helper.mac_observer_data_binding(bound["macCompile"]["data"])
         parsed = helper.ast.parse(body)
         assignments = {node.targets[0].id: node for node in parsed.body if isinstance(node, helper.ast.Assign)
@@ -490,7 +486,7 @@ class ShellCompileContractTests(unittest.TestCase):
         malformed = [b"", raw + b"suffix", raw.replace(b"<<'PY_DATA_CONTRACTS'", b"<<'OTHER'"), b"x" * (128 * 1024 + 1),
                      raw.replace(b"\nPY_DATA_CONTRACTS\n", b"\nnames = []\nPY_DATA_CONTRACTS\n"),
                      *[altered("source_names", value) for value in bad_sources],
-                     altered("names", list(reversed(tests))), altered("names", list(tests[:-1]))]
+                     altered("names", [tests[0], tests[0]]), altered("names", ["../bad"]), altered("names", [])]
         for value in malformed:
             with self.subTest(selection_bytes=len(value)), self.assertRaises((helper.CheckFailure, ValueError, SyntaxError)):
                 helper.mac_observer_data_selection(value)
@@ -663,7 +659,7 @@ class ShellCompileContractTests(unittest.TestCase):
         complete = helper.mac_observer_data_result(private, bound, 0)
         self.assertIs(helper.validate_mac_observer_data_result(complete), complete)
         self.assertEqual([row["phase"] for row in complete["commands"]], ["mount", "apfs", "build", "rust", "python"])
-        self.assertEqual(complete["pythonCounts"]["testsRun"], 84)
+        self.assertEqual(complete["pythonCounts"]["testsRun"], len(private["pythonTestIds"]))
         for field in ("nativeVaultTestsExecuted", "uiExecutedByThisBatch", "nativeTlsQualified", "allWorkerFinalityEstablished"):
             self.assertIs(complete[field], False)
         written = []
@@ -674,13 +670,19 @@ class ShellCompileContractTests(unittest.TestCase):
         helper.validate_compile_receipt(written[0], bound, "compile")
         with self.assertRaises(helper.CheckFailure):
             helper.validate_compile_receipt(written[0], mac_context(mode="observer-only"), "compile")
+        for ids in (private["pythonTestIds"][:-1], list(reversed(private["pythonTestIds"]))):
+            changed = deepcopy(private)
+            changed["pythonTestIds"] = ids
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_observer_data_result(changed, bound, 0)
         self.assertIsNone(complete["guardCode"])
         self.assertIsNone(complete["pythonFailure"])
         for change in (lambda x: x.update(guardCode="unclassified"), lambda x: x.update(pythonFailure={}),
                        lambda x: x.update(wrapperReturnCode=1), lambda x: x["commands"][3].update(returnCode=101),
                        lambda x: x["commands"][3].update(captureClosed=False), lambda x: x["commands"][3].update(outputOverflow=True),
                        lambda x: x["commands"].pop(), lambda x: x["artifact"].update(unchangedAfterRun=False),
-                       lambda x: x["artifact"].update(originalClosed=False), lambda x: x["pythonCounts"].update(testsRun=83),
+                       lambda x: x["artifact"].update(originalClosed=False), lambda x: x["pythonCounts"].update(testsRun=x["pythonExpectedCount"]-1),
+                       lambda x: (x.update(pythonExpectedCount=1), x["pythonCounts"].update(testsRun=1)),
                        lambda x: x["pythonCounts"].update(skipped=1), lambda x: x.update(sourcePost=None),
                        lambda x: x.update(temporaryEmpty=False), lambda x: x.update(allWorkerFinalityEstablished=True),
                        lambda x: x.update(extra="not admitted")):
@@ -798,12 +800,12 @@ class ShellCompileContractTests(unittest.TestCase):
         python_private.update(pythonCounts=None, ciAggregatePassed=True, ciSourcePost=None, ciTemporaryEmpty=None,
                               passed=False, failure="private Python assertion prose")
         python_private["commands"][-1]["returnCode"] = 1
-        # Use the16 longest actual84 identifiers, retained in fixed roster order.
+        # Use the16 longest actual identifiers, retained in fixed roster order.
         longest = set(sorted(private["pythonTestIds"], key=len, reverse=True)[:16])
         rows = [{"kind": "failure", "id": name} for name in private["pythonTestIds"] if name in longest]
-        python = {"testsRun": 84, "failures": 65535, "errors": 65535, "skipped": 65535,
+        python = {"testsRun": len(private["pythonTestIds"]), "failures": 65535, "errors": 65535, "skipped": 65535,
                   "expectedFailures": 65535, "unexpectedSuccesses": 65535, "actualHostBeforeAndAfter": True,
-                  "failureTests": rows, "classifiedTestCount": 168, "omittedTestCount": 152, "unclassifiedTestCount": 65535}
+                  "failureTests": rows, "classifiedTestCount": 2*len(private["pythonTestIds"]), "omittedTestCount": 2*len(private["pythonTestIds"])-16, "unclassifiedTestCount": 65535}
         supplement = {**failure, "phase": "python", "originalReturncode": 1, "rustPanic": None, "python": python}
         python_result = helper.mac_observer_data_result(python_private, bound, 1, failure=supplement)
         self.assertEqual(python_result["pythonFailure"], python)
@@ -960,6 +962,7 @@ class ShellCompileContractTests(unittest.TestCase):
     def test_observer_data_phase_routes_one_full_five_original(self):
         _, _, bound, private = observer_data_fixture()
         result = helper.mac_observer_data_result(private, bound, 0)
+        roster = helper.mac_observer_data_roster()
         binary = "/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin"
         for phase, failed in (("acquire", False), ("compile", False), ("compile", True)):
             events, calls, writes, children = [], [], [], []
@@ -973,7 +976,8 @@ class ShellCompileContractTests(unittest.TestCase):
                 self.assertEqual([kw["check"] for _, kw in calls], ["node-version", "typescript-no-emit", "vite-assets"])
                 if failed: raise primary
                 return deepcopy(result)
-            with patch.object(helper, "Path", MemoryPath), patch.object(helper, "source_unchanged"), \
+            with patch.object(helper, "mac_observer_data_roster", return_value=roster), \
+                    patch.object(helper, "Path", MemoryPath), patch.object(helper, "source_unchanged"), \
                     patch.object(helper, "mac_compile_source_guard"), patch.object(helper, "mac_compile_inputs", return_value=bound["macCompile"]), \
                     patch.object(helper, "tools", return_value=(binary + "/cargo", None)), patch.object(helper, "ordinary"), \
                     patch.object(helper.shutil, "which", return_value="/selected/bin/node"), patch.object(helper.time, "monotonic", return_value=100.0), \

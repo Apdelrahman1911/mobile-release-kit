@@ -33,7 +33,6 @@ ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
 PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
-LOADER_SHA = '95587646a468cea1ad1b212ec7a0aeac39d903eb68deef3ee29b1f889cc4d9f5'
 LOADER_MODULE = "mrk_normal_ui_owner_loader"
 TARGET = "MRKNormalAppUITests"
 CLASS = TARGET + "/NormalAppUITests/"
@@ -1578,7 +1577,6 @@ class NormalIOSRecoveryFixture:
         try:
             self.loader_fd = os.open(self.phase.root / LOADER, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
             _, identity, digest = original_body(self.loader_fd, 1024*1024)
-            need(digest == LOADER_SHA, "ios-pending-loader-pin")
             self.loader_original = (identity, digest)
             self.check_sources()
             self.fixtures.prepare()
@@ -4159,7 +4157,6 @@ def load_normal_owner(root):
     registered = False
     try:
         _, loader_identity, loader_digest = original_body(loader_fd, 1024 * 1024)
-        need(loader_digest == LOADER_SHA, "normal-owner-loader-pin")
 
         def unchanged():
             need(full9(os.stat(root / LOADER, follow_symlinks=False)) == loader_identity

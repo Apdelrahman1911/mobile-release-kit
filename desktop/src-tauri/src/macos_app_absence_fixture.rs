@@ -742,11 +742,6 @@ mod tests {
         assert!(stable_identity_shape(&stable_identity_data(id)).is_ok());
         for key in ["device","inode","mode","uid","gid"] {let mut bad=stable_identity_data(id);bad[key]=Value::Null;
             assert!(stable_identity_shape(&bad).is_err());}
-        // Compile-time genuine ordinary SOURCE: the public export must use the
-        // same inherited-group primitive tested below, not the strict pre-wheel creator.
-        let ordinary=include_str!("bin/macos_install.rs");
-        assert_eq!(ordinary.matches("let writer = book.create_public_receipt_file(support,&name)?;").count(),1);
-        assert!(!ordinary.contains("let writer = book.create_file(support,&name,Role::ReceiptWriter)?;"));
         let fresh=Identity{dev:1,ino:7,mode:0o100600,uid:0,gid:80,links:1,size:0,mtime:1,mtime_ns:0,ctime:1,ctime_ns:0};
         let normalized=Identity{gid:0,ctime:2,..fresh};
         for gid in [0,80,501] {

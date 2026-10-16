@@ -212,14 +212,15 @@ try:
     book = fixture.Originals()
     need(book.file(CHECKOUT / ".git/HEAD", 64, modes=(0o600, 0o644))[1] == (SOURCE + "\n").encode("ascii"),
          "preparation-detached-source")
-    # Hold the actual bootstrap and pinned command-owner closure.
+    # Hold the actual bootstrap bytes and fixed checkout command-owner closure.
     for relative, expected in (
         ("desktop/tools/macos_e2_native_fixture.py", fixture_hash),
         ("desktop/tools/macos_aqua_qualification.py", qualification_hash),
-        *(("src/mobile_release/" + name, pin) for name, pin in qualification.OWNER_PINS.items()),
     ):
         entry, content = book.file(CHECKOUT / relative, 1048576, modes=(0o444, 0o644))
         need(hashlib.sha256(content).hexdigest() == expected, "preparation-bootstrap-binding")
+    for name in qualification.OWNER_FILES:
+        book.file(CHECKOUT / "src/mobile_release" / name, 1048576, modes=(0o444, 0o644))
     owner = qualification.load_owner(CHECKOUT)
     book.check()
 

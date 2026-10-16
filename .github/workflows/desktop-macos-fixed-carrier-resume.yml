@@ -31,8 +31,6 @@ jobs:
     env:
       MRK_MACOS_TARGET: aarch64-apple-darwin
       MRK_MACOS_HOSTED_JOB: github-hosted-macos26-arm64
-      MRK_FIXED_RESUME_BYTES: "166885"
-      MRK_FIXED_RESUME_SHA256: "17a7b8d72e53a7781b226d313e78f8d5b7226aadb238d442f962c49720899c13"
       TEST_RUNNER_MRK_NORMAL_UI_FIXED_CARRIER_RESUME: fixed-ce644-arm-carrier-normal-local-batch-v1
       TEST_RUNNER_MRK_NORMAL_UI_FIXED_NORMAL_BATCH: ${{ matrix.normalBatch }}
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -495,45 +493,8 @@ jobs:
           set -o noclobber
           umask 077
           set +e
-          "$MRK_PYTHON" -I -S -B - > "$MRK_MACOS_WORK/normal-ui/fixed-carrier-install.json" <<'PY_RESUME_NATIVE'
-          import hashlib,os,stat,sys,time
-          from pathlib import Path
-          
-          def fixed_source_bytes(path,size,digest,started):
-              def need(v):
-                  if not v:raise ValueError('fixed-resume-source-admission')
-              def identity(v):
-                  return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
-              need(type(size)is int and 0<size<=167936 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
-              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
-              try:
-                  before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1
-                       and not before[2]&0o022 and before[6]==size and identity(os.stat(path,follow_symlinks=False))==before)
-                  data=bytearray()
-                  while len(data)<size:
-                      need(started<=time.monotonic_ns()<started+10_000_000_000)
-                      block=os.pread(fd,min(65536,size-len(data)),len(data));need(0<len(block)<=min(65536,size-len(data)));data.extend(block)
-                  need(not os.pread(fd,1,size) and hashlib.sha256(data).hexdigest()==digest
-                       and identity(os.fstat(fd))==before==identity(os.stat(path,follow_symlinks=False)))
-              except BaseException as error:primary=error;raise
-              finally:
-                  consumed,fd=fd,None
-                  try:os.close(consumed)
-                  except BaseException:
-                      if primary is None:raise ValueError('fixed-resume-source-close') from None
-                      BaseException.add_note(primary,'fixed-resume-source-close')
-              need(started<=time.monotonic_ns()<started+10_000_000_000)
-              return bytes(data)
-          
-          try:
-              started=time.monotonic_ns();path=Path('desktop/tools/macos_fixed_carrier_resume.py').absolute()
-              body=fixed_source_bytes(path,int(os.environ['MRK_FIXED_RESUME_BYTES']),os.environ['MRK_FIXED_RESUME_SHA256'],started)
-              code=compile(body,str(path),'exec');os.environ['MRK_FIXED_RESUME_STARTED_NS']=str(started)
-          except BaseException:
-              print('{"schemaVersion":1,"scope":"fixed-ce644-arm-carrier-normal-local-batch-v1","accepted":false,"phase":"initial-source","productReady":false}')
-              raise SystemExit(1) from None
-          exec(code,{'__file__':str(path),'__name__':'__main__'})
-          PY_RESUME_NATIVE
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_fixed_carrier_resume.py \
+            > "$MRK_MACOS_WORK/normal-ui/fixed-carrier-install.json"
           status=$?
           set -e
           [[ "$status" == 0 ]] || exit "$status"
@@ -616,45 +577,7 @@ jobs:
               "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" "$@"
           }
           fixed_helper() {
-            "$MRK_PYTHON" -I -S -B - "$@" <<'PY_NORMAL_HELPER'
-          import hashlib,os,stat,sys,time
-          from pathlib import Path
-          
-          def fixed_source_bytes(path,size,digest,started):
-              def need(v):
-                  if not v:raise ValueError('fixed-resume-source-admission')
-              def identity(v):
-                  return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
-              need(type(size)is int and 0<size<=167936 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
-              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
-              try:
-                  before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1
-                       and not before[2]&0o022 and before[6]==size and identity(os.stat(path,follow_symlinks=False))==before)
-                  data=bytearray()
-                  while len(data)<size:
-                      need(started<=time.monotonic_ns()<started+10_000_000_000)
-                      block=os.pread(fd,min(65536,size-len(data)),len(data));need(0<len(block)<=min(65536,size-len(data)));data.extend(block)
-                  need(not os.pread(fd,1,size) and hashlib.sha256(data).hexdigest()==digest
-                       and identity(os.fstat(fd))==before==identity(os.stat(path,follow_symlinks=False)))
-              except BaseException as error:primary=error;raise
-              finally:
-                  consumed,fd=fd,None
-                  try:os.close(consumed)
-                  except BaseException:
-                      if primary is None:raise ValueError('fixed-resume-source-close') from None
-                      BaseException.add_note(primary,'fixed-resume-source-close')
-              need(started<=time.monotonic_ns()<started+10_000_000_000)
-              return bytes(data)
-          
-          try:
-              started=time.monotonic_ns();path=Path('desktop/tools/macos_fixed_carrier_resume.py').absolute()
-              body=fixed_source_bytes(path,int(os.environ['MRK_FIXED_RESUME_BYTES']),os.environ['MRK_FIXED_RESUME_SHA256'],started)
-              code=compile(body,str(path),'exec');os.environ['MRK_FIXED_RESUME_STARTED_NS']=str(started)
-          except BaseException:
-              print('{"schemaVersion":1,"scope":"fixed-ce644-arm-carrier-normal-local-batch-v1","accepted":false,"phase":"initial-source","productReady":false}')
-              raise SystemExit(1) from None
-          exec(code,{'__file__':str(path),'__name__':'__main__'})
-          PY_NORMAL_HELPER
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_fixed_carrier_resume.py "$@"
           }
           case "$TEST_RUNNER_MRK_NORMAL_UI_FIXED_NORMAL_BATCH" in
             launch-project) families=(test project-test) ;;
@@ -722,45 +645,7 @@ jobs:
           set -o noclobber
           umask 077
           fixed_helper() {
-            "$MRK_PYTHON" -I -S -B - "$@" <<'PY_NORMAL_HELPER'
-          import hashlib,os,stat,sys,time
-          from pathlib import Path
-          
-          def fixed_source_bytes(path,size,digest,started):
-              def need(v):
-                  if not v:raise ValueError('fixed-resume-source-admission')
-              def identity(v):
-                  return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
-              need(type(size)is int and 0<size<=167936 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
-              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
-              try:
-                  before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1
-                       and not before[2]&0o022 and before[6]==size and identity(os.stat(path,follow_symlinks=False))==before)
-                  data=bytearray()
-                  while len(data)<size:
-                      need(started<=time.monotonic_ns()<started+10_000_000_000)
-                      block=os.pread(fd,min(65536,size-len(data)),len(data));need(0<len(block)<=min(65536,size-len(data)));data.extend(block)
-                  need(not os.pread(fd,1,size) and hashlib.sha256(data).hexdigest()==digest
-                       and identity(os.fstat(fd))==before==identity(os.stat(path,follow_symlinks=False)))
-              except BaseException as error:primary=error;raise
-              finally:
-                  consumed,fd=fd,None
-                  try:os.close(consumed)
-                  except BaseException:
-                      if primary is None:raise ValueError('fixed-resume-source-close') from None
-                      BaseException.add_note(primary,'fixed-resume-source-close')
-              need(started<=time.monotonic_ns()<started+10_000_000_000)
-              return bytes(data)
-          
-          try:
-              started=time.monotonic_ns();path=Path('desktop/tools/macos_fixed_carrier_resume.py').absolute()
-              body=fixed_source_bytes(path,int(os.environ['MRK_FIXED_RESUME_BYTES']),os.environ['MRK_FIXED_RESUME_SHA256'],started)
-              code=compile(body,str(path),'exec');os.environ['MRK_FIXED_RESUME_STARTED_NS']=str(started)
-          except BaseException:
-              print('{"schemaVersion":1,"scope":"fixed-ce644-arm-carrier-normal-local-batch-v1","accepted":false,"phase":"initial-source","productReady":false}')
-              raise SystemExit(1) from None
-          exec(code,{'__file__':str(path),'__name__':'__main__'})
-          PY_NORMAL_HELPER
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_fixed_carrier_resume.py "$@"
           }
           fixed_helper project-normal-batch > "$MRK_MACOS_WORK/normal-ui/fixed-normal-batch.json"
       - name: Retain only available finite family receipts and Installer authority, including earlier passes on row failure
@@ -798,45 +683,7 @@ jobs:
           set -o noclobber
           umask 077
           fixed_helper() {
-            "$MRK_PYTHON" -I -S -B - "$@" <<'PY_NORMAL_HELPER'
-          import hashlib,os,stat,sys,time
-          from pathlib import Path
-          
-          def fixed_source_bytes(path,size,digest,started):
-              def need(v):
-                  if not v:raise ValueError('fixed-resume-source-admission')
-              def identity(v):
-                  return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
-              need(type(size)is int and 0<size<=167936 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
-              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
-              try:
-                  before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1
-                       and not before[2]&0o022 and before[6]==size and identity(os.stat(path,follow_symlinks=False))==before)
-                  data=bytearray()
-                  while len(data)<size:
-                      need(started<=time.monotonic_ns()<started+10_000_000_000)
-                      block=os.pread(fd,min(65536,size-len(data)),len(data));need(0<len(block)<=min(65536,size-len(data)));data.extend(block)
-                  need(not os.pread(fd,1,size) and hashlib.sha256(data).hexdigest()==digest
-                       and identity(os.fstat(fd))==before==identity(os.stat(path,follow_symlinks=False)))
-              except BaseException as error:primary=error;raise
-              finally:
-                  consumed,fd=fd,None
-                  try:os.close(consumed)
-                  except BaseException:
-                      if primary is None:raise ValueError('fixed-resume-source-close') from None
-                      BaseException.add_note(primary,'fixed-resume-source-close')
-              need(started<=time.monotonic_ns()<started+10_000_000_000)
-              return bytes(data)
-          
-          try:
-              started=time.monotonic_ns();path=Path('desktop/tools/macos_fixed_carrier_resume.py').absolute()
-              body=fixed_source_bytes(path,int(os.environ['MRK_FIXED_RESUME_BYTES']),os.environ['MRK_FIXED_RESUME_SHA256'],started)
-              code=compile(body,str(path),'exec');os.environ['MRK_FIXED_RESUME_STARTED_NS']=str(started)
-          except BaseException:
-              print('{"schemaVersion":1,"scope":"fixed-ce644-arm-carrier-normal-local-batch-v1","accepted":false,"phase":"initial-source","productReady":false}')
-              raise SystemExit(1) from None
-          exec(code,{'__file__':str(path),'__name__':'__main__'})
-          PY_NORMAL_HELPER
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_fixed_carrier_resume.py "$@"
           }
           fixed_helper diagnostic-normal > "$MRK_MACOS_WORK/normal-ui/fixed-normal-diagnostic.json"
       - name: Retain only the finite normal diagnostic, never raw command output or private artifacts
@@ -863,45 +710,7 @@ jobs:
           set -o noclobber
           umask 077
           fixed_helper() {
-            "$MRK_PYTHON" -I -S -B - "$@" <<'PY_NORMAL_HELPER'
-          import hashlib,os,stat,sys,time
-          from pathlib import Path
-          
-          def fixed_source_bytes(path,size,digest,started):
-              def need(v):
-                  if not v:raise ValueError('fixed-resume-source-admission')
-              def identity(v):
-                  return(v.st_dev,v.st_ino,v.st_mode,v.st_uid,v.st_gid,v.st_nlink,v.st_size,v.st_mtime_ns,v.st_ctime_ns)
-              need(type(size)is int and 0<size<=167936 and len(digest)==64 and all(c in '0123456789abcdef' for c in digest))
-              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC);primary=None
-              try:
-                  before=identity(os.fstat(fd));need(stat.S_ISREG(before[2]) and before[3]==os.getuid() and before[5]==1
-                       and not before[2]&0o022 and before[6]==size and identity(os.stat(path,follow_symlinks=False))==before)
-                  data=bytearray()
-                  while len(data)<size:
-                      need(started<=time.monotonic_ns()<started+10_000_000_000)
-                      block=os.pread(fd,min(65536,size-len(data)),len(data));need(0<len(block)<=min(65536,size-len(data)));data.extend(block)
-                  need(not os.pread(fd,1,size) and hashlib.sha256(data).hexdigest()==digest
-                       and identity(os.fstat(fd))==before==identity(os.stat(path,follow_symlinks=False)))
-              except BaseException as error:primary=error;raise
-              finally:
-                  consumed,fd=fd,None
-                  try:os.close(consumed)
-                  except BaseException:
-                      if primary is None:raise ValueError('fixed-resume-source-close') from None
-                      BaseException.add_note(primary,'fixed-resume-source-close')
-              need(started<=time.monotonic_ns()<started+10_000_000_000)
-              return bytes(data)
-          
-          try:
-              started=time.monotonic_ns();path=Path('desktop/tools/macos_fixed_carrier_resume.py').absolute()
-              body=fixed_source_bytes(path,int(os.environ['MRK_FIXED_RESUME_BYTES']),os.environ['MRK_FIXED_RESUME_SHA256'],started)
-              code=compile(body,str(path),'exec');os.environ['MRK_FIXED_RESUME_STARTED_NS']=str(started)
-          except BaseException:
-              print('{"schemaVersion":1,"scope":"fixed-ce644-arm-carrier-normal-local-batch-v1","accepted":false,"phase":"initial-source","productReady":false}')
-              raise SystemExit(1) from None
-          exec(code,{'__file__':str(path),'__name__':'__main__'})
-          PY_NORMAL_HELPER
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_fixed_carrier_resume.py "$@"
           }
           fixed_helper cleanup-normal > "$MRK_MACOS_WORK/normal-ui/fixed-normal-cleanup.json"
       - name: Upload only the authenticated finite early host admission report

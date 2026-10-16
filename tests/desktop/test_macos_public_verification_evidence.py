@@ -395,7 +395,7 @@ def data_contract_failure(data, names, *, phase="python", code=1, raw=None, flag
         if phase == "python":
             selected = [names[0]] if failed_names is None else failed_names
             failures = [(SimpleNamespace(id=lambda name=name: name), SENTINEL) for name in selected]
-            value = dict(testsRun=84, failures=len(failures), errors=0, skipped=0, expectedFailures=0,
+            value = dict(testsRun=len(names), failures=len(failures), errors=0, skipped=0, expectedFailures=0,
                 unexpectedSuccesses=0, testIds=names, actualHostBeforeAndAfter=True,
                 **data["data_failed_test_rows"](failures, [], names))
             raw = json.dumps(value).encode()
@@ -3249,7 +3249,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         failures = [(SimpleNamespace(id=lambda name=name: name), SENTINEL) for name in names]
         errors = [(SimpleNamespace(id=lambda name=name: name), SENTINEL) for name in names]
         unknown = (SimpleNamespace(id=lambda: names[0] + " (private=" + SENTINEL + ")"), SENTINEL)
-        facts = dict(testsRun=84, failures=85, errors=84, skipped=0, expectedFailures=0, unexpectedSuccesses=0,
+        facts = dict(testsRun=len(names), failures=len(names)+1, errors=len(names), skipped=0, expectedFailures=0, unexpectedSuccesses=0,
             actualHostBeforeAndAfter=False, testIds=names,
             **data["data_failed_test_rows"](failures + [unknown], errors, names))
         value = data_contract_failure(data, names, raw=json.dumps(facts).encode())
@@ -3257,7 +3257,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             "data-contracts/python.status": {"receiptState": "observed", "returncode": 1}}, set())
         self.assertEqual(row["python"], value["python"])
         self.assertEqual((len(row["python"]["failureTests"]), row["python"]["classifiedTestCount"],
-                          row["python"]["omittedTestCount"], row["python"]["unclassifiedTestCount"]), (16, 168, 152, 1))
+                          row["python"]["omittedTestCount"], row["python"]["unclassifiedTestCount"]), (16, 2*len(names), 2*len(names)-16, 1))
         self.assertIs(row["python"]["actualHostBeforeAndAfter"], False)
         self.assertIs(row["statusMatched"], True)
         self.assertIs(row["nativeSuccessInferred"], False)

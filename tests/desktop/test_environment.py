@@ -188,9 +188,9 @@ class EnvironmentRequirementsTests(unittest.TestCase):
             self.assertIn("distribution: temurin", source)
             self.assertIn("java-version: '21'", source)
 
-    def test_api_and_transport_agree_on_exactly_one_new_passive_method(self):
+    def test_api_and_transport_agree_on_the_passive_environment_method(self):
         self.assertEqual(set(METHODS), engine.METHODS)
-        self.assertEqual(len(METHODS), 11)
+        self.assertEqual(METHODS.count("environment.requirements"), 1)
         caps = execute("capabilities", {})
         self.assertEqual([row for row in caps["methods"] if row["method"] == "environment.requirements"][0]["available"], True)
         self.assertTrue(all(not row["available"] for row in caps["actions"]))

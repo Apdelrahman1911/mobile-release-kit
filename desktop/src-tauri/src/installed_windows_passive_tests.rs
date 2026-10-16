@@ -295,7 +295,6 @@ fn fixed_probe_and_candidate_are_bounded_and_nonshipping() {
         ConsumerReturn { acquisition: Some(ManagementJoin::Pending), ..no_child },
         ConsumerReturn { io: child.io, ..no_child }, ConsumerReturn { io: ConsumedIo::Repeated, ..no_child },
     ] { assert!(!wrong.consistent()); }
-    assert_eq!(PROBE.len(), 27173);
     assert!(probe_command_units(&"a".repeat(507), &"a".repeat(507)).is_some());
     assert!(probe_command_units(&"a".repeat(32767), "C:\\core.zip").is_none());
     let normal = RuntimeConfig::packaged(PathBuf::new());

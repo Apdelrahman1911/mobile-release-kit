@@ -1,7 +1,6 @@
 // Inert DTO + fake IPC promises; no GitHub, native provider, process or Store.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
 import { createNativeApi } from '../src/bridge.ts';
 import { GitHubHistoryController, githubHistoryOwnerReason } from '../src/githubHistoryController.ts';
 import { GITHUB_HISTORY_ASSURANCE, GITHUB_HISTORY_EVENT, GITHUB_HISTORY_REASONS,
@@ -319,79 +318,4 @@ test('History preserves original observation and cancellation across stale repli
   revoked.emit({ ...status('settled', 4), available: false, reason: 'not-connected' }); assert.equal(revoked.controller.currentResult(), null);
   assert.equal(revoked.state.status.result.verification, 'verified');
   revoked.emit(status('settled', 5)); assert.equal(revoked.controller.currentResult(), null); // no silent revival.
-});
-
-test('History component SOURCE exposes exact read controls, contextual help and retained evidence limits', () => {
-  const packageData = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  const testEntries = packageData.scripts.test.split(/\s+/);
-  assert.equal(testEntries.filter((entry) => entry === 'tests/github-history.test.mjs').length, 1);
-  const source = readFileSync(new URL('../src/components/GitHubHistory.tsx', import.meta.url), 'utf8');
-  for (const text of ['Exact GitHub run ID', 'Exact run attempt', 'Release stage to observe', 'Evidence platform',
-    'Start authenticated history read', 'Cancel this local read', 'Read local Status',
-    'NOT current Store state or permission to promote', 'Previous / retained observation', 'Original authorization (may be older)',
-    'artifactSha256', 'candidateManifestSha256', 'operationIntentSha256', 'receiptSha256', 'provenanceSha256']) assert.ok(source.includes(text), text);
-  for (const name of ['run', 'attempt', 'stage', 'platform', 'read', 'recovery']) assert.ok(source.includes(`HELP.${name}`));
-  assert.equal((source.match(/requiredWhen:/g) ?? []).length, 6);
-  assert.ok(source.includes('controller.currentResult()')); assert.ok(source.includes('disabled={reason !== null}'));
-  assert.ok(source.includes('controller.canCancel()')); assert.ok(source.includes('compact && !state.pending && !state.uncertain'));
-  assert.ok(source.includes('value=""')); assert.ok(source.includes('Status reads local native state, not GitHub'));
-  for (const forbidden of ['dangerouslySetInnerHTML', 'window.open', 'fetch(', 'setInterval(', 'ENTRY_AVAILABLE', 'dispatchGitHub']) assert.equal(source.includes(forbidden), false);
-
-  // The tested controller is mounted by the real Desktop factory/App route,
-  // not merely an unused component. These source joins do not claim native IO.
-  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  const future = readFileSync(new URL('../src/pages/Future.tsx', import.meta.url), 'utf8');
-  const bridge = readFileSync(new URL('../src/bridge.ts', import.meta.url), 'utf8');
-  const api = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8');
-  const types = readFileSync(new URL('../src/types.ts', import.meta.url), 'utf8');
-  const preview = readFileSync(new URL('../src/preview.ts', import.meta.url), 'utf8');
-  const connectionSource = readFileSync(new URL('../src/components/GitHubConnection.tsx', import.meta.url), 'utf8');
-  assert.ok(types.includes('GitHubReleaseApi, GitHubHistoryApi, MetadataTextApi'));
-  assert.ok(api.includes("return createNativeApi(mode === 'native' ? 'native' : 'unavailable', invoke,"));
-  assert.ok(api.includes('listen<unknown>(event, ({ payload }) => onStatus(payload))'));
-  const bridgeRead = bridge.slice(bridge.indexOf('  const githubHistoryCall ='), bridge.indexOf('  const githubPreflightCall ='));
-  assert.ok(bridgeRead.includes("if (mode !== 'native' || (command === 'github_history_start' && !listen))"));
-  assert.ok(bridgeRead.indexOf("command === 'github_history_start' && !listen") < bridgeRead.indexOf('await invoke<unknown>'));
-  assert.ok(bridgeRead.indexOf('githubHistoryRequestFits(command, value)') < bridgeRead.indexOf('await invoke<unknown>'));
-  assert.ok(bridgeRead.includes('parseGitHubHistoryStatus(await invoke<unknown>(command, structuredClone(value)))'));
-  assert.ok(bridge.includes('listen(GITHUB_HISTORY_EVENT, (value) => onStatus(parseGitHubHistoryStatus(value)))'));
-  for (const name of ['githubHistoryStatus', 'startGitHubHistory', 'cancelGitHubHistory', 'subscribeGitHubHistory']) {
-    assert.equal((preview.match(new RegExp(`  ${name}: githubHistoryUnavailable,`, 'g')) ?? []).length, 1);
-  }
-  assert.ok(preview.includes("const githubHistoryUnavailable = (): Promise<never> => Promise.reject(githubHistoryError({ code: 'github_history_refused_runtime_unavailable' }))"));
-  assert.equal((app.match(/new GitHubHistoryController\(/g) ?? []).length, 1);
-  assert.ok(app.includes('connection: githubConnection.getSnapshot'));
-  assert.ok(app.includes('useSyncExternalStore(githubHistory.subscribe, githubHistory.getSnapshot, githubHistory.getSnapshot)'));
-  const dispatch = app.slice(app.indexOf('  const dispatch = useCallback'), app.indexOf('  const [configEdit]'));
-  assert.ok(dispatch.indexOf('githubHistoryControllerRef.current?.beforeWorkspaceAction()') >= 0);
-  assert.ok(dispatch.indexOf('githubHistoryControllerRef.current?.beforeWorkspaceAction()') < dispatch.indexOf('workspaceReducer(previous, action)'));
-  assert.ok(dispatch.indexOf('githubHistoryControllerRef.current?.syncContext()') > dispatch.indexOf('workspaceRef.current = next'));
-  assert.ok(app.indexOf('githubConnection.subscribe(githubHistory.syncContext)') < app.indexOf('    void bootstrap();'));
-  assert.ok(app.includes('void githubHistory.connect(connection)')); assert.equal((app.match(/void githubHistory\.connect\(null\)/g) ?? []).length, 2);
-  assert.ok(app.includes('useEffect(() => () => githubHistory.dispose(), [githubHistory])'));
-  assert.ok(app.includes('const loadSnapshot = async (projectId: string, recoveryReload = false) => {\n    githubHistory.beforeWorkspaceAction();'));
-  assert.ok(app.includes('const chooseProject = async () => {\n    githubHistory.beforeWorkspaceAction();'));
-  const navigation = app.slice(app.indexOf('  const navigate ='), app.indexOf('  const refreshReason ='));
-  assert.equal(navigation.includes('githubHistory.dispose'), false); assert.equal(navigation.includes('githubHistory.start'), false);
-  assert.ok(app.includes('(excludeHistory ? null : historyBusy())'));
-  assert.ok(app.includes('(forHistoryRead ? null : historyBusy())'));
-  assert.ok(app.includes('excludeRemoteSetup = false, excludeHistory = false'));
-  assert.ok(app.includes('excludeInitialization = false, forHistoryRead = false'));
-  assert.equal((app.match(/savedCommandBusy\(false, false, false, false, false, false, true\)/g) ?? []).length, 1);
-  assert.equal((app.match(/savedCommandPrerequisiteReason\(false, false, undefined, false, true\)/g) ?? []).length, 1);
-  assert.ok(app.includes('connection.blocked || connection.uncertain || connection.busy || connection.retirementPending || !forHistoryRead && (connection.status ?? connection.retained)?.session'));
-  assert.equal((app.match(/<GitHubHistory /g) ?? []).length, 2);
-  assert.ok(app.includes("{page !== 'github' && <GitHubHistory state={githubHistoryState} controller={githubHistory} compact"));
-  assert.ok(app.includes('<GitHubHistory state={githubHistoryState} controller={githubHistory} onHelp={setHelp} />'));
-  assert.ok(app.includes("{page === 'releases' && <Releases onOpenGitHub={() => navigate('github')}"));
-  assert.ok(future.includes('onOpenGitHub: () => void'));
-  assert.ok(future.includes('onClick={onOpenGitHub}>Open authenticated History in GitHub</button>'));
-  assert.ok(future.includes('An authenticated read requires a qualified native runtime and a separate explicit Start.'));
-  assert.ok(future.includes('Missing evidence does not prove that no release happened; retained workflow evidence is not current Store state.'));
-  for (const stale of ['Remote authenticated artifact history is not implemented', 'Load authenticated release history', 'DisabledAction', 'futureReason']) assert.equal(future.includes(stale), false);
-  for (const forbidden of ['GitHubHistoryController', 'controller.start(', 'githubHistory.start(']) assert.equal(future.includes(forbidden), false);
-  assert.equal((app.match(/githubHistory\.start\(/g) ?? []).length, 0);
-  for (const text of ['Authenticated release history panel below', 'Connect alone does not read History',
-    'Contents and Actions read access', 'Missing native runtime or attestation provider stays unavailable']) assert.ok(connectionSource.includes(text), text);
-  for (const text of [app, bridgeRead, preview]) assert.equal(/HISTORY_(?:ENTRY_)?AVAILABLE/.test(text), false);
 });

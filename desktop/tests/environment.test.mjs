@@ -2,7 +2,6 @@ import { installationError, parseInstallationDescription, parseInstallationRevea
 // Passive DTO/controller contracts. No subprocesses, selected files, native
 // runtime, GUI, tool discovery or network; controlled promises are in-memory.
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createNativeApi } from '../src/bridge.ts';
 import { EnvironmentController, environmentError, environmentRequestFits, environmentStartReason, parseEnvironmentResult } from '../src/environment.ts';
@@ -212,19 +211,6 @@ test('explicit browser fixtures stay identifiable across connection changes and 
   task.controller.dispose();
 });
 
-test('guided UI and synchronous workspace/bootstrap wiring preserve field help and fixture provenance', () => {
-  // Source-only integration guard, not an executed React/GUI test.
-  const page = readFileSync(new URL('../src/pages/Environment.tsx', import.meta.url), 'utf8');
-  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  for (const field of ['guide.platform', 'guide.operation', 'row.help']) assert.ok(page.includes(`HelpButton content={${field}}`));
-  assert.ok(page.includes("const resultPreview = state.resultBinding?.mode === 'preview'"));
-  assert.ok(page.includes('Host not observed in browser preview'));
-  assert.ok(page.includes('Earlier requirements are stale'));
-  assert.ok(page.includes('EnvironmentDiagnostics state={diagnosticsState}') && !page.includes('Run native doctor'));
-  assert.ok(app.includes('workspaceRef.current = next;\n    environmentControllerRef.current?.syncProject();'));
-  assert.ok(app.indexOf('environment.beginConnection()') < app.indexOf('const connection = await desktopApi()'));
-});
-
 test('installation description cannot turn layout DATA into verification or maintenance authority', () => {
   const value = { layout: 'fixed-macos', expectedLocation: '/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app',
     runtimeRelease: 'macos26-arm64-project-draft-01', installMode: 'verified-package-required', maintenance: 'unavailable',
@@ -271,26 +257,4 @@ test('Finder bridge has one fixed empty request, no fallback and no fabricated c
     assert.deepEqual(installationError(safe), safe);
     assert.ok(!JSON.stringify(safe).includes('PRIVATE'));
   }
-});
-
-test('fixed Finder command is registered at all Tauri gates and explained without a shell path', () => {
-  const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
-  const shell = read('../src-tauri/src/shell.rs');
-  const build = read('../src-tauri/build.rs');
-  const capability = JSON.parse(read('../src-tauri/capabilities/main.json'));
-  const native = read('../native/macos-installed-native/src/native.m');
-  const component = read('../src/components/InstallationDetails.tsx');
-  assert.equal((build.match(/"reveal_installation"/g) ?? []).length, 1);
-  assert.ok(/generate_handler!\[[\s\S]*\breveal_installation\b/.test(shell));
-  assert.equal(capability.permissions.filter((value) => value === 'allow-reveal-installation').length, 1);
-  assert.equal(capability.local, true);
-  assert.deepEqual(capability.windows, ['main']);
-  assert.ok(shell.includes('crate::installation::reveal_request(request_body(&request)?)'));
-  assert.ok(shell.includes('state.document.reveal_installation()'));
-  assert.ok(native.includes('activateFileViewerSelectingURLs:@[application]'));
-  assert.ok(native.includes('@"/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app"'));
-  for (const text of ['Location policy · not an installation check', 'A verified Installer package is required.',
-    'Finder visibility is unconfirmed', 'HelpButton content={installationLocationHelp}']) assert.ok(component.includes(text));
-  assert.ok(read('../src/pages/Environment.tsx').includes('<InstallationDetails info={info} api={api}'));
-  assert.ok(read('../src/App.tsx').includes('<Environment info={info} api={api}'));
 });

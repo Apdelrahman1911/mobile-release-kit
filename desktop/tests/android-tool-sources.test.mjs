@@ -2,7 +2,6 @@
 // native qualification is created by these tests.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
 import { createNativeApi } from '../src/bridge.ts';
 import { AndroidBuildController, androidBuildOwnerReason } from '../src/androidBuild.ts';
 import { initialWorkspace, workspaceReducer } from '../src/drafts.ts';
@@ -21,30 +20,6 @@ const picked = (patch = {}) => ({ ...idle(), statusRevision: 2, sourceGeneration
   selections: [{ role: 'jdk', displayName: 'example-17.jdk' }], ...patch });
 const pending = (patch = {}) => picked({ phase: 'picking', reason: 'none', selections: [], availability: 'busy', ...patch });
 const refused = (patch = {}) => picked({ phase: 'refused', reason: 'source-refused', selections: [], ...patch });
-
-test('tool source commands have one actual Raw handler, generated permission and local-main admission', () => {
-  const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
-  const build = read('../src-tauri/build.rs'), shell = read('../src-tauri/src/shell.rs');
-  const capability = JSON.parse(read('../src-tauri/capabilities/main.json'));
-  const manifest = build.match(/const COMMANDS:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/);
-  const handlers = shell.match(/generate_handler!\[([\s\S]*?)\]/);
-  assert.ok(manifest); assert.ok(handlers);
-  const declared = [...manifest[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
-  const registered = handlers[1].split(',').map((name) => name.trim()).filter(Boolean);
-  assert.deepEqual(capability.windows, ['main']); assert.equal(capability.local, true);
-  assert.equal(capability.remote, undefined); assert.equal(capability.webviews, undefined);
-  for (const command of ['android_tool_sources_status', 'choose_android_tool_source', 'cancel_android_tool_source']) {
-    assert.equal(declared.filter((name) => name === command).length, 1, command);
-    assert.equal(registered.filter((name) => name === command).length, 1, command);
-    assert.equal(capability.permissions.filter((name) => name === 'allow-' + command.replaceAll('_', '-')).length, 1, command);
-    const start = shell.indexOf('async fn ' + command + '('), end = shell.indexOf('\n#[tauri::command]', start + 1);
-    assert.ok(start >= 0);
-    const body = shell.slice(start, end === -1 ? undefined : end);
-    assert.match(body, /edit_window\(&webview\)/); assert.match(body, /android_sources_request_body\(request\.body\(\)\)/);
-  }
-  const body = shell.slice(shell.indexOf('fn android_sources_request_body('), shell.indexOf('fn android_catalog_request_body('));
-  assert.match(body, /InvokeBody::Raw\(bytes\) if bytes\.len\(\) <= crate::android_tool_sources::REQUEST_LIMIT/);
-});
 
 test('source wire requires bounded DATA, original identities and truthful not-inspected status', () => {
   assert.ok(parseAndroidToolSourcesStatus(idle())); assert.ok(parseAndroidToolSourcesStatus(picked()));
@@ -180,12 +155,6 @@ test('each source role has practical in-app help and UI never presents selection
     assert.equal(help.requiredness, 'required');
     for (const field of ['what', 'why', 'where', 'format', 'failure']) assert.ok(help[field].length > 20, role + '.' + field);
   }
-  const ui = readFileSync(new URL('../src/components/AndroidBuild.tsx', import.meta.url), 'utf8');
-  assert.match(ui, /controller\.chooseToolSource\(role\)/);
-  assert.match(ui, /HelpButton content=\{help\}/);
-  assert.match(ui, /Browsing alone neither inspects supplier contents nor registers a copy/);
-  assert.match(ui, /separate inspection and protected-copy approval stay disabled until their actual prerequisites are available/);
-  assert.match(ui, /sameProject \? sources\?\.selections\.find/);
 });
 
 const serviceContext = () => ({ projectId: 'p1', draftRevision: 0, baselineGeneration: 1,
@@ -218,19 +187,6 @@ test('service route wiring and bounded consent keep setup independent of sources
   assert.equal(calls.length, 1);
   (await api.subscribeAndroidToolService((value) => assert.ok(parseAndroidToolServiceStatus(value))))();
   assert.deepEqual(events, [ANDROID_TOOL_SERVICE_EVENT]);
-  const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
-  const build = read('../src-tauri/build.rs'), shell = read('../src-tauri/src/shell.rs');
-  const permissions = JSON.parse(read('../src-tauri/capabilities/main.json')).permissions;
-  const declared = [...build.match(/const COMMANDS:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/)[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
-  const handlers = shell.match(/generate_handler!\[([\s\S]*?)\]/)[1].split(',').map((name) => name.trim());
-  for (const command of ['android_tool_service_status', 'check_android_tool_service', 'request_android_tool_service_registration',
-    'open_android_tool_service_approval_settings', 'cancel_android_tool_service']) {
-    assert.equal(declared.filter((value) => value === command).length, 1);
-    assert.equal(handlers.filter((value) => value === command).length, 1);
-    assert.equal(permissions.filter((value) => value === 'allow-' + command.replaceAll('_', '-')).length, 1);
-    const start = shell.indexOf('async fn ' + command + '('), end = shell.indexOf('\n#[tauri::command]', start + 1);
-    assert.ok(start >= 0); assert.match(shell.slice(start, end === -1 ? undefined : end), /edit_window\(&webview\)/);
-  }
 });
 
 test('service observation distinguishes approval, actual denial and earlier cancellation without fake finality', () => {

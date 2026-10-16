@@ -45,9 +45,7 @@ fn native_preflight_request_refuses_windows_identity_before_posix_dto() {
 
 #[test]
 fn tauri_command_allowlist_keeps_saved_preflight_local_and_explicit() {
-    // Compile-time source DATA only; no filesystem access or shell launch.
-    let build = include_str!("../build.rs");
-    let commands = build.split("const COMMANDS: &[&str] = &[").nth(1).unwrap().split("];").next().unwrap();
+    // Actual declarative permission configuration, without source-spelling checks.
     let capability: Value = serde_json::from_str(include_str!("../capabilities/main.json")).unwrap();
     assert_eq!(capability["identifier"], "main");
     assert_eq!(capability["windows"], json!(["main"]));
@@ -55,8 +53,6 @@ fn tauri_command_allowlist_keeps_saved_preflight_local_and_explicit() {
     assert!(capability.get("remote").is_none());
     let permissions = capability["permissions"].as_array().unwrap();
     for command in ["prepare_offline_preflight", "start_offline_preflight", "offline_preflight_status", "cancel_offline_preflight"] {
-        let declared = format!("\"{command}\"");
-        assert_eq!(commands.matches(declared.as_str()).count(), 1);
         let permission = format!("allow-{}", command.replace('_', "-"));
         assert_eq!(permissions.iter().filter(|value| value.as_str() == Some(permission.as_str())).count(), 1);
     }

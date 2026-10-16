@@ -117,13 +117,11 @@ fn recovery_failure_and_unknown_never_claim_a_recovered_session() {
 }
 
 #[test]
-fn recovery_ipc_is_local_and_the_packaged_entry_is_separately_qualified() {
-    let commands = include_str!("../build.rs").split("const COMMANDS: &[&str] = &[").nth(1).unwrap().split("];").next().unwrap();
+fn recovery_commands_are_explicitly_permitted_for_local_use() {
     let capability: Value = serde_json::from_str(include_str!("../capabilities/main.json")).unwrap();
     assert_eq!(capability["local"], true); assert!(capability.get("remote").is_none());
     let permissions = capability["permissions"].as_array().unwrap();
     for command in ["prepare_project_recovery", "start_project_recovery", "project_recovery_status", "cancel_project_recovery"] {
-        assert_eq!(commands.matches(format!("\"{command}\"").as_str()).count(), 1);
         let permission = format!("allow-{}", command.replace('_', "-"));
         assert_eq!(permissions.iter().filter(|value| value.as_str() == Some(permission.as_str())).count(), 1);
     }

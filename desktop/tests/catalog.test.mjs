@@ -1,7 +1,7 @@
 // Core-owned JSON resources and pure presentation helpers only; no engine or IPC.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
+import capability from '../src-tauri/capabilities/main.json' with { type: 'json' };
 import help from '../../src/mobile_release/api/data/field-help.json' with { type: 'json' };
 import schema from '../../src/mobile_release/api/data/project.schema.json' with { type: 'json' };
 import githubSetupResource from '../../src/mobile_release/api/data/github-setup-v1.json' with { type: 'json' };
@@ -196,16 +196,6 @@ test('four desktop Browse controls append help without replacing bundled policy 
   }
   assert.deepEqual(help, original, 'desktop guidance never mutates the core catalogue');
   for (const field of [null, '', 'ios.scheme', 'android.gradleCommand', 'credential.file', '__proto__.path']) assert.equal(isProjectPathField(field), false);
-  // SOURCE guards only; this does not execute React, a WebView or a native picker.
-  const fieldSource = readFileSync(new URL('../src/components/Fields.tsx', import.meta.url), 'utf8');
-  const editor = readFileSync(new URL('../src/components/DraftEditor.tsx', import.meta.url), 'utf8');
-  assert.match(fieldSource, /const pathField = isProjectPathField\(field.path\)/);
-  assert.match(fieldSource, /HelpButton content=\{projectPathHelp\(field\)\}/);
-  assert.match(fieldSource, /projectPathDraftReason\(draft, pathField\) \?\? pathPicker.reason/);
-  assert.match(fieldSource, /disabled=\{browseReason !== null\}/);
-  assert.match(fieldSource, /pathPicker.onBrowse\(pathField\)/);
-  assert.match(editor, /Current project boundary:.*session.project.path/);
-  assert.match(editor, /pathPicker=\{pathPicker\} onChange=\{onEdit\}/);
 });
 
 test('project-path availability is fail-closed and independent of compatibility selection and preview', async () => {
@@ -361,7 +351,18 @@ test('shared-slot project-path status cannot supply credential authority or use 
   assert.equal(controller.lock(), true, 'a known-idle path operation does not prohibit a later explicit session lock');
   assert.equal(locks, 1);
   await Promise.resolve(); controller.dispose();
-  const pane = readFileSync(new URL('../src/components/CredentialSession.tsx', import.meta.url), 'utf8');
-  assert.match(pane, /Original project-path picker status/);
-  assert.match(pane, /guide && !projectPathActive/);
+});
+
+// Test the actual security configuration, not Rust/JS source spelling.
+test('desktop permissions apply only to the local main window without generic system access', () => {
+  assert.deepEqual(capability.windows, ['main']);
+  assert.equal(capability.local, true);
+  assert.equal(Object.hasOwn(capability, 'remote'), false);
+  assert.equal(Object.hasOwn(capability, 'webviews'), false);
+  assert.ok(Array.isArray(capability.permissions) && capability.permissions.length > 0);
+  assert.equal(new Set(capability.permissions).size, capability.permissions.length);
+  for (const permission of capability.permissions) {
+    assert.equal(typeof permission, 'string');
+    assert.match(permission, /^(?:allow-[a-z0-9-]+|core:event:allow-(?:un)?listen)$/);
+  }
 });

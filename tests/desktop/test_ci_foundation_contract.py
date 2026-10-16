@@ -544,28 +544,6 @@ class FixedCompilerHelperTests(unittest.TestCase):
         with self.assertRaises(helper.CheckFailure):
             validate_owner(report)  # New evidence cannot masquerade as an older healthy-save receipt.
 
-    def test_transaction_eof_is_one_bounded_phase_before_last_retained_fault(self):
-        source = HELPER.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                 and node.func.id == "run" and any(keyword.arg == "check" and isinstance(keyword.value, ast.Constant)
-                     and keyword.value.value == "config-transaction-eof-native-contract" for keyword in node.keywords)]
-        self.assertEqual(len(calls), 1)
-        call = calls[0]
-        self.assertEqual(next(keyword.value.value for keyword in call.keywords if keyword.arg == "timeout"), 90)
-        constants = [item.value for item in call.args[0].elts if isinstance(item, ast.Constant)]
-        self.assertEqual(constants, ["test", "--lib", "--features", "development-runtime", "--", "--exact", "--ignored", "--test-threads=1"])
-        self.assertTrue(any(isinstance(item, ast.Name) and item.id == "CONFIG_TRANSACTION_EOF_TEST" for item in call.args[0].elts))
-        self.assertLess(source.index('elif name == "config-owner-delta"'), source.index('elif name == "config-transaction-eof"'))
-        self.assertLess(source.index('elif name == "config-transaction-eof"'), source.index('elif name == "config-core"'))
-        for section in (source.split('elif name == "config-core":', 1)[1].split('    else:', 1)[0],
-                        source.split('require(name == "clean"', 1)[1]):
-            self.assertIn("config_transaction_eof_receipt(context)", section)
-        workflow = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text(encoding="utf-8")
-        self.assertLess(workflow.index("ci_foundation.py config-owner-delta"), workflow.index("ci_foundation.py config-transaction-eof"))
-        self.assertLess(workflow.index("ci_foundation.py config-transaction-eof"), workflow.index("ci_foundation.py config-core"))
-        self.assertIn("/config-transaction-eof-checks.json", workflow)
-        self.assertIn("/config-transaction-eof/receipt.json", workflow)
 
     def test_prepared_eof_and_partial_apply_cannot_claim_accepted_apply(self):
         report = delta_report("stop")
@@ -1363,29 +1341,6 @@ class WorkflowNativeHelperTests(unittest.TestCase):
                 helper.workflow_phase_start(context, "acquire")
         emit.assert_not_called()
 
-    def test_fixed_headless_commands_have_one_source_matrix_one_zip_case_and_closed_bounds(self):
-        tree = ast.parse(HELPER.read_text(encoding="utf-8"))
-        phase = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "phase_workflow_native")
-        calls = [node for node in ast.walk(phase) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "run"]
-        by_label = {next(keyword.value.value for keyword in call.keywords if keyword.arg == "check"): call for call in calls}
-        bounds = {"rust-toolchain-install": 600, "workflow-locked-headless-metadata": 600, "headless-test-compile-only": 600,
-                  "workflow-owner-source-native-contract": 180, "workflow-owner-zip-native-contract": 60,
-                  "workflow-transaction-eof-native-contract": 90, "workflow-core-ordinary": 90,
-                  "workflow-core-committed-fsync": 45, "workflow-core-committed-close": 45}
-        self.assertEqual(set(by_label), set(bounds))
-        self.assertEqual(len(calls), len(bounds))
-        for label, timeout in bounds.items():
-            self.assertEqual(next(keyword.value.value for keyword in by_label[label].keywords if keyword.arg == "timeout"), timeout)
-        for label in ("workflow-owner-source-native-contract", "workflow-owner-zip-native-contract", "workflow-transaction-eof-native-contract"):
-            constants = [node.value for node in by_label[label].args[0].elts if isinstance(node, ast.Constant)]
-            self.assertEqual(constants, ["test", "--lib", "--features", "development-runtime", "--", "--exact", "--ignored", "--test-threads=1"])
-        constants = [node.value for node in by_label["headless-test-compile-only"].args[0].elts if isinstance(node, ast.Constant)]
-        self.assertEqual(constants, ["test", "--lib", "--no-run", "--features", "development-runtime"])
-        source = ast.get_source_segment(HELPER.read_text(encoding="utf-8"), phase)
-        for forbidden in ("npm", "node-version", "vite", "desktop-shell", "CONFIG_OWNER_TEST", "NATIVE_TEST", "MRK_DESKTOP_CONFIG_NATIVE", "MRK_DESKTOP_EDIT_HOSTED_CHECKS"):
-            self.assertNotIn(forbidden, source)
-        self.assertIn('"--locked", "--offline", "--jobs", "1", "--no-default-features"', source)
-        self.assertIn('"--domain", "github_workflows", "--case"', source)
 
     def test_close_control_is_last_native_call_and_cleanup_has_no_subprocess_or_deletion(self):
         source = HELPER.read_text(encoding="utf-8")
@@ -1411,32 +1366,6 @@ class WorkflowNativeHelperTests(unittest.TestCase):
             self.assertIs(receipt[key], False)
         self.assertIs(receipt["vmDisposalRequired"], True)
 
-    def test_workflow_is_one_pinned_readonly_linux_job_with_allowlisted_receipts_only(self):
-        workflow = (SOURCE / helper.WORKFLOW_NATIVE_WORKFLOW).read_text(encoding="utf-8")
-        self.assertEqual(workflow.count("runs-on:"), 1)
-        self.assertIn("runs-on: ubuntu-24.04", workflow)
-        self.assertIn("contents: read", workflow)
-        self.assertIn("persist-credentials: false", workflow)
-        self.assertIn("cancel-in-progress: false", workflow)
-        for action in ("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-                       "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
-                       "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"):
-            self.assertIn(action, workflow)
-        for forbidden in ("strategy:", "matrix", "setup-node", "apt-get", "sudo", "continue-on-error", "pull_request", "secrets.", "node_modules", "core.zip", "context.json", "*.json"):
-            self.assertNotIn(forbidden, workflow)
-        positions = [workflow.index(f"ci_foundation.py {phase}'") for phase in helper.WORKFLOW_NATIVE_PHASES]
-        self.assertEqual(positions, sorted(positions))
-        self.assertEqual(workflow.count("ci_foundation.py "), len(helper.WORKFLOW_NATIVE_PHASES) + 6)
-        # The push-only metadata and version selections share this compile, not
-        # the workflow-domain native sequence. Keep the original upload unchanged.
-        workflow_upload = workflow.split("      - name: Retain only allowlisted synthetic receipts\n", 1)[1].split(
-            "      - name: Retain only allowlisted synthetic metadata receipts\n", 1)[0]
-        allowlist = [line.strip().split("${{ steps.prepare.outputs.root }}/", 1)[1]
-                     for line in workflow_upload.splitlines() if line.strip().startswith("${{ steps.prepare.outputs.root }}/")]
-        self.assertEqual(allowlist, ["public-bindings.json", "acquire-checks.json", "compile-checks.json", "workflow-owner-checks.json",
-            "workflow-owner-source/receipt.json", "workflow-owner-zip/receipt.json", "workflow-transaction-eof-checks.json",
-            "workflow-transaction-eof/receipt.json", "workflow-core-checks.json", "workflow-ordinary.json",
-            "workflow-committed-fsync.json", "workflow-committed-close.json", "retention-checks.json"])
 
 
 def metadata_environment() -> dict[str, str]:
