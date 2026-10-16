@@ -280,11 +280,14 @@ jobs:
           if [[ "$APP_CHECKS" == local-keychain ]]; then
             # Separate Cargo invocation preserves helper-only native policy.
             # Only memory/codec contracts execute, never Keychain or Installer.
-            rustup run 1.98.1 cargo check --locked \
+            # The role symbol is deliberately defined by the real helper main,
+            # not by its dependency's standalone libtest executable. Link the
+            # actual helper; run portable wire tests in the ordinary native graph.
+            # Never add a permissive role stub or unresolved-symbol linker flag.
+            rustup run 1.98.1 cargo build --locked \
               --manifest-path desktop/helpers/macos-vault-helper/Cargo.toml
             rustup run 1.98.1 cargo test --locked \
-              --manifest-path desktop/helpers/macos-vault-helper/Cargo.toml \
-              -p mrk-macos-installed-native --lib -- \
+              --manifest-path desktop/native/macos-installed-native/Cargo.toml --lib -- \
               local_keychain_wire::tests:: --test-threads=1 \
               | tee "$WORK_ROOT/local-keychain-wire-tests.log"
             grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-wire-tests.log"
