@@ -645,7 +645,7 @@ fn panel_kind(choice: DialogChoice, initial_folder: Option<&std::path::Path>) ->
         (DialogChoice::File(crate::credential_format::FileKind::AppleP12
             | crate::credential_format::FileKind::AppleProfile | crate::credential_format::FileKind::IosFirebase
             | crate::credential_format::FileKind::AscP8 | crate::credential_format::FileKind::AndroidKeystore
-            | crate::credential_format::FileKind::AndroidFirebase), None) => Ok(PanelKind::File),
+            | crate::credential_format::FileKind::AndroidFirebase | crate::credential_format::FileKind::GoogleServiceAccount), None) => Ok(PanelKind::File),
         (DialogChoice::Quit, None) => Ok(PanelKind::Quit),
         (DialogChoice::ProjectPath(field), Some(root)) if crate::asset_source::path_hint(root).is_ok() => Ok(match field {
             crate::asset_commands::ProjectPathField::VersionSource => PanelKind::VersionSource,
@@ -826,7 +826,7 @@ mod tests {
         use crate::credential_format::FileKind;
         use std::path::Path;
         for kind in [FileKind::AndroidKeystore, FileKind::AndroidFirebase, FileKind::AppleP12,
-            FileKind::AppleProfile, FileKind::IosFirebase, FileKind::AscP8] {
+            FileKind::AppleProfile, FileKind::IosFirebase, FileKind::AscP8, FileKind::GoogleServiceAccount] {
             assert!(matches!(panel_kind(DialogChoice::File(kind), None), Ok(PanelKind::File)));
             assert!(matches!(panel_kind(DialogChoice::File(kind), Some(Path::new("/inert/private"))),
                 Err(Reason::UnsupportedPlatform)));

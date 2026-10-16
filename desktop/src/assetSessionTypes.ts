@@ -1,13 +1,14 @@
 import type { ApiError, JsonObject } from './types.ts';
 
 // Native session DTOs, not a renderer file API or a second credential policy.
-export type AssetFileKind = 'android-keystore' | 'android-firebase' | 'ios-firebase' | 'apple-p12' | 'apple-profile' | 'asc-p8';
+export type AssetFileKind = 'android-keystore' | 'android-firebase' | 'ios-firebase' | 'apple-p12' | 'apple-profile' | 'asc-p8' | 'google-service-account';
 export type AssetScalarKind = 'google-wif' | 'project-read-token' | 'apple-review-contact' | 'apple-review-demo' | 'operation-commitment';
 export type AssetKind = AssetFileKind | AssetScalarKind;
 export type AssetPlatform = 'android' | 'ios' | 'project';
 export type AssetStage = 'candidate' | 'external-testing' | 'production';
 export type AssetPurpose = 'full' | 'signing' | 'store';
-export interface AssetScope { platform: AssetPlatform; stage: AssetStage; purpose: AssetPurpose }
+export type AssetExecutionMode = 'github' | 'local';
+export interface AssetScope { platform: AssetPlatform; stage: AssetStage; purpose: AssetPurpose; executionMode?: AssetExecutionMode }
 export interface AssetContextRequest extends AssetScope { projectId: string; draft: JsonObject }
 export interface AssetRecordRef { recordId: string; expectedRevision: number }
 export interface AssetRecordPreviewSubject {
@@ -52,7 +53,7 @@ export type AssetOperationName = 'choose-file' | 'choose-images' | 'inspect-inst
 export type CredentialState = 'not-applicable' | 'missing' | 'unknown' | 'invalid' | 'configured' | 'format-valid';
 export type CredentialFieldId = 'file' | 'storePassword' | 'keyAlias' | 'keyPassword' | 'password' | 'keyId' | 'issuerId' | 'provider' | 'serviceAccount' | 'token' | 'contactFirstName' | 'contactLastName' | 'contactEmail' | 'contactPhone' | 'demoUsername' | 'demoPassword' | 'keyBase64' | 'version';
 export type CredentialIssue = 'not-run' | 'incomplete' | 'unsupported-format' | 'unsupported-variant' | 'material-limit' | 'parser-limit' | 'empty-file' | 'suffix-conflict' | 'malformed-container' | 'required-missing' | 'value-nul' | 'scalar-format' | 'pkcs8-algorithm' | 'firebase-shape' | 'identity-mismatch';
-export type CredentialCheckScope = 'value-admission' | 'identifier-format' | 'credential-format' | 'file-nonempty' | 'suffix-consistency' | 'container-parse' | 'jks-header' | 'pfx-envelope' | 'cms-signed-data-envelope' | 'pkcs8-envelope' | 'json-document' | 'plist-document' | 'ec-p256-identifiers' | 'firebase-shape' | 'application-identity';
+export type CredentialCheckScope = 'value-admission' | 'identifier-format' | 'credential-format' | 'file-nonempty' | 'suffix-consistency' | 'container-parse' | 'jks-header' | 'pfx-envelope' | 'cms-signed-data-envelope' | 'pkcs8-envelope' | 'json-document' | 'plist-document' | 'ec-p256-identifiers' | 'firebase-shape' | 'application-identity' | 'service-account-format';
 export interface CredentialAssessment {
   schemaVersion: 1;
   policyVersion: 'credential-policy-v1';

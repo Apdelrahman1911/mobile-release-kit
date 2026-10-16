@@ -8248,7 +8248,7 @@ impl Observation {
         let name=match kind { crate::credential_format::FileKind::AndroidKeystore=>"android-keystore", crate::credential_format::FileKind::AndroidFirebase=>"android-firebase",
             crate::credential_format::FileKind::IosFirebase=>"ios-firebase",
             crate::credential_format::FileKind::AppleP12 | crate::credential_format::FileKind::AppleProfile
-            | crate::credential_format::FileKind::AscP8 => { self.fail(); return; } };
+            | crate::credential_format::FileKind::AscP8 | crate::credential_format::FileKind::GoogleServiceAccount => { self.fail(); return; } };
         if name!=expected || id<=2 || r.session.files.len()>=9 || r.session.files.iter().any(|f| f.id==id || f.index==index) { self.fail(); return; }
         r.session.files.push(SessionFile {id,index,kind:expected,select:!file.is_empty(),picker:Picker {created:true,..Picker::default()},parent_navigation_reserved:false});
     }

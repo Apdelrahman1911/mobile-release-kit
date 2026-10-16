@@ -451,7 +451,7 @@ pub(crate) fn suffix(kind: FileKind, path: &Path) -> Result<(), Reason> {
         FileKind::IosFirebase => suffix.eq_ignore_ascii_case(b"plist"),
         FileKind::AscP8 => suffix.eq_ignore_ascii_case(b"p8"),
         FileKind::AndroidKeystore => suffix.eq_ignore_ascii_case(b"jks") || suffix.eq_ignore_ascii_case(b"keystore"),
-        FileKind::AndroidFirebase => suffix.eq_ignore_ascii_case(b"json"),
+        FileKind::AndroidFirebase | FileKind::GoogleServiceAccount => suffix.eq_ignore_ascii_case(b"json"),
     };
     if !supported || !leaf.contains(&b'.') { return Err(Reason::UnsupportedFormat); } Ok(())
 }

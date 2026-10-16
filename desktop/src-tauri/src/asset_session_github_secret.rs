@@ -50,7 +50,7 @@ impl GitHubSecretMaterial {
     pub(crate) fn source(&self)->&wire::SecretSource{&self.source}
     pub(crate) fn selection(&self)->&wire::SecretSelection{&self.selection}
     pub(super) fn current(&self,state:&DocumentState,project_id:&str,registration:u32,root:&asset_source::RegisteredRoot)->bool{
-        self.native.project_id==project_id&&self.native.registry_generation==registration&&self.native.project==*root
+        self.native.execution_mode==commands::ExecutionMode::Github&&self.native.project_id==project_id&&self.native.registry_generation==registration&&self.native.project==*root
             &&self.native.revision==self.selection.source.context_revision&&stage(self.native.stage)==self.selection.stage
             &&assigned(state,&self.key,self.payload.kind,&self.native).is_some_and(|p|Arc::ptr_eq(p,&self.payload))
             &&field(&self.payload,self.selection.requirement).ok().and_then(|v|encoded_size(v.len(),self.source.material.encoding))
@@ -92,6 +92,7 @@ pub(super) fn borrow_material(state:&DocumentState,selection:&wire::SecretSelect
     root:&asset_source::RegisteredRoot)->Result<Arc<GitHubSecretMaterial>,BridgeError>{
     if !selection.valid(){return Err(refused(wire::Reason::InvalidInput))}
     let native=state.context.as_ref().ok_or_else(||refused(wire::Reason::MaterialUnavailable))?.clone();
+    if native.execution_mode != commands::ExecutionMode::Github { return Err(refused(wire::Reason::MaterialChanged)); }
     if native.project_id!=project_id||native.registry_generation!=registration||native.project!=*root||native.revision!=selection.source.context_revision
         ||stage(native.stage)!=selection.stage||platform(native.platform)!=selection.requirement.platform()
         ||native.draft.is_empty()||native.draft.len()>524288{return Err(refused(wire::Reason::MaterialChanged))}

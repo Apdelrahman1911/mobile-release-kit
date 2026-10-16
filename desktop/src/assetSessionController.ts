@@ -12,7 +12,7 @@ function freeze<T>(value: T): T {
   }
   return value;
 }
-function sameScope(a: AssetScope, b: AssetScope): boolean { return a.platform === b.platform && a.stage === b.stage && a.purpose === b.purpose; }
+function sameScope(a: AssetScope, b: AssetScope): boolean { return a.platform === b.platform && a.stage === b.stage && a.purpose === b.purpose && (a.executionMode ?? 'github') === (b.executionMode ?? 'github'); }
 function sameRevision(a: ProjectSession | null, b: { id: string; revision: number; baseline: number } | null): boolean {
   return a === null ? b === null : !!b && a.project.id === b.id && a.revision === b.revision && a.baselineGeneration === b.baseline;
 }

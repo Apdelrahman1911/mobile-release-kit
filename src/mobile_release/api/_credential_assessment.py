@@ -16,11 +16,11 @@ from typing import Any, NoReturn, cast
 from ..config import MAX_CONFIG_BYTES, ReleaseConfig, parse_config_text
 from ..credential_policy import (
     CREDENTIAL_POLICY_VERSION, credential_format_error,
-    firebase_payload_shape_and_match, material_size_limit,
+    firebase_payload_shape_and_match,
 )
 from ..credential_requirements import requirements
 from ..errors import ConfigurationError
-from ._credential_guide import _KIND_LAYOUT
+from ._credential_guide import _KIND_LAYOUT, requirement_name, assessment_material_limit
 from ._json import MAX_DEPTH, MAX_NODES, bounded_json_text
 from .contracts import ApiError, CredentialAssessmentResult
 
@@ -54,10 +54,12 @@ _FORMATS = {
     "android-keystore": ("jks", "pkcs12"), "android-firebase": ("firebase-json",),
     "apple-p12": ("pkcs12",), "apple-profile": ("cms-signed-data",),
     "asc-p8": ("pkcs8",), "ios-firebase": ("firebase-plist",),
+    "google-service-account": ("google-service-account-json",),
 }
 _FORMAT_SCOPES = {
     "jks": "jks-header", "pkcs12": "pfx-envelope", "cms-signed-data": "cms-signed-data-envelope",
     "pkcs8": "pkcs8-envelope", "firebase-json": "json-document", "firebase-plist": "plist-document",
+    "google-service-account-json": "service-account-format",
 }
 _FIREBASE_KINDS = ("android-firebase", "ios-firebase")
 
@@ -199,13 +201,13 @@ def _observation(value: object, kind: str, file_requirement: str | None) -> None
         extra_keys = {
             "jks": {"version"}, "pkcs12": {"version", "authSafe"}, "cms-signed-data": {"encoding"},
             "pkcs8": {"encoding", "algorithm", "curve"}, "firebase-json": {"document"},
-            "firebase-plist": {"encoding", "document"},
+            "firebase-plist": {"encoding", "document"}, "google-service-account-json": set(),
         }[format_name]
         observation = _exact(value, {"status", "byteCount", "format"} | extra_keys)
         count = observation["byteCount"]
         if type(count) is not int or count < 1:
             _refuse()
-        if count > material_size_limit(file_requirement):
+        if count > assessment_material_limit(file_requirement):
             _refuse("assessment_limit")
         if format_name in ("jks", "pkcs12"):
             version = observation["version"]
@@ -225,7 +227,7 @@ def _observation(value: object, kind: str, file_requirement: str | None) -> None
                 _refuse()
         elif format_name == "firebase-json":
             _android_projection(observation["document"])
-        else:
+        elif format_name == "firebase-plist":
             _enum(observation["encoding"], ("xml", "binary"))
             _ios_projection(observation["document"])
     _json_text(value, max_bytes=MAX_OBSERVATION_BYTES, max_nodes=MAX_OBSERVATION_NODES,
@@ -233,7 +235,7 @@ def _observation(value: object, kind: str, file_requirement: str | None) -> None
 
 
 def _applicability(config: ReleaseConfig, kind_platform: str, platform: str, stage: str,
-                   purpose: str, names: set[str]) -> dict[str, str]:
+                   purpose: str, names: set[str], execution_mode: str = "github") -> dict[str, str]:
     # The signed iOS owner borrows every assigned build input from its one
     # original iOS/candidate/signing context. A project dependency token keeps
     # its project requirement identity; this exception does not retarget context
@@ -247,9 +249,15 @@ def _applicability(config: ReleaseConfig, kind_platform: str, platform: str, sta
     elif platform != "project" and not config.platform_enabled(platform):
         reason = "platform-disabled"
     else:
-        selected = {item.name for item in requirements(
+        selected_names = {item.name for item in requirements(
             config, stage, purpose=purpose, platforms=() if platform == "project" else (platform,),
-        )} & names
+        )}
+        if execution_mode == "local" and platform == "android":
+            wif = {"MOBILE_RELEASE_GOOGLE_WIF_PROVIDER", "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT"}
+            if wif <= selected_names:
+                selected_names.difference_update(wif)
+                selected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
+        selected = selected_names & names
         if selected and selected != names:
             _refuse("assessment_unavailable")
         reason = "selected" if selected else "not-required"
@@ -341,7 +349,10 @@ def _assess(params: object) -> CredentialAssessmentResult:
         _refuse()
     if version != 1:
         _refuse("assessment_version")
-    context = _exact(request["context"], {"draft", "platform", "stage", "purpose"})
+    raw_context = request["context"]
+    extra = {"executionMode"} if type(raw_context) is dict and "executionMode" in raw_context else set()
+    context = _exact(raw_context, {"draft", "platform", "stage", "purpose"} | extra)
+    execution_mode = _enum(context.get("executionMode", "github"), ("github", "local"))
     platform = _enum(context["platform"], ("android", "ios", "project"))
     stage = _enum(context["stage"], ("candidate", "external-testing", "production"))
     purpose = _enum(context["purpose"], ("full", "signing", "store"))
@@ -357,7 +368,7 @@ def _assess(params: object) -> CredentialAssessmentResult:
             scalar_bytes += _string_size(value, MAX_SCALAR_BYTES)
         if scalar_bytes > MAX_SCALARS_BYTES:
             _refuse("assessment_limit")
-    file_name = "MOBILE_RELEASE_" + layout[0][1] if layout[0][2] == "file" else None
+    file_name = requirement_name(layout[0][1]) if layout[0][2] == "file" else None
     _observation(supplied["observation"], kind, file_name)
     _json_text(params, max_bytes=MAX_PARAMS_BYTES)
     raw_draft = _json_text(context["draft"], max_bytes=MAX_CONFIG_BYTES)
@@ -369,12 +380,12 @@ def _assess(params: object) -> CredentialAssessmentResult:
     # project_path/release_version/filesystem methods are never invoked.
     config = ReleaseConfig(path=Path("release/mobile-release.json"), root=Path("."), data=data)
     applicability = _applicability(config, kind_platform, platform, stage, purpose,
-                                   {"MOBILE_RELEASE_" + suffix for _, suffix, _, _ in layout})
+                                   {requirement_name(suffix) for _, suffix, _, _ in layout}, execution_mode)
     identity = "not-assessed" if kind in _FIREBASE_KINDS else "not-applicable"
     fields = []
     for field_id, suffix, input_kind, _ in layout:
         value = supplied["observation"] if input_kind == "file" else scalar_fields[field_id]
-        name = "MOBILE_RELEASE_" + suffix
+        name = requirement_name(suffix)
         presence = "missing" if value is None or (input_kind != "file" and value == "") else "supplied"
         if applicability["state"] == "not-applicable":
             state, issues, checks = "not-applicable", [], []
@@ -392,7 +403,8 @@ def _assess(params: object) -> CredentialAssessmentResult:
                      "format-valid" if kind in _FIREBASE_KINDS else "configured")
     result = {
         "schemaVersion": 1, "policyVersion": CREDENTIAL_POLICY_VERSION, "kind": kind,
-        "context": {"platform": platform, "stage": stage, "purpose": purpose},
+        "context": {"platform": platform, "stage": stage, "purpose": purpose,
+                    **({"executionMode": "local"} if execution_mode == "local" else {})},
         "applicability": applicability, "state": state, "fields": fields, "identity": identity,
         "assurance": {
             "basis": "supplied-input-only", "scalarValuesProcessed": any(value is not None for value in scalar_fields.values()),

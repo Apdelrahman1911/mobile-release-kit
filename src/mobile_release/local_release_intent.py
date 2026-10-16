@@ -153,7 +153,7 @@ def _artifacts(rows: object, platform: str, metadata_sha: str) -> None:
 def _assignments(rows: object, platform: str) -> None:
     _need(type(rows) is list and 1 <= len(rows) <= 8)
     # Use the real Desktop asset-kind names, not environment-variable aliases.
-    allowed = {"google-adc", "operation-commitment"} if platform == "android" else {
+    allowed = {"google-service-account", "operation-commitment"} if platform == "android" else {
         "asc-p8", "operation-commitment", "apple-review-contact", "apple-review-demo"}
     kinds: set[str] = set()
     records: set[str] = set()
@@ -167,7 +167,7 @@ def _assignments(rows: object, platform: str) -> None:
         _need(row["contextRevision"] == rows[0]["contextRevision"])
         kinds.add(row["kind"])
         records.add(row["recordId"])
-    _need(("google-adc" if platform == "android" else "asc-p8") in kinds)
+    _need(("google-service-account" if platform == "android" else "asc-p8") in kinds)
 
 
 def _decode(data: bytes) -> LocalReleaseDraft:

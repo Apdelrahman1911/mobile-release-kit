@@ -71,7 +71,7 @@ export interface CredentialHelp extends Omit<HelpContent, 'label'> {
   alternatives: string[];
 }
 
-export type CredentialKindId = 'android-keystore' | 'android-firebase' | 'apple-p12' | 'apple-profile' | 'asc-p8' | 'ios-firebase' | 'google-wif' | 'project-read-token' | 'apple-review-contact' | 'apple-review-demo' | 'operation-commitment';
+export type CredentialKindId = 'android-keystore' | 'android-firebase' | 'apple-p12' | 'apple-profile' | 'asc-p8' | 'ios-firebase' | 'google-wif' | 'project-read-token' | 'apple-review-contact' | 'apple-review-demo' | 'operation-commitment' | 'google-service-account';
 export interface CredentialGuideField extends HelpContent {
   id: string;
   requirement: string;

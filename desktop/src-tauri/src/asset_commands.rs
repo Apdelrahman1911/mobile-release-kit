@@ -2,7 +2,7 @@
 //! Tauri has already materialized Json bodies. These are admitted-payload limits,
 //! not a pre-IPC allocation/RSS guarantee. No parser observation or path enters.
 use std::{io, sync::Arc};
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
 use crate::protocol;
 
@@ -15,7 +15,7 @@ const PREPARE_LIMIT: usize = 128 * 1024;
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Kind {
     AndroidKeystore, AndroidFirebase, AppleP12, AppleProfile, AscP8,
-    IosFirebase, GoogleWif, ProjectReadToken, AppleReviewContact, AppleReviewDemo, OperationCommitment,
+    IosFirebase, GoogleWif, ProjectReadToken, AppleReviewContact, AppleReviewDemo, OperationCommitment, GoogleServiceAccount,
 }
 impl Kind {
     pub(crate) fn name(self) -> &'static str {
@@ -26,19 +26,20 @@ impl Kind {
             Self::AppleReviewContact => "apple-review-contact",
             Self::AppleReviewDemo => "apple-review-demo",
             Self::OperationCommitment => "operation-commitment",
+            Self::GoogleServiceAccount => "google-service-account",
         }
     }
     pub(crate) fn enabled(self) -> bool {
         matches!(self, Self::AndroidKeystore | Self::AndroidFirebase | Self::IosFirebase | Self::GoogleWif | Self::ProjectReadToken | Self::AppleReviewContact | Self::AppleReviewDemo | Self::OperationCommitment)
             || (cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
                 all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))) && self == Self::AscP8)
-            || (cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && matches!(self, Self::AppleP12 | Self::AppleProfile))
+            || (cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && matches!(self, Self::AppleP12 | Self::AppleProfile | Self::GoogleServiceAccount))
     }
     pub(crate) fn file(self) -> Option<crate::credential_format::FileKind> {
         use crate::credential_format::FileKind;
         match self { Self::AndroidKeystore => Some(FileKind::AndroidKeystore), Self::AndroidFirebase => Some(FileKind::AndroidFirebase),
             Self::IosFirebase => Some(FileKind::IosFirebase), Self::AppleP12 => Some(FileKind::AppleP12),
-            Self::AppleProfile => Some(FileKind::AppleProfile), Self::AscP8 => Some(FileKind::AscP8), _ => None }
+            Self::AppleProfile => Some(FileKind::AppleProfile), Self::AscP8 => Some(FileKind::AscP8), Self::GoogleServiceAccount => Some(FileKind::GoogleServiceAccount), _ => None }
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -50,6 +51,10 @@ pub(crate) enum Stage { Candidate, ExternalTesting, Production }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Purpose { Full, Signing, Store }
+#[derive(Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ExecutionMode { #[default] Github, Local }
+impl ExecutionMode { pub(crate) fn is_github(&self) -> bool { *self == Self::Github } }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -121,6 +126,7 @@ pub(crate) struct RecordRef<'a> { pub(crate) record_id: &'a str, pub(crate) expe
 pub(crate) struct Context<'a> {
     pub(crate) project_id: &'a str, pub(crate) draft: &'a Value,
     pub(crate) platform: Platform, pub(crate) stage: Stage, pub(crate) purpose: Purpose,
+    pub(crate) execution_mode: ExecutionMode,
 }
 pub(crate) struct Choose<'a> { pub(crate) context_revision: u32, pub(crate) kind: Kind, pub(crate) replacement: Option<RecordRef<'a>> }
 pub(crate) enum Source<'a> {
@@ -299,6 +305,7 @@ pub(crate) fn kind(value: &Value) -> Result<Kind, AssetError> {
         "apple-review-contact" => Ok(Kind::AppleReviewContact),
         "apple-review-demo" => Ok(Kind::AppleReviewDemo),
         "operation-commitment" => Ok(Kind::OperationCommitment),
+        "google-service-account" => Ok(Kind::GoogleServiceAccount),
         _ => Err(AssetError::invalid()),
     }
 }
@@ -312,7 +319,7 @@ fn replacement(value: &Value) -> Result<Option<RecordRef<'_>>, AssetError> {
 pub(crate) fn field_names(kind: Kind) -> &'static [&'static str] {
     match kind {
         Kind::AndroidKeystore => &["storePassword", "keyAlias", "keyPassword"],
-        Kind::AndroidFirebase | Kind::IosFirebase | Kind::AppleProfile => &[],
+        Kind::AndroidFirebase | Kind::IosFirebase | Kind::AppleProfile | Kind::GoogleServiceAccount => &[],
         Kind::AppleP12 => &["password"], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
         Kind::AscP8 => &["keyId", "issuerId"],
         Kind::AppleReviewContact => &["contactFirstName", "contactLastName", "contactEmail", "contactPhone"],
@@ -371,13 +378,17 @@ pub(crate) fn open(body: &Value) -> Result<OpenMode, AssetError> {
 }
 pub(crate) fn context(body: &Value) -> Result<Context<'_>, AssetError> {
     bounded(body, protocol::REQUEST_LIMIT)?;
-    let object = exact(body, &["projectId", "draft", "platform", "stage", "purpose"])?;
+    let fields: &[&str] = if body.get("executionMode").is_some() { &["projectId", "draft", "platform", "stage", "purpose", "executionMode"] }
+        else { &["projectId", "draft", "platform", "stage", "purpose"] };
+    let object = exact(body, fields)?;
+    let execution_mode = object.get("executionMode").map(|v| serde_json::from_value::<ExecutionMode>(v.clone())
+        .map_err(|_| AssetError::invalid())).transpose()?.unwrap_or_default();
     let project_id = text(&object["projectId"])?;
     if !protocol::valid_id(project_id) || !object["draft"].is_object() || !within(&object["draft"], DRAFT_LIMIT) { return Err(AssetError::invalid()); }
     let platform = match text(&object["platform"])? { "android" => Platform::Android, "ios" => Platform::Ios, "project" => Platform::Project, _ => return Err(AssetError::invalid()) };
     let stage = match text(&object["stage"])? { "candidate" => Stage::Candidate, "external-testing" => Stage::ExternalTesting, "production" => Stage::Production, _ => return Err(AssetError::invalid()) };
     let purpose = match text(&object["purpose"])? { "full" => Purpose::Full, "signing" => Purpose::Signing, "store" => Purpose::Store, _ => return Err(AssetError::invalid()) };
-    Ok(Context { project_id, draft: &object["draft"], platform, stage, purpose })
+    Ok(Context { project_id, draft: &object["draft"], platform, stage, purpose, execution_mode })
 }
 pub(crate) fn choose(body: &Value) -> Result<Choose<'_>, AssetError> {
     bounded(body, SMALL_LIMIT)?;

@@ -53,7 +53,7 @@ class CredentialGuideTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in resource["kinds"]], list(guide.KIND_IDS))
         self.assertEqual([item["id"] for item in resource["controls"]], list(guide.CONTROL_IDS))
         self.assertEqual([item["id"] for item in resource["states"]], list(guide.STATE_IDS))
-        self.assertEqual(sum(len(item["fields"]) for item in resource["kinds"]), 23)
+        self.assertEqual(sum(len(item["fields"]) for item in resource["kinds"]), 24)
         self.assertFalse(result["assurance"]["credentialsRead"])
         self.assertEqual(tuple(method for method in METHODS if method.startswith("credentials.")),
                          ("credentials.assess",))
@@ -133,6 +133,14 @@ class CredentialGuideTests(unittest.TestCase):
                 name = field["requirement"]
                 self.assertNotIn(name, guided)
                 guided.add(name)
+                if name == "GOOGLE_APPLICATION_CREDENTIALS":
+                    self.assertEqual(kind["id"], "google-service-account")
+                    self.assertEqual(field["alternatives"], [])
+                    self.assertEqual(field["input"], "file")
+                    self.assertEqual(field["maxBytes"], 16384)
+                    self.assertIn("Local", field["requiredWhen"])
+                    self.assertNotIn(name, by_name)  # Never offered as a GitHub secret.
+                    continue
                 self.assertEqual(field["alternatives"], by_name[name]["alternatives"])
                 self.assertEqual(field["input"] == "text", by_name[name]["kind"] == "variable")
                 self.assertEqual(kind["platform"], by_name[name]["platform"])
@@ -147,11 +155,11 @@ class CredentialGuideTests(unittest.TestCase):
                     self.assertTrue(field[key].strip(), (kind["id"], field["id"], key))
         legacy_names = {item["name"] for item in result["credentials"]}
         self.assertEqual(legacy_names, set(by_name))
-        self.assertEqual(guided, legacy_names)
+        self.assertEqual(guided, legacy_names | {"GOOGLE_APPLICATION_CREDENTIALS"})
         for suffix in ("OPERATION_COMMITMENT_KEY_BASE64", "OPERATION_COMMITMENT_KEY_VERSION",
                        "APPLE_REVIEW_CONTACT_EMAIL", "APPLE_DEMO_ACCOUNT_PASSWORD"):
             self.assertIn("MOBILE_RELEASE_" + suffix, guided)
-        self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", guided)
+        self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", legacy_names)
 
     def test_requirements_remain_the_only_stage_platform_purpose_selector(self):
         config = ReleaseConfig(Path("unused"), Path("."), all_branches())

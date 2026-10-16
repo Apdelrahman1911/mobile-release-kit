@@ -508,6 +508,8 @@ mod tests {
             (commands::Kind::AppleP12, serde_json::json!({"password":" ORIGINAL_P12_PASSWORD_CANARY\0é "})),
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             (commands::Kind::AppleProfile, serde_json::json!({})),
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            (commands::Kind::GoogleServiceAccount, serde_json::json!({})),
         ] {
             let fields = commands::own_fields(kind, &values).unwrap_or_else(|_| panic!("fixed fields"));
             let descriptor = Descriptor::new(kind, None, fields.vault_presence(), true).unwrap();

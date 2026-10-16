@@ -160,7 +160,7 @@ mod tests {
             fields: Some(fields) })
     }
     fn context(project: asset_source::RegisteredRoot) -> Arc<NativeContext> {
-        Arc::new(NativeContext { revision: 2, project_id: "inert-android".into(), project, registry_generation: 7,
+        Arc::new(NativeContext { execution_mode: commands::ExecutionMode::Github, revision: 2, project_id: "inert-android".into(), project, registry_generation: 7,
             draft: br#"{"android":{"applicationId":"org.example.app"}}"#.to_vec(),
             platform: Platform::Android, stage: Stage::Candidate, purpose: Purpose::Signing })
     }

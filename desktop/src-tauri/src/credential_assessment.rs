@@ -9,6 +9,7 @@
 //! Request/serializer/owner buffers can retain secret copies, especially after
 //! unknown cleanup. There is no zeroization, cancellation or erasure promise.
 use std::io;
+use crate::asset_commands::ExecutionMode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Value};
 use crate::{error::BridgeError, protocol::{self, Method}, supervisor::Supervisor};
@@ -37,12 +38,13 @@ enum Purpose { Full, Signing, Store }
 enum PolicyVersion { #[serde(rename = "credential-policy-v1")] V1 }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-enum Kind { AndroidKeystore, AndroidFirebase, AppleP12, AppleProfile, AscP8, IosFirebase, GoogleWif, ProjectReadToken, AppleReviewContact, AppleReviewDemo, OperationCommitment }
+enum Kind { AndroidKeystore, AndroidFirebase, AppleP12, AppleProfile, AscP8, IosFirebase, GoogleWif, ProjectReadToken, AppleReviewContact, AppleReviewDemo, OperationCommitment, GoogleServiceAccount }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 enum FieldId { File, StorePassword, KeyAlias, KeyPassword, Password, KeyId, IssuerId, Provider, ServiceAccount, Token, ContactFirstName, ContactLastName, ContactEmail, ContactPhone, DemoUsername, DemoPassword, KeyBase64, Version }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 enum Requirement {
+    #[serde(rename = "GOOGLE_APPLICATION_CREDENTIALS")] GoogleAdc,
     #[serde(rename = "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64")] AndroidKeystore,
     #[serde(rename = "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD")] AndroidStorePassword,
     #[serde(rename = "MOBILE_RELEASE_ANDROID_KEY_ALIAS")] AndroidKeyAlias,
@@ -74,7 +76,7 @@ struct LayoutField { id: FieldId, requirement: Requirement, role: Role }
 impl Kind {
     fn platform(self) -> Platform {
         match self {
-            Self::AndroidKeystore | Self::AndroidFirebase | Self::GoogleWif => Platform::Android,
+            Self::AndroidKeystore | Self::AndroidFirebase | Self::GoogleWif | Self::GoogleServiceAccount => Platform::Android,
             Self::AppleP12 | Self::AppleProfile | Self::AscP8 | Self::IosFirebase
                 | Self::AppleReviewContact | Self::AppleReviewDemo | Self::OperationCommitment => Platform::Ios,
             Self::ProjectReadToken => Platform::Project,
@@ -86,13 +88,14 @@ impl Kind {
     fn material_limit(self) -> u64 {
         // Fixed version-one wire bounds, not a reader, size claim or selector.
         // Canonical material_size_limit and all requiredness remain in Python.
-        if matches!(self, Self::AndroidKeystore | Self::AppleP12) { 32 * 1024 * 1024 } else { 4 * 1024 * 1024 }
+        if self == Self::GoogleServiceAccount { 16 * 1024 } else if matches!(self, Self::AndroidKeystore | Self::AppleP12) { 32 * 1024 * 1024 } else { 4 * 1024 * 1024 }
     }
     fn permits_format(self, format: Format) -> bool {
         matches!((self, format),
             (Self::AndroidKeystore, Format::Jks | Format::Pkcs12) | (Self::AppleP12, Format::Pkcs12)
             | (Self::AppleProfile, Format::CmsSignedData) | (Self::AscP8, Format::Pkcs8)
-            | (Self::AndroidFirebase, Format::FirebaseJson) | (Self::IosFirebase, Format::FirebasePlist))
+            | (Self::AndroidFirebase, Format::FirebaseJson) | (Self::IosFirebase, Format::FirebasePlist)
+            | (Self::GoogleServiceAccount, Format::GoogleServiceAccountJson))
     }
     fn layout(self) -> &'static [LayoutField] {
         // Redaction allowlist: exact guide field order and server constants.
@@ -119,6 +122,7 @@ impl Kind {
                 LayoutField { id: F::IssuerId, requirement: R::AscIssuerId, role: T::Identifier },
             ],
             Self::IosFirebase => &[LayoutField { id: F::File, requirement: R::IosFirebase, role: T::File }],
+            Self::GoogleServiceAccount => &[LayoutField { id: F::File, requirement: R::GoogleAdc, role: T::File }],
             Self::GoogleWif => &[
                 LayoutField { id: F::Provider, requirement: R::GoogleProvider, role: T::Identifier },
                 LayoutField { id: F::ServiceAccount, requirement: R::GoogleServiceAccount, role: T::Identifier },
@@ -150,6 +154,7 @@ enum UnavailableReason { NotRun, Incomplete, UnsupportedFormat, UnsupportedVaria
 enum RejectedReason { EmptyFile, SuffixConflict, MalformedContainer }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 enum Format {
+    #[serde(rename = "google-service-account-json")] GoogleServiceAccountJson,
     #[serde(rename = "jks")] Jks,
     #[serde(rename = "pkcs12")] Pkcs12,
     #[serde(rename = "cms-signed-data")] CmsSignedData,
@@ -202,6 +207,8 @@ struct IosProjection { root: IosRoot, bundle_id: Option<String> }
 #[derive(Serialize)]
 #[serde(tag = "format")]
 enum Observed {
+    #[serde(rename = "google-service-account-json")]
+    GoogleServiceAccountJson { #[serde(rename = "byteCount")] byte_count: u64 },
     #[serde(rename = "jks")]
     Jks { #[serde(rename = "byteCount")] byte_count: u64, version: u8 },
     #[serde(rename = "pkcs12")]
@@ -218,6 +225,7 @@ enum Observed {
 impl Observed {
     fn format(&self) -> Format {
         match self {
+            Self::GoogleServiceAccountJson { .. } => Format::GoogleServiceAccountJson,
             Self::Jks { .. } => Format::Jks, Self::Pkcs12 { .. } => Format::Pkcs12,
             Self::CmsSignedData { .. } => Format::CmsSignedData, Self::Pkcs8 { .. } => Format::Pkcs8,
             Self::FirebaseJson { .. } => Format::FirebaseJson, Self::FirebasePlist { .. } => Format::FirebasePlist,
@@ -268,6 +276,7 @@ struct OperationCommitmentFields { key_base64: Option<PrivateScalar>, version: O
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum Input {
+    GoogleServiceAccount { fields: EmptyFields, observation: Option<FileObservation> },
     AndroidKeystore { fields: KeystoreFields, observation: Option<FileObservation> },
     AndroidFirebase { fields: EmptyFields, observation: Option<FileObservation> },
     AppleP12 { fields: P12Fields, observation: Option<FileObservation> },
@@ -281,7 +290,8 @@ enum Input {
     OperationCommitment { fields: OperationCommitmentFields, observation: () },
 }
 #[derive(Serialize)]
-struct RequestContext { draft: Value, platform: Platform, stage: Stage, purpose: Purpose }
+struct RequestContext { draft: Value, platform: Platform, stage: Stage, purpose: Purpose,
+    #[serde(rename = "executionMode", skip_serializing_if = "ExecutionMode::is_github")] execution_mode: ExecutionMode }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AssessmentRequest {
@@ -621,6 +631,7 @@ fn observation(value: &Value, kind: Kind) -> Result<Option<FileObservation>, Ass
             let format: Format = finite(object.get("format").ok_or_else(AssessmentError::invalid)?)?;
             if !kind.permits_format(format) { return Err(AssessmentError::invalid()); }
             let keys: &[&str] = match format {
+                Format::GoogleServiceAccountJson => &["status", "byteCount", "format"],
                 Format::Jks => &["status", "byteCount", "format", "version"],
                 Format::Pkcs12 => &["status", "byteCount", "format", "version", "authSafe"],
                 Format::CmsSignedData => &["status", "byteCount", "format", "encoding"],
@@ -632,6 +643,7 @@ fn observation(value: &Value, kind: Kind) -> Result<Option<FileObservation>, Ass
             let byte_count = object["byteCount"].as_u64().filter(|value| *value > 0).ok_or_else(AssessmentError::invalid)?;
             if byte_count > kind.material_limit() { return Err(AssessmentError::limit()); }
             let data = match format {
+                Format::GoogleServiceAccountJson => Observed::GoogleServiceAccountJson { byte_count },
                 Format::Jks => {
                     let version = object["version"].as_u64().filter(|value| matches!(*value, 1 | 2)).ok_or_else(AssessmentError::invalid)?;
                     Observed::Jks { byte_count, version: version as u8 }
@@ -678,6 +690,7 @@ fn input(value: &Value) -> Result<Input, AssessmentError> {
     let mut total = 0usize;
     let observation = observation(&object["observation"], kind)?;
     Ok(match kind {
+        Kind::GoogleServiceAccount => Input::GoogleServiceAccount { fields: EmptyFields {}, observation },
         Kind::AndroidKeystore => Input::AndroidKeystore { fields: KeystoreFields {
             store_password: scalar(&fields["storePassword"], &mut total)?, key_alias: scalar(&fields["keyAlias"], &mut total)?,
             key_password: scalar(&fields["keyPassword"], &mut total)?,
@@ -724,7 +737,10 @@ impl AssessmentRequest {
             }
             _ => return Err(AssessmentError::invalid()),
         }
-        let context = exact(&object["context"], &["draft", "platform", "stage", "purpose"])?;
+        let names: &[&str] = if object["context"].get("executionMode").is_some() { &["draft", "platform", "stage", "purpose", "executionMode"] }
+            else { &["draft", "platform", "stage", "purpose"] };
+        let context = exact(&object["context"], names)?;
+        let execution_mode: ExecutionMode = context.get("executionMode").map(finite).transpose()?.unwrap_or_default();
         let platform: Platform = finite(&context["platform"])?;
         let stage: Stage = finite(&context["stage"])?;
         let purpose: Purpose = finite(&context["purpose"])?;
@@ -736,7 +752,7 @@ impl AssessmentRequest {
         // No duplicate config/schema validator here: core independently parses
         // this bounded draft. The real transport still bounds its actual frame.
         Ok(Self { schema_version: 1, policy_version: PolicyVersion::V1,
-            context: RequestContext { draft: draft.clone(), platform, stage, purpose }, input })
+            context: RequestContext { draft: draft.clone(), platform, stage, purpose, execution_mode }, input })
     }
     fn into_params(self) -> Result<Value, AssessmentError> {
         serde_json::to_value(self).map_err(|_| AssessmentError::unavailable_request())
@@ -772,7 +788,7 @@ enum Scope {
     ValueAdmission, IdentifierFormat, CredentialFormat, FileNonempty, SuffixConsistency, ContainerParse,
     JksHeader, PfxEnvelope, CmsSignedDataEnvelope,
     #[serde(rename = "pkcs8-envelope")] Pkcs8Envelope,
-    JsonDocument, PlistDocument, EcP256Identifiers, FirebaseShape, ApplicationIdentity,
+    JsonDocument, PlistDocument, EcP256Identifiers, FirebaseShape, ApplicationIdentity, ServiceAccountFormat,
 }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -785,7 +801,8 @@ struct Check { scope: Scope, outcome: Outcome }
 struct FieldResult { id: FieldId, requirement: Requirement, presence: Presence, state: State, issues: Vec<IssueCode>, checks: Vec<Check> }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct ResultContext { platform: Platform, stage: Stage, purpose: Purpose }
+struct ResultContext { platform: Platform, stage: Stage, purpose: Purpose,
+    #[serde(rename = "executionMode", default, skip_serializing_if = "ExecutionMode::is_github")] execution_mode: ExecutionMode }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Applicability { state: ApplicabilityState, reason: ApplicabilityReason }
@@ -845,6 +862,7 @@ impl AssessmentRequest {
     fn expected(&self) -> Expected {
         use FieldExpectation as E;
         let (kind, fields) = match &self.input {
+            Input::GoogleServiceAccount { observation, .. } => (Kind::GoogleServiceAccount, vec![E::file(observation)]),
             Input::AndroidKeystore { fields, observation } => (Kind::AndroidKeystore, vec![
                 E::file(observation), E::scalar(&fields.store_password), E::scalar(&fields.key_alias), E::scalar(&fields.key_password),
             ]),
@@ -861,7 +879,7 @@ impl AssessmentRequest {
         };
         let scalar_values_processed = fields.iter().any(|field| matches!(field, E::Scalar { processed: true, .. }));
         let file_observations_processed = fields.iter().any(|field| matches!(field, E::File(fact) if !matches!(fact, FileFact::Missing)));
-        Expected { kind, context: ResultContext { platform: self.context.platform, stage: self.context.stage, purpose: self.context.purpose },
+        Expected { kind, context: ResultContext { platform: self.context.platform, stage: self.context.stage, purpose: self.context.purpose, execution_mode: self.context.execution_mode },
             fields, scalar_values_processed, file_observations_processed }
     }
 }
@@ -900,6 +918,7 @@ fn rejected_check(reason: RejectedReason) -> (IssueCode, Scope) {
 }
 fn format_scope(format: Format) -> Scope {
     match format {
+        Format::GoogleServiceAccountJson => Scope::ServiceAccountFormat,
         Format::Jks => Scope::JksHeader, Format::Pkcs12 => Scope::PfxEnvelope,
         Format::CmsSignedData => Scope::CmsSignedDataEnvelope, Format::Pkcs8 => Scope::Pkcs8Envelope,
         Format::FirebaseJson => Scope::JsonDocument, Format::FirebasePlist => Scope::PlistDocument,
@@ -918,7 +937,7 @@ fn file_result(field: &FieldResult, fact: FileFact, kind: Kind) -> Option<Identi
         FileFact::Observed(format) => {
             let envelope = (format_scope(format), AssertedPass);
             match format {
-                Format::Jks | Format::Pkcs12 | Format::CmsSignedData => field_is(field, State::Configured, &[], &[envelope]).then_some(not_assessed),
+                Format::Jks | Format::Pkcs12 | Format::CmsSignedData | Format::GoogleServiceAccountJson => field_is(field, State::Configured, &[], &[envelope]).then_some(not_assessed),
                 Format::Pkcs8 => {
                     let valid = field_is(field, State::Configured, &[], &[envelope, (Scope::EcP256Identifiers, Passed)])
                         || field_is(field, State::Invalid, &[IssueCode::Pkcs8Algorithm], &[envelope, (Scope::EcP256Identifiers, Failed)]);
@@ -969,6 +988,10 @@ fn result_valid(result: &AssessmentResult, expected: &Expected) -> bool {
     // A signed iOS build borrows its dependency token from the same original
     // context as P12/profile. This admits only the core's finite response; it
     // neither changes the context echo nor decides whether the token is needed.
+    if applicable && ((expected.kind == Kind::GoogleServiceAccount
+        && (expected.context.execution_mode != ExecutionMode::Local || expected.context.platform != Platform::Android
+            || !matches!(expected.context.purpose, Purpose::Full | Purpose::Store)))
+        || expected.kind == Kind::GoogleWif && expected.context.execution_mode == ExecutionMode::Local) { return false; }
     let ios_signing_dependency = expected.kind == Kind::ProjectReadToken
         && expected.context.platform == Platform::Ios && expected.context.stage == Stage::Candidate
         && expected.context.purpose == Purpose::Signing;
@@ -1008,7 +1031,10 @@ fn string_members(object: &Map<String, Value>, keys: &[&str]) -> bool {
 fn result_shape(raw: &Value) -> bool {
     let Ok(object) = exact(raw, &["schemaVersion", "policyVersion", "kind", "context", "applicability", "state", "fields", "identity", "assurance"]) else { return false; };
     if object["schemaVersion"].as_u64() != Some(1) || !string_members(object, &["policyVersion", "kind", "state", "identity"]) { return false; }
-    let Ok(context) = exact(&object["context"], &["platform", "stage", "purpose"]) else { return false; };
+    let names: &[&str] = if object["context"].get("executionMode").is_some() { &["platform", "stage", "purpose", "executionMode"] }
+        else { &["platform", "stage", "purpose"] };
+    let Ok(context) = exact(&object["context"], names) else { return false; };
+    if context.get("executionMode").is_some_and(|v| !v.is_string()) { return false; }
     let Ok(applicability) = exact(&object["applicability"], &["state", "reason"]) else { return false; };
     if !string_members(context, &["platform", "stage", "purpose"]) || !string_members(applicability, &["state", "reason"]) { return false; }
     let Some(fields) = object["fields"].as_array() else { return false; };
@@ -1127,6 +1153,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn local_google_observation_echo_is_mode_bound_and_never_contains_account_data() {
+        let body = request(Kind::GoogleServiceAccount);
+        let result = response(Kind::GoogleServiceAccount);
+        accepts(&body, result.clone());
+        assert_eq!(result["fields"][0]["requirement"], "GOOGLE_APPLICATION_CREDENTIALS");
+        assert_eq!(result["fields"][0]["checks"][0]["scope"], "service-account-format");
+        assert_eq!(result["assurance"]["serviceValidation"], "not-run");
+        for mode in [json!("github"), Value::Null, json!("LOCAL")] {
+            let mut other = result.clone(); other["context"]["executionMode"] = mode;
+            refuses(&body, other);
+        }
+        let mut other = result.clone(); other["context"].as_object_mut().unwrap().remove("executionMode");
+        refuses(&body, other);
+        let mut github = body.clone(); github["context"].as_object_mut().unwrap().remove("executionMode");
+        let mut forged = result.clone(); forged["context"].as_object_mut().unwrap().remove("executionMode");
+        refuses(&github, forged); // CI cannot treat a local service-account file as selected WIF.
+        let mut private = body.clone(); private["input"]["observation"]["account"] = json!("private-account-canary");
+        request_error(&private, "assessment_invalid_request");
+        let mut leaking = result; leaking["fields"][0]["account"] = json!("private-account-canary");
+        refuses(&body, leaking);
+    }
+
     fn client(package: Value) -> Value {
         json!({"clientInfo": {"androidClientInfo": {"packageName": package}}})
     }
@@ -1143,6 +1192,7 @@ mod tests {
             _ => json!({}),
         };
         let observation = match kind {
+            Kind::GoogleServiceAccount => json!({"status":"observed", "byteCount":128, "format":"google-service-account-json"}),
             Kind::AndroidKeystore => json!({"status":"observed", "byteCount":128, "format":"jks", "version":2}),
             Kind::AppleP12 => json!({"status":"observed", "byteCount":128, "format":"pkcs12", "version":3, "authSafe":"data"}),
             Kind::AppleProfile => json!({"status":"observed", "byteCount":128, "format":"cms-signed-data", "encoding":"der"}),
@@ -1153,9 +1203,11 @@ mod tests {
         };
         // Deliberately not a valid core config: this adapter must not add a
         // second config/requirement validator. Only the core can accept draft.
-        json!({"schemaVersion":1, "policyVersion":POLICY,
+        let mut result = json!({"schemaVersion":1, "policyVersion":POLICY,
             "context":{"draft":{}, "platform":kind.platform(), "stage":"candidate", "purpose":"full"},
-            "input":{"kind":kind, "fields":fields, "observation":observation}})
+            "input":{"kind":kind, "fields":fields, "observation":observation}});
+        if kind == Kind::GoogleServiceAccount { result["context"]["executionMode"] = json!("local"); }
+        result
     }
     fn admitted(body: &Value) -> AssessmentRequest {
         match AssessmentRequest::admit(body) { Ok(request) => request, Err(_) => panic!("fictional request should admit") }

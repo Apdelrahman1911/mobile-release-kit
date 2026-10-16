@@ -271,7 +271,7 @@ class CredentialHelp(TypedDict):
 
 CredentialKindId = Literal["android-keystore", "android-firebase", "apple-p12", "apple-profile",
                            "asc-p8", "ios-firebase", "google-wif", "project-read-token",
-                           "apple-review-contact", "apple-review-demo", "operation-commitment"]
+                           "apple-review-contact", "apple-review-demo", "operation-commitment", "google-service-account"]
 CredentialFieldId = Literal["file", "storePassword", "keyAlias", "keyPassword", "password", "keyId",
                             "issuerId", "provider", "serviceAccount", "token", "contactFirstName", "contactLastName",
                             "contactEmail", "contactPhone", "demoUsername", "demoPassword", "keyBase64", "version"]
@@ -352,8 +352,9 @@ AssessmentIssueCode = Literal["not-run", "incomplete", "unsupported-format", "un
 AssessmentScope = Literal["value-admission", "identifier-format", "credential-format", "file-nonempty", "suffix-consistency",
                           "container-parse", "jks-header", "pfx-envelope", "cms-signed-data-envelope",
                           "pkcs8-envelope", "json-document", "plist-document", "ec-p256-identifiers",
-                          "firebase-shape", "application-identity"]
+                          "firebase-shape", "application-identity", "service-account-format"]
 AssessmentRequirement = Literal[
+    "GOOGLE_APPLICATION_CREDENTIALS",
     "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64", "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
     "MOBILE_RELEASE_ANDROID_KEY_ALIAS", "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
     "MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64", "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64",
@@ -373,6 +374,7 @@ AssessmentRequirement = Literal[
 
 
 class AssessmentContext(TypedDict):
+    executionMode: NotRequired[Literal["github", "local"]]
     draft: dict[str, Any]
     platform: AssessmentPlatform
     stage: AssessmentStage
@@ -571,7 +573,20 @@ class AssessmentOperationCommitmentInput(TypedDict):
     observation: None
 
 
+class AssessmentGoogleServiceAccountObservation(TypedDict):
+    status: Literal["observed"]
+    format: Literal["google-service-account-json"]
+    byteCount: int
+
+
+class AssessmentGoogleServiceAccountInput(TypedDict):
+    kind: Literal["google-service-account"]
+    fields: AssessmentNoScalarFields
+    observation: AssessmentGoogleServiceAccountObservation | AssessmentNoSuccessObservation
+
+
 AssessmentInput = (
+    AssessmentGoogleServiceAccountInput |
     AssessmentKeystoreInput | AssessmentAndroidFirebaseInput | AssessmentP12Input | AssessmentProfileInput
     | AssessmentP8Input | AssessmentIosFirebaseInput | AssessmentWifInput | AssessmentTokenInput
     | AssessmentAppleReviewContactInput | AssessmentAppleReviewDemoInput | AssessmentOperationCommitmentInput
@@ -586,6 +601,7 @@ class CredentialAssessmentRequest(TypedDict):
 
 
 class AssessmentResultContext(TypedDict):
+    executionMode: NotRequired[Literal["github", "local"]]
     platform: AssessmentPlatform
     stage: AssessmentStage
     purpose: AssessmentPurpose

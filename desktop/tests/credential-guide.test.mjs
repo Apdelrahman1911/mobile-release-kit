@@ -19,7 +19,7 @@ test('core-owned guide is compatible, complete, and detached from its provider',
   input.kinds[0].fields[0].where = 'changed after delivery';
   input.controls[0].what = 'changed after delivery';
   assert.deepEqual(result, guide);
-  assert.equal(result.kinds.length, 11);
+  assert.equal(result.kinds.length, 12);
 });
 
 test('future or enabled-looking guide contracts never imply collection authority', () => {

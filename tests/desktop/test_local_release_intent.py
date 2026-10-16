@@ -43,7 +43,7 @@ def fixture(platform="android", stage="candidate"):
         "configuration": {"path": "release/mobile-release.json", "sha256": "1" * 64, "metadataSha256": "c" * 64},
         "versionSource": {"path": "release/version.properties", "sha256": "2" * 64},
         "artifacts": artifacts,
-        "assignments": [{"kind": "google-adc" if platform == "android" else "asc-p8",
+        "assignments": [{"kind": "google-service-account" if platform == "android" else "asc-p8",
                          "recordId": "3" * 32, "expectedRevision": 2, "contextRevision": 1}],
         "predecessors": prior,
     }

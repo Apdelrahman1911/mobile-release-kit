@@ -412,7 +412,7 @@ mod persistent_memory {
         use super::*;
 
         fn context_data() -> Arc<NativeContext> {
-            Arc::new(NativeContext { revision: 1, project_id: "data-project".into(),
+            Arc::new(NativeContext { execution_mode: commands::ExecutionMode::Github, revision: 1, project_id: "data-project".into(),
                 project: asset_source::RegisteredRoot { path: "/inert/project".into(),
                     identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
                 registry_generation: 1, draft: Vec::with_capacity(97), platform: Platform::Android,

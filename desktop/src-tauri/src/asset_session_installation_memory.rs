@@ -492,7 +492,7 @@ mod known {
             assert!(matches!(owner.coordinator.lock().unwrap().receipt,JoinReceipt::New));
             owner
         });
-        let context=Arc::new(NativeContext{revision:1,project_id:project_id.to_owned(),project:project.clone(),
+        let context=Arc::new(NativeContext{ execution_mode: commands::ExecutionMode::Github,revision:1,project_id:project_id.to_owned(),project:project.clone(),
             registry_generation:1,draft:br#"{"schemaVersion":1,"project":{"name":"catalogue-budget"}}"#.to_vec(),
             platform:Platform::Android,stage:Stage::Candidate,purpose:Purpose::Full});
         let records=vec![

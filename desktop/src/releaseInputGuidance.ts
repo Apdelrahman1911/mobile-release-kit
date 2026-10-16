@@ -138,7 +138,7 @@ export function sessionPreparationKind(kind: CredentialKindId): AssetKind | null
   return ASSET_KINDS.find((entry) => entry === kind) ?? null;
 }
 export function preparationScopeChanged(target: ReleaseInputPreparationTarget, scope: AssetScope): boolean {
-  return target.scope.platform !== scope.platform || target.scope.stage !== scope.stage || target.scope.purpose !== scope.purpose;
+  return target.scope.platform !== scope.platform || target.scope.stage !== scope.stage || target.scope.purpose !== scope.purpose || (target.scope.executionMode ?? 'github') !== (scope.executionMode ?? 'github');
 }
 // Pure UI protection only; existing native/core admission still owns context,
 // collection and assignment. No action or private field value enters this helper.

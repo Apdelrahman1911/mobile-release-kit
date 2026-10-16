@@ -22,6 +22,21 @@ Mobile Release Kit protects the binding among reviewed source, final signed arti
 
 The final public-release decision is intentionally outside automation.
 
+### Local Google credentials and GitHub identity
+
+The Desktop local credential mode accepts only an explicitly selected, bounded
+Google `service_account` JSON key through its private native file owner. It does
+not discover ambient ADC/gcloud files or accept external/executable credential
+sources or custom token endpoints. The JSON and key remain in private session or
+encrypted-vault backing, not previews, logs, or GitHub secrets. Switching between
+local and GitHub contexts revokes assessments and assigned-material loans.
+
+GitHub automation continues to require its existing keyless WIF identity and CI
+authorization. A local file's format check does not authenticate the account,
+prove Play Console permissions, or authorize Store mutations. Direct local Store
+operations additionally require their reviewed execution owner, explicit consent,
+owned credential snapshot, and separate local provenance/recovery authority.
+
 ### Desktop credential storage boundary
 
 The Linux encrypted-vault implementation is **disabled pending independent

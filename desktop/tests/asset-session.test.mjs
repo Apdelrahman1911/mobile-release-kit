@@ -191,7 +191,7 @@ test('requests are exact, bounded unions; paths, bytes, observations and extra f
 });
 
 test('iOS Firebase and separately admitted Apple and ASC files extend only the exact closed session kinds', () => {
-  assert.deepEqual(ASSET_KINDS, ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8', 'google-wif', 'project-read-token', 'apple-review-contact', 'apple-review-demo', 'operation-commitment']);
+  assert.deepEqual(ASSET_KINDS, ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8', 'google-service-account', 'google-wif', 'project-read-token', 'apple-review-contact', 'apple-review-demo', 'operation-commitment']);
   assert.deepEqual(SESSION_FIELDS['ios-firebase'], []);
   for (const kind of ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8']) {
     assert.equal(isAssetFileKind(kind), true);
@@ -1441,4 +1441,55 @@ test('installation originals block credential routes and queued contexts; known 
     h.latest('context').resolve(status(4, { context: { ...context, revision: 2 },
       operation: { ...op, phase: 'idle', settlement: 'known' } })); await settle();
   } finally { h.controller.dispose(); }
+});
+
+test('local Google snapshot assessment is redacted, canonical and mode-bound', () => {
+  const local = { ...context, executionMode: 'local' };
+  const evaluated = { ...assessment(), kind: 'google-service-account',
+    context: { platform:'android',stage:'candidate',purpose:'full',executionMode:'local' },
+    fields:[{id:'file',requirement:'GOOGLE_APPLICATION_CREDENTIALS',presence:'supplied',state:'configured',issues:[],
+      checks:[{scope:'service-account-format',outcome:'asserted-pass'}]}],
+    assurance:{...assessment().assurance,scalarValuesProcessed:false,fileObservationsProcessed:true} };
+  const input=status(2,{context:local,operation:operation({assessment:evaluated,
+    preview:{token:A,action:'save',expiresInMs:10000,subject:{type:'record',kind:'google-service-account',change:'new',recordId:null,recordRevision:null}}})});
+  assert.deepEqual(parseAssetStatus(input),input);
+  assert.equal(isAssetFileKind('google-service-account'),true);
+  assert.equal(assetRequestFits('asset_choose',{contextRevision:1,kind:'google-service-account',replacement:null}),true);
+  for(const mutate of [
+    s=>{delete s.context.executionMode;},
+    s=>{delete s.operation.assessment.context.executionMode;},
+    s=>{s.context.executionMode='LOCAL';},
+    s=>{s.operation.assessment.fields[0].account='private-account-canary';},
+    s=>{s.operation.assessment.fields[0].requirement='MOBILE_RELEASE_GOOGLE_APPLICATION_CREDENTIALS_BASE64';},
+    s=>{s.operation.assessment.assurance.serviceValidation='passed';},
+  ]){const changed=structuredClone(input);mutate(changed);assert.equal(parseAssetStatus(changed),null);}
+  assert.equal(guide.kinds.find(k=>k.id==='google-service-account').fields[0].maxBytes,16384);
+});
+
+test('execution mode changes revoke current context and stale replies for session and encrypted records', async () => {
+  for(const encrypted of [false,true]){
+    const h=harness(encrypted?vaultStatus():status());
+    const modePatch=encrypted?{mode:'encrypted',persistence:{state:'unlocked',reason:'none',keyAccess:'read-write'}}:{};
+    await ready(h,modePatch);
+    const initial=h.controller.getSnapshot();
+    h.controller.setScope({...initial.scope,executionMode:'local'}); await settle();
+    assert.equal(h.controller.getSnapshot().contextCurrent,false);
+    assert.equal(h.controller.getSnapshot().reviewReady,false);
+    assert.equal(h.controller.getSnapshot().previewDeadline,null);
+    assert(h.controller.getSnapshot().entryGeneration>initial.entryGeneration);
+    const first=h.latest('context');assert.equal(first.args.executionMode,'local');
+    // A response for the old mode cannot establish local currentness.
+    first.resolve(status(2,modePatch));await settle();
+    assert.equal(h.controller.getSnapshot().contextCurrent,false);
+    h.controller.submitContext();await settle();
+    h.latest('context').resolve(status(3,{...modePatch,context:{...context,revision:3,executionMode:'local'}}));await settle();
+    assert.equal(h.controller.getSnapshot().contextCurrent,true);
+    h.controller.setScope({...h.controller.getSnapshot().scope,executionMode:'github'});await settle();
+    assert.equal(h.controller.getSnapshot().contextCurrent,false);
+    assert.equal(preparationScopeChanged({scope:{platform:'android',stage:'candidate',purpose:'full'}},
+      {platform:'android',stage:'candidate',purpose:'full',executionMode:'local'}),true);
+    h.latest('context').resolve(status(4,{...modePatch,context:{...context,revision:4}}));await settle();
+    assert.equal(h.controller.getSnapshot().contextCurrent,true); // omitted remains GitHub.
+    h.controller.dispose();
+  }
 });

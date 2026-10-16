@@ -3,13 +3,14 @@
 import type { ApiError } from './types.ts';
 import type { AssetFileKind, AssetKind, AssetReason, AssetStatus, CredentialAssessment } from './assetSessionTypes.ts';
 
-export const ASSET_FILE_KINDS = ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8'] as const;
+export const ASSET_FILE_KINDS = ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8', 'google-service-account'] as const;
 export const ASSET_KINDS = [...ASSET_FILE_KINDS, 'google-wif', 'project-read-token', 'apple-review-contact', 'apple-review-demo', 'operation-commitment'] as const;
 export const ASSET_REASONS = ['none', 'closed', 'unqualified', 'unsupported-platform', 'unsupported-filesystem', 'unsupported-format', 'invalid-request', 'busy', 'source-refused', 'source-changed', 'material-limit', 'parser-limit', 'project-overlap', 'exclusion-unconfirmed', 'capacity', 'context-stale', 'user-cancelled', 'review-expired', 'deadline', 'document-lost', 'shutdown', 'cleanup-unknown',
   'vault-uninitialized', 'vault-key-missing', 'vault-keyring-locked', 'vault-keyring-denied', 'vault-keyring-unavailable', 'vault-provider-unsupported', 'vault-corrupt', 'vault-interrupted', 'vault-durability-unknown'] as const;
 export const ASSET_PLATFORMS = ['android', 'ios', 'project'] as const;
 export const ASSET_STAGES = ['candidate', 'external-testing', 'production'] as const;
 export const ASSET_PURPOSES = ['full', 'signing', 'store'] as const;
+export const ASSET_EXECUTION_MODES = ['github', 'local'] as const;
 export const SESSION_FIELDS = {
   'android-keystore': ['storePassword', 'keyAlias', 'keyPassword'],
   'android-firebase': [],
@@ -17,6 +18,7 @@ export const SESSION_FIELDS = {
   'apple-p12': ['password'],
   'apple-profile': [],
   'asc-p8': ['keyId', 'issuerId'],
+  'google-service-account': [],
   'google-wif': ['provider', 'serviceAccount'],
   'project-read-token': ['token'],
   'apple-review-contact': ['contactFirstName', 'contactLastName', 'contactEmail', 'contactPhone'],
@@ -26,6 +28,7 @@ export const SESSION_FIELDS = {
 const fieldLayout: Record<AssetKind, readonly (readonly [string, string])[]> = {
   'android-keystore': [['file', 'ANDROID_KEYSTORE_BASE64'], ['storePassword', 'ANDROID_KEYSTORE_PASSWORD'], ['keyAlias', 'ANDROID_KEY_ALIAS'], ['keyPassword', 'ANDROID_KEY_PASSWORD']],
   'android-firebase': [['file', 'ANDROID_GOOGLE_SERVICES_JSON_BASE64']],
+  'google-service-account': [['file', 'GOOGLE_APPLICATION_CREDENTIALS']],
   'ios-firebase': [['file', 'IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64']],
   'apple-p12': [['file', 'APPLE_DISTRIBUTION_P12_BASE64'], ['password', 'APPLE_DISTRIBUTION_P12_PASSWORD']],
   'apple-profile': [['file', 'APPLE_PROVISIONING_PROFILE_BASE64']],
@@ -38,7 +41,7 @@ const fieldLayout: Record<AssetKind, readonly (readonly [string, string])[]> = {
 };
 const states = ['not-applicable', 'missing', 'unknown', 'invalid', 'configured', 'format-valid'];
 const issues = ['not-run', 'incomplete', 'unsupported-format', 'unsupported-variant', 'material-limit', 'parser-limit', 'empty-file', 'suffix-conflict', 'malformed-container', 'required-missing', 'value-nul', 'scalar-format', 'pkcs8-algorithm', 'firebase-shape', 'identity-mismatch'];
-const scopes = ['value-admission', 'identifier-format', 'credential-format', 'file-nonempty', 'suffix-consistency', 'container-parse', 'jks-header', 'pfx-envelope', 'cms-signed-data-envelope', 'pkcs8-envelope', 'json-document', 'plist-document', 'ec-p256-identifiers', 'firebase-shape', 'application-identity'];
+const scopes = ['value-admission', 'identifier-format', 'credential-format', 'file-nonempty', 'suffix-consistency', 'container-parse', 'jks-header', 'pfx-envelope', 'cms-signed-data-envelope', 'pkcs8-envelope', 'json-document', 'plist-document', 'ec-p256-identifiers', 'firebase-shape', 'application-identity', 'service-account-format'];
 const encoder = new TextEncoder();
 type ObjectValue = Record<string, unknown>;
 function object(value: unknown): value is ObjectValue {
@@ -54,7 +57,9 @@ export function assetCounter(value: unknown): value is number { return Number.is
 function token(value: unknown): value is string { return typeof value === 'string' && value.length === 32 && /^[0-9a-f]{32}$/u.test(value); }
 function projectId(value: unknown): value is string { return typeof value === 'string' && value.length >= 1 && value.length <= 64 && /^[A-Za-z0-9_-]+$/u.test(value); }
 function scope(value: unknown): boolean {
-  return keys(value, ['platform', 'stage', 'purpose']) && one(value.platform, ASSET_PLATFORMS) && one(value.stage, ASSET_STAGES) && one(value.purpose, ASSET_PURPOSES);
+  const names = object(value) && Object.hasOwn(value, 'executionMode') ? ['platform', 'stage', 'purpose', 'executionMode'] : ['platform', 'stage', 'purpose'];
+  return keys(value, names) && one(value.platform, ASSET_PLATFORMS) && one(value.stage, ASSET_STAGES) && one(value.purpose, ASSET_PURPOSES)
+    && (!Object.hasOwn(value, 'executionMode') || one(value.executionMode, ASSET_EXECUTION_MODES));
 }
 function list(value: unknown, maximum: number, check: (value: unknown) => boolean): value is unknown[] {
   return Array.isArray(value) && value.length <= maximum && value.every(check);
@@ -120,7 +125,7 @@ function assessment(value: unknown): value is CredentialAssessment {
   if (!Array.isArray(value.fields) || value.fields.length !== layout.length || !value.fields.every((field, index) => {
     const expected = layout[index];
     return !!expected && keys(field, ['id', 'requirement', 'presence', 'state', 'issues', 'checks']) &&
-      field.id === expected[0] && field.requirement === `MOBILE_RELEASE_${expected[1]}` && one(field.presence, ['missing', 'supplied']) && one(field.state, states) &&
+      field.id === expected[0] && field.requirement === (expected[1] === 'GOOGLE_APPLICATION_CREDENTIALS' ? expected[1] : `MOBILE_RELEASE_${expected[1]}`) && one(field.presence, ['missing', 'supplied']) && one(field.state, states) &&
       list(field.issues, 15, (item) => one(item, issues)) && new Set(field.issues).size === field.issues.length &&
       list(field.checks, 14, (check) => keys(check, ['scope', 'outcome']) && one(check.scope, scopes) && one(check.outcome, ['passed', 'failed', 'asserted-pass', 'asserted-fail']));
   })) return false;
@@ -153,8 +158,8 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
         value.persistence.keyAccess === 'read-only' && value.persistence.state !== 'interrupted' ||
         value.persistence.keyAccess === 'read-write' && !one(value.persistence.state, ['unlocked', 'mutating']) ||
         value.persistence.keyAccess === 'locked' && one(value.persistence.state, ['unlocked', 'mutating']) : value.persistence !== null) return null;
-    if (value.context !== null && (!keys(value.context, ['revision', 'projectId', 'platform', 'stage', 'purpose']) || !assetCounter(value.context.revision) ||
-        !projectId(value.context.projectId) || !scope({ platform: value.context.platform, stage: value.context.stage, purpose: value.context.purpose }))) return null;
+    if (value.context !== null && (!keys(value.context, object(value.context) && Object.hasOwn(value.context, 'executionMode') ? ['revision', 'projectId', 'platform', 'stage', 'purpose', 'executionMode'] : ['revision', 'projectId', 'platform', 'stage', 'purpose']) || !assetCounter(value.context.revision) ||
+        !projectId(value.context.projectId) || !scope({ platform: value.context.platform, stage: value.context.stage, purpose: value.context.purpose, ...(Object.hasOwn(value.context, 'executionMode') ? { executionMode: value.context.executionMode } : {}) }))) return null;
     if (!list(value.records, encrypted ? 128 : 32, (record) => keys(record, ['recordId', 'revision', 'kind', 'availability', 'storage', 'label', 'payloadState']) && token(record.recordId) &&
         assetCounter(record.revision) && one(record.kind, ASSET_KINDS) && one(record.availability, ['unassigned', 'assigned', 'mutation-pending']) &&
         one(record.storage, ['session', 'encrypted']) && record.storage === value.mode && assetLabelFits(record.label) && one(record.payloadState, ['not-checked', 'assessed']) &&
@@ -199,7 +204,7 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
     // observable even before all its originals settle.
     if (typed.mode === 'closed' && (typed.context !== null || typed.records.length || typed.assignments.length ||
         typed.operation?.selectionToken || evaluated || typed.operation?.preview)) return null;
-    if (evaluated && (!typed.context || !['platform', 'stage', 'purpose'].every((key) => evaluated.context[key as keyof typeof evaluated.context] === typed.context![key as keyof typeof evaluated.context]))) return null;
+    if (evaluated && (!typed.context || !['platform', 'stage', 'purpose'].every((key) => evaluated.context[key as keyof typeof evaluated.context] === typed.context![key as keyof typeof evaluated.context]) || (evaluated.context.executionMode ?? 'github') !== (typed.context.executionMode ?? 'github'))) return null;
     const preview = typed.operation?.preview;
     if (preview && ['save', 'bind'].includes(preview.action) && (!evaluated || evaluated.applicability.state !== 'required' || !['configured', 'format-valid'].includes(evaluated.state))) return null;
     if (preview) {
@@ -249,8 +254,8 @@ export function assetRequestFits(command: AssetCommand, value: unknown): boolean
     case 'vault_commit': case 'vault_bind': return keys(value, ['previewToken']) && token(value.previewToken);
     case 'vault_discard': return keys(value, ['operationId']) && assetCounter(value.operationId);
     case 'vault_prepare_delete': return recordRef(value);
-    case 'asset_context': return keys(value, ['projectId', 'draft', 'platform', 'stage', 'purpose']) && projectId(value.projectId) && object(value.draft) &&
-      assetJsonFits(value.draft, 524288) && scope({ platform: value.platform, stage: value.stage, purpose: value.purpose });
+    case 'asset_context': return keys(value, object(value) && Object.hasOwn(value, 'executionMode') ? ['projectId', 'draft', 'platform', 'stage', 'purpose', 'executionMode'] : ['projectId', 'draft', 'platform', 'stage', 'purpose']) && projectId(value.projectId) && object(value.draft) &&
+      assetJsonFits(value.draft, 524288) && scope({ platform: value.platform, stage: value.stage, purpose: value.purpose, ...(Object.hasOwn(value, 'executionMode') ? { executionMode: value.executionMode } : {}) });
     case 'asset_choose': return keys(value, ['contextRevision', 'kind', 'replacement']) && assetCounter(value.contextRevision) && isAssetFileKind(value.kind) &&
       (value.replacement === null || recordRef(value.replacement));
     case 'credential_prepare': {

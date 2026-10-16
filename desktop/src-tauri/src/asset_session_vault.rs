@@ -975,7 +975,7 @@ mod tests {
         }
     }
     fn context_data() -> Arc<NativeContext> {
-        Arc::new(NativeContext { revision: 1, project_id: "data-project".into(),
+        Arc::new(NativeContext { execution_mode: commands::ExecutionMode::Github, revision: 1, project_id: "data-project".into(),
             project: asset_source::RegisteredRoot { path: "/inert/project".into(),
                 identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
             registry_generation: 7, draft: Vec::new(), platform: Platform::Android, stage: Stage::Candidate, purpose: Purpose::Store })
@@ -1072,7 +1072,7 @@ mod tests {
     }
     fn loan_state() -> DocumentState {
         let (mut state, _) = model(Operation::Bind, true);
-        state.context = Some(Arc::new(NativeContext { revision: 1, project_id: "data-project".into(),
+        state.context = Some(Arc::new(NativeContext { execution_mode: commands::ExecutionMode::Github, revision: 1, project_id: "data-project".into(),
             project: context_data().project.clone(), registry_generation: 7, draft: b"{}".to_vec(),
             platform: Platform::Ios, stage: Stage::Candidate, purpose: Purpose::Signing }));
         state
@@ -1230,7 +1230,7 @@ mod tests {
     #[test]
     fn loan_currentness_rejects_equal_counter_replacement_new_context_registry_and_reassignment() {
         let kind = if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) { Kind::AppleP12 } else { Kind::GoogleWif };
-        for changed in 0..6 {
+        for changed in 0..7 {
             let mut state = loan_state(); let key = publish_loan_data(&mut state, kind, 3);
             let native = state.context.as_ref().unwrap().clone();
             assert!(assigned_payload(&state, &key, kind, &native).is_some());
@@ -1241,7 +1241,10 @@ mod tests {
                 2 => state.vault.as_mut().unwrap().registry_generation += 1,
                 3 => revoke_record(&mut state, &key),
                 4 => state.assignments[0].availability = AssignmentAvailability::Unavailable,
-                _ => state.vault.as_mut().unwrap().revoked = true,
+                5 => state.vault.as_mut().unwrap().revoked = true,
+                _ => { let old=state.context.as_ref().unwrap();state.context=Some(Arc::new(NativeContext {
+                    execution_mode:commands::ExecutionMode::Local,revision:old.revision,project_id:old.project_id.clone(),project:old.project.clone(),
+                    registry_generation:old.registry_generation,draft:old.draft.clone(),platform:old.platform,stage:old.stage,purpose:old.purpose })); },
             }
             assert!(assigned_payload(&state, &key, kind, &native).is_none(), "changed={changed}");
             assert!(!assignment_available(&state, &state.assignments[0]));

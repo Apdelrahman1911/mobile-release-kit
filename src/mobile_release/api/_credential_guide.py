@@ -1,7 +1,8 @@
 """Closed, versioned credential guidance from the selected package only.
 
 This is static presentation data, not credential admission or requiredness.
-credential_requirements remains the sole stage/platform/purpose selector. No
+credential_requirements remains the CI stage/platform/purpose selector. The
+assessment service separately selects explicit local ADC in place of WIF. No
 credential value, source file, keyring or native/service capability is observed.
 """
 from __future__ import annotations
@@ -72,7 +73,19 @@ _KIND_LAYOUT = {
         ('version', 'OPERATION_COMMITMENT_KEY_VERSION', 'text', ()),
     )),
 }
+_KIND_LAYOUT["google-service-account"] = ("android", (
+    ("file", "GOOGLE_APPLICATION_CREDENTIALS", "file", (".json",)),
+))
 KIND_IDS = tuple(_KIND_LAYOUT)
+
+
+def requirement_name(suffix: str) -> str:
+    # Local ADC is an owned file role, not a GitHub secret/base64 setting.
+    return suffix if suffix == "GOOGLE_APPLICATION_CREDENTIALS" else "MOBILE_RELEASE_" + suffix
+
+
+def assessment_material_limit(name: str) -> int:
+    return 16 * 1024 if name == "GOOGLE_APPLICATION_CREDENTIALS" else material_size_limit(name)
 CONTROL_IDS = ("project", "platform", "stage", "purpose", "mode", "label", "choose", "prepare",
                "review", "save", "assign", "replace", "delete", "cancel", "discard", "lock")
 STATE_IDS = ("unknown", "missing", "invalid", "configured", "format-valid", "native-not-run",
@@ -131,13 +144,14 @@ def _guide(value: object) -> CredentialGuide:
         _text_list(kind["notVerified"], 8)
         for raw_field, (field_id, suffix, input_kind, suffixes) in zip(_list(kind["fields"], len(layout)), layout):
             entry = _object(raw_field, _FIELD_FIELDS)
-            name = "MOBILE_RELEASE_" + suffix
-            alternatives = [name.removesuffix("_BASE64") + "_PATH"] if input_kind == "file" else []
+            name = requirement_name(suffix)
+            alternatives = ([name.removesuffix("_BASE64") + "_PATH"]
+                            if input_kind == "file" and name != "GOOGLE_APPLICATION_CREDENTIALS" else [])
             _require(entry["id"] == field_id and entry["requirement"] == name and entry["input"] == input_kind)
             _require(type(entry["alternatives"]) is list and entry["alternatives"] == alternatives)
             _require(type(entry["suffixes"]) is list and entry["suffixes"] == list(suffixes))
             if input_kind == "file":
-                _require(type(entry["maxBytes"]) is int and entry["maxBytes"] == material_size_limit(name))
+                _require(type(entry["maxBytes"]) is int and entry["maxBytes"] == assessment_material_limit(name))
             else:
                 _require(entry["maxBytes"] is None)
             _help(entry, field=True)

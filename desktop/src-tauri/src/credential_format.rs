@@ -18,6 +18,8 @@ use serde::{de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor}, Serializ
 mod plist_xml;
 #[path = "credential_apple.rs"]
 mod apple;
+#[path = "credential_google.rs"]
+mod google;
 
 const JKS_LIMIT: usize = 32 * 1024 * 1024;
 const JSON_LIMIT: usize = 4 * 1024 * 1024;
@@ -39,7 +41,7 @@ const NO_KEY: u32 = u32::MAX;
 const PARSE_ERROR: &str = "credential document refused";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FileKind { AndroidKeystore, AndroidFirebase, IosFirebase, AppleP12, AppleProfile, AscP8 }
+pub(crate) enum FileKind { AndroidKeystore, AndroidFirebase, IosFirebase, AppleP12, AppleProfile, AscP8, GoogleServiceAccount }
 
 pub(crate) struct Interrupted;
 
@@ -68,6 +70,8 @@ enum RejectedReason { EmptyFile, MalformedContainer }
 #[derive(Serialize)]
 #[serde(tag = "format")]
 enum Observed {
+    #[serde(rename = "google-service-account-json")]
+    GoogleServiceAccountJson { #[serde(rename = "byteCount")] byte_count: u64 },
     #[serde(rename = "jks")]
     Jks { #[serde(rename = "byteCount")] byte_count: u64, version: u8 },
     #[serde(rename = "firebase-json")]
@@ -151,7 +155,7 @@ pub(crate) fn inspect(
     kind: FileKind, bytes: &[u8], stop: &mut dyn FnMut() -> bool,
 ) -> Result<FileObservation, Interrupted> {
     if stop() { return Err(Interrupted); }
-    let maximum = match kind { FileKind::AndroidKeystore | FileKind::AppleP12 => JKS_LIMIT,
+    let maximum = match kind { FileKind::GoogleServiceAccount => 16 * 1024, FileKind::AndroidKeystore | FileKind::AppleP12 => JKS_LIMIT,
         FileKind::AndroidFirebase | FileKind::IosFirebase | FileKind::AppleProfile | FileKind::AscP8 => JSON_LIMIT };
     let observation = if bytes.len() > maximum {
         FileObservation::unavailable(UnavailableReason::MaterialLimit)
@@ -165,6 +169,7 @@ pub(crate) fn inspect(
             FileKind::AppleP12 => apple::pfx(bytes, stop),
             FileKind::AppleProfile => apple::profile(bytes, stop),
             FileKind::AscP8 => apple::p8(bytes, stop),
+            FileKind::GoogleServiceAccount => google::inspect(bytes, stop),
         };
         match parsed {
             Ok(observation) => observation,

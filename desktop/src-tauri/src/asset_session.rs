@@ -62,6 +62,9 @@ pub(crate) use vault::KeyringInitializationAdmission;
 #[path = "asset_session_ios_signing.rs"]
 mod ios_signing;
 pub(crate) use ios_signing::{IOSSigningMaterial, MATERIAL_PREFIX as IOS_MATERIAL_PREFIX, MATERIAL_SUFFIX as IOS_MATERIAL_SUFFIX};
+#[path = "asset_session_store_material.rs"]
+mod store_material;
+pub(crate) use store_material::SelectedStoreMaterial;
 #[path = "asset_session_github_secret.rs"]
 mod github_secret;
 pub(crate) use github_secret::{GitHubSecretMaterial, GitHubSecretFrame};
@@ -145,7 +148,7 @@ struct TokenBatch { selection: Token, record: Token, preview: Token, bind: Token
 struct RecordKey { id: Token, revision: u32 }
 struct NativeContext {
     revision: u32, project_id: String, project: asset_source::RegisteredRoot, registry_generation: u32,
-    draft: Vec<u8>, platform: Platform, stage: Stage, purpose: Purpose,
+    draft: Vec<u8>, platform: Platform, stage: Stage, purpose: Purpose, execution_mode: commands::ExecutionMode,
 }
 // Native admission tuple for one DATA-only browse. It is neither an asset
 // context nor a project registration and contains no draft/record authority.
@@ -283,7 +286,8 @@ struct PersistenceStatus { state: &'static str, reason: Reason, key_access: &'st
 struct StorageStatus { effect: &'static str, durability: &'static str, cleanup: &'static str }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ContextStatus { revision: u32, project_id: String, platform: Platform, stage: Stage, purpose: Purpose }
+struct ContextStatus { revision: u32, project_id: String, platform: Platform, stage: Stage, purpose: Purpose,
+    #[serde(skip_serializing_if = "commands::ExecutionMode::is_github")] execution_mode: commands::ExecutionMode }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OperationStatus {
@@ -1884,6 +1888,20 @@ mod lookup_memory {
         { census.add(future)?;if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes) }
     }
 
+    // Future Store owner adds its actual owned scratch/framing separately; this
+    // counts the same context/payload originals once, not copied secret buffers.
+    pub(super) fn store_admission_bytes(document:&Arc<Inner>,state:&DocumentState,loan:&Arc<SelectedStoreMaterial>,
+        future:usize)->Result<usize,Problem>{
+        let mut census=Census {current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
+            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        let(context,payload)=loan.census_parts();census.context(context)?;census.payload(payload)?;
+        census.arc_cells::<SelectedStoreMaterial>()?;census.add(loan.own_retained_heap_bytes())?;
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
+        census.add(std::mem::size_of::<Census<'_>>())?;census.add(future)?;
+        if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes)
+    }
+
     pub(super) fn variable_admission_bytes(document:&Arc<Inner>,state:&DocumentState,loan:&Arc<GitHubVariableMaterial>,
         original_bytes:usize)->Result<usize,Problem>{
         let mut census=Census {current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
@@ -1946,7 +1964,7 @@ mod lookup_memory {
             Arc::new(Material { origin: MaterialOrigin::Selected(asset_source::CapturedSource::memory_data(Vec::with_capacity(capacity))), observation })
         }
         fn data_context() -> Arc<NativeContext> {
-            Arc::new(NativeContext { revision: 1, project_id: "data-project".into(),
+            Arc::new(NativeContext { execution_mode: commands::ExecutionMode::Github, revision: 1, project_id: "data-project".into(),
                 project: asset_source::RegisteredRoot { path: "/inert/project".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
                 registry_generation: 1, draft: Vec::with_capacity(97), platform: Platform::Android, stage: Stage::Candidate, purpose: Purpose::Signing })
         }
@@ -2231,6 +2249,14 @@ fn macos_session_kind(platform: Platform, stage: Stage, purpose: Purpose, kind: 
     }
 }
 fn session_kind_gate(context: &NativeContext, kind: Kind) -> Result<(), AssetError> {
+    if kind == Kind::GoogleServiceAccount {
+        return if context.execution_mode == commands::ExecutionMode::Local && context.platform == Platform::Android
+            && matches!(context.purpose, Purpose::Full | Purpose::Store) && kind.enabled() { Ok(()) }
+            else { Err(AssetError::new(Reason::UnsupportedFormat)) };
+    }
+    if context.execution_mode == commands::ExecutionMode::Local && kind == Kind::GoogleWif {
+        return Err(AssetError::new(Reason::UnsupportedFormat));
+    }
     if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
         && !macos_session_kind(context.platform, context.stage, context.purpose, kind) {
         return Err(AssetError::new(Reason::UnsupportedFormat));
@@ -3990,7 +4016,7 @@ impl DocumentBinding {
             capability: Capability { available: capability_reason == Reason::None, reason: capability_reason },
             modes: StorageCapabilities::projection(capability_reason, persistence_qualified),
             context: if private_redacted { None } else { state.context.as_ref().map(|context| ContextStatus { revision: context.revision, project_id: context.project_id.clone(),
-                platform: context.platform, stage: context.stage, purpose: context.purpose }) }, operation,
+                platform: context.platform, stage: context.stage, purpose: context.purpose, execution_mode: context.execution_mode }) }, operation,
             records: if redacted || asset_mode(state) == "closed" { Vec::new() } else if encrypted_mode(state) { encrypted_summaries(state) } else { state.records.iter().map(|record| RecordStatus { storage: "session", label: None,
                 payload_state: if record_assessed(state, &record.key) { "assessed" } else { "not-checked" }, record_id: record.key.id.clone(), revision: record.key.revision,
                 kind: record.payload.kind, availability: if record.mutation_pending { "mutation-pending" } else if state.assignments.iter().any(|a| a.record_id == record.key.id && a.record_revision == record.key.revision && assignment_available(state, a)) { "assigned" } else { "unassigned" } }).collect() },
@@ -4029,6 +4055,9 @@ impl DocumentBinding {
         } else { Ok(self.snapshot(&state)) }
     }
     pub(crate) fn context(&self, args: commands::Context<'_>) -> Result<AssetStatus, AssetError> {
+        if args.execution_mode == commands::ExecutionMode::Local && !cfg!(all(target_os="macos", target_pointer_width="64", any(target_arch="aarch64",target_arch="x86_64"))) {
+            return Err(AssetError::new(Reason::UnsupportedPlatform));
+        }
         if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
             && !macos_session_context(args.platform, args.stage, args.purpose) {
             return Err(AssetError::new(Reason::UnsupportedFormat));
@@ -4060,7 +4089,7 @@ impl DocumentBinding {
         let project_id = commands::copy_text(args.project_id)?;
         let retired_slot_context = retire_context_authority(&mut state, Instant::now());
         state.next_context = revision;
-        let old = state.context.replace(Arc::new(NativeContext { revision, project_id, project, registry_generation, draft,
+        let old = state.context.replace(Arc::new(NativeContext { execution_mode: args.execution_mode, revision, project_id, project, registry_generation, draft,
             platform: args.platform, stage: args.stage, purpose: args.purpose }));
         // Keep even this data-only retirement registered. Another context
         // admission cannot accumulate caller-local old draft buffers while an
@@ -4476,6 +4505,9 @@ fn assemble_request(payload: &Payload, context: &NativeContext) -> Result<Assess
     ctx.insert("platform".into(), serde_json::to_value(context.platform).map_err(|_| AssetError::invalid())?);
     ctx.insert("stage".into(), serde_json::to_value(context.stage).map_err(|_| AssetError::invalid())?);
     ctx.insert("purpose".into(), serde_json::to_value(context.purpose).map_err(|_| AssetError::invalid())?);
+    if context.execution_mode != commands::ExecutionMode::Github {
+        ctx.insert("executionMode".into(), serde_json::to_value(context.execution_mode).map_err(|_| AssetError::invalid())?);
+    }
     let mut input = Map::new(); input.insert("kind".into(), Value::String(payload.kind.name().into())); input.insert("fields".into(), fields); input.insert("observation".into(), observation);
     let mut root = Map::new(); root.insert("schemaVersion".into(), Value::from(1)); root.insert("policyVersion".into(), Value::String(commands::POLICY.into()));
     root.insert("context".into(), Value::Object(ctx)); root.insert("input".into(), Value::Object(input));
@@ -7911,7 +7943,7 @@ mod tests {
     pub(super) fn evidence_cancel_preserves_source_context_records_github_and_first_cleanup_body() {
         let (mut state, owner) = evidence_model(3); let at = Instant::now();
         let root = asset_source::RegisteredRoot { path: "/synthetic/never-opened/project".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
-        let context = Arc::new(NativeContext { revision: 9, project_id: "source-project".to_owned(), project: root, registry_generation: 7,
+        let context = Arc::new(NativeContext { execution_mode: commands::ExecutionMode::Github, revision: 9, project_id: "source-project".to_owned(), project: root, registry_generation: 7,
             draft: b"{\"unchanged\":true}".to_vec(), platform: Platform::Android, stage: Stage::Candidate, purpose: Purpose::Full });
         state.context = Some(context.clone());
         state.records.push(Record { key: RecordKey { id: token('a'), revision: 1 }, payload: scalar(), mutation_pending: false });
@@ -8095,7 +8127,7 @@ mod tests {
 
 
     fn input_scope(platform: Platform, stage: Stage, purpose: Purpose) -> Arc<NativeContext> {
-        Arc::new(NativeContext { revision: 1, project_id: "inert-input-project".into(),
+        Arc::new(NativeContext { execution_mode: commands::ExecutionMode::Github, revision: 1, project_id: "inert-input-project".into(),
             project: asset_source::RegisteredRoot { path: "/inert/never-opened/project".into(),
                 identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
             registry_generation: 1, draft: b"{}".to_vec(), platform, stage, purpose })

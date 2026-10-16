@@ -38,7 +38,7 @@ SCALARS = {
     "android-keystore": {"storePassword": "fictional-store-password", "keyAlias": "fixture_alias", "keyPassword": "fictional-key-password"},
     "android-firebase": {}, "apple-p12": {"password": "fictional-p12-password"}, "apple-profile": {},
     "asc-p8": {"keyId": "FIXTURE123", "issuerId": "12345678-1234-1234-1234-123456789abc"},
-    "ios-firebase": {},
+    "ios-firebase": {}, "google-service-account": {},
     "google-wif": {"provider": "projects/123/locations/global/workloadIdentityPools/fixture/providers/fixture",
                    "serviceAccount": "fixture@fixture-project.iam.gserviceaccount.com"},
     "project-read-token": {"token": "fictional-read-token"},
@@ -67,6 +67,7 @@ def client(package="org.assessment.fixture"):
 
 def observed(kind):
     extra = {
+        "google-service-account": {"format": "google-service-account-json"},
         "android-keystore": {"format": "jks", "version": 2},
         "android-firebase": {"format": "firebase-json", "document": {"root": "object", "clients": [client()]}},
         "apple-p12": {"format": "pkcs12", "version": 3, "authSafe": "data"},
@@ -79,7 +80,7 @@ def observed(kind):
 
 def request(kind="android-keystore", *, platform=None, stage="candidate", purpose="full"):
     return {"schemaVersion": 1, "policyVersion": "credential-policy-v1",
-            "context": {"draft": draft(), "platform": platform or guide._KIND_LAYOUT[kind][0], "stage": stage, "purpose": purpose},
+            "context": {"draft": draft(), "platform": platform or guide._KIND_LAYOUT[kind][0], "stage": stage, "purpose": purpose, **({"executionMode": "local"} if kind == "google-service-account" else {})},
             "input": {"kind": kind, "fields": copy.deepcopy(SCALARS[kind]), "observation": observed(kind)}}
 
 
@@ -105,10 +106,10 @@ class CredentialAssessmentTests(unittest.TestCase):
                 body = request(kind, stage="external-testing" if kind in ("apple-review-contact", "apple-review-demo", "operation-commitment") else "candidate")
                 result = execute("credentials.assess", body)
                 self.assertEqual(set(result), {"schemaVersion", "policyVersion", "kind", "context", "applicability", "state", "fields", "identity", "assurance"})
-                self.assertEqual(result["context"], {key: body["context"][key] for key in ("platform", "stage", "purpose")})
+                self.assertEqual(result["context"], {key: value for key, value in body["context"].items() if key != "draft"})
                 self.assertEqual(result["applicability"], {"state": "required", "reason": "selected"})
                 self.assertEqual([(field["id"], field["requirement"]) for field in result["fields"]],
-                                 [(field_id, "MOBILE_RELEASE_" + suffix) for field_id, suffix, _, _ in layout])
+                                 [(field_id, guide.requirement_name(suffix)) for field_id, suffix, _, _ in layout])
                 firebase = kind in ("android-firebase", "ios-firebase")
                 self.assertEqual(result["state"], "format-valid" if firebase else "configured")
                 self.assertEqual(result["identity"], "match" if firebase else "not-applicable")
@@ -127,6 +128,37 @@ class CredentialAssessmentTests(unittest.TestCase):
                     "serviceValidation": "not-run", "releaseReadiness": "unknown",
                 })
                 self.assertNotIn("credentialsRead", result["assurance"])
+
+    def test_local_google_mode_requires_private_observation_without_changing_ci_requirements(self):
+        for stage in ("candidate", "external-testing", "production"):
+            for purpose in ("full", "store", "signing"):
+                body = request("google-service-account", stage=stage, purpose=purpose)
+                result = execute("credentials.assess", body)
+                self.assertEqual(result["state"], "not-applicable" if purpose == "signing" else "configured")
+                self.assertEqual(result["fields"][0]["requirement"], "GOOGLE_APPLICATION_CREDENTIALS")
+                self.assertEqual(result["context"]["executionMode"], "local")
+                self.assertNotIn("private_key", encoded(result).decode())
+                self.assertEqual(result["assurance"]["serviceValidation"], "not-run")
+                for mode in (None, "github"):
+                    other = copy.deepcopy(body)
+                    if mode is None: other["context"].pop("executionMode")
+                    else: other["context"]["executionMode"] = mode
+                    self.assertEqual(execute("credentials.assess", other)["state"], "not-applicable")
+                wif = request("google-wif", stage=stage, purpose=purpose)
+                self.assertEqual(execute("credentials.assess", wif)["state"], "not-applicable" if purpose == "signing" else "configured")
+                wif["context"]["executionMode"] = "local"
+                self.assertEqual(execute("credentials.assess", wif)["state"], "not-applicable")
+        body = request("google-service-account")
+        for mode in (None, "LOCAL", "ci", True, {"local": True}):
+            bad = copy.deepcopy(body); bad["context"]["executionMode"] = mode; self.refusal(bad)
+        for key, value in (("byteCount", 16385), ("account", "private-account-canary"), ("document", {"private_key": "canary"})):
+            bad = copy.deepcopy(body); bad["input"]["observation"][key] = value
+            self.refusal(bad, "assessment_limit" if key == "byteCount" else "assessment_invalid_request")
+        body["context"]["draft"]["android"] = {"enabled": False}
+        self.assertEqual(execute("credentials.assess", body)["applicability"]["reason"], "platform-disabled")
+        selected = {item.name for item in requirements(ReleaseConfig(Path("unused"), Path("."), draft()), "candidate", purpose="store", platforms=("android",))}
+        self.assertIn("MOBILE_RELEASE_GOOGLE_WIF_PROVIDER", selected)
+        self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", selected)
 
     def test_review_and_commitment_requiredness_format_and_private_projection(self):
         for kind in ("apple-review-contact", "apple-review-demo", "operation-commitment"):
@@ -164,11 +196,13 @@ class CredentialAssessmentTests(unittest.TestCase):
 
     def test_stage_purpose_platform_service_selection_uses_only_shared_requirements(self):
         for kind, (platform, layout) in guide._KIND_LAYOUT.items():
-            names = {"MOBILE_RELEASE_" + suffix for _, suffix, _, _ in layout}
+            names = {guide.requirement_name(suffix) for _, suffix, _, _ in layout}
             for stage in ("candidate", "external-testing", "production"):
                 for purpose in ("full", "signing", "store"):
                     with self.subTest(kind=kind, stage=stage, purpose=purpose):
                         body = request(kind, stage=stage, purpose=purpose)
+                        # This matrix proves the unchanged CI requirement selector.
+                        body["context"].pop("executionMode", None)
                         config = ReleaseConfig(Path("unused"), Path("."), body["context"]["draft"])
                         selection = () if platform == "project" else (platform,)
                         selected = {item.name for item in requirements(config, stage, purpose=purpose, platforms=selection)} & names
@@ -609,7 +643,7 @@ class CredentialAssessmentTests(unittest.TestCase):
         for kind, (_, layout) in guide._KIND_LAYOUT.items():
             if observed(kind) is None:
                 continue
-            limit = policy.material_size_limit("MOBILE_RELEASE_" + layout[0][1])
+            limit = guide.assessment_material_limit(guide.requirement_name(layout[0][1]))
             for count in (1, limit):
                 body = request(kind)
                 body["input"]["observation"]["byteCount"] = count

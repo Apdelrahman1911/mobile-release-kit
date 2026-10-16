@@ -209,7 +209,7 @@ pub(crate) struct InstalledSourceFacts {
 }
 
 pub(crate) fn material_limit(kind: FileKind) -> usize {
-    match kind { FileKind::AndroidKeystore | FileKind::AppleP12 => 32 * 1024 * 1024,
+    match kind { FileKind::GoogleServiceAccount => 16 * 1024, FileKind::AndroidKeystore | FileKind::AppleP12 => 32 * 1024 * 1024,
         FileKind::AndroidFirebase | FileKind::IosFirebase | FileKind::AppleProfile | FileKind::AscP8 => 4 * 1024 * 1024 }
 }
 fn private_file(mode: u32) -> bool { mode & 0o077 == 0 }
@@ -609,7 +609,7 @@ mod linux {
             FileKind::AndroidFirebase => suffix.eq_ignore_ascii_case(b"json"),
             FileKind::IosFirebase => suffix.eq_ignore_ascii_case(b"plist"),
             FileKind::AscP8 => suffix.eq_ignore_ascii_case(b"p8"),
-            FileKind::AppleP12 | FileKind::AppleProfile => return Err(Reason::UnsupportedPlatform),
+            FileKind::AppleP12 | FileKind::AppleProfile | FileKind::GoogleServiceAccount => return Err(Reason::UnsupportedPlatform),
         };
         if !matches || !leaf.contains(&b'.') { return Err(Reason::UnsupportedFormat); } Ok(())
     }

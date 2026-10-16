@@ -59,7 +59,7 @@ pub(crate) fn suffix(kind: FileKind, path: &Path) -> Result<(), Reason> {
         FileKind::AndroidKeystore => &["jks", "keystore"],
         FileKind::AndroidFirebase => &["json"],
         FileKind::IosFirebase => &["plist"],
-        FileKind::AppleP12 | FileKind::AppleProfile | FileKind::AscP8 => return Err(Reason::UnsupportedPlatform),
+        FileKind::AppleP12 | FileKind::AppleProfile | FileKind::AscP8 | FileKind::GoogleServiceAccount => return Err(Reason::UnsupportedPlatform),
     };
     let extension = path.extension().and_then(|extension| extension.to_str()).ok_or(Reason::UnsupportedFormat)?;
     if !allowed.iter().any(|allowed| extension.eq_ignore_ascii_case(allowed)) { return Err(Reason::UnsupportedFormat); }
