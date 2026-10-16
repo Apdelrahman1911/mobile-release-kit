@@ -49,6 +49,7 @@ jobs:
         working-directory: desktop
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
         with:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -71,7 +72,7 @@ jobs:
             test_metadata_images test_metadata_images_protocol test_release_version \
             test_workflow_edit_protocol test_workflow_recovery_engine \
             test_offline_preflight test_project_recovery test_macos_workflow_admission \
-            test_macos_android_ui_result
+            test_macos_android_ui_result test_local_release_intent
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24.20.0'
@@ -88,6 +89,15 @@ jobs:
           path: desktop/dist/
           if-no-files-found: error
           retention-days: 1
+      - name: Remove disposable frontend outputs after the artifact handoff
+        if: always() && steps.checkout.outcome == 'success'
+        env:
+          FRONTEND_UPLOADED: ${{ steps.frontend.outcome == 'success' }}
+        run: |
+          rm -rf -- node_modules
+          if [ "$FRONTEND_UPLOADED" = true ]; then
+            rm -rf -- dist
+          fi
 
   native:
     name: Native tests and build (${{ matrix.os }})
@@ -105,8 +115,10 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: '1.98.0'
       CARGO_INCREMENTAL: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/desktop/.ci-target
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
         with:
           persist-credentials: false
       - name: Download only the frontend artifact produced by this run
@@ -131,3 +143,6 @@ jobs:
         run: cargo build --locked --bin mobile-release-kit-desktop --no-default-features --features desktop-shell,development-runtime
       - name: Build the embedded-frontend shell
         run: cargo build --locked --bin mobile-release-kit-desktop --no-default-features --features desktop-shell,custom-protocol
+      - name: Remove only this job's build and downloaded frontend outputs
+        if: always() && steps.checkout.outcome == 'success'
+        run: rm -rf -- ../.ci-target ../dist

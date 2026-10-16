@@ -70,6 +70,25 @@ Actual carrier, package, certificate, profile, and TLS integrity checks remain.
 These changes do not authorize an old package as a new build or establish a
 successful native UI operation.
 
+Routine jobs remove their own disposable outputs after their final consumer:
+frontend `node_modules`, `dist` after successful same-run upload, and each native
+job's dedicated `desktop/.ci-target` plus downloaded `dist`. Shared Cargo/npm
+caches are not deleted. These cleanup steps also run after ordinary failures;
+forced runner termination can prevent any final step from executing. The pure
+local Store draft tests are included in the fast Python selection; they do not
+establish local Store execution or authentication.
+
+### Small Mac component builds
+
+`desktop-macos-components.yml` compiles only the Applications launcher with the
+native macOS SDK on Apple Silicon and Intel, then checks its plist and Mach-O
+architecture. It has no signing environment, Store credentials, installed app
+invocation or retained carrier download. Its new temporary output and compiler
+cache are disposable and removed after their last consumer. This is component
+compilation, not launcher runtime, installation, signing or distribution evidence.
+The dedicated verification branch can exercise this small job without rebuilding
+the Desktop application or repeating notarization.
+
 ### Trusted checkout instead of frozen helper code
 
 Aqua, the normal UI runner, GitHub tool preparation, Android dependency
