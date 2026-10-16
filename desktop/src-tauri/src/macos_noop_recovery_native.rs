@@ -936,7 +936,7 @@ mod tests {
             children.sort_by(|a,b|a.0.cmp(&b.0));
             RemovalSnapshotDirectory{path:path.into(),identity:d.identity_data(),flags:0,children}
         }).collect();
-        let mut capture=RemovalSnapshotCapture{root:0,versions:None,prior_archives:None,controls,directories,
+        let mut capture=RemovalSnapshotCapture{root:0,versions:None,prior_archives:None,controls,directories,restore_stages:Vec::new(),
             complete:false,quote:Some((0,0)),failed:false};capture.finish(RemovalArchiveCensus::empty(0).unwrap()).unwrap();
         let binding=selected.current_data().binding_data();
         let request=BindingData::new_data(BindingInputData{request_id:&"1".repeat(32),root_nonce:&"2".repeat(32),

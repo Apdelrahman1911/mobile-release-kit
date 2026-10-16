@@ -38,7 +38,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, installer, installer-recovery, installer-frames, app, app-contracts, ui-build, store-runtime]
+        options: [all, integration, launcher, installer, installer-tests, installer-recovery, installer-frames, app, app-contracts, ui-build, store-runtime]
 
 permissions:
   contents: read
@@ -98,8 +98,8 @@ jobs:
         run: rm -rf -- "$WORK_ROOT"
 
   installer-check:
-    name: ${{ inputs.component == 'installer-frames' && 'Test installer frames' || inputs.component == 'installer-recovery' && 'Test installer recovery' || 'Check installer and remover' }} (${{ matrix.arch }})
-    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-recovery' || inputs.component == 'installer-frames'
+    name: ${{ inputs.component == 'installer-tests' && 'Test installer contracts' || inputs.component == 'installer-frames' && 'Test installer frames' || inputs.component == 'installer-recovery' && 'Test installer recovery' || 'Check installer and remover' }} (${{ matrix.arch }})
+    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-tests' || inputs.component == 'installer-recovery' || inputs.component == 'installer-frames'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -139,7 +139,9 @@ jobs:
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
           # Separate invocations keep the two mutually exclusive roles distinct;
           # dependencies are compiled once in this job's shared target directory.
-          if [[ "$INSTALLER_CHECKS" != installer-recovery && "$INSTALLER_CHECKS" != installer-frames ]]; then
+          # Fixture-only fixes reuse passed normal-role compilation. Still run
+          # every installer contract and Restore transaction test below.
+          if [[ "$INSTALLER_CHECKS" != installer-tests && "$INSTALLER_CHECKS" != installer-recovery && "$INSTALLER_CHECKS" != installer-frames ]]; then
             rustup run 1.98.1 cargo check --locked --no-default-features \
               --features macos-installed-installer --bin mrk-macos-install
             rustup run 1.98.1 cargo check --locked --no-default-features \
