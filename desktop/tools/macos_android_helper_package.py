@@ -2635,9 +2635,14 @@ class Operation:
 
     def publish(self, name, data, *, mode=0o600, parent=None):
         if parent is not None:
-            need((self.phase == SAME_PACKAGE_PHASE and parent is self.same_package_case
+            prepared = (self.prepared_staging and self.phase == "package-install" and parent is self.target_entry
+                and 1 <= len(self.calls) <= 16 and self.calls[-1].get("role") == "prepared-resource-memory"
+                and self.calls[-1].get("returned") is True and self.calls[-1].get("capturesSettled") is False
+                and name in tuple("android-helper-prepared-resource-memory-" + f"{len(self.calls):02d}" + suffix
+                                  for suffix in (".stdout", ".stderr", ".status")))
+            need(mode == 0o600 and (prepared or (self.phase == SAME_PACKAGE_PHASE and parent is self.same_package_case
                   or self.phase == UPDATE_PHASE and self.update is not None and parent is self.update["case"])
-                 and name == "installer-output.status" and mode == 0o600, "same-package-status-purpose")
+                 and name == "installer-output.status"), "same-package-status-purpose")
             self.recheck_directory(parent)
         fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                      mode, dir_fd=(self.work_entry if parent is None else parent)["fd"])
@@ -2755,6 +2760,13 @@ class Operation:
                  and all(c.get("returned") is True and c.get("capturesSettled") is True for c in self.calls),
                  "same-package-original-boundary")
             self.notary_clock()
+        prepared_capture = self.prepared_staging and role == "prepared-resource-memory"
+        if prepared_capture:
+            need(self.phase == "package-install" and self.target_entry is not None and len(self.calls) < 16
+                 and all(row.get("role") == role and row.get("returned") is True
+                         and row.get("capturesSettled") is True and row.get("returncode") == 0 for row in self.calls),
+                 "prepared-resource-capture-order")
+            self.recheck_directory(self.target_entry)
         record = {"role": recorded_role, "entered": True, "returned": False, "capturesSettled": False}
         self.calls.append(record)
         try:
@@ -2799,9 +2811,15 @@ class Operation:
         record.update(returned=True, returncode=result.returncode,
                       stdoutSha256=digest(result.stdout), stderrSha256=digest(result.stderr))
         prefix = "android-helper-" + ((self.phase + "-") if self.removal or self.phase == SAME_PACKAGE_PHASE else "") + recorded_role
-        self.publish(prefix + (".jsonl" if role == "build" else ".stdout"), result.stdout)
-        self.publish(prefix + ".stderr", result.stderr)
-        self.publish(prefix + ".status", (str(result.returncode) + "\n").encode("ascii"))
+        # Prepared acquisition/hydration share a work root. Each resource
+        # sample belongs to this original target, not a reusable work-root name.
+        # The calls row was retained before dispatch; failed slots never replay.
+        capture_parent = self.target_entry if prepared_capture else None
+        if prepared_capture:
+            prefix += "-" + f"{len(self.calls):02d}"
+        self.publish(prefix + (".jsonl" if role == "build" else ".stdout"), result.stdout, parent=capture_parent)
+        self.publish(prefix + ".stderr", result.stderr, parent=capture_parent)
+        self.publish(prefix + ".status", (str(result.returncode) + "\n").encode("ascii"), parent=capture_parent)
         if self.phase == "package-install" and role == "installer":
             self.publish("installer-output.txt", result.stdout + result.stderr)
         record["capturesSettled"] = True  # All original output/readback/closes returned.

@@ -320,6 +320,102 @@ class PreparedPackageData(unittest.TestCase):
                             self.assertTrue(later.receipt['originalClosesKnown'] and later.receipt['targetRetired'])
                             self.assertFalse(later.receipt['passed'])
 
+    def resource_original(self, helper, tool, root, target=P.TARGETS[0]):
+        import subprocess
+        import time
+        work=root/'work';work.mkdir(mode=0o700,exist_ok=True)
+        checkout=root/'source';checkout.mkdir(exist_ok=True)
+        environment=dict(GITHUB_SHA='1'*40,GITHUB_WORKFLOW_SHA='1'*40,GITHUB_RUN_ID='41',
+            GITHUB_RUN_ATTEMPT='2',GITHUB_WORKFLOW_REF=P.REPOSITORY+'/'+P.WORKFLOW+'@refs/heads/'+P.BRANCH,
+            MRK_MACOS_PACKAGE_ROLE='ordinary-image')
+        body=(b'Mach Virtual Memory Statistics: (page size of 4096 bytes)\n'
+              b'Pages free: 1000000.\nPages inactive: 1.\nPages speculative: 1.\n')
+        def native(argv, **kwargs):
+            self.assertEqual(argv,['/usr/bin/vm_stat'])
+            self.assertEqual(kwargs['timeout'],10)
+            return subprocess.CompletedProcess(argv,0,body,b'')
+        dispatch=mock.Mock(side_effect=native)
+        op=helper.Operation(SimpleNamespace(run_owned=dispatch),checkout,work,'package-install',environment,tool,target=target)
+        op.prepared_staging=True
+        op.open()
+        op.package_started=op.package_observed=time.monotonic_ns()
+        op.package_endpoint=op.package_started+180_000_000_000
+        op.mount_api=object()
+        # Only native Darwin host admission/counters are inert. The ResourceGuard,
+        # VM-output parser, dispatch ledger, publisher/readback/closes are real.
+        with mock.patch.object(op,'normal_mount_host'):
+            guard=P.ResourceGuard(op)
+        return op,guard,dispatch,body
+
+    def test_resource_samples_and_next_prepared_owner_use_original_target_captures(self):
+        _,tool,helper=real_modules()
+        for target in P.TARGETS:
+            with self.subTest(target=target),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory)
+                for owner_number,samples in ((1,16),(2,2)):
+                    op,guard,dispatch,body=self.resource_original(helper,tool,root,target)
+                    try:
+                        with mock.patch.object(guard.data,'host_memory_data',return_value=(4096,16<<30)):
+                            for _ in range(samples):guard.check(dict(memoryBytes=1,diskBytes=1))
+                            if owner_number==1:
+                                with self.assertRaisesRegex(ValueError,'prepared-resource-sample-bound'):
+                                    guard.check(dict(memoryBytes=1,diskBytes=1))
+                        self.assertEqual(dispatch.call_count,samples)
+                        for index in range(1,samples+1):
+                            prefix=op.work/op.target_name/('android-helper-prepared-resource-memory-%02d'%index)
+                            for suffix,expected in (('.stdout',body),('.stderr',b''),('.status',b'0\n')):
+                                self.assertEqual(Path(str(prefix)+suffix).read_bytes(),expected)
+                        self.assertTrue(all(row['returned'] and row['capturesSettled'] for row in op.calls))
+                    finally:P.finish_staging(op,sys.exception())
+                    self.assertTrue(op.receipt['targetRetired'] and op.receipt['originalClosesKnown'])
+                    self.assertTrue(all(row['closed'] and row['fd'] is None for row in op.entries))
+                    self.assertFalse((op.work/op.target_name).exists())
+                    # Existing work-root captures from an earlier version are
+                    # neither deleted nor overwritten by the next owner.
+                    for suffix in ('.stdout','.stderr','.status'):
+                        previous=op.work/('android-helper-prepared-resource-memory'+suffix)
+                        if owner_number==1:previous.write_bytes(b'prior original')
+                        self.assertEqual(previous.read_bytes(),b'prior original')
+
+    def test_occupied_resource_capture_refuses_and_never_reuses_failed_slot(self):
+        _,tool,helper=real_modules()
+        with tempfile.TemporaryDirectory() as directory:
+            op,guard,dispatch,_=self.resource_original(helper,tool,Path(directory))
+            occupied=op.work/op.target_name/'android-helper-prepared-resource-memory-01.stdout'
+            occupied.write_bytes(b'preserved original');occupied.chmod(0o600)
+            failure=None
+            try:
+                with mock.patch.object(guard.data,'host_memory_data',return_value=(4096,16<<30)):
+                    with self.assertRaises(FileExistsError) as raised:guard.check(dict(memoryBytes=1,diskBytes=1))
+                    failure=raised.exception
+                    with self.assertRaises(helper.Refused):guard.check(dict(memoryBytes=1,diskBytes=1))
+                self.assertEqual(dispatch.call_count,1)
+                self.assertEqual(len(op.calls),1)
+                self.assertTrue(op.calls[0]['returned']);self.assertFalse(op.calls[0]['capturesSettled'])
+                with self.assertRaises(helper.Refused):op.publish('unexpected.stdout',b'not allowed',parent=op.target_entry)
+                self.assertEqual(occupied.read_bytes(),b'preserved original')
+            finally:P.finish_staging(op,failure)
+            self.assertFalse(op.receipt['targetRetired'])
+            self.assertTrue(op.receipt['originalClosesKnown'])
+            self.assertEqual(occupied.read_bytes(),b'preserved original')
+            self.assertIn('prepared-staging-original-closes',failure.__notes__)
+
+    def test_nonstaging_call_keeps_existing_capture_scope(self):
+        _,tool,helper=real_modules()
+        with tempfile.TemporaryDirectory() as directory:
+            op,_,dispatch,body=self.resource_original(helper,tool,Path(directory))
+            op.prepared_staging=False
+            try:
+                op.call('prepared-resource-memory',['/usr/bin/vm_stat'],op.native_environment(),
+                        cwd=op.work,timeout=10,limit=65536)
+                self.assertEqual((op.work/'android-helper-prepared-resource-memory.stdout').read_bytes(),body)
+                self.assertEqual(sorted(p.name for p in (op.work/op.target_name).iterdir()),['tmp'])
+                with self.assertRaises(helper.Refused):
+                    op.publish('android-helper-prepared-resource-memory-01.stdout',b'not allowed',parent=op.target_entry)
+            finally:op.finish()
+            self.assertEqual(dispatch.call_count,1)
+            self.assertTrue(op.receipt['targetRetired'] and op.receipt['originalClosesKnown'])
+
     def test_failed_consuming_close_preserves_original_exception(self):
         class Op:
             def finish(self): raise KeyboardInterrupt('inert close')
