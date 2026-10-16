@@ -28,7 +28,7 @@ mutations require separate owner approval.
    native file/folder/multiple selection, contextual field help, progress,
    actionable errors, history and domain-specific recovery. Preserve unrelated
    files and reject changed originals instead of silently overwriting them.
-3. **Credentials and local builds.** Finish signing and read-only online checks;
+3. **Credentials and local builds.** Finish signing and nonpublishing online checks;
    verify Keychain persistence/replacement/restart/update behavior, doctor,
    Android build/sign/inspect and real iOS archive/export/recovery. Format
    assessment is not successful signing or account access.
@@ -75,7 +75,10 @@ and reselection; credential persistence and denied access; both native build/sig
 paths; GitHub setup and lifecycle; local release policy and evidence separation;
 timeouts/network ambiguity/partial recovery; update/reinstall/uninstall integrity.
 Use fixtures for Store mutations unless the owner separately authorizes a real
-test. Read-only authenticated service checks still require suitable credentials.
+test. Authenticated service checks still require suitable credentials and consent.
+Google Play access preflight creates and attempts to delete a temporary uncommitted
+edit; cancellation or network failure can leave it to expire. It never commits
+the edit or publishes a release and must not be described as zero-write.
 
 All available four slots may now be used (primary plus three subagents), with
 disjoint edits and independent reviews for important boundaries. Serialize heavy
@@ -180,6 +183,54 @@ required artifacts/evidence.
 - The previously authorized Mac SSH route timed out again on 2026-10-16.
   No build or worker was started there. Native verification continues through
   GitHub macOS runners rather than blocking independent work.
+- Applications-launcher packaging is integrated in `3815dcbf`: the fixed G2
+  signing owner signs its original bundle before the outer application; the
+  existing single payload notarization submission now staples and verifies the
+  launcher separately. Four focused methods passed (including refusal cases
+  and the unchanged two-ticket route), with independent implementation acceptance.
+  These use inert Apple-service boundaries; actual native package qualification
+  is still required. No additional notarization submission was introduced.
+- The small signed Store loader check `38891319610/1`, source `0958cbb9`, failed
+  on both architectures before native signature or Ruby calls. The restored
+  component contains legitimate `%gem_name%`/`%plugin_name%` templates and
+  internal-space filenames rejected by overly narrow packaging path rules.
+  A complete public unsigned inventory also exposed input-only empty directories
+  and deeper paths. Context-scoped packaging fixes are in progress; the passed
+  signing run is not being repeated. Both failed jobs cleaned their task outputs.
+- The corrected standalone loader passed on both Macs in `38896469051/1`,
+  source `49ecaf2b04b5ae3c284d6e9a91a358c018fd6b7f`: ARM job `116958026367`,
+  Intel job `116958026790`. Each verified all 133 Developer ID images, executed
+  the real CRC32/Fastlane loader smoke with networking denied, and rechecked
+  all 6,534 files plus the original directory roster. Both cleanup steps passed.
+  No Store lane, rebuild, signing or notarization ran. App, launcher and installer
+  jobs were deliberately skipped; this does not establish their completion.
+
+
+- The combined local Rust gate now passes 11 focused tests: local Store consent,
+  private credential borrowing, original deadlines, cancellation and dropped GO,
+  cleanup/finality, reciprocal operation exclusion, contextual runtime paths,
+  and genuine-prior-state Noop recovery. The first test compile caught a missing
+  new-domain arm in an offline-only test helper; its explicit refusal arm was
+  corrected. The successful rerun compiled in 1m53s and ran in 0.02s, with zero
+  failures or ignored tests. No native installer or Store call ran. Store
+  integration and the broader Python packaging slice have independent source
+  acceptance; native installer path parity and current Mac compilation remain
+  the next gate, not a completed installed-app milestone.
+
+- `6968400c` integrates the local Google Play preflight UI/native bridge and
+  scoped signed-Store packaging paths. Five frontend tests pass, including a
+  failed-Cancel regression: only an explicit retry may resend the exact original
+  cancellation; automatic loops and clearing unknown ownership remain forbidden.
+  App-only native run `38900278450/1` is in progress on both Macs. Installer work
+  is being checked separately so it does not hold up app compiler feedback or
+  require rebuilding the app for installer-only changes.
+- Interrupted Noop recovery and the native installer/remover Store-path adapter
+  have independent source acceptance. The next native installer selection runs
+  nine named inert cases, including the two new recovery cases and a real
+  path/partial-roster/removal-ancestry regression. This does not yet prove actual
+  interrupted installation or removal. RestoreFixedApp pre-publication work is
+  detached and incomplete; Update and later Restore interruption paths remain
+  unresolved. No new recovery feature is counted as installed-runtime verified.
 
 Important local logs are retained under
 `/dev/shm/mrk-ci-simplification-results-20261015/`; compiler targets and test

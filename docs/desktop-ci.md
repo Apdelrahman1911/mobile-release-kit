@@ -80,19 +80,24 @@ establish local Store execution or authentication.
 
 ### Small Mac component builds
 
-`desktop-macos-components.yml` compiles the Applications launcher with the
-native macOS SDK on Apple Silicon and Intel, then checks its plist and Mach-O
-architecture. A separate job uses ordinary `cargo check` for the exclusive
-Installer and Remover roles on both architectures using their supported Rust
-1.98.1 clock/toolchain tuple. Three named, pure Applications-adapter byte/data
-tests run in the Installer test binary; the actual Installer/Remover main and
-filesystem adapter do not run. Dispatch can select only
-the launcher, only the Installer/Remover check, or both. The workflow has no signing environment, Store credentials, installed app
-invocation or retained carrier download. Its new temporary output and compiler
-cache are disposable and removed after their last consumer. This is component
-compilation, not launcher runtime, installation, signing or distribution evidence.
-The dedicated verification branch can exercise this small job without rebuilding
-the Desktop application or repeating notarization.
+`desktop-macos-components.yml` supports targeted manual selections:
+
+- `launcher`: Swift compilation, plist, architecture and linkage checks on both Macs.
+- `installer`: native Installer/Remover compilation plus the named pure
+  Applications/recovery tests; no Installer/Remover main or filesystem adapter runs.
+- `installer-recovery`: only the named recovery tests after unchanged compilation
+  and launcher tests have already passed.
+- `app`: frontend and the actual packaged Tauri image graph, plus the two named
+  memory-only Mac Store cleanup/ownership tests. This is not installed UI testing.
+- `integration`: the changed app and installer checks together, without rebuilding
+  the unchanged Swift launcher or re-signing the Store component.
+- `store-runtime`: reuse the selected signed Ruby/Fastlane component, verify its
+  native signatures, run its loader with networking denied and check its originals.
+  No Store lane, signing, notarization or application build runs.
+
+These jobs use no signing environment or Store credentials. Task-owned compiler
+outputs and caches are removed after their final consumer. Compilation and loader
+results do not establish installation, signed distribution or feature completeness.
 
 ### Trusted checkout instead of frozen helper code
 

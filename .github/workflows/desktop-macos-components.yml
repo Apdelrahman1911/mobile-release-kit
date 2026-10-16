@@ -10,6 +10,7 @@ on:
       - desktop/src-tauri/src/macos_applications*.rs
       - desktop/src-tauri/src/bin/macos_install.rs
       - desktop/src-tauri/src/macos_install*.rs
+      - desktop/src-tauri/src/macos_noop_recovery_native.rs
       - desktop/src-tauri/Cargo.toml
       - desktop/src-tauri/Cargo.lock
       - desktop/src-tauri/build.rs
@@ -23,6 +24,7 @@ on:
       - desktop/src-tauri/src/macos_applications*.rs
       - desktop/src-tauri/src/bin/macos_install.rs
       - desktop/src-tauri/src/macos_install*.rs
+      - desktop/src-tauri/src/macos_noop_recovery_native.rs
       - desktop/src-tauri/Cargo.toml
       - desktop/src-tauri/Cargo.lock
       - desktop/src-tauri/build.rs
@@ -34,7 +36,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, launcher, installer, installer-recovery, app, store-runtime]
+        options: [all, integration, launcher, installer, installer-recovery, app, store-runtime]
 
 permissions:
   contents: read
@@ -95,7 +97,7 @@ jobs:
 
   installer-check:
     name: Check installer and remover (${{ matrix.arch }})
-    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'installer' || inputs.component == 'installer-recovery'
+    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-recovery'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -141,17 +143,23 @@ jobs:
             rustup run 1.98.1 cargo check --locked --no-default-features \
               --features macos-installed-remover --bin mrk-macos-remove
           fi
-          # Only launcher and existing recovery-contract byte/data tests run. The Installer main, live
-          # filesystem adapter and removal entry point are not invoked.
-          tests=(installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality)
+          # Only named launcher, path and recovery byte/data tests run. The
+          # Installer main, live filesystem adapter and remover do not run.
+          tests=(installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality
+                 installer::maintenance::noop_recovery::tests::preserved_prefix_transport_is_closed_without_relaxing_ordinary_controls
+                 installer::maintenance::noop_recovery::tests::completed_recovery_snapshot_rehome_requires_receipt_bound_originals_and_prefixes)
           # Use only for a recovery-test-only correction after both native roles
           # and launcher tests already passed; normal runs keep their full scope.
+          expected_tests=3
           if [[ "$INSTALLER_CHECKS" != installer-recovery ]]; then
-            tests+=(installer::applications::tests::)
+            tests+=(installer::applications::tests::
+                    installer::maintenance::store_path_tests::contextual_store_paths_keep_copy_recovery_and_removal_scoped)
+            expected_tests=9
           fi
           rustup run 1.98.1 cargo test --locked --no-default-features \
             --features macos-installed-installer --bin mrk-macos-install -- \
-            "${tests[@]}" --test-threads=1
+            "${tests[@]}" --test-threads=1 | tee "$WORK_ROOT/installer-contract-tests.log"
+          grep -Eq "^test result: ok\. $expected_tests passed; 0 failed; 0 ignored;" "$WORK_ROOT/installer-contract-tests.log"
       - name: Remove only this job's disposable compiler and dependencies
         if: always() && steps.work.outputs.root != ''
         shell: bash
@@ -162,7 +170,7 @@ jobs:
   app-check:
     # This targeted path checks the real packaged Tauri graph without producing
     # another signed/notarized package or rebuilding unrelated native helpers.
-    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'app')
+    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app')
     name: Compile packaged app (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30

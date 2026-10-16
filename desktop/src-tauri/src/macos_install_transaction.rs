@@ -110,11 +110,40 @@ fn pair(expected: &ReleaseSetData, action: ActionData, old: Option<&ReleaseData>
 struct StateLink { invocation: String, sha256: String }
 impl StateLink { fn valid(&self) -> bool { hex(&self.invocation, 32) && hex(&self.sha256, 64) } }
 
+/// Closed reference to an immutable original-preservation receipt. This is
+/// correlation DATA, never authority to discover or move a directory. Native
+/// observation must authenticate the original stage, receipt and old complete
+/// records before using it. Omitted on all legacy/ordinary transactions.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryReferenceData {
+    stage_invocation: String, torn_invocation: String, receipt_sha256: String,
+}
+impl RecoveryReferenceData {
+    pub fn new_data(stage: &str, torn: &str, receipt_sha256: &str) -> Result<Self> {
+        let value = Self { stage_invocation:stage.into(), torn_invocation:torn.into(),
+            receipt_sha256:receipt_sha256.into() };
+        require(value.valid(), TransactionDataError::Binding)?; Ok(value)
+    }
+    fn valid(&self) -> bool { hex(&self.stage_invocation,32) && hex(&self.torn_invocation,32)
+        && self.stage_invocation != self.torn_invocation && hex(&self.receipt_sha256,64) }
+    pub fn stage_invocation_data(&self) -> &str { &self.stage_invocation }
+    pub fn torn_invocation_data(&self) -> &str { &self.torn_invocation }
+    pub fn receipt_sha256_data(&self) -> &str { &self.receipt_sha256 }
+    pub fn receipt_name_data(&self) -> String { format!(".noop-recovery-{}.json",self.torn_invocation) }
+    pub fn preserved_name_data(&self,invocation:&str,role:&str)->Result<String> {
+        require(hex(invocation,32) && matches!(role,"intent"|"state"|"receipt-prefix"),TransactionDataError::Binding)?;
+        Ok(format!(".noop-recovery-{}-{invocation}.{role}.json",self.torn_invocation))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct IntentWire {
     schema_version: u32, kind: String, target: String, invocation: String, request_id: String, action: ActionData,
     previous: Option<ReleaseData>, next: ReleaseData, previous_state: Option<StateLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery: Option<RecoveryReferenceData>,
 }
 /// Validated comparison input only; no Deserialize bypass or mutation methods.
 #[derive(Debug)]
@@ -132,6 +161,7 @@ impl IntentData {
         let value = raw(bytes, INTENT_LIMIT)?;
         record_field(&value, "previous", true)?; record_field(&value, "next", false)?;
         record_field(&value, "previousState", true)?;
+        if value.get("recovery").is_some() { record_field(&value,"recovery",false)?; }
         let wire: IntentWire = decode(value)?;
         header(wire.schema_version, &wire.kind, INTENT_KIND, &wire.target, &wire.invocation, &wire.request_id, expected)?;
         pair(expected, wire.action, wire.previous.as_ref(), &wire.next, current)?;
@@ -139,11 +169,15 @@ impl IntentData {
             None => wire.action == ActionData::FreshInstall,
             Some(link) => link.valid() && link.invocation != wire.invocation && wire.previous.is_some(),
         }, TransactionDataError::Binding)?;
+        require(wire.recovery.as_ref().is_none_or(|r| r.valid()
+            && wire.action == ActionData::SamePackageNoop && r.torn_invocation != wire.invocation),
+            TransactionDataError::Binding)?;
         Ok(Self { wire, body_sha256: digest(bytes) })
     }
     pub fn invocation_data(&self) -> &str { &self.wire.invocation }
     pub fn request_id_data(&self) -> &str { &self.wire.request_id }
     pub fn digest_data(&self) -> &str { &self.body_sha256 }
+    pub fn recovery_data(&self) -> Option<&RecoveryReferenceData> { self.wire.recovery.as_ref() }
     pub fn action_data(&self) -> ActionData { self.wire.action }
     pub fn next_data(&self) -> &ReleaseData { &self.wire.next }
     pub fn previous_data(&self) -> Option<&ReleaseData> { self.wire.previous.as_ref() }
@@ -155,11 +189,19 @@ impl IntentData {
     /// asked to attest its old outer Installer's future exit.
     pub fn encode_data(invocation: &str, request_id: &str, action: ActionData,
         previous: Option<(&StateData, &CapsuleData)>, expected: &ReleaseSetData) -> Result<Vec<u8>> {
+        Self::encode_with_recovery_data(invocation,request_id,action,previous,None,expected)
+    }
+    pub fn encode_with_recovery_data(invocation: &str, request_id: &str, action: ActionData,
+        previous: Option<(&StateData, &CapsuleData)>, recovery: Option<&RecoveryReferenceData>,
+        expected: &ReleaseSetData) -> Result<Vec<u8>> {
+        require(recovery.is_none_or(|r| previous.is_some_and(|(state,_)|
+            r.stage_invocation == state.current_data().instance_data())),TransactionDataError::Binding)?;
         let wire = IntentWire { schema_version: 2, kind: INTENT_KIND.into(),
             target: expected.target_data().target().into(), invocation: invocation.into(), request_id: request_id.into(), action,
             previous: previous.map(|(state, _)| state.wire.current.release.clone()),
             next: expected.current_data().clone(), previous_state: previous.map(|(state, _)| StateLink {
-                invocation: state.wire.invocation.clone(), sha256: state.body_sha256.clone() }) };
+                invocation: state.wire.invocation.clone(), sha256: state.body_sha256.clone() }),
+            recovery:recovery.cloned() };
         let bytes = encode(&wire, INTENT_LIMIT)?;
         let parsed = Self::parse_data(&bytes, expected)?;
         require(previous_matches(&parsed, previous), TransactionDataError::Binding)?;
@@ -259,6 +301,8 @@ struct StateWire {
     schema_version: u32, kind: String, target: String, invocation: String, request_id: String, capsule_invocation: String,
     intended_action: ActionData, phase: StatePhase, current: Generation, retained: Vec<Generation>,
     previous_evidence: Vec<EvidenceRef>, residue: Option<Residue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery: Option<RecoveryReferenceData>,
 }
 #[derive(Debug)]
 pub struct StateData { wire: StateWire, body_sha256: String }
@@ -269,6 +313,7 @@ impl StateData {
         for item in records(&value, "retained", PREDECESSOR_LIMIT)? { generation_shape(item)?; }
         records(&value, "previousEvidence", INVOCATION_LIMIT - 1)?;
         record_field(&value, "residue", true)?;
+        if value.get("recovery").is_some() { record_field(&value,"recovery",false)?; }
         if !field(&value, "residue")?.is_null() { record_field(field(&value, "residue")?, "release", false)?; }
         let wire: StateWire = decode(value)?;
         header(wire.schema_version, &wire.kind, STATE_KIND, &wire.target, &wire.invocation, &wire.request_id, expected)?;
@@ -312,12 +357,18 @@ impl StateData {
         }
         require(wire.phase != StatePhase::InverseRecorded || wire.intended_action == ActionData::Update,
             TransactionDataError::Binding)?;
+        require(wire.recovery.as_ref().is_none_or(|r| r.valid()
+            && wire.intended_action == ActionData::SamePackageNoop && wire.phase == StatePhase::MutationRecorded
+            && r.stage_invocation == wire.current.instance && r.torn_invocation != wire.invocation
+            && !wire.previous_evidence.iter().any(|old|old.invocation == r.torn_invocation)),
+            TransactionDataError::Binding)?;
         Ok(Self { wire, body_sha256: digest(bytes) })
     }
     pub fn invocation_data(&self) -> &str { &self.wire.invocation }
     pub fn request_id_data(&self) -> &str { &self.wire.request_id }
     pub fn digest_data(&self) -> &str { &self.body_sha256 }
     pub fn action_data(&self) -> ActionData { self.wire.intended_action }
+    pub fn recovery_data(&self) -> Option<&RecoveryReferenceData> { self.wire.recovery.as_ref() }
     pub fn current_data(&self) -> GenerationData { GenerationData(self.wire.current.clone()) }
     pub fn retained_data(&self) -> impl Iterator<Item = GenerationData> + '_ {
         self.wire.retained.iter().cloned().map(GenerationData)
@@ -358,7 +409,7 @@ impl StateData {
         let wire = StateWire { schema_version: 2, kind: STATE_KIND.into(), target: intent.wire.target.clone(),
             invocation: intent.wire.invocation.clone(), request_id: intent.wire.request_id.clone(), capsule_invocation: intent.wire.invocation.clone(),
             intended_action: intent.wire.action, phase: StatePhase::MutationRecorded, current: current.0.clone(),
-            retained, previous_evidence: Self::next_evidence(previous)?, residue: None };
+            retained, previous_evidence: Self::next_evidence(previous)?, residue: None, recovery:intent.wire.recovery.clone() };
         let bytes = encode(&wire, STATE_LIMIT)?; Self::parse_data(&bytes, expected)?; Ok(bytes)
     }
     /// Only the known one-inverse path may supply these observations. A failed
@@ -372,8 +423,50 @@ impl StateData {
             intended_action: intent.wire.action, phase: StatePhase::InverseRecorded,
             current: previous.0.wire.current.clone(), retained: previous.0.wire.retained.clone(),
             previous_evidence: Self::next_evidence(Some(previous))?, residue: Some(Residue {
-                invocation: intent.wire.invocation.clone(), release: intent.wire.next.clone(), staging_present, runtime_present }) };
+                invocation: intent.wire.invocation.clone(), release: intent.wire.next.clone(), staging_present, runtime_present }), recovery:None };
         let bytes = encode(&wire, STATE_LIMIT)?; Self::parse_data(&bytes, expected)?; Ok(bytes)
+    }
+}
+
+/// Comparison-only disposition of a Noop's exact State pair. No raw State
+/// can attest a successful interrupted worker; the prior genuine capsule is
+/// required before deriving any allowed writer prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoopStatePlacementData { Unchanged, PendingBeforeSwap, Swapped }
+pub struct NoopRecoveryData {
+    torn_invocation:String, previous_invocation:String, previous_state_sha256:String,
+    previous_capsule_sha256:String, stage_invocation:String, expected_state:Vec<u8>,
+}
+impl NoopRecoveryData {
+    pub fn from_recorded_data(torn:&IntentData, previous:(&StateData,&CapsuleData),
+        expected:&ReleaseSetData)->Result<Self> {
+        require(torn.action_data()==ActionData::SamePackageNoop && previous_matches(torn,Some(previous))
+            && expected.contains_data(previous.0.current_data().release_data()),TransactionDataError::Binding)?;
+        let stage=previous.0.current_data().instance_data().to_owned();
+        require(torn.recovery_data().is_none_or(|r|r.stage_invocation==stage),TransactionDataError::Binding)?;
+        Ok(Self {torn_invocation:torn.invocation_data().into(),previous_invocation:previous.0.invocation_data().into(),
+            previous_state_sha256:previous.0.digest_data().into(),previous_capsule_sha256:previous.1.digest_data().into(),
+            stage_invocation:stage,expected_state:StateData::encode_applied_data(torn,Some(previous),
+                &previous.0.current_data(),expected)?})
+    }
+    pub fn expected_state_data(&self)->&[u8] {&self.expected_state}
+    pub fn torn_invocation_data(&self)->&str {&self.torn_invocation}
+    pub fn stage_invocation_data(&self)->&str {&self.stage_invocation}
+    pub fn previous_data(&self)->(&str,&str,&str) {
+        (&self.previous_invocation,&self.previous_state_sha256,&self.previous_capsule_sha256)
+    }
+    pub fn state_placement_data(&self, previous:&[u8], canonical:&[u8], archived:Option<&[u8]>)
+        ->Result<NoopStatePlacementData> {
+        require(!previous.is_empty() && previous.len()<=STATE_LIMIT
+            && digest(previous)==self.previous_state_sha256 && canonical.len()<=STATE_LIMIT
+            && archived.is_none_or(|a|a.len()<=STATE_LIMIT),TransactionDataError::Binding)?;
+        match (canonical==previous,archived) {
+            (true,None)=>Ok(NoopStatePlacementData::Unchanged),
+            (true,Some(pending)) if self.expected_state.starts_with(pending)
+                && pending!=previous=>Ok(NoopStatePlacementData::PendingBeforeSwap),
+            (false,Some(old)) if old==previous && canonical==self.expected_state=>Ok(NoopStatePlacementData::Swapped),
+            _=>Err(TransactionDataError::Transition),
+        }
     }
 }
 
@@ -529,7 +622,10 @@ fn evidence_matches(state: &StateWire, previous: Option<(&StateData, &CapsuleDat
 pub fn correspondence_data(intent: &IntentData, previous: Option<(&StateData, &CapsuleData)>, state: Option<&StateData>,
     capsule: Option<&CapsuleData>) -> CorrespondenceData {
     if intent.wire.previous_state.is_some() && previous.is_none() { return CorrespondenceData::Pending; }
-    if !previous_matches(intent, previous) { return CorrespondenceData::Mismatch; }
+    if !previous_matches(intent, previous) || intent.recovery_data().is_some_and(|r|
+        previous.is_none_or(|(old,_)|r.stage_invocation != old.current_data().instance_data())) {
+        return CorrespondenceData::Mismatch;
+    }
     let Some(capsule) = capsule else { return CorrespondenceData::Pending; };
     let c = &capsule.wire; let i = &intent.wire;
     if c.invocation != i.invocation || c.request_id != i.request_id || c.target != i.target || c.intended_action != i.action
@@ -540,7 +636,8 @@ pub fn correspondence_data(intent: &IntentData, previous: Option<(&StateData, &C
     if let Some(state) = state {
         if c.state_sha256.as_deref() != Some(state.body_sha256.as_str()) || state.wire.invocation != i.invocation
             || state.wire.request_id != i.request_id || state.wire.target != i.target || state.wire.intended_action != i.action
-            || c.actual_current.as_ref() != Some(&state.wire.current.release) { return CorrespondenceData::Mismatch; }
+            || c.actual_current.as_ref() != Some(&state.wire.current.release)
+            || state.wire.recovery != i.recovery { return CorrespondenceData::Mismatch; }
     } else if c.state_sha256.is_some() { return CorrespondenceData::Pending; }
     if matches!(c.outcome, WorkerOutcome::Refused | WorkerOutcome::Partial) {
         return if c.writer.exit_code.is_some_and(|code| code != 0) { CorrespondenceData::FailureRecorded }
@@ -948,6 +1045,73 @@ mod tests {
         replaced["current"]["releaseDirectory"]["inode"] = json!(1000);
         let changed = capsule(&restore, &replaced, "restored-app");
         assert_eq!(compare(&restore, Some(&old), &replaced, &changed), CorrespondenceData::Mismatch);
+    }
+    #[test]
+    fn noop_recovery_reference_requires_genuine_old_finality_and_exact_state_placements() {
+        let e=expected(); let old=state(3,3); let old_raw=bytes(&old);
+        let old_state=StateData::parse_data(&old_raw,&e).unwrap();
+        let old_capsule=CapsuleData::parse_data(&bytes(&prior_capsule(&old)),&e).unwrap();
+        let raw=IntentData::encode_data(&id(9),&id(109),ActionData::SamePackageNoop,
+            Some((&old_state,&old_capsule)),&e).unwrap();
+        assert!(serde_json::from_slice::<Value>(&raw).unwrap().get("recovery").is_none());
+        let torn=IntentData::parse_data(&raw,&e).unwrap();
+        let recovery=NoopRecoveryData::from_recorded_data(&torn,(&old_state,&old_capsule),&e).unwrap();
+        use NoopStatePlacementData as P;
+        let next=recovery.expected_state_data();
+        assert_eq!(recovery.state_placement_data(&old_raw,&old_raw,None),Ok(P::Unchanged));
+        assert_eq!(recovery.state_placement_data(&old_raw,next,Some(&old_raw)),Ok(P::Swapped));
+        for end in [0,1,next.len()/2,next.len()-1,next.len()] {
+            assert_eq!(recovery.state_placement_data(&old_raw,&old_raw,Some(&next[..end])),Ok(P::PendingBeforeSwap));
+        }
+        for (canonical,archive) in [(next,None),(next,Some(next)),(&old_raw[..],Some(&old_raw[..])),
+            (&next[..next.len()-1],Some(&old_raw[..])),(&old_raw[..],Some(b"foreign".as_slice()))] {
+            assert!(recovery.state_placement_data(&old_raw,canonical,archive).is_err());
+        }
+        let mut changed=old_raw.clone(); changed[0]=b'[';
+        assert!(recovery.state_placement_data(&changed,&changed,None).is_err());
+        let reference=RecoveryReferenceData::new_data(old_state.current_data().instance_data(),&id(9),&"a".repeat(64)).unwrap();
+        let retry_raw=IntentData::encode_with_recovery_data(&id(10),&id(110),ActionData::SamePackageNoop,
+            Some((&old_state,&old_capsule)),Some(&reference),&e).unwrap();
+        let retry=IntentData::parse_data(&retry_raw,&e).unwrap();
+        let retry_state_raw=StateData::encode_applied_data(&retry,Some((&old_state,&old_capsule)),
+            &old_state.current_data(),&e).unwrap();
+        let retry_state=StateData::parse_data(&retry_state_raw,&e).unwrap();
+        assert_eq!(retry.recovery_data(),Some(&reference)); assert_eq!(retry_state.recovery_data(),Some(&reference));
+        let retry_value:Value=serde_json::from_slice(&retry_raw).unwrap();
+        let state_value:Value=serde_json::from_slice(&retry_state_raw).unwrap();
+        let mut retry_capsule_value=capsule(&retry_value,&state_value,"same-package");
+        retry_capsule_value["intentSha256"]=json!(retry.digest_data());
+        retry_capsule_value["stateSha256"]=json!(retry_state.digest_data());
+        let retry_capsule=CapsuleData::parse_data(&bytes(&retry_capsule_value),&e).unwrap();
+        assert_eq!(correspondence_data(&retry,Some((&old_state,&old_capsule)),Some(&retry_state),Some(&retry_capsule)),
+            CorrespondenceData::MatchingRecordedData);
+        // Reference removal/substitution cannot be hidden under a genuine
+        // worker capsule: correspondence binds BOTH new intent and State.
+        let mut stripped=state_value.clone();stripped.as_object_mut().unwrap().remove("recovery");
+        let stripped_state=StateData::parse_data(&bytes(&stripped),&e).unwrap();
+        let mut stripped_capsule_value=capsule(&retry_value,&stripped,"same-package");
+        stripped_capsule_value["intentSha256"]=json!(retry.digest_data());
+        let stripped_capsule=CapsuleData::parse_data(&bytes(&stripped_capsule_value),&e).unwrap();
+        assert_eq!(correspondence_data(&retry,Some((&old_state,&old_capsule)),Some(&stripped_state),Some(&stripped_capsule)),
+            CorrespondenceData::Mismatch);
+        for bad in [Value::Null,json!([]),json!({"stageInvocation":id(3),"tornInvocation":id(9),
+            "receiptSha256":"a".repeat(64),"extra":true}),json!({"stageInvocation":id(3),"tornInvocation":id(10),
+            "receiptSha256":"a".repeat(64)})] {
+            let mut changed=retry_value.clone(); changed["recovery"]=bad;
+            assert!(IntentData::parse_data(&bytes(&changed),&e).is_err());
+        }
+        let wrong_stage=RecoveryReferenceData::new_data(&id(99),&id(9),&"a".repeat(64)).unwrap();
+        assert!(IntentData::encode_with_recovery_data(&id(10),&id(110),ActionData::SamePackageNoop,
+            Some((&old_state,&old_capsule)),Some(&wrong_stage),&e).is_err());
+        for fact in ["originalJoined","resultEof","originalClosesKnown","withinOriginalDeadline"] {
+            let mut incomplete=prior_capsule(&old);incomplete["writer"][fact]=json!(false);
+            let incomplete=CapsuleData::parse_data(&bytes(&incomplete),&e).unwrap();
+            assert!(NoopRecoveryData::from_recorded_data(&torn,(&old_state,&incomplete),&e).is_err());
+        }
+        let mut update=retry_value.clone();update["action"]=json!("restore-fixed-app");
+        assert!(IntentData::parse_data(&bytes(&update),&e).is_err());
+        let duplicate=String::from_utf8(retry_raw).unwrap().replacen("\"recovery\":", "\"recovery\":null,\"recovery\":",1);
+        assert!(IntentData::parse_data(duplicate.as_bytes(),&e).is_err());
     }
     #[test]
     fn retained_generations_and_inverse_never_adopt_partial_or_unrelated_state() {
