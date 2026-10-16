@@ -2190,7 +2190,7 @@ mod installer {
             restore_ref:Option<transaction::RestoreReferenceData>,
             restore_root_names:Option<BTreeSet<String>>,
             invocations:InstallInvocationSetData,removal_invocations:usize,
-            restore_joined:Option<restore_recovery::JoinedNamespace>,
+            pub(super) restore_joined:Option<restore_recovery::JoinedNamespace>,
         }
         // Same-book originals, not installed-file trust. An old pair is only
         // bounded retained DATA; the new package selects eligible generations.
@@ -3029,7 +3029,8 @@ mod installer {
             pub(super) fn controls_data(&self)->&[RemovalControlSpanData] {&self.spans.controls}
             pub(super) fn directories_data(&self)->&[RemovalDirectorySpanData] {&self.spans.directories}
             pub(super) fn prior_archives_data(&self)->&[RemovalPriorReferenceData] {&self.spans.prior}
-            pub(super) fn restore_stages_data(&self)->&[restore_recovery::RestoreStageSpanData] {&self.spans.restore_stages}
+            fn restore_stages_data(&self)->&[restore_recovery::RestoreStageSpanData] {&self.spans.restore_stages}
+            pub(super) fn has_restore_stages_data(&self)->bool {!self.spans.restore_stages.is_empty()}
             pub(super) fn restore_transport_data(&self)->bool {self.header.restore_transport}
             pub(super) fn whole_sha256_data(&self)->&[u8;32] {&self.digest}
             pub(super) fn owned_bytes_data(&self)->Result<usize> {
@@ -14505,7 +14506,7 @@ mod installer {
         fn removal_restore_snapshot_post(book:&mut Install,snapshot:usize,digest:[u8;32],
             genesis:Option<&maintenance::RemovalGenesisData>,capture:&maintenance::RemovalSnapshotCapture)->Result<()> {
             if capture.restore_originals_data()?==0 {
-                check(genesis.is_none_or(|g|g.restore_stages_data().is_empty()),"restore-transport-capture-binding")?;
+                check(genesis.is_none_or(|g|!g.has_restore_stages_data()),"restore-transport-capture-binding")?;
                 return Ok(());
             }
             let decoded;

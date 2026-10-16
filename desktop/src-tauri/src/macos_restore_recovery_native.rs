@@ -973,7 +973,7 @@ impl Namespace {
 // Called only after state_after_join reproduced the current State and rebound
 // the held old State to its exact archive. Do NOT call active Observation.post:
 // it intentionally requires an absent App and unchanged canonical old State.
-pub(super) struct JoinedNamespace {namespace:Namespace,names:BTreeSet<String>,before:[u8;32],intent:[u8;32]}
+pub(in crate::installer) struct JoinedNamespace {namespace:Namespace,names:BTreeSet<String>,before:[u8;32],intent:[u8;32]}
 fn names_commitment(names:&BTreeSet<String>)->[u8;32] {
     let mut hash=Sha256::new();hash.update(b"MRK-RESTORE-ROOT-CENSUS-v1\0");
     for name in names {hash.update((name.len() as u64).to_le_bytes());hash.update(name.as_bytes());}
@@ -1397,7 +1397,7 @@ mod tests {
 // Closed V3 transport descriptor. These fixed DATA rows describe an indivisible
 // preserved stage; neither a row nor its matching path admits a partial tree.
 // Every consumer must reproduce the receipt/history census and conserved tree.
-#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+#[derive(Clone,Copy,PartialEq,Eq)]
 pub(super) struct RestoreStageSpanData {
     torn:[u8;16],holder:[u8;16],receipt:[u8;32],root:OriginalIdentityData,
     stage:OriginalIdentityData,top:Identity,commitment:[u8;32],
@@ -1712,7 +1712,7 @@ fn with_transport_index<T>(book:&mut Install,descriptor:&RestoreStageSpanData,sn
 // The SAME peak applies at admission and each actual tree read. Containing
 // lifecycles add their future held-reader envelope rather than assuming those
 // readers will close before the Restore cut; no future close supplies credit.
-pub(super) fn transport_live_data(live:usize,external:usize,held:usize)->bool {
+pub(in crate::installer) fn transport_live_data(live:usize,external:usize,held:usize)->bool {
     live.checked_add(external).and_then(|n|n.checked_add(held))
         .and_then(|n|n.checked_add(40)).is_some_and(|n|n<=96)
 }
@@ -1780,7 +1780,7 @@ fn snapshot_v3_descriptor_wire_and_completed_prefix_data() {
         let at=at as usize;let n=out.len().min(bytes.len()-at).min(7);
         out[..n].copy_from_slice(&bytes[at..at+n]);Ok(n)
     });
-    assert_eq!(RestoreStageSpanData::parse(&mut cursor).unwrap(),descriptor);cursor.eof().unwrap();
+    assert!(RestoreStageSpanData::parse(&mut cursor).unwrap()==descriptor);cursor.eof().unwrap();
     for bad in [RestoreStageSpanData{phase_files:0,..descriptor},RestoreStageSpanData{phase_bytes:8193,..descriptor},
         RestoreStageSpanData{holder:descriptor.torn,..descriptor},RestoreStageSpanData{app_directories:0,..descriptor},
         RestoreStageSpanData{top:Identity{mode:0o040555,..descriptor.top},..descriptor}] {
@@ -1799,7 +1799,7 @@ fn snapshot_v3_descriptor_wire_and_completed_prefix_data() {
             let at=at as usize;let n=out.len().min(v3.len()-at).min(11);
             out[..n].copy_from_slice(&v3[at..at+n]);Ok(n)
         }).unwrap();
-        assert_eq!(decoded.restore_stages_data(),&[descriptor]);
+        assert!(decoded.restore_stages_data()==&[descriptor]);
         let mut wrong_version=v3.clone();wrong_version[..REMOVAL_SNAPSHOT_MAGIC.len()].copy_from_slice(REMOVAL_SNAPSHOT_MAGIC);
         assert!(removal_archive_test_parse(&wrong_version,true).is_err());
         let mut empty=legacy.clone();empty[..REMOVAL_SNAPSHOT_MAGIC.len()].copy_from_slice(REMOVAL_SNAPSHOT_RESTORE_MAGIC);
@@ -1830,7 +1830,7 @@ fn snapshot_v3_descriptor_wire_and_completed_prefix_data() {
         let (directories,files,bytes)=plan.prefix_counts(prefix).unwrap();
         let reference=RehomeReferenceData::observed_data(&plan,child,0,prefix,directories,files,bytes,[5;32]).unwrap();
         let present=prefix>stage_position;
-        assert_eq!(reference.restores.as_slice(),if present{std::slice::from_ref(&descriptor)}else{&[]});
+        assert!(reference.restores.as_slice()==if present{std::slice::from_ref(&descriptor)}else{&[]});
         assert_eq!(reference.storage_bytes_data(),bytes+if present{descriptor.storage_bytes()}else{0});
         assert_eq!(reference.audit_originals_data().unwrap(),2*directories+files
             +if present{descriptor.original_quote().unwrap()-2}else{0});
