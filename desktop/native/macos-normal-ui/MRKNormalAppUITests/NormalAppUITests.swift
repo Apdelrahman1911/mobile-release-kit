@@ -4233,7 +4233,10 @@ final class NormalAppUITests: XCTestCase {
                     "native navigation is not the owned synthetic fixture")
         // A panel container need not expose a mouse hit point. Check an actual
         // always-available control; Open may be disabled until a file is chosen.
-        let cancel = try waitElement(sheet.buttons.matching(identifier: "Cancel"), in: sheet, enabled: true)
+        let cancels = sheet.buttons.matching(identifier: "Cancel")
+        let opens = sheet.buttons.matching(identifier: "Open")
+        let cancel = try waitElement(cancels, in: sheet, enabled: true)
+        let open = try unique(opens, "original native Open control is missing or ambiguous")
         try require(cancel.isHittable, "original native selection panel is not actionable")
         // Open-panel internals do not promise an English AX field label. Bind
         // the editor to this original sheet and its appearance after the shortcut,
@@ -4273,6 +4276,20 @@ final class NormalAppUITests: XCTestCase {
         pathField.click()
         pathField.typeKey("a", modifierFlags: .command)
         pathField.typeText(path)
+        guard let clock = caseClock, let wholeDeadline = journeyDeadline else {
+            throw Refusal.condition("original native navigation deadline missing")
+        }
+        try checkOriginalOwners()
+        // Exact-value settlement and Return completion share the original five
+        // seconds; never renew the interval or replace the outer case deadline.
+        let navigationEnd = min(wholeDeadline, try clock.end(within: 5))
+        @MainActor func navigationRemaining() throws -> TimeInterval {
+            try checkOriginalOwners()
+            return try clock.remaining(5, before: navigationEnd)
+        }
+        let exact = XCTNSPredicateExpectation(predicate: NSPredicate(format:
+            "exists == true AND enabled == true AND hittable == true AND value == %@", path), object: pathField)
+        let settled = XCTWaiter.wait(for: [exact], timeout: try navigationRemaining())
         // One original AX value snapshot. These first-failure sites describe
         // only closed relations to the expected synthetic path, never its text
         // or a guessed explanation. No alternate spelling is accepted.
@@ -4298,9 +4315,24 @@ final class NormalAppUITests: XCTestCase {
                 try require(false, "native navigation value has another mismatch")
             }
         }
-        try require(typedValue == path, "native Go to Folder did not retain the exact fixture path")
+        try require(settled == .completed && typedValue == path,
+                    "native Go to Folder did not settle on the exact fixture path")
+        _ = try navigationRemaining() // Expired settlement cannot authorize Return.
         pathField.typeKey("\r", modifierFlags: [])
-        do { try waitGone(pathField) }
+        do {
+            // An ordinal field query can resolve to a different field after
+            // navigation. The retained parent panel, not that query's absence,
+            // supplies the browsing-ready boundary. File selection comes later.
+            let panelTargets: NSDictionary = ["cancel": cancel, "open": open]
+            let navigable = XCTNSPredicateExpectation(predicate: NSPredicate(format:
+                "cancel.exists == true AND cancel.enabled == true AND cancel.hittable == true AND open.exists == true"),
+                object: panelTargets)
+            try require(XCTWaiter.wait(for: [navigable], timeout: try navigationRemaining()) == .completed,
+                        "original native panel did not become navigable")
+            try require(cancels.count == 1 && opens.count == 1 && cancel.exists && cancel.isEnabled
+                        && cancel.isHittable && open.exists, "original native panel readiness changed")
+            _ = try navigationRemaining() // A late ready sample cannot authorize the next action.
+        }
         catch {
             observeProjectNavigation(pathField, sheet: sheet, role: navigationRole, phase: .timeout,
                                      path: path, initialValue: navigationInitial, value: { pathField.value as? String })
