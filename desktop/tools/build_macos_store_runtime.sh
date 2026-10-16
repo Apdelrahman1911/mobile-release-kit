@@ -6,8 +6,8 @@ umask 077
 mode="${1:-}"; [ "$#" -gt 0 ] && shift
 case "$mode:$#" in
     base:6) ruby_arg="$1"; openssl_arg="$2"; yaml_arg="$3"; ca_arg="$4"; output="$5"; architecture="$6" ;;
-    assemble:4) base_arg="$1"; cache_arg="$2"; output="$3"; architecture="$4" ;;
-    *) echo 'Usage: build_macos_store_runtime.sh base RUBY OPENSSL LIBYAML CA ABSENT_OUTPUT ARCH | assemble BASE GEM_CACHE ABSENT_OUTPUT ARCH' >&2; exit 64 ;;
+    assemble:5) base_arg="$1"; cache_arg="$2"; headers_arg="$3"; output="$4"; architecture="$5" ;;
+    *) echo 'Usage: build_macos_store_runtime.sh base RUBY OPENSSL LIBYAML CA ABSENT_OUTPUT ARCH | assemble BASE GEM_CACHE RUBY_HEADERS ABSENT_OUTPUT ARCH' >&2; exit 64 ;;
 esac
 if [ "$(/usr/bin/uname -s)" != Darwin ] || [ "$(/usr/bin/id -u)" = 0 ]; then
     echo 'Use an ordinary account on a native macOS build runner.' >&2; exit 69
@@ -34,6 +34,7 @@ if [ "$mode" = base ]; then
 else
     base="$(cd -- "$base_arg" && pwd -P)"
     cache="$(cd -- "$cache_arg" && pwd -P)"
+    headers="$(cd -- "$headers_arg" && pwd -P)"
 fi
 sdk="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 compiler="$(/usr/bin/xcrun --sdk macosx --find clang)"
@@ -101,6 +102,11 @@ fi
 /bin/cp -R "$base" "$prefix"
 ca="$prefix/ca.pem"
 run "$prefix/bin/ruby" --disable=gems "$here/verify_macos_store_runtime.rb" "$prefix" "$architecture" default
+run "$prefix/bin/ruby" --disable=gems "$here/verify_macos_store_runtime.rb" "$prefix" "$architecture" headers "$headers"
+# Fail fast on the actual extension SDK, before installing the full gem set.
+/bin/mkdir "$scratch/header-probe"
+(cd "$scratch/header-probe"; run "$prefix/bin/ruby" -rmkmf -e \
+    'abort "Ruby common/generated headers cannot compile" unless try_compile("#include <ruby.h>\n#include <ruby/version.h>\nint main(void) { return RUBY_API_VERSION_MAJOR != 3; }\n")')
 [ -d "$prefix/tooling" ] && [ ! -L "$prefix/tooling" ] || exit 65
 /bin/rm -rf -- "$prefix/tooling"
 run "$python" -I -B "$here/prepare_macos_store_inputs.py" --tooling-only "$prefix/tooling"

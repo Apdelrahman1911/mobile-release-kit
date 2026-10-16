@@ -6,10 +6,12 @@ separate step from the offline component build. No credentials or global cache.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -62,6 +64,42 @@ def unpack(archive, destination, expected_root):
     return result
 
 
+def unpack_ruby_headers(archive, destination):
+    """Select upstream common headers only; generated arch headers stay in base.
+
+    Matches Ruby 3.3.12 tool/rbinstall.rb's common-header selection. The caller
+    authenticates the complete archive before this ordinary data-only extraction.
+    """
+    destination.mkdir(mode=0o700)
+    prefix = SOURCES[0]["directory"] + "/include/"
+    names, members, total = set(), [], 0
+    with tarfile.open(archive, "r:gz") as source:
+        for member in source:
+            if not member.name.startswith(prefix):
+                continue
+            name = member.name.removeprefix(prefix)
+            if member.isdir():
+                continue
+            parts = name.split("/")
+            if (not member.isfile() or any(part in ("", ".", "..") or re.fullmatch(r"[A-Za-z0-9_.-]+", part) is None for part in parts)
+                    or len(parts) > 16 or "\\" in name or len(name) > 512):
+                raise ValueError("Unsupported Ruby header entry")
+            if not name.endswith((".h", ".hpp")) or parts[-1] == "win32.h":
+                continue
+            if name.casefold() in names or member.size < 0:
+                raise ValueError("Duplicate or invalid Ruby header")
+            names.add(name.casefold())
+            total += member.size
+            if len(names) > 2048 or total > 16 * 1024 * 1024:
+                raise ValueError("Ruby headers exceed assembly bounds")
+            selected = copy.copy(member)
+            selected.name = name
+            members.append(selected)
+        if not {"ruby.h", "ruby/ruby.h", "ruby/version.h"} <= names:
+            raise ValueError("Required common Ruby headers missing")
+        source.extractall(destination, members=members, filter=tarfile.data_filter)
+
+
 
 def copy_tooling(source_root, destination):
     """Copy the shared core's actual tooling roster into a fresh component."""
@@ -90,6 +128,7 @@ def main():
     modes.add_argument("--tooling-only", action="store_true", help="Copy first-party tooling only; no network")
     modes.add_argument("--sources-only", action="store_true", help="Acquire native base sources/CA, no gems")
     modes.add_argument("--gems-only", action="store_true", help="Acquire locked gems only, no native sources")
+    modes.add_argument("--assembly-inputs", action="store_true", help="Acquire locked gems and common Ruby headers; no base compilation")
     args = parser.parse_args()
     output = args.output.absolute()
     if args.tooling_only:
@@ -98,7 +137,12 @@ def main():
     output.mkdir(mode=0o700)  # Existing/foreign output is never adopted.
     if shutil.disk_usage(output).free < 4 * 1024**3:
         raise ValueError("Need at least 4 GiB free for public sources and compilation")
-    if not args.gems_only:
+    if args.assembly_inputs:
+        archive = output / "ruby-headers.tar.gz"
+        fetch(SOURCES[0], archive)
+        unpack_ruby_headers(archive, output / "ruby-headers")
+        archive.unlink()
+    elif not args.gems_only:
         lock = json.loads((ROOT / "desktop/macos-cpython-source-inputs/source-lock.json").read_text())
         openssl, = [row for row in lock["archiveSelections"] if row["id"] == "openssl"]
         if openssl["version"] != "3.5.8":

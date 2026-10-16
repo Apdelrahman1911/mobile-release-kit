@@ -118,5 +118,38 @@ class StoreInputs(unittest.TestCase):
                 self.assertFalse((root / 'escaped').exists())
 
 
+class RubyHeaderInputsTests(unittest.TestCase):
+    def archive(self, path, extra=()):
+        with tarfile.open(path, 'w:gz') as archive:
+            for name, kind in [(name, tarfile.REGTYPE) for name in
+                    ('ruby.h', 'ruby/ruby.h', 'ruby/version.h', 'ruby/detail.hpp', 'ruby/win32.h')] + list(extra):
+                member = tarfile.TarInfo('ruby-3.3.12/include/' + name)
+                member.type = kind
+                member.mode = 0o644
+                if kind == tarfile.REGTYPE:
+                    member.size = 7
+                    archive.addfile(member, io.BytesIO(b'fixture'))
+                else:
+                    member.linkname = '/outside'
+                    archive.addfile(member)
+
+    def test_selects_common_headers_without_windows_or_source_programs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); archive = root / 'ruby.tar.gz'
+            self.archive(archive, [('ignored.c', tarfile.REGTYPE)])
+            TOOL.unpack_ruby_headers(archive, root / 'headers')
+            self.assertEqual({p.relative_to(root / 'headers').as_posix() for p in (root / 'headers').rglob('*') if p.is_file()},
+                             {'ruby.h', 'ruby/ruby.h', 'ruby/version.h', 'ruby/detail.hpp'})
+
+    def test_duplicate_traversal_and_link_headers_refuse(self):
+        for extra in [('ruby.h', tarfile.REGTYPE), ('../escaped.h', tarfile.REGTYPE),
+                      ('link.h', tarfile.SYMTYPE), ('ruby/RUBY.h', tarfile.REGTYPE)]:
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); archive = root / 'ruby.tar.gz'
+                self.archive(archive, [extra])
+                with self.assertRaises(ValueError): TOOL.unpack_ruby_headers(archive, root / 'headers')
+                self.assertFalse((root / 'escaped.h').exists())
+
+
 if __name__ == '__main__':
     unittest.main()

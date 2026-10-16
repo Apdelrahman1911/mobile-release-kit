@@ -9,6 +9,59 @@ require "open3"
 module StoreRuntimeComponent
   OPTIONAL_APP = "vendor/terminal-notifier/terminal-notifier.app"
 
+  def self.install_headers(root, headers, config = RbConfig::CONFIG)
+    lexical_root = File.expand_path(root)
+    root = File.realpath(root)
+    headers = File.realpath(headers)
+    destination = File.expand_path(config.fetch("rubyhdrdir"))
+    destination = root + destination.delete_prefix(lexical_root) if destination.start_with?(lexical_root + "/")
+    raise ArgumentError, "Ruby header destination escaped copied runtime" unless destination.start_with?(root + "/")
+    directory = lambda do |path|
+      info = File.lstat(path)
+      raise ArgumentError, "Ruby header directory is not an owned ordinary directory" unless info.directory? && info.uid == Process.euid && (info.mode & 0o022).zero?
+    end
+    directory.call(root)
+    current = root
+    destination.delete_prefix(root + "/").split("/").each do |part|
+      current = File.join(current, part)
+      directory.call(current) # Generated headers installed by the base must exist.
+    end
+    total = count = 0
+    Find.find(headers) do |path|
+      info = File.lstat(path)
+      if info.directory?
+        directory.call(path)
+        next
+      end
+      relative = path.delete_prefix(headers + "/")
+      raise ArgumentError, "Unexpected common Ruby header" unless info.file? && info.nlink == 1 && info.uid == Process.euid && relative.end_with?(".h", ".hpp")
+      count += 1
+      total += info.size
+      raise ArgumentError, "Ruby headers exceed assembly bounds" if count > 2048 || total > 16 * 1024 * 1024
+      target = File.join(destination, relative)
+      parent = destination
+      relative.split("/")[0...-1].each do |part|
+        parent = File.join(parent, part)
+        Dir.mkdir(parent, 0o755) unless File.exist?(parent) || File.symlink?(parent)
+        directory.call(parent)
+      end
+      File.open(path, File::RDONLY | File::NOFOLLOW) do |input|
+        bytes = input.read(info.size + 1)
+        raise ArgumentError, "Ruby header source changed" unless bytes.bytesize == info.size && input.stat.ino == info.ino && input.stat.dev == info.dev
+        if File.exist?(target) || File.symlink?(target)
+          existing = File.lstat(target)
+          raise ArgumentError, "Existing Ruby header differs" unless existing.file? && existing.uid == Process.euid && existing.nlink == 1 && existing.size == bytes.bytesize && File.binread(target) == bytes
+        else
+          File.open(target, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o644) { |output| output.write(bytes) }
+        end
+      end
+    end
+    %w[ruby.h ruby/ruby.h ruby/version.h].each do |relative|
+      raise ArgumentError, "Incomplete common Ruby headers" unless File.file?(File.join(destination, relative))
+    end
+    puts "Installed common Ruby headers for offline extension assembly; generated architecture headers preserved."
+  end
+
   def self.remove_optional_notifier(root, specs)
     selected = specs.select { |spec| spec.name == "terminal-notifier" }
     raise ArgumentError, "Expected exactly terminal-notifier 2.0.0" unless selected.length == 1 && selected.first.version.to_s == "2.0.0"
@@ -106,9 +159,12 @@ module StoreRuntimeComponent
 end
 
 if $PROGRAM_NAME == __FILE__
-  abort "Expected root, architecture and default|bundle|trim-notifier mode" unless ARGV.length == 3
+  abort "Expected root, architecture and component mode" unless ARGV.length == (ARGV[2] == "headers" ? 4 : 3)
   root, architecture, mode = ARGV
-  if mode == "trim-notifier"
+  if mode == "headers"
+    abort "Unsupported runtime" unless RUBY_VERSION == "3.3.12" && %w[arm64 x86_64].include?(architecture)
+    StoreRuntimeComponent.install_headers(root, ARGV[3])
+  elsif mode == "trim-notifier"
     abort "Unsupported runtime" unless RUBY_VERSION == "3.3.12" && %w[arm64 x86_64].include?(architecture)
     require "bundler"
     abort "Bundler mismatch" unless Bundler::VERSION == "4.0.16"

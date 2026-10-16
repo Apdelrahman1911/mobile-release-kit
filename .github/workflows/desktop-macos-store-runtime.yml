@@ -159,10 +159,10 @@ jobs:
           fi
           python -I -B desktop/tools/macos_store_component.py restore "$WORK_ROOT/base" \
             --run-id "$BASE_RUN" --source "$BASE_SOURCE" --arch "$TARGET_ARCH" --artifact-id "$artifact"
-      - name: Acquire locked gems only, without native source downloads
+      - name: Acquire locked gems and Ruby headers without rebuilding the native base
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
-        run: python -I -B desktop/tools/prepare_macos_store_inputs.py --gems-only "$WORK_ROOT/inputs"
+        run: python -I -B desktop/tools/prepare_macos_store_inputs.py --assembly-inputs "$WORK_ROOT/inputs"
       - name: Assemble offline using current tooling, then verify native images and relocation
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
@@ -171,7 +171,7 @@ jobs:
           set -euo pipefail
           bash desktop/tools/build_macos_store_runtime.sh assemble \
             "$WORK_ROOT/base/extracted/ruby-base" "$WORK_ROOT/inputs/gems" \
-            "$WORK_ROOT/runtime" "$TARGET_ARCH"
+            "$WORK_ROOT/inputs/ruby-headers" "$WORK_ROOT/runtime" "$TARGET_ARCH"
           cp "$WORK_ROOT/base/base.json" "$WORK_ROOT/base-origin.json"
           tar -czf "$WORK_ROOT/store-runtime.tar.gz" -C "$WORK_ROOT" runtime
       - name: Retain unsigned assembled component and original base identity

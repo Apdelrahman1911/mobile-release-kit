@@ -64,4 +64,41 @@ class MacOSStoreRuntimeTest < Minitest::Test
       assert File.directory?(moved)
     end
   end
+
+  def header_fixture(root)
+    runtime = File.join(root, "runtime")
+    destination = File.join(runtime, "include/ruby-3.3.0")
+    headers = File.join(root, "headers")
+    FileUtils.mkdir_p(File.join(destination, "fixture-arch/ruby"))
+    FileUtils.mkdir_p(File.join(headers, "ruby"))
+    %w[ruby.h ruby/ruby.h ruby/version.h].each { |path| File.write(File.join(headers, path), "common header") }
+    generated = File.join(destination, "fixture-arch/ruby/config.h")
+    File.write(generated, "generated arch header")
+    [runtime, headers, destination, generated]
+  end
+
+  def test_common_headers_repair_assembly_without_changing_generated_headers
+    Dir.mktmpdir("mrk-ruby-headers-") do |root|
+      runtime, headers, destination, generated = header_fixture(root)
+      config = {"rubyhdrdir" => destination}
+      StoreRuntimeComponent.install_headers(runtime, headers, config)
+      assert_equal "common header", File.read(File.join(destination, "ruby/ruby.h"))
+      assert_equal "generated arch header", File.read(generated)
+      StoreRuntimeComponent.install_headers(runtime, headers, config) # Equal existing bytes need no rewrite.
+      File.write(File.join(destination, "ruby/ruby.h"), "foreign header")
+      assert_raises(ArgumentError) { StoreRuntimeComponent.install_headers(runtime, headers, config) }
+      assert_equal "foreign header", File.read(File.join(destination, "ruby/ruby.h"))
+    end
+  end
+
+  def test_header_copy_never_follows_an_outside_destination_or_link
+    Dir.mktmpdir("mrk-ruby-headers-") do |root|
+      runtime, headers, destination, generated = header_fixture(root)
+      assert_raises(ArgumentError) { StoreRuntimeComponent.install_headers(runtime, headers, {"rubyhdrdir" => root}) }
+      File.symlink(headers, File.join(destination, "ruby"))
+      assert_raises(ArgumentError) { StoreRuntimeComponent.install_headers(runtime, headers, {"rubyhdrdir" => destination}) }
+      assert File.symlink?(File.join(destination, "ruby"))
+      assert_equal "generated arch header", File.read(generated)
+    end
+  end
 end
