@@ -8,6 +8,13 @@ require "open3"
 # These build-only filesystem operations never run when the helper is imported.
 module StoreRuntimeComponent
   OPTIONAL_APP = "vendor/terminal-notifier/terminal-notifier.app"
+  MACH_MAGICS = %w[feedface cefaedfe feedfacf cffaedfe cafebabe bebafeca cafebabf bfbafeca].freeze
+
+  def self.native_image?(path)
+    # File.binread(path, length) returns nil at EOF for an empty ordinary file.
+    # Empty gem resources are valid DATA, not native images or a read failure.
+    MACH_MAGICS.include?(File.binread(path, 4).to_s.unpack1("H*"))
+  end
 
   def self.install_headers(root, headers, config = RbConfig::CONFIG)
     lexical_root = File.expand_path(root)
@@ -133,7 +140,6 @@ module StoreRuntimeComponent
     total = 0
     files = 0
     native_files = 0
-    mach_magic = ["feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca"]
     Find.find(root) do |path|
       info = File.lstat(path)
       abort "Nonordinary component entry: #{path.delete_prefix(root + '/')}" unless info.directory? || info.file?
@@ -141,7 +147,7 @@ module StoreRuntimeComponent
       files += 1
       total += info.size
       abort "Store component exceeds 512 MiB" if total > 512 * 1024 * 1024
-      next unless mach_magic.include?(File.binread(path, 4).unpack1("H*"))
+      next unless native_image?(path)
       native_files += 1
       arches, status = Open3.capture2e("/usr/bin/lipo", "-archs", path)
       abort "Native component does not support #{architecture}: #{path.delete_prefix(root + '/')}" unless status.success? && arches.split.include?(architecture)

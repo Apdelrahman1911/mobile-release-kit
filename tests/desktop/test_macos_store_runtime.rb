@@ -8,6 +8,22 @@ require_relative "../../desktop/tools/verify_macos_store_runtime"
 class MacOSStoreRuntimeTest < Minitest::Test
   Spec = Struct.new(:name, :version, :full_gem_path)
 
+  def test_native_image_detection_handles_empty_gem_resources_without_hiding_read_errors
+    Dir.mktmpdir("mrk-store-magic-") do |root|
+      file = File.join(root, "ordinary-data")
+      ["", "x", "xy", "xyz", "plain text"].each do |bytes|
+        File.binwrite(file, bytes)
+        refute StoreRuntimeComponent.native_image?(file)
+      end
+      %w[feedface cefaedfe feedfacf cffaedfe cafebabe bebafeca cafebabf bfbafeca].each do |magic|
+        File.binwrite(file, [magic].pack("H*") + "synthetic header only")
+        assert StoreRuntimeComponent.native_image?(file)
+      end
+      File.unlink(file)
+      assert_raises(Errno::ENOENT) { StoreRuntimeComponent.native_image?(file) }
+    end
+  end
+
   def fixture(root)
     gem = File.join(root, "bundle/ruby/3.3.0/gems/terminal-notifier-2.0.0")
     app = File.join(gem, StoreRuntimeComponent::OPTIONAL_APP)
