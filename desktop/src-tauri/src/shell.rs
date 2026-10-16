@@ -3331,7 +3331,25 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             // main-window CloseRequested path alone owns confirmation/cleanup.
             let quit = MenuItem::with_id(app, QUIT_MENU_ID, "Quit", true, Some("CmdOrCtrl+Q"))?;
             let file = Submenu::with_items(app, "File", true, &[&quit])?;
-            Menu::with_items(app, &[&file])
+            let menu = Menu::with_items(app, &[&file])?;
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::PredefinedMenuItem;
+                // The custom File menu replaces Tauri's default menu. Retain
+                // standard AppKit responder-chain editing for native panels
+                // and web inputs; no renderer shortcut or clipboard access.
+                let undo = PredefinedMenuItem::undo(app, None)?;
+                let redo = PredefinedMenuItem::redo(app, None)?;
+                let separator = PredefinedMenuItem::separator(app)?;
+                let cut = PredefinedMenuItem::cut(app, None)?;
+                let copy = PredefinedMenuItem::copy(app, None)?;
+                let paste = PredefinedMenuItem::paste(app, None)?;
+                let select_all = PredefinedMenuItem::select_all(app, None)?;
+                let edit = Submenu::with_items(app, "Edit", true,
+                    &[&undo, &redo, &separator, &cut, &copy, &paste, &select_all])?;
+                menu.append(&edit)?;
+            }
+            Ok(menu)
         })
         .on_menu_event(|app, event| {
             if event.id().as_ref() != QUIT_MENU_ID { return; }
