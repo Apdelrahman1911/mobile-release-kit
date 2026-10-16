@@ -6,6 +6,20 @@ composition and installed-book loans support this optional component; a shipped
 application consuming it is not yet verified. It does not authorize direct Store
 mutations.
 
+### Read-only core invocation boundary
+
+`StoreRuntimeContext` lets `stores.online_preflight_findings` use the selected
+bundle with the **same live online invocation, selected credential snapshot and
+private scratch owner**. It builds a fresh environment, ignores ambient GitHub,
+ADC, Ruby preload and readback settings, and retains the existing fixed command
+seal and process/cancellation owner. The ordinary CLI/CI path is unchanged.
+
+This Python context is not an installed-signature check or release authority.
+Its native caller must retain and check the installed Store-runtime loan for
+the whole operation; native/UI wiring and real non-publishing account checks
+are still separate work. Its private HOME has no generic cache-deletion
+permission: unexpected child files remain a cleanup failure and are preserved.
+
 ## Publisher build inputs
 
 Run `desktop/tools/build_macos_store_runtime.sh` as an ordinary user on a native

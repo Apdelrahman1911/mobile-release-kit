@@ -32,6 +32,7 @@ from .owned_process import ProcessError, preserve_lifetime_error, run_owned
 from ._profile_callers import first_primary_context
 from ._store_lane_evidence import StoreLaneCallEvidence, StoreLaneEvidenceError
 from ._store_lane_files import StoreLaneAttempt, StoreLaneFiles
+from ._store_runtime import StoreRuntimeContext
 from .discovery import GitContext, valid_observed_source
 from .errors import MutationGuardError, StoreOperationError, ValidationError
 from .reporting import FAILING_STATUSES, Finding, Status
@@ -315,9 +316,16 @@ def _store_environment(
 
 
 def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancellation | None = None,
-                             source_environment: Mapping[str, str] | None = None) -> None:
+                             source_environment: Mapping[str, str] | None = None,
+                             runtime_context: StoreRuntimeContext | None = None) -> None:
     gemfile = tooling_root / "Gemfile"
-    source_environment = os.environ if source_environment is None else source_environment
+    if runtime_context is not None:
+        if (type(runtime_context) is not StoreRuntimeContext or tooling_root != runtime_context.tooling_root
+                or cancellation is not runtime_context._invocation.cancellation or source_environment is not None):
+            raise StoreOperationError("Selected Store runtime context cannot mix caller environment or tooling")
+        source_environment = runtime_context.environment()
+    else:
+        source_environment = os.environ if source_environment is None else source_environment
     environment = _runtime_environment(source_environment)
     environment.update(
         {
@@ -336,14 +344,15 @@ def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancell
 
     def run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
         try:
-            return run_owned(
-                argv,
-                cwd=tooling_root,
-                environ=environment,
-                capture=True,
-                timeout=60,
-                cancellation=cancellation,
-            )
+            with runtime_context.checked() if runtime_context is not None else nullcontext():
+                return run_owned(
+                    argv,
+                    cwd=tooling_root,
+                    environ=environment,
+                    capture=True,
+                    timeout=60,
+                    cancellation=cancellation,
+                )
         except ProcessError as error:
             if error.fatal:
                 raise
@@ -844,12 +853,18 @@ def online_preflight_findings(
     platforms: tuple[str, ...],
     material: SelectedStoreMaterial,
     invocation: InvocationCustody,
+    runtime_context: StoreRuntimeContext | None = None,
 ) -> list[Finding]:
     if type(material) is not SelectedStoreMaterial or type(invocation) is not InvocationCustody:
         raise StoreOperationError("Online preflight requires its original selected material and invocation")
     material.require(config=config, platforms=platforms, invocation=invocation)
     cancellation = invocation.cancellation
-    explicit_readback = os.environ.get("MOBILE_RELEASE_PREFLIGHT_READBACK_PATH")
+    if runtime_context is not None:
+        if type(runtime_context) is not StoreRuntimeContext:
+            raise StoreOperationError("Selected Store runtime context is not original")
+        runtime_context.require(root=config.root, invocation=invocation)
+    explicit_readback = (None if runtime_context is not None else
+                         os.environ.get("MOBILE_RELEASE_PREFLIGHT_READBACK_PATH"))
     # One caller filename cannot safely hold two platforms without overwriting.
     # Refuse before even the tooling probes; never invent filename suffixes.
     if explicit_readback and len(platforms) != 1:
@@ -858,7 +873,7 @@ def online_preflight_findings(
                      if explicit_readback else None)
     if explicit_path is not None and os.path.lexists(explicit_path):
         raise StoreOperationError("Refusing to overwrite an existing Store preflight readback")
-    tooling_root = resolve_tooling_root()
+    tooling_root = runtime_context.tooling_root if runtime_context is not None else resolve_tooling_root()
     if tooling_root is None:
         return [Finding("store.online.tooling", Status.FAIL,
             "Shared Fastlane assets are unavailable; install the complete pinned distribution "
@@ -868,7 +883,10 @@ def online_preflight_findings(
         return [Finding("store.online.fastfile", Status.FAIL,
                         "Pinned shared Fastlane/Gem bundle is incomplete.", category="store-access")]
     try:
-        _require_fastlane_bundle(tooling_root, cancellation=cancellation)
+        if runtime_context is None:
+            _require_fastlane_bundle(tooling_root, cancellation=cancellation)
+        else:
+            _require_fastlane_bundle(tooling_root, cancellation=cancellation, runtime_context=runtime_context)
     except ProcessError:
         raise
     except StoreOperationError as error:
@@ -888,7 +906,8 @@ def online_preflight_findings(
         # Close each platform's actual output/cwd scopes before another platform
         # can start; an unresolved writer or disposal cannot become a diagnostic
         # that allows later commands to continue.
-        with finite_scratch(layout="online-runner", cancellation=cancellation) as runner_scratch:
+        with finite_scratch(layout="online-runner", cancellation=cancellation,
+                            parent=runtime_context.private_directory if runtime_context is not None else None) as runner_scratch:
             output_context = (finite_scratch(layout="online-readback", cancellation=cancellation,
                                               parent=private_root)
                               if explicit_path is None else nullcontext(None))
@@ -907,7 +926,7 @@ def online_preflight_findings(
                 runner_scratch._owner()
                 runner_scratch._check()
                 runner_directory = runner_scratch._path
-                environment = _runtime_environment(os.environ)
+                environment = _runtime_environment(runtime_context.environment() if runtime_context is not None else os.environ)
                 environment.update(material.lane_environment(platform=platform))
                 environment.update({
                     "MOBILE_RELEASE_APP_ROOT": str(config.root),
@@ -919,9 +938,10 @@ def online_preflight_findings(
                         if evidence is None else evidence.seal_readback(
                             runner=runner, cwd=runner_directory, environ=environment))
                 try:
-                    completed = run_owned(argv, cwd=runner_directory, environ=environment,
-                                          capture=False, timeout=15 * 60,
-                                          cancellation=cancellation, _evidence=evidence)
+                    with runtime_context.checked() if runtime_context is not None else nullcontext():
+                        completed = run_owned(argv, cwd=runner_directory, environ=environment,
+                                              capture=False, timeout=15 * 60,
+                                              cancellation=cancellation, _evidence=evidence)
                 except ProcessError as error:
                     if error.fatal:
                         raise
@@ -946,6 +966,8 @@ def online_preflight_findings(
                         category="store-access"))
                     continue
                 material.require(config=config, platforms=platforms, invocation=invocation)
+                if runtime_context is not None:
+                    runtime_context.require(root=config.root, invocation=invocation)
                 findings.append(Finding(f"store.online.{platform}", Status.PASS,
                     f"Non-publishing {platform} Store access, identity, destinations, and build uniqueness are valid.",
                     category="store-access"))
