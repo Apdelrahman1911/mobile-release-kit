@@ -31,10 +31,10 @@ on:
   workflow_dispatch:
     inputs:
       component:
-        description: Compile only the changed native component
+        description: Check only the selected native component
         type: choice
         default: all
-        options: [all, launcher, installer, installer-recovery, app]
+        options: [all, launcher, installer, installer-recovery, app, store-runtime]
 
 permissions:
   contents: read
@@ -229,8 +229,174 @@ jobs:
                   shutil.rmtree(path)
           PY
 
-# No Installer/Remover main runs. Only named inert byte/data unit tests execute.
-# Standard compiler/build scripts execute,
-# but no application launch, private runtime, privileged installation, signing
-# or notarization is involved. Runtime and
-# installation/update/removal behavior still require native integration tests.
+  store-runtime:
+    # Explicit reuse only: no gem/Ruby/app rebuild, signing or automatic rerun.
+    if: github.event_name == 'workflow_dispatch' && inputs.component == 'store-runtime'
+    name: Smoke signed Store runtime (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+            target: aarch64-apple-darwin
+          - runner: macos-26-intel
+            arch: x86_64
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
+        with:
+          python-version: '3.14.7'
+      - name: Allocate one task-owned offline smoke directory
+        id: work
+        shell: bash
+        env:
+          COMPONENT_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" ]] || exit 1
+          [[ "$RUNNER_OS" == macOS && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == "$COMPONENT_ARCH" && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-store-smoke.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+      - name: Restore only the SOURCE-selected successful signed Store component
+        timeout-minutes: 5
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_PYTHON: ${{ steps.python.outputs.python-path }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          COMPONENT_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$OWNER_PYTHON" -I -S -B desktop/tools/macos_store_component.py restore-selected \
+            "$WORK_ROOT/component" --target "$COMPONENT_TARGET"
+      - name: Verify every Developer ID image before one offline Ruby smoke
+        timeout-minutes: 6
+        shell: bash
+        env:
+          OWNER_PYTHON: ${{ steps.python.outputs.python-path }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          COMPONENT_TARGET: ${{ matrix.target }}
+          COMPONENT_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$OWNER_PYTHON" -I -S -B - <<'PY'
+          import importlib.util, json, os, resource, subprocess, sys, time, unicodedata
+          from pathlib import Path
+          checkout, work = Path.cwd(), Path(os.environ["WORK_ROOT"])
+          target, arch = os.environ["COMPONENT_TARGET"], os.environ["COMPONENT_ARCH"]
+          def load(name):
+              spec = importlib.util.spec_from_file_location("_store_smoke_" + name, checkout / "desktop/tools" / (name + ".py"))
+              module = importlib.util.module_from_spec(spec)
+              sys.modules[spec.name] = module
+              spec.loader.exec_module(module)
+              return module
+          stager, prep, helper, signing = [load(name) for name in
+              ("stage_macos_installed", "prepare_runtime", "macos_android_helper_package", "macos_store_signing")]
+          capsule = work / "component"
+          runtime = prep._root(capsule / "extracted/runtime")
+          original = stager.store_component_inputs(capsule, target)
+          expected = original[1]
+          def snapshot():
+              rows = []
+              for path in prep.files(runtime, max_files=prep.MAC_MAX_FILES, max_entries=prep.MAC_MAX_ENTRIES):
+                  with stager.parent(path) as (parent, leaf):
+                      body, info = stager.read_at(parent, leaf, signing.FILE_LIMIT)
+                  rows.append((path.relative_to(runtime).as_posix(), stager.digest(body), len(body)))
+              stager.need(tuple(rows) == expected, "store-smoke-complete-extracted-bytes")
+          snapshot()
+          producer_path = checkout / helper.PRODUCER_PROFILE
+          service_path = checkout / helper.PROFILE
+          producer, service = stager.read(producer_path, 1024), stager.read(service_path, 1024)
+          stager.packaging_signing_data(producer, service)
+          identity = stager.service_signing_data(service)
+          receipt = stager.decode(stager.read(capsule / "store-signed-receipt.json", 256 * 1024))
+          native = receipt["nativeMembers"]
+          stager.need(len(native) == signing.NATIVE_COUNT, "store-smoke-native-count")
+          home = work / "home"
+          home.mkdir(mode=0o700)
+          clean = {"PATH": str(runtime / "bin") + ":/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(home),
+              "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "CI": "true",
+              "FASTLANE_SKIP_UPDATE_CHECK": "1", "FASTLANE_OPT_OUT_USAGE": "1", "FASTLANE_HIDE_CHANGELOG": "1"}
+          # One finite capture for the whole batch, not unbounded communicate().
+          # subprocess.run kills and waits for its original child on timeout.
+          resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+          resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024, 256 * 1024))
+          phase, index = "signature", 0
+          try:
+              with (work / "native-output.log").open("xb") as capture:
+                  deadline = time.monotonic() + 180
+                  for index, row in enumerate(native, 1):
+                      name = row["path"]
+                      stager.need(name.startswith("runtime/") and row["identifier"] == signing.identifier(name), "store-smoke-native-path")
+                      requirement = helper.signing_requirement(identity, signing.identifier(name))
+                      remaining = deadline - time.monotonic()
+                      stager.need(remaining > 0, "store-smoke-signature-deadline")
+                      subprocess.run(["/usr/bin/codesign", "--verify", "--strict", "--all-architectures",
+                          "--test-requirement", "=" + requirement, str(capsule / "extracted" / name)],
+                          stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT, env=clean,
+                          cwd=home, check=True, timeout=min(30, remaining))
+                  phase = "ruby"
+                  # This is a loader smoke, not proof of general sandbox/API support.
+                  profile = '(version 1) (allow default) (deny network*) (deny file-write* (subpath (param "RUNTIME")))'
+                  subprocess.run(["/usr/bin/sandbox-exec", "-D", "RUNTIME=" + str(runtime), "-p", profile,
+                      str(runtime / "bin/bundle"), "exec", "ruby", str(checkout / "desktop/tools/verify_macos_store_runtime.rb"),
+                      str(runtime), arch, "projected-smoke"], stdin=subprocess.DEVNULL, stdout=capture,
+                      stderr=subprocess.STDOUT, env=clean, cwd=home, check=True, timeout=90)
+              phase = "post"
+              snapshot()
+              stager.need(stager.store_component_inputs(capsule, target) == original
+                  and stager.read(producer_path, 1024) == producer and stager.read(service_path, 1024) == service,
+                  "store-smoke-source-input-post")
+          except Exception as error:
+              def diagnostic(value, maximum):
+                  value = value.replace(str(work), "<work>").replace(str(checkout), "<checkout>")
+                  value = "".join(char for char in value if not unicodedata.category(char).startswith("C"))
+                  return value.encode("utf-8")[:maximum].decode("utf-8", "ignore")
+              try:
+                  tail = stager.read(work / "native-output.log", 256 * 1024)[-4096:].decode("utf-8", "replace")
+                  tail = diagnostic(tail, 4096)
+              except Exception as capture_error:
+                  tail = "capture-unavailable:" + type(capture_error).__name__
+              reason = diagnostic(str(error), 256) if isinstance(error, (stager.Refused, helper.Refused, signing.Refused)) else None
+              print(json.dumps({"phase": phase, "nativeIndex": index, "errorType": type(error).__name__,
+                  "returncode": getattr(error, "returncode", None), "reason": reason, "diagnosticTail": tail}), flush=True)
+              raise SystemExit(1)
+          print(json.dumps({"nativeVerified": len(native), "filesPostChecked": len(expected),
+              "projectedCrc32FastlaneSmoke": "passed", "networkDenied": True, "storeLaneRun": False}))
+          PY
+      - name: Remove only this job's restored component and smoke scratch
+        if: always() && steps.work.outputs.root != ''
+        shell: bash
+        env:
+          OWNER_PYTHON: ${{ steps.python.outputs.python-path }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          "$OWNER_PYTHON" -I -S -B - <<'PY'
+          import os, shutil, stat
+          from pathlib import Path
+          work = Path(os.environ["WORK_ROOT"])
+          info = work.lstat()
+          assert work.parent == Path(os.environ["RUNNER_TEMP"]) and work.name.startswith("mrk-store-smoke.")
+          assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
+          shutil.rmtree(work)
+          PY
+
+# No Installer/Remover main, app launch, privileged installation, signing or
+# notarization runs. The explicit Store job only verifies already-signed code
+# and executes the network-denied CRC32/Fastlane loader smoke, never a Store lane.
+# Installation/update/removal behavior still requires native integration tests.
