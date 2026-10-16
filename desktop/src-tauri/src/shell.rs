@@ -1469,6 +1469,55 @@ async fn github_remote_setup_cancel(webview: Webview, request: tauri::ipc::Reque
 }
 
 #[tauri::command]
+async fn github_setup_publication_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_publication_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::InvalidInput)); }
+    state.document.github_publication_command("github_setup_publication_status", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_setup_publication_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_publication_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::InvalidInput)); }
+    state.document.github_publication_command("github_setup_publication_prepare", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_setup_publication_publish(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_publication_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::InvalidInput)); }
+    state.document.github_publication_command("github_setup_publication_publish", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_setup_publication_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_publication_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::InvalidInput)); }
+    state.document.github_publication_command("github_setup_publication_pending", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_setup_publication_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_publication_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::InvalidInput)); }
+    state.document.github_publication_command("github_setup_publication_reconcile", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_setup_publication_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_publication_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::InvalidInput)); }
+    state.document.github_publication_command("github_setup_publication_discard", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_setup_publication_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_publication_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::InvalidInput)); }
+    state.document.github_publication_command("github_setup_publication_cancel", request_body(&request)?)
+}
+
+#[tauri::command]
 async fn github_release_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
@@ -1839,6 +1888,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut github_preflight_revision = None;
         let mut github_release_revision = None;
         let mut github_setup_revision = None;
+        let mut github_publication_revision = None;
         let mut github_history_revision = None;
         let mut preflight_revision = None;
         let mut preflight_relay_failed = false;
@@ -1943,6 +1993,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             if github_setup_revision != Some(status.revision) {
                 github_setup_revision = Some(status.revision);
                 let _ = app.emit_to(MAIN_WINDOW, crate::github_setup_protocol::EVENT, &status);
+            }
+            let status=document.github_publication_status();
+            if github_publication_revision!=Some(status.revision){
+                github_publication_revision=Some(status.revision);
+                let _=app.emit_to(MAIN_WINDOW,crate::github_publication_protocol::EVENT,&status);
             }
             let status=document.github_history_status();
             if github_history_revision!=Some(status.revision){
@@ -3622,6 +3677,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_release_status, github_release_prepare, github_release_dispatch, github_release_track,
             github_release_reconcile, github_release_pending, github_release_cancel,
             github_remote_setup_status, github_remote_setup_prepare, github_remote_setup_apply, github_remote_setup_discard, github_remote_setup_cancel,
+            github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
             github_history_status, github_history_start, github_history_cancel,
             vault_status, vault_open, vault_prepare_initialize, vault_unlock, asset_context, asset_choose, credential_prepare,
             vault_prepare_delete, vault_commit, vault_bind, vault_discard, vault_lock,

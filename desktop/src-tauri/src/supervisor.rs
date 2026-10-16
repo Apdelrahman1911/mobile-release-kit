@@ -36,6 +36,12 @@ use crate::installed_runtime::GitHubHistoryRuntimeSlots;
 mod history;
 pub(crate) use history::{GitHubHistoryAdmission,GitHubHistoryReceipt,GitHubHistoryTicket};
 use crate::github_history_protocol as history_protocol;
+use crate::github_publication_protocol as publication_protocol;
+#[path = "supervisor_publication.rs"]
+mod publication;
+pub(crate) use publication::{GitHubPublicationReceipt, GitHubPublicationTicket};
+#[cfg(test)]
+pub(crate) use publication::PublicationControlFixture;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 use crate::installed_runtime_windows::{InspectionFailure as PassiveAdmissionFailure, CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
 
@@ -207,6 +213,9 @@ struct Owner {
     release_receipt: Option<Arc<Mutex<GitHubReleaseReceipt>>>,
     release_request: Option<release_protocol::Request>,
     release_gate: Option<crate::asset_session::GitHubReleaseGoGate>,
+    publication_receipt: Option<Arc<Mutex<GitHubPublicationReceipt>>>,
+    publication_request: Option<publication_protocol::Request>,
+    publication_gate: Option<crate::asset_session::GitHubPublicationGoGate>,
     setup_receipt: Option<Arc<Mutex<GitHubSetupReceipt>>>,
     setup_request: Option<setup_protocol::Request>,
     setup_gate: Option<crate::asset_session::GitHubSetupGoGate>,
@@ -253,11 +262,11 @@ impl ManagementJoin {
     }
 }
 #[derive(Debug, PartialEq)]
-enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), History(history_protocol::Reply) }
+enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), History(history_protocol::Reply) }
 enum DriverEnd { Ready(Result<ReadOutcome, BridgeError>), RetainedUnknown }
 
 #[derive(Clone, Copy)]
-enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubHistory }
+enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, GitHubHistory }
 impl Profile {
     fn stdout_limit(self) -> usize {
         match self {
@@ -267,10 +276,11 @@ impl Profile {
             Self::GitHubPreflight => preflight_protocol::RESPONSE_LIMIT,
             Self::GitHubRelease => release_protocol::RESPONSE_LIMIT,
             Self::GitHubSetup => setup_protocol::RESPONSE_LIMIT,
+            Self::GitHubPublication => publication_protocol::RESPONSE_LIMIT,
             Self::GitHubHistory => 64*1024,
         }
     }
-    fn decode(self, bytes: &[u8], id: &str, preflight: Option<&preflight_protocol::Request>, release: Option<&release_protocol::Request>, setup: Option<&setup_protocol::Request>) -> Result<ReadOutcome, BridgeError> {
+    fn decode(self, bytes: &[u8], id: &str, preflight: Option<&preflight_protocol::Request>, release: Option<&release_protocol::Request>, setup: Option<&setup_protocol::Request>, publication: Option<&publication_protocol::Request>) -> Result<ReadOutcome, BridgeError> {
         match self {
             Self::Passive(Method::EnvironmentRequirements) => crate::environment::decode_envelope(bytes, id).map(ReadOutcome::Passive),
             Self::Passive(Method::MetadataTextObserve | Method::MetadataTextValidate) => crate::metadata_text_edit_protocol::decode_passive_envelope(bytes, id).map(ReadOutcome::Passive),
@@ -282,6 +292,8 @@ impl Profile {
                 release.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Release),
             Self::GitHubSetup => setup_protocol::decode_reply(id, bytes,
                 setup.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Setup),
+            Self::GitHubPublication => publication_protocol::decode_reply(id, bytes,
+                publication.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Publication),
             // Only drive's actual sealed-source branch may decode History.
             Self::GitHubHistory => Err(BridgeError::protocol()),
         }
@@ -296,18 +308,19 @@ enum AdmissionRequest<'a> {
     Preflight { request: preflight_protocol::Request, gate: crate::asset_session::GitHubPreflightGoGate },
     Release { request: release_protocol::Request, gate: crate::asset_session::GitHubReleaseGoGate },
     Setup { request: setup_protocol::Request, gate: crate::asset_session::GitHubSetupGoGate, material: Option<SetupNativeAdmission> },
+    Publication { request: publication_protocol::Request, gate: crate::asset_session::GitHubPublicationGoGate, end: Instant },
     History(GitHubHistoryAdmission),
 }
 impl AdmissionRequest<'_> {
     fn profile(&self) -> Profile {
         match self { Self::Passive { method, .. } => Profile::Passive(*method), Self::GitHub { .. } => Profile::GitHubReadOnly,
-            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::History(_) => Profile::GitHubHistory }
+            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::History(_) => Profile::GitHubHistory }
     }
     fn encode(self, id: &str) -> Result<(Vec<u8>, Option<preflight_protocol::Request>, Option<crate::asset_session::GitHubPreflightGoGate>,
         Option<release_protocol::Request>, Option<crate::asset_session::GitHubReleaseGoGate>,
         Option<setup_protocol::Request>, Option<crate::asset_session::GitHubSetupGoGate>, Option<SetupNativeAdmission>), BridgeError> {
         match self {
-            Self::History(_) => Err(BridgeError::protocol()), // Initial requires actual source first.
+            Self::History(_) | Self::Publication { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
             Self::Passive { method, params } => Ok((protocol::encode_request(id, method, params)?, None, None, None, None, None, None, None)),
             Self::GitHub { repository, expected_account_id, expected_repository_id, token } =>
                 Ok((github_protocol::encode_private_request(id, repository, expected_account_id, expected_repository_id, token)?, None, None, None, None, None, None, None)),
@@ -379,6 +392,7 @@ enum CompletionTarget {
     Preflight(Arc<Mutex<GitHubPreflightReceipt>>),
     Release(Arc<Mutex<GitHubReleaseReceipt>>),
     Setup(Arc<Mutex<GitHubSetupReceipt>>),
+    Publication(Arc<Mutex<GitHubPublicationReceipt>>),
     History(Arc<Mutex<GitHubHistoryReceipt>>),
 }
 
@@ -839,6 +853,10 @@ impl Owner {
             let mut receipt = lock(receipt);
             if matches!(&*receipt, GitHubSetupReceipt::Pending) { *receipt = GitHubSetupReceipt::RetainedUnknown; }
         }
+        if let Some(receipt) = &self.publication_receipt {
+            let mut receipt = lock(receipt);
+            if matches!(&*receipt, GitHubPublicationReceipt::Pending) { *receipt = GitHubPublicationReceipt::RetainedUnknown; }
+        }
         if let Some(receipt)=&self.history_receipt{
             let mut receipt=lock(receipt);
             if matches!(&*receipt,GitHubHistoryReceipt::Pending){*receipt=GitHubHistoryReceipt::RetainedUnknown;}
@@ -962,6 +980,21 @@ impl Owner {
                     let was_unknown = was_unknown || matches!(&*receipt, GitHubSetupReceipt::RetainedUnknown);
                     if !matches!(&*receipt, GitHubSetupReceipt::Settled { .. }) {
                         *receipt = GitHubSetupReceipt::Settled {
+                            outcome: if was_unknown { Err(BridgeError::cleanup_unknown()) } else { outcome }, settled_at, was_unknown,
+                        };
+                    }
+                }
+            }
+            Profile::GitHubPublication => {
+                drop(reply);
+                let outcome = result.and_then(|value| match value {
+                    ReadOutcome::Publication(value) => Ok(value), _ => Err(BridgeError::protocol()),
+                });
+                if let Some(receipt) = &self.publication_receipt {
+                    let mut receipt = lock(receipt);
+                    let was_unknown = was_unknown || matches!(&*receipt, GitHubPublicationReceipt::RetainedUnknown);
+                    if !matches!(&*receipt, GitHubPublicationReceipt::Settled { .. }) {
+                        *receipt = GitHubPublicationReceipt::Settled {
                             outcome: if was_unknown { Err(BridgeError::cleanup_unknown()) } else { outcome }, settled_at, was_unknown,
                         };
                     }
@@ -1155,18 +1188,22 @@ impl Supervisor {
 
     fn admit(&self, request: AdmissionRequest<'_>, completion: CompletionTarget) -> Result<Arc<Owner>, BridgeError> {
         let history_endpoints=match &request{AdmissionRequest::History(admission)=>Some(admission.endpoints),_=>None};
-        let endpoint = history_endpoints.map_or_else(||Instant::now()+OPERATION_TIME,|original|original.work);
+        let publication_end=match &request{AdmissionRequest::Publication{end,..}=>Some(*end),_=>None};
+        let now=Instant::now();
+        if publication_end.is_some_and(|end|end<=now || end>now+Duration::from_secs(60)){return Err(BridgeError::invalid())}
+        let endpoint = publication_end.unwrap_or_else(||history_endpoints.map_or(now+OPERATION_TIME,|original|original.work));
         let profile = request.profile();
-        let (reply, github_receipt, preflight_receipt, release_receipt, setup_receipt,history_receipt) = match (profile, completion) {
+        let (reply, github_receipt, preflight_receipt, release_receipt, setup_receipt,history_receipt,publication_receipt) = match (profile, completion) {
             (Profile::Passive(_), CompletionTarget::Passive(sender)) =>
-                (Some(PassiveReply::Value { sender: Some(sender) }), None, None, None, None, None),
+                (Some(PassiveReply::Value { sender: Some(sender) }), None, None, None, None, None, None),
             (Profile::Passive(Method::ReleaseVersionObserve), CompletionTarget::ReleaseVersionObserve { sender, completion }) =>
-                (Some(PassiveReply::ReleaseVersionObserve { sender: Some(sender), completion }), None, None, None, None, None),
-            (Profile::GitHubReadOnly, CompletionTarget::GitHub(receipt)) => (None, Some(receipt), None, None, None, None),
-            (Profile::GitHubPreflight, CompletionTarget::Preflight(receipt)) => (None, None, Some(receipt), None, None, None),
-            (Profile::GitHubRelease, CompletionTarget::Release(receipt)) => (None, None, None, Some(receipt), None, None),
-            (Profile::GitHubSetup, CompletionTarget::Setup(receipt)) => (None, None, None, None, Some(receipt),None),
-            (Profile::GitHubHistory,CompletionTarget::History(receipt))=>(None,None,None,None,None,Some(receipt)),
+                (Some(PassiveReply::ReleaseVersionObserve { sender: Some(sender), completion }), None, None, None, None, None, None),
+            (Profile::GitHubReadOnly, CompletionTarget::GitHub(receipt)) => (None, Some(receipt), None, None, None, None, None),
+            (Profile::GitHubPreflight, CompletionTarget::Preflight(receipt)) => (None, None, Some(receipt), None, None, None, None),
+            (Profile::GitHubRelease, CompletionTarget::Release(receipt)) => (None, None, None, Some(receipt), None, None, None),
+            (Profile::GitHubSetup, CompletionTarget::Setup(receipt)) => (None, None, None, None, Some(receipt),None,None),
+            (Profile::GitHubHistory,CompletionTarget::History(receipt))=>(None,None,None,None,None,Some(receipt),None),
+            (Profile::GitHubPublication,CompletionTarget::Publication(receipt))=>(None,None,None,None,None,None,Some(receipt)),
             _ => return Err(BridgeError::invalid()),
         };
         let executor = tokio::runtime::Handle::try_current()
@@ -1178,11 +1215,16 @@ impl Supervisor {
         let key = self.inner.next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| value.checked_add(1))
             .map_err(|_| BridgeError::new("unavailable", "The query identity space is exhausted."))?;
         let id = match profile { Profile::Passive(_) => format!("query-{key}"), Profile::GitHubReadOnly => format!("github-read-{key}"),
-            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubHistory=>format!("github-history-{key}") };
-        let (history,ordinary)=match request{AdmissionRequest::History(admission)=>(Some(admission),None),other=>(None,Some(other))};
-        let (bytes, preflight_request, preflight_gate, release_request, release_gate, setup_request, setup_gate, material) = match ordinary{
+            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::GitHubHistory=>format!("github-history-{key}") };
+        let (publication,history,ordinary)=match request{
+            AdmissionRequest::Publication{request,gate,..}=>(Some((request,gate)),None,None),
+            AdmissionRequest::History(admission)=>(None,Some(admission),None),other=>(None,None,Some(other))};
+        let (mut bytes, preflight_request, preflight_gate, release_request, release_gate, setup_request, setup_gate, material) = match ordinary{
             Some(request)=>request.encode(&id)?,None=>(Vec::new(),None,None,None,None,None,None,None),
         };
+        let (publication_request,publication_gate)=match publication{
+            Some((request,gate))=>{bytes=publication_protocol::encode_initial(&id,&request)?;(Some(request),Some(gate))},
+            None=>(None,None)};
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         let history_slots=history.as_ref().map(|value|value.slots.clone());
         let(history_nomination,history_gate)=match history{Some(value)=>(Some(value.nomination),Some(value.gate)),None=>(None,None)};
@@ -1204,6 +1246,7 @@ impl Supervisor {
         let (stop, _) = watch::channel(false);
         let owner = Arc::new(Owner {
             key, id, profile, github_receipt, preflight_receipt, preflight_request, preflight_gate, release_receipt, release_request, release_gate, setup_receipt, setup_request, setup_gate,
+            publication_receipt,publication_request,publication_gate,
             setup_material, setup_first_bound, secret_sealed: Mutex::new(secret_cipher),
             history_nomination,history_gate,history_receipt,history_endpoints,
             preflight_go_claimed: AtomicBool::new(false), state: Mutex::new({let mut state=OwnerState::with_reply(endpoint,reply);state.history_endpoints=history_endpoints;state}),
@@ -1521,7 +1564,7 @@ async fn write_request(mut writer: tokio::process::ChildStdin, bytes: Vec<u8>, m
 }
 
 #[derive(Clone, Copy)]
-enum ReadyKind { Preflight(preflight_protocol::Kind), Release(preflight_protocol::Kind), Setup, History }
+enum ReadyKind { Preflight(preflight_protocol::Kind), Release(preflight_protocol::Kind), Setup, Publication, History }
 
 async fn read_preflight<R: AsyncRead + Unpin>(mut reader: R, id: String, digest: String,
     kind: ReadyKind, profile: Profile, ready: oneshot::Sender<Result<(), BridgeError>>,
@@ -1545,6 +1588,7 @@ async fn read_preflight<R: AsyncRead + Unpin>(mut reader: R, id: String, digest:
                         (Profile::GitHubPreflight, ReadyKind::Preflight(kind)) => preflight_protocol::decode_ready(&header, &id, &digest, kind),
                         (Profile::GitHubRelease, ReadyKind::Release(kind)) => release_protocol::decode_ready(&header, &id, &digest, kind),
                         (Profile::GitHubSetup, ReadyKind::Setup) => setup_protocol::decode_ready(&header, &id, &digest),
+                        (Profile::GitHubPublication,ReadyKind::Publication)=>publication_protocol::decode_ready(&header,&id,&digest),
                         (Profile::GitHubHistory, ReadyKind::History) => history_protocol::decode_ready(&header, &id, &digest),
                         _ => Err(BridgeError::protocol()),
                     };
@@ -1632,6 +1676,13 @@ async fn write_preflight(mut writer: tokio::process::ChildStdin, initial: Vec<u8
                 gate.claim(&owner.id, &digest, request, || claim_preflight_go(&inner, &owner, Profile::GitHubSetup)),
             _ => Err(BridgeError::cleanup_unknown()),
         },
+        Profile::GitHubPublication => match (&owner.publication_gate,&owner.publication_request) {
+            (Some(gate),Some(request)) if owner.preflight_gate.is_none() && owner.preflight_request.is_none()
+                && owner.release_gate.is_none() && owner.release_request.is_none() && owner.setup_gate.is_none()
+                && owner.setup_request.is_none() => gate.claim(&owner.id,&digest,request,
+                    ||claim_preflight_go(&inner,&owner,Profile::GitHubPublication)),
+            _=>Err(BridgeError::cleanup_unknown()),
+        },
         _ => Err(BridgeError::cleanup_unknown()),
     };
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
@@ -1718,13 +1769,14 @@ fn github_history_selected(profile:Profile)->bool{
 }
 fn github_setup_selected(profile: Profile) -> bool {
     cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && !cfg!(all(feature = "development-runtime", debug_assertions))
-        && matches!(profile, Profile::GitHubSetup)
+        && matches!(profile, Profile::GitHubSetup | Profile::GitHubPublication)
 }
 
 fn preflight_claim_clear(original: bool, profile: Profile, expected: Profile, state: &OwnerState, now: Instant,
     stopping: bool, disabled: bool, stop: bool) -> bool {
     original && matches!((profile, expected), (Profile::GitHubPreflight, Profile::GitHubPreflight)
         | (Profile::GitHubRelease, Profile::GitHubRelease) | (Profile::GitHubSetup, Profile::GitHubSetup)
+        | (Profile::GitHubPublication,Profile::GitHubPublication)
         | (Profile::GitHubHistory, Profile::GitHubHistory)) && !state.terminal && !state.unknown && state.error.is_none()
         && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
 }
@@ -2286,9 +2338,11 @@ fn acquire_setup_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<
     // no environment/native call is added between claim and child creation.
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     crate::runtime::macos_installed_environment(&mut command).map_err(AcquisitionError::from)?;
+    let expected=match owner.profile{Profile::GitHubSetup=>Profile::GitHubSetup,Profile::GitHubPublication=>Profile::GitHubPublication,
+        _=>return Err(AcquisitionError::unsupported("Unexpected Setup runtime profile"))};
     let owners = lock(&inner.owners); let state = lock(&owner.state);
     if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
-        Profile::GitHubSetup, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+        expected, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
         return Err(AcquisitionError::unsupported("GitHub setup original claim is no longer available"));
     }
     runtime.claim_once().map_err(AcquisitionError::final_claim)?;
@@ -2675,7 +2729,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 }
                 return Err(BridgeError::unavailable("The GitHub release action runtime is not qualified."));
             },
-            Profile::GitHubSetup => {
+            Profile::GitHubSetup | Profile::GitHubPublication => {
                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 if github_setup_selected(profile) {
                     let native = inspection_setup.ok_or_else(|| {
@@ -2747,7 +2801,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         #[cfg(all(windows, test, feature = "development-runtime"))]
         let runtime = match profile {
             Profile::Passive(_) => hosted_tests::select_windows_bootstrap(runtime, windows_bootstrap, endpoint)?,
-            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory => runtime, // Never a passive fixture override for GitHub actions.
+            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory => runtime, // Never a passive fixture override for GitHub actions.
         };
         Ok(runtime)
     }));
@@ -2815,7 +2869,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         if acquire_enter.blocking_recv().is_err() {
             let error = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory) {
+            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory) {
                 acquiring_owner.observe_macos_action_acquisition_failure(&error);
             }
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2967,10 +3021,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         None => { owner_unknown!(owner, &inner, Some(&resources), ChildMissing); return DriverEnd::RetainedUnknown; }
     };
     let (faults, mut fault_rx) = mpsc::channel(4);
-    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory) {
+    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory) {
         let (send, receive) = oneshot::channel(); (Some(send), Some(receive))
     } else { (None, None) };
-    let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
+    let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
     let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory){
         let (send,receive)=oneshot::channel();(Some(send),Some(receive))
     }else{(None,None)};
@@ -3006,6 +3060,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 Profile::GitHubPreflight => owner.preflight_request.as_ref().map(|request| ReadyKind::Preflight(request.kind())),
                 Profile::GitHubRelease => owner.release_request.as_ref().map(|request| ReadyKind::Release(request.kind())),
                 Profile::GitHubSetup => owner.setup_request.as_ref().map(|_| ReadyKind::Setup),
+                Profile::GitHubPublication=>owner.publication_request.as_ref().map(|_|ReadyKind::Publication),
                 Profile::GitHubHistory => owner.history_nomination.as_ref().map(|_| ReadyKind::History), _ => None,
             };
             match (kind, preflight_digest) {
@@ -3274,7 +3329,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     // reaped. Diagnostics are never emitted to renderer/logs as raw contents.
     drop(diagnostics);
     resources.child.take();
-    let result = match output { Some(output) => profile.decode(&output.bytes, &owner.id, owner.preflight_request.as_ref(), owner.release_request.as_ref(), owner.setup_request.as_ref()), None => Err(BridgeError::protocol()) };
+    let result = match output { Some(output) => profile.decode(&output.bytes, &owner.id, owner.preflight_request.as_ref(), owner.release_request.as_ref(), owner.setup_request.as_ref(),owner.publication_request.as_ref()), None => Err(BridgeError::protocol()) };
     // Only after the SAME original IO/native retirement above. A structurally
     // valid child response cannot replace the actual assigned field with a
     // different desired value (including a fingerprint-only NoChange result).
@@ -5550,6 +5605,7 @@ mod tests {
         Owner {
             key: 1, id: "query-1".into(), profile: Profile::Passive(Method::Capabilities), github_receipt: None,
             preflight_receipt: None, preflight_request: None, preflight_gate: None, release_receipt: None, release_request: None, release_gate: None, setup_receipt: None, setup_request: None, setup_gate: None,
+            publication_receipt:None,publication_request:None,publication_gate:None,
             history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
             state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, None)),
             resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(),

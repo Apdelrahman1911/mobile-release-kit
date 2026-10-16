@@ -1,3 +1,6 @@
+import { PUBLICATION_EVENT, publicationError, publicationRequestFits, parsePublicationStatus } from './githubPublicationProtocol.ts';
+import type { PublicationCommand } from './githubPublicationProtocol.ts';
+import type { PublicationStatus } from './githubPublicationTypes.ts';
 import { ARTIFACT_INSPECTION_EVENT, encodeArtifactInspectionRequest, artifactInspectionError, parseArtifactInspectionStatus } from './artifactInspectionProtocol.ts';
 import type { ArtifactInspectionCommand } from './artifactInspectionProtocol.ts';
 import type { ArtifactInspectionStatus } from './artifactInspectionTypes.ts';
@@ -67,7 +70,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -101,6 +104,15 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!status) throw { code: 'project_recovery_protocol' };
       return status;
     } catch (error) { throw projectRecoveryError(error); }
+  };
+  const publicationCall = async (command: PublicationCommand, value: unknown): Promise<PublicationStatus> => {
+    try {
+      if (mode !== 'native' || !listen) throw { code: 'github_setup_publication_refused_runtime_unavailable' };
+      if (!publicationRequestFits(command, value)) throw { code: 'github_setup_publication_refused_invalid_input' };
+      const status = parsePublicationStatus(await invoke<unknown>(command, structuredClone(value)));
+      if (!status) throw { code: 'github_setup_publication_unknown' };
+      return status;
+    } catch (error) { throw publicationError(error); }
   };
   const githubRemoteSetupCall = async (command: GitHubRemoteSetupCommand, value: unknown): Promise<GitHubRemoteSetupStatus> => {
     try {
@@ -622,6 +634,19 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (mode !== 'native' || !listen) return Promise.reject(githubConnectionError({ code: 'github_connection_refused_runtime_unavailable' }));
       try { return listen(GITHUB_CONNECTION_EVENT, (value) => onStatus(parseGitHubConnectionStatus(value))).catch(connectionRejection); }
       catch (error) { return Promise.reject(githubConnectionError(error)); }
+    },
+    githubPublicationStatus: () => publicationCall('github_setup_publication_status', {}),
+    githubPublicationPrepare: (args) => publicationCall('github_setup_publication_prepare', args),
+    githubPublicationPublish: (args) => publicationCall('github_setup_publication_publish', args),
+    githubPublicationPending: (args) => publicationCall('github_setup_publication_pending', args),
+    githubPublicationReconcile: (args) => publicationCall('github_setup_publication_reconcile', args),
+    githubPublicationDiscard: (args) => publicationCall('github_setup_publication_discard', args),
+    githubPublicationCancel: (operationId) => publicationCall('github_setup_publication_cancel', { operationId }),
+    subscribeGitHubPublication: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'github_setup_publication_refused_runtime_unavailable' };
+        return await listen(PUBLICATION_EVENT, (value) => onStatus(parsePublicationStatus(value)));
+      } catch (error) { throw publicationError(error); }
     },
     githubRemoteSetupStatus: () => githubRemoteSetupCall('github_remote_setup_status', {}),
     githubRemoteSetupPrepare: (args) => githubRemoteSetupCall('github_remote_setup_prepare', args),

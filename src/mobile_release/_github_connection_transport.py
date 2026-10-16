@@ -51,9 +51,13 @@ class _ExchangeProfile(Enum):
     STANDARD = "standard"
     RELEASE_PREPARE = "release-prepare"
     SETUP = "setup"
+    PUBLICATION = "publication"
 
 
 class _ResponseRole(Enum):
+    PUBLICATION_READ = "publication-read"
+    PUBLICATION_CREATE = "publication-create"
+    PUBLICATION_LIST = "publication-list"
     STANDARD = "standard"
     RELEASE_CONFIG = "release-config"
     RELEASE_VERSION = "release-version"
@@ -73,6 +77,9 @@ class _ResponseRole(Enum):
     SETUP_VARIABLE_REPLACE = "setup-variable-replace"
 
 
+_PUBLICATION_ROLES = frozenset({_ResponseRole.PUBLICATION_READ, _ResponseRole.PUBLICATION_CREATE, _ResponseRole.PUBLICATION_LIST})
+
+
 _VARIABLE_ROLES = frozenset({_ResponseRole.SETUP_VARIABLE_READ, _ResponseRole.SETUP_VARIABLE_CREATE, _ResponseRole.SETUP_VARIABLE_REPLACE})
 _SECRET_READ_ROLES = frozenset({_ResponseRole.SETUP_SECRET_METADATA_READ, _ResponseRole.SETUP_SECRET_KEY_READ, _ResponseRole.SETUP_SECRET_METADATA_AFTER})
 _ENVIRONMENT_READ_ROLES = frozenset({_ResponseRole.SETUP_ENVIRONMENT_READ, _ResponseRole.SETUP_ENVIRONMENT_LIST,
@@ -84,6 +91,10 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
     """Closed private roles, never caller-provided numeric limits."""
     if type(profile) is not _ExchangeProfile or type(role) is not _ResponseRole:
         raise ValueError("Invalid fixed GitHub response role")
+    if role in _PUBLICATION_ROLES:
+        if profile is not _ExchangeProfile.PUBLICATION:
+            raise ValueError("Fixed publication role belongs to another action")
+        return (384 * 1024, 2048)
     if (role in {_ResponseRole.RELEASE_CONFIG, _ResponseRole.RELEASE_VERSION}
             and profile is not _ExchangeProfile.RELEASE_PREPARE
             or role in ({_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE} | _ENVIRONMENT_ROLES | _SECRET_READ_ROLES | {_ResponseRole.SETUP_SECRET_WRITE} | _VARIABLE_ROLES)
@@ -95,6 +106,10 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
 
 def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str, path: str) -> tuple[int, int]:
     limits = _role_limits(profile, role)
+    if profile is _ExchangeProfile.PUBLICATION:
+        from ._github_setup_publication_transport import validate_endpoint
+        validate_endpoint(role, method, path)
+        return limits
     if profile is _ExchangeProfile.SETUP:
         from .api._github_connection import _coordinate
 
@@ -248,13 +263,14 @@ class _Budget:
         if type(started) not in (int, float):
             raise ReadFailure("network-unavailable")
         self.started = started
-        self.end = started + READ_SECONDS
+        self.end = started + (60.0 if _profile is _ExchangeProfile.PUBLICATION else READ_SECONDS)
         self.monotonic = monotonic
         self.wall = wall
         self.body_bytes = 0
         self.metadata_bytes = 0
         self.profile = _profile
-        self.body_total_limit = 2 * 1024 * 1024 if _profile is _ExchangeProfile.RELEASE_PREPARE else MAX_BODY_TOTAL
+        self.body_total_limit = (4 * 1024 * 1024 if _profile is _ExchangeProfile.PUBLICATION else
+                                 2 * 1024 * 1024 if _profile is _ExchangeProfile.RELEASE_PREPARE else MAX_BODY_TOTAL)
         if not math.isfinite(started) or not math.isfinite(self.end):
             raise ReadFailure("network-unavailable")
 
@@ -650,7 +666,9 @@ def _header_control(head: _Head, budget: _Budget, *,
             delays.append(delay)
     delay = None if blocked else max(delays) if delays else 60 if recognized else None
     base = _status_reason(head.status)
-    if (head.status == 204 and _role in {_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE}
+    if (head.status == 201 and _role is _ResponseRole.PUBLICATION_CREATE
+            or head.status == 404 and _role is _ResponseRole.PUBLICATION_READ
+            or head.status == 204 and _role in {_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE}
             or head.status in {201, 204} and _role is _ResponseRole.SETUP_SECRET_WRITE
             or head.status == 201 and _role is _ResponseRole.SETUP_VARIABLE_CREATE
             or head.status == 204 and _role is _ResponseRole.SETUP_VARIABLE_REPLACE
@@ -733,7 +751,7 @@ def _response_result(response: _ResponseBody, budget: _Budget) -> ReadResult:
             return _failed("response-invalid", control)
         except ReadFailure as error:
             return _failed(error.reason, control)
-    if head.status != 200:
+    if head.status != 200 and not (head.status == 201 and response.role is _ResponseRole.PUBLICATION_CREATE):
         # Never read/parse/retain arbitrary error bodies, even JSON-looking ones.
         if head.status == 403 and control["reason"] == "rate-limited":
             return _failed("rate-limited", control)
@@ -748,9 +766,10 @@ def _response_result(response: _ResponseBody, budget: _Budget) -> ReadResult:
                 break
             chunks.append(block)
         body = _decode_json(b"".join(chunks), limit=response.maximum, nodes=20_000, depth=24)
-        if type(body) is not dict:
+        expected = list if response.role is _ResponseRole.PUBLICATION_LIST else dict
+        if type(body) is not expected or expected is list and len(body) > 2:
             raise ReadFailure("response-invalid")
-        return ReadResult({"status": 200, "body": body, "failure": "none"}, control)
+        return ReadResult({"status": head.status, "body": body, "failure": "none"}, control)
     except _JsonLimit:
         return _failed("response-limit", control)
     except _JsonError:
@@ -974,12 +993,13 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             or not 1 <= len(token) <= 4096 or any(not 0x21 <= ord(c) <= 0x7e for c in token)):
         raise ValueError("Invalid fixed GitHub transport input")
     _role_limits(_profile, _ResponseRole.STANDARD)
-    if _profile is _ExchangeProfile.SETUP and api_version != "2026-03-10":
+    if _profile in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION} and api_version != "2026-03-10":
         raise ValueError("Fixed Setup API version differs")
     if _setup_budget is not None:
-        if (type(_setup_budget) is not _Budget or _profile is not _ExchangeProfile.SETUP
-                or _setup_budget.profile is not _ExchangeProfile.SETUP
-                or _setup_budget.started != started or _setup_budget.end != started + READ_SECONDS
+        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION}
+                or _setup_budget.profile is not _profile
+                or _setup_budget.started != started
+                or _setup_budget.end != started + (60.0 if _profile is _ExchangeProfile.PUBLICATION else READ_SECONDS)
                 or getattr(_setup_budget, "_secret_exchange_claimed", False)):
             raise ValueError("Invalid same-original Setup budget")
         _setup_budget._secret_exchange_claimed = True
@@ -1015,7 +1035,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                 or "#" in path or "\\" in path
                 or method == "GET" and body is not None
                 or method == "POST" and _profile is not _ExchangeProfile.SETUP
-                and (type(body) is not bytes or not 1 <= len(body) <= 2048)):
+                and (type(body) is not bytes or not 1 <= len(body) <= (384 * 1024 if _profile is _ExchangeProfile.PUBLICATION else 2048))):
             raise ValueError("Invalid fixed GitHub transport request")
         original_response: list[Any] = [None]
         close_failed = [False]

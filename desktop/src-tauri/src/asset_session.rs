@@ -67,6 +67,9 @@ mod github_secret;
 pub(crate) use github_secret::{GitHubSecretMaterial, GitHubSecretFrame};
 #[path = "asset_session_github_variable.rs"]
 mod github_variable;
+#[path = "asset_session_github_publication.rs"]
+mod github_publication;
+pub(crate) use github_publication::GitHubPublicationGoGate;
 pub(crate) use github_variable::GitHubVariableMaterial;
 
 #[path = "asset_session_android_signing.rs"]
@@ -3386,6 +3389,7 @@ impl DocumentBinding {
         let gate = self.github_gate(state);
         state.github.reconcile(now, gate);
         self.github_setup_observe_locked(state, now, gate);
+        self.github_publication_observe_locked(state, now, gate);
         self.github_history_observe_locked(state, now, gate);
     }
     fn github_setup_registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Option<T> {

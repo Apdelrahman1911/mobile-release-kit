@@ -95,6 +95,15 @@ class Journal:
     waiting namespace lock, finite enumeration and postconditions cover every
     write; a collision or malformed unrelated record is preserved and refused.
     """
+    # The publication leaf reuses this exact custody/close implementation with
+    # its own closed record grammar; no caller-selected paths or limits.
+    _leaf_pattern = _LEAF
+    _max_entries = MAX_ENTRIES
+    _max_total_bytes = MAX_TOTAL_BYTES
+
+    def _leaf_limit(self, name: str) -> int:
+        return MAX_INTENT_BYTES if name.endswith(".intent.json") else MAX_RUN_BYTES
+
     def __init__(self, home: str, *, end: float, family: Family = Family.PREFLIGHT) -> None:
         self.family = family
         self.suffix = journal_suffix(family)
@@ -190,14 +199,14 @@ class Journal:
         with os.scandir(self.root) as entries:
             for entry in entries:
                 self._time()
-                if len(names) >= MAX_ENTRIES or _LEAF.fullmatch(entry.name) is None or entry.name in names:
+                if len(names) >= self._max_entries or self._leaf_pattern.fullmatch(entry.name) is None or entry.name in names:
                     raise JournalError("Private preflight journal inventory differs")
                 names.add(entry.name)
         return names
 
     def _read(self, name: str) -> bytes:
         self._time()
-        maximum = MAX_INTENT_BYTES if name.endswith(".intent.json") else MAX_RUN_BYTES
+        maximum = self._leaf_limit(name)
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=self.root)
         try:
             before = os.fstat(fd)
@@ -265,10 +274,10 @@ class Journal:
 
     def _create(self, name: str, raw: bytes) -> None:
         self._post()
-        if (self.root is None or _LEAF.fullmatch(name) is None or name in self.leaves
-                or len(self.leaves) >= MAX_ENTRIES or len(raw) + sum(len(row[1]) for row in self.leaves.values()) > MAX_TOTAL_BYTES):
+        if (self.root is None or self._leaf_pattern.fullmatch(name) is None or name in self.leaves
+                or len(self.leaves) >= self._max_entries or len(raw) + sum(len(row[1]) for row in self.leaves.values()) > self._max_total_bytes):
             raise JournalError("Private preflight journal collision or capacity limit")
-        maximum = MAX_INTENT_BYTES if name.endswith(".intent.json") else MAX_RUN_BYTES
+        maximum = self._leaf_limit(name)
         if not 0 < len(raw) <= maximum:
             raise JournalError("Private preflight record size differs")
         fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400, dir_fd=self.root)

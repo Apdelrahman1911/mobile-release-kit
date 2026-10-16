@@ -108,6 +108,11 @@ def _source(source: dict, selection: dict, *, kind: str = "secret") -> tuple[str
         _keys(source["material"], {"bytes", "sha256"})
         _need(_uint(source["material"]["bytes"], MAX_VALUE_BYTES, 1), "material-too-large")
         _need(_hex(source["material"]["sha256"], 64))
+    return _root_source(source)
+
+
+def _root_source(source: dict) -> tuple[str, tuple[int, ...]]:
+    """Shared original-root identity decoder; callers close their own schema."""
     root = snapshot.validate_root(source["root"])
     _need(len(root.split("/")) - 1 <= _MAX_COMPONENTS, "resources-unavailable")
     identity = source["rootIdentity"]
@@ -168,12 +173,15 @@ def _json_prelude(raw: bytes, budget: _SecretConfigurationBudget) -> None:
 class _SecretConfigurationBudget:
     """One finite filesystem loan of the exact existing transport Budget."""
     def __init__(self, owner: transport._Budget, root: str):
-        _need(type(owner) is transport._Budget and owner.profile is transport._ExchangeProfile.SETUP)
+        _need(type(owner) is transport._Budget and owner.profile in (
+            transport._ExchangeProfile.SETUP, transport._ExchangeProfile.PUBLICATION))
         _need(not hasattr(owner, "_secret_configuration_claimed"), "resources-unavailable")
         owner.remaining()
         # Monotone one-use reservation on the SAME owner, never renewed on exit.
         owner._secret_configuration_claimed = CONFIGURATION_WORK_BYTES
         self.owner = owner
+        self.profile = owner.profile
+        self.max_checkpoints = 64 if self.profile is transport._ExchangeProfile.PUBLICATION else _MAX_CHECKPOINTS
         self.end = owner.end
         self.root = Path(root)
         self.root_fd: int | None = None
@@ -196,7 +204,7 @@ class _SecretConfigurationBudget:
     def check(self) -> None:
         if self.closed or self.failed is not None:
             self.fail()
-        if self.owner.end != self.end or self.owner.profile is not transport._ExchangeProfile.SETUP:
+        if self.owner.end != self.end or self.owner.profile is not self.profile:
             self.fail()
         try:
             self.owner.remaining()
@@ -338,7 +346,7 @@ class _Observed:
     def checkpoint(self) -> None:
         try:
             self._budget.check()
-            if self._budget.checks >= _MAX_CHECKPOINTS:
+            if self._budget.checks >= self._budget.max_checkpoints:
                 self._budget.fail("resources-unavailable")
             self._budget.checks += 1
             self._budget.check_root()
@@ -368,10 +376,38 @@ def observe_variable_configuration(source: dict, selection: dict, *, budget: tra
     return _observe_configuration(source, selection, budget=budget, kind="variable")
 
 
+def publication_source(source: dict) -> tuple[str, tuple[int, ...]]:
+    """Private native capture identity, never a renderer-selected file path."""
+    _keys(source, {"root", "rootIdentity"})
+    return _root_source(source)
+
+
+class _PublicationObserved(_Observed):
+    def __init__(self, budget, reader, value, raw: bytes):
+        super().__init__(budget, reader, value)
+        self._raw = raw
+
+    def saved_bytes(self) -> bytes:
+        self.checkpoint()
+        return self._raw
+
+
+def observe_publication_configuration(source: dict, *, budget: transport._Budget):
+    """Same held config original, retained only for the fixed five-file review.
+
+    No credential requirement is invented. Only the publication profile can
+    request this loan; secret/variable callers retain their original 10s rules.
+    """
+    return _observe_configuration(source, None, budget=budget, kind="publication")
+
+
 @contextmanager
-def _observe_configuration(source: dict, selection: dict, *, budget: transport._Budget, kind: str):
+def _observe_configuration(source: dict, selection: dict | None, *, budget: transport._Budget, kind: str):
     try:
-        root, expected = _source(source, selection, kind=kind)
+        publication = kind == "publication"
+        expected_profile = transport._ExchangeProfile.PUBLICATION if publication else transport._ExchangeProfile.SETUP
+        _need(type(budget) is transport._Budget and budget.profile is expected_profile)
+        root, expected = publication_source(source) if publication else _source(source, selection, kind=kind)
     except SecretConfigurationError:
         raise
     except Exception as error:
@@ -390,19 +426,28 @@ def _observe_configuration(source: dict, selection: dict, *, budget: transport._
             # Exact existing Android/iOS native-draft comparison convention.
             canonical = json.dumps(data, sort_keys=True, ensure_ascii=False,
                                    separators=(",", ":"), allow_nan=False).encode("utf-8")
-            _need(0 < len(canonical) <= MAX_CONFIG_BYTES and _digest(canonical) == source["draft"])
-            config = ReleaseConfig(path=Path(root) / CONFIGURATION_PATH, root=Path(root), data=data)
-            selected = requirements(config, selection["stage"], purpose=source["purpose"],
-                                    platforms=() if source["platform"] == "project" else (source["platform"],))
-            matching = [r for r in selected if r.name == selection["requirement"] and r.kind == kind
-                        and r.stage == selection["stage"] and r.platform == source["platform"]]
-            _need(len(matching) == 1, "requirement-unsupported")
-            value = {"savedConfig": _digest(raw), "canonicalConfig": _digest(canonical),
-                     "requirement": {"name": matching[0].name, "kind": kind, "stage": matching[0].stage,
-                                     "platform": matching[0].platform}}
-            # No parsed config/body retained for the network phase.
-            del raw, canonical, data, config, selected, matching
-            observed = _Observed(custody, reader, value)
+            _need(0 < len(canonical) <= MAX_CONFIG_BYTES)
+            if not publication:
+                _need(_digest(canonical) == source["draft"])
+            value = {"savedConfig": _digest(raw), "canonicalConfig": _digest(canonical)}
+            if publication:
+                from .github_setup_publication import MAX_CONFIG_BYTES as review_limit
+                _need(len(raw) <= review_limit, "resources-unavailable")
+                observed = _PublicationObserved(custody, reader, value, raw)
+            else:
+                config = ReleaseConfig(path=Path(root) / CONFIGURATION_PATH, root=Path(root), data=data)
+                selected = requirements(config, selection["stage"], purpose=source["purpose"],
+                                        platforms=() if source["platform"] == "project" else (source["platform"],))
+                matching = [r for r in selected if r.name == selection["requirement"] and r.kind == kind
+                            and r.stage == selection["stage"] and r.platform == source["platform"]]
+                _need(len(matching) == 1, "requirement-unsupported")
+                value["requirement"] = {"name": matching[0].name, "kind": kind, "stage": matching[0].stage,
+                                        "platform": matching[0].platform}
+                del config, selected, matching
+                observed = _Observed(custody, reader, value)
+            # Publication retains exact reviewed bytes, never parsed aliases.
+            # Secret/variable operations retain no config body for network work.
+            del raw, canonical, data
             observed.checkpoint()
             yield observed
             observed.checkpoint()

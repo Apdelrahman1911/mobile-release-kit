@@ -1,3 +1,4 @@
+import { publicationError } from './githubPublicationProtocol.ts';
 import { artifactInspectionError } from './artifactInspectionProtocol.ts';
 import { initializationError } from './projectInitializationProtocol.ts';
 import { installationError, installationCheckError, installationPreparationError } from './installation.ts';
@@ -269,6 +270,14 @@ export const previewApi: DesktopApi = {
   refreshGitHubConnection: connectionUnavailable,
   disconnectGitHubConnection: connectionUnavailable,
   subscribeGitHubConnection: connectionUnavailable,
+  githubPublicationStatus: async () => { throw publicationError({ code: 'github_setup_publication_refused_runtime_unavailable' }); },
+  githubPublicationPrepare: async () => { throw publicationError({ code: 'github_setup_publication_refused_runtime_unavailable' }); },
+  githubPublicationPublish: async () => { throw publicationError({ code: 'github_setup_publication_refused_runtime_unavailable' }); },
+  githubPublicationPending: async () => { throw publicationError({ code: 'github_setup_publication_refused_runtime_unavailable' }); },
+  githubPublicationReconcile: async () => { throw publicationError({ code: 'github_setup_publication_refused_runtime_unavailable' }); },
+  githubPublicationDiscard: async () => { throw publicationError({ code: 'github_setup_publication_refused_runtime_unavailable' }); },
+  githubPublicationCancel: async () => { throw publicationError({ code: 'github_setup_publication_refused_runtime_unavailable' }); },
+  subscribeGitHubPublication: async () => { throw publicationError({ code: 'github_setup_publication_refused_runtime_unavailable' }); },
   githubRemoteSetupStatus: githubRemoteSetupUnavailable,
   githubRemoteSetupPrepare: githubRemoteSetupUnavailable,
   githubRemoteSetupApply: githubRemoteSetupUnavailable,

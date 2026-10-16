@@ -58,6 +58,8 @@ def main(*, started: float, runtime_dir: str) -> int:
                 or not math.isfinite(started + READ_SECONDS)
                 or type(runtime_dir) is not str or not os.path.isabs(runtime_dir)):
             return 78
+        # The existing bounded initial-frame admission is unchanged. Only the
+        # validated publication protocol selects its original-start +60s end.
         end = started + READ_SECONDS
         def check() -> None:
             now = time.monotonic()
@@ -70,76 +72,86 @@ def main(*, started: float, runtime_dir: str) -> int:
         null = os.open(os.devnull, os.O_RDONLY); owned.append(null)
         os.dup2(null, 0, inheritable=False)
         os.dup2(2, 1, inheritable=False)
-        request = policy.parse_initial(_read_initial(control, end))
-        check()
-        _write_response(output, policy.ready_frame(request))
-        check()
-        # EOF belongs to the original native GO writer's checked close.
-        from .github_setup_variable_runtime import VariableRuntimeAction, parse_variable_go, execute_runtime
-        variable = type(request.action) is VariableRuntimeAction
-        applying_secret = type(request.action) is policy.SecretAction and request.action.kind == "apply"
-        if variable:
-            token, variable_value = parse_variable_go(_read_request(control, end), request)
-        elif applying_secret:
-            token, sealed = policy.parse_secret_apply_go(_read_secret_apply_go(control, end), request)
+        initial = _read_initial(control, end)
+        header = policy._frame(initial, policy.MAX_INITIAL_BYTES, nodes=256, depth=8)
+        if type(header) is dict and header.get("protocol") == "mrk-github-setup-publication/1":
+            from ._github_setup_publication_runtime import run_owned
+            end = started + 60.0
+            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+            request = None
         else:
-            token = policy.parse_go(_read_request(control, end), request)
-        check()
-        from datetime import datetime, timezone
-
-        observed = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-        if variable:
-            from ._github_connection_transport import _Budget, _ExchangeProfile
-            budget = _Budget(started, _profile=_ExchangeProfile.SETUP)
-            result, variable_binding = execute_runtime(request.action, token, variable_value,
-                started=started, runtime_dir=runtime_dir, budget=budget, observed_at=observed)
-        elif type(request.action) is policy.SecretAction:
-            from ._github_connection_transport import _Budget, _ExchangeProfile, _control
-            from .github_setup_secret_inputs import observe_secret_configuration, SecretConfigurationError
-
-            budget = _Budget(started, _profile=_ExchangeProfile.SETUP)
-            reader = None
-            result = None
-            progress = policy.SecretApplyProgress() if applying_secret else None
-            try:
-                with observe_secret_configuration(request.action.source, request.action.target["selection"], budget=budget) as configuration:
-                    value = configuration.value()
-                    policy._object(value, {"savedConfig", "canonicalConfig", "requirement"})
-                    expected = {"name": request.action.target["selection"]["requirement"], "kind": "secret",
-                                "stage": request.action.target["selection"]["stage"], "platform": request.action.source["platform"]}
-                    policy._require(value["requirement"] == expected)
-                    reader = policy._make_secret_reader(request.action, token, started=started, runtime_dir=runtime_dir,
-                                                        budget=budget, configuration=configuration, sealed=sealed, progress=progress)
-                    binding = {"savedConfig": value["savedConfig"], "canonicalConfig": value["canonicalConfig"]}
-                    result = (policy.execute_secret_apply(request.action, reader, binding, key=sealed["key"], progress=progress)
-                              if applying_secret else policy.execute_secret_read(request.action, reader, binding, observed_at=observed))
-                    configuration.checkpoint()
-                # Exiting the SAME context includes actual held/named POST,
-                # every consuming close and one final original deadline check.
-            except SecretConfigurationError as error:
-                if error.cleanup_unknown:
-                    raise  # No finite result can attest a failed close.
-                retained_control = reader.control if reader is not None else (result["control"] if result is not None else _control())
-                result = policy.secret_configuration_failure(error.reason, retained_control, result, progress=progress)
-            finally:
-                reader = None
-        else:
-            reader = policy._make_live_reader(request.action, token, started=started, runtime_dir=runtime_dir)
-            if type(request.action) is policy.EnvironmentAction:
-                result = policy.execute_environment(request.action, reader, observed_at=observed)
-            elif type(request.action) is policy.Action:
-                result = policy.execute(request.action, reader, observed_at=observed)
+            end = started + READ_SECONDS
+            request = policy.parse_initial(initial)
+        if request is not None:
+            check()
+            _write_response(output, policy.ready_frame(request))
+            check()
+            # EOF belongs to the original native GO writer's checked close.
+            from .github_setup_variable_runtime import VariableRuntimeAction, parse_variable_go, execute_runtime
+            variable = type(request.action) is VariableRuntimeAction
+            applying_secret = type(request.action) is policy.SecretAction and request.action.kind == "apply"
+            if variable:
+                token, variable_value = parse_variable_go(_read_request(control, end), request)
+            elif applying_secret:
+                token, sealed = policy.parse_secret_apply_go(_read_secret_apply_go(control, end), request)
             else:
-                raise ProtocolError("Unknown fixed Setup action")
-        reader = None
-        token = None
-        check()
-        encoded = policy.encode_result(request, result, variable_value=variable_value,
-                                       variable_configuration=variable_binding)
-        variable_value = variable_binding = None
-        _write_response(output, encoded)
-        encoded = None
-        check()
+                token = policy.parse_go(_read_request(control, end), request)
+            check()
+            from datetime import datetime, timezone
+
+            observed = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+            if variable:
+                from ._github_connection_transport import _Budget, _ExchangeProfile
+                budget = _Budget(started, _profile=_ExchangeProfile.SETUP)
+                result, variable_binding = execute_runtime(request.action, token, variable_value,
+                    started=started, runtime_dir=runtime_dir, budget=budget, observed_at=observed)
+            elif type(request.action) is policy.SecretAction:
+                from ._github_connection_transport import _Budget, _ExchangeProfile, _control
+                from .github_setup_secret_inputs import observe_secret_configuration, SecretConfigurationError
+
+                budget = _Budget(started, _profile=_ExchangeProfile.SETUP)
+                reader = None
+                result = None
+                progress = policy.SecretApplyProgress() if applying_secret else None
+                try:
+                    with observe_secret_configuration(request.action.source, request.action.target["selection"], budget=budget) as configuration:
+                        value = configuration.value()
+                        policy._object(value, {"savedConfig", "canonicalConfig", "requirement"})
+                        expected = {"name": request.action.target["selection"]["requirement"], "kind": "secret",
+                                    "stage": request.action.target["selection"]["stage"], "platform": request.action.source["platform"]}
+                        policy._require(value["requirement"] == expected)
+                        reader = policy._make_secret_reader(request.action, token, started=started, runtime_dir=runtime_dir,
+                                                            budget=budget, configuration=configuration, sealed=sealed, progress=progress)
+                        binding = {"savedConfig": value["savedConfig"], "canonicalConfig": value["canonicalConfig"]}
+                        result = (policy.execute_secret_apply(request.action, reader, binding, key=sealed["key"], progress=progress)
+                                  if applying_secret else policy.execute_secret_read(request.action, reader, binding, observed_at=observed))
+                        configuration.checkpoint()
+                    # Exiting the SAME context includes actual held/named POST,
+                    # every consuming close and one final original deadline check.
+                except SecretConfigurationError as error:
+                    if error.cleanup_unknown:
+                        raise  # No finite result can attest a failed close.
+                    retained_control = reader.control if reader is not None else (result["control"] if result is not None else _control())
+                    result = policy.secret_configuration_failure(error.reason, retained_control, result, progress=progress)
+                finally:
+                    reader = None
+            else:
+                reader = policy._make_live_reader(request.action, token, started=started, runtime_dir=runtime_dir)
+                if type(request.action) is policy.EnvironmentAction:
+                    result = policy.execute_environment(request.action, reader, observed_at=observed)
+                elif type(request.action) is policy.Action:
+                    result = policy.execute(request.action, reader, observed_at=observed)
+                else:
+                    raise ProtocolError("Unknown fixed Setup action")
+            reader = None
+            token = None
+            check()
+            encoded = policy.encode_result(request, result, variable_value=variable_value,
+                                           variable_configuration=variable_binding)
+            variable_value = variable_binding = None
+            _write_response(output, encoded)
+            encoded = None
+            check()
     except (KeyboardInterrupt, SystemExit):
         status = 130
     except Exception:
