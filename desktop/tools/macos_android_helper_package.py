@@ -97,7 +97,7 @@ PYTHON_SUPPLIERS = {
 }
 
 
-SIGNING_PHASES = ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover")
+SIGNING_PHASES = ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover", "sign-applications-launcher")
 CREDENTIAL_VARIABLES = ("MRK_MACOS_DEVELOPER_ID_P12_BASE64", "MRK_MACOS_DEVELOPER_ID_P12_PASSWORD")
 CREDENTIAL_ROLES = ("search-before", "default-before", "create", "search-created", "settings", "unlock", "import",
                     "partitions", "identity", "certificates", "search-admit", "restrict", "search-restricted",
@@ -332,6 +332,25 @@ NOTARY_ROLES = ("resolve-notarytool", "resolve-stapler", "verify-inner-before", 
                 "payload-zip", "payload-submit", "payload-log", "staple-inner", "validate-inner",
                 "staple-outer", "validate-outer", "verify-inner-after", "verify-outer-after")
 NOTARY_TICKETS = ("Contents/CodeResources", "Contents/Helpers/MobileReleaseKitPayload.app/Contents/CodeResources")
+LAUNCHER_IDENTIFIER = "dev.mobile-release-kit.desktop.launcher"
+LAUNCHER_BUNDLE = "Contents/Helpers/MobileReleaseKitLauncher.app"
+LAUNCHER_TICKET = LAUNCHER_BUNDLE + "/Contents/CodeResources"
+
+
+def notary_roles(launcher=False):
+    need(type(launcher) is bool, "notary-launcher-role")
+    if not launcher:
+        return NOTARY_ROLES
+    return (NOTARY_ROLES[:2] + ("verify-launcher-before",) + NOTARY_ROLES[2:7]
+            + ("staple-launcher", "validate-launcher") + NOTARY_ROLES[7:11]
+            + ("verify-launcher-after",) + NOTARY_ROLES[11:])
+
+
+def notary_tickets(launcher=False):
+    need(type(launcher) is bool, "notary-launcher-role")
+    return NOTARY_TICKETS + ((LAUNCHER_TICKET,) if launcher else ())
+
+
 NOTARY_FREE_FLOOR = 3 * 1024 * 1024 * 1024
 NOTARY_STORAGE_RESERVE = 2 * 1024 * 1024 * 1024
 NOTARY_ZIP_LIMIT = 576 * 1024 * 1024
@@ -1808,7 +1827,7 @@ def signing_requirement(identity, identifier):
          and (store_identifier or identifier in (IDENTIFIER, IDENTIFIER + ".image", "dev.mobile-release-kit.desktop.distribution",
                             "dev.mobile-release-kit.desktop.observation", "dev.mobile-release-kit.desktop.remove-distribution", PYTHON_IDENTIFIER,
                              "dev.mobile-release-kit.desktop", "dev.mobile-release-kit.desktop.entry",
-                             "dev.mobile-release-kit.desktop.remove", *SUPPORT_IDENTIFIERS, *[row[1] for row in TOOL_FIXED.values()])), "fixed-signing-requirement")
+                             "dev.mobile-release-kit.desktop.remove", LAUNCHER_IDENTIFIER, *SUPPORT_IDENTIFIERS, *[row[1] for row in TOOL_FIXED.values()])), "fixed-signing-requirement")
     return ('identifier "' + identifier + '" and anchor apple generic'
             ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
             ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
@@ -2388,9 +2407,9 @@ class Operation:
         if self.phase in NOTARY_PHASES:
             need(NOTARY_KEY_VARIABLE not in environment and self.credential_active is None
                  and not self.notary_retiring and not self.notary_unknown and not self.errors
-                 and self.stager_io_pending is None and len(self.calls) < len(NOTARY_ROLES)
-                 and role == NOTARY_ROLES[len(self.calls)]
-                 and self.notary_mutation_pending == (role in ("staple-inner", "staple-outer"))
+                 and self.stager_io_pending is None and len(self.calls) < len(notary_roles(getattr(self, "notary_launcher", False)))
+                 and role == notary_roles(getattr(self, "notary_launcher", False))[len(self.calls)]
+                 and self.notary_mutation_pending == (role in ("staple-inner", "staple-outer", "staple-launcher"))
                  and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls),
                  "notary-original-dispatch-boundary")
             self.notary_clock()
@@ -3179,7 +3198,7 @@ class Operation:
         need(tool_selected(self.stager, self.target, checkout=self.checkout) == (selection, source), "tool-staged-source-post")
 
     def fixed_sign(self):
-        """Six fixed workflow roles, never a user-selected path/argv."""
+        """Fixed workflow roles, never a user-selected path/argv."""
         need(self.phase in SIGNING_PHASES and self.signing is not None, "fixed-signing-purpose")
         base = "app/Mobile Release Kit.app"
         payload = base + "/Contents/Helpers/MobileReleaseKitPayload.app"
@@ -3190,15 +3209,29 @@ class Operation:
             "sign-root-app": base,
             "sign-root-installer": "cargo-target/" + self.target + "/release/mrk-macos-install",
             "sign-remover": "remover-target/" + self.target + "/release/mrk-macos-remove",
+            "sign-applications-launcher": "applications-launcher/MobileReleaseKitLauncher.app",
         }[self.phase]
         if self.phase == "sign-desktop-image":
             need(self.environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image", "fixed-desktop-image-role")
         if self.phase == "sign-root-installer":
             need(self.environment.get("CARGO_TARGET_DIR") == str(self.work / "cargo-target"), "fixed-installer-target")
         path = self.work / selected
-        bundled = self.phase in ("sign-desktop-payload", "sign-root-app")
+        launcher = self.phase == "sign-applications-launcher"
+        if launcher:
+            need(self.environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image", "fixed-launcher-role")
+            unsigned = self.stager.tree(path, max_bytes=4 * 1024 * 1024)
+            need(set(unsigned) == {"Contents/Info.plist", "Contents/Resources/icon.png", "Contents/MacOS/mrk-macos-launcher"},
+                 "fixed-launcher-unsigned-roster")
+            for name, source_path, maximum in (
+                    ("Contents/Info.plist", "desktop/native/macos-applications-launcher/Info.plist", 16384),
+                    ("Contents/Resources/icon.png", "desktop/src-tauri/icons/icon.png", 1024 * 1024)):
+                source = self.source_original(source_path, "fixed-launcher-source", maximum)
+                source_body = self.read(source)
+                need(unsigned[name][0] == source_body, "fixed-launcher-source-correspondence")
+                self.package_sources.append((source, source_body))
+        bundled = self.phase in ("sign-desktop-payload", "sign-root-app", "sign-applications-launcher")
         root = self.descend(self.work_entry, tuple(selected.split("/"))) if bundled else None
-        binary_name = ("mobile-release-kit-desktop" if self.phase == "sign-desktop-payload" else ENTRY)
+        binary_name = ("mrk-macos-launcher" if launcher else "mobile-release-kit-desktop" if self.phase == "sign-desktop-payload" else ENTRY)
         binary = selected + "/Contents/MacOS/" + binary_name if bundled else selected
         parent = self.descend(self.work_entry, tuple(binary.split("/")[:-1]))
         old = self.original(parent, binary.split("/")[-1], "fixed-sign-input", 64 * 1024 * 1024, (0o555, 0o700, 0o755), alias=not bundled)
@@ -3214,10 +3247,11 @@ class Operation:
         self.package_sources.append((entitlements, empty))
         arguments = ["--options", "runtime", "--entitlements",
             str(self.checkout / "desktop/packaging/macos-empty-entitlements.plist")]
-        if self.phase == "sign-remover":
-            arguments += ["--identifier", "dev.mobile-release-kit.desktop.remove"]
-        verify_arguments = (["-R", "=" + signing_requirement(self.signing, "dev.mobile-release-kit.desktop.remove")]
-                            if self.phase == "sign-remover" else [])
+        identifier = (LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove"
+                      if self.phase == "sign-remover" else None)
+        if identifier is not None:
+            arguments += ["--identifier", identifier]
+        verify_arguments = (["-R", "=" + signing_requirement(self.signing, identifier)] if identifier is not None else [])
         with self.credential_scope(self.phase):
             self.stage = self.phase
             self.signing_mutation_pending = True
@@ -3239,6 +3273,11 @@ class Operation:
             if root is not None:
                 self.recheck_directory(root)
         self.sha256 = digest(body)
+        if launcher:
+            # The same signed source bundle is copied into the outer app. No
+            # extra files, alternate plist/icon or existing ticket are adopted.
+            self.stager.applications_launcher_files(argparse.Namespace(target=self.target, package_role="ordinary-image",
+                applications_launcher=path, expected_applications_launcher=self.sha256))
         self.fixed_sign_complete = True
         self.receipt.update(fixedSigningRole=self.phase, signedBytesSha256=self.sha256,
                             signingAuthority="unchanged-source-identity-native-verification-still-required")
@@ -3521,8 +3560,9 @@ class Operation:
         self.notary_clock(work=work)
 
     def notary_call(self, role, argv, *, maximum=30, limit=65536, developer=False):
-        need(self.notary_known() and not self.notary_retiring and len(self.calls) < len(NOTARY_ROLES)
-             and NOTARY_ROLES[len(self.calls)] == role, "notary-fixed-role-order")
+        roles = notary_roles(getattr(self, "notary_launcher", False))
+        need(self.notary_known() and not self.notary_retiring and len(self.calls) < len(roles)
+             and roles[len(self.calls)] == role, "notary-fixed-role-order")
         self.notary_post()
         now, endpoint = self.notary_clock()
         need(type(maximum) is int and 0 < maximum <= 1200, "notary-child-timeout")
@@ -3533,7 +3573,7 @@ class Operation:
         if developer:
             environment["DEVELOPER_DIR"] = str(NOTARY_XCODE)
         self.stage = role
-        changing = role in ("staple-inner", "staple-outer")
+        changing = role in ("staple-inner", "staple-outer", "staple-launcher")
         self.notary_mutation_pending = changing
         try:
             result = self.call(role, argv, environment, cwd=self.work, timeout=timeout, limit=limit)
@@ -3550,7 +3590,8 @@ class Operation:
             app = self.notary_roots[0]
             actual = self.notary_snapshot(app["entry"], app["path"])
             previous = app["snapshot"]
-            added = NOTARY_TICKETS[1] if role == "staple-inner" else NOTARY_TICKETS[0]
+            added = (LAUNCHER_TICKET if role == "staple-launcher" else
+                     NOTARY_TICKETS[1] if role == "staple-inner" else NOTARY_TICKETS[0])
             need(set(actual["files"]) == set(previous["files"]) | {added}
                  and added not in previous["files"] and set(actual["directories"]) == set(previous["directories"]),
                  "notary-ticket-only-addition")
@@ -3633,7 +3674,10 @@ class Operation:
         if self.removal_final_active():
             roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"])
             package_prefix = roles[:roles.index("final-package-submit")]
-        need((self.phase in NOTARY_PHASES and len(self.calls) == 5
+        payload_roles = notary_roles(getattr(self, "notary_launcher", False))
+        payload_prefix = payload_roles[:payload_roles.index("payload-submit")]
+        need((self.phase in NOTARY_PHASES
+              and tuple(row.get("role") for row in self.calls) == payload_prefix
               or self.removal_final_active() and self.removal_final_calls() == package_prefix
               or self.phase in FINAL_IMAGE_PHASES and len(self.calls) == 3)
              and self.notary_key is None
@@ -3709,6 +3753,10 @@ class Operation:
         need(self.phase in NOTARY_PHASES and self.signing is not None
              and not any(key in self.environment for key in CREDENTIAL_VARIABLES), "notary-configured-purpose")
         self.notary_space(reserve=True)
+        launcher_sha = self.environment.get("MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256")
+        self.notary_launcher = launcher_sha is not None
+        need(not self.notary_launcher or self.stager.sha(launcher_sha)
+             and self.environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image", "notary-launcher-binding")
         profile = self.source_original(NOTARY_PROFILE, "source-notary-profile", 1024)
         profile_body = self.read(profile)
         self.notary_profile = notary_service(profile_body, self.signing)
@@ -3768,6 +3816,9 @@ class Operation:
             expected_desktop_image=self.environment.get("MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256") if self.environment["MRK_MACOS_PACKAGE_ROLE"] == "ordinary-image" else None,
             expected_manifest=selected["runtimeManifestSha256"], app=app_path, runtime=self.work / "runtime",
             output=self.work / self.target_name / "payload-input")
+        if self.notary_launcher:
+            arguments.applications_launcher = app_path / LAUNCHER_BUNDLE
+            arguments.expected_applications_launcher = launcher_sha
         self.notary_post()
         self.notary_io("notary-preflight-input", self.stager.input_command, arguments)
         copied = self.directory(self.target_entry, "payload-input", "notary-disposable-payload")
@@ -3783,7 +3834,10 @@ class Operation:
         inner_path = app_path / self.stager.PAYLOAD_RELATIVE
         inner_requirement = signing_requirement(self.signing, "dev.mobile-release-kit.desktop")
         outer_requirement = signing_requirement(self.signing, "dev.mobile-release-kit.desktop.entry")
-        for role, path, requirement in (("verify-inner-before", inner_path, inner_requirement), ("verify-outer-before", app_path, outer_requirement)):
+        launcher_path = app_path / LAUNCHER_BUNDLE
+        launcher_requirement = signing_requirement(self.signing, LAUNCHER_IDENTIFIER)
+        before_roles = ((("verify-launcher-before", launcher_path, launcher_requirement),) if self.notary_launcher else ())
+        for role, path, requirement in (*before_roles, ("verify-inner-before", inner_path, inner_requirement), ("verify-outer-before", app_path, outer_requirement)):
             verified = self.notary_call(role, ["/usr/bin/codesign", "--verify", "--strict", "-R=" + requirement, str(path)])
             need(not verified.stdout and not verified.stderr, "notary-strict-verification-output")
         archive_path = self.work / self.target_name / NOTARY_ZIP_NAME
@@ -3813,14 +3867,20 @@ class Operation:
         need(self.notary_key is None and self.receipt["notaryAuthentication"] == {"created": True, "closed": True, "retired": True},
              "notary-authentication-not-retired")
         tool = str(self.notary_tools["stapler"]["path"])
-        for role, verb, path in (("staple-inner", "staple", inner_path), ("validate-inner", "validate", inner_path),
+        launcher_staple = ((("staple-launcher", "staple", launcher_path), ("validate-launcher", "validate", launcher_path))
+                          if self.notary_launcher else ())
+        for role, verb, path in (*launcher_staple, ("staple-inner", "staple", inner_path), ("validate-inner", "validate", inner_path),
                                  ("staple-outer", "staple", app_path), ("validate-outer", "validate", app_path)):
             self.notary_call(role, [tool, verb, str(path)], developer=True)
-        for role, path, requirement in (("verify-inner-after", inner_path, inner_requirement), ("verify-outer-after", app_path, outer_requirement)):
+        after_roles = ((("verify-launcher-after", launcher_path, launcher_requirement),) if self.notary_launcher else ())
+        for role, path, requirement in (*after_roles, ("verify-inner-after", inner_path, inner_requirement), ("verify-outer-after", app_path, outer_requirement)):
             verified = self.notary_call(role, ["/usr/bin/codesign", "--verify", "--strict", "-R=" + requirement, str(path)])
             need(not verified.stdout and not verified.stderr, "notary-strict-verification-output")
-        tickets = sorted(self.notary_ticket_rows, key=lambda row: NOTARY_TICKETS.index(row["path"]))
-        need(tuple(row["path"] for row in tickets) == NOTARY_TICKETS, "notary-ticket-pair")
+        expected_tickets = notary_tickets(self.notary_launcher)
+        tickets = sorted(self.notary_ticket_rows, key=lambda row: expected_tickets.index(row["path"]))
+        need(tuple(row["path"] for row in tickets) == expected_tickets, "notary-ticket-roster")
+        if self.notary_launcher:
+            arguments.expected_applications_launcher_ticket = next(row["sha256"] for row in tickets if row["path"] == LAUNCHER_TICKET)
         arguments.output = self.work / "input"
         result = self.notary_io("notary-final-input", self.stager.input_command, arguments, ticket_expectations=tickets)
         self.notary_post()
@@ -3838,7 +3898,7 @@ class Operation:
             "archiveBytes": self.notary_zip["identity"][6], "archiveSha256": self.notary_zip_sha,
             "tickets": tickets, "inventorySha256": self.sha256, "runtimeManifestSha256": selected["runtimeManifestSha256"],
             "strictVerificationBeforeAndAfter": True, "actualStaplerValidation": True,
-            "assurance": "accepted-payload-and-two-ticket-observations-not-package-or-installed-authority"}
+            "assurance": "accepted-payload-and-ticket-observations-not-package-or-installed-authority"}
         self.notary_clock()
 
     def notary_retirement(self):
@@ -7975,7 +8035,7 @@ class Operation:
                  (removal_runtime_roles(self.removal_case) if self.removal_case in REMOVAL_CASES else ()) if self.phase == "package-removal-fixture" else
                  FINAL_IMAGE_ROLES if self.phase in FINAL_IMAGE_PHASES else
                  final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"]) if self.phase in FINAL_PACKAGE_PHASES else
-                 NOTARY_ROLES if self.phase in NOTARY_PHASES else
+                 notary_roles(getattr(self, "notary_launcher", False)) if self.phase in NOTARY_PHASES else
                  PYTHON_ROLES if self.phase in PYTHON_PHASES else
                  self.stager.PACKAGING_CALL_ROLES if self.phase == "package-install" else
                  REMOVE_PACKAGE_ROLES if self.phase == "package-remove" else
@@ -8203,7 +8263,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
 # Fixed DATA checkpoint after the eight existing native phase owners. This is
 # not a native operation or a certificate/notary/Installer policy override.
 APP_SIGNATURE_REF = "refs/heads/verify/desktop-macos-app-signature"
-APP_SIGNATURE_PHASES = ("prepare", "sign-vault-helper", "sign-remover", "verify-before",
+APP_SIGNATURE_PHASES = ("prepare", "sign-vault-helper", "sign-remover", "sign-applications-launcher", "verify-before",
                         "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "verify-after")
 APP_SIGNATURE_DATA = ("select-github-tools-signed", "project-history-provider", "project-github-seal")
 APP_SIGNATURE_SUMMARY = "summarize-app-signature"
@@ -8328,6 +8388,7 @@ def app_signature_summary(target, environment, stager, work):
         prefix + "Frameworks/libmrk_desktop_image.dylib": ("sign-desktop-image", "MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256"),
         prefix + "Helpers/mrk-vault-keychain": ("sign-vault-helper", "MRK_MACOS_VAULT_HELPER_SHA256"),
         prefix + "Helpers/mrk-macos-remove": ("sign-remover", "MRK_MACOS_REMOVER_SHA256"),
+        stager.LAUNCHER_EXECUTABLE: ("sign-applications-launcher", "MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256"),
     }
     for path, (phase, variable) in anchors.items():
         need(path in app and tool_hex(environment.get(variable))
@@ -8611,7 +8672,7 @@ def main():
             print("resident-image-sha256=" + operation.resident_image_sha256, flush=True)
             print("desktop-facade-sha256=" + operation.desktop_facade_sha256, flush=True)
             print("image-release-id=" + operation.image_release, flush=True)
-        if phase == "sign-remover":
+        if phase in ("sign-remover", "sign-applications-launcher"):
             # Only the same completed fixed-sign owner may publish this digest;
             # no caller reopens/rehashes a replacement to infer success.
             need(type(result) is str and re.fullmatch(r"[0-9a-f]{64}", result), "fixed-remover-result")

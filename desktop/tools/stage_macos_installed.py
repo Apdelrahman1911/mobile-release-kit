@@ -3299,7 +3299,7 @@ def runtime_tree(root, expected, *, current=False, target=ARM_TARGET):
     return files
 
 
-def ticket_input_names(app, expectations):
+def ticket_input_names(app, expectations, *, launcher=False):
     """Match only explicit ticket DATA; this does not establish notarization.
 
     The existing tree reader supplies regular, single-link, original-bound
@@ -3308,8 +3308,9 @@ def ticket_input_names(app, expectations):
     """
     if expectations is None:
         return set()
-    paths = ("Contents/CodeResources", PAYLOAD_CONTENTS + "CodeResources")
-    need(type(expectations) is list and len(expectations) == 2, "ticket-input-expectations")
+    need(type(launcher) is bool, "ticket-launcher-role")
+    paths = ("Contents/CodeResources", PAYLOAD_CONTENTS + "CodeResources") + ((LAUNCHER_TICKET,) if launcher else ())
+    need(type(expectations) is list and len(expectations) == len(paths), "ticket-input-expectations")
     for row, path in zip(expectations, paths):
         need(type(row) is dict and set(row) == {"path", "bytes", "sha256"}
              and row["path"] == path and type(row["bytes"]) is int
@@ -3354,7 +3355,7 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
              for path, (body, mode) in launcher.items()), "applications-launcher-installed-correspondence")
     need(all(app.get(path) == (body, mode) or app.get(path) == (body, 0o444)
              and mode == 0o644 for path, (body, mode) in seal.items()), "github-seal-installed-correspondence")
-    expected_names.update(ticket_input_names(app, ticket_expectations))
+    expected_names.update(ticket_input_names(app, ticket_expectations, launcher=bool(launcher)))
     need(set(app) == expected_names and app["Contents/Info.plist"][0] == source_entry_info(selection=selection)
          and app[PAYLOAD_INFO][0] == source_app_info(selection=selection), "signed-app-roster")
     need(sha(args.expected_entry) and digest(app[ENTRY_BINARY][0]) == args.expected_entry

@@ -1487,6 +1487,15 @@ jobs:
           set -o noclobber
           # Current compiler-derived program, not an installer alias. The
           # same fixed signing owner returns a digest only after known finality.
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/applications-launcher"
+          bash desktop/native/macos-applications-launcher/build.sh \
+            "$MRK_MACOS_WORK/applications-launcher/MobileReleaseKitLauncher.app" "$MRK_MACOS_MACHINE"
+          launcher_result=$(MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-applications-launcher --target "$MRK_MACOS_TARGET")
+          [[ "$launcher_result" =~ ^sha256=[0-9a-f]{64}$ ]] || exit 1
+          MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256=${launcher_result#sha256=}
+          printf 'MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256=%s\n' "$MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256" >> "$GITHUB_ENV"
           remover_result=$(MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
           MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
             "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-remover --target "$MRK_MACOS_TARGET")
@@ -1525,6 +1534,8 @@ jobs:
             --expected-desktop-image "$MRK_MACOS_DESKTOP_IMAGE_SHA256" \
             --desktop-image-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl" \
             --desktop-image-cargo-target-dir "$CARGO_TARGET_DIR" \
+            --applications-launcher "$MRK_MACOS_WORK/applications-launcher/MobileReleaseKitLauncher.app" \
+            --expected-applications-launcher "$MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256" \
             --output "$MRK_MACOS_WORK/app/Mobile Release Kit.app" > "$MRK_MACOS_WORK/app-result.json"
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-before --target "$MRK_MACOS_TARGET"
           payload="$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app"

@@ -3334,7 +3334,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertFalse(selected.final_image_known())
                     if fault != "missing": self.assertTrue(path.exists())
 
-    def notary_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None):
+    def notary_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None, launcher=False):
         """Actual copy/FD/parser code, inert app/runtime/key and native doubles.
 
         No key cryptography, Apple endpoint, native tool, payload or service is
@@ -3381,6 +3381,16 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             TOOL.PAYLOAD_CONTENTS + "_CodeSignature/CodeResources": (b"INERT inner seal", 0o644)}
         if role == "ordinary-image":
             files[TOOL.DESKTOP_IMAGE] = (desktop, 0o755)
+        if launcher:
+            self.assertEqual(role, "ordinary-image")
+            launcher_info = (source / "desktop/native/macos-applications-launcher/Info.plist").read_bytes()
+            launcher_icon = (source / "desktop/src-tauri/icons/icon.png").read_bytes()
+            put(checkout / "desktop/native/macos-applications-launcher/Info.plist", launcher_info)
+            put(checkout / "desktop/src-tauri/icons/icon.png", launcher_icon)
+            files.update({TOOL.LAUNCHER_EXECUTABLE: (body, 0o555),
+                TOOL.LAUNCHER_BUNDLE + "/Contents/Info.plist": (launcher_info, 0o644),
+                TOOL.LAUNCHER_BUNDLE + "/Contents/Resources/icon.png": (launcher_icon, 0o644),
+                TOOL.LAUNCHER_BUNDLE + "/Contents/_CodeSignature/CodeResources": (b"INERT launcher seal", 0o644)})
         support = android_support_fixture(inputs)
         put(support.manifest_path, support.values[support.manifest_path])
         files.update({TOOL.PAYLOAD_RELATIVE + "/" + name: value for name, value in support.files.items()})
@@ -3414,6 +3424,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             "MRK_MACOS_VAULT_HELPER_SHA256": TOOL.digest(body), "MRK_MACOS_REMOVER_SHA256": TOOL.digest(body),
             "MRK_MACOS_ANDROID_HELPER_SHA256": TOOL.digest(body),
             "MRK_MACOS_RESIDENT_IMAGE_SHA256": TOOL.digest(resident), "MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256": TOOL.digest(desktop)}
+        if launcher:
+            environment["MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256"] = TOOL.digest(body)
         for variable, name in (("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", "runtimeManifestSha256"),
             ("MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "sourceInputsSha256"), ("MRK_MACOS_SIGNED_PYTHON_SHA256", "signedPythonSha256"),
             ("MRK_MACOS_SIGNING_RECEIPT_SHA256", "signingReceiptSha256"), ("MRK_MACOS_SIGNING_SOURCE_COMMIT", "signingSourceCommit"),
@@ -3434,7 +3446,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             operation = state.operation
             role_name = operation.calls[-1]["role"]
             index = len(state.observations)
-            self.assertEqual(role_name, module.NOTARY_ROLES[index])
+            self.assertEqual(role_name, module.notary_roles(launcher)[index])
             self.assertFalse(operation.calls[-1]["returned"] or operation.calls[-1]["capturesSettled"])
             self.assertFalse(set(module.CREDENTIAL_VARIABLES + (module.NOTARY_KEY_VARIABLE,)) & set(options["environ"]))
             self.assertEqual(options["cwd"], work)
@@ -3444,7 +3456,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertEqual(options["output_limit"], expected_limit)
             self.assertEqual(set(options["environ"]), {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ"}
                              | ({"DEVELOPER_DIR"} if role_name.startswith("resolve-") or role_name in
-                                ("payload-submit", "payload-log", "staple-inner", "validate-inner", "staple-outer", "validate-outer") else set()))
+                                ("payload-submit", "payload-log", "staple-inner", "validate-inner", "staple-outer", "validate-outer", "staple-launcher", "validate-launcher") else set()))
             if "DEVELOPER_DIR" in options["environ"]:
                 self.assertEqual(options["environ"]["DEVELOPER_DIR"], str(state.xcode))
             private = work / operation.target_name / "payload-input"
@@ -3477,9 +3489,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     alias.unlink(); alias.symlink_to("Xcode-selected.app", target_is_directory=True)
             elif role_name.startswith("verify-"):
                 self.assertEqual(argv[:3], ["/usr/bin/codesign", "--verify", "--strict"])
-                identifier = TOOL.BUNDLE_ID if "inner" in role_name else TOOL.ENTRY_BUNDLE_ID
+                identifier = module.LAUNCHER_IDENTIFIER if "launcher" in role_name else TOOL.BUNDLE_ID if "inner" in role_name else TOOL.ENTRY_BUNDLE_ID
                 self.assertEqual(argv[3], "-R=" + module.signing_requirement(("TEST000001", "1" * 40), identifier))
-                self.assertEqual(Path(argv[-1]), app / TOOL.PAYLOAD_RELATIVE if "inner" in role_name else app)
+                self.assertEqual(Path(argv[-1]), app / TOOL.LAUNCHER_BUNDLE if "launcher" in role_name else app / TOOL.PAYLOAD_RELATIVE if "inner" in role_name else app)
             elif role_name == "payload-zip":
                 self.assertEqual(argv[:4], ["/usr/bin/ditto", "-c", "-k", "--keepParent"])
                 self.assertEqual(Path(argv[-2]), private)
@@ -3518,7 +3530,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             else:
                 self.assertEqual(argv[0], str((state.xcode / "usr/bin/stapler").resolve()))
                 inner = role_name.endswith("inner")
-                path = app / TOOL.PAYLOAD_RELATIVE if inner else app
+                path = app / TOOL.LAUNCHER_BUNDLE if role_name.endswith("launcher") else app / TOOL.PAYLOAD_RELATIVE if inner else app
                 self.assertEqual(argv[1:], ["staple" if role_name.startswith("staple-") else "validate", str(path)])
                 self.assertFalse((work / operation.target_name / "notary-key").exists())
                 self.assertEqual(operation.receipt["notaryAuthentication"], {"created": True, "closed": True, "retired": True})
@@ -6522,6 +6534,102 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertFalse((work / module.RESIDENT_IMAGE).exists())
                 self.assertFalse((work / "android-helper-target" / module.INTEL_TARGET).exists())
 
+    def test_fixed_workflow_signing_roles_use_original_inputs_and_identity(self):
+        module = ANDROID_HELPER
+        # Every new workflow phase traverses the actual fixed selector, held
+        # files, same original calls, credential scope, POST and target cleanup.
+        # These tiny Mach-O/Keychain return values remain inert DATA only.
+        _transport, matcher, _parser = self.python_data_functions()
+        for target in (module.ARM_TARGET, module.INTEL_TARGET):
+            for phase, failed_verify in ([(value, False) for value in module.SIGNING_PHASES] + [("sign-remover", True), ("sign-applications-launcher", True)]):
+                with self.subTest(fixedSigning=phase, target=target, failedVerify=failed_verify), tempfile.TemporaryDirectory() as directory:
+                    checkout, work, environment, _owner, _observations = self.fixture(Path(directory), build_target=target)
+                    environment["CARGO_TARGET_DIR"] = str(work / "cargo-target")
+                    for relative, body in (("desktop/packaging/macos-empty-entitlements.plist",
+                            (Path(__file__).absolute().parents[2] / "desktop/packaging/macos-empty-entitlements.plist").read_bytes()),
+                            ("desktop/tools/macos_cpython_orchestrator.py", b"# INERT held parser SOURCE; DATA functions injected below\n")):
+                        path = checkout / relative
+                        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        path.write_bytes(body); path.chmod(0o644)
+                    app = work / "app/Mobile Release Kit.app"
+                    payload = app / "Contents/Helpers/MobileReleaseKitPayload.app"
+                    selected = {"sign-vault-helper": work / ("vault-helper-target/" + target + "/release/mrk-vault-keychain"),
+                        "sign-desktop-image": payload / "Contents/Frameworks/libmrk_desktop_image.dylib",
+                        "sign-desktop-payload": payload, "sign-root-app": app,
+                        "sign-root-installer": work / ("cargo-target/" + target + "/release/mrk-macos-install"),
+                        "sign-remover": work / ("remover-target/" + target + "/release/mrk-macos-remove"),
+                        "sign-applications-launcher": work / "applications-launcher/MobileReleaseKitLauncher.app"}[phase]
+                    launcher = phase == "sign-applications-launcher"
+                    binary = (selected / "Contents/MacOS" / ("mrk-macos-launcher" if launcher else "mobile-release-kit-desktop" if phase == "sign-desktop-payload" else module.ENTRY)
+                              if phase in ("sign-desktop-payload", "sign-root-app", "sign-applications-launcher") else selected)
+                    binary.parent.mkdir(mode=0o700, parents=True)
+                    original = (image_macho_fixture("desktop", target=target) if phase == "sign-desktop-image"
+                                else entry_macho_fixture(target=target)) + bytes(64)
+                    signed = self.signed_macho_fixture(original)
+                    binary.write_bytes(original); binary.chmod(0o755)
+                    if launcher:
+                        for name, relative in (("Contents/Info.plist", "desktop/native/macos-applications-launcher/Info.plist"),
+                                               ("Contents/Resources/icon.png", "desktop/src-tauri/icons/icon.png")):
+                            source_body = (Path(__file__).absolute().parents[2] / relative).read_bytes()
+                            for path in (checkout / relative, selected / name):
+                                path.parent.mkdir(parents=True, exist_ok=True)
+                                path.write_bytes(source_body); path.chmod(0o644)
+                    calls = []
+                    def fixed(argv, **options):
+                        calls.append((tuple(argv), options))
+                        self.assertEqual(Path(argv[-1]), selected)
+                        if "--sign" in argv:
+                            self.assertEqual(argv[argv.index("--sign") + 1], credentials.leaf)
+                            expected_sign = ["/usr/bin/codesign", "--force", "--sign", credentials.leaf,
+                                "--options", "runtime", "--entitlements",
+                                str(checkout / "desktop/packaging/macos-empty-entitlements.plist")]
+                            if phase == "sign-remover" or launcher:
+                                expected_sign += ["--identifier", module.LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove"]
+                            self.assertEqual(argv, expected_sign + ["--timestamp", str(selected)])
+                            self.assertIn("--timestamp", argv)
+                            replacement = binary.with_name(binary.name + ".replacement")
+                            replacement.write_bytes(signed); replacement.chmod(0o755); replacement.replace(binary)
+                            if launcher:
+                                seal = selected / "Contents/_CodeSignature/CodeResources"
+                                seal.parent.mkdir(); seal.write_bytes(b"INERT launcher signature"); seal.chmod(0o644)
+                        else:
+                            expected_verify = ["/usr/bin/codesign", "--verify", "--strict"]
+                            if phase == "sign-remover" or launcher:
+                                expected_verify += ["-R", "=" + module.signing_requirement(("TEST000001", credentials.leaf),
+                                                                                   module.LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove")]
+                            self.assertEqual(argv, expected_verify + [str(selected)])
+                            self.assertEqual(binary.read_bytes(), signed)
+                            if failed_verify:
+                                return CompletedProcess(argv, 1, b"", b"INERT signature rejected")
+                        return CompletedProcess(argv, 0, b"", b"")
+                    operation = module.Operation(SimpleNamespace(run_owned=fixed), checkout, work, phase, environment, TOOL, target=target)
+                    credentials = self.credential_fixture(operation)
+                    def parser(root, filename, name):
+                        self.assertEqual((root, filename, name), (checkout, "macos_cpython_orchestrator.py", "_mrk_credential_signing_content"))
+                        return matcher
+                    original_loader = module.load_data
+                    with self.credential_fixture_call(operation, credentials), mock.patch.object(module, "load_data", side_effect=parser):
+                        if failed_verify:
+                            with self.assertRaises(module.Refused): operation.execute()
+                        else:
+                            self.assertEqual(operation.execute(), module.digest(signed))
+                    self.assertEqual(operation.receipt["passed"], not failed_verify)
+                    self.assertIs(module.load_data, original_loader)
+                    self.assertEqual(len(calls), 2)
+                    self.assertEqual([row["role"] for row in operation.calls], [phase, phase + "-verify"])
+                    self.assertTrue(operation.receipt["originalClosesKnown"] and operation.receipt["targetRetired"])
+                    self.assertEqual(operation.fixed_sign_complete, not failed_verify)
+                    self.assertEqual(credentials.search, credentials.initial)
+                    self.assertFalse(Path(credentials.keychain).parent.exists())
+                    self.assertTrue(all(all(row[key] is True for key in ("closed", "retired", "searchRestored", "defaultUnchanged"))
+                                        for row in operation.credential_contexts))
+                    public = json.dumps(operation.receipt)
+                    self.assertNotIn("INERT PKCS12", public)
+                    self.assertNotIn(environment[module.CREDENTIAL_VARIABLES[0]], public)
+                    self.assertNotIn(environment[module.CREDENTIAL_VARIABLES[1]], public)
+                    self.assertFalse(operation.receipt["developerIdOrNotarizationQualified"] or operation.receipt["productReady"])
+
+
     def test_actual_copy_and_staged_checks_bind_final_bytes_and_retire_each_owned_target(self):
         module = ANDROID_HELPER
 
@@ -6734,86 +6842,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         operation.python_call("python-modules", ["never", "executed"])
 
 
-        # Every new workflow phase traverses the actual fixed selector, held
-        # files, same original calls, credential scope, POST and target cleanup.
-        # These tiny Mach-O/Keychain return values remain inert DATA only.
         _transport, matcher, _parser = self.python_data_functions()
-        for target in (module.ARM_TARGET, module.INTEL_TARGET):
-            for phase, failed_verify in ([(value, False) for value in module.SIGNING_PHASES] + [("sign-remover", True)]):
-                with self.subTest(fixedSigning=phase, target=target, failedVerify=failed_verify), tempfile.TemporaryDirectory() as directory:
-                    checkout, work, environment, _owner, _observations = self.fixture(Path(directory), build_target=target)
-                    environment["CARGO_TARGET_DIR"] = str(work / "cargo-target")
-                    for relative, body in (("desktop/packaging/macos-empty-entitlements.plist",
-                            (Path(__file__).absolute().parents[2] / "desktop/packaging/macos-empty-entitlements.plist").read_bytes()),
-                            ("desktop/tools/macos_cpython_orchestrator.py", b"# INERT held parser SOURCE; DATA functions injected below\n")):
-                        path = checkout / relative
-                        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                        path.write_bytes(body); path.chmod(0o644)
-                    app = work / "app/Mobile Release Kit.app"
-                    payload = app / "Contents/Helpers/MobileReleaseKitPayload.app"
-                    selected = {"sign-vault-helper": work / ("vault-helper-target/" + target + "/release/mrk-vault-keychain"),
-                        "sign-desktop-image": payload / "Contents/Frameworks/libmrk_desktop_image.dylib",
-                        "sign-desktop-payload": payload, "sign-root-app": app,
-                        "sign-root-installer": work / ("cargo-target/" + target + "/release/mrk-macos-install"),
-                        "sign-remover": work / ("remover-target/" + target + "/release/mrk-macos-remove")}[phase]
-                    binary = (selected / "Contents/MacOS" / ("mobile-release-kit-desktop" if phase == "sign-desktop-payload" else module.ENTRY)
-                              if phase in ("sign-desktop-payload", "sign-root-app") else selected)
-                    binary.parent.mkdir(mode=0o700, parents=True)
-                    original = (image_macho_fixture("desktop", target=target) if phase == "sign-desktop-image"
-                                else entry_macho_fixture(target=target)) + bytes(64)
-                    signed = self.signed_macho_fixture(original)
-                    binary.write_bytes(original); binary.chmod(0o755)
-                    calls = []
-                    def fixed(argv, **options):
-                        calls.append((tuple(argv), options))
-                        self.assertEqual(Path(argv[-1]), selected)
-                        if "--sign" in argv:
-                            self.assertEqual(argv[argv.index("--sign") + 1], credentials.leaf)
-                            expected_sign = ["/usr/bin/codesign", "--force", "--sign", credentials.leaf,
-                                "--options", "runtime", "--entitlements",
-                                str(checkout / "desktop/packaging/macos-empty-entitlements.plist")]
-                            if phase == "sign-remover":
-                                expected_sign += ["--identifier", "dev.mobile-release-kit.desktop.remove"]
-                            self.assertEqual(argv, expected_sign + ["--timestamp", str(selected)])
-                            self.assertIn("--timestamp", argv)
-                            replacement = binary.with_name(binary.name + ".replacement")
-                            replacement.write_bytes(signed); replacement.chmod(0o755); replacement.replace(binary)
-                        else:
-                            expected_verify = ["/usr/bin/codesign", "--verify", "--strict"]
-                            if phase == "sign-remover":
-                                expected_verify += ["-R", "=" + module.signing_requirement(("TEST000001", credentials.leaf),
-                                                                                   "dev.mobile-release-kit.desktop.remove")]
-                            self.assertEqual(argv, expected_verify + [str(selected)])
-                            self.assertEqual(binary.read_bytes(), signed)
-                            if failed_verify:
-                                return CompletedProcess(argv, 1, b"", b"INERT signature rejected")
-                        return CompletedProcess(argv, 0, b"", b"")
-                    operation = module.Operation(SimpleNamespace(run_owned=fixed), checkout, work, phase, environment, TOOL, target=target)
-                    credentials = self.credential_fixture(operation)
-                    def parser(root, filename, name):
-                        self.assertEqual((root, filename, name), (checkout, "macos_cpython_orchestrator.py", "_mrk_credential_signing_content"))
-                        return matcher
-                    original_loader = module.load_data
-                    with self.credential_fixture_call(operation, credentials), mock.patch.object(module, "load_data", side_effect=parser):
-                        if failed_verify:
-                            with self.assertRaises(module.Refused): operation.execute()
-                        else:
-                            self.assertEqual(operation.execute(), module.digest(signed))
-                    self.assertEqual(operation.receipt["passed"], not failed_verify)
-                    self.assertIs(module.load_data, original_loader)
-                    self.assertEqual(len(calls), 2)
-                    self.assertEqual([row["role"] for row in operation.calls], [phase, phase + "-verify"])
-                    self.assertTrue(operation.receipt["originalClosesKnown"] and operation.receipt["targetRetired"])
-                    self.assertEqual(operation.fixed_sign_complete, not failed_verify)
-                    self.assertEqual(credentials.search, credentials.initial)
-                    self.assertFalse(Path(credentials.keychain).parent.exists())
-                    self.assertTrue(all(all(row[key] is True for key in ("closed", "retired", "searchRestored", "defaultUnchanged"))
-                                        for row in operation.credential_contexts))
-                    public = json.dumps(operation.receipt)
-                    self.assertNotIn("INERT PKCS12", public)
-                    self.assertNotIn(environment[module.CREDENTIAL_VARIABLES[0]], public)
-                    self.assertNotIn(environment[module.CREDENTIAL_VARIABLES[1]], public)
-                    self.assertFalse(operation.receipt["developerIdOrNotarizationQualified"] or operation.receipt["productReady"])
 
         # The producer receives -T/CDHash only after its same compiler-derived
         # copy was actually created, ad-hoc-return verified, POST and sealed0555.
@@ -7807,7 +7836,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             with self.assertRaises(module.Refused): module.tool_signed_receipt(raw, row, purpose, target, producer, service, entitlements)
         self.assertEqual(module.MAX_HELPER, 32 * 1024 * 1024)
         self.assertEqual(module.SIGNING_PHASES, ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload",
-            "sign-root-app", "sign-root-installer", "sign-remover"))
+            "sign-root-app", "sign-root-installer", "sign-remover", "sign-applications-launcher"))
         with self.assertRaises(module.Refused): module.tool_quote("arbitrary-tool")
         # The original epoch is not restarted by a callback or cleanup switch.
         clock = SimpleNamespace(phase="sign-github-seal", tool_started=100, tool_observed=100)
@@ -10066,7 +10095,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             with self.subTest(displayBytes=len(value)), self.assertRaises(module.Refused): module.credential_cdhash(value)
         self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove",
                                        "same-package-noop", "update-baseline", "prepare-app-absence", "app-absence-restore"))
-        self.assertEqual(module.SIGNING_PHASES, ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover"))
+        self.assertEqual(module.SIGNING_PHASES, ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover", "sign-applications-launcher"))
         for phase in module.SIGNING_PHASES:
             for target in (module.ARM_TARGET, module.INTEL_TARGET):
                 self.assertEqual(module.entrypoint(["tool", phase, "--target", target]), (phase, target))
@@ -10305,9 +10334,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertFalse(operation.receipt["notaryAuthentication"]["created"])
                 self.assertEqual((state.work / "distribution/MobileReleaseKit.dmg").read_bytes(), state.original_image)
 
-        # New ref selects eight existing native owners, never a notary/Installer fallback.
+        # The application-signature ref selects only fixed signing owners, never a notary/Installer fallback.
         module = ANDROID_HELPER
-        expected = ("prepare", "sign-vault-helper", "sign-remover", "verify-before", "sign-desktop-image",
+        expected = ("prepare", "sign-vault-helper", "sign-remover", "sign-applications-launcher", "verify-before", "sign-desktop-image",
                     "sign-desktop-payload", "sign-root-app", "verify-after")
         self.assertEqual(module.APP_SIGNATURE_PHASES, expected)
         self.assertEqual(module.APP_SIGNATURE_DATA, ("select-github-tools-signed", "project-history-provider", "project-github-seal"))
