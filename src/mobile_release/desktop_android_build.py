@@ -8,6 +8,7 @@ No Store call or release publication occurs.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import os
 import sys
 import threading
@@ -47,6 +48,7 @@ class AndroidBuildRun:
         self.report: Report | None = None
         self._candidate: dict | None = None
         self._local_handoff = None  # Internal opt-in; no request/wire authority.
+        self._local_composition = None
         self._run_claimed = self._close_claimed = False
         # This constructor roots itself in source before any child owner can
         # fail construction. The engine has a fixed original-operation fallback
@@ -54,6 +56,8 @@ class AndroidBuildRun:
         self.operation = AndroidBuildOperation(request, guard, source)
 
     def remember(self, error: BaseException) -> None:
+        if getattr(self, "_local_composition", None) is not None:
+            self._local_composition._fail(error)
         if getattr(self, "_local_handoff", None) is not None:
             self._local_handoff._fail()
         if self.primary is None:
@@ -82,69 +86,74 @@ class AndroidBuildRun:
                     try:
                         bound = operation.bind_inputs()
                         operation.advance("inputs-bound")
-                        operation.prepare()
-                        if operation.signing is None:
-                            operation.advance("building")
-                            # Shared core owns invocation/capture. Its diagnostic
-                            # returned Path map is deliberately unused.
-                            run_android_build(bound.config, signed=False, cancellation=self.guard,
-                                              operation=operation)
-                        else:
-                            self._signed_body(bound)
-                        operation.advance("inspecting")
-                        artifact = operation.artifact()
-                        findings = validate_aab(
-                            artifact.path, expected_application_id=bound.saved.configuration.application_id,
-                            release=bound.release, expected_fingerprint=(bound.saved.configuration.upload_certificate_sha256
-                                                                        if bound.check_signer else None),
-                            require_tools=True, check_signer=bound.check_signer, cancellation=self.guard, artifact=artifact,
-                            tools=operation.tools,
-                        )
-                        self.report = Report("android-build-inspect", findings=findings)
-                        if operation.signing is not None and any(
-                                item.status not in {Status.PASS, Status.NOT_APPLICABLE} for item in findings):
-                            operation.fail("signing-validation-failed")
-                        operation.check_inputs()
-                        operation.tools.check()
-                        abi = (AndroidAbiObservation((), False) if operation.zip_metadata is None
-                               else android_abis_from_zip_metadata(operation.zip_metadata,
-                                                                   checkpoint=artifact.check))
-                        artifact.verify_bytes()
-                        records = artifact_records_from_observations((ArtifactObservation(
-                            artifact.logical_name, artifact.file_name, artifact.size, artifact.sha256,
-                            abi.architectures,
-                        ),))
-                        observed = project_artifact(records[0], unknown_abi=abi.unknown_abi)
-                        used_config, used_version = operation.used_inputs()
-                        operation.advance("disposing-work")
-                        operation.finish_work()
-                        # Final publication DATA still refers to these same
-                        # retained originals, not reopened normalized filenames.
-                        artifact.verify_bytes()
-                        operation.check_inputs()
-                        operation.tools.check()
-                        try:
-                            self._candidate = project_result(
-                                project_activity(self.report, stage=operation.stage,
-                                                 selection=operation.selection(), command=operation.command_outcome()),
-                                observed, used_config=used_config, used_version=used_version,
-                                validation=self.request.context["artifactValidation"],
-                                toolchain_profile=self.request.native["toolchain"]["profile"],
-                                toolchain_selection=self.request.native["toolchain"].get("selection"),
-                                signed=operation.signing is not None,
+                        scope = (nullcontext() if getattr(self, "_local_composition", None) is None
+                                 else self._local_composition._source_scope(bound))
+                        with scope:
+                            operation.prepare()
+                            if operation.signing is None:
+                                operation.advance("building")
+                                # Shared core owns invocation/capture. Its diagnostic
+                                # returned Path map is deliberately unused.
+                                run_android_build(bound.config, signed=False, cancellation=self.guard,
+                                                  operation=operation)
+                            else:
+                                self._signed_body(bound)
+                            operation.advance("inspecting")
+                            artifact = operation.artifact()
+                            findings = validate_aab(
+                                artifact.path, expected_application_id=bound.saved.configuration.application_id,
+                                release=bound.release, expected_fingerprint=(bound.saved.configuration.upload_certificate_sha256
+                                                                            if bound.check_signer else None),
+                                require_tools=True, check_signer=bound.check_signer, cancellation=self.guard, artifact=artifact,
+                                tools=operation.tools,
                             )
-                        except (ProtocolError, ValueError, TypeError, RecursionError) as error:
-                            # Bounded DATA projection is not a successful build
-                            # result. Preserve a hidden original lifetime failure
-                            # rather than relabel it as a representation limit.
-                            if fatal_lifetime_error(error, "Android result custody did not settle") is not None:
-                                raise
-                            raise AndroidBuildError("result-limit") from None
-                        operation.checkpoint()
-                        if getattr(self, "_local_handoff", None) is not None:
-                            from .local_release_candidate import LocalAndroidBuildHandoff
-                            require(type(self._local_handoff) is LocalAndroidBuildHandoff)
-                            self._local_handoff._capture(self, artifact)
+                            self.report = Report("android-build-inspect", findings=findings)
+                            if operation.signing is not None and any(
+                                    item.status not in {Status.PASS, Status.NOT_APPLICABLE} for item in findings):
+                                operation.fail("signing-validation-failed")
+                            operation.check_inputs()
+                            operation.tools.check()
+                            abi = (AndroidAbiObservation((), False) if operation.zip_metadata is None
+                                   else android_abis_from_zip_metadata(operation.zip_metadata,
+                                                                       checkpoint=artifact.check))
+                            artifact.verify_bytes()
+                            records = artifact_records_from_observations((ArtifactObservation(
+                                artifact.logical_name, artifact.file_name, artifact.size, artifact.sha256,
+                                abi.architectures,
+                            ),))
+                            observed = project_artifact(records[0], unknown_abi=abi.unknown_abi)
+                            used_config, used_version = operation.used_inputs()
+                            operation.advance("disposing-work")
+                            operation.finish_work()
+                            # Final publication DATA still refers to these same
+                            # retained originals, not reopened normalized filenames.
+                            artifact.verify_bytes()
+                            operation.check_inputs()
+                            operation.tools.check()
+                            try:
+                                self._candidate = project_result(
+                                    project_activity(self.report, stage=operation.stage,
+                                                     selection=operation.selection(), command=operation.command_outcome()),
+                                    observed, used_config=used_config, used_version=used_version,
+                                    validation=self.request.context["artifactValidation"],
+                                    toolchain_profile=self.request.native["toolchain"]["profile"],
+                                    toolchain_selection=self.request.native["toolchain"].get("selection"),
+                                    signed=operation.signing is not None,
+                                )
+                            except (ProtocolError, ValueError, TypeError, RecursionError) as error:
+                                # Bounded DATA projection is not a successful build
+                                # result. Preserve a hidden original lifetime failure
+                                # rather than relabel it as a representation limit.
+                                if fatal_lifetime_error(error, "Android result custody did not settle") is not None:
+                                    raise
+                                raise AndroidBuildError("result-limit") from None
+                            operation.checkpoint()
+                            if getattr(self, "_local_handoff", None) is not None:
+                                from .local_release_candidate import LocalAndroidBuildHandoff
+                                require(type(self._local_handoff) is LocalAndroidBuildHandoff)
+                                if getattr(self, "_local_composition", None) is not None:
+                                    self._local_composition._before_capture(artifact)
+                                self._local_handoff._capture(self, artifact)
                     except BaseException as error:
                         # F and the original primary precede potentially blocking
                         # independent work/artifact/tool/namespace closes.
@@ -210,7 +219,11 @@ class AndroidBuildRun:
 
     def _failure(self, command: dict) -> tuple[str, str]:
         error = self.primary
-        if isinstance(error, (AndroidSelectionRefused, AndroidBuildError, AndroidToolError, AndroidFileError)):
+        from .local_release_candidate import LocalCandidateError
+        from .local_release_source import LocalSourceError
+        if getattr(self, "_local_composition", None) is not None and isinstance(error, (LocalCandidateError, LocalSourceError)):
+            reason = "protocol-error"
+        elif isinstance(error, (AndroidSelectionRefused, AndroidBuildError, AndroidToolError, AndroidFileError)):
             reason = error.reason
         elif isinstance(error, BuildInputError):
             reason = ("build-inputs-unrestored" if self.operation.signing is not None
@@ -243,6 +256,8 @@ class AndroidBuildRun:
         verdict = self.guard.lifetime_ledger.verdict()
         signed = is_signed(self.request.context)
         maximum_commands = 6 if signed else 4 if self.request.context["artifactValidation"]["mode"] == "upload-signature" else 2
+        if getattr(self, "_local_composition", None) is not None:
+            maximum_commands += self._local_composition._settled_source_calls()
         if verdict.profile_calls != 0 or verdict.commands > maximum_commands:
             self.guard._abort(ProtocolError("Unexpected Android build lifetime domain"))
             verdict = self.guard.lifetime_ledger.verdict()
@@ -297,6 +312,8 @@ class AndroidBuildRun:
         terminal = {"schemaVersion": 1, "context": self.request.context,
                     "outcome": outcome, "reason": reason, "activity": activity,
                     "disposition": disposition, "result": result, "lifetime": lifetime}
+        if getattr(self, "_local_composition", None) is not None:
+            return self._local_composition._terminal(terminal)
         validate_terminal(terminal, self.request)
         if getattr(self, "_local_handoff", None) is not None:
             self._local_handoff._terminal(self, terminal)

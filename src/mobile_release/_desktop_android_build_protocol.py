@@ -546,17 +546,28 @@ def _disposition(value: object) -> dict:
     return dict(value)
 
 
-def _lifetime(value: object, *, signed: bool = False) -> dict:
+def _lifetime(value: object, *, signed: bool = False, command_limit: int | None = None) -> dict:
     closes = (*_CLOSE_FIELDS, *(SIGNED_CLOSE_FIELDS if signed else ()))
     value = _keys(value, {"complete", "fatal", "contained", "commandDispatched", "commands", "profileCalls", "stopObserved", *closes})
     require(all(type(value[key]) is bool for key in ("complete", "fatal", "contained", *closes))
             and (value["commandDispatched"] is None or type(value["commandDispatched"]) is bool)
-            and integer(value["commands"], 6 if signed else 4) and type(value["profileCalls"]) is int and value["profileCalls"] == 0
+            and integer(value["commands"], (6 if signed else 4) if command_limit is None else command_limit) and type(value["profileCalls"]) is int and value["profileCalls"] == 0
             and _enum(value["stopObserved"], ("none", "cancelled", "timed-out")))
     return dict(value)
 
 
 def validate_terminal(value: object, request: AndroidBuildRequest) -> None:
+    # Ordinary wire contract remains signed6 and rejects every composed envelope.
+    _validate_terminal(value, request)
+
+
+def _validate_composed_terminal(value, request, candidate):
+    from .local_release_candidate import LocalAndroidCandidateComposition
+    require(type(candidate) is LocalAndroidCandidateComposition and candidate.run.request is request)
+    _validate_terminal(value, request, candidate=candidate)
+
+
+def _validate_terminal(value: object, request: AndroidBuildRequest, *, candidate=None) -> None:
     _request_binding(request)
     _structure(value)
     value = _keys(value, {"schemaVersion", "context", "outcome", "reason", "activity", "disposition", "result", "lifetime"})
@@ -565,26 +576,36 @@ def validate_terminal(value: object, request: AndroidBuildRequest) -> None:
             and _enum(value["reason"], REASONS))
     signed = is_signed(request.context)
     closes = (*_CLOSE_FIELDS, *(SIGNED_CLOSE_FIELDS if signed else ()))
-    activity, disposition, life = _activity(value["activity"]), _disposition(value["disposition"]), _lifetime(value["lifetime"], signed=signed)
+    activity, disposition, life = _activity(value["activity"]), _disposition(value["disposition"]), _lifetime(value["lifetime"], signed=signed, command_limit=None if candidate is None else 18)
+    commands, dispatched = life["commands"], life["commandDispatched"]
+    if candidate is not None:
+        commands, dispatched = candidate._build_facts()
+        facts = candidate.run.guard.lifetime_ledger.verdict()
+        require(signed and life["commands"] == facts.commands == commands + candidate._settled_source_calls()
+                and life["commandDispatched"] is facts.command_dispatched
+                and life["complete"] is facts.complete and life["fatal"] is facts.fatal
+                and life["contained"] is facts.contained and facts.profile_calls == 0)
+    # Build-specific relationships use the original build-role facts, not a
+    # fabricated reduced lifetime document. Whole ledger fields stay unchanged.
     require(activity["stage"] in ("accepted", *stages(request.context)))
     validation = request.context["artifactValidation"]
     _inspection_mode(activity["findings"], validation)
     offset = 2 if signed else 0
-    require(life["commands"] <= (6 if signed else 4 if validation["mode"] == "upload-signature" else 2))
+    require(commands <= (6 if signed else 4 if validation["mode"] == "upload-signature" else 2))
     if activity["command"] != {"outcome": "exited", "exitCode": 0}:
-        require(life["commands"] <= (2 if signed else 1))
-    if life["commands"] > (3 if signed else 1):
+        require(commands <= (2 if signed else 1))
+    if commands > (3 if signed else 1):
         require(activity["stage"] in {"inspecting", "disposing-work"})
-    if signed and life["commands"] == 3:
+    if signed and commands == 3:
         require(activity["stage"] in {"signing", "restoring-inputs", "inspecting", "disposing-work"})
     if any(row["check"] not in {"core-lifecycle", "other-core-finding"} for row in activity["findings"]):
-        require(life["commands"] == _inspection_commands(activity["findings"], validation) + offset)
+        require(commands == _inspection_commands(activity["findings"], validation) + offset)
     settled = (life["complete"] and not life["fatal"] and life["contained"] and all(life[key] for key in closes)
                and life["commandDispatched"] is not None and "unknown" not in disposition.values())
     if activity["command"]["outcome"] == "not-dispatched":
-        require(life["commandDispatched"] is False and life["commands"] <= 1)
+        require(dispatched is False and commands <= 1)
     elif activity["command"]["outcome"] == "exited":
-        require(life["commandDispatched"] is True and life["commands"] >= 1)
+        require(dispatched is True and commands >= 1)
     if value["outcome"] == "complete":
         require(settled and life["stopObserved"] == "none" and value["reason"] == "none"
                 and activity["stage"] == "disposing-work"
@@ -597,7 +618,7 @@ def validate_terminal(value: object, request: AndroidBuildRequest) -> None:
                 and result["toolchainProfile"] == request.native["toolchain"]["profile"]
                 and result.get("toolchainSelection") == request.native["toolchain"].get("selection")
                 and all(result[key] == activity[key] for key in ("selection", "command", "findings", "summary")))
-        require(life["commands"] == _inspection_commands(result["findings"], validation) + offset)
+        require(commands == _inspection_commands(result["findings"], validation) + offset)
     else:
         require(value["result"] is None and value["reason"] != "none" and disposition["artifacts"] != "retained-local-result")
         require(settled or value["outcome"] == "unknown")
@@ -608,7 +629,7 @@ def validate_terminal(value: object, request: AndroidBuildRequest) -> None:
         if value["outcome"] in {"cancelled", "timed-out"}:
             require(value["outcome"] == value["reason"] == life["stopObserved"])
         if value["outcome"] == "refused":
-            require(activity["command"]["outcome"] == "not-dispatched" and life["commandDispatched"] is False)
+            require(activity["command"]["outcome"] == "not-dispatched" and dispatched is False)
         if value["reason"] == "command-failed":
             require(value["outcome"] == "failed" and activity["command"]["outcome"] == "exited"
                     and activity["command"]["exitCode"] != 0)

@@ -70,6 +70,16 @@ class AndroidBuildInput(_SavedCommandInput):
         self.guard._check_owner()
         return self.operation
 
+    def command_limits(self, timeout: int, capture: bool, output_limit: int) -> tuple[int, int]:
+        operation = self.require_operation()
+        candidate = getattr(operation, "_local_composition", None)
+        if candidate is not None and candidate._source_pending is not None:
+            from .local_release_candidate import LocalAndroidCandidateComposition
+            self._require(type(candidate) is LocalAndroidCandidateComposition
+                          and candidate.run.source is self and operation._pending is None)
+            return candidate._source_limits(self.remaining_timeout(timeout), capture, output_limit)
+        return super().command_limits(timeout, capture, output_limit)
+
     def _bind_engine(self, engine: _Engine) -> None:
         from ._desktop_android_build_engine import _Engine
         self._owner()

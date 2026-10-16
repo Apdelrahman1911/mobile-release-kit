@@ -27,7 +27,7 @@ import time
 
 from .build_inputs import InvocationCustody
 from .cancellation import CleanupScope
-from .checked_files import _Reader, _Policy, _Node, _directory_identity
+from .checked_files import _Reader, _Policy, _Node, _directory_identity, _file_identity
 from .config import MAX_CONFIG_BYTES, MAX_VERSION_BYTES, ReleaseConfig, parse_config_text
 from .discovery import GitContext
 from .errors import ConfigurationError, ValidationError
@@ -118,6 +118,8 @@ class LocalSourceObservation:
         self.pid, self.thread = os.getpid(), threading.current_thread()
         self.endpoint, self.execution_source = endpoint, execution_source
         self.readers, self.files = [], []
+        self.directories = {}
+        self._composition = None
         self.calls = self.held = 0
         self.active = False
         self.closed = False
@@ -136,6 +138,20 @@ class LocalSourceObservation:
         self.version_path = _relative(self.config.section("version")["source"])
         _need(self.version_path != CONFIG_PATH, "path")
 
+    def descriptor_quote(self):
+        leaves = (CONFIG_PATH, self.version_path, ".git/config", ".git/HEAD", ".git/index",
+                  ".git/packed-refs", ".git/refs/heads/" + self.branch)
+        paths = {Path("/")}
+        for relative in (*leaves, ".git/objects/info", ".git/info", ".git/refs"):
+            path = self.root / relative
+            paths.update((path, *path.parents))
+        _need(len(paths) <= MAX_HELD, "budget")
+        return len(paths)
+
+    def _charge(self, count):
+        _need(type(count) is int and count >= 0 and self.held + count <= self.descriptor_quote(), "budget")
+        self.held += count  # Never credit an unknown open or consuming close.
+
     def _owner(self):
         _need(self.pid == os.getpid() and self.thread is threading.current_thread()
               and not self.closed and self.invocation.project_owner is self.project, "owner")
@@ -152,14 +168,28 @@ class LocalSourceObservation:
         else:
             _relative(relative)
         path = self.root / relative
-        # Reader opens one root, each ancestor, and the leaf; no Darwin alias
-        # is used by this canonical project spelling. Reserve before acquisition.
-        quote = len(path.parts)
-        _need(self.held + quote <= MAX_HELD, "budget")
-        self.held += quote
-        reader = _Reader(self.guard)
-        self.readers.append(reader)  # Original fallback before any open.
-        node = reader.acquire(path, _Policy(False, 1, limit), None)
+        if not self.readers:
+            self._charge(len(path.parts))
+            reader = _Reader(self.guard)
+            self.readers.append(reader)  # Original fallback before any open.
+            node = reader.acquire(path, _Policy(False, 1, limit), None)
+            self.directories.update((item.canonical, item) for item in reader.nodes if item.directory)
+        else:
+            reader = self.readers[0]
+            reader.terminal()
+            parent = self.directories[self.root]
+            for part in path.relative_to(self.root).parts[:-1]:
+                parent = self._directory(reader, parent, part)
+            info = reader._stat(parent.slot, path.name)
+            _need(stat.S_ISREG(info.st_mode) and 1 <= info.st_size <= limit
+                  and info.st_uid == os.geteuid() and info.st_nlink == 1
+                  and not info.st_mode & 0o022, "input")
+            self._charge(1)
+            slot = reader._open(path.name, parent=parent.slot, directory=False)
+            node = _Node(slot, parent.slot, path.name, path, info, False)
+            reader.nodes.append(node)  # Root before any failing identity POST.
+            _need(_file_identity(os.fstat(reader._number(slot))) == _file_identity(info)
+                  == _file_identity(reader._stat(parent.slot, path.name)), "changed")
         _need(node.observed.st_uid == os.geteuid() and node.observed.st_nlink == 1
               and not node.observed.st_mode & 0o022, "input")
         roots = [item for item in reader.nodes if item.canonical == self.root]
@@ -173,8 +203,13 @@ class LocalSourceObservation:
 
     def _directory(self, reader, parent, name):
         self._owner()
-        _need(self.held < MAX_HELD, "budget")
-        self.held += 1
+        reader.terminal()
+        path = parent.canonical / name
+        if path in self.directories:
+            node = self.directories[path]
+            _need(node.parent is parent.slot and node in reader.nodes, "changed")
+            return node
+        self._charge(1)
         info = reader._stat(parent.slot, name)
         _need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
               and not info.st_mode & 0o022, "repository")
@@ -182,6 +217,7 @@ class LocalSourceObservation:
         node = _Node(slot, parent.slot, name, parent.canonical / name, info, True)
         reader.nodes.append(node)
         reader.terminal()
+        self.directories[path] = node
         return node
 
     def _unchanged(self):
@@ -211,9 +247,20 @@ class LocalSourceObservation:
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0",
             "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1",
             "GIT_ALLOW_PROTOCOL": "", "GIT_LITERAL_PATHSPECS": "1", "GIT_ATTR_NOSYSTEM": "1", "GIT_PAGER": "cat"}
-        result = run_owned(argv, cwd=self.root, environ=environment, capture=True, text=False,
-            timeout=min(10, math.floor(remaining)), output_limit=limit, cancellation=self.guard,
-            execution_scope=None if self.execution_source is None else self.execution_source.new_scope())
+        timeout = min(10, math.floor(remaining))
+        candidate = self._composition
+        if candidate is not None:
+            candidate._arm_source(self, arguments, timeout, limit)
+        try:
+            result = run_owned(argv, cwd=self.root, environ=environment, capture=True, text=False,
+                timeout=timeout, output_limit=limit, cancellation=self.guard,
+                execution_scope=None if self.execution_source is None else self.execution_source.new_scope())
+        except BaseException as error:
+            if candidate is not None:
+                candidate._source_error(self, error)
+            raise
+        if candidate is not None:
+            candidate._source_returned(self, result)
         _need(type(result.returncode) is int and result.returncode == 0 and result.args == argv and type(result.stdout) is bytes and type(result.stderr) is bytes
               and result.stderr == b"" and len(result.stdout) <= limit, "command")
         self._unchanged()
@@ -337,16 +384,9 @@ class LocalSourceObservation:
 
 
 @contextmanager
-def observe_local_source(invocation, *, configuration_bytes, version_bytes,
-                         execution_source=None, timeout=60):
-    """Borrow a real project lease; hold source across preparation/build cuts.
-
-    A returned GitContext or LocalReleaseDraft is not durable intent, artifact
-    custody or authorization. The original caller still owns producer finality.
-    """
-    _need(type(timeout) is int and 1 <= timeout <= 120, "deadline")
-    owner = LocalSourceObservation(invocation, configuration_bytes, version_bytes,
-                                   _now() + timeout, execution_source)
+def _retain_source(owner):
+    # Shared original scope; the candidate constructs an owner with its exact
+    # borrowed work endpoint rather than extending the public short timeout.
     scope = CleanupScope(owner.guard, owner._close, owns_cancellation=False,
                          fork_cleanup=owner._fork_close, first_primary=True)
     try:
@@ -367,3 +407,14 @@ def observe_local_source(invocation, *, configuration_bytes, version_bytes,
         if isinstance(error, (OSError, UnicodeError)) or isinstance(error, ValidationError) and not isinstance(error, (LocalSourceError, ProcessError)):
             raise LocalSourceError("input") from None
         raise
+
+
+@contextmanager
+def observe_local_source(invocation, *, configuration_bytes, version_bytes,
+                         execution_source=None, timeout=60):
+    """Short preparation DATA only; no durable intent or Store authority."""
+    _need(type(timeout) is int and 1 <= timeout <= 120, "deadline")
+    owner = LocalSourceObservation(invocation, configuration_bytes, version_bytes,
+                                   _now() + timeout, execution_source)
+    with _retain_source(owner) as held:
+        yield held

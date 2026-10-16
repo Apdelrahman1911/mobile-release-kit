@@ -27,6 +27,8 @@ from .errors import ValidationError
 
 MAX_HANDOFF_FDS = 48
 READ_CHUNK = 64 * 1024
+COMPOSITION_FDS = 256
+BUILD_ROLES = ("keytool-input", "gradle", "aab-sign", "bundletool", "jarsigner", "keytool")
 
 
 class LocalCandidateError(ValidationError):
@@ -260,4 +262,277 @@ def retain_android_build_inputs(run):
             scope.__exit__(*sys.exc_info())
     except BaseException:
         handoff.failed = True
+        raise
+
+
+def composition_fd_quote(*, project, source, bound_files, module_depth, root_depth, firebase):
+    """Closed owned-Python peak, not ambient/native-parent headroom evidence."""
+    values = (project, source, bound_files, module_depth, root_depth)
+    _need(all(type(n) is int and 0 <= n <= 96 for n in values) and type(firebase) is bool)
+    normal = bound_files + 2 * module_depth + 18
+    # BuildInputs pins project/.mobile-release/pending as the scratch parent.
+    signing = root_depth + 2 + 2 + 1 + 2 + 1 + 2 + 4
+    if firebase:
+        signing += root_depth + module_depth + 2
+    handoff = root_depth + 5 + 2  # namespace3/artifacts/leaf + checked alias allowance.
+    # Independent work cleanup still runs when signing.close loses its return.
+    # Keep that entire workspace alongside possibly unclosed signing/native IO.
+    workspace = max(signing + 20 + 67, handoff + 20)
+    total = project + source + normal + 3 + 64 + 2 + 8 + workspace
+    _need(total <= COMPOSITION_FDS)
+    return {"project": project, "source": source, "normalFiles": normal, "normalIterators": 2,
+            "namespace": 3, "tools": 64, "baseline": 8, "signingWithCommand": signing + 20,
+            "cleanup": 67, "handoffWithPostCommand": handoff + 20, "total": total,
+            "handoff": handoff}
+
+
+class LocalAndroidCandidateComposition:
+    """Internal original source/build join; deliberately not a native wire API.
+
+    No constructor/draft/observation grants Store authority. Ordinary Android
+    protocol validators still reject this distinct terminal envelope.
+    """
+    def __init__(self, run):
+        from .desktop_android_build import AndroidBuildRun
+        _need(type(run) is AndroidBuildRun and not run._run_claimed and not run._close_claimed
+              and run.primary is None and getattr(run, "_local_composition", None) is None
+              and getattr(run.operation, "_local_composition", None) is None
+              and run.request.native["toolchain"]["profile"] in
+                  ("android-registered-macos-arm64-v1", "android-registered-macos-x86_64-v1"))
+        self.run = run
+        self.handoff = LocalAndroidBuildHandoff(run)
+        self.source = None
+        self.quote = self.source_binding = None
+        self.failed = self.closed = self.source_closed = self.joined = False
+        self._source_pending = None
+        self._source_rows = []
+        self._build_errors = {}
+        self.source_failure = None
+        run._local_composition = run.operation._local_composition = self
+
+    def _owner(self):
+        self.run.operation.owner()
+        _need(self.run._local_composition is self and self.run.operation._local_composition is self)
+
+    def _fail(self, error=None):
+        self._owner()
+        self.failed = True
+        self.handoff._fail()
+        from .local_release_source import LocalSourceError
+        if type(error) is LocalSourceError and self.source_failure is None:
+            self.source_failure = error.reason
+
+    def _settled_source_calls(self):
+        return sum(row["settled"] for row in self._source_rows)
+
+    def _source_calls_for_build(self):
+        self._owner()
+        _need(not self.failed and not self.closed and self._source_pending is None
+              and self.source is not None and not self.source.closed
+              and all(row["returned"] and row["code"] == 0 for row in self._source_rows))
+        return self._settled_source_calls()
+
+    def _arm_source(self, source, arguments, timeout, limit):
+        self._owner()
+        op = self.run.operation
+        _need(source is self.source and source._composition is self and source.execution_source is None
+              and source.endpoint == self.run.source.work_end and not self.failed and not self.closed
+              and self._source_pending is None and op._pending is None and len(self._source_rows) < 12
+              and (all(state == "new" for state in op._roles.values())
+                   or (op._signature_passed and all(op._roles.get(role) == "returned"
+                       and op._returned.get(role) in ((0, 4) if role == "jarsigner" else (0,))
+                       for role in BUILD_ROLES))))
+        initial = (("config", ["config", "--local", "--no-includes", "--null", "--list"], 65536),
+            ("identity", ["rev-parse", "--shared-index-path", "HEAD", "HEAD^{tree}"], 1024),
+            ("index", ["ls-files", "--stage", "-z"], 2 << 20),
+            ("flags", ["ls-files", "-v", "-z"], 2 << 20))
+        index = len(self._source_rows)
+        if index < 4:
+            role, expected, cap = initial[index]
+            _need(arguments == expected and limit == cap)
+        elif index == 4:
+            import re
+            role = "tree"
+            _need(len(arguments) == 5 and arguments[:4] == ["ls-tree", "-r", "-z", "--full-tree"]
+                  and type(arguments[4]) is str and re.fullmatch(r"[0-9a-f]{40}", arguments[4])
+                  and limit == 2 << 20)
+        else:
+            role = "status"
+            _need(arguments == ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"]
+                  and limit == 2 << 20)
+        facts = self.run.guard.lifetime_ledger.verdict()
+        _need(facts.complete and facts.cleanup_complete and facts.contained and not facts.fatal
+              and facts.profile_calls == 0 and facts.commands == self._settled_source_calls() + len(op._returned))
+        row = {"role": role, "before": facts.commands, "attempted": False, "returned": False,
+               "settled": False, "code": None}
+        self._source_rows.append(row)
+        self._source_pending = (row, timeout, limit)
+
+    def _source_limits(self, timeout, capture, output_limit):
+        self._owner()
+        _need(not self.failed and not self.closed and self._source_pending is not None)
+        row, requested, cap = self._source_pending
+        _need(not row["attempted"] and capture is True and type(timeout) is int
+              and 1 <= timeout <= requested <= 10 and output_limit == cap)
+        row["attempted"] = True
+        return timeout, cap
+
+    def _source_returned(self, source, result):
+        self._owner()
+        _need(source is self.source and self._source_pending is not None)
+        row = self._source_pending[0]
+        facts = self.run.guard.lifetime_ledger.verdict()
+        _need(row["attempted"] and facts.complete and facts.cleanup_complete and facts.contained
+              and not facts.fatal and facts.commands == row["before"] + 1 and facts.profile_calls == 0
+              and type(result.returncode) is int)
+        row.update(returned=True, settled=True, code=result.returncode)
+        self._source_pending = None
+        if result.returncode != 0:
+            self._fail()
+
+    def _source_error(self, source, error):
+        self._owner()
+        _need(source is self.source and self._source_pending is not None)
+        row = self._source_pending[0]
+        facts = self.run.guard.lifetime_ledger.verdict()
+        row["settled"] = bool(row["attempted"] and facts.complete and facts.cleanup_complete
+                              and facts.contained and not facts.fatal and facts.commands == row["before"] + 1)
+        self._source_pending = None
+        self._fail(error)
+
+    def _build_error(self, role):
+        self._owner()
+        op = self.run.operation
+        facts = self.run.guard.lifetime_ledger.verdict()
+        before = op._command_before.get(role)
+        self._build_errors[role] = bool(type(before) is int and facts.complete
+            and facts.cleanup_complete and facts.contained and not facts.fatal and facts.commands == before + 1)
+        self._fail()
+
+    def _build_facts(self):
+        self._owner()
+        op = self.run.operation
+        _need(tuple(op._roles) == BUILD_ROLES)
+        completed = set(op._returned) | {role for role, settled in self._build_errors.items() if settled}
+        _need(completed <= set(BUILD_ROLES))
+        dispatched = True if op._returned else None if any(state != "new" for state in op._roles.values()) else False
+        return len(completed), dispatched
+
+    def _charge(self, name, amount):
+        # Called before ordinary slot allocation. No recursive project/clock
+        # check: the original operation already performed that checkpoint.
+        if self.quote is None or name not in ("file-slots", "file-iterators"):
+            return
+        files = self.run.operation.files
+        slots = files.slots if name == "file-slots" else files.iterators
+        count = sum(slot.close_state != "CLOSED" for slot in slots)
+        cap = self.quote["normalFiles" if name == "file-slots" else "normalIterators"]
+        _need(type(amount) is int and 0 <= amount and count + amount <= cap)
+
+    @contextmanager
+    def _source_scope(self, bound):
+        from .local_release_source import LocalSourceObservation, _retain_source
+        import resource
+        self._owner()
+        op = self.run.operation
+        _need(self.source is None and not self.failed and not self.closed and op.inputs is bound
+              and op.invocation.project_owner is op.invocation._original_project)
+        source = LocalSourceObservation(op.invocation, bound.saved.configuration.raw, bound.saved.version_raw,
+                                        self.run.source.work_end, None)
+        self.source = source  # Root before original source opens.
+        source._composition = self
+        project = op.invocation.project_owner
+        module_depth = len(bound.saved.configuration.module.lstrip(":").split(":")) if bound.saved.configuration.module != ":" else 0
+        self.quote = composition_fd_quote(project=len(project.directory.slots) + 1,
+            source=source.descriptor_quote(), bound_files=sum(s.close_state != "CLOSED" for s in op.files.slots),
+            module_depth=module_depth, root_depth=len(op.root.parts),
+            firebase=bound.config.section("services").get("androidFirebase") == "required")
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        _need(soft == resource.RLIM_INFINITY or soft >= COMPOSITION_FDS)
+        try:
+            with _retain_source(source):
+                observed = source.observed
+                self.source_binding = {"commit": observed.commit, "tree": observed.tree,
+                                       "ref": observed.ref, "branch": observed.branch}
+                try:
+                    yield
+                except BaseException as error:
+                    self._fail(error)  # First failure before independent source closes.
+                    raise
+            _need(source.closed and all(reader.assert_closed() is None for reader in source.readers))
+            self.source_closed = True
+        except BaseException as error:
+            self._fail(error)
+            raise
+
+    def _before_capture(self, artifact):
+        self._owner()
+        _need(self.source is not None and self.quote is not None and not self.failed
+              and self.run.operation.work_finish_attempted)
+        self.source.check()
+        path = self.run.operation.root / ".mobile-release" / "desktop-android-build" / self.run.operation.operation_id / "artifacts" / "app-release.aab"
+        _need(artifact.path == path and len(path.parts) + 2 <= self.quote["handoff"])
+
+    def _terminal(self, terminal):
+        try:
+            return self._terminal_data(terminal)
+        except BaseException as error:
+            self._fail(error)
+            raise
+
+    def _terminal_data(self, terminal):
+        from ._desktop_android_build_protocol import _validate_composed_terminal
+        _validate_composed_terminal(terminal, self.run.request, self)
+        if terminal["outcome"] == "complete":
+            _need(not self.failed and self.source_closed and self.source_binding is not None
+                  and self._source_pending is None and len(self._source_rows) == 8
+                  and all(row["returned"] and row["code"] == 0 for row in self._source_rows))
+        if terminal["outcome"] != "complete":
+            self._fail()
+        self.handoff._terminal(self.run, terminal)
+        self.joined = terminal["outcome"] == "complete" and self.handoff.producer_joined
+        return {"origin": "local-desktop", "scope": "source-bound-android-build-composition",
+                "build": terminal, "source": self.source_binding, "sourceCalls": [dict(row) for row in self._source_rows],
+                "sourceOriginalsClosed": self.source_closed, "sourceFailure": self.source_failure,
+                "ownedPythonDescriptorQuote": self.quote,
+                # Serialized payload/row bounds, not a Python heap or OS-wide
+                # memory proof. No AAB body is retained in memory.
+                "additionalDataBounds": {"sourceRetainedPayloadBytes": MAX_CONFIG_BYTES + MAX_VERSION_BYTES
+                    + 65536 + 1024 + 128 + 2 * (2 << 20), "sourceCommandStreamBytes": 2 << 20,
+                    "sourceTrackedRowsPerTable": 32768, "sourceTrackedTables": 2,
+                    "handoffSavedBytes": MAX_CONFIG_BYTES + MAX_VERSION_BYTES,
+                    "handoffResultBytes": RESPONSE_LIMIT, "artifactReadChunkBytes": READ_CHUNK},
+                "outerTransportFinality": "not-established",
+                "freshness": "not-established", "candidatePrepared": False, "storeAuthorized": False}
+
+    def observation(self):
+        self._owner()
+        _need(self.joined and not self.closed and not self.failed)
+        return {**self.handoff.observation(), "sourceCorrespondence": dict(self.source_binding)}
+
+    def artifact_blocks(self):
+        self.observation()
+        return self.handoff.artifact_blocks()
+
+    def _close(self):
+        self._owner()
+        self.closed = True
+        self.handoff._close()
+
+
+@contextmanager
+def retain_local_android_candidate(run):
+    """No engine/wire caller yet; original internal composition only."""
+    owner = LocalAndroidCandidateComposition(run)
+    scope = CleanupScope(run.guard, owner._close, owns_cancellation=False,
+        fork_cleanup=lambda: owner.handoff.reader.after_fork_child() if owner.handoff.reader else None,
+        first_primary=True)
+    try:
+        try:
+            with scope:
+                yield owner
+        finally:
+            scope.__exit__(*sys.exc_info())
+    except BaseException as error:
+        owner._fail(error)
         raise

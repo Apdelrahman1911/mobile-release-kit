@@ -90,6 +90,7 @@ class AndroidBuildOperation:
         self.zip_metadata = None
         self.stage = "accepted"
         self._ignore_policy_read = False
+        self._local_composition = None  # Internal source/build composition, not a wire role.
         # Constructors below acquire no filesystem/tool resources. Root this
         # original operation before the service constructor can lose its return.
         source.bind_operation(self)
@@ -140,6 +141,8 @@ class AndroidBuildOperation:
             self.cleanup_checkpoint()
         else:
             self._tick()
+        if getattr(self, "_local_composition", None) is not None:
+            self._local_composition._charge(name, amount)
         old = self.counters.get(name, 0)
         if (type(amount) is not int or amount < 0 or type(limit) is not int or limit <= 0
                 or old > limit - amount):
@@ -305,7 +308,9 @@ class AndroidBuildOperation:
         facts = self.guard.lifetime_ledger.verdict()
         require(facts.cleanup_complete and facts.contained and not facts.fatal and facts.profile_calls == 0)
         previous = tuple(self._roles)[:tuple(self._roles).index(role)]
-        require(facts.commands == len(previous) and all(self._roles[item] == "returned" for item in previous))
+        source_calls = 0 if getattr(self, "_local_composition", None) is None else self._local_composition._source_calls_for_build()
+        require(facts.commands == len(previous) + source_calls
+                and all(self._roles[item] == "returned" for item in previous))
         if role not in {"keytool-input", "gradle"}:
             require(self._returned.get("gradle") == 0)
             if role != "aab-sign":
@@ -420,6 +425,8 @@ class AndroidBuildOperation:
     def command_error(self, role: str, error: BaseException) -> None:
         self.owner()
         require(role in self._roles)
+        if getattr(self, "_local_composition", None) is not None:
+            self._local_composition._build_error(role)
         self.source.failure_observed()
         if self._roles[role] != "returned":
             self._roles[role] = "failed"
@@ -431,6 +438,8 @@ class AndroidBuildOperation:
         self.owner()
         if "gradle" in self._returned:
             return {"outcome": "exited", "exitCode": self._returned["gradle"]}
+        if getattr(self, "_local_composition", None) is not None and all(state == "new" for state in self._roles.values()):
+            return {"outcome": "not-dispatched", "exitCode": None}
         facts = self.guard.lifetime_ledger.verdict()
         return {"outcome": "not-dispatched" if facts.command_dispatched is False else "unknown", "exitCode": None}
 
@@ -441,8 +450,9 @@ class AndroidBuildOperation:
                 and (module, variant) == (self.inputs.saved.configuration.module,
                                           self.inputs.saved.configuration.variant))
         facts = self.guard.lifetime_ledger.verdict()
+        source_calls = 0 if getattr(self, "_local_composition", None) is None else self._local_composition._source_calls_for_build()
         require(facts.cleanup_complete and facts.contained and not facts.fatal
-                and facts.command_dispatched is True and facts.commands == (2 if self.signing is not None else 1)
+                and facts.command_dispatched is True and facts.commands == source_calls + (2 if self.signing is not None else 1)
                 and facts.profile_calls == 0)
 
     def capture_after(self) -> OriginalAndroidArtifact:
