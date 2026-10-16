@@ -26,8 +26,11 @@ private enum InstalledApplication {
               let code,
               SecRequirementCreateWithString(requirement as CFString, [], &rule) == errSecSuccess,
               let rule else { return false }
+        // Use public SDK flags only; do not opt into kSecCSAllowNetworkAccess.
+        // Ordinary OS certificate trust and NSWorkspace/Gatekeeper policy can
+        // involve network access; absence of that opt-in is no offline guarantee.
         let flags = SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures
-            | kSecCSCheckNestedCode | kSecCSNoNetworkAccess)
+            | kSecCSCheckNestedCode)
         return SecStaticCodeCheckValidity(code, flags, rule) == errSecSuccess
     }
 }
