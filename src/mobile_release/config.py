@@ -24,7 +24,7 @@ ROOT_KEYS = {
 }
 SECTION_KEYS = {
     "version": {"source", "nameKey", "buildKey"},
-    "source": {"candidateBranch", "productionBranch", "projectReadTokenRequired"},
+    "source": {"candidateBranch", "productionBranch", "projectReadTokenRequired", "localStoreEnabled"},
     "android": {
         "enabled",
         "applicationId",
@@ -257,6 +257,7 @@ def _validate_config(data: dict[str, Any]) -> None:
         if len(source[key]) > 255 or not BRANCH_RE.fullmatch(source[key]):
             raise ConfigurationError(f"source.{key} is not a safe Git branch name")
     _optional_bool(source, "projectReadTokenRequired", "source")
+    _optional_bool(source, "localStoreEnabled", "source")
 
     for platform in ("android", "ios"):
         section = _object(data.get(platform), platform)

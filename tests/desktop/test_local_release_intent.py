@@ -2,7 +2,9 @@
 import dataclasses
 import json
 import unittest
+from pathlib import Path
 
+from mobile_release.config import ReleaseConfig, default_config_data
 from mobile_release.discovery import GitContext
 from mobile_release.local_release_intent import (
     MAX_DRAFT_BYTES, LocalDraftError, LocalStorePolicy, decode_local_draft, prepare_local_draft,
@@ -50,6 +52,48 @@ def encoded(value):
 
 
 class LocalReleaseDraftTests(unittest.TestCase):
+    def test_saved_configuration_policy_is_explicit_strict_and_keeps_actual_branches(self):
+        data = default_config_data({"android": {"applicationId": "com.example.reader"}})
+        config = ReleaseConfig(Path("release/mobile-release.json"), Path("."), data)
+        raw = encoded(fixture())
+        for value in (None, False, True):
+            if value is None:
+                data["source"].pop("localStoreEnabled", None)
+            else:
+                data["source"]["localStoreEnabled"] = value
+            policy = LocalStorePolicy.from_config(config)
+            self.assertIs(policy.enabled, value is True)
+            if value is True:
+                self.assertEqual(prepare_local_draft(raw, observed_source=SOURCE, policy=policy).stage, "candidate")
+            else:
+                with self.assertRaises(LocalDraftError):
+                    prepare_local_draft(raw, observed_source=SOURCE, policy=policy)
+        for invalid in (0, 1, "true", None, [], {}):
+            data["source"]["localStoreEnabled"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(LocalDraftError):
+                LocalStorePolicy.from_config(config)
+        data["source"].update(localStoreEnabled=True, candidateBranch="develop", productionBranch="release")
+        policy = LocalStorePolicy.from_config(config)
+        self.assertEqual((policy.candidate_branch, policy.production_branch), ("develop", "release"))
+        with self.assertRaises(LocalDraftError):
+            prepare_local_draft(raw, observed_source=SOURCE, policy=policy)
+        for stage, branch in (("candidate", "develop"), ("production-submit", "release")):
+            value = fixture(stage=stage)
+            value["source"].update(branch=branch, ref=f"refs/heads/{branch}")
+            observed = dataclasses.replace(SOURCE, branch=branch, ref=f"refs/heads/{branch}")
+            self.assertEqual(prepare_local_draft(encoded(value), observed_source=observed, policy=policy).stage, stage)
+
+    def test_local_policy_cannot_enable_existing_ci_mutation_entry(self):
+        from mobile_release.errors import MutationGuardError
+        from mobile_release.stores import StoreRequest, guard_ci_mutation
+        data = default_config_data({"android": {"applicationId": "com.example.reader"}})
+        data["source"]["localStoreEnabled"] = True
+        config = ReleaseConfig(Path("release/mobile-release.json"), Path("."), data)
+        draft = decode_local_draft(encoded(fixture()))
+        request = StoreRequest("candidate", "android", fixture()["confirmation"], True, Path("release/output"))
+        with self.assertRaisesRegex(MutationGuardError, "restricted to GitHub Actions"):
+            guard_ci_mutation(request=request, config=config, release=draft.release, git=SOURCE, environ={})
+
     def refuse(self, value):
         with self.assertRaisesRegex(LocalDraftError, "^Invalid local Store draft$"):
             decode_local_draft(encoded(value))

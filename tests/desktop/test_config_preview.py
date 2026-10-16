@@ -53,6 +53,22 @@ def contexts(result: dict) -> dict:
 
 
 class ConfigPreviewTests(unittest.TestCase):
+    def test_local_store_opt_in_is_reviewed_without_changing_other_settings(self):
+        base = draft()
+        base["source"].update(candidateBranch="develop", productionBranch="release", projectReadTokenRequired=True)
+        value = copy.deepcopy(base)
+        value["source"]["localStoreEnabled"] = True
+        result = compare(base, value)
+        self.assertTrue(result["validation"]["valid"])
+        self.assertEqual([row["path"] for row in result["comparison"]["changes"]], ["source.localStoreEnabled"])
+        self.assertEqual(contexts(result)["source.localStoreEnabled"]["state"], "optional")
+        self.assertTrue(contexts(result)["source.localStoreEnabled"]["present"])
+        self.assertNotIn("localStoreEnabled", base["source"])
+        self.assertEqual({k: v for k, v in value["source"].items() if k != "localStoreEnabled"}, base["source"])
+        for invalid in ("true", 1, None):
+            value["source"]["localStoreEnabled"] = invalid
+            self.assertFalse(compare(base, value)["validation"]["valid"])
+
     def test_closed_contract_and_no_authorization_fields(self):
         result = compare(None, draft())
         self.assertEqual(set(result), {"schemaVersion", "validation", "comparison", "fields", "assurance"})
@@ -65,7 +81,7 @@ class ConfigPreviewTests(unittest.TestCase):
         self.assertEqual(comparison["state"], "complete")
         self.assertEqual(set(comparison["counts"]), {"added", "changed", "removed"})
         self.assertEqual(set(contexts(result)), set(CONFIGURATION_FIELD_PATHS))
-        self.assertEqual(len(result["fields"]), 40)
+        self.assertEqual(len(result["fields"]), len(CONFIGURATION_FIELD_PATHS))
         self.assertEqual([item["path"] for item in result["fields"]], sorted(contexts(result)))
         for item in result["fields"]:
             self.assertEqual(set(item), {"path", "state", "present", "reason"})

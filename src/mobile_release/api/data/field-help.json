@@ -110,6 +110,19 @@
     "failure": "A required token must be provided through the future protected credential flow; it never grants Store authority."
   },
   {
+    "path": "source.localStoreEnabled",
+    "label": "Allow local Store release preparation",
+    "section": "source",
+    "input": "boolean",
+    "requiredness": "optional",
+    "requiredWhen": "Optional; off unless you explicitly choose direct release preparation on your Mac.",
+    "what": "Project policy permitting preparation for the separate local Store route rather than a GitHub workflow.",
+    "why": "Direct Store access must be an explicit project choice, never inferred from saved credentials.",
+    "where": "Choose this with the release owner. No value is obtained from Apple, Google or GitHub.",
+    "format": "On or off. Omission means off. Candidate and production branch settings still apply.",
+    "failure": "Off blocks local preparation. On does not upload, publish, authorize a Store action or bypass a missing runtime, credential, evidence or confirmation check. The local execution route is not yet available."
+  },
+  {
     "path": "android.enabled",
     "label": "Android release",
     "section": "android",

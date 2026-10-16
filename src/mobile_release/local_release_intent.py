@@ -13,8 +13,8 @@ import re
 from uuid import UUID
 
 from .config import (
-    ANDROID_ID_RE, BRANCH_RE, IOS_ID_RE, ReleaseVersion,
-    release_version_from_values,
+    ANDROID_ID_RE, BRANCH_RE, IOS_ID_RE, ReleaseConfig, ReleaseVersion,
+    release_version_from_values, validate_config_data,
 )
 from .discovery import GitContext, valid_observed_source
 from .errors import ConfigurationError, ValidationError
@@ -83,6 +83,24 @@ class LocalStorePolicy:
     enabled: bool = False
     candidate_branch: str = "main"
     production_branch: str = "main"
+
+    @classmethod
+    def from_config(cls, config: ReleaseConfig) -> LocalStorePolicy:
+        """Derive draft policy from core-validated configuration, without IO.
+
+        The native caller must provide its original saved configuration. A
+        constructed ReleaseConfig is not proof of custody, consent or access.
+        This method does not change the existing CI-only mutation guard.
+        """
+        _need(type(config) is ReleaseConfig)
+        try:
+            validate_config_data(config.data)
+        except ConfigurationError:
+            raise LocalDraftError(_ERROR) from None
+        source = config.data["source"]
+        return cls(enabled=source.get("localStoreEnabled", False),
+                   candidate_branch=source["candidateBranch"],
+                   production_branch=source["productionBranch"])
 
 
 @dataclass(frozen=True)

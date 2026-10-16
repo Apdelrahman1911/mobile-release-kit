@@ -12,6 +12,16 @@ are checked separately. A local Git repository is required, not GitHub hosting.
 The original owner must supply the observation; constructing a `GitContext` or
 replaying a serialized `dirty:false` claim does not establish actual cleanliness.
 
+The optional saved project setting `source.localStoreEnabled` is strictly a
+boolean and defaults to false. It is exposed by the existing guided settings
+editor with contextual help and the ordinary preview/save path.
+`LocalStorePolicy.from_config` derives the draft policy and both branch names
+from core-validated configuration; it does not read a file or prove that a
+constructed `ReleaseConfig` is an original saved observation. The native owner
+must supply that observation. Turning this setting on does not enable an
+unfinished UI action, grant consent, change CI authorization or execute a Store
+operation. Existing projects that omit it remain local-preparation disabled.
+
 The draft binds local operation/project UUIDs, source commit/tree/branch, approved
 application identity, release/confirmation, configuration/version/metadata
 content digests, existing seven-field artifact records, and credential assignment
