@@ -4273,29 +4273,45 @@ final class NormalAppUITests: XCTestCase {
         try require(pathField.exists && pathField.isEnabled && pathField.isHittable,
                     "standard Go to Folder field is not actionable", check: .actionable)
         let navigationInitial = projectRequireDiagnosticMethod == nil || journeyStage != "project-open" ? nil : pathField.value as? String
+        // Use the normal Paste action for one complete synthetic path, not
+        // per-character injection into the system panel's completion editor.
+        // This external test runs only on its admitted disposable hosted account.
+        // Never read/snapshot unrelated clipboard contents or overwrite them.
+        let pasteboard = NSPasteboard.general
+        let emptyGeneration = pasteboard.changeCount
+        try require((pasteboard.types ?? []).isEmpty && (pasteboard.pasteboardItems ?? []).isEmpty
+                    && pasteboard.changeCount == emptyGeneration,
+                    "hosted test clipboard is not empty")
+        var ownedPasteboardGeneration: Int?
+        defer {
+            // A later writer is not ours. Preserve it instead of restoring or
+            // clearing its contents; changeCount is not an atomic locking API.
+            if let generation = ownedPasteboardGeneration, pasteboard.changeCount == generation {
+                pasteboard.clearContents()
+            }
+        }
         pathField.click()
+        _ = try remaining(15)
+        try require(pasteboard.changeCount == emptyGeneration, "clipboard changed before synthetic input")
+        ownedPasteboardGeneration = pasteboard.clearContents()
+        try require(pasteboard.setString(path, forType: .string), "synthetic path could not be placed on clipboard")
+        try require(pasteboard.changeCount == ownedPasteboardGeneration,
+                    "clipboard ownership changed while placing synthetic input")
         pathField.typeKey("a", modifierFlags: .command)
-        pathField.typeText(path)
-        guard let clock = caseClock, let wholeDeadline = journeyDeadline else {
-            throw Refusal.condition("original native navigation deadline missing")
-        }
-        try checkOriginalOwners()
-        // Exact-value settlement and Return completion share the original five
-        // seconds; never renew the interval or replace the outer case deadline.
-        let navigationEnd = min(wholeDeadline, try clock.end(within: 5))
-        @MainActor func navigationRemaining() throws -> TimeInterval {
-            try checkOriginalOwners()
-            return try clock.remaining(5, before: navigationEnd)
-        }
+        pathField.typeKey("v", modifierFlags: .command)
+        try require(pasteboard.changeCount == ownedPasteboardGeneration,
+                    "clipboard changed during synthetic input")
+        // These are ordinary bounded UI expectations, not a five-second
+        // performance benchmark spanning several synchronous accessibility RPCs.
+        // Every wait/action still uses the unchanged whole-case owner/deadline.
         let exact = XCTNSPredicateExpectation(predicate: NSPredicate(format:
             "exists == true AND enabled == true AND hittable == true AND value == %@", path), object: pathField)
-        let settled = XCTWaiter.wait(for: [exact], timeout: try navigationRemaining())
+        let settled = XCTWaiter.wait(for: [exact], timeout: try remaining(15))
         // One original AX value snapshot. These first-failure sites describe
         // only closed relations to the expected synthetic path, never its text
         // or a guessed explanation. No alternate spelling is accepted.
         let typedValue = pathField.value as? String
-        // Optional multi-query AX diagnostics must not consume the shared
-        // navigation budget on the successful path to Return.
+        // Optional multi-query AX diagnostics stay off the successful path.
         if settled != .completed || typedValue != path {
             observeProjectNavigation(pathField, sheet: sheet, role: navigationRole, phase: .typed,
                                      path: path, initialValue: navigationInitial, value: { typedValue })
@@ -4321,7 +4337,7 @@ final class NormalAppUITests: XCTestCase {
         }
         try require(settled == .completed && typedValue == path,
                     "native Go to Folder did not settle on the exact fixture path")
-        _ = try navigationRemaining() // Expired settlement cannot authorize Return.
+        _ = try remaining(15) // Expired whole-case settlement cannot authorize Return.
         pathField.typeKey("\r", modifierFlags: [])
         do {
             // An ordinal field query can resolve to a different field after
@@ -4331,11 +4347,11 @@ final class NormalAppUITests: XCTestCase {
             let navigable = XCTNSPredicateExpectation(predicate: NSPredicate(format:
                 "cancel.exists == true AND cancel.enabled == true AND cancel.hittable == true AND open.exists == true"),
                 object: panelTargets)
-            try require(XCTWaiter.wait(for: [navigable], timeout: try navigationRemaining()) == .completed,
+            try require(XCTWaiter.wait(for: [navigable], timeout: try remaining(15)) == .completed,
                         "original native panel did not become navigable")
             try require(cancels.count == 1 && opens.count == 1 && cancel.exists && cancel.isEnabled
                         && cancel.isHittable && open.exists, "original native panel readiness changed")
-            _ = try navigationRemaining() // A late ready sample cannot authorize the next action.
+            _ = try remaining(15) // A late whole-case sample cannot authorize the next action.
         }
         catch {
             observeProjectNavigation(pathField, sheet: sheet, role: navigationRole, phase: .timeout,
