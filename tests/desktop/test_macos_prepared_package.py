@@ -1,0 +1,316 @@
+"""Inert prepared-package correspondence; no signing, native or network calls."""
+import copy
+import importlib.util
+import os
+import stat
+import sys
+import tempfile
+from types import SimpleNamespace, ModuleType
+from pathlib import Path
+import unittest
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[2]
+SPEC = importlib.util.spec_from_file_location('prepared_package_data', ROOT / 'desktop/tools/macos_prepared_package.py')
+P = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(P)
+
+
+def fixture(target='aarch64-apple-darwin'):
+    origin = dict(source='1'*40, tree='2'*40, target=target, runId='41', runAttempt='1', jobId='42')
+    values = {'MobileReleaseKit.pkg': b'inert finalized package', 'MobileReleaseKit-original.pkg': b'inert original package',
+              'android-helper-finalize-package.json': b'{"inert":true}\n', 'package-finalization.status': b'0\n'}
+    manifest = dict(schemaVersion=1, scope=P.SCOPE, origin=origin, packageRole='ordinary-image',
+        packageVersion='0.2.0', release='macos26-test', packagerUid=501, packagerGid=20,
+        inventorySha256='3'*64, runtimeManifestSha256='4'*64,
+        members=[dict(name=n, bytes=len(values[n]), sha256=P.sha(values[n])) for n in sorted(values)],
+        originalFinalizationReturnedZero=True, originalClosesKnown=True, installed=False, productReady=False,
+        normalBuild=dict(appBinarySha256BeforeSigning='a'*64,desktopImageSha256BeforeSigning='b'*64))
+    values['PREPARED.json'] = P.canonical(manifest)
+    service = dict(run=dict(id=41, run_attempt=1, head_sha=origin['source'], head_branch=P.BRANCH,
+        event='push', path=P.WORKFLOW, workflow_id=363563168, repository={'full_name':P.REPOSITORY}, conclusion='failure'),
+        job=dict(id=42, run_id=41, run_attempt=1, head_sha=origin['source'], name='normal-installed-'+target,
+            steps=[dict(name=name, number=i+1, status='completed', conclusion='success') for i,name in enumerate(P.PRODUCER_STEPS)]),
+        artifact=dict(id=43, name=P.artifact_name(origin), expired=False, size_in_bytes=1000, digest='sha256:'+'5'*64,
+                      workflow_run=dict(id=41, head_sha=origin['source'], head_branch=P.BRANCH)))
+    consumer = dict(source='1'*40, tree='2'*40, target=target, runId='41', runAttempt='2')
+    return values, manifest, service, consumer
+
+
+def real_modules():
+    base=Path(os.environ.get('MRK_TEST_REPO', ROOT))
+    sys.path.insert(0,str(base/'tests/desktop'))
+    import test_macos_installed_staging as T
+    result=[]
+    for filename in ('stage_macos_installed.py', 'macos_android_helper_package.py'):
+        name='prepared_test_'+filename[:-3]
+        module=ModuleType(name); module.__file__=str(base/'desktop/tools'/filename)
+        sys.modules[name]=module
+        exec(compile((ROOT/'desktop/tools'/filename).read_bytes(),module.__file__,'exec'),module.__dict__)
+        result.append(module)
+    return T,*result
+
+
+class PreparedPackageData(unittest.TestCase):
+    def test_exact_cohort_and_real_producer_attempt_are_distinct_from_new_consumer(self):
+        for target in P.TARGETS:
+            values, manifest, service, consumer = fixture(target)
+            binding = P.admit_data(values, service, consumer)
+            current = dict(GITHUB_SHA=consumer['source'], GITHUB_RUN_ID='41', GITHUB_RUN_ATTEMPT='2')
+            old = binding.finalization_environment(current)
+            self.assertEqual((old['GITHUB_RUN_ID'],old['GITHUB_RUN_ATTEMPT']),('41','1'))
+            self.assertEqual(current['GITHUB_RUN_ATTEMPT'],'2')
+            self.assertTrue(binding.same_source)
+            self.assertEqual(binding.manifest,manifest)
+            current['GITHUB_RUN_ATTEMPT']='3'
+            with self.assertRaisesRegex(ValueError,'prepared-current-consumer'):
+                binding.finalization_environment(current)
+
+    def test_new_harness_never_relabels_built_source(self):
+        values, manifest, service, consumer = fixture()
+        consumer.update(source='6'*40,tree='7'*40)
+        binding=P.admit_data(values,service,consumer)
+        self.assertFalse(binding.same_source)
+        self.assertEqual(binding.source,'1'*40)
+        with self.assertRaisesRegex(ValueError,'prepared-binding-constructor'):
+            P.PreparedBinding(object(),manifest,consumer,{})
+
+    def test_omission_extra_changed_status_duplicate_json_and_bad_manifest_refuse(self):
+        values, manifest, service, consumer=fixture()
+        for name in P.NAMES:
+            wrong=dict(values);wrong.pop(name)
+            with self.subTest(name=name),self.assertRaises(ValueError): P.admit_data(wrong,service,consumer)
+        for name in P.FILES:
+            wrong=dict(values);wrong[name]+=b'changed'
+            with self.subTest(changed=name),self.assertRaises(ValueError): P.admit_data(wrong,service,consumer)
+        wrong=dict(values, private=b'no raw logs')
+        with self.assertRaises(ValueError): P.admit_data(wrong,service,consumer)
+        with self.assertRaisesRegex(ValueError,'prepared-json-duplicate'): P.decode(b'{"a":1,"a":1}',100)
+        for key,val in (('runtimeManifestSha256','0'*64),('installed',True),('originalClosesKnown',False),('packagerUid',0)):
+            wrong=copy.deepcopy(manifest);wrong[key]=val
+            with self.subTest(key=key),self.assertRaises(ValueError): P.manifest_data(wrong)
+
+    def test_closed_cut_not_whole_job_or_artifact_name_is_required(self):
+        values,manifest,service,consumer=fixture()
+        for index in range(3):
+            for mutation in ('missing','duplicate','failure','in_progress'):
+                changed=copy.deepcopy(service)
+                if mutation=='missing': changed['job']['steps'].pop(index)
+                elif mutation=='duplicate': changed['job']['steps'].append(dict(changed['job']['steps'][index],number=10))
+                elif mutation=='failure': changed['job']['steps'][index]['conclusion']='failure'
+                else: changed['job']['steps'][index]['status']='in_progress'
+                with self.subTest(index=index,mutation=mutation),self.assertRaises(ValueError): P.admit_data(values,changed,consumer)
+        for which,key,val in (('artifact','expired',True),('artifact','size_in_bytes',True),('run','run_attempt',2),
+                              ('job','id',True),('job','name','normal-installed-other'),('run','event','pull_request')):
+            changed=copy.deepcopy(service);changed[which][key]=val
+            with self.subTest(key=key),self.assertRaises(ValueError): P.admit_data(values,changed,consumer)
+
+    def test_actual_allocation_quote_counts_overlapping_vectors(self):
+        quote=P.quote_data(10,20,30,40)
+        self.assertEqual(quote['memoryBytes'],3*30+4*30+2*40+32*P.MIB)
+        self.assertEqual(quote['diskBytes'],2*30+30+40+32*P.MIB)
+        for args in ((True,20,30,40),(10,20,0,40),(10,20,30,12*P.MIB+1)):
+            with self.assertRaises(ValueError): P.quote_data(*args)
+
+    def test_real_original_cpio_materialization_and_final_product_audit_both_targets(self):
+        base=Path(os.environ.get('MRK_TEST_REPO',ROOT))
+        sys.path.insert(0,str(base/'tests/desktop'))
+        import test_macos_installed_staging as T
+        tool=T.TOOL
+        fixture_owner=T.MacAndroidHelperPackagingData()
+        for target in P.TARGETS:
+            selection=tool.source_build_selection(target)
+            names=('app/'+tool.ENTRY_BINARY,'app/'+tool.APP_BINARY,'app/'+tool.VAULT_HELPER,
+                   'app/Contents/Info.plist','app/'+tool.PAYLOAD_INFO,'runtime/python/bin/python3','runtime/manifest.json')
+            executables={names[0],names[1],names[2],names[-2]}
+            payload={name:(('INERT '+name+'\n').encode(),0o555 if name in executables else 0o444) for name in names}
+            manifest_sha=P.sha(payload['runtime/manifest.json'][0])
+            inventory=P.canonical(dict(schemaVersion=1,release=selection.release,runtimeManifestSha256=manifest_sha,
+                files=[dict(path=name,size=len(body),sha256=P.sha(body),executable=mode==0o555)
+                       for name,(body,mode) in sorted(payload.items())]))
+            scripts={'input/'+name:row for name,row in payload.items()}
+            scripts.update({'input/install-inventory.json':(inventory,0o444),'postinstall':(b'exit 97\n',0o555),
+                            'mrk-macos-install':(b'INERT NEVER EXECUTED\n',0o555)})
+            info=T.package_data(selection=selection)[1]['PackageInfo']
+            def archive(uid,gid):
+                body=T.odc('.',stat.S_IFDIR|0o755,uid=uid,gid=gid)
+                for name in sorted(tool.directories(scripts)):
+                    body+=T.odc('./'+name,stat.S_IFDIR|0o555,uid=uid,gid=gid)
+                for name,(contents,mode) in sorted(scripts.items()):
+                    body+=T.odc('./'+name,stat.S_IFREG|mode,contents,uid=uid,gid=gid)
+                return body+T.odc('TRAILER!!!',0)
+            original=fixture_owner.final_package_xar({'PackageInfo':info,'Scripts':archive(os.getuid(),os.getgid())})
+            component=fixture_owner.final_package_xar({'PackageInfo':info,'Scripts':archive(0,0)})
+            definition,readme=tool.install_product_sources(selection)
+            package=fixture_owner.final_package_xar({'Distribution':definition,'Resources/InstallerReadMe.html':readme,
+                tool.INSTALL_COMPONENT:component},signed=True,product=True)
+            values,manifest,_,_=fixture(target)
+            values.update({'MobileReleaseKit.pkg':package,'MobileReleaseKit-original.pkg':original})
+            manifest.update(packageVersion=selection.package_version,release=selection.release,
+                packagerUid=os.getuid(),packagerGid=os.getgid(),inventorySha256=P.sha(inventory),runtimeManifestSha256=manifest_sha,
+                members=[dict(name=name,bytes=len(values[name]),sha256=P.sha(values[name])) for name in sorted(P.FILES)])
+            values['PREPARED.json']=P.canonical(manifest)
+            self.assertEqual(P.cohort_data(values),manifest)
+            parsed=P.original_scripts_data(tool,original,manifest)
+            self.assertEqual(parsed,scripts)
+            with tempfile.TemporaryDirectory() as directory:
+                root=Path(directory)
+                (root/'original.pkg').write_bytes(original);(root/'original.pkg').chmod(0o600)
+                (root/'final.pkg').write_bytes(package);(root/'final.pkg').chmod(0o444)
+                tool.write_tree(root/'scripts',parsed,root_mode=0o755,mac_store_prefix='input/runtime/store')
+                result=tool.audit_install_product_command(SimpleNamespace(target=target,fixture=False,store_runtime=True,
+                    scripts=root/'scripts',original_package=root/'original.pkg',package=root/'final.pkg'))
+                self.assertEqual(result['packageSha256'],P.sha(package))
+                self.assertEqual(result['scriptFileCount'],len(scripts))
+                (root/'scripts/postinstall').chmod(0o755)
+                with self.assertRaises(tool.Refused):
+                    tool.audit_install_product_command(SimpleNamespace(target=target,fixture=False,store_runtime=True,
+                        scripts=root/'scripts',original_package=root/'original.pkg',package=root/'final.pkg'))
+            wrong=dict(manifest,packagerUid=os.getuid()+1)
+            with self.assertRaisesRegex(ValueError,'prepared-packager-identity'):
+                P.original_scripts_data(tool,original,wrong)
+
+    def test_actual_prepared_preview_keeps_current_closures_and_refuses_cross_source(self):
+        T, tool, helper=real_modules()
+        with mock.patch.object(T,'TOOL',tool), mock.patch.dict(sys.modules,{'desktop.tools.macos_prepared_package':P}):
+            for target in P.TARGETS:
+                work, values, docs, expected, selection=T.MacNormalPreviewData().preview_fixture(target)
+                _,manifest,service,consumer=fixture(target)
+                origin=manifest['origin']; origin.update(source='a'*40,tree='b'*40,runId='123')
+                consumer.update(source='a'*40,tree='b'*40,runId='123',runAttempt='1')
+                manifest.update(runtimeManifestSha256='c'*64, inventorySha256='d'*64,
+                    normalBuild={k:docs['app-result.json'][k] for k in ('appBinarySha256BeforeSigning','desktopImageSha256BeforeSigning')})
+                binding=P.PreparedBinding(P._SEAL,manifest,consumer,{})  # Explicit synthetic provenance DATA only.
+                docs['android-helper-package-install.json'].update(runId='123',runAttempt='1',directStagerIOPending=None)
+                final=docs['android-helper-finalize-image.json']
+                final['workflow']=tool._CANDIDATE_FINAL_IMAGE_WORKFLOW
+                final['finalImage']['packageInstallReceiptSha256']=tool.digest(tool.canonical(docs['android-helper-package-install.json']))
+                for name in ('android-helper-package-install.json','android-helper-finalize-image.json'):
+                    values[work/name]=tool.canonical(docs[name])
+                values[work/'input/install-inventory.json']=b'INERT inventory boundary'
+                # All OLD worktree build controls removed. Actual common preview
+                # still validates current16 calls/readback/producer/final13 calls.
+                for name in ('source-binding.json','source-inventory.json','normal-build.status','normal-build.jsonl','app-result.json','mobile-release-kit-desktop'):
+                    values.pop(work/name,None)
+                environment=dict(GITHUB_REPOSITORY=P.REPOSITORY,GITHUB_EVENT_NAME='push',GITHUB_REF='refs/heads/'+P.BRANCH,
+                    GITHUB_WORKFLOW_REF=tool._CANDIDATE_FINAL_IMAGE_WORKFLOW,GITHUB_SHA='a'*40,GITHUB_WORKFLOW_SHA='a'*40,
+                    GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1')
+                args=SimpleNamespace(target=target,work=work,output=work/'candidate',expected_source='a'*40,candidate_carrier=True,installed_passive_carrier=False)
+                with mock.patch.dict(os.environ,environment,clear=True), mock.patch.object(tool,'source_build_selection',return_value=selection), mock.patch.object(tool,'read',side_effect=lambda path,*_:values[Path(path)]), \
+                     mock.patch.object(tool,'observation_inventory_bytes',return_value=expected), \
+                     mock.patch.object(tool,'observation_inventory',return_value=expected), mock.patch.object(tool,'write_tree') as output:
+                    tool.preview_command(args,prepared=binding)
+                    summary=tool.decode(output.call_args.args[1]['PREVIEW.json'][0])
+                    self.assertEqual(summary['preparedProducer'],origin)
+                    self.assertFalse(summary['productReady']);self.assertEqual(summary['normalBuild'],'passed')
+                    output.reset_mock()
+                    values[work/'package-install.status']=b'1\n'
+                    with self.assertRaises(tool.Refused):tool.preview_command(args,prepared=binding)
+                    output.assert_not_called()
+                    values[work/'package-install.status']=b'0\n'
+                    cross=P.PreparedBinding(P._SEAL,manifest,dict(consumer,source='e'*40),{})
+                    with self.assertRaises(ValueError):tool.preview_command(args,prepared=cross)
+                    output.assert_not_called()
+
+    def test_exact_job_and_artifact_selection_never_last_matrix_row_or_truncated_page(self):
+        values,manifest,service,consumer=fixture()
+        job=dict(service['job'],status='completed',conclusion='success')
+        opposite=dict(job,name='normal-installed-'+P.TARGETS[1],id=99)
+        body=P.canonical(dict(total_count=2,jobs=[opposite,job]))
+        self.assertEqual(P.selected_job_data(body,'1'*40,'41',P.TARGETS[0],completed=True),job)
+        for rows,total in (([job,job],2),([job],2),([dict(job,run_attempt=True)],1)):
+            with self.assertRaises(ValueError):P.selected_job_data(P.canonical(dict(total_count=total,jobs=rows)),'1'*40,'41',P.TARGETS[0],completed=True)
+        body=P.canonical(dict(total_count=1,artifacts=[service['artifact']]))
+        self.assertEqual(P.selected_artifact_data(body,manifest['origin']),service['artifact'])
+        with self.assertRaises(ValueError):P.selected_artifact_data(P.canonical(dict(total_count=2,artifacts=[service['artifact']]*2)),manifest['origin'])
+
+    def test_failed_prepared_source_admission_is_inside_actual_execute_cleanup(self):
+        T,tool,helper=real_modules()
+        values,manifest,service,consumer=fixture()
+        binding=P.admit_data(values,service,consumer)
+        environment=dict(GITHUB_SHA=consumer['source'],GITHUB_WORKFLOW_SHA=consumer['source'],GITHUB_RUN_ID='41',
+            GITHUB_RUN_ATTEMPT='2',GITHUB_WORKFLOW_REF=P.REPOSITORY+'/'+P.WORKFLOW+'@refs/heads/'+P.BRANCH,
+            MRK_MACOS_PACKAGE_ROLE='ordinary-image')
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(sys.modules,{'desktop.tools.macos_prepared_package':P}):
+            root=Path(directory); checkout=root/'source';work=root/'work';checkout.mkdir();work.mkdir(mode=0o700)
+            (checkout/'.git').mkdir();(checkout/'.git/HEAD').write_bytes(b'wrong original HEAD\n');(checkout/'.git/HEAD').chmod(0o644)
+            native=mock.Mock(side_effect=AssertionError('native must not enter'))
+            operation=helper.Operation(SimpleNamespace(run_owned=native),checkout,work,'package-install',environment,tool,prepared=binding)
+            with self.assertRaises(helper.Refused):operation.execute()
+            native.assert_not_called()
+            self.assertTrue(operation.receipt['originalClosesKnown'] and operation.receipt['targetRetired'])
+            self.assertTrue(all(row['closed'] and row['fd'] is None for row in operation.entries))
+            self.assertFalse(operation.receipt['passed'])
+            self.assertFalse((work/operation.target_name).exists())
+
+    def test_all_attempt_selection_keeps_the_unique_successful_old_producer(self):
+        values,manifest,service,consumer=fixture()
+        old=dict(service['job'],status='completed',conclusion='success')
+        install=dict(old,id=99,run_attempt=2,name='prepared-installed-'+P.TARGETS[0],conclusion='failure')
+        failed_build=dict(old,id=101,run_attempt=2,conclusion='failure')
+        latest=P.canonical(dict(total_count=2,jobs=[install,failed_build]))
+        with self.assertRaises(ValueError):P.selected_job_data(latest,'1'*40,'41',P.TARGETS[0],completed=True)
+        all_attempts=P.canonical(dict(total_count=3,jobs=[install,old,failed_build]))
+        selected=P.selected_job_data(all_attempts,'1'*40,'41',P.TARGETS[0],completed=True)
+        self.assertEqual(selected['run_attempt'],1)
+        with self.assertRaises(ValueError):
+            P.selected_job_data(P.canonical(dict(total_count=2,jobs=[old,dict(old,id=103,run_attempt=3)])),
+                '1'*40,'41',P.TARGETS[0],completed=True)
+        for key,value in (('size_in_bytes',P.ARTIFACT_LIMIT+1),('size_in_bytes',True),('digest','sha256:'+'0'*64)):
+            artifact=dict(service['artifact'],**{key:value})
+            with self.assertRaises(ValueError):P.selected_artifact_data(P.canonical(dict(total_count=1,artifacts=[artifact])),manifest['origin'])
+
+    def test_actual_original_receipt_consumer_keeps_producer_and_new_attempt_separate(self):
+        T,tool,helper=real_modules()
+        fixture_owner=T.MacAndroidHelperPackagingData()
+        with mock.patch.object(T,'TOOL',tool), mock.patch.object(T,'ANDROID_HELPER',helper), \
+             mock.patch.dict(sys.modules,{'desktop.tools.macos_prepared_package':P}):
+            for target in P.TARGETS:
+                with tempfile.TemporaryDirectory() as directory:
+                    state=fixture_owner.final_package_fixture(Path(directory),target=target)
+                    state.environment.update(GITHUB_REF='refs/heads/'+P.BRANCH,GITHUB_WORKFLOW_REF=P.REPOSITORY+'/'+P.WORKFLOW+'@refs/heads/'+P.BRANCH)
+                    state.operation.receipt['workflow']=state.environment['GITHUB_WORKFLOW_REF']
+                    with fixture_owner.final_package_fixture_call(state):state.operation.execute()
+                    record=state.operation.receipt['finalPackage']
+                    status=state.work/'package-finalization.status';status.write_bytes(b'0\n');status.chmod(0o600)
+                    _,manifest,_,_=fixture(target)
+                    manifest['origin'].update(source=state.environment['GITHUB_SHA'],runId=state.environment['GITHUB_RUN_ID'],runAttempt=state.environment['GITHUB_RUN_ATTEMPT'])
+                    for harness in (state.environment['GITHUB_SHA'],'6'*40):
+                        consumer=dict(source=harness,tree='2'*40,target=target,runId=state.environment['GITHUB_RUN_ID'],runAttempt='2')
+                        binding=P.PreparedBinding(P._SEAL,manifest,consumer,{})
+                        current=dict(state.environment,GITHUB_SHA=harness,GITHUB_WORKFLOW_SHA=harness,GITHUB_RUN_ATTEMPT='2')
+                        for prepared in (None,binding):
+                            env=dict(current,MRK_MACOS_INSTALL_SOURCE_COMMIT=harness if prepared is None else binding.source)
+                            later=helper.Operation(SimpleNamespace(run_owned=mock.Mock(side_effect=AssertionError('no native handoff call'))),
+                                state.checkout,state.work,'package-install',env,tool,target=target,prepared=prepared)
+                            later.package_started=later.package_observed=state.clock[0]
+                            later.package_endpoint=state.clock[0]+990_000_000_000
+                            later.signing=state.operation.signing
+                            with fixture_owner.credential_fixture_call(later,state.credentials):
+                                try:
+                                    later.open();later.image_binding()
+                                    parent=later.directory(later.work_entry,'package-final','prepared-test-final')
+                                    original=later.original(parent,'MobileReleaseKit.pkg','prepared-test-package',tool.MAX_BYTES,(0o444,))
+                                    if prepared is None:
+                                        with self.assertRaises(helper.Refused):later.package_finalization_input(original,later.read(original))
+                                    else:
+                                        self.assertEqual(later.package_finalization_input(original,later.read(original)),record)
+                                        self.assertEqual(later.image_source,binding.source)
+                                        self.assertEqual(later.receipt['source'],harness)
+                                        later.package_post()
+                                    self.assertEqual(later.calls,[])
+                                    self.assertEqual(env['GITHUB_RUN_ATTEMPT'],'2')
+                                finally:later.finish()
+                            self.assertTrue(later.receipt['originalClosesKnown'] and later.receipt['targetRetired'])
+                            self.assertFalse(later.receipt['passed'])
+
+    def test_failed_consuming_close_preserves_original_exception(self):
+        class Op:
+            def finish(self): raise KeyboardInterrupt('inert close')
+        error=ValueError('inert primary')
+        P.finish_staging(Op(),error)
+        self.assertEqual(error.__notes__,['prepared-staging-original-closes'])
+        with self.assertRaises(KeyboardInterrupt): P.finish_staging(Op())
+
+
+if __name__=='__main__': unittest.main()

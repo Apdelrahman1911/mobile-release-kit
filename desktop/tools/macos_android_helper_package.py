@@ -2342,11 +2342,19 @@ def transport_mount_path_data(environment, target, phase):
 class Operation:
     """Custody for this one fixed packaging operation and its finite outputs."""
 
-    def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET, support_started=None):
+    def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET, support_started=None, prepared=None):
         need(phase in ("candidate-baseline",) + PHASES + SUPPORT_PHASES + STORE_SIGNING_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES, "closed-phase")
         self.arch, self.runner_arch, self.release_input = build_profile(target)
         self.target = target
         self.owner, self.checkout, self.work = owner, checkout, work
+        if prepared is not None:
+            from desktop.tools.macos_prepared_package import PreparedBinding
+            need(type(prepared) is PreparedBinding and phase in ("package-install", "finalize-image")
+                 and prepared.origin["target"] == target
+                 and (phase == "package-install" or prepared.same_source), "prepared-fixed-owner-purpose")
+            prepared.finalization_environment(environment)  # Exact current caller, no env mutation.
+        self.prepared_binding = prepared
+        self.prepared_staging = False
         self.phase, self.environment, self.stager = phase, environment, stager
         # Exhaustive SOURCE-selected purpose. No filenames/roles come from DATA.
         self.removal = phase in REMOVE_PHASES + REMOVAL_OWNER_PHASES
@@ -2521,6 +2529,12 @@ class Operation:
     def register(self, fd, role, kind, parent=None, name=None):
         entry = {"fd": fd, "role": role, "kind": kind, "parent": parent, "name": name, "closed": False}
         self.entries.append(entry)  # Before any fallible identity/content observation.
+        if self.prepared_binding is not None or self.prepared_staging:
+            # One current book plus forty reserved codec/native/capture slots;
+            # consumed-unknown rows never get future-close credit.
+            need(len(self.entries) <= 24576
+                 and sum(e["fd"] is not None or not e["closed"] for e in self.entries) + 40 <= 256,
+                 "prepared-original-ledger-bound")
         if self.app_absence is not None or self.update is not None:
             need(len(self.entries) <= 24576 and sum(e["fd"] is not None for e in self.entries) <= 96,
                  "app-absence-original-ledger-bound")
@@ -5314,7 +5328,9 @@ class Operation:
         need(status_body == b"0\n", "package-finalization-original-status")
         receipt = self.original(self.work_entry, self.package_receipt_name, "final-package-receipt", 16384, (0o600,))
         receipt_body = self.read(receipt)
-        value = final_package_receipt(receipt_body, self.environment, self.target, self.installer_selection,
+        value = final_package_receipt(receipt_body,
+                                      self.environment if self.prepared_binding is None else self.prepared_binding.finalization_environment(self.environment),
+                                      self.target, self.installer_selection,
                                       self.installer_profile_sha, digest(profile_body), len(body), digest(body),
                                       self.image_release, digest(self.read(self.release_entry)), remove=self.removal,
                                       runtime_stager=self.stager if self.selected_package_store() else None)
@@ -5698,7 +5714,8 @@ class Operation:
         self.release_entry = self.source_original(self.release_input, "source-image-release", self.stager.BUILD_RELEASE_LIMIT)
         body = self.read(self.release_entry)
         value = self.stager.build_release_data(body, target=self.target)
-        source, release = self.environment["GITHUB_SHA"], value["release"]
+        source = self.environment["GITHUB_SHA"] if self.prepared_binding is None else self.prepared_binding.source
+        release = value["release"]
         need(re.fullmatch(r"[0-9a-f]{40}", source) is not None and source != "0" * 40
              and source == self.environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"]
              and type(release) is str and 0 < len(release) < 64 and release.isascii(), "source-image-binding")
@@ -7864,6 +7881,10 @@ class Operation:
         environment = build_environment(self.environment, self.work, self.image_release, target=self.target)
         environment.update(CARGO_TARGET_DIR=str(self.work / self.target_name), TMPDIR=str(self.work / self.target_name / "tmp"),
             MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=manifest_hash, MRK_MACOS_INSTALL_INVENTORY_SHA256=inventory_hash)
+        if self.prepared_binding is not None:
+            # Compile only the existing producer from its actual built SOURCE;
+            # the real consumer GITHUB_* identity is never relabeled.
+            environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"] = self.prepared_binding.source
         binary = self.package_producer_compile(environment)
         binary_dir = self.descend(self.target_entry, (self.target, "release", "examples"))
         executable = self.original(binary_dir, binary.name, "producer-compiled-example", 64 * 1024 * 1024, (0o700, 0o755), alias=True)
@@ -8258,6 +8279,13 @@ class Operation:
                 self.python_clock()
                 self.receipt.update(toolchain=None, helperIdentifier=None, pythonIdentifier=PYTHON_IDENTIFIER)
             self.open()
+            if self.prepared_binding is not None:
+                # Acquired INSIDE this execute try/finally, including malformed
+                # or changed HEAD. Main never leaves a preexecute original open.
+                head = self.source_original(".git/HEAD", "prepared-built-source-head", 64)
+                body = self.read(head)
+                need(body == (self.prepared_binding.source + "\n").encode("ascii"), "prepared-built-source-head")
+                self.package_sources.append((head, body))
             if self.phase in STORE_SIGNING_PHASES:
                 self.store_signing_load()
             if self.phase in SUPPORT_PHASES:

@@ -2598,7 +2598,7 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
     return final
 
 
-def preview_command(args):
+def preview_command(args, *, prepared=None):
     """Copy only an audited, normally built and read-back package to fresh output."""
     args._carrier_validation_group = 'source-selection'
     installed = getattr(args, "installed_passive_carrier", False)
@@ -2612,19 +2612,26 @@ def preview_command(args):
     work = Path(args.work)
     need(work.is_absolute(), "preview-work-absolute")
     args._carrier_validation_group = 'source-binding'
-    binding = decode(read(work / "source-binding.json", 65536))
-    source = decode(read(work / "source-inventory.json", 1024 * 1024))
-    expected_scope = ("current-macos-candidate" if candidate else
-                      "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only"
-                      if installed else "normal-macos-early-preview")
-    need(type(binding) is dict and type(source) is dict
-         and source.get("source") == binding.get("source") == args.expected_source
-         and binding.get("workflowSource") == args.expected_source
-         and source.get("tree") == binding.get("tree") and type(source.get("tree")) is str
-         and re.fullmatch(r"[0-9a-f]{40}", source["tree"])
-         and binding.get("scope") == expected_scope and binding.get("instrumented") is False
-         and binding.get("packageRole") == "ordinary-image",
-         "preview-source-binding")
+    if prepared is None:
+        binding = decode(read(work / "source-binding.json", 65536))
+        source = decode(read(work / "source-inventory.json", 1024 * 1024))
+        expected_scope = ("current-macos-candidate" if candidate else
+                          "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only"
+                          if installed else "normal-macos-early-preview")
+        need(type(binding) is dict and type(source) is dict
+             and source.get("source") == binding.get("source") == args.expected_source
+             and binding.get("workflowSource") == args.expected_source
+             and source.get("tree") == binding.get("tree") and type(source.get("tree")) is str
+             and re.fullmatch(r"[0-9a-f]{40}", source["tree"])
+             and binding.get("scope") == expected_scope and binding.get("instrumented") is False
+             and binding.get("packageRole") == "ordinary-image",
+             "preview-source-binding")
+    else:
+        # Exact internal cohort type; no caller manifest, changed ordinary
+        # workDirectory flag or cross-source candidate admission.
+        from desktop.tools.macos_prepared_package import PreparedBinding
+        need(type(prepared) is PreparedBinding and candidate and not installed, "prepared-preview-purpose")
+        binding, source, app, normal = prepared.preview_inputs(sys.modules[__name__], args)
     need(all(type(binding.get(k)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", binding[k])
              for k in ("runId", "runAttempt")), "preview-run-binding")
     if installed or candidate:
@@ -2641,24 +2648,28 @@ def preview_command(args):
         need(all(os.environ.get(key) == expected for key, expected in expected_environment.items()),
              "candidate-carrier-ci-context" if candidate else "installed-carrier-ci-context")
     args._carrier_validation_group = 'build-products'
-    need(read(work / "normal-build.status", 4) == b"0\n"
-         and read(work / "installer-output.status", 4) == b"0\n"
-         and read(work / "package-install.status", 4) == b"0\n", "preview-original-statuses")
-    original = work / "cargo-target" / selection.target / "release/libmrk_desktop_image.dylib"
-    normal = image_cargo_artifact(read(work / "normal-build.jsonl", 8 * 1024 * 1024),
-                                 original, work / "cargo-target", read(original), "desktop", target=selection.target)
-    facade = read(work / "mobile-release-kit-desktop", 1024 * 1024)
-    entry_macho(facade, target=selection.target)
-    app = decode(read(work / "app-result.json", 16384))
-    need(type(app) is dict and app.get("packageRole") == "ordinary-image"
-         and app.get("desktopImageCargoArtifact") == normal and "observerCargoArtifact" not in app
-         and "normalCargoArtifact" not in app
-         and app.get("desktopImageSha256BeforeSigning") == normal["binarySha256"]
-         and app.get("appBinarySha256BeforeSigning") == digest(facade)
-         and sha(app.get("residentImageSha256")) and sha(app.get("androidHelperSha256"))
-         and sha(app.get("entryBinarySha256BeforeSigning"))
-         and app.get("entryBundleIdentifier") == ENTRY_BUNDLE_ID
-         and app.get("payloadBundleIdentifier") == BUNDLE_ID, "preview-normal-app-binding")
+    if prepared is None:
+        need(read(work / "normal-build.status", 4) == b"0\n"
+             and read(work / "installer-output.status", 4) == b"0\n"
+             and read(work / "package-install.status", 4) == b"0\n", "preview-original-statuses")
+        original = work / "cargo-target" / selection.target / "release/libmrk_desktop_image.dylib"
+        normal = image_cargo_artifact(read(work / "normal-build.jsonl", 8 * 1024 * 1024),
+                                     original, work / "cargo-target", read(original), "desktop", target=selection.target)
+        facade = read(work / "mobile-release-kit-desktop", 1024 * 1024)
+        entry_macho(facade, target=selection.target)
+        app = decode(read(work / "app-result.json", 16384))
+        need(type(app) is dict and app.get("packageRole") == "ordinary-image"
+             and app.get("desktopImageCargoArtifact") == normal and "observerCargoArtifact" not in app
+             and "normalCargoArtifact" not in app
+             and app.get("desktopImageSha256BeforeSigning") == normal["binarySha256"]
+             and app.get("appBinarySha256BeforeSigning") == digest(facade)
+             and sha(app.get("residentImageSha256")) and sha(app.get("androidHelperSha256"))
+             and sha(app.get("entryBinarySha256BeforeSigning"))
+             and app.get("entryBundleIdentifier") == ENTRY_BUNDLE_ID
+             and app.get("payloadBundleIdentifier") == BUNDLE_ID, "preview-normal-app-binding")
+    else:
+        need(read(work / "installer-output.status", 4) == b"0\n"
+             and read(work / "package-install.status", 4) == b"0\n", "preview-original-statuses")
     args._carrier_validation_group = 'installation-readback'
     observed = decode(read(work / "installation-observation.json", INSTALLER_RESULT_BYTES))
     args._carrier_validation_group = 'package-owner'
@@ -2668,6 +2679,9 @@ def preview_command(args):
          and owner.get("source") == args.expected_source and owner.get("passed") is True
          and owner.get("targetRetired") is True and owner.get("originalClosesKnown") is True
          and owner.get("outerFinalityRequired") is True and not owner.get("cleanupErrors"), "preview-original-package-owner")
+    if prepared is not None:
+        need(owner.get("runId") == binding["runId"] and owner.get("runAttempt") == binding["runAttempt"]
+             and owner.get("directStagerIOPending") is None, "prepared-current-package-owner")
     calls = owner.get("originalCalls")
     need(type(calls) is list and all(type(row) is dict for row in calls)
          and tuple(row.get("role") for row in calls) == PACKAGING_CALL_ROLES
@@ -2783,6 +2797,9 @@ def preview_command(args):
     if candidate:
         summary.update(scope="current-macos-candidate", workflowRef=workflow,
                        unexecutedReason="candidate-export-before-independent-ui-verification")
+    if prepared is not None:
+        summary["preparedProducer"] = prepared.origin
+        summary["candidateProducerJob"] = "prepared-installed-" + selection.target
     args._carrier_validation_group = 'output-write'
     files = {"MobileReleaseKit.dmg": (image, 0o444), "PREVIEW.json": (canonical(summary) + b"\n", 0o444)}
     if candidate:

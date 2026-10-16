@@ -53,7 +53,7 @@ def candidate_metadata_data(run, job, artifact, nomination):
     steps = job.get('steps')
     need(all(type(job.get(k)) is int and job[k] == int(row[v]) for k, v in
              (('id', 'jobId'), ('run_id', 'runId'), ('run_attempt', 'runAttempt')))
-         and job.get('head_sha') == row['source'] and job.get('name') == 'normal-installed-' + row['target']
+         and job.get('head_sha') == row['source'] and job.get('name') in ('normal-installed-' + row['target'], 'prepared-installed-' + row['target'])
          and type(steps) is list and 4 <= len(steps) <= 256
          and all(type(s) is dict and type(s.get('number')) is int and 0 < s['number'] <= 256 for s in steps)
          and len({s['number'] for s in steps}) == len(steps), 'candidate-producer-job')

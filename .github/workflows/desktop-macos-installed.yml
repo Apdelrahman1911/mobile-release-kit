@@ -1,6 +1,23 @@
 name: Desktop Mac normal package and limited early preview (Aqua gate separate)
 
 on:
+  workflow_dispatch:
+    inputs:
+      prepared_source:
+        description: Exact built source of an existing prepared input (diagnostic install only)
+        required: true
+        type: string
+      prepared_run:
+        description: Exact producer run with a successful prepared checkpoint
+        required: true
+        type: string
+      target:
+        description: Existing prepared target; no architecture fallback
+        required: true
+        type: choice
+        options:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
   push:
     branches:
       - verify/desktop-macos-installed
@@ -2035,6 +2052,37 @@ jobs:
           # The following same-owner package-install phase requires BOTH this
           # actual original0/status and the retained closed receipt, not a flag.
 
+      - name: Publish only the prepared signed input checkpoint; not installed
+        id: prepared_export
+        if: github.ref == 'refs/heads/verify/desktop-macos-candidate'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GH_TOKEN: ${{ github.token }}
+          GH_HOST: github.com
+        run: |
+          set +x
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          # One bounded original page, no latest-artifact or pagination fallback.
+          (ulimit -f 16384; gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" > "$MRK_MACOS_WORK/prepared-jobs.json")
+          printf '0\n' > "$MRK_MACOS_WORK/prepared-api.status"
+          unset GH_TOKEN
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py export --target "$MRK_MACOS_TARGET"
+      - name: Retain prepared signed input for failed-job-only installation retries
+        id: prepared_upload
+        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.prepared_export.outcome == 'success'
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-release-kit-macos26-${{ matrix.target }}-prepared-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/prepared/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
       - name: Fixed nonshipping app-absence prepare-app-absence; no credentials or user artifact
         id: app_absence_prepare
         if: github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture'
@@ -2116,7 +2164,7 @@ jobs:
           # P1 remains the existing one package-install original, not a replay.
 
       - name: Standard Installer only is privileged; never execute the app or Python as root
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature'
         id: package_install
         timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' && 32 || 18 }}
         shell: bash
@@ -2154,7 +2202,7 @@ jobs:
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Notarize, staple and verify only the final user image
         id: finalize_image
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-installed') && steps.package_install.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-installed') && steps.package_install.outcome == 'success'
         timeout-minutes: 32
         shell: bash
         env:
@@ -2183,39 +2231,8 @@ jobs:
           [[ "$image_status_saved" == 0 ]] || exit "$image_status_saved"
           # Neither a provisional file nor its receipt substitutes for this
           # actual original0. Preview has no fallback to the old image.
-      - name: Stage the current signed candidate only after actual installation and final-image verification
-        id: candidate_stage
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success'
-        timeout-minutes: 3
-        shell: bash
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          umask 077
-          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
-            "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \
-            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_REF=$GITHUB_REF" "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \
-            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
-            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
-            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py preview --candidate-carrier --target "$MRK_MACOS_TARGET" \
-            --work "$MRK_MACOS_WORK" --expected-source "$MRK_EXPECTED_SHA" \
-            --output "$MRK_MACOS_WORK/candidate" > "$MRK_MACOS_WORK/candidate-result.json"
-      - name: Retain the complete candidate for independent installed-app testing
-        id: candidate_upload
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.candidate_stage.outcome == 'success'
-        timeout-minutes: 3
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: mobile-release-kit-macos26-${{ matrix.target }}-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ steps.work.outputs.root }}/candidate/MobileReleaseKit.dmg
-            ${{ steps.work.outputs.root }}/candidate/PREVIEW.json
-            ${{ steps.work.outputs.root }}/candidate/README.md
-          if-no-files-found: error
-          retention-days: 14
-          compression-level: 0
       - name: Retire only the completed candidate's disposable compiler outputs
-        if: always() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.candidate_stage.outcome == 'success'
+        if: always() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.prepared_upload.outcome == 'success'
         timeout-minutes: 3
         shell: bash
         run: |
@@ -2251,65 +2268,6 @@ jobs:
               assert stat.S_ISDIR(current.st_mode) and current.st_uid == os.getuid() and current.st_dev == info.st_dev
               shutil.rmtree(path)
           PY_CANDIDATE_CLEAN
-      - name: Observe one same-build Applications launch only after retaining the candidate
-        id: candidate_applications_ui
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.candidate_upload.outcome == 'success'
-        timeout-minutes: 16
-        shell: bash
-        env:
-          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          umask 077
-          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1
-          /bin/mkdir -m 700 "$MRK_MACOS_WORK/normal-ui"
-          /bin/mkdir -m 700 "$MRK_MACOS_WORK/normal-ui/tmp"
-          ui() {
-            local label=$1
-            shift
-            set +e
-            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
-              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
-              LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" \
-              "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
-              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
-              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
-              "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" "$@" \
-              > "$MRK_MACOS_WORK/normal-ui/$label.log" 2>&1
-            local status=$?
-            set -e
-            printf '%s\n' "$status" > "$MRK_MACOS_WORK/normal-ui/$label.status"
-            printf 'MRK_CANDIDATE_APPLICATIONS_PHASE=%s;originalReturncode=%s;qualification=observation-only\n' "$label" "$status"
-            return "$status"
-          }
-          # The existing owner checks exact limits, source/host and original closure.
-          ulimit -f 33554432
-          ui build --normal-build
-          ulimit -f 1048576
-          ui applications-test test-without-building \
-            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
-            -configuration Debug -destination "platform=macOS,arch=$MRK_MACOS_MACHINE" -destination-timeout 15 \
-            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
-            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/applications-test.xcresult" \
-            -only-testing:MRKNormalAppUITests/NormalAppUITests/testApplicationsLaunchAndQuit \
-            -parallel-testing-enabled NO -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 60 -maximum-test-execution-time-allowance 60 \
-            -disableAutomaticPackageResolution
-          ui applications-summary --normal-summary applications-test.xcresult
-          # All original phase owners joined successfully; remove only their build output.
-          "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/normal-ui/DerivedData" <<'PY_UI_CLEAN'
-          import os, shutil, stat, sys
-          from pathlib import Path
-          path = Path(sys.argv[1]); before = path.lstat(); parent = path.parent.lstat()
-          assert path.name == 'DerivedData' and path.parent.name == 'normal-ui'
-          assert stat.S_ISDIR(before.st_mode) and stat.S_ISDIR(parent.st_mode)
-          assert before.st_uid == parent.st_uid == os.getuid() != 0 and before.st_dev == parent.st_dev
-          assert shutil.rmtree.avoids_symlink_attacks
-          shutil.rmtree(path)
-          PY_UI_CLEAN
-          # Exact marker + one passed/zero skipped counts are enforced by the owner.
-          # Failure stops this step; retain uncertain originals, never launch later cases.
       - name: Stage only the finalized ordinary image as an unqualified P0 carrier input
         id: p0_carrier_stage
         if: github.ref == 'refs/heads/verify/desktop-macos-installed' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled'
@@ -5399,6 +5357,315 @@ jobs:
   # Compile the real shipping graph only: no signing environment, installed app,
   # supplier receipt, launch, package or Store operation. Independent of the
   # configured installed/preview engineering job above.
+  prepared-install:
+    needs: engineering-install
+    if: always() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    environment: macos-developer-id
+    name: prepared-installed-${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (inputs.target == 'aarch64-apple-darwin' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64"}]' || '[{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64"}]') || '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64"}]') }}
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target] }}
+      MRK_MACOS_TARGET: ${{ matrix.target }}
+      MRK_MACOS_RUNNER: ${{ matrix.runner }}
+      MRK_MACOS_MACHINE: ${{ matrix.machine }}
+      MRK_MACOS_HOSTED_JOB: ${{ matrix.hosted_job }}
+      MRK_EXPECTED_SHA: ${{ github.sha }}
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      RUNNER_ENVIRONMENT: ${{ runner.environment }}
+    steps:
+      - name: Admit only the disposable hosted prepared-input route
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
+          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+          case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$(/usr/bin/uname -m)" in
+            aarch64-apple-darwin/ARM64/arm64|x86_64-apple-darwin/X64/x86_64) ;;
+            *) exit 1 ;;
+          esac
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+      - name: Check out the exact current harness source without credentials
+        timeout-minutes: 3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select DATA Python, never the packaged interpreter
+        id: python
+        timeout-minutes: 3
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Reserve one fresh consumer work directory
+        id: work
+        timeout-minutes: 1
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+          [[ "$(/usr/bin/git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          tree=$(/usr/bin/git rev-parse 'HEAD^{tree}')
+          [[ "$tree" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nMRK_CONSUMER_TREE=%s\n' "$root" "$MRK_PYTHON" "$tree" >> "$GITHUB_ENV"
+      - name: Select the one closed upstream target checkpoint without matrix output ambiguity
+        id: prepared
+        timeout-minutes: 4
+        shell: bash
+        env:
+          PRODUCER_SOURCE: ${{ github.event_name == 'workflow_dispatch' && inputs.prepared_source || github.sha }}
+          PRODUCER_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.prepared_run || github.run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_HOST: github.com
+        run: |
+          set +x
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          [[ "$PRODUCER_SOURCE" =~ ^[0-9a-f]{40}$ && "$PRODUCER_RUN" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+          fetch() { (ulimit -f 16384; gh api "$1" > "$2"); }
+          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/jobs?filter=all&per_page=100" "$MRK_MACOS_WORK/prepared-jobs.json"
+          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/artifacts?per_page=100" "$MRK_MACOS_WORK/prepared-artifacts.json"
+          fetch "repos/$GITHUB_REPOSITORY/git/commits/$PRODUCER_SOURCE" "$MRK_MACOS_WORK/prepared-commit.json"
+          printf '0\n' > "$MRK_MACOS_WORK/prepared-api.status"
+          unset GH_TOKEN
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py select --target "$MRK_MACOS_TARGET" \
+            --producer-source "$PRODUCER_SOURCE" --producer-run "$PRODUCER_RUN" > "$MRK_MACOS_WORK/prepared-selection.txt"
+          /bin/cat "$MRK_MACOS_WORK/prepared-selection.txt" >> "$GITHUB_OUTPUT"
+      - name: Capture the exact selected producer attempt, not the current rerun attempt
+        timeout-minutes: 2
+        shell: bash
+        env:
+          PRODUCER_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.prepared_run || github.run_id }}
+          PRODUCER_ATTEMPT: ${{ steps.prepared.outputs.producer-attempt }}
+          GH_TOKEN: ${{ github.token }}
+          GH_HOST: github.com
+        run: |
+          set +x
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$PRODUCER_RUN" =~ ^[1-9][0-9]{0,19}$ && "$PRODUCER_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+          (ulimit -f 16384; gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$PRODUCER_ATTEMPT" > "$MRK_MACOS_WORK/prepared-service/run.json")
+          printf '0\n' > "$MRK_MACOS_WORK/prepared-service/metadata.status"
+      - name: Download only the selected prepared artifact with service digest verification
+        timeout-minutes: 5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ steps.prepared.outputs.artifact-id }}
+          github-token: ${{ github.token }}
+          repository: Apdelrahman1911/mobile-release-kit
+          run-id: ${{ github.event_name == 'workflow_dispatch' && inputs.prepared_run || github.run_id }}
+          path: ${{ steps.work.outputs.root }}/prepared-input
+          merge-multiple: true
+          digest-mismatch: error
+          skip-decompress: 'false'
+      - name: Check out the authentic built source separately for diagnostic-only retry
+        if: github.event_name == 'workflow_dispatch' && steps.prepared.outputs.producer-source != github.sha
+        timeout-minutes: 3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.prepared.outputs.producer-source }}
+          path: prepared-built-source
+          persist-credentials: false
+      - name: Reconstruct fresh script originals and repeat full finalized product audit
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py hydrate --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE"
+      - name: Install and verify only the pinned producer toolchain
+        timeout-minutes: 8
+        shell: bash
+        run: *mrk_installed_direct_rust
+      - name: Fetch only the exact producer source dependencies before its unchanged offline build
+        timeout-minutes: 8
+        shell: bash
+        env:
+          BUILT_SOURCE: ${{ steps.prepared.outputs.producer-source }}
+        run: |
+          set -euo pipefail
+          checkout="$GITHUB_WORKSPACE"
+          if [[ "$BUILT_SOURCE" != "$GITHUB_SHA" ]]; then checkout="$checkout/prepared-built-source"; fi
+          [[ "$(/usr/bin/git -C "$checkout" rev-parse HEAD)" == "$BUILT_SOURCE" ]] || exit 1
+          /usr/bin/env -i PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+            HOME=/Users/runner CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup \
+            RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 \
+            DEVELOPER_DIR="$DEVELOPER_DIR" MACOSX_DEPLOYMENT_TARGET=26.0 \
+            "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" fetch \
+              --manifest-path "$checkout/desktop/src-tauri/Cargo.toml" --locked --target "$MRK_MACOS_TARGET"
+      - name: Standard Installer only is privileged; never execute the app or Python as root
+        if: success()
+        id: package_install
+        timeout-minutes: 18
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # One original existing owner: final archive audit, explicit producer,
+          # two fixed signed images, readonly mount, standard Installer and V2
+          # nonroot readback. Ordinary one990s remains unchanged. The fixed
+          # app-absence route alone adds baseline/image originals within1740s
+          # work/1800s hard; the job350min cap is never renewed.
+          # Previous pkgbuild/tar/xar construction is not relabeled as owned.
+          set +e
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py package-install --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE" \
+            > "$MRK_MACOS_WORK/package-install.stdout"
+          package_status=$?
+          printf '%s\n' "$package_status" > "$MRK_MACOS_WORK/package-install.status"
+          package_status_saved=$?
+          set -e
+          if [[ "$package_status" != 0 ]]; then exit "$package_status"; fi
+          [[ "$package_status_saved" == 0 ]] || exit "$package_status_saved"
+          # The receipt is not its own exit proof: only this original0, the
+          # saved Installer0, same-request readback and known detach permit use.
+          # Unknown resources remain retained; no forced detach or root Python.
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+      - name: Notarize, staple and verify only the final user image
+        id: finalize_image
+        if: github.event_name == 'push' && steps.package_install.outcome == 'success'
+        timeout-minutes: 32
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_NOTARY_API_KEY_BASE64: ${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64 }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # The old signed image and package receipt remain immutable. The
+          # fixed phase finalizes only its own copy; the final readonly mount
+          # must contain exactly the already-bound P and two producer files.
+          set +e
+          MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py finalize-image --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE" \
+            > "$MRK_MACOS_WORK/image-finalization.stdout"
+          image_status=$?
+          printf '%s\n' "$image_status" > "$MRK_MACOS_WORK/image-finalization.status"
+          image_status_saved=$?
+          unset MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -e
+          if [[ "$image_status" != 0 ]]; then exit "$image_status"; fi
+          [[ "$image_status_saved" == 0 ]] || exit "$image_status_saved"
+          # Neither a provisional file nor its receipt substitutes for this
+          # actual original0. Preview has no fallback to the old image.
+      - name: Stage the current signed candidate only after actual installation and final-image verification
+        id: candidate_stage
+        if: github.event_name == 'push' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success'
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py candidate --target "$MRK_MACOS_TARGET" \
+            --consumer-tree "$MRK_CONSUMER_TREE" > "$MRK_MACOS_WORK/candidate-result.json"
+      - name: Retain the complete candidate for independent installed-app testing
+        id: candidate_upload
+        if: github.event_name == 'push' && steps.candidate_stage.outcome == 'success'
+        timeout-minutes: 3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-release-kit-macos26-${{ matrix.target }}-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/candidate/MobileReleaseKit.dmg
+            ${{ steps.work.outputs.root }}/candidate/PREVIEW.json
+            ${{ steps.work.outputs.root }}/candidate/README.md
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Observe one same-build Applications launch only after retaining the candidate
+        id: candidate_applications_ui
+        if: github.event_name == 'push' && steps.candidate_upload.outcome == 'success'
+        timeout-minutes: 16
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/normal-ui"
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/normal-ui/tmp"
+          ui() {
+            local label=$1
+            shift
+            set +e
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
+              LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+              "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" "$@" \
+              > "$MRK_MACOS_WORK/normal-ui/$label.log" 2>&1
+            local status=$?
+            set -e
+            printf '%s\n' "$status" > "$MRK_MACOS_WORK/normal-ui/$label.status"
+            printf 'MRK_CANDIDATE_APPLICATIONS_PHASE=%s;originalReturncode=%s;qualification=observation-only\n' "$label" "$status"
+            return "$status"
+          }
+          # The existing owner checks exact limits, source/host and original closure.
+          ulimit -f 33554432
+          ui build --normal-build
+          ulimit -f 1048576
+          ui applications-test test-without-building \
+            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
+            -configuration Debug -destination "platform=macOS,arch=$MRK_MACOS_MACHINE" -destination-timeout 15 \
+            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
+            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/applications-test.xcresult" \
+            -only-testing:MRKNormalAppUITests/NormalAppUITests/testApplicationsLaunchAndQuit \
+            -parallel-testing-enabled NO -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 60 -maximum-test-execution-time-allowance 60 \
+            -disableAutomaticPackageResolution
+          ui applications-summary --normal-summary applications-test.xcresult
+          # All original phase owners joined successfully; remove only their build output.
+          "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/normal-ui/DerivedData" <<'PY_UI_CLEAN'
+          import os, shutil, stat, sys
+          from pathlib import Path
+          path = Path(sys.argv[1]); before = path.lstat(); parent = path.parent.lstat()
+          assert path.name == 'DerivedData' and path.parent.name == 'normal-ui'
+          assert stat.S_ISDIR(before.st_mode) and stat.S_ISDIR(parent.st_mode)
+          assert before.st_uid == parent.st_uid == os.getuid() != 0 and before.st_dev == parent.st_dev
+          assert shutil.rmtree.avoids_symlink_attacks
+          shutil.rmtree(path)
+          PY_UI_CLEAN
+          # Exact marker + one passed/zero skipped counts are enforced by the owner.
+          # Failure stops this step; retain uncertain originals, never launch later cases.
+      # Unknown mounts/native originals are retained for hosted VM disposal.
+      # Never force-detach or delete an installed application on failure.
+
   shipping-image-compile:
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-image-compile'
     runs-on: macos-26
