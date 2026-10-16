@@ -34,7 +34,7 @@ on:
         description: Compile only the changed native component
         type: choice
         default: all
-        options: [all, launcher, installer]
+        options: [all, launcher, installer, app]
 
 permissions:
   contents: read
@@ -45,7 +45,7 @@ concurrency:
 
 jobs:
   launcher:
-    if: github.event_name != 'workflow_dispatch' || inputs.component != 'installer'
+    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'launcher'
     name: Compile launcher (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
@@ -95,7 +95,7 @@ jobs:
 
   installer-check:
     name: Check installer and remover (${{ matrix.arch }})
-    if: github.event_name != 'workflow_dispatch' || inputs.component != 'launcher'
+    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'installer'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -149,6 +149,76 @@ jobs:
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
         run: rm -rf -- "$WORK_ROOT"
+
+  app-check:
+    # This targeted path checks the real packaged Tauri graph without producing
+    # another signed/notarized package or rebuilding unrelated native helpers.
+    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'app')
+    name: Compile packaged app (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+            release: macos26-arm64-desktop-02
+          - runner: macos-26-intel
+            arch: x86_64
+            release: macos26-x86_64-desktop-02
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.20.0'
+      - name: Allocate task-owned app compiler directory
+        id: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=$(mktemp -d "$RUNNER_TEMP/mrk-app-check.XXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+      - name: Compile frontend and actual packaged desktop image
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+          MRK_IMAGE_RELEASE_ID: ${{ matrix.release }}
+          MACOSX_DEPLOYMENT_TARGET: '26.0'
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="$WORK_ROOT/cargo" RUSTUP_HOME="$WORK_ROOT/rustup"
+          export CARGO_TARGET_DIR="$WORK_ROOT/target" CARGO_INCREMENTAL=0
+          export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0
+          export npm_config_cache="$WORK_ROOT/npm-cache"
+          npm --prefix desktop ci --ignore-scripts --no-audit --no-fund
+          npm --prefix desktop run build
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          # Includes actual Tauri command/ACL generation, Mac-only modules and
+          # linker/framework resolution; no live app, Store or signing action.
+          rustup run 1.98.1 cargo build --locked --lib \
+            --manifest-path desktop/helpers/macos-desktop-image/Cargo.toml
+      - name: Remove only this job's app compiler and frontend outputs
+        if: always() && steps.work.outputs.root != ''
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          python3 - <<'PY'
+          import os, shutil
+          from pathlib import Path
+          work = Path(os.environ["WORK_ROOT"])
+          assert work.parent == Path(os.environ["RUNNER_TEMP"])
+          assert work.name.startswith("mrk-app-check.") and not work.is_symlink()
+          for path in (work, Path("desktop/node_modules"), Path("desktop/dist")):
+              if path.exists():
+                  assert path.is_dir() and not path.is_symlink()
+                  shutil.rmtree(path)
+          PY
 
 # No Installer/Remover main runs. Only named inert byte/data unit tests execute.
 # Standard compiler/build scripts execute,
