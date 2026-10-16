@@ -72,29 +72,69 @@ def fixture(count=M.NATIVE_COUNT):
         ('runtime/empty', b'', tarfile.REGTYPE)]
 
 
+def build_objects(*, cpu=0x100000c, subtype=0):
+    commands = (struct.pack('<II16sQQQQIIII', 0x19, 72, bytes(16), 0, 0, 0, 0, 7, 7, 0, 0)
+        + struct.pack('<6I', 0x32, 24, 1, 26 << 16, 26 << 16, 0)
+        + (struct.pack('<IIQ', 0x2e, 16, 0) if cpu == 0x100000c else b'') + struct.pack('<6I', 0x2, 24, 0, 0, 0, 0)
+        + struct.pack('<20I', 0xb, 80, *([0] * 18)))
+    body = struct.pack('<8I', 0xfeedfacf, cpu, subtype, 1, 5 if cpu == 0x100000c else 4, len(commands), 0x2000, 0) + commands
+    return [(name, body, tarfile.REGTYPE) for name in sorted(M.BUILD_OBJECT_PATHS)]
+
+
 def profile(target=API.ARM_TARGET):
     return types.SimpleNamespace(stager=STAGER, target=target,
         arch='arm64' if target == API.ARM_TARGET else 'x86_64')
 
 
 class StoreSigning(unittest.TestCase):
-    def test_all_187_native_headers_and_all_data_are_examined(self):
+    def test_all_loadable_native_headers_and_all_data_are_examined(self):
         seen = []
         def inspect(body, name):
             M.native_policy(body, name, profile(), MATCHER)
             seen.append(name)
         rows = M.archive_scan(tar(fixture()), inspect)
-        self.assertEqual(len(seen), 187)
-        self.assertEqual(len(rows), 189)
+        self.assertEqual(len(seen), M.NATIVE_COUNT)
+        self.assertEqual(len(rows), M.NATIVE_COUNT + 2)
         self.assertEqual(rows[-1]['bytes'], 0)
         for body in (native(cpu=0x1000007, subtype=3), b'\xca\xfe\xba\xbe' + bytes(32), native(kind=6)):
             changed = fixture(); changed[50] = (changed[50][0], body, tarfile.REGTYPE)
             with self.assertRaises((M.Refused, STAGER.Refused, MATCHER.PreparationRefused)):
                 M.archive_scan(tar(changed), inspect)
         with self.assertRaises(M.Refused):
-            M.archive_scan(tar(fixture(186)), inspect)
+            M.archive_scan(tar(fixture(M.NATIVE_COUNT - 1)), inspect)
+        # Exact public unsigned assembly member that previously failed before
+        # credentials: fastlane-sirp's Bundler configuration DIRECTORY.
+        directory = 'runtime/bundle/ruby/3.3.0/gems/fastlane-sirp-1.1.0/.bundle'
+        ordinary = [(directory, b'', tarfile.DIRTYPE),
+                    (directory + '/config', b'---\nBUNDLE_WITHOUT: development\n', tarfile.REGTYPE)]
+        scanned = M.archive_scan(tar(fixture() + ordinary), inspect)
+        self.assertFalse(scanned[-2]['native'])
+        self.assertTrue(scanned[-2]['directory'])
+        self.assertFalse(scanned[-1]['native'])
+        with self.assertRaises(M.Refused):
+            M.archive_scan(tar(fixture() + [(directory, b'not code', tarfile.REGTYPE)]), inspect)
+        with self.assertRaises(M.Refused):
+            M.archive_scan(tar(fixture() + ordinary + [(directory + '/bad.bundle', b'not code', tarfile.REGTYPE)]), inspect)
         intel = native(cpu=0x1000007, subtype=3)
         M.native_policy(intel, 'runtime/bin/ruby', profile(API.INTEL_TARGET), MATCHER)
+
+    def test_projection_checks_all187_headers_and_omits_only_exact54_build_objects(self):
+        for target, cpu, subtype in ((API.ARM_TARGET, 0x100000c, 0), (API.INTEL_TARGET, 0x1000007, 3)):
+            loadable = [(name, native(cpu=cpu, subtype=subtype, kind=2 if name == 'runtime/bin/ruby' else 8)
+                         if data[:4] in M.MAGICS else data, kind) for name, data, kind in fixture()]
+            objects = build_objects(cpu=cpu, subtype=subtype)
+            before, after, omitted = M.project_runtime_inventory(tar(loadable + objects), profile(target), MATCHER)
+            self.assertEqual(sum(r['native'] for r in before), 187)
+            self.assertEqual(sum(r['native'] for r in after), 133)
+            self.assertEqual(len(omitted), 54)
+            self.assertEqual(after, [r for r in before if r['path'] not in M.BUILD_OBJECT_PATHS])
+            for bad in (objects[:-1], [(objects[0][0], native(cpu=cpu, subtype=subtype), tarfile.REGTYPE)] + objects[1:],
+                        [(objects[0][0], b'not Mach-O', tarfile.REGTYPE)] + objects[1:],
+                        [('runtime/unselected.o', objects[0][1], tarfile.REGTYPE)] + objects[1:]):
+                with self.assertRaises((M.Refused, STAGER.Refused)):
+                    M.project_runtime_inventory(tar(loadable + bad), profile(target), MATCHER)
+            with self.assertRaises((M.Refused, STAGER.Refused)):
+                M.archive_scan(tar(loadable + objects), lambda data, name: M.native_policy(data, name, profile(target), MATCHER))
 
     def test_archive_implicit_aliases_links_duplicates_and_native_disguises_refuse(self):
         for extra in (
@@ -147,8 +187,8 @@ class StoreSigning(unittest.TestCase):
         with mock.patch.object(M.time, 'monotonic_ns', return_value=(M.WORK_SECONDS + 1) * 10**9):
             with self.assertRaises(M.Refused): M.clock(op)
             M.clock(op, work=False)
-        self.assertEqual(len(M.ROLES), 374)
-        self.assertEqual(len(set(M.ROLES)), 374)
+        self.assertEqual(len(M.ROLES), 2 * M.NATIVE_COUNT)
+        self.assertEqual(len(set(M.ROLES)), 2 * M.NATIVE_COUNT)
 
     def test_actual_credential_scope_uses_hard_reserve_and_only_known_native_unwind(self):
         # Reuse existing inert Security port, not a mocked credential_scope.
@@ -250,7 +290,7 @@ class StoreSigning(unittest.TestCase):
         def credential_scope(op, purpose):
             scopes.append(purpose)
             # Keep the real census at its admitted eight-file bound through
-            # all374 original calls. Closed census FDs still consume lifetime
+            # all266 original calls. Closed census FDs still consume lifetime
             # ledger cells; mocking census hid the old4096-cell integration bug.
             private = op.work / op.target_name / 'inert-private-db'
             private.mkdir(mode=0o700)
@@ -280,7 +320,7 @@ class StoreSigning(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary)
             incoming = work / 'store-original'; incoming.mkdir(mode=0o700)
-            body = tar(fixture())
+            body = tar(fixture() + build_objects())
             archive = incoming / 'store-runtime.tar.gz'; archive.write_bytes(body); archive.chmod(0o400)
             origin = {'signed': False, 'arch': 'arm64', 'archiveSha256': M.sha(body),
                 'source': '0039f79baa54318d58d87606335492f7ef2a90dd', 'runId': 38844616192,
@@ -330,17 +370,18 @@ class StoreSigning(unittest.TestCase):
                     self.assertTrue((work / op.target_name).exists())
                     self.assertEqual(archive.read_bytes(), body)
                     return
-                self.assertEqual(len(calls), 374)
+                self.assertEqual(len(calls), len(M.ROLES))
                 self.assertEqual(tuple(c['role'] for c in op.calls), M.ROLES)
-                self.assertGreaterEqual(len(op.entries), 374 * (3 + 1 + 2 * 8) + 40 * 8)
+                self.assertGreaterEqual(len(op.entries), len(M.ROLES) * (3 + 1 + 2 * 8) + 40 * 8)
                 self.assertLessEqual(len(op.entries), M.ORIGINAL_LIMIT)
                 self.assertTrue(M.success(op))
                 signed = (work / 'store-signed.tar.gz').read_bytes()
                 final = M.archive_scan(signed, lambda value, name: M.native_policy(value, name, profile(), MATCHER))
-                initial = M.archive_scan(body, lambda *_: None)
+                initial = M.archive_scan(body, lambda *_: None, native_count=M.INPUT_NATIVE_COUNT)
                 self.assertEqual([r for r in initial if not r['native']], [r for r in final if not r['native']])
                 self.assertEqual(archive.read_bytes(), body)
-                self.assertEqual(len(op.store_signing['native']), 187)
+                self.assertEqual(len(op.store_signing['native']), M.NATIVE_COUNT)
+                self.assertEqual(len(op.store_signing['receipt']['omittedBuildObjects']), 54)
                 op.finish()
                 self.assertTrue(op.receipt['targetRetired'])
                 self.assertTrue(op.receipt['originalClosesKnown'])

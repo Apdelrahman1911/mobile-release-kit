@@ -20,11 +20,21 @@ REF = 'refs/heads/verify/desktop-macos-store-signing'
 ARCHIVE_LIMIT = 512 * 1024 * 1024
 FILE_LIMIT = 64 * 1024 * 1024
 ENTRY_LIMIT = 32768
-NATIVE_COUNT = 187
+NATIVE_COUNT = 133
+INPUT_NATIVE_COUNT = 187
+# The exact pinned gem compiler intermediates are not loadable Ruby extensions.
+CRC_BUILD_MODULES = (
+    "crc12_3gpp", "crc15", "crc16", "crc16_ccitt", "crc16_dnp", "crc16_genibus",
+    "crc16_kermit", "crc16_modbus", "crc16_usb", "crc16_x_25", "crc16_xmodem", "crc16_zmodem",
+    "crc24", "crc32", "crc32_bzip2", "crc32_jam", "crc32_mpeg", "crc32_posix", "crc32_xfer",
+    "crc32c", "crc5", "crc64", "crc64_jones", "crc64_nvme", "crc64_xz", "crc8", "crc8_1wire")
+BUILD_OBJECT_PATHS = frozenset(
+    f"runtime/bundle/ruby/3.3.0/gems/digest-crc-0.7.0/ext/digest/{name}/{name}{suffix}.o"
+    for name in CRC_BUILD_MODULES for suffix in ("", "_ext"))
 WORK_SECONDS, HARD_SECONDS = 1500, 1620
 ROLES = tuple(f'store-{index:03d}-{action}' for index in range(NATIVE_COUNT) for action in ('sign', 'verify'))
-# 374*(3 capture + 1 native + 2*8 private census) + 40*8 auxiliary
-# census + 128 source/acquisition originals = 7928, including consumed closes.
+# 266*(3 capture + 1 native + 2*8 private census) + 40*8 auxiliary
+# census + 128 source/acquisition originals = 5768, including consumed closes.
 ORIGINAL_LIMIT = 8192
 MAGICS = {b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xce',
           b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca', b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'}
@@ -47,9 +57,10 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode('ascii')
 
 
-def archive_scan(body, native_check):
+def archive_scan(body, native_check, *, native_count=NATIVE_COUNT):
     """Inspect every byte/name once before secrets; keep only bounded row DATA."""
-    need(type(body) is bytes and 0 < len(body) <= ARCHIVE_LIMIT, 'archive-bound')
+    need(type(body) is bytes and 0 < len(body) <= ARCHIVE_LIMIT
+         and native_count in (NATIVE_COUNT, INPUT_NATIVE_COUNT), 'archive-bound')
     rows, names, planned, total, natives = [], set(), {}, 0, []
     with tarfile.open(fileobj=io.BytesIO(body), mode='r:gz') as archive:
         for entry in archive:
@@ -79,15 +90,18 @@ def archive_scan(body, native_check):
                 need(entry.size == 0, 'archive-directory-data')
             native = data[:4] in MAGICS
             # A malformed native-named executable cannot silently become DATA.
-            expected = name == 'runtime/bin/ruby' or name.endswith(('.bundle', '.dylib'))
+            expected = entry.isfile() and (name == 'runtime/bin/ruby' or name.endswith(('.bundle', '.dylib')))
+            # Bundler's ordinary .bundle configuration directory is not code.
+            # Its child files remain fully inspected; native-named files still
+            # fail closed unless they carry an admitted Mach-O header.
             need(not data.startswith((b'\x7fELF', b'MZ')) and (not expected or native), 'archive-native-header')
             if native:
                 native_check(data, name)  # Every architecture/loader checked before any secret use.
                 natives.append(name)
-                need(len(natives) <= NATIVE_COUNT, 'archive-native-count')
+                need(len(natives) <= native_count, 'archive-native-count')
             rows.append({'path': name, 'directory': entry.isdir(), 'mode': entry.mode,
                          'bytes': len(data), 'sha256': sha(data), 'native': native})
-    need('runtime/bin/ruby' in natives and len(natives) == NATIVE_COUNT, 'archive-complete-native-roster')
+    need('runtime/bin/ruby' in natives and len(natives) == native_count, 'archive-complete-native-roster')
     return rows
 
 
@@ -110,6 +124,34 @@ def native_policy(body, name, op, matcher):
         allowed_kinds=(2,) if name == 'runtime/bin/ruby' else (2, 8))
     need(complete and minimum == [(1, 26 << 16)], 'native-loader-or-deployment')
     matcher.macho_records(body, op.arch)
+
+
+def project_runtime_inventory(body, op, matcher):
+    """Check all187 original headers; omit only54 exact build-only objects.
+
+    Ruby requires crc*_ext.bundle through its installed library/load path; these
+    ext/digest/*.o are compiler intermediates, never signed runtime images.
+    Every other member, including extension bundles and source/notices, stays.
+    """
+    objects = []
+    def inspect(data, name):
+        if name not in BUILD_OBJECT_PATHS:
+            native_policy(data, name, op, matcher)
+            return
+        complete, minimum, records = op.stager._macho_commands(data, target=op.target,
+            system_only=True, allowed_kinds=(1,))
+        need(complete and minimum == [(1, 26 << 16)]
+             and tuple(row[0] for row in records) == ((0x19, 0x32, 0x2e, 0x2, 0xb)
+                 if op.target == op.stager.ARM_TARGET else (0x19, 0x32, 0x2, 0xb))
+             and not any(row[2] for row in records), 'build-object-header')
+        objects.append(name)
+    original = archive_scan(body, inspect, native_count=INPUT_NATIVE_COUNT)
+    need(len(objects) == 54 and set(objects) == BUILD_OBJECT_PATHS, 'build-object-exact-roster')
+    omitted = [{'path': row['path'], 'bytes': row['bytes'], 'sha256': row['sha256']}
+               for row in original if row['path'] in BUILD_OBJECT_PATHS]
+    projected = [row for row in original if row['path'] not in BUILD_OBJECT_PATHS]
+    need(sum(row['native'] for row in projected) == NATIVE_COUNT, 'projected-native-roster')
+    return original, projected, omitted
 
 
 def clock(op, *, work=True):
@@ -222,21 +264,22 @@ def prepare(op):
          and upstream.get('runId') == 38844616192 and upstream.get('runAttempt') == 1
          and upstream.get('artifactId') == (12022417782 if op.arch == 'arm64' else 12022823630), 'service-origin')
     matcher = op.signing_matcher()
-    before = io_call(op, 'store-preflight', lambda: archive_scan(original,
-        lambda body, name: native_policy(body, name, op, matcher)))
+    input_rows, before, omitted = io_call(op, 'store-preflight', lambda: project_runtime_inventory(original, op, matcher))
     state['rows'] = before
     post(op)
     destination, after, native_index = io.BytesIO(), [], 0
     with op.credential_scope(PHASE):
         with tarfile.open(fileobj=io.BytesIO(original), mode='r:gz') as source, \
                 tarfile.open(fileobj=destination, mode='w:gz', format=tarfile.PAX_FORMAT) as target:
-            for entry, row in zip(source, before, strict=True):
+            for entry, row in zip(source, input_rows, strict=True):
                 clock(op)
                 data = b''
                 if entry.isfile():
                     with source.extractfile(entry) as stream:
                         data = stream.read(FILE_LIMIT + 1)
                 need(len(data) == row['bytes'] and sha(data) == row['sha256'], 'preimage-row')
+                if row['path'] in BUILD_OBJECT_PATHS:
+                    continue  # Exact inspected compiler object only; original archive is unchanged.
                 if row['native']:
                     index = native_index
                     native_index += 1
@@ -296,7 +339,9 @@ def prepare(op):
     state['receipt'] = {'schemaVersion': 1, 'kind': 'macos-store-signed-v1', 'target': op.target,
         'source': op.environment['GITHUB_SHA'], 'runId': op.environment['GITHUB_RUN_ID'],
         'runAttempt': op.environment['GITHUB_RUN_ATTEMPT'], 'workflow': op.environment['GITHUB_WORKFLOW_REF'],
-        'upstream': upstream, 'originalInventorySha256': sha(canonical(before)),
+        'upstream': upstream, 'originalInventorySha256': sha(canonical(input_rows)),
+        'inputMemberCount': len(input_rows), 'outputMemberCount': len(observed),
+        'inputNativeCount': INPUT_NATIVE_COUNT, 'outputNativeCount': NATIVE_COUNT, 'omittedBuildObjects': omitted,
         'signedInventorySha256': sha(canonical(observed)), 'signedArchiveSha256': sha(body), 'signedArchiveBytes': len(body),
         'nativeMembers': state['native'], 'nonNativeUnchanged': True,
         'signer': {'teamIdentifier': op.signing[0], 'certificateSha1': op.signing[1],

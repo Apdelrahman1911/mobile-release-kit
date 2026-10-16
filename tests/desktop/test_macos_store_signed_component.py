@@ -46,11 +46,15 @@ class SignedStoreComponent(unittest.TestCase):
             'signer': {'teamIdentifier': identity[0], 'certificateSha1': identity[1],
                 'producerProfileSha256': policy.producer_sha256, 'serviceProfileSha256': policy.service_sha256},
             'originalsClosed': True, 'sourcePost': True, 'inputPost': True, 'nonNativeUnchanged': True,
-            'outerExitRequired': True, 'nativeCallCount': 374, 'credentialCallCount': 19,
+            'outerExitRequired': True, 'nativeCallCount': len(FIXTURE.M.ROLES), 'credentialCallCount': 19,
             'credentialContexts': [{'purpose': FIXTURE.M.PHASE, 'closed': True, 'retired': True,
                                    'searchRestored': True, 'defaultUnchanged': True}],
             'signedArchiveSha256': hashlib.sha256(archive).hexdigest(), 'signedArchiveBytes': len(archive),
             'signedInventorySha256': FIXTURE.M.sha(FIXTURE.M.canonical(rows)),
+            'inputNativeCount': FIXTURE.M.INPUT_NATIVE_COUNT, 'outputNativeCount': FIXTURE.M.NATIVE_COUNT,
+            'inputMemberCount': len(rows) + 54, 'outputMemberCount': len(rows),
+            'omittedBuildObjects': [{'path': name, 'bytes': len(body), 'sha256': FIXTURE.M.sha(body)}
+                for name, body, _ in FIXTURE.build_objects(cpu=cpu, subtype=subtype)],
             'nativeMembers': [{'path': row['path'], 'signedBytes': row['bytes'], 'signedSha256': row['sha256'],
                               'identifier': FIXTURE.M.identifier(row['path']), 'codeDirectoryFlags': [0x10000]}
                              for row in rows if row['native']]}
@@ -63,7 +67,7 @@ class SignedStoreComponent(unittest.TestCase):
                 'head_sha': SOURCE, 'status': 'completed', 'conclusion': 'success'}]}
         return archive, receipt, run, workflow, artifact, jobs
 
-    def attempt(self, root, arch, fixture):
+    def attempt(self, root, arch, fixture, *, expected_attempt=None):
         archive, receipt, run, workflow, artifact, jobs = fixture
         transport = io.BytesIO()
         with zipfile.ZipFile(transport, 'w') as target:
@@ -78,7 +82,7 @@ class SignedStoreComponent(unittest.TestCase):
             stdout.write(body)
         with mock.patch.object(TOOL, 'api', side_effect=lambda route: responses[route]), \
                 mock.patch.object(TOOL.subprocess, 'run', side_effect=download):
-            return TOOL.restore_signed(root, 100, SOURCE, arch, 300)
+            return TOOL.restore_signed(root, 100, SOURCE, arch, 300, expected_attempt=expected_attempt)
 
     def test_exact_architecture_complete_roster_and_service_project_without_execution(self):
         for arch in ('arm64', 'x86_64'):
@@ -87,17 +91,26 @@ class SignedStoreComponent(unittest.TestCase):
                 fixture = self.fixture(arch)
                 result = self.attempt(root, arch, fixture)
                 self.assertEqual((result / 'licenses/NOTICE').read_bytes(), b'Keep every original notice byte\n')
-                self.assertEqual(len([p for p in result.rglob('*') if p.is_file()]), 189)
+                self.assertEqual(len([p for p in result.rglob('*') if p.is_file()]), FIXTURE.M.NATIVE_COUNT + 2)
                 self.assertEqual(json.loads((root / 'signed-origin.json').read_bytes())['artifactId'], 300)
                 self.assertFalse((root / 'artifact.zip').exists())
                 with self.assertRaises(FileExistsError): self.attempt(root, arch, fixture)
 
+    def test_source_selected_attempt_refuses_before_any_transport(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'projection'
+            with self.assertRaisesRegex(ValueError, 'SOURCE-selected signed Store attempt differs'):
+                self.attempt(root, 'arm64', self.fixture('arm64'), expected_attempt=2)
+            self.assertFalse(root.exists())
+
     def test_wrong_origin_incomplete_closure_signer_or_full_inventory_refuse(self):
         fixture = self.fixture('arm64')
-        changes = ('job', 'branch', 'source', 'calls', 'closure', 'identity', 'inventory', 'native', 'native-duplicate')
+        changes = ('job', 'branch', 'source', 'calls', 'closure', 'identity', 'inventory', 'native', 'native-duplicate', 'object-roster', 'projection-count')
         for changed in changes:
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
                 data = copy.deepcopy(fixture)
+                if changed == 'object-roster': data[1]['omittedBuildObjects'][0]['path'] = 'runtime/other.o'
+                if changed == 'projection-count': data[1]['outputNativeCount'] = 187
                 if changed == 'job': data[5]['jobs'][0]['conclusion'] = 'failure'
                 elif changed == 'branch': data[2]['head_branch'] = 'main'
                 elif changed == 'source': data[1]['source'] = 'b' * 40

@@ -251,7 +251,7 @@ def restore_runtime(output, run_id, source, arch, artifact_id):
     return runtime
 
 
-def restore_signed(output, run_id, source, arch, artifact_id):
+def restore_signed(output, run_id, source, arch, artifact_id, *, expected_attempt=None):
     """Project one exact successful signing job, without executing its payload.
 
     Ordinary packaging selects these identifiers from its source input. This
@@ -278,6 +278,8 @@ def restore_signed(output, run_id, source, arch, artifact_id):
             or not re.fullmatch(r'sha256:[0-9a-f]{64}', artifact.get('digest', ''))):
         raise ValueError('Signed Store service origin differs')
     attempt = int(matched[1])
+    if expected_attempt is not None and (type(expected_attempt) is not int or attempt != expected_attempt):
+        raise ValueError('SOURCE-selected signed Store attempt differs')
     jobs = api(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
     if type(jobs.get('total_count')) is not int or not 0 < jobs['total_count'] <= 100:
         raise ValueError('Signed Store job roster differs')
@@ -354,6 +356,18 @@ def restore_signed(output, run_id, source, arch, artifact_id):
             or type(native_rows) is not list or len(native_rows) != signing.NATIVE_COUNT
             or len({row.get('path') for row in native_rows if type(row) is dict}) != signing.NATIVE_COUNT):
         raise ValueError('Signed Store complete inventory differs')
+    omitted = receipt.get('omittedBuildObjects')
+    if (receipt.get('inputNativeCount') != signing.INPUT_NATIVE_COUNT
+            or receipt.get('outputNativeCount') != signing.NATIVE_COUNT
+            or receipt.get('outputMemberCount') != len(rows) or receipt.get('inputMemberCount') != len(rows) + 54
+            or type(omitted) is not list or len(omitted) != 54
+            or any(type(row) is not dict or set(row) != {'path', 'sha256', 'bytes'}
+                or type(row.get('path')) is not str or row['path'] not in signing.BUILD_OBJECT_PATHS
+                or type(row.get('sha256')) is not str or not re.fullmatch(r'[0-9a-f]{64}', row['sha256'])
+                or type(row.get('bytes')) is not int or not 0 < row['bytes'] <= signing.FILE_LIMIT for row in omitted)
+            or {row['path'] for row in omitted} != signing.BUILD_OBJECT_PATHS
+            or any(row['path'] in signing.BUILD_OBJECT_PATHS for row in rows)):
+        raise ValueError('Signed Store build-only projection differs')
     by_name = {row['path']: row for row in native_rows}
     with tarfile.open(fileobj=io.BytesIO(archive_body), mode='r:gz') as contents:
         for entry, row in zip(contents, rows, strict=True):
@@ -446,9 +460,26 @@ def restore(output, run_id, source, arch, artifact_id=None):
     return base
 
 
+def restore_selected(output, target):
+    spec = importlib.util.spec_from_file_location('_mrk_store_source_selector', ROOT / 'desktop/tools/stage_macos_installed.py')
+    stager = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = stager
+    spec.loader.exec_module(stager)
+    selected, original = stager.signed_store_selection(target)
+    arch = 'arm64' if target == stager.ARM_TARGET else 'x86_64'
+    runtime = restore_signed(output, int(selected['runId']), selected['source'], arch,
+                             int(selected['artifactId']), expected_attempt=int(selected['runAttempt']))
+    if stager.signed_store_selection(target) != (selected, original):
+        raise ValueError('SOURCE-selected signed Store changed during restore')
+    return runtime
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
+    selected = sub.add_parser('restore-selected', help='Restore only the fixed SOURCE-selected signed Store component')
+    selected.add_argument('output', type=Path)
+    selected.add_argument('--target', required=True, choices=['aarch64-apple-darwin', 'x86_64-apple-darwin'])
     config = sub.add_parser('config')
     config.add_argument('output', type=Path)
     pack = sub.add_parser('archive')
@@ -468,7 +499,9 @@ def main():
         item.add_argument('--run-id', required=True)
     pack.add_argument('--attempt', required=True)
     args = parser.parse_args()
-    if args.command == 'config':
+    if args.command == 'restore-selected':
+        restore_selected(args.output, args.target)
+    elif args.command == 'config':
         write_build_config(args.output)
     elif args.command == 'archive':
         archive_base(args.base, args.output, checked_source(args.source), args.arch,
