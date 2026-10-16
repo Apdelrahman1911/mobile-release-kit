@@ -270,9 +270,11 @@ class CredentialHelp(TypedDict):
 
 
 CredentialKindId = Literal["android-keystore", "android-firebase", "apple-p12", "apple-profile",
-                           "asc-p8", "ios-firebase", "google-wif", "project-read-token"]
+                           "asc-p8", "ios-firebase", "google-wif", "project-read-token",
+                           "apple-review-contact", "apple-review-demo", "operation-commitment"]
 CredentialFieldId = Literal["file", "storePassword", "keyAlias", "keyPassword", "password", "keyId",
-                            "issuerId", "provider", "serviceAccount", "token"]
+                            "issuerId", "provider", "serviceAccount", "token", "contactFirstName", "contactLastName",
+                            "contactEmail", "contactPhone", "demoUsername", "demoPassword", "keyBase64", "version"]
 CredentialControlId = Literal["project", "platform", "stage", "purpose", "mode", "label", "choose",
                               "prepare", "review", "save", "assign", "replace", "delete", "cancel",
                               "discard", "lock"]
@@ -347,7 +349,7 @@ AssessmentIssueCode = Literal["not-run", "incomplete", "unsupported-format", "un
                               "material-limit", "parser-limit", "empty-file", "suffix-conflict",
                               "malformed-container", "required-missing", "value-nul", "scalar-format",
                               "pkcs8-algorithm", "firebase-shape", "identity-mismatch"]
-AssessmentScope = Literal["value-admission", "identifier-format", "file-nonempty", "suffix-consistency",
+AssessmentScope = Literal["value-admission", "identifier-format", "credential-format", "file-nonempty", "suffix-consistency",
                           "container-parse", "jks-header", "pfx-envelope", "cms-signed-data-envelope",
                           "pkcs8-envelope", "json-document", "plist-document", "ec-p256-identifiers",
                           "firebase-shape", "application-identity"]
@@ -359,6 +361,14 @@ AssessmentRequirement = Literal[
     "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64", "MOBILE_RELEASE_ASC_KEY_ID", "MOBILE_RELEASE_ASC_ISSUER_ID",
     "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64", "MOBILE_RELEASE_GOOGLE_WIF_PROVIDER",
     "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT", "MOBILE_RELEASE_PROJECT_READ_TOKEN",
+    "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME",
+    "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME",
+    "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL",
+    "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE",
+    "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME",
+    "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD",
+    "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64",
+    "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION",
 ]
 
 
@@ -474,6 +484,23 @@ class AssessmentTokenFields(TypedDict):
     token: str | None
 
 
+class AssessmentAppleReviewContactFields(TypedDict):
+    contactFirstName: str | None
+    contactLastName: str | None
+    contactEmail: str | None
+    contactPhone: str | None
+
+
+class AssessmentAppleReviewDemoFields(TypedDict):
+    demoUsername: str | None
+    demoPassword: str | None
+
+
+class AssessmentOperationCommitmentFields(TypedDict):
+    keyBase64: str | None
+    version: str | None
+
+
 class AssessmentNoScalarFields(TypedDict):
     pass
 
@@ -526,9 +553,28 @@ class AssessmentTokenInput(TypedDict):
     observation: None
 
 
+class AssessmentAppleReviewContactInput(TypedDict):
+    kind: Literal["apple-review-contact"]
+    fields: AssessmentAppleReviewContactFields
+    observation: None
+
+
+class AssessmentAppleReviewDemoInput(TypedDict):
+    kind: Literal["apple-review-demo"]
+    fields: AssessmentAppleReviewDemoFields
+    observation: None
+
+
+class AssessmentOperationCommitmentInput(TypedDict):
+    kind: Literal["operation-commitment"]
+    fields: AssessmentOperationCommitmentFields
+    observation: None
+
+
 AssessmentInput = (
     AssessmentKeystoreInput | AssessmentAndroidFirebaseInput | AssessmentP12Input | AssessmentProfileInput
     | AssessmentP8Input | AssessmentIosFirebaseInput | AssessmentWifInput | AssessmentTokenInput
+    | AssessmentAppleReviewContactInput | AssessmentAppleReviewDemoInput | AssessmentOperationCommitmentInput
 )
 
 

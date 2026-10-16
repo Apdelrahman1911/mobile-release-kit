@@ -4,7 +4,7 @@ import type { ApiError } from './types.ts';
 import type { AssetFileKind, AssetKind, AssetReason, AssetStatus, CredentialAssessment } from './assetSessionTypes.ts';
 
 export const ASSET_FILE_KINDS = ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8'] as const;
-export const ASSET_KINDS = [...ASSET_FILE_KINDS, 'google-wif', 'project-read-token'] as const;
+export const ASSET_KINDS = [...ASSET_FILE_KINDS, 'google-wif', 'project-read-token', 'apple-review-contact', 'apple-review-demo', 'operation-commitment'] as const;
 export const ASSET_REASONS = ['none', 'closed', 'unqualified', 'unsupported-platform', 'unsupported-filesystem', 'unsupported-format', 'invalid-request', 'busy', 'source-refused', 'source-changed', 'material-limit', 'parser-limit', 'project-overlap', 'exclusion-unconfirmed', 'capacity', 'context-stale', 'user-cancelled', 'review-expired', 'deadline', 'document-lost', 'shutdown', 'cleanup-unknown',
   'vault-uninitialized', 'vault-key-missing', 'vault-keyring-locked', 'vault-keyring-denied', 'vault-keyring-unavailable', 'vault-provider-unsupported', 'vault-corrupt', 'vault-interrupted', 'vault-durability-unknown'] as const;
 export const ASSET_PLATFORMS = ['android', 'ios', 'project'] as const;
@@ -19,6 +19,9 @@ export const SESSION_FIELDS = {
   'asc-p8': ['keyId', 'issuerId'],
   'google-wif': ['provider', 'serviceAccount'],
   'project-read-token': ['token'],
+  'apple-review-contact': ['contactFirstName', 'contactLastName', 'contactEmail', 'contactPhone'],
+  'apple-review-demo': ['demoUsername', 'demoPassword'],
+  'operation-commitment': ['keyBase64', 'version'],
 } as const;
 const fieldLayout: Record<AssetKind, readonly (readonly [string, string])[]> = {
   'android-keystore': [['file', 'ANDROID_KEYSTORE_BASE64'], ['storePassword', 'ANDROID_KEYSTORE_PASSWORD'], ['keyAlias', 'ANDROID_KEY_ALIAS'], ['keyPassword', 'ANDROID_KEY_PASSWORD']],
@@ -29,10 +32,13 @@ const fieldLayout: Record<AssetKind, readonly (readonly [string, string])[]> = {
   'asc-p8': [['file', 'ASC_PRIVATE_KEY_P8_BASE64'], ['keyId', 'ASC_KEY_ID'], ['issuerId', 'ASC_ISSUER_ID']],
   'google-wif': [['provider', 'GOOGLE_WIF_PROVIDER'], ['serviceAccount', 'GOOGLE_SERVICE_ACCOUNT']],
   'project-read-token': [['token', 'PROJECT_READ_TOKEN']],
+  'apple-review-contact': [['contactFirstName', 'APPLE_REVIEW_CONTACT_FIRST_NAME'], ['contactLastName', 'APPLE_REVIEW_CONTACT_LAST_NAME'], ['contactEmail', 'APPLE_REVIEW_CONTACT_EMAIL'], ['contactPhone', 'APPLE_REVIEW_CONTACT_PHONE']],
+  'apple-review-demo': [['demoUsername', 'APPLE_DEMO_ACCOUNT_USERNAME'], ['demoPassword', 'APPLE_DEMO_ACCOUNT_PASSWORD']],
+  'operation-commitment': [['keyBase64', 'OPERATION_COMMITMENT_KEY_BASE64'], ['version', 'OPERATION_COMMITMENT_KEY_VERSION']],
 };
 const states = ['not-applicable', 'missing', 'unknown', 'invalid', 'configured', 'format-valid'];
 const issues = ['not-run', 'incomplete', 'unsupported-format', 'unsupported-variant', 'material-limit', 'parser-limit', 'empty-file', 'suffix-conflict', 'malformed-container', 'required-missing', 'value-nul', 'scalar-format', 'pkcs8-algorithm', 'firebase-shape', 'identity-mismatch'];
-const scopes = ['value-admission', 'identifier-format', 'file-nonempty', 'suffix-consistency', 'container-parse', 'jks-header', 'pfx-envelope', 'cms-signed-data-envelope', 'pkcs8-envelope', 'json-document', 'plist-document', 'ec-p256-identifiers', 'firebase-shape', 'application-identity'];
+const scopes = ['value-admission', 'identifier-format', 'credential-format', 'file-nonempty', 'suffix-consistency', 'container-parse', 'jks-header', 'pfx-envelope', 'cms-signed-data-envelope', 'pkcs8-envelope', 'json-document', 'plist-document', 'ec-p256-identifiers', 'firebase-shape', 'application-identity'];
 const encoder = new TextEncoder();
 type ObjectValue = Record<string, unknown>;
 function object(value: unknown): value is ObjectValue {
@@ -255,8 +261,8 @@ export function assetRequestFits(command: AssetCommand, value: unknown): boolean
       if (!keys(value, ['contextRevision', 'source', 'fields']) && !labelled) return false;
       if (source.type === 'selection') return keys(source, ['type', 'selectionToken']) && token(source.selectionToken) &&
         (fields(value.fields, []) || fields(value.fields, SESSION_FIELDS['android-keystore']) || fields(value.fields, SESSION_FIELDS['apple-p12']) || fields(value.fields, SESSION_FIELDS['asc-p8']));
-      return keys(source, ['type', 'kind', 'replacement']) && source.type === 'scalar' && one(source.kind, ['google-wif', 'project-read-token']) &&
-        (source.replacement === null || recordRef(source.replacement)) && fields(value.fields, SESSION_FIELDS[source.kind as 'google-wif' | 'project-read-token']);
+      return keys(source, ['type', 'kind', 'replacement']) && source.type === 'scalar' && one(source.kind, ['google-wif', 'project-read-token', 'apple-review-contact', 'apple-review-demo', 'operation-commitment']) &&
+        (source.replacement === null || recordRef(source.replacement)) && fields(value.fields, SESSION_FIELDS[source.kind as 'google-wif' | 'project-read-token' | 'apple-review-contact' | 'apple-review-demo' | 'operation-commitment']);
     }
   }
 }

@@ -1,4 +1,4 @@
-//! Five NONSECRET assigned identifiers. No lookup, sealing or process authority.
+//! Fixed NONSECRET assigned identifiers. No lookup, sealing or process authority.
 //! Included by the existing Setup protocol; shared variant wiring is separate.
 use super::*;
 
@@ -29,6 +29,7 @@ variable_requirements!(
     (GoogleServiceAccount,"MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT","google-wif","serviceAccount",Android),
     (AscKeyId,"MOBILE_RELEASE_ASC_KEY_ID","asc-p8","keyId",Ios),
     (AscIssuerId,"MOBILE_RELEASE_ASC_ISSUER_ID","asc-p8","issuerId",Ios),
+    (CommitmentVersion,"MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION","operation-commitment","version",Ios),
 );
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]

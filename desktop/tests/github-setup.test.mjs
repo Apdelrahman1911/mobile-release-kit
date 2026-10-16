@@ -805,6 +805,7 @@ const rsVariableValues = {
   MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT: 'release-bot@example-project.iam.gserviceaccount.com',
   MOBILE_RELEASE_ASC_KEY_ID: 'A1B2C3D4E5',
   MOBILE_RELEASE_ASC_ISSUER_ID: '12345678-1234-5678-abcd-123456789abc',
+  MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION: 'fixture-v1',
 };
 function rsValue(text) { return { text, bytes: Buffer.byteLength(text), sha256: createHash('sha256').update(text).digest('hex') }; }
 function rsVariableSelection(mode = 'create', requirement = 'MOBILE_RELEASE_ANDROID_KEY_ALIAS') {
@@ -916,7 +917,7 @@ test('remote setup closed policy and consent preserve untouched fields and disti
   for (const permission of ['triage', 'maintain', 'none']) { const bad = rsEnvironmentReview(rsEnvironmentSelection('create')); bad.consent.prepared.reviewer.permission = permission; assert.equal(parseGitHubRemoteSetupStatus(bad), null); }
   const mismatch = rsEnvironmentReview(rsEnvironmentSelection('create')); mismatch.consent.prepared.reviewer.login = 'another-user'; assert.equal(parseGitHubRemoteSetupStatus(mismatch), null);
   // Fixed secret public wire contains references/config bindings, never material.
-  assert.equal(Object.keys(GITHUB_REMOTE_SETUP_SECRET_FIELDS).length, 10);
+  assert.equal(Object.keys(GITHUB_REMOTE_SETUP_SECRET_FIELDS).length, 17);
   for (const requirement of Object.keys(GITHUB_REMOTE_SETUP_SECRET_FIELDS)) for (const mode of ['create', 'replace']) {
     const selected = rsSecretSelection(mode, requirement), good = rsSecretReview(selected);
     assert.ok(githubRemoteSetupSelection(selected)); assert.ok(parseGitHubRemoteSetupStatus(good));
@@ -975,7 +976,7 @@ test('remote setup closed policy and consent preserve untouched fields and disti
     }
     const absentAfter = { ...done, observed: { ...observed, value: null, metadata: null } }; assert.equal(parseGitHubRemoteSetupStatus(absentAfter), null);
   }
-  for (const requirement of ['ARBITRARY', 'MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD', 'MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION']) assert.equal(githubRemoteSetupSelection(rsVariableSelection('create', requirement)), false);
+  for (const requirement of ['ARBITRARY', 'MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD', 'OPERATION_COMMITMENT_KEY_VERSION']) assert.equal(githubRemoteSetupSelection(rsVariableSelection('create', requirement)), false);
   for (const patch of [{ mode: 'upsert' }, { value: 'RAW' }, { source: { ...rsVariableSelection().source, field: 'keyAlias' } }]) assert.equal(githubRemoteSetupSelection({ ...rsVariableSelection(), ...patch }), false);
   const boundary = rsVariableReview(rsVariableSelection('create', 'MOBILE_RELEASE_GOOGLE_WIF_PROVIDER'));
   const prefix = 'projects/123/locations/global/workloadIdentityPools/release/providers/';

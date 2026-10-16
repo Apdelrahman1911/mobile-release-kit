@@ -5,7 +5,7 @@ export type GitHubRemoteSetupEnvironmentSelection = {
   kind: 'environment_protection'; mode: 'configure' | 'create'; stage: 'candidate' | 'external-testing' | 'production';
   waitTimerMinutes: number; preventSelfReview: boolean | null; reviewerLogin: string | null; branches: 'all' | 'protected' | null;
 };
-export type GitHubRemoteSetupSecretRequirement = 'MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64' | 'MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD' | 'MOBILE_RELEASE_ANDROID_KEY_PASSWORD' | 'MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64' | 'MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64' | 'MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD' | 'MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64' | 'MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64' | 'MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64' | 'MOBILE_RELEASE_PROJECT_READ_TOKEN';
+export type GitHubRemoteSetupSecretRequirement = 'MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64' | 'MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD' | 'MOBILE_RELEASE_ANDROID_KEY_PASSWORD' | 'MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64' | 'MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64' | 'MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD' | 'MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64' | 'MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64' | 'MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64' | 'MOBILE_RELEASE_PROJECT_READ_TOKEN' | 'MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME' | 'MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME' | 'MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL' | 'MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE' | 'MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME' | 'MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD' | 'MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64';
 export type GitHubRemoteSetupSecretSelection = {
   kind: 'environment_secret'; mode: 'create' | 'replace'; stage: 'candidate' | 'external-testing' | 'production';
   requirement: GitHubRemoteSetupSecretRequirement;
@@ -18,7 +18,7 @@ export interface GitHubRemoteSetupSecretFacts {
 export interface GitHubRemoteSetupConfiguration {
   savedConfig: { bytes: number; sha256: string }; canonicalConfig: { bytes: number; sha256: string };
 }
-export type GitHubRemoteSetupVariableRequirement = 'MOBILE_RELEASE_ANDROID_KEY_ALIAS' | 'MOBILE_RELEASE_GOOGLE_WIF_PROVIDER' | 'MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT' | 'MOBILE_RELEASE_ASC_KEY_ID' | 'MOBILE_RELEASE_ASC_ISSUER_ID';
+export type GitHubRemoteSetupVariableRequirement = 'MOBILE_RELEASE_ANDROID_KEY_ALIAS' | 'MOBILE_RELEASE_GOOGLE_WIF_PROVIDER' | 'MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT' | 'MOBILE_RELEASE_ASC_KEY_ID' | 'MOBILE_RELEASE_ASC_ISSUER_ID' | 'MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION';
 export type GitHubRemoteSetupVariableSelection = {
   kind: 'environment_variable'; mode: 'create' | 'replace'; stage: 'candidate' | 'external-testing' | 'production';
   requirement: GitHubRemoteSetupVariableRequirement;

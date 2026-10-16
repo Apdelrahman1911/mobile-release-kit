@@ -258,11 +258,12 @@ def _scalar_result(value: str | None, name: str, input_kind: str) -> tuple[str, 
     if "\x00" in value:
         return "invalid", ["value-nul"], [_check("value-admission", "failed")]
     checks = [_check("value-admission", "passed")]
-    # Only these guide text fields have shared identifier rules. Passwords and
-    # the project token receive value admission, never a password/permission test.
-    if input_kind == "text":
+    # Public identifiers and the two explicitly policy-checked secret fields use
+    # core format rules. Other secrets receive value admission, never a login test.
+    policy_secret = name in {"MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL", "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64"}
+    if input_kind == "text" or policy_secret:
         valid = credential_format_error(name, value) is None
-        checks.append(_check("identifier-format", "passed" if valid else "failed"))
+        checks.append(_check("credential-format" if policy_secret else "identifier-format", "passed" if valid else "failed"))
         if not valid:
             return "invalid", ["scalar-format"], checks
     return "configured", [], checks

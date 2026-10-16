@@ -52,6 +52,13 @@ requirements!(
     (IosFirebase,"MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64","ios-firebase","file",Base64,Ios),
     (AscP8,"MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64","asc-p8","file",Base64,Ios),
     (ProjectReadToken,"MOBILE_RELEASE_PROJECT_READ_TOKEN","project-read-token","token",Utf8,Project),
+    (ContactFirstName,"MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME","apple-review-contact","contactFirstName",Utf8,Ios),
+    (ContactLastName,"MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME","apple-review-contact","contactLastName",Utf8,Ios),
+    (ContactEmail,"MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL","apple-review-contact","contactEmail",Utf8,Ios),
+    (ContactPhone,"MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE","apple-review-contact","contactPhone",Utf8,Ios),
+    (DemoUsername,"MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME","apple-review-demo","demoUsername",Utf8,Ios),
+    (DemoPassword,"MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD","apple-review-demo","demoPassword",Utf8,Ios),
+    (KeyBase64,"MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64","operation-commitment","keyBase64",Utf8,Ios),
 );
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]

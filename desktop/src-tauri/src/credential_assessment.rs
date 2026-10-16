@@ -37,10 +37,10 @@ enum Purpose { Full, Signing, Store }
 enum PolicyVersion { #[serde(rename = "credential-policy-v1")] V1 }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-enum Kind { AndroidKeystore, AndroidFirebase, AppleP12, AppleProfile, AscP8, IosFirebase, GoogleWif, ProjectReadToken }
+enum Kind { AndroidKeystore, AndroidFirebase, AppleP12, AppleProfile, AscP8, IosFirebase, GoogleWif, ProjectReadToken, AppleReviewContact, AppleReviewDemo, OperationCommitment }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-enum FieldId { File, StorePassword, KeyAlias, KeyPassword, Password, KeyId, IssuerId, Provider, ServiceAccount, Token }
+enum FieldId { File, StorePassword, KeyAlias, KeyPassword, Password, KeyId, IssuerId, Provider, ServiceAccount, Token, ContactFirstName, ContactLastName, ContactEmail, ContactPhone, DemoUsername, DemoPassword, KeyBase64, Version }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 enum Requirement {
     #[serde(rename = "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64")] AndroidKeystore,
@@ -58,21 +58,31 @@ enum Requirement {
     #[serde(rename = "MOBILE_RELEASE_GOOGLE_WIF_PROVIDER")] GoogleProvider,
     #[serde(rename = "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT")] GoogleServiceAccount,
     #[serde(rename = "MOBILE_RELEASE_PROJECT_READ_TOKEN")] ProjectToken,
+    #[serde(rename = "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME")] ContactFirstName,
+    #[serde(rename = "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME")] ContactLastName,
+    #[serde(rename = "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL")] ContactEmail,
+    #[serde(rename = "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE")] ContactPhone,
+    #[serde(rename = "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME")] DemoUsername,
+    #[serde(rename = "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD")] DemoPassword,
+    #[serde(rename = "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64")] KeyBase64,
+    #[serde(rename = "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION")] Version,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Role { File, Secret, Identifier }
+enum Role { File, Secret, PolicySecret, Identifier }
 struct LayoutField { id: FieldId, requirement: Requirement, role: Role }
 
 impl Kind {
     fn platform(self) -> Platform {
         match self {
             Self::AndroidKeystore | Self::AndroidFirebase | Self::GoogleWif => Platform::Android,
-            Self::AppleP12 | Self::AppleProfile | Self::AscP8 | Self::IosFirebase => Platform::Ios,
+            Self::AppleP12 | Self::AppleProfile | Self::AscP8 | Self::IosFirebase
+                | Self::AppleReviewContact | Self::AppleReviewDemo | Self::OperationCommitment => Platform::Ios,
             Self::ProjectReadToken => Platform::Project,
         }
     }
     fn firebase(self) -> bool { matches!(self, Self::AndroidFirebase | Self::IosFirebase) }
-    fn has_file(self) -> bool { !matches!(self, Self::GoogleWif | Self::ProjectReadToken) }
+    fn has_file(self) -> bool { !matches!(self, Self::GoogleWif | Self::ProjectReadToken
+        | Self::AppleReviewContact | Self::AppleReviewDemo | Self::OperationCommitment) }
     fn material_limit(self) -> u64 {
         // Fixed version-one wire bounds, not a reader, size claim or selector.
         // Canonical material_size_limit and all requiredness remain in Python.
@@ -114,6 +124,20 @@ impl Kind {
                 LayoutField { id: F::ServiceAccount, requirement: R::GoogleServiceAccount, role: T::Identifier },
             ],
             Self::ProjectReadToken => &[LayoutField { id: F::Token, requirement: R::ProjectToken, role: T::Secret }],
+            Self::AppleReviewContact => &[
+                LayoutField { id: F::ContactFirstName, requirement: R::ContactFirstName, role: T::Secret },
+                LayoutField { id: F::ContactLastName, requirement: R::ContactLastName, role: T::Secret },
+                LayoutField { id: F::ContactEmail, requirement: R::ContactEmail, role: T::PolicySecret },
+                LayoutField { id: F::ContactPhone, requirement: R::ContactPhone, role: T::Secret },
+            ],
+            Self::AppleReviewDemo => &[
+                LayoutField { id: F::DemoUsername, requirement: R::DemoUsername, role: T::Secret },
+                LayoutField { id: F::DemoPassword, requirement: R::DemoPassword, role: T::Secret },
+            ],
+            Self::OperationCommitment => &[
+                LayoutField { id: F::KeyBase64, requirement: R::KeyBase64, role: T::PolicySecret },
+                LayoutField { id: F::Version, requirement: R::Version, role: T::Identifier },
+            ],
         }
     }
 }
@@ -222,6 +246,25 @@ struct P8Fields { key_id: Option<String>, issuer_id: Option<String> }
 struct WifFields { provider: Option<String>, service_account: Option<String> }
 #[derive(Serialize)]
 struct TokenFields { token: Option<String> }
+// These new scalar records never derive Debug; their owned adapter copies are
+// zeroized on drop. This does not promise erasure of renderer/serializer copies.
+#[derive(Serialize)]
+#[serde(transparent)]
+struct PrivateScalar(String);
+impl Drop for PrivateScalar { fn drop(&mut self) { use zeroize::Zeroize; self.0.zeroize(); } }
+impl AsRef<str> for PrivateScalar { fn as_ref(&self) -> &str { &self.0 } }
+fn private_scalar(value: &Value, total: &mut usize) -> Result<Option<PrivateScalar>, AssessmentError> {
+    scalar(value, total).map(|value| value.map(PrivateScalar))
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppleReviewContactFields { contact_first_name: Option<PrivateScalar>, contact_last_name: Option<PrivateScalar>, contact_email: Option<PrivateScalar>, contact_phone: Option<PrivateScalar> }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppleReviewDemoFields { demo_username: Option<PrivateScalar>, demo_password: Option<PrivateScalar> }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationCommitmentFields { key_base64: Option<PrivateScalar>, version: Option<PrivateScalar> }
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum Input {
@@ -233,6 +276,9 @@ enum Input {
     IosFirebase { fields: EmptyFields, observation: Option<FileObservation> },
     GoogleWif { fields: WifFields, observation: () },
     ProjectReadToken { fields: TokenFields, observation: () },
+    AppleReviewContact { fields: AppleReviewContactFields, observation: () },
+    AppleReviewDemo { fields: AppleReviewDemoFields, observation: () },
+    OperationCommitment { fields: OperationCommitmentFields, observation: () },
 }
 #[derive(Serialize)]
 struct RequestContext { draft: Value, platform: Platform, stage: Stage, purpose: Purpose }
@@ -623,6 +669,9 @@ fn input(value: &Value) -> Result<Input, AssessmentError> {
         Kind::AndroidKeystore => &["storePassword", "keyAlias", "keyPassword"],
         Kind::AppleP12 => &["password"], Kind::AscP8 => &["keyId", "issuerId"],
         Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
+        Kind::AppleReviewContact => &["contactFirstName", "contactLastName", "contactEmail", "contactPhone"],
+        Kind::AppleReviewDemo => &["demoUsername", "demoPassword"],
+        Kind::OperationCommitment => &["keyBase64", "version"],
         _ => &[],
     };
     let fields = exact(&object["fields"], keys)?;
@@ -644,6 +693,20 @@ fn input(value: &Value) -> Result<Input, AssessmentError> {
             provider: scalar(&fields["provider"], &mut total)?, service_account: scalar(&fields["serviceAccount"], &mut total)?,
         }, observation: () },
         Kind::ProjectReadToken => Input::ProjectReadToken { fields: TokenFields { token: scalar(&fields["token"], &mut total)? }, observation: () },
+        Kind::AppleReviewContact => Input::AppleReviewContact { fields: AppleReviewContactFields {
+            contact_first_name: private_scalar(&fields["contactFirstName"], &mut total)?,
+            contact_last_name: private_scalar(&fields["contactLastName"], &mut total)?,
+            contact_email: private_scalar(&fields["contactEmail"], &mut total)?,
+            contact_phone: private_scalar(&fields["contactPhone"], &mut total)?,
+        }, observation: () },
+        Kind::AppleReviewDemo => Input::AppleReviewDemo { fields: AppleReviewDemoFields {
+            demo_username: private_scalar(&fields["demoUsername"], &mut total)?,
+            demo_password: private_scalar(&fields["demoPassword"], &mut total)?,
+        }, observation: () },
+        Kind::OperationCommitment => Input::OperationCommitment { fields: OperationCommitmentFields {
+            key_base64: private_scalar(&fields["keyBase64"], &mut total)?,
+            version: private_scalar(&fields["version"], &mut total)?,
+        }, observation: () },
     })
 }
 
@@ -706,7 +769,7 @@ enum IssueCode {
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum Scope {
-    ValueAdmission, IdentifierFormat, FileNonempty, SuffixConsistency, ContainerParse,
+    ValueAdmission, IdentifierFormat, CredentialFormat, FileNonempty, SuffixConsistency, ContainerParse,
     JksHeader, PfxEnvelope, CmsSignedDataEnvelope,
     #[serde(rename = "pkcs8-envelope")] Pkcs8Envelope,
     JsonDocument, PlistDocument, EcP256Identifiers, FirebaseShape, ApplicationIdentity,
@@ -760,10 +823,10 @@ impl FieldExpectation {
             Some(FileObservation::Observed { data }) => FileFact::Observed(data.format()),
         })
     }
-    fn scalar(value: &Option<String>) -> Self {
+    fn scalar<T: AsRef<str>>(value: &Option<T>) -> Self {
         Self::Scalar {
-            presence: if value.as_ref().is_none_or(|value| value.is_empty()) { Presence::Missing } else { Presence::Supplied },
-            nul: value.as_ref().is_some_and(|value| value.contains('\0')), processed: value.is_some(),
+            presence: if value.as_ref().is_none_or(|value| value.as_ref().is_empty()) { Presence::Missing } else { Presence::Supplied },
+            nul: value.as_ref().is_some_and(|value| value.as_ref().contains('\0')), processed: value.is_some(),
         }
     }
     fn presence(&self) -> Presence {
@@ -792,6 +855,9 @@ impl AssessmentRequest {
             Input::IosFirebase { observation, .. } => (Kind::IosFirebase, vec![E::file(observation)]),
             Input::GoogleWif { fields, .. } => (Kind::GoogleWif, vec![E::scalar(&fields.provider), E::scalar(&fields.service_account)]),
             Input::ProjectReadToken { fields, .. } => (Kind::ProjectReadToken, vec![E::scalar(&fields.token)]),
+            Input::AppleReviewContact { fields, .. } => (Kind::AppleReviewContact, vec![E::scalar(&fields.contact_first_name), E::scalar(&fields.contact_last_name), E::scalar(&fields.contact_email), E::scalar(&fields.contact_phone)]),
+            Input::AppleReviewDemo { fields, .. } => (Kind::AppleReviewDemo, vec![E::scalar(&fields.demo_username), E::scalar(&fields.demo_password)]),
+            Input::OperationCommitment { fields, .. } => (Kind::OperationCommitment, vec![E::scalar(&fields.key_base64), E::scalar(&fields.version)]),
         };
         let scalar_values_processed = fields.iter().any(|field| matches!(field, E::Scalar { processed: true, .. }));
         let file_observations_processed = fields.iter().any(|field| matches!(field, E::File(fact) if !matches!(fact, FileFact::Missing)));
@@ -806,11 +872,13 @@ fn field_is(field: &FieldResult, state: State, issues: &[IssueCode], checks: &[(
 }
 fn scalar_result(field: &FieldResult, role: Role, presence: Presence, nul: bool) -> bool {
     use Outcome::{Failed, Passed};
-    use Scope::{IdentifierFormat, ValueAdmission};
+    use Scope::{CredentialFormat, IdentifierFormat, ValueAdmission};
     if presence == Presence::Missing { return field_is(field, State::Missing, &[IssueCode::RequiredMissing], &[]); }
     if nul { return field_is(field, State::Invalid, &[IssueCode::ValueNul], &[(ValueAdmission, Failed)]); }
     match role {
         Role::Secret => field_is(field, State::Configured, &[], &[(ValueAdmission, Passed)]),
+        Role::PolicySecret => field_is(field, State::Configured, &[], &[(ValueAdmission, Passed), (CredentialFormat, Passed)])
+            || field_is(field, State::Invalid, &[IssueCode::ScalarFormat], &[(ValueAdmission, Passed), (CredentialFormat, Failed)]),
         Role::Identifier => field_is(field, State::Configured, &[], &[(ValueAdmission, Passed), (IdentifierFormat, Passed)])
             || field_is(field, State::Invalid, &[IssueCode::ScalarFormat], &[(ValueAdmission, Passed), (IdentifierFormat, Failed)]),
         Role::File => false,
@@ -992,8 +1060,27 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const KINDS: [Kind; 8] = [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::AppleP12, Kind::AppleProfile,
-        Kind::AscP8, Kind::IosFirebase, Kind::GoogleWif, Kind::ProjectReadToken];
+    const KINDS: [Kind; 11] = [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::AppleP12, Kind::AppleProfile,
+        Kind::AscP8, Kind::IosFirebase, Kind::GoogleWif, Kind::ProjectReadToken,
+        Kind::AppleReviewContact, Kind::AppleReviewDemo, Kind::OperationCommitment];
+
+    #[test]
+    fn secret_format_results_are_finite_redacted_and_not_public_identifier_checks() {
+        for (kind, index) in [(Kind::AppleReviewContact, 2), (Kind::OperationCommitment, 0)] {
+            let body = request(kind);
+            accepts(&body, response(kind));
+            let mut invalid = response(kind);
+            invalid["state"] = json!("invalid");
+            invalid["fields"][index]["state"] = json!("invalid");
+            invalid["fields"][index]["issues"] = json!(["scalar-format"]);
+            invalid["fields"][index]["checks"] = json!([check(Scope::ValueAdmission, Outcome::Passed), check(Scope::CredentialFormat, Outcome::Failed)]);
+            accepts(&body, invalid.clone());
+            invalid["fields"][index]["checks"][1]["scope"] = json!("identifier-format");
+            refuses(&body, invalid);
+            let mut leaking = response(kind); leaking["fields"][index]["value"] = json!("fictional-private");
+            refuses(&body, leaking);
+        }
+    }
 
     fn client(package: Value) -> Value {
         json!({"clientInfo": {"androidClientInfo": {"packageName": package}}})
@@ -1005,6 +1092,9 @@ mod tests {
             Kind::AscP8 => json!({"keyId":"FIXTURE123", "issuerId":"12345678-1234-1234-1234-123456789abc"}),
             Kind::GoogleWif => json!({"provider":"projects/123/locations/global/workloadIdentityPools/fixture/providers/fixture", "serviceAccount":"fixture@fixture-project.iam.gserviceaccount.com"}),
             Kind::ProjectReadToken => json!({"token":"fictional-read-token"}),
+            Kind::AppleReviewContact => json!({"contactFirstName":"Fictional", "contactLastName":"Reviewer", "contactEmail":"review@example.invalid", "contactPhone":"+15555550100"}),
+            Kind::AppleReviewDemo => json!({"demoUsername":"fictional-demo", "demoPassword":"fictional-demo-password"}),
+            Kind::OperationCommitment => json!({"keyBase64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "version":"fixture-v1"}),
             _ => json!({}),
         };
         let observation = match kind {
@@ -1063,6 +1153,7 @@ mod tests {
                 FieldExpectation::Scalar { .. } => {
                     checks.push(check(Scope::ValueAdmission, Outcome::Passed));
                     if layout.role == Role::Identifier { checks.push(check(Scope::IdentifierFormat, Outcome::Passed)); }
+                    if layout.role == Role::PolicySecret { checks.push(check(Scope::CredentialFormat, Outcome::Passed)); }
                 }
                 _ => panic!("fictional baseline must be supplied"),
             }
@@ -1186,7 +1277,7 @@ mod tests {
         let mut body = request(Kind::AppleP12);
         body["input"]["observation"] = request(Kind::AndroidKeystore)["input"]["observation"].clone();
         request_error(&body, "assessment_invalid_request");
-        for kind in [Kind::GoogleWif, Kind::ProjectReadToken] {
+        for kind in [Kind::GoogleWif, Kind::ProjectReadToken, Kind::AppleReviewContact, Kind::AppleReviewDemo, Kind::OperationCommitment] {
             let mut body = request(kind); body["input"]["observation"] = json!({"status":"unavailable", "reason":"not-run"});
             request_error(&body, "assessment_invalid_request");
         }

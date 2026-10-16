@@ -145,7 +145,7 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
   // The complete existing outer + inner render condition protects even an
   // unsubmitted private form. Navigation never inspects or resets its values.
   const writeOnlyFormMounted = selectionVisible && !!kind && (!!(operation?.selectionToken && state.selectionKind) ||
-    (idle && !intentPending && (kindId === 'google-wif' || kindId === 'project-read-token')));
+    (idle && !intentPending && (kindId === 'google-wif' || kindId === 'project-read-token' || kindId === 'apple-review-contact' || kindId === 'apple-review-demo' || kindId === 'operation-commitment')));
   const replacement = controller.replacement(kindId, replacementId);
   const preview = operation?.preview;
   const expired = state.previewDeadline === null || performance.now() >= state.previewDeadline;
@@ -166,6 +166,9 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
     if (replacement === undefined) return false;
     if (kindId === 'google-wif') return controller.prepareScalar('google-wif', { provider: fields.provider ?? null, serviceAccount: fields.serviceAccount ?? null }, replacement, label);
     if (kindId === 'project-read-token') return controller.prepareScalar('project-read-token', { token: fields.token ?? null }, replacement, label);
+    if (kindId === 'apple-review-contact') return controller.prepareScalar('apple-review-contact', { contactFirstName: fields.contactFirstName ?? null, contactLastName: fields.contactLastName ?? null, contactEmail: fields.contactEmail ?? null, contactPhone: fields.contactPhone ?? null }, replacement, label);
+    if (kindId === 'apple-review-demo') return controller.prepareScalar('apple-review-demo', { demoUsername: fields.demoUsername ?? null, demoPassword: fields.demoPassword ?? null }, replacement, label);
+    if (kindId === 'operation-commitment') return controller.prepareScalar('operation-commitment', { keyBase64: fields.keyBase64 ?? null, version: fields.version ?? null }, replacement, label);
     return false;
   };
   const preparationCurrent = preparation !== null && isPreparationCurrent(preparation);

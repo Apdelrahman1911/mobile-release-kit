@@ -2216,7 +2216,8 @@ fn macos_session_kind(platform: Platform, stage: Stage, purpose: Purpose, kind: 
         Platform::Android => matches!(kind, Kind::AndroidKeystore | Kind::AndroidFirebase | Kind::GoogleWif),
         Platform::Project => kind == Kind::ProjectReadToken,
         Platform::Ios => match purpose {
-            Purpose::Full | Purpose::Store => kind == Kind::AscP8,
+            Purpose::Full | Purpose::Store => kind == Kind::AscP8
+                || stage != Stage::Candidate && matches!(kind, Kind::AppleReviewContact | Kind::AppleReviewDemo | Kind::OperationCommitment),
             Purpose::Signing => matches!(kind, Kind::AppleP12 | Kind::AppleProfile | Kind::IosFirebase | Kind::ProjectReadToken),
         },
     }
@@ -5296,7 +5297,7 @@ impl DocumentBinding {
             commands::Source::Scalar { kind, replacement } => {
                 idle(&state)?;
                 session_kind_gate(&context, kind)?;
-                if !matches!(kind, Kind::GoogleWif | Kind::ProjectReadToken) { return Err(AssetError::new(Reason::UnsupportedFormat)); }
+                if !matches!(kind, Kind::GoogleWif | Kind::ProjectReadToken | Kind::AppleReviewContact | Kind::AppleReviewDemo | Kind::OperationCommitment) { return Err(AssetError::new(Reason::UnsupportedFormat)); }
                 let target = target(&state, replacement, kind)?;
                 let fields = commands::own_fields(kind, args.fields.ok_or_else(AssetError::invalid)?)?;
                 let payload = Arc::new(Payload { kind, material: None, fields: Some(fields) });
@@ -8092,17 +8093,82 @@ mod tests {
     }
     fn ios_scope(stage: Stage, purpose: Purpose) -> Arc<NativeContext> { input_scope(Platform::Ios, stage, purpose) }
     #[test]
+    fn review_and_commitment_borrow_original_fields_without_export_or_double_encoding() {
+        use crate::github_setup_protocol as wire;
+        use wire::SecretRequirement as R;
+        let native = ios_scope(Stage::Production, Purpose::Store);
+        for (kind, values, selected) in [
+            (Kind::AppleReviewContact, serde_json::json!({"contactFirstName":"Fictional", "contactLastName":"Reviewer", "contactEmail":"review@example.invalid", "contactPhone":"+15555550100"}),
+                vec![R::ContactFirstName, R::ContactLastName, R::ContactEmail, R::ContactPhone]),
+            (Kind::AppleReviewDemo, serde_json::json!({"demoUsername":"fictional-demo", "demoPassword":"fictional-password"}),
+                vec![R::DemoUsername, R::DemoPassword]),
+            (Kind::OperationCommitment, serde_json::json!({"keyBase64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "version":"fixture-v1"}),
+                vec![R::KeyBase64]),
+        ] {
+            let mut state = empty_state();
+            state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+            state.context = Some(native.clone());
+            let key = RecordKey { id: token('a'), revision: 1 };
+            let payload = Arc::new(Payload { kind, material: None,
+                fields: Some(commands::own_fields(kind, &values).ok().unwrap()) });
+            state.records.push(Record { key: key.clone(), payload: payload.clone(), mutation_pending: false });
+            state.assignments.push(Assignment { kind, record_id: key.id.clone(), record_revision: 1,
+                context_revision: 1, availability: AssignmentAvailability::Available });
+            for requirement in selected {
+                let selection = wire::SecretSelection { mode: wire::SecretMode::Create,
+                    stage: wire::EnvironmentStage::Production, requirement,
+                    source: wire::SecretRecord { record_id: key.id.0.clone(), record_revision: 1, context_revision: 1 } };
+                let loan = github_secret::borrow_material(&state, &selection, &native.project_id, 1, &native.project).unwrap();
+                assert!(Arc::ptr_eq(loan.census_parts().1, &payload));
+                assert!(loan.source().material.encoding == wire::SecretEncoding::Utf8);
+                let frame = loan.frame(&[0; 32]).unwrap();
+                assert_eq!(&frame.bytes()[44..], values[requirement.field()].as_str().unwrap().as_bytes());
+                let public = serde_json::to_string(loan.source()).unwrap();
+                assert!(!public.contains(values[requirement.field()].as_str().unwrap()));
+                state.lock_pending = true;
+                assert!(!loan.current(&state, &native.project_id, 1, &native.project));
+                assert!(github_secret::borrow_material(&state, &selection, &native.project_id, 1, &native.project).is_err());
+                state.lock_pending = false;
+                let mut stale = selection.clone(); stale.source.record_revision += 1;
+                assert!(github_secret::borrow_material(&state, &stale, &native.project_id, 1, &native.project).is_err());
+                stale = selection.clone(); stale.stage = wire::EnvironmentStage::Candidate;
+                assert!(github_secret::borrow_material(&state, &stale, &native.project_id, 1, &native.project).is_err());
+                state.records[0].payload = Arc::new(Payload { kind, material: None,
+                    fields: Some(commands::own_fields(kind, &values).ok().unwrap()) });
+                assert!(!loan.current(&state, &native.project_id, 1, &native.project));
+                state.records[0].payload = payload.clone();
+                assert!(loan.current(&state, &native.project_id, 1, &native.project));
+            }
+            if kind == Kind::OperationCommitment {
+                let selection = wire::VariableSelection { mode: wire::VariableMode::Create,
+                    stage: wire::EnvironmentStage::Production, requirement: wire::VariableRequirement::CommitmentVersion,
+                    source: wire::SecretRecord { record_id: key.id.0.clone(), record_revision: 1, context_revision: 1 } };
+                let loan = github_variable::borrow_material(&state, &selection, &native.project_id, 1, &native.project).unwrap();
+                assert!(Arc::ptr_eq(loan.census_parts().1, &payload));
+                assert_eq!(loan.value().unwrap(), "fixture-v1");
+                let frame = loan.go_frame("fixture-1", &"a".repeat(64), "fictional-token").unwrap();
+                assert!(!String::from_utf8(frame).unwrap().contains(values["keyBase64"].as_str().unwrap()));
+                state.assignments[0].availability = AssignmentAvailability::Unavailable;
+                assert!(!loan.current(&state, &native.project_id, 1, &native.project));
+            }
+        }
+    }
+
+    #[test]
     fn macos_input_context_matrix_keeps_platform_kinds_and_ios_signing_separate() {
         let kinds = [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::AppleP12, Kind::AppleProfile,
-            Kind::AscP8, Kind::IosFirebase, Kind::GoogleWif, Kind::ProjectReadToken];
+            Kind::AscP8, Kind::IosFirebase, Kind::GoogleWif, Kind::ProjectReadToken,
+            Kind::AppleReviewContact, Kind::AppleReviewDemo, Kind::OperationCommitment];
         for stage in [Stage::Candidate, Stage::ExternalTesting, Stage::Production] {
             for purpose in [Purpose::Full, Purpose::Store] {
                 assert!(macos_session_context(Platform::Ios, stage, purpose));
                 let context = ios_scope(stage, purpose);
                 for kind in kinds {
-                    assert_eq!(macos_session_kind(Platform::Ios, stage, purpose, kind), kind == Kind::AscP8);
+                    let allowed = kind == Kind::AscP8 || stage != Stage::Candidate
+                        && [Kind::AppleReviewContact, Kind::AppleReviewDemo, Kind::OperationCommitment].contains(&kind);
+                    assert_eq!(macos_session_kind(Platform::Ios, stage, purpose, kind), allowed);
                     assert_eq!(session_kind_gate(&context, kind).is_ok(),
-                        !cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) || kind == Kind::AscP8);
+                        !cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) || allowed);
                 }
             }
             assert_eq!(macos_session_context(Platform::Ios, stage, Purpose::Signing), stage == Stage::Candidate);

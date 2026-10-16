@@ -15,7 +15,7 @@ const PREPARE_LIMIT: usize = 128 * 1024;
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Kind {
     AndroidKeystore, AndroidFirebase, AppleP12, AppleProfile, AscP8,
-    IosFirebase, GoogleWif, ProjectReadToken,
+    IosFirebase, GoogleWif, ProjectReadToken, AppleReviewContact, AppleReviewDemo, OperationCommitment,
 }
 impl Kind {
     pub(crate) fn name(self) -> &'static str {
@@ -23,10 +23,13 @@ impl Kind {
             Self::AndroidKeystore => "android-keystore", Self::AndroidFirebase => "android-firebase",
             Self::AppleP12 => "apple-p12", Self::AppleProfile => "apple-profile", Self::AscP8 => "asc-p8",
             Self::IosFirebase => "ios-firebase", Self::GoogleWif => "google-wif", Self::ProjectReadToken => "project-read-token",
+            Self::AppleReviewContact => "apple-review-contact",
+            Self::AppleReviewDemo => "apple-review-demo",
+            Self::OperationCommitment => "operation-commitment",
         }
     }
     pub(crate) fn enabled(self) -> bool {
-        matches!(self, Self::AndroidKeystore | Self::AndroidFirebase | Self::IosFirebase | Self::GoogleWif | Self::ProjectReadToken)
+        matches!(self, Self::AndroidKeystore | Self::AndroidFirebase | Self::IosFirebase | Self::GoogleWif | Self::ProjectReadToken | Self::AppleReviewContact | Self::AppleReviewDemo | Self::OperationCommitment)
             || (cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
                 all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))) && self == Self::AscP8)
             || (cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && matches!(self, Self::AppleP12 | Self::AppleProfile))
@@ -293,6 +296,9 @@ pub(crate) fn kind(value: &Value) -> Result<Kind, AssetError> {
         "android-keystore" => Ok(Kind::AndroidKeystore), "android-firebase" => Ok(Kind::AndroidFirebase),
         "apple-p12" => Ok(Kind::AppleP12), "apple-profile" => Ok(Kind::AppleProfile), "asc-p8" => Ok(Kind::AscP8),
         "ios-firebase" => Ok(Kind::IosFirebase), "google-wif" => Ok(Kind::GoogleWif), "project-read-token" => Ok(Kind::ProjectReadToken),
+        "apple-review-contact" => Ok(Kind::AppleReviewContact),
+        "apple-review-demo" => Ok(Kind::AppleReviewDemo),
+        "operation-commitment" => Ok(Kind::OperationCommitment),
         _ => Err(AssetError::invalid()),
     }
 }
@@ -309,6 +315,9 @@ pub(crate) fn field_names(kind: Kind) -> &'static [&'static str] {
         Kind::AndroidFirebase | Kind::IosFirebase | Kind::AppleProfile => &[],
         Kind::AppleP12 => &["password"], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
         Kind::AscP8 => &["keyId", "issuerId"],
+        Kind::AppleReviewContact => &["contactFirstName", "contactLastName", "contactEmail", "contactPhone"],
+        Kind::AppleReviewDemo => &["demoUsername", "demoPassword"],
+        Kind::OperationCommitment => &["keyBase64", "version"],
     }
 }
 pub(crate) fn validate_fields(kind: Kind, value: &Value) -> Result<(), AssetError> {
@@ -400,7 +409,7 @@ pub(crate) fn prepare(body: &Value) -> Result<Prepare<'_>, AssetError> {
             exact(body, new_keys)?;
             let object = exact(&root["source"], &["type", "kind", "replacement"])?;
             let kind = kind(&object["kind"])?;
-            if !matches!(kind, Kind::GoogleWif | Kind::ProjectReadToken) { return Err(AssetError::invalid()); }
+            if !matches!(kind, Kind::GoogleWif | Kind::ProjectReadToken | Kind::AppleReviewContact | Kind::AppleReviewDemo | Kind::OperationCommitment) { return Err(AssetError::invalid()); }
             validate_fields(kind, &root["fields"])?;
             (Source::Scalar { kind, replacement: replacement(&object["replacement"])? }, Some(&root["fields"]))
         }

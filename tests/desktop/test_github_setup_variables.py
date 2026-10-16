@@ -27,6 +27,7 @@ VALUES = {
     "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT": "release-bot@example-project.iam.gserviceaccount.com",
     "MOBILE_RELEASE_ASC_KEY_ID": "A1B2C3D4E5",
     "MOBILE_RELEASE_ASC_ISSUER_ID": "12345678-1234-5678-abcd-123456789abc",
+    "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION": "fixture-v1",
 }
 ALIAS = "MOBILE_RELEASE_ANDROID_KEY_ALIAS"
 
@@ -127,12 +128,12 @@ class VariableSetupTests(unittest.TestCase):
             guard.start()
             self.addCleanup(guard.stop)
 
-    def test_closed_five_mapping_policy_and_actual_serialized_bounds(self):
+    def test_closed_mapping_policy_and_actual_serialized_bounds(self):
         self.assertEqual(set(VALUES), {row[0] for row in variables.VARIABLE_FIELDS})
-        self.assertEqual(len(variables.VARIABLE_FIELDS), 5)
+        self.assertEqual(len(variables.VARIABLE_FIELDS), 6)
         self.assertEqual(target().selection.mapping, ("android-keystore", "keyAlias", "android"))
         for name, valid in VALUES.items():
-            selected = target(name).selection
+            selected = target(name, stage="production" if name == "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION" else "candidate").selection
             variables.require_variable(policy_config(), selected, purpose="full")
             self.assertEqual(variables._desired(name, valid), valid)
             with self.assertRaises(variables.VariableRefused):
@@ -149,7 +150,7 @@ class VariableSetupTests(unittest.TestCase):
         with self.assertRaises(variables.VariableRefused):
             variables.require_variable(policy_config(), target("MOBILE_RELEASE_ASC_KEY_ID").selection, purpose="signing")
         for field, bad in (("kind", "environment_secret"), ("mode", "upsert"), ("stage", "arbitrary"),
-                           ("requirement", "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION"),
+                           ("requirement", "OPERATION_COMMITMENT_KEY_VERSION"),
                            ("requirement", "MOBILE_RELEASE_ANDROID_KEY_PASSWORD"), ("requirement", "alias")):
             row = selection();row[field] = bad
             with self.assertRaises(ValueError):variables.VariableSelection.parse(row)

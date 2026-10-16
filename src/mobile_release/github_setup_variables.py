@@ -35,6 +35,7 @@ VARIABLE_FIELDS = (
     ("MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT", "google-wif", "serviceAccount", "android"),
     ("MOBILE_RELEASE_ASC_KEY_ID", "asc-p8", "keyId", "ios"),
     ("MOBILE_RELEASE_ASC_ISSUER_ID", "asc-p8", "issuerId", "ios"),
+    ("MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION", "operation-commitment", "version", "ios"),
 )
 REASONS = _setup.REASONS | frozenset({
     "variable-exists", "variable-missing", "variable-changed", "material-too-large",

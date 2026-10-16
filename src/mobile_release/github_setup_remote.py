@@ -810,6 +810,13 @@ SECRET_REQUIREMENTS = {
     "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64": ("ios", "base64"),
     "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64": ("ios", "base64"),
     "MOBILE_RELEASE_PROJECT_READ_TOKEN": ("project", "utf8"),
+    "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME": ("ios", "utf8"),
+    "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME": ("ios", "utf8"),
+    "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL": ("ios", "utf8"),
+    "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE": ("ios", "utf8"),
+    "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME": ("ios", "utf8"),
+    "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD": ("ios", "utf8"),
+    "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64": ("ios", "utf8"),
 }
 SECRET_REASONS = (REASONS - {"no-change"}) | frozenset({"material-unavailable", "material-changed",
     "material-too-large", "requirement-unsupported", "configuration-changed", "secret-exists", "secret-missing",

@@ -53,7 +53,7 @@ class CredentialGuideTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in resource["kinds"]], list(guide.KIND_IDS))
         self.assertEqual([item["id"] for item in resource["controls"]], list(guide.CONTROL_IDS))
         self.assertEqual([item["id"] for item in resource["states"]], list(guide.STATE_IDS))
-        self.assertEqual(sum(len(item["fields"]) for item in resource["kinds"]), 15)
+        self.assertEqual(sum(len(item["fields"]) for item in resource["kinds"]), 23)
         self.assertFalse(result["assurance"]["credentialsRead"])
         self.assertEqual(tuple(method for method in METHODS if method.startswith("credentials.")),
                          ("credentials.assess",))
@@ -121,7 +121,7 @@ class CredentialGuideTests(unittest.TestCase):
                 self.assertIs(raised.exception, original_error)
                 additive.assert_called_once_with()
 
-    def test_kind_associations_limits_and_existing_deferred_guidance(self):
+    def test_kind_associations_limits_and_complete_existing_requirement_guidance(self):
         result = execute("catalog", {})
         by_name = {item["name"]: item for item in requirement_descriptors(all_branches())}
         guided = set()
@@ -134,6 +134,7 @@ class CredentialGuideTests(unittest.TestCase):
                 self.assertNotIn(name, guided)
                 guided.add(name)
                 self.assertEqual(field["alternatives"], by_name[name]["alternatives"])
+                self.assertEqual(field["input"] == "text", by_name[name]["kind"] == "variable")
                 self.assertEqual(kind["platform"], by_name[name]["platform"])
                 self.assertEqual(field["requiredness"], "conditional")
                 if field["input"] == "file":
@@ -146,10 +147,10 @@ class CredentialGuideTests(unittest.TestCase):
                     self.assertTrue(field[key].strip(), (kind["id"], field["id"], key))
         legacy_names = {item["name"] for item in result["credentials"]}
         self.assertEqual(legacy_names, set(by_name))
-        self.assertLess(guided, legacy_names)
+        self.assertEqual(guided, legacy_names)
         for suffix in ("OPERATION_COMMITMENT_KEY_BASE64", "OPERATION_COMMITMENT_KEY_VERSION",
                        "APPLE_REVIEW_CONTACT_EMAIL", "APPLE_DEMO_ACCOUNT_PASSWORD"):
-            self.assertIn("MOBILE_RELEASE_" + suffix, legacy_names - guided)
+            self.assertIn("MOBILE_RELEASE_" + suffix, guided)
         self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", guided)
 
     def test_requirements_remain_the_only_stage_platform_purpose_selector(self):
@@ -163,7 +164,7 @@ class CredentialGuideTests(unittest.TestCase):
             if stage != "candidate":
                 self.assertEqual(signing, set())
         # The project-token branch is deliberately not rewritten as a platform
-        # requirement or conditioned on the catalogue's eight kind descriptors.
+        # requirement or conditioned on the catalogue's kind descriptors.
         selected = requirements(config, "candidate", purpose="signing", platforms=())
         self.assertEqual([(item.name, item.platform) for item in selected],
                          [("MOBILE_RELEASE_PROJECT_READ_TOKEN", "project")])

@@ -69,7 +69,14 @@ export const GITHUB_REMOTE_SETUP_SECRET_FIELDS = Object.freeze({
   "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64": { kind: 'apple-profile', platform: 'ios', encoding: 'base64' },
   "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64": { kind: 'ios-firebase', platform: 'ios', encoding: 'base64' },
   "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64": { kind: 'asc-p8', platform: 'ios', encoding: 'base64' },
-  "MOBILE_RELEASE_PROJECT_READ_TOKEN": { kind: 'project-read-token', platform: 'project', encoding: 'utf8' }
+  "MOBILE_RELEASE_PROJECT_READ_TOKEN": { kind: 'project-read-token', platform: 'project', encoding: 'utf8' },
+  "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME": { kind: 'apple-review-contact', platform: 'ios', encoding: 'utf8' },
+  "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME": { kind: 'apple-review-contact', platform: 'ios', encoding: 'utf8' },
+  "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL": { kind: 'apple-review-contact', platform: 'ios', encoding: 'utf8' },
+  "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE": { kind: 'apple-review-contact', platform: 'ios', encoding: 'utf8' },
+  "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME": { kind: 'apple-review-demo', platform: 'ios', encoding: 'utf8' },
+  "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD": { kind: 'apple-review-demo', platform: 'ios', encoding: 'utf8' },
+  "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64": { kind: 'operation-commitment', platform: 'ios', encoding: 'utf8' },
 } as const);
 export const GITHUB_REMOTE_SETUP_VARIABLE_FIELDS = Object.freeze({
   MOBILE_RELEASE_ANDROID_KEY_ALIAS: { kind: 'android-keystore', field: 'keyAlias', platform: 'android' },
@@ -77,6 +84,7 @@ export const GITHUB_REMOTE_SETUP_VARIABLE_FIELDS = Object.freeze({
   MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT: { kind: 'google-wif', field: 'serviceAccount', platform: 'android' },
   MOBILE_RELEASE_ASC_KEY_ID: { kind: 'asc-p8', field: 'keyId', platform: 'ios' },
   MOBILE_RELEASE_ASC_ISSUER_ID: { kind: 'asc-p8', field: 'issuerId', platform: 'ios' },
+  MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION: { kind: 'operation-commitment', field: 'version', platform: 'ios' },
 } as const);
 export const GITHUB_REMOTE_SETUP_VARIABLE_CONFIRMATION = "Send this exact required variable to GitHub? Variables are not secrets and can be read by permitted GitHub users and workflows. This action uses the selected assigned field. There is no atomic compare-and-set: another actor can change or delete the variable after these observations. Cancel does not undo a sent request. Readback confirms the observed value only; it does not prove a build or release works.";
 export const GITHUB_REMOTE_SETUP_VARIABLE_PREVIOUS = 'Previous value is not displayed; this is not a full before-value diff.';

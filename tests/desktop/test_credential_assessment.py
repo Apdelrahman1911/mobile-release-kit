@@ -42,6 +42,9 @@ SCALARS = {
     "google-wif": {"provider": "projects/123/locations/global/workloadIdentityPools/fixture/providers/fixture",
                    "serviceAccount": "fixture@fixture-project.iam.gserviceaccount.com"},
     "project-read-token": {"token": "fictional-read-token"},
+    "apple-review-contact": {"contactFirstName": "Fictional", "contactLastName": "Reviewer", "contactEmail": "review@example.invalid", "contactPhone": "+15555550100"},
+    "apple-review-demo": {"demoUsername": "fictional-demo", "demoPassword": "fictional-demo-password"},
+    "operation-commitment": {"keyBase64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "version": "fixture-v1"},
 }
 
 
@@ -51,7 +54,7 @@ def draft():
         "version": {"source": "release/version.properties", "nameKey": "VERSION_NAME", "buildKey": "BUILD_NUMBER"},
         "source": {"candidateBranch": "main", "productionBranch": "main", "projectReadTokenRequired": True},
         "android": {"enabled": True, "applicationId": "org.assessment.fixture", "identityStatus": "unverified"},
-        "ios": {"enabled": True, "bundleId": "org.assessment.fixture", "identityStatus": "unverified"},
+        "ios": {"enabled": True, "bundleId": "org.assessment.fixture", "identityStatus": "unverified", "review": {"usesNonExemptEncryption": False, "demoAccountRequired": True}},
         "metadata": {"root": "release/store", "androidLocales": ["en-US"], "iosLocales": ["en-US"]},
         "services": {"androidFirebase": "required", "iosFirebase": "required"},
         "projectChecks": {"preflight": [["./never-execute-fixture"]], "androidArtifact": [], "iosArtifact": []},
@@ -96,10 +99,10 @@ class CredentialAssessmentTests(unittest.TestCase):
         self.assertEqual(raised.exception.message, ERRORS[code])
         return raised.exception
 
-    def test_all_eight_unions_have_ordered_constant_fields_and_honest_assurance(self):
+    def test_all_unions_have_ordered_constant_fields_and_honest_assurance(self):
         for kind, (_, layout) in guide._KIND_LAYOUT.items():
             with self.subTest(kind=kind):
-                body = request(kind)
+                body = request(kind, stage="external-testing" if kind in ("apple-review-contact", "apple-review-demo", "operation-commitment") else "candidate")
                 result = execute("credentials.assess", body)
                 self.assertEqual(set(result), {"schemaVersion", "policyVersion", "kind", "context", "applicability", "state", "fields", "identity", "assurance"})
                 self.assertEqual(result["context"], {key: body["context"][key] for key in ("platform", "stage", "purpose")})
@@ -124,6 +127,40 @@ class CredentialAssessmentTests(unittest.TestCase):
                     "serviceValidation": "not-run", "releaseReadiness": "unknown",
                 })
                 self.assertNotIn("credentialsRead", result["assurance"])
+
+    def test_review_and_commitment_requiredness_format_and_private_projection(self):
+        for kind in ("apple-review-contact", "apple-review-demo", "operation-commitment"):
+            for stage in ("external-testing", "production"):
+                for purpose in ("full", "store"):
+                    body = request(kind, stage=stage, purpose=purpose)
+                    result = execute("credentials.assess", body)
+                    self.assertEqual(result["state"], "configured")
+                    for secret in SCALARS[kind].values():
+                        self.assertNotIn(secret, encoded(result).decode())
+                    self.assertFalse(result["assurance"]["selectedFilesRead"])
+                    self.assertEqual(result["assurance"]["serviceValidation"], "not-run")
+            for change in ({"stage": "candidate"}, {"stage": "production", "purpose": "signing"}, {"platform": "android"}):
+                self.assertEqual(execute("credentials.assess", request(kind, **change))["state"], "not-applicable")
+        for required in (False, True):
+            body = request("apple-review-demo", stage="production")
+            body["context"]["draft"]["ios"]["review"]["demoAccountRequired"] = required
+            body["input"]["fields"]["demoPassword"] = None
+            result = execute("credentials.assess", body)
+            self.assertEqual(result["state"], "missing" if required else "not-applicable")
+        for kind, field, bad_values, scope in (
+            ("operation-commitment", "keyBase64", ("not-base64", "YQ==", "A" * 43, "A" * 44 + "="), "credential-format"),
+            ("operation-commitment", "version", ("has space", "v" * 65, "v/1"), "identifier-format"),
+            ("apple-review-contact", "contactEmail", ("no-at-sign", "bad@", "@invalid"), "credential-format"),
+        ):
+            for value in bad_values:
+                body = request(kind, stage="production")
+                body["input"]["fields"][field] = value
+                result = execute("credentials.assess", body)
+                self.assertEqual(result["state"], "invalid")
+                row = next(row for row in result["fields"] if row["id"] == field)
+                self.assertEqual(row["issues"], ["scalar-format"])
+                self.assertEqual(checks(row), [("value-admission", "passed"), (scope, "failed")])
+                self.assertNotIn(value, encoded(result).decode())
 
     def test_stage_purpose_platform_service_selection_uses_only_shared_requirements(self):
         for kind, (platform, layout) in guide._KIND_LAYOUT.items():

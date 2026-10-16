@@ -143,6 +143,32 @@ test('status DTO detaches the provider and refuses raw material, extra authority
   assert.equal(parseAssetStatus(lost), null);
 });
 
+test('review and commitment scalar records use the existing private prepare owner and exact fields', async () => {
+  const kinds = {
+    'apple-review-contact': { contactFirstName: 'Fictional', contactLastName: 'Reviewer', contactEmail: 'review@example.invalid', contactPhone: '+15555550100' },
+    'apple-review-demo': { demoUsername: 'fictional-demo', demoPassword: 'fictional-password' },
+    'operation-commitment': { keyBase64: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', version: 'fixture-v1' },
+  };
+  for (const [kind, fields] of Object.entries(kinds)) {
+    const h = harness();
+    h.controller.setScope({ platform: 'ios', stage: 'production', purpose: 'store' });
+    await ready(h, { context: { ...context, platform: 'ios', stage: 'production', purpose: 'store' } });
+    const request = { contextRevision: 1, source: { type: 'scalar', kind, replacement: null }, fields };
+    assert.ok(assetRequestFits('credential_prepare', request));
+    assert.equal(isAssetFileKind(kind), false);
+    assert.equal(h.controller.prepareScalar(kind, fields), true);
+    assert.deepEqual(h.latest('prepare').args, request);
+    assert.equal(h.calls.filter((call) => call.command === 'commit' || call.command === 'bind').length, 0);
+    assert.equal(h.controller.prepareScalar(kind, fields), false); // One retained original operation.
+    for (const field of Object.keys(fields)) {
+      const missing = structuredClone(request); delete missing.fields[field];
+      assert.equal(assetRequestFits('credential_prepare', missing), false);
+    }
+    assert.equal(assetRequestFits('credential_prepare', { ...request, fields: { ...fields, arbitrarySecret: 'never-forward' } }), false);
+    assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind, replacement: null }), false);
+  }
+});
+
 test('requests are exact, bounded unions; paths, bytes, observations and extra field roles cannot cross', () => {
   const request = { contextRevision: 1, source: { type: 'scalar', kind: 'google-wif', replacement: null }, fields: { ...fields } };
   assert.equal(assetRequestFits('credential_prepare', request), true);
@@ -165,7 +191,7 @@ test('requests are exact, bounded unions; paths, bytes, observations and extra f
 });
 
 test('iOS Firebase and separately admitted Apple and ASC files extend only the exact closed session kinds', () => {
-  assert.deepEqual(ASSET_KINDS, ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8', 'google-wif', 'project-read-token']);
+  assert.deepEqual(ASSET_KINDS, ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8', 'google-wif', 'project-read-token', 'apple-review-contact', 'apple-review-demo', 'operation-commitment']);
   assert.deepEqual(SESSION_FIELDS['ios-firebase'], []);
   for (const kind of ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8']) {
     assert.equal(isAssetFileKind(kind), true);

@@ -402,7 +402,8 @@ mod tests {
 
     #[test]
     fn descriptor_requires_every_exact_typed_key_and_current_kind_presence() {
-        for kind in [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::IosFirebase, Kind::AscP8, Kind::GoogleWif, Kind::ProjectReadToken] {
+        for kind in [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::IosFirebase, Kind::AscP8, Kind::GoogleWif, Kind::ProjectReadToken,
+            Kind::AppleReviewContact, Kind::AppleReviewDemo, Kind::OperationCommitment] {
             if !kind.enabled() {
                 // Backend availability never broadens target credential kinds.
                 assert!(Descriptor::new(kind, None, vec![false; commands::field_names(kind).len()], kind.file().is_some()).is_err());

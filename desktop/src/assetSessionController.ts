@@ -2,7 +2,7 @@
 // invoke or view. This controller never claims to cancel by dropping a Promise.
 import type { ProjectSession } from './drafts.ts';
 import type { DesktopApi } from './types.ts';
-import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOperationName, AssetPreviewAction, AssetRecordIntent, AssetRecordRef, AssetScope, AssetStatus, CredentialPrepareRequest, KeystoreFields, P12Fields, AscP8Fields, TokenFields, WifFields } from './assetSessionTypes.ts';
+import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOperationName, AssetPreviewAction, AssetRecordIntent, AssetRecordRef, AssetScope, AssetStatus, CredentialPrepareRequest, KeystoreFields, P12Fields, AscP8Fields, TokenFields, WifFields, AppleReviewContactFields, AppleReviewDemoFields, OperationCommitmentFields } from './assetSessionTypes.ts';
 import { ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetRequestFits, assetStorageWritable, parseAssetStatus } from './assetSessionProtocol.ts';
 
 function freeze<T>(value: T): T {
@@ -394,7 +394,10 @@ export class AssetSessionController {
   }
   prepareScalar(kind: 'google-wif', fields: WifFields, replacement?: AssetRecordRef | null, label?: string | null): boolean;
   prepareScalar(kind: 'project-read-token', fields: TokenFields, replacement?: AssetRecordRef | null, label?: string | null): boolean;
-  prepareScalar(kind: 'google-wif' | 'project-read-token', fields: WifFields | TokenFields, replacement: AssetRecordRef | null = null, label: string | null = null): boolean {
+  prepareScalar(kind: 'apple-review-contact', fields: AppleReviewContactFields, replacement?: AssetRecordRef | null, label?: string | null): boolean;
+  prepareScalar(kind: 'apple-review-demo', fields: AppleReviewDemoFields, replacement?: AssetRecordRef | null, label?: string | null): boolean;
+  prepareScalar(kind: 'operation-commitment', fields: OperationCommitmentFields, replacement?: AssetRecordRef | null, label?: string | null): boolean;
+  prepareScalar(kind: 'google-wif' | 'project-read-token' | 'apple-review-contact' | 'apple-review-demo' | 'operation-commitment', fields: WifFields | TokenFields | AppleReviewContactFields | AppleReviewDemoFields | OperationCommitmentFields, replacement: AssetRecordRef | null = null, label: string | null = null): boolean {
     if (!this.contextReady() || !this.idle()) return false;
     const request = { contextRevision: this.state.status!.context!.revision, source: { type: 'scalar', kind, replacement }, fields,
       ...(this.state.status!.mode === 'encrypted' ? { label } : {}) } as CredentialPrepareRequest;

@@ -61,6 +61,53 @@ class SecretConfigurationTests(unittest.TestCase):
             "requirement": "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD", "source": {
                 "recordId": "a" * 32, "recordRevision": 0, "contextRevision": 0}}
 
+    def test_review_and_commitment_use_actual_saved_config_requiredness_before_remote_work(self):
+        from mobile_release import github_setup_remote as remote
+        names = ["APPLE_REVIEW_CONTACT_FIRST_NAME", "APPLE_REVIEW_CONTACT_LAST_NAME", "APPLE_REVIEW_CONTACT_EMAIL",
+                 "APPLE_REVIEW_CONTACT_PHONE", "APPLE_DEMO_ACCOUNT_USERNAME", "APPLE_DEMO_ACCOUNT_PASSWORD",
+                 "OPERATION_COMMITMENT_KEY_BASE64", "OPERATION_COMMITMENT_KEY_VERSION"]
+        self.data["ios"] = {"enabled": True, "bundleId": "org.fixture.app", "identityStatus": "unverified",
+                            "review": {"usesNonExemptEncryption": False, "demoAccountRequired": True}}
+        self.data["metadata"]["iosLocales"] = ["en-US"]
+        def save():
+            self.path.write_text(json.dumps(self.data), encoding="utf-8")
+            self.source["draft"] = inputs._digest(canonical(self.data))
+        save()
+        self.source.update(platform="ios", purpose="store")
+        for suffix in names:
+            name = "MOBILE_RELEASE_" + suffix
+            variable = suffix.endswith("KEY_VERSION")
+            self.selection.update(kind="environment_variable" if variable else "environment_secret", requirement=name)
+            if variable:
+                self.source["material"] = inputs._digest(b"fixture-v1")
+                observer = inputs.observe_variable_configuration
+            else:
+                self.assertEqual(remote.SECRET_REQUIREMENTS[name], ("ios", "utf8"))
+                self.source["material"] = {"encoding": "utf8", "plaintextBytes": 44 if suffix.endswith("KEY_BASE64") else 7}
+                observer = inputs.observe_secret_configuration
+            for stage in ("external-testing", "production"):
+                self.selection["stage"] = stage
+                with observer(self.source, self.selection, budget=budget()) as actual:
+                    self.assertEqual(actual.value()["requirement"], {"name": name, "kind": "variable" if variable else "secret", "stage": stage, "platform": "ios"})
+                    ledger = actual._budget
+                self.assertTrue(ledger.closed)
+                self.assertFalse(ledger.handles)
+            for stage, purpose in (("candidate", "full"), ("production", "signing")):
+                self.selection["stage"] = stage; self.source["purpose"] = purpose
+                with self.assertRaises(inputs.SecretConfigurationError) as caught:
+                    with observer(self.source, self.selection, budget=budget()):
+                        self.fail("unsupported requirement must not reach remote preparation")
+                self.assertEqual(caught.exception.reason, "requirement-unsupported")
+            self.source["purpose"] = "store"
+        self.data["ios"]["review"]["demoAccountRequired"] = False
+        save()
+        self.source["material"] = {"encoding": "utf8", "plaintextBytes": 7}
+        self.selection.update(kind="environment_secret", requirement="MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD", stage="production")
+        with self.assertRaises(inputs.SecretConfigurationError) as caught:
+            with inputs.observe_secret_configuration(self.source, self.selection, budget=budget()):
+                self.fail("optional demo account does not authorize secret setup")
+        self.assertEqual(caught.exception.reason, "requirement-unsupported")
+
     def test_actual_config_originals_canonical_raw_requirement_and_finality(self):
         owner = budget()
         with inputs.observe_secret_configuration(self.source, self.selection, budget=owner) as observed:
