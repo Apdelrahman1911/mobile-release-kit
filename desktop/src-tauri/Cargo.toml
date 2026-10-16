@@ -86,6 +86,8 @@ macos-installed-restore-own-attempt-fixture = ["macos-installed-installer", "mrk
 macos-installed-restore-stage-move-fixture = ["macos-installed-installer", "mrk-macos-installed-native/installed-restore-cut-fixture"]
 # Exclusive nonshipping role; the fixed root fixture owns its own baseline/restore proof.
 macos-installed-app-absence-fixture = []
+# Observer-only refinement; cannot unify with any fixed writer cut.
+macos-installed-restore-chain-observer = ["macos-installed-app-absence-fixture"]
 macos-installed-remover = []
 # Private-key signing is isolated to the explicit nonshipping example graph.
 macos-package-producer = ["mrk-macos-installed-native/package-producer-signing"]

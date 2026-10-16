@@ -13387,8 +13387,9 @@ class MacInstalledData(unittest.TestCase):
                         body = {"producer.json": descriptor, "producer.sig": signed}[name]
                         self.assertLessEqual(len(body), limit)
                         return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
-                    def tree(path, *, installed):
+                    def tree(path, *, installed, mac_store_prefix=None):
                         self.assertIs(installed, True)
+                        self.assertEqual(mac_store_prefix, "store" if path.name == "runtime" else None)
                         prefix = {TOOL.INSTALL_ROOT / TOOL.APP_NAME: "app/",
                                   TOOL.INSTALL_ROOT / "versions" / selection.release / "runtime": "runtime/"}[path]
                         return {name[len(prefix):]: value for name, value in payload.items() if name.startswith(prefix)}
@@ -13413,7 +13414,7 @@ class MacInstalledData(unittest.TestCase):
                         stack.enter_context(mock.patch.object(TOOL, "source_build_selection", return_value=selection))
                         stack.enter_context(mock.patch.object(TOOL, "parent", side_effect=lambda path: contextlib.nullcontext((200, path.name))))
                         stack.enter_context(mock.patch.object(TOOL, "read", side_effect=lambda path, limit: inventory
-                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == 1024 * 1024 else self.fail("unexpected SOURCE read")))
+                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == TOOL.INVENTORY_BYTES else self.fail("unexpected SOURCE read")))
                         history = stack.enter_context(mock.patch.object(TOOL, "maintenance_history_data", wraps=TOOL.maintenance_history_data))
                         producer_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_producer_inputs", wraps=TOOL.maintenance_producer_inputs))
                         generation_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_generation_readback", wraps=TOOL.maintenance_generation_readback))

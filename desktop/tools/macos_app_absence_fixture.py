@@ -81,19 +81,21 @@ def private_name_data(binding, root_nonce):
     return "MobileReleaseKit-AppAbsenceFixture-" + value["fixtureSource"][:12] + "-" + root_nonce
 
 
-def transport_layout_data(rows):
+def transport_layout_data(rows, *, recovery=False):
     """Six metadata rows; no payload bytes, native opens, extraction or copying.
 
     Each future actual original must independently prove its shape, hash and
     single-link identity. Three fixture copies are identical; the product P is
     untouched. No user-distribution roster/cap is changed by this function.
     """
-    need(type(rows) is list and len(rows) == 6, "fixture-layout-count")
+    need(type(recovery) is bool, "fixture-layout-purpose")
+    names = CARRIER_NAMES + CUT_PACKAGES if recovery else CARRIER_NAMES
+    need(type(rows) is list and len(rows) == len(names), "fixture-layout-count")
     entries = {}
     for row in rows:
         need(type(row) is dict and set(row) == {"name", "bytes", "sha256", "mode", "links"}, "fixture-layout-fields")
         name = row["name"]
-        need(type(name) is str and name in CARRIER_NAMES and name not in entries, "fixture-layout-name")
+        need(type(name) is str and name in names and name not in entries, "fixture-layout-name")
         size = row["bytes"]
         need(type(size) is int and type(row["mode"]) is int and row["mode"] == 0o444
              and type(row["links"]) is int and row["links"] == 1 and nonzero_hex_data(row["sha256"], 64),
@@ -106,7 +108,9 @@ def transport_layout_data(rows):
     fixture = entries[PHASE_NAMES[0]]
     need(all((entries[name]["bytes"], entries[name]["sha256"]) == (fixture["bytes"], fixture["sha256"])
              for name in PHASE_NAMES), "fixture-package-copies-differ")
-    return {"kind": "app-absence-six-file-layout-data", "fileCount": 6,
+    need(not recovery or sum(row["bytes"] for row in entries.values()) + MIB <= FIXTURE_IMAGE_LIMIT,
+         "restore-chain-image-content-bound")
+    return {"kind": "restore-chain-nine-file-layout-data" if recovery else "app-absence-six-file-layout-data", "fileCount": len(names),
             "bytes": sum(row["bytes"] for row in entries.values()),
             "productSha256": entries["Install.pkg"]["sha256"],
             "fixtureSha256": fixture["sha256"], "fixtureBytes": fixture["bytes"]}
@@ -209,6 +213,26 @@ import time
 from types import SimpleNamespace
 
 REF = "refs/heads/verify/desktop-macos-app-absence-fixture"
+RECOVERY_REF = "refs/heads/verify/desktop-macos-restore-chain-fixture"
+CUTS = ("app-write", "own-attempt", "stage-move")
+CUT_PACKAGES = ("MRK-Restore-AppWrite.pkg", "MRK-Restore-OwnAttempt.pkg", "MRK-Restore-StageMove.pkg")
+RECOVERY_PHASES = ("recovery-cut-1", "recovery-cut-2", "recovery-cut-3", "recovered")
+CUT_POSTINSTALL = (b'#!/bin/sh\nset -eu\nd="${0%/*}"\np="${1%/*}/Install.pkg"\n'
+                   b'exec "$d/mrk-macos-install" "$d/input" "$p"\n')
+
+
+def recovery_mode(op):
+    return op.environment.get("GITHUB_REF") == RECOVERY_REF
+
+
+def carrier_names(op):
+    return CARRIER_NAMES + CUT_PACKAGES if recovery_mode(op) else CARRIER_NAMES
+
+
+def transport_layout(op, rows):
+    return transport_layout_data(rows, recovery=recovery_mode(op))
+
+
 PREPARE = "prepare-app-absence"
 RESTORE = "app-absence-restore"
 PHASES = (PREPARE, RESTORE)
@@ -265,7 +289,7 @@ def clock(op, *, work=True):
 
 
 def start(op, api):
-    need(op.environment.get("GITHUB_REF") == REF and op.phase in PHASES + ("package-install",)
+    need(op.environment.get("GITHUB_REF") in (REF, RECOVERY_REF) and op.phase in PHASES + ("package-install",)
          and op.environment.get("MRK_MACOS_SAME_PACKAGE_SCOPE", "disabled") == "disabled"
          and op.environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image", "app-absence-fixed-route")
     binding = source_binding(op.environment, op.target)
@@ -274,7 +298,7 @@ def start(op, api):
     op.app_absence_api = api
     op.app_absence = {"binding": binding, "started": now, "observed": now, "workSeconds": work,
         "hardSeconds": hard, "outputs": [], "roots": [], "mount": None, "pendingRoot": None,
-        "complete": False, "future": {k: v for k, v in OUTPUTS.items()
+        "complete": False, "pendingCut": None, "future": {k: v for k, v in OUTPUTS.items()
             if op.phase == PREPARE or op.phase == "package-install" and k in ("copies", "product", "image", "withdrawn")
             or op.phase == RESTORE and k == "withdrawn"}, "summary": None}
     op.package_started = op.package_observed = now
@@ -308,8 +332,24 @@ def io(op, label, function, *args, **kwargs):
 
 
 def roles(op):
+    if recovery_mode(op):
+        if op.phase == PREPARE:
+            return PREPARE_ROLES + tuple("app-absence-cut-" + cut + "-" + role for cut in CUTS
+                for role in ("build", "adhoc", "verify-code", "pkgbuild", "tar", "xar"))
+        if op.phase == RESTORE:
+            return ("app-absence-restore-attach", "app-absence-withdraw") + tuple(role for i, cut in enumerate(CUTS)
+                for role in ("app-absence-cut-" + cut, "app-absence-" + RECOVERY_PHASES[i])) + (
+                    "app-absence-install", "app-absence-recovered", "app-absence-restore-detach")
     return (PREPARE_ROLES if op.phase == PREPARE else RESTORE_ROLES if op.phase == RESTORE
             else package_roles(op.stager.PACKAGING_CALL_ROLES))
+
+
+def cut_role_data(op, role):
+    return recovery_mode(op) and op.phase == RESTORE and role in tuple("app-absence-cut-" + cut for cut in CUTS)
+
+
+def cut_return_data(op, role, code):
+    return cut_role_data(op, role) and type(code) is int and code == 1
 
 
 def dispatch(op, role):
@@ -319,10 +359,14 @@ def dispatch(op, role):
     need(not op.errors and op.stager_io_pending is None and state["pendingRoot"] is None
          and len(op.calls) < len(expected) and role == expected[len(op.calls)]
          and all(row.get("returned") is True and row.get("capturesSettled") is True
-                 and type(row.get("returncode")) is int and (row.get("returncode") == 0 or op.phase == "package-install"
-                      and row.get("role") in ("installer-log-cursor", "installer-log-capture") and row.get("returncode") == 1)
+                 and type(row.get("returncode")) is int and (row.get("returncode") == 0 and not cut_role_data(op, row.get("role")) or op.phase == "package-install"
+                      and row.get("role") in ("installer-log-cursor", "installer-log-capture") and row.get("returncode") == 1
+                      or cut_return_data(op, row.get("role"), row.get("returncode")))
                  for row in op.calls), "app-absence-exact-original-order")
-    if role in ("app-absence-baseline", "app-absence-withdraw", "app-absence-install", "app-absence-verify"):
+    if state["pendingCut"] is not None:
+        need(role == "app-absence-" + RECOVERY_PHASES[state["pendingCut"]], "restore-chain-observer-before-next-effect")
+    if role in ("app-absence-baseline", "app-absence-withdraw", "app-absence-install", "app-absence-verify") + tuple(
+            "app-absence-cut-" + cut for cut in CUTS) + tuple("app-absence-" + phase for phase in RECOVERY_PHASES):
         state["pendingRoot"] = role  # Before the SAME owner dispatch; failure retains this latch.
     if role in ("app-absence-baseline-attach", "app-absence-restore-attach"):
         need(state["mount"] is not None and not state["mount"]["entered"], "app-absence-mount-dispatch")
@@ -331,9 +375,11 @@ def dispatch(op, role):
 
 def returned(op, role):
     if op.app_absence["pendingRoot"] == role:
-        need(op.calls[-1].get("role") == role and type(op.calls[-1].get("returncode")) is int and op.calls[-1].get("returncode") == 0
+        need(op.calls[-1].get("role") == role and type(op.calls[-1].get("returncode")) is int and (op.calls[-1].get("returncode") == 0 and not cut_role_data(op, role) or cut_return_data(op, role, op.calls[-1].get("returncode")))
              and op.calls[-1].get("returned") is True and op.calls[-1].get("capturesSettled") is True,
              "app-absence-root-original-incomplete")
+        if cut_return_data(op, role, op.calls[-1].get("returncode")):
+            op.app_absence["pendingCut"] = CUTS.index(role.removeprefix("app-absence-cut-"))
         op.app_absence["pendingRoot"] = None
     clock(op)
 
@@ -447,11 +493,17 @@ def finish_ready(op):
     if state is None:
         return True
     mount = state["mount"]
-    return (state["pendingRoot"] is None and op.stager_io_pending is None
+    return (state["pendingRoot"] is None and state.get("pendingCut") is None and op.stager_io_pending is None
             and (mount is None or not mount["entered"] or mount["detached"]) )
 
 
-def artifact_data(body, checkout, root, target):
+def artifact_data(body, checkout, root, target, *, cut=None, recovery=False):
+    need(cut is None or cut in CUTS, "restore-chain-fixed-cut")
+    need(type(recovery) is bool and (cut is None or recovery), "restore-chain-artifact-purpose")
+    program = FIXTURE_EXECUTABLE if cut is None else "mrk-macos-install"
+    features = (["macos-installed-app-absence-fixture", "macos-installed-restore-chain-observer"] if recovery and cut is None
+                else ["macos-installed-installer", "macos-installed-restore-" + cut + "-fixture"] if cut is not None
+                else ["macos-installed-app-absence-fixture"])
     need(type(body) is bytes and 0 < len(body) <= 4*MIB and body.endswith(b"\n") and target in TARGETS,
          "app-absence-cargo-bound")
     def pairs(rows):
@@ -469,10 +521,10 @@ def artifact_data(body, checkout, root, target):
         elif row["reason"] == "compiler-artifact":
             need(type(row.get("target")) is dict and type(row.get("filenames")) is list, "app-absence-cargo-artifact")
             artifacts.append(row)
-    binary = root / target / "release" / FIXTURE_EXECUTABLE
-    selected = [r for r in artifacts if r["target"].get("name") in (FIXTURE_EXECUTABLE, "mobile_release_desktop")]
+    binary = root / target / "release" / program
+    selected = [r for r in artifacts if r["target"].get("name") in (program, "mobile_release_desktop")]
     need(finished and len(selected) == 2, "app-absence-cargo-selected")
-    for name, source, kind, executable in ((FIXTURE_EXECUTABLE, "src/bin/macos_install.rs", ["bin"], str(binary)),
+    for name, source, kind, executable in ((program, "src/bin/macos_install.rs", ["bin"], str(binary)),
                                          ("mobile_release_desktop", "src/lib.rs", ["lib"], None)):
         matched = [r for r in selected if r["target"].get("name") == name]
         need(len(matched) == 1, "app-absence-cargo-one-target")
@@ -480,7 +532,7 @@ def artifact_data(body, checkout, root, target):
         package_root = checkout / "desktop/src-tauri"
         need(row.get("package_id") == "path+" + package_root.as_uri() + "#mobile-release-kit-desktop@0.1.2"
              and row.get("manifest_path") == str(package_root / "Cargo.toml")
-             and row.get("features") == ["macos-installed-app-absence-fixture"]
+             and row.get("features") == features
              and target_row.get("kind") == target_row.get("crate_types") == kind
              and target_row.get("src_path") == str(package_root / source) and target_row.get("edition") == "2021"
              and "executable" in row and row["executable"] == executable and type(row.get("fresh")) is bool
@@ -618,7 +670,20 @@ def input_post(op):
     visit(source, destination, "")
 
 
-def prepare(op):
+def prepare_one(op, cut=None):
+    need(cut is None or recovery_mode(op) and cut in CUTS, "restore-chain-prepare-purpose")
+    prefix = "app-absence" if cut is None else "app-absence-cut-" + cut
+    program_name = FIXTURE_EXECUTABLE if cut is None else "mrk-macos-install"
+    feature = ("macos-installed-restore-chain-observer" if recovery_mode(op) and cut is None else
+               "macos-installed-restore-" + cut + "-fixture" if cut is not None else "macos-installed-app-absence-fixture")
+    def allocation(name):
+        if cut is not None:
+            # Same per-output ceilings, sequential allocation. Previously
+            # produced packages remain actual live disk, never credited away.
+            op.app_absence["future"][prefix + "-" + name] = OUTPUTS[name]
+            reserve(op, prefix + "-" + name)
+        else:
+            reserve(op, name)
     api = op.app_absence_api
     inventory, rows = input_rows(op)
     environment = api.build_environment(op.environment, op.work, op.image_release, target=op.target)
@@ -628,70 +693,75 @@ def prepare(op):
         MRK_BUNDLED_PROTOCOL_SHA256=op.stager.CURRENT_PROTOCOL,
         MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT=op.image_source, MRK_APP_ABSENCE_FIXTURE_RUN_ID=op.environment["GITHUB_RUN_ID"],
         MRK_APP_ABSENCE_FIXTURE_RUN_ATTEMPT=op.environment["GITHUB_RUN_ATTEMPT"])
-    result = call(op, "app-absence-build", [api.direct_rust_tools(op.target)[0], "build", "--manifest-path",
+    if cut is not None:
+        for name in ("MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT", "MRK_APP_ABSENCE_FIXTURE_RUN_ID", "MRK_APP_ABSENCE_FIXTURE_RUN_ATTEMPT"):
+            environment.pop(name)
+    result = call(op, prefix + "-build", [api.direct_rust_tools(op.target)[0], "build", "--manifest-path",
         str(op.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--jobs", "1", "--target", op.target,
-        "--no-default-features", "--features", "macos-installed-app-absence-fixture", "--bin", FIXTURE_EXECUTABLE,
+        "--no-default-features", "--features", feature, "--bin", program_name,
         "--message-format=json-render-diagnostics"], maximum=1440, limit=4*MIB, environment=environment, cwd=op.checkout / "desktop/src-tauri")
-    binary_path = artifact_data(result.stdout, op.checkout, op.work / op.target_name, op.target)
+    binary_path = artifact_data(result.stdout, op.checkout, op.work / op.target_name, op.target, cut=cut, recovery=recovery_mode(op))
     release = op.descend(op.target_entry, (op.target, "release"))
-    binary = op.original(release, FIXTURE_EXECUTABLE, "app-absence-compiler-binary", 64*MIB, (0o700, 0o755), alias=True)
+    binary = op.original(release, program_name, "app-absence-compiler-binary", 64*MIB, (0o700, 0o755), alias=True)
     program = op.read(binary)
     op.stager.macho(program, target=op.target)
     script_quote(rows, len(program))
     del program
     binary_sha = original_hash(op, binary)
-    tests_entry = op.source_original("desktop/src-tauri/src/macos_app_absence_fixture.rs", "source-app-absence-data-tests", 2*MIB)
-    tests_source = op.read(tests_entry)
-    names = re.findall(rb"#\[test\]\s*fn ([A-Za-z0-9_]+)\(", tests_source)
-    need(len(names) == 6 and {name.decode("ascii") for name in names} == {name.rsplit("::", 1)[1] for name in NATIVE_DATA_TESTS}
-         and b"#[ignore" not in tests_source and b"#[should_panic" not in tests_source, "app-absence-data-tests-source")
-    op.package_sources.append((tests_entry, tests_source))
-    tested = call(op, "app-absence-data-tests", [api.direct_rust_tools(op.target)[0], "test", "--manifest-path",
-        str(op.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--jobs", "1", "--target", op.target,
-        "--no-default-features", "--features", "macos-installed-app-absence-fixture", "--bin", FIXTURE_EXECUTABLE,
-        "--color", "never", "installer::worker::app_absence_fixture::tests::", "--", "--test-threads=1", "--color", "never"],
-        maximum=1440, limit=4*MIB, environment=environment, cwd=op.checkout / "desktop/src-tauri")
-    pure_tests = native_data_tests_result(tested)
-    need(original_hash(op, binary) == binary_sha and op.read(tests_entry) == tests_source, "app-absence-data-tests-original-post")
-    reserve(op, "executable")
-    prepared = op.package_directory("app-absence-prepared")
-    executable = copy(op, binary, prepared, FIXTURE_EXECUTABLE, 64*MIB, mode=0o555)
+    pure_tests = None
+    if cut is None:
+        tests_entry = op.source_original("desktop/src-tauri/src/macos_app_absence_fixture.rs", "source-app-absence-data-tests", 2*MIB)
+        tests_source = op.read(tests_entry)
+        names = re.findall(rb"#\[test\]\s*fn ([A-Za-z0-9_]+)\(", tests_source)
+        need(len(names) == 6 and {name.decode("ascii") for name in names} == {name.rsplit("::", 1)[1] for name in NATIVE_DATA_TESTS}
+             and b"#[ignore" not in tests_source and b"#[should_panic" not in tests_source, "app-absence-data-tests-source")
+        op.package_sources.append((tests_entry, tests_source))
+        tested = call(op, "app-absence-data-tests", [api.direct_rust_tools(op.target)[0], "test", "--manifest-path",
+            str(op.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--jobs", "1", "--target", op.target,
+            "--no-default-features", "--features", feature, "--bin", program_name,
+            "--color", "never", "installer::worker::app_absence_fixture::tests::", "--", "--test-threads=1", "--color", "never"],
+            maximum=1440, limit=4*MIB, environment=environment, cwd=op.checkout / "desktop/src-tauri")
+        pure_tests = native_data_tests_result(tested)
+        need(original_hash(op, binary) == binary_sha and op.read(tests_entry) == tests_source, "app-absence-data-tests-original-post")
+    allocation("executable")
+    prepared = op.package_directory(prefix + "-prepared")
+    executable = copy(op, binary, prepared, program_name, 64*MIB, mode=0o555)
     op.close(binary); need(binary["closed"], "app-absence-compiler-close")
     op.app_absence["outputs"].remove(next(row for row in op.app_absence["outputs"] if row[0] is executable))
     op.close(executable); need(executable["closed"], "app-absence-presign-close")
-    path = op.work / "app-absence-prepared" / FIXTURE_EXECUTABLE
-    call(op, "app-absence-adhoc", ["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", str(path)])
-    executable, program_sha = retained(op, prepared, FIXTURE_EXECUTABLE, 64*MIB, (0o555,))
+    path = op.work / (prefix + "-prepared") / program_name
+    call(op, prefix + "-adhoc", ["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", str(path)])
+    executable, program_sha = retained(op, prepared, program_name, 64*MIB, (0o555,))
     program = op.read(executable); op.stager.macho(program, target=op.target); del program
-    call(op, "app-absence-verify-code", ["/usr/bin/codesign", "--verify", "--strict", str(path)])
-    reserve(op, "scripts")
-    scripts = op.package_directory("app-absence-scripts")
-    output(op, scripts, "postinstall", POSTINSTALL, mode=0o555)
-    copy(op, executable, scripts, FIXTURE_EXECUTABLE, 64*MIB, mode=0o555)
+    call(op, prefix + "-verify-code", ["/usr/bin/codesign", "--verify", "--strict", str(path)])
+    allocation("scripts")
+    scripts = op.package_directory(prefix + "-scripts")
+    output(op, scripts, "postinstall", POSTINSTALL if cut is None else CUT_POSTINSTALL, mode=0o555)
+    copy(op, executable, scripts, program_name, 64*MIB, mode=0o555)
     projected = mkdir(op, scripts, "input")
     copy_input(op, projected, inventory, rows)
     os.fchmod(scripts["fd"], 0o755); scripts["identity"] = api.directory_identity(os.fstat(scripts["fd"]))
-    op.app_absence["roots"].append((scripts, {"postinstall", FIXTURE_EXECUTABLE, "input"}))
-    reserve(op, "original")
-    original_path = op.work / "app-absence-original.pkg"
-    call(op, "app-absence-pkgbuild", ["/usr/bin/pkgbuild", "--nopayload", "--scripts", str(op.work / "app-absence-scripts"),
+    op.app_absence["roots"].append((scripts, {"postinstall", program_name, "input"}))
+    allocation("original")
+    original_path = op.work / (prefix + "-original.pkg")
+    call(op, prefix + "-pkgbuild", ["/usr/bin/pkgbuild", "--nopayload", "--scripts", str(op.work / (prefix + "-scripts")),
         "--identifier", op.stager.PACKAGE_ID + "-app-absence-fixture", "--version", selected(op).package_version,
         "--install-location", "/", str(original_path)])
     original, original_sha = retained(op, op.work_entry, original_path.name, PRODUCT_LIMIT, (0o644, 0o444))
-    args = SimpleNamespace(target=op.target, scripts=op.work / "app-absence-scripts", original_package=original_path,
-        package=op.work / "app-absence-prepared/fixture.pkg", expected_program=program_sha,
+    args = SimpleNamespace(target=op.target, restore_cut=cut, scripts=op.work / (prefix + "-scripts"), original_package=original_path,
+        package=op.work / (prefix + "-prepared") / "fixture.pkg", expected_program=program_sha,
         expected_inventory=op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"])
     input_post(op)
     compact = io(op, "original-audit", op.stager.app_absence_original_command, args)
     need(compact["originalPackageSha256"] == original_sha, "app-absence-original-audit-post")
     output(op, prepared, "PackageInfo", compact["packageInfo"])
-    reserve(op, "archive")
-    call(op, "app-absence-tar", ["/usr/bin/tar", "-c", "-z", "-f", str(op.work / "app-absence-prepared/Scripts"),
-        "--format=odc", "--uid=0", "--gid=0", "--uname=root", "--gname=wheel", "."], maximum=60, cwd=op.work / "app-absence-scripts")
+    allocation("archive")
+    call(op, prefix + "-tar", ["/usr/bin/tar", "-c", "-z", "-f", str(op.work / (prefix + "-prepared") / "Scripts"),
+        "--format=odc", "--uid=0", "--gid=0", "--uname=root", "--gname=wheel", "."], maximum=60, cwd=op.work / (prefix + "-scripts"))
     retained(op, prepared, "Scripts", PRODUCT_LIMIT, (0o644, 0o444))
-    reserve(op, "fixture")
-    call(op, "app-absence-xar", ["/usr/bin/xar", "-cf", str(args.package), "--compression=none", "PackageInfo", "Scripts"],
-         cwd=op.work / "app-absence-prepared")
+    allocation("fixture")
+    call(op, prefix + "-xar", ["/usr/bin/xar", "-cf", str(args.package), "--compression=none", "PackageInfo", "Scripts"],
+         cwd=op.work / (prefix + "-prepared"))
     fixture = op.original(prepared, "fixture.pkg", "app-absence-fixture-package", PRODUCT_LIMIT, (0o644, 0o444))
     os.fchmod(fixture["fd"], 0o444); fixture["identity"] = api.signature(os.fstat(fixture["fd"]))
     fixture_sha = original_hash(op, fixture)
@@ -699,15 +769,49 @@ def prepare(op):
     audit = io(op, "final-audit", op.stager.app_absence_final_command, args, compact)
     del compact
     need(audit["packageSha256"] == fixture_sha and audit["packageSize"] == fixture["identity"][6], "app-absence-final-audit-post")
-    op.app_absence["roots"].append((prepared, {FIXTURE_EXECUTABLE, "PackageInfo", "Scripts", "fixture.pkg"}))
-    op.receipt["appAbsencePreparation"] = dict(op.app_absence["binding"], fixtureExecutableSha256=program_sha,
+    op.app_absence["roots"].append((prepared, {program_name, "PackageInfo", "Scripts", "fixture.pkg"}))
+    data = dict(op.app_absence["binding"], fixtureExecutableSha256=program_sha,
         fixtureExecutableBytes=executable["identity"][6], fixturePackageSha256=fixture_sha, fixturePackageBytes=fixture["identity"][6],
         inventorySha256=op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"],
         runtimeManifestSha256=op.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"], protocolSha256=op.stager.CURRENT_PROTOCOL,
         cargoMessagesSha256=digest(result.stdout), pureDataTests=pure_tests, archiveAudited=True, adHocOnly=True, productReady=False)
+    if recovery_mode(op):
+        data["fixtureFeature"] = feature
     input_post(op)
     post(op); reserve(op)
-    op.sha256 = fixture_sha
+    return data
+
+
+
+def recovery_builder_quote_data(files, directories, depth, retained, live):
+    need(all(type(n) is int and n >= 0 for n in (files, directories, depth, retained, live))
+         and depth <= 15 and 24 * (files + 1 + directories) + retained + 512 <= 24576
+         and live + 4 * 11 + 7 + 2 * depth + 8 <= 96, "restore-chain-complete-original-quote")
+
+
+def prepare(op):
+    if recovery_mode(op):
+        _inventory, rows = input_rows(op)
+        paths = {""}
+        for name in rows:
+            parts = name.split("/")
+            paths.update("/".join(parts[:i]) for i in range(1, len(parts)))
+        # Four sequential SAME-owner copy+two POST traversals. Reserve their
+        # complete original ledger before any scripts, not only the next copy.
+        # At most11 retained top-level originals per builder,7 shared source/
+        # compiler ancestors, paired traversal depth and8 native/temporary ends.
+        # Conservative coexistence: no future close credit or FD cap increase.
+        recovery_builder_quote_data(len(rows), len(paths), max((name.count("/") for name in rows), default=0),
+            len(op.entries), sum(entry["fd"] is not None for entry in op.entries))
+    data = prepare_one(op)
+    if recovery_mode(op):
+        data["restoreCuts"] = {cut: prepare_one(op, cut) for cut in CUTS}
+        # Quote the three later transport copies once from independently
+        # decoded completed originals, not three times their maximum ceiling.
+        op.app_absence["future"]["cutCopies"] = sum(row["fixturePackageBytes"] for row in data["restoreCuts"].values())
+        reserve(op)
+    op.receipt["appAbsencePreparation"] = data
+    op.sha256 = data["fixturePackageSha256"]
     op.app_absence["complete"] = True
 
 
@@ -715,7 +819,8 @@ def preparation_input(op):
     need(small(op, op.work_entry, "app-absence-preparation.status", 4) == b"0\n", "app-absence-prepare-original-zero")
     body = small(op, op.work_entry, "android-helper-prepare-app-absence.json")
     value = op.app_absence_api.tool_json(body)
-    receipt_data(op, value, PREPARE, PREPARE_ROLES)
+    receipt_data(op, value, PREPARE, PREPARE_ROLES + tuple("app-absence-cut-" + cut + "-" + role for cut in CUTS
+        for role in ("build", "adhoc", "verify-code", "pkgbuild", "tar", "xar")) if recovery_mode(op) else PREPARE_ROLES)
     data = value.get("appAbsencePreparation")
     need(type(data) is dict and all(data.get(k) == v for k, v in op.app_absence["binding"].items())
          and data.get("inventorySha256") == op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"]
@@ -736,6 +841,32 @@ def preparation_input(op):
     need(program_sha == data.get("fixtureExecutableSha256") and program["identity"][6] == data.get("fixtureExecutableBytes")
          and fixture_sha == data.get("fixturePackageSha256") and fixture["identity"][6] == data.get("fixturePackageBytes"),
          "app-absence-prepared-originals")
+    need(("restoreCuts" in data) == recovery_mode(op), "restore-chain-preparation-purpose")
+    if recovery_mode(op):
+        need(data.get("fixtureFeature") == "macos-installed-restore-chain-observer"
+             and data.get("cargoMessagesSha256") == value["originalCalls"][0].get("stdoutSha256"), "restore-chain-observer-graph")
+        cuts = data["restoreCuts"]
+        need(type(cuts) is dict and set(cuts) == set(CUTS), "restore-chain-preparation-cuts")
+        retained_cuts = {}
+        for index, cut in enumerate(CUTS):
+            row = cuts[cut]
+            need(type(row) is dict and all(row.get(k) == v for k, v in op.app_absence["binding"].items())
+                 and all(row.get(k) == data.get(k) for k in ("inventorySha256", "runtimeManifestSha256", "protocolSha256"))
+                 and row.get("fixtureFeature") == "macos-installed-restore-" + cut + "-fixture"
+                 and row.get("cargoMessagesSha256") == value["originalCalls"][7+index*6].get("stdoutSha256")
+                 and row.get("pureDataTests") is None and row.get("archiveAudited") is True
+                 and row.get("adHocOnly") is True and row.get("productReady") is False, "restore-chain-cut-binding")
+            cut_root = op.directory(op.work_entry, "app-absence-cut-" + cut + "-prepared", "restore-chain-cut-prepared")
+            need(set(os.listdir(cut_root["fd"])) == {"mrk-macos-install", "PackageInfo", "Scripts", "fixture.pkg"}, "restore-chain-cut-roster")
+            executable, executable_sha = retained(op, cut_root, "mrk-macos-install", 64*MIB, (0o555,))
+            package, package_sha = retained(op, cut_root, "fixture.pkg", PRODUCT_LIMIT, (0o444,))
+            need(executable_sha == row.get("fixtureExecutableSha256") and executable["identity"][6] == row.get("fixtureExecutableBytes")
+                 and package_sha == row.get("fixturePackageSha256") and package["identity"][6] == row.get("fixturePackageBytes"), "restore-chain-cut-originals")
+            retained_cuts[cut] = package
+        op.app_absence["cutPackages"] = retained_cuts
+        if op.phase == "package-install":
+            op.app_absence["future"]["cutCopies"] = sum(row["fixturePackageBytes"] for row in cuts.values())
+            reserve(op)
     op.app_absence["preparation"] = data
     op.app_absence["preparationSha256"] = digest(body)
     return fixture
@@ -771,19 +902,30 @@ def binding_for(op, rows):
 
 def image_prepare(op, producer):
     fixture = preparation_input(op)
-    root = op.package_directory("app-absence-carrier")
-    reserve(op, "product")
+    originals = {}
     rows = {}
-    for name, limit in (("Install.pkg", PRODUCT_LIMIT), ("producer.json", 16384), ("producer.sig", 16384)):
+    for name, limit in (("Install.pkg", PRODUCT_LIMIT), ("producer.json", 16384), ("producer.sig", 512)):
         old, sha = retained(op, producer, name, limit, (0o444,))
-        entry = copy(op, old, root, name, limit)
-        rows[name] = {"name": name, "bytes": entry["identity"][6], "sha256": sha, "mode": 0o444, "links": 1}
-    reserve(op, "copies")
+        originals[name] = old
+        rows[name] = {"name": name, "bytes": old["identity"][6], "sha256": sha, "mode": 0o444, "links": 1}
     for name in PHASE_NAMES:
-        entry = copy(op, fixture, root, name, PRODUCT_LIMIT)
-        rows[name] = {"name": name, "bytes": entry["identity"][6], "sha256": original_hash(op, entry), "mode": 0o444, "links": 1}
-    transport_layout_data(list(rows.values()))
-    op.app_absence["roots"].append((root, set(CARRIER_NAMES)))
+        originals[name] = fixture
+        rows[name] = {"name": name, "bytes": fixture["identity"][6], "sha256": op.app_absence["preparation"]["fixturePackageSha256"], "mode": 0o444, "links": 1}
+    if recovery_mode(op):
+        for cut, name in zip(CUTS, CUT_PACKAGES):
+            original = op.app_absence["cutPackages"][cut]
+            originals[name] = original
+            rows[name] = {"name": name, "bytes": original["identity"][6], "sha256": op.app_absence["preparation"]["restoreCuts"][cut]["fixturePackageSha256"],
+                          "mode": 0o444, "links": 1}
+    transport_layout(op, list(rows.values()))
+    root = op.package_directory("app-absence-carrier")
+    reserve(op, "product"); reserve(op, "copies")
+    if recovery_mode(op):
+        reserve(op, "cutCopies")
+    for name in carrier_names(op):
+        entry = copy(op, originals[name], root, name, PRODUCT_LIMIT if name.endswith(".pkg") else 16384)
+        need(entry["identity"][6] == rows[name]["bytes"] and original_hash(op, entry) == rows[name]["sha256"], "app-absence-copy-post")
+    op.app_absence["roots"].append((root, set(carrier_names(op))))
     op.app_absence["layout"] = rows
     op.app_absence["nativeBinding"] = binding_for(op, rows)
     reserve(op, "image")
@@ -813,7 +955,7 @@ def mounted_post(op):
          == mount_identity(os.stat(state["name"], dir_fd=op.work_entry["fd"], follow_symlinks=False))
          and os.fstatvfs(entry["fd"]).f_flag & os.ST_RDONLY
          and entry["identity"][0] != op.work_entry["identity"][0]
-         and set(os.listdir(entry["fd"])) == set(CARRIER_NAMES), "app-absence-readonly-mount-post")
+         and set(os.listdir(entry["fd"])) == set(carrier_names(op)), "app-absence-readonly-mount-post")
     for leaf in state["files"]:
         identity = leaf["identity"]
         need(api.signature(os.fstat(leaf["fd"])) == identity
@@ -843,8 +985,8 @@ def attach(op, role, rows):
     entry = op.register(fd, "app-absence-mount", "app-absence-mount", op.work_entry["fd"], name)
     entry["identity"] = mount_identity(os.fstat(fd)); state["entry"] = entry
     state["known"] = True
-    need(set(rows) == set(CARRIER_NAMES) and set(os.listdir(fd)) == set(CARRIER_NAMES), "app-absence-mount-roster")
-    for name in CARRIER_NAMES:
+    need(set(rows) == set(carrier_names(op)) and set(os.listdir(fd)) == set(carrier_names(op)), "app-absence-mount-roster")
+    for name in carrier_names(op):
         file_fd = os.open(name, op.app_absence_api.READ_FLAGS, dir_fd=fd)
         leaf = op.register(file_fd, "app-absence-mounted-" + name, "app-absence-mounted-file", fd, name)
         info = os.fstat(file_fd)
@@ -859,7 +1001,7 @@ def detach(op, role):
     state = op.app_absence["mount"]
     need(role in ("app-absence-baseline-detach", "app-absence-restore-detach") and state is not None
          and state["known"] and not state["detached"] and op.app_absence["pendingRoot"] is None
-         and op.package_settled(), "app-absence-detach-incomplete")
+         and op.app_absence.get("pendingCut") is None and op.package_settled(), "app-absence-detach-incomplete")
     post(op)
     for entry in state["files"] + [state["entry"]]:
         op.close(entry); need(entry["closed"], "app-absence-mount-close-unknown")
@@ -875,7 +1017,8 @@ def detach(op, role):
 
 
 def phase_observation(op, result, phase):
-    need(phase in PROOFS and type(result.returncode) is int and result.returncode == 0 and type(result.stdout) is bytes and type(result.stderr) is bytes
+    recovery_step = RECOVERY_PHASES.index(phase) if phase in RECOVERY_PHASES and recovery_mode(op) else None
+    need((phase in PROOFS or recovery_step is not None) and type(result.returncode) is int and result.returncode == 0 and type(result.stdout) is bytes and type(result.stderr) is bytes
          and len(result.stdout) + len(result.stderr) <= 256*1024, "app-absence-phase-output-bound")
     marker = b"MRK_MACOS_APP_ABSENCE_RESULT="
     found = []
@@ -901,10 +1044,22 @@ def phase_observation(op, result, phase):
          and nonzero_hex_data(value["baselineSha256"], 64) and nonzero_hex_data(value["recordSha256"], 64)
          and (phase != "baseline" or value["baselineSha256"] == value["recordSha256"])
          and value["originalOuterExitRequired"] is True and value["systemServiceExitClaimed"] is False and value["productReady"] is False
-         and type(value["proof"]) is dict and set(value["proof"]) == set(PROOFS[phase])
-         and all(v is True for v in value["proof"].values()), "app-absence-phase-observation")
+         and type(value["proof"]) is dict, "app-absence-phase-observation")
+    if recovery_step is None:
+        need(set(value["proof"]) == set(PROOFS[phase]) and all(v is True for v in value["proof"].values()), "app-absence-phase-proof")
+    else:
+        proof = value["proof"]
+        need(set(proof) == {"step", "initialHistoryPreserved", "runtimeUnchanged", "withdrawnAppVerified", "partialAppConserved",
+             "recordReadback", "ordinaryRetryComplete", "originalOuterExitRequired"}
+             and type(proof["step"]) is int and proof["step"] == recovery_step
+             and proof["ordinaryRetryComplete"] is (recovery_step == 3)
+             and all(proof[k] is True for k in ("initialHistoryPreserved", "runtimeUnchanged", "withdrawnAppVerified", "partialAppConserved",
+                      "recordReadback", "originalOuterExitRequired")), "restore-chain-exact-proof")
+        need(op.app_absence["pendingCut"] == (recovery_step if recovery_step < 3 else None), "restore-chain-observation-order")
     if phase != "baseline":
         need(value["baselineSha256"] == op.app_absence["baselineSha256"], "app-absence-baseline-unchanged")
+    if recovery_step is not None:
+        op.app_absence["pendingCut"] = None
     return value
 
 
@@ -942,7 +1097,7 @@ def baseline_read(op, expected_sha):
 
 
 def root_call(op, phase):
-    index = {"baseline": 0, "withdraw": 1, "verify": 2}[phase]
+    index = 2 if phase in RECOVERY_PHASES else {"baseline": 0, "withdraw": 1, "verify": 2}[phase]
     role = "app-absence-" + phase
     reserve(op)
     result = call(op, role, ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg",
@@ -1003,7 +1158,7 @@ def restore(op):
          and previous.get("productReady") is False and previous.get("systemServiceExitClaimed") is False,
          "app-absence-baseline-owner")
     rows = previous["layout"]
-    transport_layout_data(list(rows.values()))
+    transport_layout(op, list(rows.values()))
     need(previous["binding"] == binding_for(op, rows), "app-absence-same-native-binding")
     op.app_absence.update(nativeBinding=previous["binding"], baselineSha256=previous["baselineSha256"],
                          baselineOriginal=previous["baselineOriginal"])
@@ -1011,8 +1166,8 @@ def restore(op):
     image, image_sha = retained(op, op.work_entry, "app-absence-fixture.dmg", FIXTURE_IMAGE_LIMIT, (0o444,))
     need(previous["image"] == {"bytes": image["identity"][6], "sha256": image_sha}, "app-absence-image-same-original")
     carrier = op.directory(op.work_entry, "app-absence-carrier", "app-absence-carrier")
-    need(set(os.listdir(carrier["fd"])) == set(CARRIER_NAMES), "app-absence-carrier-roster")
-    for name in CARRIER_NAMES:
+    need(set(os.listdir(carrier["fd"])) == set(carrier_names(op)), "app-absence-carrier-roster")
+    for name in carrier_names(op):
         entry, sha = retained(op, carrier, name, PRODUCT_LIMIT, (0o444,))
         need(rows[name]["bytes"] == entry["identity"][6] and rows[name]["sha256"] == sha, "app-absence-carrier-post")
     attach(op, "app-absence-restore-attach", rows)
@@ -1036,6 +1191,8 @@ def restore(op):
     args.installer_status = op.work / "app-absence-case/installer-output.status"
     withdraw = root_call(op, "withdraw")
     need(withdraw["proof"]["renameKnownSuccess"] is True, "app-absence-known-withdraw-required")
+    if recovery_mode(op):
+        return recovery_restore(op, args, previous, body, image_sha, withdraw)
     result = call(op, "app-absence-install", ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg", str(args.package),
         "-target", "/", "-dumplog", "-verboseR"], maximum=123, limit=256*1024)
     after = io(op, "restore-census", op.stager.same_package_result_census)
@@ -1068,3 +1225,31 @@ def save_restore_status(op, code):
     need(op.phase == RESTORE and type(code) is int and op.app_absence["pendingRoot"] == "app-absence-install",
          "app-absence-status-purpose")
     output(op, op.app_absence["case"], "installer-output.status", (str(code) + "\n").encode("ascii"), mode=0o600)
+
+
+
+def recovery_restore(op, args, previous, baseline_body, image_sha, withdraw):
+    need(recovery_mode(op) and op.phase == RESTORE, "restore-chain-fixed-purpose")
+    observations = []
+    for index, (cut, package) in enumerate(zip(CUTS, CUT_PACKAGES)):
+        # Same bounded original owner, actual return1, then the fixed readonly
+        # observer MUST prove this exact durable cut before another write.
+        call(op, "app-absence-cut-" + cut, ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg",
+            str(op.work / "app-absence-mount" / package), "-target", "/", "-dumplog", "-verboseR"], maximum=123, limit=256*1024)
+        observations.append(root_call(op, RECOVERY_PHASES[index]))
+    call(op, "app-absence-install", ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg", str(args.package),
+        "-target", "/", "-dumplog", "-verboseR"], maximum=123, limit=256*1024)
+    recovered = root_call(op, "recovered")
+    need(io(op, "baseline-final", baseline_read, op, previous["baselineSha256"]) == previous["baselineOriginal"],
+         "restore-chain-baseline-post")
+    # Keep all reserved exports and private controls. Ordinary two-export DATA
+    # census is deliberately NOT widened to bless interrupted reservations.
+    detach(op, "app-absence-restore-detach")
+    op.receipt["restoreChain"] = {"schemaVersion": 1, "binding": previous["binding"], "baselineOwnerReceiptSha256": digest(baseline_body),
+        "preparationReceiptSha256": op.app_absence["preparationSha256"], "imageSha256": image_sha,
+        "withdraw": withdraw, "cuts": observations, "recovered": recovered, "nativeRecoveredReadback": True,
+        "originalInstallerReturnedZero": True, "originalMountDetached": True, "retainedPrivateEvidence": True,
+        "nonrootExportCensusClaimed": False, "systemServiceExitClaimed": False, "productReady": False}
+    op.sha256 = image_sha
+    op.app_absence["complete"] = True
+    post(op)

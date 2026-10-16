@@ -34,7 +34,7 @@ NOW = 1_000_000_000
 
 def state():
     return {"started": NOW, "observed": NOW, "workSeconds": 10, "hardSeconds": 20,
-            "pendingRoot": None, "mount": None, "outputs": [], "roots": []}
+            "pendingRoot": None, "pendingCut": None, "mount": None, "outputs": [], "roots": []}
 
 
 def call_row(role, **changes):
@@ -43,7 +43,7 @@ def call_row(role, **changes):
 
 def inert_operation(phase=None):
     return SimpleNamespace(app_absence=state(), app_absence_api=HELPER,
-        phase=phase or FIXTURE.PREPARE, errors=[], calls=[], stager_io_pending=None,
+        phase=phase or FIXTURE.PREPARE, environment={"GITHUB_REF": FIXTURE.REF}, errors=[], calls=[], stager_io_pending=None,
         package_settled=lambda: True)
 
 
@@ -57,6 +57,7 @@ def file_operation():
         op.entries, op.errors, op.calls = [], [], []
         op.entry_registry, op.directories = {}, {}
         op.app_absence, op.app_absence_api = state(), HELPER
+        op.store_signing = None
         op.stager_io_pending = None
         try:
             fd = os.open(directory, HELPER.READ_FLAGS | os.O_DIRECTORY)
@@ -377,3 +378,234 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
                 read(candidate)
         with self.assertRaisesRegex(ValueError, "baseline-original-post"):
             read(value, parent_after=dict(parent, inode=13))
+
+class RestoreChainFixtureData(unittest.TestCase):
+    def test_fixed_cut_artifact_graphs_and_nine_file_quote_both_targets(self):
+        FIXTURE.recovery_builder_quote_data(100,20,4,10,29)  # Exactly96 live quote.
+        for values in ((100,20,4,10,30),(1002,0,0,0,0),(1,1,16,0,0),(True,1,1,0,0)):
+            with self.assertRaisesRegex(ValueError,'complete-original-quote'): FIXTURE.recovery_builder_quote_data(*values)
+        checkout, target_root = Path('/owned/source'), Path('/owned/target')
+        for target in FIXTURE.TARGETS:
+            for cut in (None,) + FIXTURE.CUTS:
+                rows = cargo_rows(checkout, target_root, target)
+                features = (['macos-installed-app-absence-fixture', 'macos-installed-restore-chain-observer'] if cut is None
+                            else ['macos-installed-installer', 'macos-installed-restore-' + cut + '-fixture'])
+                for row in rows[:2]: row['features'] = features[:]
+                program = FIXTURE.FIXTURE_EXECUTABLE if cut is None else 'mrk-macos-install'
+                rows[0]['target']['name'] = program
+                expected = target_root / target / 'release' / program
+                rows[0]['executable'] = str(expected); rows[0]['filenames'] = [str(expected)]
+                self.assertEqual(FIXTURE.artifact_data(encoded_rows(rows), checkout, target_root, target, cut=cut, recovery=True), expected)
+                for wrong in (['macos-installed-installer'], features + ['desktop-shell'], ['macos-installed-app-absence-fixture']):
+                    changed = copy.deepcopy(rows); changed[0]['features'] = wrong
+                    with self.assertRaises(ValueError):
+                        FIXTURE.artifact_data(encoded_rows(changed), checkout, target_root, target, cut=cut, recovery=True)
+                with self.assertRaises(ValueError): FIXTURE.artifact_data(encoded_rows(rows), checkout, target_root, target)
+        rows = [{'name': n, 'bytes': 100, 'sha256': '5'*64, 'mode': 0o444, 'links': 1}
+                for n in FIXTURE.CARRIER_NAMES + FIXTURE.CUT_PACKAGES]
+        self.assertEqual(FIXTURE.transport_layout_data(rows, recovery=True)['fileCount'], 9)
+        for wrong in (rows[:-1], rows+[rows[-1]], rows[:6]):
+            with self.assertRaises(ValueError): FIXTURE.transport_layout_data(wrong, recovery=True)
+        with self.assertRaises(ValueError): FIXTURE.transport_layout_data(rows)
+        for row in rows:
+            if row['name'].endswith('.pkg'): row['bytes'] = FIXTURE.PRODUCT_LIMIT
+        with self.assertRaisesRegex(ValueError, 'image-content-bound'): FIXTURE.transport_layout_data(rows, recovery=True)
+
+    def test_cut_scripts_pin_independently_authenticated_ordinary_product(self):
+        stager = load_tool('mrk_restore_chain_stager', 'stage_macos_installed.py')
+        program, inventory = b'inert-program', b'inert-inventory'
+        rows = {'postinstall': (FIXTURE.CUT_POSTINSTALL, 0o555), 'mrk-macos-install': (program, 0o555),
+                'input/'+stager.INSTALLATION_INVENTORY_NAME: (inventory, 0o444)}
+        for cut in FIXTURE.CUTS:
+            stager.app_absence_scripts_data(rows, FIXTURE.digest(program), FIXTURE.digest(inventory), restore_cut=cut)
+            wrong = dict(rows); wrong['postinstall'] = (FIXTURE.CUT_POSTINSTALL.replace(b'"$p"', b'"$1"'), 0o555)
+            with self.assertRaises(stager.Refused):
+                stager.app_absence_scripts_data(wrong, FIXTURE.digest(program), FIXTURE.digest(inventory), restore_cut=cut)
+        for cut in (None, 'any', True):
+            with self.assertRaises(stager.Refused):
+                stager.app_absence_scripts_data(rows, FIXTURE.digest(program), FIXTURE.digest(inventory), restore_cut=cut)
+
+    def test_whole_fixed_chain_requires_each_observer_and_preserves_ambiguous_failure(self):
+        # Actual adapter order/dispatch/return/proof/finish functions. Only the
+        # existing native call and readonly final filesystem POST are inert.
+        for fault in (None, 'unknown-cut', 'bad-proof', 'cut-zero', 'cut-two'):
+            with self.subTest(fault=fault), patch.object(FIXTURE.time, 'monotonic_ns', return_value=NOW):
+                op, template = phase_value('verify')
+                op.phase = FIXTURE.RESTORE; op.environment['GITHUB_REF'] = FIXTURE.RECOVERY_REF
+                op.work = Path('/owned/work'); op.app_absence['complete'] = False
+                op.app_absence['preparationSha256'] = '6'*64; op.receipt = {}
+                op.calls = [call_row('app-absence-restore-attach'), call_row('app-absence-withdraw')]
+                events = []
+                def native(role, argv, **kwargs):
+                    FIXTURE.dispatch(op, role); events.append(role)
+                    self.assertEqual(argv[:5], ['/usr/bin/sudo','-n','--','/usr/sbin/installer','-pkg'])
+                    if role == 'app-absence-cut-app-write' and fault == 'unknown-cut':
+                        raise RuntimeError('inert unresolved native original')
+                    cut = role in ['app-absence-cut-'+c for c in FIXTURE.CUTS]
+                    status = (0 if fault == 'cut-zero' else 2 if fault == 'cut-two' else 1) if cut else 0
+                    # Same exact extra return predicate used by existing owner.
+                    if cut and status != 1:
+                        op.calls.append(call_row(role, returncode=status))
+                        FIXTURE.returned(op, role)
+                        self.fail('unexpected cut return admitted')
+                    body = b''
+                    phase = role.removeprefix('app-absence-')
+                    if phase in FIXTURE.RECOVERY_PHASES:
+                        index = FIXTURE.RECOVERY_PHASES.index(phase); value = copy.deepcopy(template)
+                        value['phase'] = phase
+                        value['proof'] = dict(step=index, initialHistoryPreserved=True, runtimeUnchanged=True,
+                            withdrawnAppVerified=True, partialAppConserved=True, recordReadback=True,
+                            ordinaryRetryComplete=index==3, originalOuterExitRequired=True)
+                        if fault == 'bad-proof': value['proof']['partialAppConserved'] = False
+                        body = marker(value)
+                    op.calls.append(call_row(role, returncode=status)); FIXTURE.returned(op, role)
+                    return SimpleNamespace(returncode=status, stdout=body, stderr=b'')
+                op.package_call = native
+                previous = {'binding': op.app_absence['nativeBinding'], 'baselineSha256':'3'*64, 'baselineOriginal':{'held':True}}
+                def detached(_op, role):
+                    FIXTURE.dispatch(_op, role); events.append(role); _op.calls.append(call_row(role)); FIXTURE.returned(_op, role)
+                with patch.object(FIXTURE, 'reserve'), patch.object(FIXTURE, 'post'), \
+                     patch.object(FIXTURE, 'baseline_read', return_value={'held':True}), patch.object(FIXTURE, 'detach', side_effect=detached):
+                    if fault:
+                        with self.assertRaises((ValueError, RuntimeError)):
+                            FIXTURE.recovery_restore(op, SimpleNamespace(package=op.work/'Install.pkg'), previous, b'baseline', '7'*64, {})
+                        self.assertFalse(op.app_absence['complete']); self.assertFalse(FIXTURE.finish_ready(op))
+                        self.assertNotIn('app-absence-cut-own-attempt', events)
+                    else:
+                        FIXTURE.recovery_restore(op, SimpleNamespace(package=op.work/'Install.pkg'), previous, b'baseline', '7'*64, {})
+                        self.assertEqual(tuple(e['role'] for e in op.calls), FIXTURE.roles(op))
+                        self.assertTrue(FIXTURE.finish_ready(op)); self.assertTrue(op.receipt['restoreChain']['nativeRecoveredReadback'])
+                        self.assertFalse(op.receipt['restoreChain']['nonrootExportCensusClaimed'])
+                        self.assertFalse(op.receipt['restoreChain']['productReady'])
+        for ref, phase, role, code in ((FIXTURE.REF, FIXTURE.RESTORE,'app-absence-cut-app-write',1),
+                (FIXTURE.RECOVERY_REF,FIXTURE.PREPARE,'app-absence-cut-app-write',1),
+                (FIXTURE.RECOVERY_REF,FIXTURE.RESTORE,'app-absence-install',1),
+                (FIXTURE.RECOVERY_REF,FIXTURE.RESTORE,'app-absence-cut-app-write',True)):
+            op = inert_operation(phase); op.environment['GITHUB_REF'] = ref
+            self.assertFalse(FIXTURE.cut_return_data(op,role,code))
+
+    def test_actual_shared_cut_builder_selects_fixed_image_script_and_clears_observer_tuple(self):
+        # Whole shared prepare_one + genuine Cargo artifact reducer. Compiler,
+        # signing/archive, and filesystem effects are inert boundaries here.
+        for target in FIXTURE.TARGETS:
+            for cut in FIXTURE.CUTS:
+                with self.subTest(target=target,cut=cut):
+                    op = inert_operation(); op.environment.update(GITHUB_REF=FIXTURE.RECOVERY_REF,
+                        GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1', MRK_MACOS_INSTALL_INVENTORY_SHA256='2'*64,
+                        MRK_BUNDLED_RUNTIME_MANIFEST_SHA256='3'*64)
+                    op.work=Path('/owned/work');op.checkout=Path('/owned/source');op.target=target;op.target_name='compiler'
+                    op.target_entry={};op.work_entry={};op.image_source='1'*40;op.image_release='0.1.2'
+                    op.app_absence.update(binding={'fixtureSource':op.image_source},future={});op.package_sources=[]
+                    identity = [1,2,0o100555,1000,1000,1,16,0,0,0,0]
+                    def entry(name): return {'name':name,'identity':identity[:],'closed':False,'fd':55}
+                    op.app_absence_api=SimpleNamespace(build_environment=lambda *a,**k:op.environment.copy(),
+                        direct_rust_tools=lambda _:('/inert/cargo',),signature=lambda _:identity[:],directory_identity=lambda _:(1,2))
+                    op.descend=lambda *a: {};op.original=lambda parent,name,*a,**k:entry(name)
+                    op.read=lambda e:b'program';op.close=lambda e:e.update(closed=True)
+                    op.package_directory=lambda name:entry(name)
+                    digest='4'*64; package_digest='5'*64
+                    op.stager=SimpleNamespace(CURRENT_PROTOCOL='6'*64,PACKAGE_ID='fixed.test',macho=lambda *a,**k:None,
+                        app_absence_original_command=lambda args:{'originalPackageSha256':package_digest,'packageInfo':b'info'},
+                        app_absence_final_command=lambda args,compact:{'packageSha256':package_digest,'packageSize':16})
+                    commands=[];written=[];allocations=[]
+                    prefix='app-absence-cut-'+cut
+                    def call(_op,role,argv,**kwargs):
+                        commands.append((role,argv,kwargs))
+                        if role.endswith('-build'):
+                            self.assertNotIn('MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT',kwargs['environment'])
+                            self.assertNotIn('MRK_APP_ABSENCE_FIXTURE_RUN_ID',kwargs['environment'])
+                            self.assertNotIn('MRK_APP_ABSENCE_FIXTURE_RUN_ATTEMPT',kwargs['environment'])
+                            rows=cargo_rows(op.checkout,op.work/op.target_name,target)
+                            for row in rows[:2]: row['features']=['macos-installed-installer','macos-installed-restore-'+cut+'-fixture']
+                            rows[0]['target']['name']='mrk-macos-install'
+                            rows[0]['executable']=str(op.work/op.target_name/target/'release/mrk-macos-install')
+                            rows[0]['filenames']=[rows[0]['executable']]
+                            return SimpleNamespace(stdout=encoded_rows(rows))
+                        return SimpleNamespace(stdout=b'')
+                    def copy_file(_op,old,parent,name,*a,**k):
+                        e=entry(name);op.app_absence['outputs'].append((e,digest));return e
+                    def retained(_op,parent,name,*a,**k):
+                        e=entry(name);sha=digest if name=='mrk-macos-install' else package_digest
+                        op.app_absence['outputs'].append((e,sha));return e,sha
+                    def output(_op,parent,name,body,**kwargs): written.append((name,body))
+                    def quoted(_op,name=None):
+                        if name:
+                            allocations.append((name,_op.app_absence['future'][name]));del _op.app_absence['future'][name]
+                    with patch.object(FIXTURE,'input_rows',return_value=(entry('inventory'),{})), \
+                         patch.object(FIXTURE,'call',side_effect=call), patch.object(FIXTURE,'script_quote'), \
+                         patch.object(FIXTURE,'selected',return_value=SimpleNamespace(package_version='0.1.2')), \
+                         patch.object(FIXTURE,'original_hash',side_effect=lambda op,e:digest if e['name']=='mrk-macos-install' else package_digest), \
+                         patch.object(FIXTURE,'copy',side_effect=copy_file),patch.object(FIXTURE,'retained',side_effect=retained), \
+                         patch.object(FIXTURE,'output',side_effect=output),patch.object(FIXTURE,'mkdir',side_effect=lambda *a:entry('input')), \
+                         patch.object(FIXTURE,'copy_input'),patch.object(FIXTURE,'input_post'),patch.object(FIXTURE,'post'), \
+                         patch.object(FIXTURE,'reserve',side_effect=quoted),patch.object(FIXTURE,'io',side_effect=lambda op,label,fn,*a:fn(*a)), \
+                         patch.object(FIXTURE.os,'fchmod'),patch.object(FIXTURE.os,'fstat',return_value=None):
+                        data=FIXTURE.prepare_one(op,cut)
+                    self.assertEqual([role for role,_,_ in commands],[prefix+'-'+r for r in ('build','adhoc','verify-code','pkgbuild','tar','xar')])
+                    self.assertEqual(commands[0][1][commands[0][1].index('--features')+1],'macos-installed-restore-'+cut+'-fixture')
+                    for index in (1,2): self.assertEqual(commands[index][1][-1],str(op.work/(prefix+'-prepared')/'mrk-macos-install'))
+                    self.assertIn(('postinstall',FIXTURE.CUT_POSTINSTALL),written)
+                    self.assertIsNone(data['pureDataTests']);self.assertFalse(data['productReady'])
+                    self.assertEqual(data['fixtureFeature'],'macos-installed-restore-'+cut+'-fixture')
+                    self.assertEqual([n for n,_ in allocations],[prefix+'-'+n for n in ('executable','scripts','original','archive','fixture')])
+                    self.assertEqual([size for _,size in allocations],[FIXTURE.OUTPUTS[n] for n in ('executable','scripts','original','archive','fixture')])
+
+    def test_existing_operation_owner_accepts_only_joined_cut_one_and_settled_proof(self):
+        # Reuse existing Operation fixture (no new process implementation).
+        import sys
+        import subprocess
+        spec = importlib.util.spec_from_file_location('mrk_restore_chain_existing_fixtures', ROOT/'tests/desktop/test_macos_installed_staging.py')
+        fixtures = importlib.util.module_from_spec(spec);spec.loader.exec_module(fixtures)
+        harness = fixtures.MacAndroidHelperPackagingData()
+        for fault in (None, 'zero', 'unknown', 'unproved'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                checkout, work, environment, _, _ = harness.fixture(Path(directory),build_target=FIXTURE.TARGETS[0])
+                producer,service,_,_,_=fixtures.packaging_fixture(FIXTURE.TARGETS[0])
+                (checkout/HELPER.PROFILE).write_bytes(service);(checkout/HELPER.PRODUCER_PROFILE).write_bytes(producer)
+                adapter_path=checkout/'desktop/tools/macos_app_absence_fixture.py';adapter_path.parent.mkdir(parents=True,exist_ok=True)
+                adapter_path.write_bytes((ROOT/'desktop/tools/macos_app_absence_fixture.py').read_bytes());adapter_path.chmod(0o644)
+                environment.update(GITHUB_REF=HELPER.RESTORE_CHAIN_REF,MRK_MACOS_SAME_PACKAGE_SCOPE='disabled')
+                events=[]
+                def native(argv,**kwargs):
+                    role=operation.calls[-1]['role'];events.append(role)
+                    self.assertEqual(argv,['/inert/fixed-data-port',role])
+                    if role=='app-absence-cut-app-write' and fault=='unknown': raise RuntimeError('inert original uncertainty')
+                    code=1 if role.startswith('app-absence-cut-') else 0
+                    if role=='app-absence-cut-app-write' and fault=='zero': code=0
+                    return subprocess.CompletedProcess(argv,code,b'',b'')
+                operation=HELPER.Operation(SimpleNamespace(run_owned=native),checkout,work,FIXTURE.RESTORE,environment,fixtures.TOOL,target=FIXTURE.TARGETS[0])
+                original_load=operation.app_absence_load
+                def phase_port(op):
+                    adapter=op.app_absence_module;op.app_absence['case']=op.package_directory('app-absence-case')
+                    op.app_absence['mount']={'entered':False,'detached':False}
+                    for role in adapter.roles(op):
+                        op.package_call(role,['/inert/fixed-data-port',role],timeout=30,limit=65536)
+                        phase=role.removeprefix('app-absence-')
+                        if phase in adapter.RECOVERY_PHASES:
+                            _, value=phase_value('verify');index=adapter.RECOVERY_PHASES.index(phase)
+                            op.app_absence['nativeBinding']={k:value[k] for k in adapter.BINDING_FIELDS}
+                            op.app_absence['baselineSha256']=value['baselineSha256'];value['phase']=phase
+                            value['proof']=dict(step=index,initialHistoryPreserved=True,runtimeUnchanged=True,
+                                withdrawnAppVerified=True,partialAppConserved=fault!='unproved',recordReadback=True,
+                                ordinaryRetryComplete=index==3,originalOuterExitRequired=True)
+                            adapter.phase_observation(op,SimpleNamespace(returncode=0,stdout=marker(value),stderr=b''),phase)
+                        if role=='app-absence-restore-detach':op.app_absence['mount']['detached']=True
+                    op.sha256='a'*64;op.app_absence['complete']=True  # Inert phase port, not a native claim.
+                def load():
+                    original_load();operation.app_absence_module.restore=phase_port
+                try:
+                    with patch.dict(sys.modules,{HELPER.__name__:HELPER}),patch.object(operation,'app_absence_load',side_effect=load), \
+                         patch.object(os,'fstatvfs',return_value=SimpleNamespace(f_bavail=100*1024*1024,f_frsize=4096)):
+                        if fault is None: operation.execute()
+                        else:
+                            with self.assertRaisesRegex(HELPER.Refused,'^helper-package-incomplete$'):operation.execute()
+                    self.assertEqual(operation.credential_calls,[]);self.assertEqual(operation.credential_contexts,[])
+                    if fault is None:
+                        self.assertTrue(operation.receipt['passed']);self.assertTrue(operation.receipt['originalClosesKnown'])
+                        self.assertTrue(operation.receipt['targetRetired'])
+                        self.assertEqual(sum(row['returncode']==1 for row in operation.calls),3)
+                    else:
+                        self.assertFalse(operation.receipt['passed']);self.assertNotIn('app-absence-cut-own-attempt',events)
+                        self.assertFalse(operation.receipt['originalClosesKnown'] or operation.receipt['targetRetired'])
+                finally:
+                    for entry in reversed(operation.entries): operation.close(entry)

@@ -11845,6 +11845,35 @@ mod installer {
                 "restoreRecovery":history.current.intent.restore_recovery_data(),
                 "restoreNamespace":restore_namespace.binding()}))
         }
+        #[cfg(feature="macos-installed-restore-chain-observer")]
+        pub(super) fn restore_chain_snapshot(book:&mut Install,observed:&Observed)->Result<serde_json::Value> {
+            check(observed.intent.is_none()&&observed.intent_original.is_none(),"restore-chain-readonly-observer")?;
+            if observed.action==ActionData::SamePackageNoop {
+                let snapshot=app_absence_snapshot(book,observed)?;
+                let namespace=observed.restore_namespace.as_ref().ok_or("restore-chain-namespace")?;
+                let preserved=namespace.fixture_preserved(book,observed.prepared.destination)?;
+                namespace.post(book,observed.prepared.destination,observed.history.as_ref().ok_or("restore-chain-history")?,&observed.selected)?;
+                return Ok(serde_json::json!({"current":snapshot,"preserved":preserved}));
+            }
+            check(observed.action==ActionData::RestoreFixedApp && observed.old_app.is_none()
+                && observed.restore_namespace.as_ref().is_some_and(|n|n.names.is_empty()),"restore-chain-pending-required")?;
+            app_absence_initial_history(observed)?;observed.controls_post(book)?;
+            let history=observed.history.as_ref().ok_or("restore-chain-history")?;
+            held_bytes(book,history.state_original,&history.state_bytes)?;
+            let release=observed.old_release.ok_or("restore-chain-runtime")?;
+            book.check_name(release,true)?;
+            let runtime=book.open(Some(release),"runtime",true)?;book.protected(runtime,true,Some(0o555))?;
+            let runtime_id=worker::identity_data(book.identity(runtime)?);book.forward_close(runtime,"restore-chain-runtime-close")?;
+            let recovery=observed.restore.as_ref().ok_or("restore-chain-pending")?;
+            recovery.fixture_post(book,&observed.prepared,history,&observed.selected)?;
+            let pending=recovery.fixture_pending()?;
+            book.absent(observed.prepared.destination,paths::APP_NAME)?;
+            Ok(serde_json::json!({"root":book.recorded_directory(observed.prepared.destination)?,
+                "versions":book.recorded_directory(observed.prepared.versions)?,"release":worker::identity_data(book.identity(release)?),
+                "runtime":runtime_id,"instance":history.current.state.current_data().instance_data(),
+                "invocation":history.current.intent.invocation_data(),"stateSha256":history.current.state.digest_data(),
+                "intentSha256":history.current.intent.digest_data(),"capsuleSha256":history.current.capsule.digest_data(),"pending":pending}))
+        }
         #[cfg(feature="macos-installed-app-absence-fixture")]
         pub(super) fn app_absence_initial_history(observed:&Observed)->Result<()> {
             let h=observed.history.as_ref().ok_or("app-absence-history-required")?;

@@ -50,6 +50,7 @@ PACKAGE_SCOPES = (
     "project-recovery-pending", "ios-recovery-pending", "doctor-preflight2", "local-edits3",
 )
 APP_ABSENCE_REF = "refs/heads/verify/desktop-macos-app-absence-fixture"
+RESTORE_CHAIN_REF = "refs/heads/verify/desktop-macos-restore-chain-fixture"
 APP_ABSENCE_PHASES = ("prepare-app-absence", "app-absence-restore")
 UPDATE_REF = "refs/heads/verify/desktop-macos-positive-update"
 UPDATE_PHASE = "update-baseline"
@@ -1883,7 +1884,8 @@ def package_timeout_data(now, endpoint, requested, *, phase=None, role=None):
     need((phase is None and role is None) or (type(phase) is str and type(role) is str),
          "package-group-clock")
     maximum = (1440 if phase == "prepare-app-absence" and role in
-               ("app-absence-build", "app-absence-data-tests") else 480)
+               ("app-absence-build", "app-absence-data-tests", "app-absence-cut-app-write-build",
+                "app-absence-cut-own-attempt-build", "app-absence-cut-stage-move-build") else 480)
     need(type(now) is int and type(endpoint) is int and 0 <= now < endpoint
          and type(requested) is int and 0 < requested <= maximum, "package-group-clock")
     remaining = (endpoint - now - 3_000_000_000) // 1_000_000_000
@@ -2324,7 +2326,7 @@ class Operation:
     def app_absence_load(self):
         # One fixed current SOURCE leaf, held before loading any definitions.
         # Not a plug-in resolver or a new process owner.
-        entry = self.source_original("desktop/tools/macos_app_absence_fixture.py", "source-app-absence-adapter", 65536)
+        entry = self.source_original("desktop/tools/macos_app_absence_fixture.py", "source-app-absence-adapter", 96 * 1024)
         body = self.read(entry)
         path = self.checkout / "desktop/tools/macos_app_absence_fixture.py"
         spec = importlib.util.spec_from_file_location("mrk_app_absence_adapter", path)
@@ -2616,8 +2618,10 @@ class Operation:
             except BaseException:
                 pass  # No diagnostic failure may replace the SAME nonzero result.
         diagnostic = self.phase == "package-install" and role in ("installer-log-cursor", "installer-log-capture")
-        need(result.returncode == 0 or diagnostic and result.returncode == 1
-             or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, role, result.returncode),
+        need(result.returncode == 0 and not (self.app_absence is not None and self.app_absence_module.cut_role_data(self, role))
+             or diagnostic and result.returncode == 1
+             or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, role, result.returncode)
+             or self.app_absence is not None and self.app_absence_module.cut_return_data(self, role, result.returncode),
              "original-nonzero-" + role)
         if self.android_support is not None:
             self.android_support_module.returned(self, role)
@@ -8054,7 +8058,7 @@ class Operation:
                 self.android_support_load()
             if self.environment.get("GITHUB_REF") == UPDATE_REF and self.phase in (UPDATE_PHASE, "package-install"):
                 self.update_load()
-            if self.phase in APP_ABSENCE_PHASES or self.phase == "package-install" and self.environment.get("GITHUB_REF") == APP_ABSENCE_REF:
+            if self.phase in APP_ABSENCE_PHASES or self.phase == "package-install" and self.environment.get("GITHUB_REF") in (APP_ABSENCE_REF, RESTORE_CHAIN_REF):
                 self.app_absence_load()
             self.profile_entry = self.source_original(PROFILE, "source-signing-profile", 1024)
             self.service_profile = self.read(self.profile_entry)
@@ -8063,7 +8067,7 @@ class Operation:
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
                 allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + STORE_SIGNING_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
-                and self.environment.get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF, CANDIDATE_REF))
+                and self.environment.get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF))
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
             if self.phase in STORE_SIGNING_PHASES:
@@ -8168,9 +8172,11 @@ class Operation:
                                   and self.receipt["targetRetired"] and self.receipt["originalClosesKnown"]
                                   and tuple(call["role"] for call in self.calls) == roles
                                   and all(call["returned"] and call.get("capturesSettled") is True
-                                       and (call["returncode"] == 0 or self.phase == "package-install"
+                                       and (call["returncode"] == 0 and not (self.app_absence is not None and self.app_absence_module.cut_role_data(self, call["role"]))
+                                       or self.phase == "package-install"
                                        and call["role"] in ("installer-log-cursor", "installer-log-capture") and call["returncode"] == 1
-                                       or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, call["role"], call["returncode"])) for call in self.calls)
+                                       or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, call["role"], call["returncode"])
+                                       or self.app_absence is not None and self.app_absence_module.cut_return_data(self, call["role"], call["returncode"])) for call in self.calls)
                                   and self.sha256 is not None
                                   and (self.phase not in FINAL_PACKAGE_PHASES or self.final_package_complete and self.notary_known()
                                        and self.notary_key is None and tuple(row["role"] for row in self.credential_calls) == INSTALLER_CREDENTIAL_ROSTER
@@ -8317,9 +8323,9 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
         need(ref == UPDATE_REF and not any(k in environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
              + (NOTARY_KEY_VARIABLE,)), "update-fixed-credential-free-baseline")
     if phase in APP_ABSENCE_PHASES:
-        need(ref == APP_ABSENCE_REF and not any(k in environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
+        need(ref in (APP_ABSENCE_REF, RESTORE_CHAIN_REF) and not any(k in environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
              + (NOTARY_KEY_VARIABLE,)), "app-absence-fixed-native-phase")
-    if ref == APP_ABSENCE_REF:
+    if ref in (APP_ABSENCE_REF, RESTORE_CHAIN_REF):
         need(scope == "disabled" and phase in APP_SIGNATURE_PHASES + ("notarize-payload", "sign-root-installer", "finalize-package", "package-install")
              + APP_ABSENCE_PHASES, "app-absence-fixed-native-route")
     if ref == APP_SIGNATURE_REF:
@@ -8356,7 +8362,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     workflow = ("desktop-macos-android-support-signing.yml" if support_phase else
                 "desktop-macos-python-runtime-signing.yml" if python_phase or tool_phase or store_phase else
                 "desktop-macos-aqua.yml" if ref == "refs/heads/verify/desktop-macos-aqua" else
-                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF, CANDIDATE_REF) else None)
+                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF) else None)
     need(workflow is not None, "closed-workflow-route")
     sha = environment.get("GITHUB_SHA", "")
     required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": runner_arch,
@@ -8640,11 +8646,11 @@ def tool_data_context(environment, phase, target):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "tool-data-platform")
     ref = environment.get("GITHUB_REF")
     build_selection = phase in TOOL_SELECTION_PHASES[:2]
-    if ref in (APP_SIGNATURE_REF, APP_ABSENCE_REF, CANDIDATE_REF):
+    if ref in (APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, CANDIDATE_REF):
         need(phase in APP_SIGNATURE_DATA, "app-signature-fixed-data-phase")
     workflow = "desktop-macos-python-runtime-signing.yml" if build_selection else "desktop-macos-installed.yml"
     need(ref == TOOL_REF if build_selection else ref in
-         ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, CANDIDATE_REF), "tool-data-ref")
+         ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, CANDIDATE_REF), "tool-data-ref")
     sha = environment.get("GITHUB_SHA")
     need(tool_hex(sha, 40) and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py"
          and all(environment.get(k) == v for k, v in {

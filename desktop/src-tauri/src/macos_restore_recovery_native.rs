@@ -1881,3 +1881,57 @@ fn snapshot_v3_descriptor_wire_and_completed_prefix_data() {
         }
     }
 }
+
+// Nonshipping, readonly projections of ALREADY authenticated original groups.
+// They are private fixture records, never INIT/RESULT, selectors or admission.
+#[cfg(feature="macos-installed-restore-chain-observer")]
+fn fixture_attempt(attempt:&AttemptObserved)->serde_json::Value {
+    serde_json::json!({"invocation":attempt.expected.invocation,"requestId":attempt.expected.request,
+        "identity":attempt.expected.identity,"expectedSha256":hash(&attempt.expected.body),
+        "rawSha256":attempt.raw_sha,"bytes":attempt.raw_size,"mode":attempt.mode})
+}
+#[cfg(feature="macos-installed-restore-chain-observer")]
+impl Observation {
+    pub(super) fn fixture_post(&self,book:&mut Install,prepared:&PreparedFresh,history:&History,selected:&ReleaseSetData)->Result<()> {
+        self.post(book,prepared,history,selected)
+    }
+    pub(super) fn fixture_pending(&self)->Result<serde_json::Value> {
+        check(self.current.is_none()&&!self.preservation.entered&&(1..=3).contains(&self.attempts.len())
+            &&self.receipts.len()+1==self.attempts.len()&&self.stage.prepared==PreparedReceipt::Absent,
+            "restore-chain-fixed-pending")?;
+        let app=self.stage.app.ok_or("restore-chain-positive-app")?;
+        check(app.bytes>0&&app.bytes<=65536&&app.state==PartialFreshFileState::Unfinished
+            &&self.stage.control_files==1
+            &&self.attempts.iter().all(|a|a.placement==transaction::RestoreOriginalPlacementData::Original),
+            "restore-chain-fixed-app-prefix")?;
+        Ok(serde_json::json!({"base":self.base.invocation_data(),"stage":self.stage_identity,
+            "stageSha256":archive_hex_text_data(&self.stage.commitment),"appBytes":app.bytes,
+            "phaseFiles":self.stage.control_files,"stagePreserved":self.stage_placement==transaction::RestoreOriginalPlacementData::Preserved,
+            "attempts":self.attempts.iter().map(fixture_attempt).collect::<Vec<_>>(),
+            "receipts":self.receipts.iter().map(|r|hash(&r.data.raw)).collect::<Vec<_>>()}))
+    }
+}
+#[cfg(feature="macos-installed-restore-chain-observer")]
+impl Namespace {
+    pub(super) fn fixture_preserved(&self,book:&mut Install,root:usize)->Result<serde_json::Value> {
+        check(self.groups.len()==1,"restore-chain-one-group")?;
+        let group=&self.groups[0];
+        check(group.attempts.len()==4&&group.transport.app_bytes>0&&group.transport.app_bytes<=65536
+            &&group.transport.phase_files==1,"restore-chain-fixed-complete")?;
+        // Only three readonly additional attempt views, sequential scoped FDs;
+        // no native borrowing or future-close credit and no increased cap.
+        check(book.originals.len().checked_add(12).is_some_and(|n|n<=installation_record::ORIGINAL_LIMIT)
+            &&book.originals.iter().filter(|r|r.fd.is_some()).count().checked_add(4).is_some_and(|n|n<=96),
+            "restore-chain-observer-original-bound")?;
+        let mut attempts=Vec::with_capacity(3);
+        for expected in group.attempts.iter().take(3) {
+            let attempt=observe_attempt(book,root,group.base.invocation_data(),expected.clone())?;
+            check(attempt.placement==transaction::RestoreOriginalPlacementData::Preserved,"restore-chain-preserved-attempt")?;
+            attempts.push(fixture_attempt(&attempt));
+        }
+        Ok(serde_json::json!({"base":group.base.invocation_data(),"stage":group.stage_identity,
+            "stageSha256":archive_hex_text_data(&group.transport.commitment),"appBytes":group.transport.app_bytes,
+            "phaseFiles":group.transport.phase_files,"stagePreserved":true,"attempts":attempts,
+            "holder":group.holder.invocation_data(),"reference":group.holder.restore_recovery_data()}))
+    }
+}

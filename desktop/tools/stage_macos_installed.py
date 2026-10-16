@@ -3674,14 +3674,19 @@ def original_package(scripts_path, package_path, *, fixture=False, selection=Non
     return scripts, package, members, identifier, owner
 
 
-def app_absence_scripts_data(scripts, expected_program, expected_inventory):
+def app_absence_scripts_data(scripts, expected_program, expected_inventory, *, restore_cut=None):
+    need(restore_cut is None or restore_cut in ("app-write", "own-attempt", "stage-move"), "restore-chain-script-purpose")
     """One nonshipping role, never arbitrary scripts or an ordinary parser exception."""
     need(type(scripts) is dict and sha(expected_program) and sha(expected_inventory), "app-absence-scripts-shape")
     fixed = b'#!/bin/sh\nset -eu\nd="${0%/*}"\nexec "$d/mrk-macos-app-absence-fixture" "$d/input" "$1"\n'
+    program_name = "mrk-macos-app-absence-fixture"
+    if restore_cut is not None:
+        program_name = "mrk-macos-install"
+        fixed = b'#!/bin/sh\nset -eu\nd="${0%/*}"\np="${1%/*}/Install.pkg"\nexec "$d/mrk-macos-install" "$d/input" "$p"\n'
     need(scripts.get("postinstall") == (fixed, 0o555)
-         and set(name for name in scripts if not name.startswith("input/")) == {"postinstall", "mrk-macos-app-absence-fixture"},
+         and set(name for name in scripts if not name.startswith("input/")) == {"postinstall", program_name},
          "app-absence-scripts-roster")
-    program, mode = scripts["mrk-macos-app-absence-fixture"]
+    program, mode = scripts[program_name]
     need(type(program) is bytes and 0 < len(program) <= 64 * 1024 * 1024 and mode == 0o555
          and digest(program) == expected_program, "app-absence-program-correspondence")
     inventory = scripts.get("input/" + INSTALLATION_INVENTORY_NAME)
@@ -3694,8 +3699,8 @@ def app_absence_original_command(args):
     selection = source_build_selection(command_target(args))
     scripts, original, members, identifier, owner = original_package(args.scripts, args.original_package,
         selection=selection, app_absence=True)
-    app_absence_scripts_data(scripts, args.expected_program, args.expected_inventory)
-    macho(scripts["mrk-macos-app-absence-fixture"][0], target=selection.target)
+    app_absence_scripts_data(scripts, args.expected_program, args.expected_inventory, restore_cut=getattr(args, "restore_cut", None))
+    macho(scripts["mrk-macos-install" if getattr(args, "restore_cut", None) is not None else "mrk-macos-app-absence-fixture"][0], target=selection.target)
     rows = {name: {"size": len(body), "sha256": digest(body), "mode": mode} for name, (body, mode) in scripts.items()}
     rows.update({name: {"size": None, "sha256": None, "mode": 0o555} for name in directories(scripts)})
     need(len(rows) <= MAX_FILES, "app-absence-script-count")

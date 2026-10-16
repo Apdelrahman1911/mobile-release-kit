@@ -7,8 +7,14 @@ const OUTPUT_MARKER:&[u8]=b"MRK_MACOS_APP_ABSENCE_RESULT=";
 const FIXTURE_PACKAGE_LIMIT: u64 = 640 * 1024 * 1024;
 const FIXTURE_IMAGE_LIMIT: u64 = 2560 * 1024 * 1024;
 const PHASE_NAMES: [&str; 3] = ["MRK-AppAbsence-Baseline.pkg", "MRK-AppAbsence-Withdraw.pkg", "MRK-AppAbsence-Verify.pkg"];
+#[cfg(not(feature="macos-installed-restore-chain-observer"))]
 const CARRIER_NAMES: [&str; 6] = ["Install.pkg", "producer.json", "producer.sig",
     "MRK-AppAbsence-Baseline.pkg", "MRK-AppAbsence-Withdraw.pkg", "MRK-AppAbsence-Verify.pkg"];
+
+#[cfg(feature="macos-installed-restore-chain-observer")]
+const CARRIER_NAMES: [&str; 9] = ["Install.pkg", "producer.json", "producer.sig",
+    "MRK-AppAbsence-Baseline.pkg", "MRK-AppAbsence-Withdraw.pkg", "MRK-AppAbsence-Verify.pkg",
+    "MRK-Restore-AppWrite.pkg", "MRK-Restore-OwnAttempt.pkg", "MRK-Restore-StageMove.pkg"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PhaseData { Baseline, Withdraw, Verify }
@@ -395,7 +401,8 @@ fn protected_storage(book:&Install,root:usize,app_bytes:u64)->Result<()> {
     let free=fs.blocks_available().checked_mul(u64::from(fs.block_size())).ok_or("app-absence-storage")?;
     // Existing app remains live after rename; another complete app plus fixed
     // records and the approved free floor/reserve must fit this actual volume.
-    let needed=app_bytes.checked_add(3*RECORD_LIMIT as u64).and_then(|n|n.checked_add(5*1024*1024*1024))
+    let records=if cfg!(feature="macos-installed-restore-chain-observer") {6}else{3};
+    let needed=app_bytes.checked_add(records*RECORD_LIMIT as u64).and_then(|n|n.checked_add(5*1024*1024*1024))
         .ok_or("app-absence-storage")?;
     check(free>=needed,"app-absence-storage")?;book.clock()
 }
@@ -423,8 +430,11 @@ fn initial_snapshot_data(value:&Value)->Result<()> {
         "app-absence-initial-snapshot")
 }
 fn restore_snapshot_data(before:&Value,after:&Value)->Result<()> {
-    initial_snapshot_data(before)?;
     ordinary_restore_namespace_data(after)?;
+    restore_transition_data(before,after)
+}
+fn restore_transition_data(before:&Value,after:&Value)->Result<()> {
+    initial_snapshot_data(before)?;
     object(after,&["root","versions","release","runtime","app","instance","invocation","requestId","action",
         "stateSha256","intentSha256","capsuleSha256","previous","history","restoreRecovery","restoreNamespace"])?;
     for key in ["stateSha256","intentSha256","capsuleSha256"] {check(after[key].as_str().is_some_and(sha),"app-absence-snapshot-hash")?;}
@@ -505,7 +515,9 @@ fn observe_current(book:&mut Install,admission:&mut Admission,baseline:&Baseline
     let selected=admission.selected.as_ref().ok_or("app-absence-native-admission-required")?.clone();
     let prepared=PreparedFresh{input:admission.source.input,inventory,inventory_bytes,destination:root,versions};
     let observed=maintenance::observe(book,prepared,selected,None)?;
-    check(observed.action==ActionData::SamePackageNoop,"app-absence-current-required")?;
+    check(observed.action==ActionData::SamePackageNoop
+        || cfg!(feature="macos-installed-restore-chain-observer") && admission.phase==PhaseData::Verify
+            && observed.action==ActionData::RestoreFixedApp,"app-absence-current-required")?;
     observed.incoming_controls(book,admission.producer.input.descriptor_data(),admission.producer.input.signature_data())?;
     book.registration_complete_admitted(root,observed.action)?;
     gates.post(book)?;book.registration_ready()?;Ok(observed)
@@ -626,7 +638,12 @@ pub(in crate::installer) fn entry()->i32 {
                 observation_data(&binding,PhaseData::Baseline,&baseline.record.digest,&baseline.record.digest)?
             },
             PhaseData::Withdraw=>{let baseline=Baseline::read(&mut book,&binding)?;withdraw(&mut book,admitted,&binding,&baseline)?},
-            PhaseData::Verify=>{let baseline=Baseline::read(&mut book,&binding)?;verify(&mut book,admitted,&binding,&baseline)?},
+            PhaseData::Verify=>{let baseline=Baseline::read(&mut book,&binding)?;
+                #[cfg(feature="macos-installed-restore-chain-observer")]
+                { recovery_verify(&mut book,admitted,&binding,&baseline)? }
+                #[cfg(not(feature="macos-installed-restore-chain-observer"))]
+                { verify(&mut book,admitted,&binding,&baseline)? }
+            },
         };
         // This line says only pre-exit facts. Parent MUST require our actual0.
         emit_observation(&book,&output)
@@ -726,6 +743,8 @@ mod tests {
         after["history"].as_array_mut().unwrap().push(json!({"invocation":"1".repeat(32),"requestId":"2".repeat(32),
             "intentSha256":"3".repeat(64),"stateSha256":"4".repeat(64),"capsuleSha256":"5".repeat(64)}));
         assert!(restore_snapshot_data(&before,&after).is_ok());
+        #[cfg(feature="macos-installed-restore-chain-observer")]
+        recovery_chain_data_checks(&before,&after);
         // A genuine recovered State/reference still is NOT ordinary Restore
         // evidence. Missing/null/extra rows and typed count substitutions also
         // refuse; the private commitment never replaces an actual native audit.
@@ -762,6 +781,57 @@ mod tests {
         assert!(restore_snapshot_data(&before,&changed).is_err());
         let mut changed=before.clone();changed["action"]=json!("same-package-noop");assert!(initial_snapshot_data(&changed).is_err());
         changed=before.clone();changed["previous"]=json!(["1".repeat(32),"2".repeat(64)]);assert!(initial_snapshot_data(&changed).is_err());
+    }
+    #[cfg(feature="macos-installed-restore-chain-observer")]
+    fn recovery_chain_data_checks(before:&Value,ordinary_after:&Value) {
+        let mut pending=before.clone();
+        for key in ["app","requestId","action","previous","history","restoreRecovery","restoreNamespace"] {pending.as_object_mut().unwrap().remove(key);}
+        let identity=json!({"device":1,"inode":22,"birthSeconds":1,"birthNanoseconds":0});
+        let attempt=|index:u8|json!({"invocation":format!("{index:032x}"),"requestId":format!("{:032x}",index+10),
+            "identity":identity,"expectedSha256":"7".repeat(64),"rawSha256":if index==4 {digest_data(&[])}else{"7".repeat(64)},
+            "bytes":if index==4 {0}else{100},"mode":if index==4 {0o600}else{0o444}});
+        pending["pending"]=json!({"base":format!("{:032x}",3),"stage":identity,"stageSha256":"8".repeat(64),
+            "appBytes":17,"phaseFiles":1,"stagePreserved":false,"attempts":[attempt(3)],"receipts":[]});
+        assert!(recovery_step_data(before,None,&pending,0).is_ok());
+        assert!(recovery_step_data(before,Some(&pending),&pending,0).is_err());
+        assert!(recovery_step_data(before,None,&pending,1).is_err());
+        let mut second=pending.clone();second["pending"]["attempts"].as_array_mut().unwrap().push(attempt(4));
+        second["pending"]["receipts"]=json!(["9".repeat(64)]);
+        assert!(recovery_step_data(before,Some(&pending),&second,1).is_ok());
+        let mut third=second.clone();third["pending"]["attempts"].as_array_mut().unwrap().push(attempt(5));
+        third["pending"]["receipts"].as_array_mut().unwrap().push(json!("6".repeat(64)));third["pending"]["stagePreserved"]=json!(true);
+        assert!(recovery_step_data(before,Some(&second),&third,2).is_ok());
+        let mut current=ordinary_after.clone();let reference=json!({"tornInvocation":pending["pending"]["base"],
+            "receiptInvocation":current["invocation"],"receiptSha256":"4".repeat(64)});
+        current["restoreRecovery"]=reference.clone();current["restoreNamespace"]=json!({"commitment":"5".repeat(64),
+            "groups":1,"names":7,"files":8,"controlBytes":900,"payloadBytes":17});
+        let mut saved=third["pending"].clone();saved.as_object_mut().unwrap().remove("receipts");
+        saved["holder"]=current["invocation"].clone();saved["reference"]=reference;
+        let complete=json!({"current":current,"preserved":saved});
+        assert!(recovery_step_data(before,Some(&third),&complete,3).is_ok());
+        assert!(restore_snapshot_data(before,&complete["current"]).is_err());
+        for (step,previous,actual) in [(0,None,&pending),(1,Some(&pending),&second),(2,Some(&second),&third)] {
+            for key in ["root","versions","release","runtime","instance","stateSha256"] {
+                let mut changed=actual.clone();changed[key]=Value::Null;assert!(recovery_step_data(before,previous,&changed,step).is_err());
+            }
+            for key in ["stageSha256","appBytes","phaseFiles","stagePreserved","attempts","receipts"] {
+                let mut changed=actual.clone();changed["pending"][key]=Value::Null;assert!(recovery_step_data(before,previous,&changed,step).is_err());
+            }
+        }
+        for bad in [json!(1),json!(true),json!(-1)] {
+            let mut changed=second.clone();changed["pending"]["attempts"][1]["bytes"]=bad;
+            assert!(recovery_step_data(before,Some(&pending),&changed,1).is_err());
+        }
+        let mut changed=third.clone();changed["pending"]["attempts"][1]["rawSha256"]=json!("0".repeat(64));
+        assert!(recovery_step_data(before,Some(&second),&changed,2).is_err());
+        for key in ["base","stage","stageSha256","appBytes","attempts","reference","holder"] {
+            let mut changed=complete.clone();changed["preserved"][key]=Value::Null;
+            assert!(recovery_step_data(before,Some(&third),&changed,3).is_err());
+        }
+        for bad in [json!(0),json!(2),json!(true)] {
+            let mut changed=complete.clone();changed["current"]["restoreNamespace"]["groups"]=bad;
+            assert!(recovery_step_data(before,Some(&third),&changed,3).is_err());
+        }
     }
     #[test]
     fn exclusive_rename_metadata_and_record_bounds_are_not_identity_reset() {
@@ -821,4 +891,118 @@ mod tests {
         assert!(private_record_data(&binding,&"2".repeat(64),&Value::Null,&Value::Null,PhaseData::Baseline).is_err());
     }
 
+}
+
+// The SAME Verify package is called at four fixed points. Its private exact
+// prefix roster selects the next observation, never an environment/path flag.
+#[cfg(feature="macos-installed-restore-chain-observer")]
+const RECOVERY_RECORDS:[&str;4]=["cut-1.json","cut-2.json","cut-3.json","recovered.json"];
+#[cfg(feature="macos-installed-restore-chain-observer")]
+fn recovery_step_data(before:&Value,previous:Option<&Value>,actual:&Value,step:usize)->Result<()> {
+    initial_snapshot_data(before)?;check(step<4&&previous.is_some()==(step>0),"restore-chain-step")?;
+    if step<3 {
+        object(actual,&["root","versions","release","runtime","instance","invocation","stateSha256","intentSha256","capsuleSha256","pending"])?;
+        for key in ["root","versions","release","runtime","instance","invocation","stateSha256","intentSha256","capsuleSha256"] {
+            check(actual[key]==before[key],"restore-chain-initial-unchanged")?;
+        }
+        let pending=&actual["pending"];
+        object(pending,&["base","stage","stageSha256","appBytes","phaseFiles","stagePreserved","attempts","receipts"])?;
+        let attempts=pending["attempts"].as_array().ok_or("restore-chain-attempts")?;
+        let receipts=pending["receipts"].as_array().ok_or("restore-chain-receipts")?;
+        check(attempts.len()==step+1&&receipts.len()==step&&pending["phaseFiles"]==1
+            &&pending["stagePreserved"].as_bool()==Some(step==2)
+            &&pending["appBytes"].as_u64().is_some_and(|n|n>0&&n<=65536)
+            &&pending["stageSha256"].as_str().is_some_and(sha)
+            &&pending["base"]==attempts[0]["invocation"]
+            &&receipts.iter().all(|r|r.as_str().is_some_and(sha)),"restore-chain-exact-cut")?;
+        let mut ids=BTreeSet::new();
+        for (index,attempt) in attempts.iter().enumerate() {
+            object(attempt,&["invocation","requestId","identity","expectedSha256","rawSha256","bytes","mode"])?;
+            for key in ["invocation","requestId"] {
+                let id=attempt[key].as_str().filter(|v|invocation_valid(v)).ok_or("restore-chain-attempt-id")?;
+                check(ids.insert(id)&&id!=before["invocation"].as_str().ok_or("restore-chain-before-id")?
+                    &&id!=before["requestId"].as_str().ok_or("restore-chain-before-id")?,"restore-chain-reused-id")?;
+            }
+            check(attempt["expectedSha256"].as_str().is_some_and(sha)
+                &&attempt["rawSha256"].as_str().is_some_and(sha),"restore-chain-attempt-hash")?;
+            if index==1 {
+                check(attempt["bytes"].as_u64()==Some(0)&&attempt["mode"].as_u64()==Some(0o600)
+                    &&attempt["rawSha256"]==digest_data(&[]),"restore-chain-durable-empty-attempt")?;
+            }else {
+                check(attempt["bytes"].as_u64().is_some_and(|n|n>0&&n<=transaction::INTENT_LIMIT as u64)
+                    &&attempt["mode"].as_u64()==Some(0o444)&&attempt["rawSha256"]==attempt["expectedSha256"],
+                    "restore-chain-complete-intent")?;
+            }
+        }
+        if let Some(previous)=previous {
+            let old=&previous["pending"];
+            for key in ["base","stage","stageSha256","appBytes","phaseFiles"] {check(pending[key]==old[key],"restore-chain-conservation")?;}
+            check(old["attempts"].as_array().is_some_and(|a|a.len()==step&&a.as_slice()==&attempts[..step])
+                &&old["receipts"].as_array().is_some_and(|a|a.len()+1==receipts.len()&&a.as_slice()==&receipts[..step-1]),
+                "restore-chain-preserved-prefix")?;
+        }else {check(step==0,"restore-chain-missing-previous")?;}
+    }else {
+        object(actual,&["current","preserved"])?;
+        let previous=previous.ok_or("restore-chain-missing-previous")?;
+        let current=&actual["current"];let saved=&actual["preserved"];let old=&previous["pending"];
+        restore_transition_data(before,current)?;
+        object(saved,&["base","stage","stageSha256","appBytes","phaseFiles","stagePreserved","attempts","holder","reference"])?;
+        for key in ["base","stage","stageSha256","appBytes","phaseFiles","attempts"] {check(saved[key]==old[key],"restore-chain-final-conservation")?;}
+        let reference=&current["restoreRecovery"];
+        object(reference,&["tornInvocation","receiptInvocation","receiptSha256"])?;
+        check(saved["stagePreserved"]==true&&old["stagePreserved"]==true
+            &&saved["holder"]==current["invocation"]&&saved["reference"]==*reference
+            &&reference["tornInvocation"]==saved["base"]&&reference["receiptInvocation"]==current["invocation"]
+            &&reference["receiptSha256"].as_str().is_some_and(sha),"restore-chain-genuine-reference")?;
+        let ns=&current["restoreNamespace"];
+        object(ns,&["commitment","groups","names","files","controlBytes","payloadBytes"])?;
+        check(ns["commitment"].as_str().is_some_and(sha)&&ns["groups"].as_u64()==Some(1)&&ns["names"].as_u64()==Some(7)
+            &&ns["files"].as_u64().is_some_and(|n|n>=8&&n<=installation_record::FILE_LIMIT as u64)
+            &&ns["controlBytes"].as_u64().is_some_and(|n|n>0&&n<=installation_record::CONTROL_LIMIT as u64)
+            &&ns["payloadBytes"]==saved["appBytes"],"restore-chain-exact-namespace")?;
+    }
+    Ok(())
+}
+#[cfg(feature="macos-installed-restore-chain-observer")]
+fn recovery_verify(book:&mut Install,admission:&mut Admission,binding:&Value,baseline:&Baseline)->Result<Value> {
+    let roster=maintenance::roster_now(book,baseline.private)?;
+    let step=RECOVERY_RECORDS.iter().take_while(|name|roster.contains_key(**name)).count();
+    check(step<4,"restore-chain-already-complete")?;
+    let mut names=vec!["app","withdrawn.json"];names.extend_from_slice(&RECOVERY_RECORDS[..step]);
+    private_roster(book,baseline.private,&names)?;
+    let withdrawn=HeldRecord::read(book,baseline.private,"withdrawn.json")?;
+    object(&withdrawn.value,&PRIVATE_FIELDS)?;
+    check(withdrawn.value["schemaVersion"]==1&&withdrawn.value["kind"]=="app-absence-withdrawn"
+        &&withdrawn.value["binding"]==*binding&&withdrawn.value["baselineSha256"]==baseline.record.digest
+        &&withdrawn.value["renameReturned"]=="known-success"&&withdrawn.value["proof"]==pending_record_proof_data(PhaseData::Withdraw)
+        &&withdrawn.value["transportState"]=="pending-original-exit","restore-chain-withdrawal")?;
+    let mut prior=Vec::with_capacity(3);let mut previous_sha=withdrawn.digest.clone();
+    for (index,name) in RECOVERY_RECORDS[..step].iter().enumerate() {
+        let record=HeldRecord::read(book,baseline.private,name)?;
+        object(&record.value,&["schemaVersion","kind","step","binding","baselineSha256","withdrawnSha256","previousSha256","snapshot","transportState"])?;
+        check(record.value["schemaVersion"]==1&&record.value["kind"]=="restore-chain-private-observation"
+            &&record.value["step"].as_u64()==Some(index as u64)&&record.value["binding"]==*binding
+            &&record.value["baselineSha256"]==baseline.record.digest&&record.value["withdrawnSha256"]==withdrawn.digest
+            &&record.value["previousSha256"]==previous_sha&&record.value["transportState"]=="pending-original-exit",
+            "restore-chain-record-binding")?;
+        recovery_step_data(&withdrawn.value["snapshot"],prior.last().map(|r:&HeldRecord|&r.value["snapshot"]),&record.value["snapshot"],index)?;
+        previous_sha=record.digest.clone();prior.push(record);
+    }
+    let observed=observe_current(book,admission,baseline)?;
+    let snapshot=maintenance::restore_chain_snapshot(book,&observed)?;
+    recovery_step_data(&withdrawn.value["snapshot"],prior.last().map(|r|&r.value["snapshot"]),&snapshot,step)?;
+    let retained=maintenance::app_absence_retained_audit(book,&observed,baseline.private)?;
+    check(identity_data(book.identity(retained)?)==withdrawn.value["withdrawnAppIdentity"],"restore-chain-withdrawn-original")?;
+    let record=HeldRecord::write(book,baseline.private,RECOVERY_RECORDS[step],json!({"schemaVersion":1,
+        "kind":"restore-chain-private-observation","step":step,"binding":binding,"baselineSha256":baseline.record.digest,
+        "withdrawnSha256":withdrawn.digest,"previousSha256":previous_sha,"snapshot":snapshot,"transportState":"pending-original-exit"}))?;
+    names.push(RECOVERY_RECORDS[step]);private_roster(book,baseline.private,&names)?;
+    check(maintenance::restore_chain_snapshot(book,&observed)?==snapshot,"restore-chain-final-post")?;
+    baseline.post(book,true)?;withdrawn.post(book)?;for old in &prior {old.post(book)?;}record.post(book)?;
+    admission.post(book,true)?;book.check_name(retained,true)?;
+    let mut output=observation_data(binding,PhaseData::Verify,&baseline.record.digest,&record.digest)?;
+    output["phase"]=json!(["recovery-cut-1","recovery-cut-2","recovery-cut-3","recovered"][step]);
+    output["proof"]=json!({"step":step,"initialHistoryPreserved":true,"runtimeUnchanged":true,"withdrawnAppVerified":true,
+        "partialAppConserved":true,"recordReadback":true,"ordinaryRetryComplete":step==3,"originalOuterExitRequired":true});
+    json_bytes_data(&output,4096)?;Ok(output)
 }
