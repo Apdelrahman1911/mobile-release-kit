@@ -113,7 +113,8 @@ jobs:
         shell: bash
         working-directory: desktop/src-tauri
     env:
-      RUSTUP_TOOLCHAIN: '1.98.0'
+      # Mac app/helpers share the reviewed CLOCK_UPTIME_RAW compiler tuple.
+      RUSTUP_TOOLCHAIN: ${{ startsWith(matrix.os, 'macos-') && '1.98.1' || '1.98.0' }}
       CARGO_INCREMENTAL: '0'
       CARGO_TARGET_DIR: ${{ github.workspace }}/desktop/.ci-target
     steps:

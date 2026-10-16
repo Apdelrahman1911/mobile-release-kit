@@ -129,12 +129,14 @@ jobs:
           export CARGO_HOME="$WORK_ROOT/cargo" RUSTUP_HOME="$WORK_ROOT/rustup"
           export CARGO_TARGET_DIR="$WORK_ROOT/target" CARGO_INCREMENTAL=0
           export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0
-          rustup toolchain install 1.98.0 --profile minimal --no-self-update
+          # This is the existing reviewed native clock tuple on both Macs.
+          # 1.98.0 is supported only on Intel, not Apple Silicon.
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
           # Separate invocations keep the two mutually exclusive roles distinct;
           # dependencies are compiled once in this job's shared target directory.
-          rustup run 1.98.0 cargo check --locked --no-default-features \
+          rustup run 1.98.1 cargo check --locked --no-default-features \
             --features macos-installed-installer --bin mrk-macos-install
-          rustup run 1.98.0 cargo check --locked --no-default-features \
+          rustup run 1.98.1 cargo check --locked --no-default-features \
             --features macos-installed-remover --bin mrk-macos-remove
       - name: Remove only this job's disposable compiler and dependencies
         if: always() && steps.work.outputs.root != ''
