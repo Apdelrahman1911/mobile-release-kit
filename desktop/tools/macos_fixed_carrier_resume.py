@@ -829,7 +829,7 @@ def tls_context(ca):
     return context
 
 
-def acquisition_main():
+def acquisition_main(*, candidate=None):
     """Fixed child; parent supplies exact retained SOURCE via authenticated -c.
 
     Only work-directory/output/CA originals are newly opened in this child;
@@ -839,7 +839,8 @@ def acquisition_main():
     cfg = decode(os.environ['MRK_P0_REQUEST'].encode('ascii'))
     need(type(cfg) is dict and set(cfg) == {'row', 'role', 'target', 'work', 'workIdentity', 'caPath', 'caSha256', 'endpoint'}, 'p0-child-request')
     role, row = cfg['role'], cfg['row']
-    need(role in ('qualification', 'carrier') and cfg['target'] in TARGETS
+    need((role == 'candidate' and candidate is not None and cfg['target'] in ('aarch64-apple-darwin', 'x86_64-apple-darwin')
+          or candidate is None and role in ('qualification', 'carrier') and cfg['target'] in TARGETS)
          and type(cfg['endpoint']) is int and time.monotonic_ns() < cfg['endpoint']
          and type(cfg['work']) is str and re.fullmatch(r'/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}/resume-carrier', cfg['work']) is not None
          and str(Path(cfg['work'])) == os.path.normpath(cfg['work']), 'p0-child-admission')
@@ -906,7 +907,8 @@ def acquisition_main():
         job = metadata('/actions/jobs/' + row['jobId'])
         selected = row['qualificationArtifact'] if role == 'qualification' else row
         artifact = metadata('/actions/artifacts/' + selected['artifactId'])
-        metadata_data(run, job, artifact, row, role, cfg['target'])
+        (candidate.candidate_metadata_data(run, job, artifact, row) if candidate is not None
+         else metadata_data(run, job, artifact, row, role, cfg['target']))
         phase = 'artifact'
         response = request('https://api.github.com/repos/' + REPOSITORY + '/actions/artifacts/' + selected['artifactId'] + '/zip', True)
         h = headers(response)
@@ -1000,10 +1002,11 @@ def scripts_archive_data(packed, stager, live, allocation_budget=None):
     return archive
 
 
-def mounted_data(originals, row, target, stager, *, allocation_budget=None):
+def mounted_data(originals, row, target, stager, *, allocation_budget=None, candidate=False):
     """Actual unchanged package parsers; inventory digest precedes observed size."""
     need(type(originals) is dict and set(originals) == {'Install.pkg', 'producer.json', 'producer.sig'}
          and all(type(v) is tuple and len(v) == 2 and type(v[0]) is bytes and type(v[1]) is int for v in originals.values()), 'enrollment-mounted-roster')
+    need(type(candidate) is bool, 'resume-mounted-purpose')
     bodies = {k: v[0] for k, v in originals.items()}
     for key in ('package', 'descriptor', 'signature'):
         selected = row[key]; body = bodies[selected['name']]
@@ -1018,7 +1021,9 @@ def mounted_data(originals, row, target, stager, *, allocation_budget=None):
          and release['packageSha256'] == row['package']['sha256'], 'enrollment-release-original')
     policy = descriptor['signingPolicies'][0]
     need(policy['sha256'] == release['signingPolicySha256'] and all(policy['policy'][k] == v for k, v in row['signingIdentity'].items()), 'enrollment-policy-original')
-    selection = stager.BuildSelection(target, row['packageVersion'], row['release'])
+    selection = (stager.source_build_selection(target) if candidate else
+                 stager.BuildSelection(target, row['packageVersion'], row['release']))
+    need((selection.package_version, selection.release) == (row['packageVersion'], row['release']), 'resume-source-release')
     members = (stager.install_product_members(bodies['Install.pkg']) if allocation_budget is None else
         stager.install_product_members(bodies['Install.pkg'], allocation_budget=allocation_budget))
     outer_retained = sum(len(value) for value in members.values())
@@ -1040,23 +1045,24 @@ def mounted_data(originals, row, target, stager, *, allocation_budget=None):
     def cpio_budget(phase, live, packed_bytes, output):
         if allocation_budget is not None:
             allocation_budget(phase, outer_retained + component_retained + live, packed_bytes, output)
-    scripts = (stager.cpio_members(archive) if allocation_budget is None else
-        stager.cpio_members(archive, allocation_budget=cpio_budget))
+    options = {'store_runtime': True} if candidate else {}
+    if allocation_budget is not None: options['allocation_budget'] = cpio_budget
+    scripts = stager.cpio_members(archive, **options)
     key = 'input/' + stager.INSTALLATION_INVENTORY_NAME
     need(key in scripts and type(scripts[key][0]) is bytes and scripts[key][1] == 0o444, 'enrollment-original-inventory')
     inventory = scripts[key][0]
     rows = stager.observation_inventory_bytes(inventory, row['inventorySha256'], row['runtimeManifestSha256'], selection=selection)
-    result = {'schemaVersion': 1, 'kind': 'mrk-p0-readonly-enrollment-data-v1', 'target': target,
+    result = {'schemaVersion': 1, 'kind': 'mrk-candidate-mounted-data-v1' if candidate else 'mrk-p0-readonly-enrollment-data-v1', 'target': target,
             'source': row['source'], 'tree': row['tree'], 'runId': row['runId'], 'runAttempt': row['runAttempt'],
             'jobId': row['jobId'], 'artifactId': row['artifactId'], 'artifactSha256': row['artifactSha256'],
-            'qualificationEvidenceSha256': row['qualificationEvidenceSha256'], 'members': row['members'],
+            'members': row['members'],
             'package': row['package'], 'descriptor': row['descriptor'], 'signature': row['signature'],
             'inventory': {'name': stager.INSTALLATION_INVENTORY_NAME, 'bytes': len(inventory), 'sha256': sha(inventory)},
-            'inventoryDocument': stager.decode(inventory), 'release': release, 'signingPolicy': policy,
+            'inventoryDocument': stager.decode(inventory, **({'byte_limit': stager.INVENTORY_BYTES, 'node_limit': 150000} if candidate else {})), 'release': release, 'signingPolicy': policy,
             'inventoryFiles': len(rows), 'inventoryPayloadBytes': sum(v['size'] for v in rows.values()),
             'nativeQualificationInferred': False, 'updateActivated': False, 'productReady': False}
+    if not candidate: result['qualificationEvidenceSha256'] = row['qualificationEvidenceSha256']
     return result, inventory
-
 
 def producer_message_data(descriptor):
     # Native install_producer.m and Rust message_data sign the domain (one NUL)
@@ -1101,6 +1107,7 @@ def fresh_installer_request_data(before, after):
 
 
 class Resume:
+    command_roles = ('memory', 'acquire-carrier', 'attach', 'detach', 'producer-key', 'producer-signature', 'installer', 'entry-signature', 'payload-signature')
     def __init__(self, root, work, clock, factory, *, quota=None):
         self.root, self.work, self.clock = root, work, clock
         self.quota = OriginalQuota() if quota is None else quota
@@ -1140,7 +1147,7 @@ class Resume:
 
 
     def command(self, role, argv, maximum, *, env=None):
-        need(role in ('memory', 'acquire-carrier', 'attach', 'detach', 'producer-key', 'producer-signature', 'installer', 'entry-signature', 'payload-signature'), 'p0-command-role')
+        need(role in self.command_roles, 'p0-command-role')
         self.point(); timeout = self.clock.seconds(maximum)
         limit = 256 * 1024 if role == 'installer' else 65536
         row = {'role': role, 'entered': True, 'returned': False, 'capturesSettled': False,
@@ -1311,13 +1318,46 @@ class Resume:
         need(self.outer.read(entry) == body, 'resume-acquisition-original-post')
         return values
 
+    @property
+    def origin(self): return ORIGIN
+
+    @property
+    def target(self): return TARGETS[0]
+
+    def mount_path(self): return transport_path_data(self.run_id, self.run_attempt)
+
+    @property
+    def image_name(self): return 'arm64.dmg' if self.target == 'aarch64-apple-darwin' else 'intel.dmg'
+
+    def read_mounted(self, mounted, directory, mount, image, preview):
+        originals = {}
+        for key in ('package', 'descriptor', 'signature'):
+            selected = self.origin[key]; info = os.stat(selected['name'], dir_fd=directory['fd'], follow_symlinks=False)
+            need(info.st_uid in (0, os.getuid()) and info.st_gid in (0, os.getgid()), 'resume-mounted-owner')
+            entry, data = self.quota.call(mounted, 'file', mount / selected['name'], selected['bytes'], uid=info.st_uid, modes=(0o444,))
+            need((len(data), sha(data)) == (selected['bytes'], selected['sha256']), 'resume-mounted-content-pin')
+            originals[selected['name']] = (data, 0o444)
+        row = dict(self.origin, members=[{'name': 'MobileReleaseKit.dmg', 'bytes': len(image), 'sha256': sha(image)},
+             {'name': 'PREVIEW.json', 'bytes': self.preview_bytes, 'sha256': self.preview_sha}],
+             inventorySha256=preview['installerInventorySha256'], runtimeManifestSha256=preview['runtimeManifestSha256'],
+             signingIdentity=self.signing_identity)
+        result, inventory = mounted_data(originals, row, self.target, self.stager,
+            allocation_budget=self.allocation_budget)
+        return originals, row, result, inventory
+
+    def prepare_readback(self, result, inventory):
+        return original_release_readback_data(result, inventory, target=self.target)
+
+    def observe_installation(self, args, readback):
+        return self.stager.observation_command(args, original_release_readback=readback)
+
     def install_image(self, image, preview):
-        self.publish_image(self.work / 'arm64.dmg', image)
-        image_entry, original = self.quota.call(self.outer, 'file', self.work / 'arm64.dmg', len(image), modes=(0o444,))
+        self.publish_image(self.work / self.image_name, image)
+        image_entry, original = self.quota.call(self.outer, 'file', self.work / self.image_name, len(image), modes=(0o444,))
         need(original == image, 'resume-image-copy-original')
         del original
-        self.private['arm64.dmg'] = image_entry['identity']
-        mount = transport_path_data(self.run_id, self.run_attempt)
+        self.private[self.image_name] = image_entry['identity']
+        mount = self.mount_path()
         volumes = self.quota.call(self.outer, 'directory', Path('/Volumes'))
         slash = self.outer.directories[Path('/')]
         slash_facts = self.transport_facts(slash)
@@ -1329,7 +1369,7 @@ class Resume:
         try:
             STATE['phase'] = 'attach'
             call = self.command('attach', ['/usr/bin/hdiutil', 'attach', '-readonly', '-nobrowse', '-owners', 'on',
-                '-mountpoint', str(mount), '-plist', str(self.work / 'arm64.dmg')], 60)
+                '-mountpoint', str(mount), '-plist', str(self.work / self.image_name)], 60)
             need(call.returncode == 0, 'resume-original-attach')
             device = self.stager.distribution_mount_data(call.stdout, call.stderr, call.returncode, mount)
             attached = True
@@ -1349,19 +1389,8 @@ class Resume:
                      and set(os.listdir(directory['fd'])) == {'Install.pkg', 'producer.json', 'producer.sig'}, 'resume-mounted-original-roster')
                 need(self.outer.read(image_entry) == image, 'resume-image-retained-post')
                 return facts
-            facts = post(); originals = {}
-            for key in ('package', 'descriptor', 'signature'):
-                selected = ORIGIN[key]; info = os.stat(selected['name'], dir_fd=directory['fd'], follow_symlinks=False)
-                need(info.st_uid in (0, os.getuid()) and info.st_gid in (0, os.getgid()), 'resume-mounted-owner')
-                entry, data = self.quota.call(mounted, 'file', mount / selected['name'], selected['bytes'], uid=info.st_uid, modes=(0o444,))
-                need((len(data), sha(data)) == (selected['bytes'], selected['sha256']), 'resume-mounted-content-pin')
-                originals[selected['name']] = (data, 0o444)
-            row = dict(ORIGIN, members=[{'name': 'MobileReleaseKit.dmg', 'bytes': len(image), 'sha256': sha(image)},
-                 {'name': 'PREVIEW.json', 'bytes': self.preview_bytes, 'sha256': self.preview_sha}],
-                 inventorySha256=preview['installerInventorySha256'], runtimeManifestSha256=preview['runtimeManifestSha256'],
-                 signingIdentity=self.signing_identity)
-            result, inventory = mounted_data(originals, row, TARGETS[0], self.stager,
-                allocation_budget=self.allocation_budget)
+            facts = post()
+            originals, row, result, inventory = self.read_mounted(mounted, directory, mount, image, preview)
             need(post() == facts, 'resume-mounted-parser-post')
             STATE['phase'] = 'producer-signature'
             key = self.command('producer-key', ['/usr/bin/openssl', 'x509', '-inform', 'DER', '-in',
@@ -1382,12 +1411,12 @@ class Resume:
             need(verified.stderr == b'', 'resume-native-producer-signature')
             need(self.outer.read(message_entry) == message, 'resume-producer-message-post')
             need(post() == facts, 'resume-producer-mounted-signature-post')
-            readback = original_release_readback_data(result, inventory, target=TARGETS[0])
+            readback = self.prepare_readback(result, inventory)
             input_parent = self.fresh_directory(self.parent, 'input')
             self.publish_owned(input_parent['path'] / self.stager.INSTALLATION_INVENTORY_NAME, inventory)
-            args = argparse.Namespace(target=TARGETS[0], fixture=False, input=self.work / 'input', expected_source=ORIGIN['source'],
+            args = argparse.Namespace(target=self.target, fixture=False, input=self.work / 'input', expected_source=self.origin['source'],
                 expected_inventory=row['inventorySha256'], expected_manifest=row['runtimeManifestSha256'],
-                expected_package=ORIGIN['package']['sha256'], request_id=None,
+                expected_package=self.origin['package']['sha256'], request_id=None,
                 producer_descriptor=mount / 'producer.json', producer_signature=mount / 'producer.sig',
                 installer_status=self.work / 'installer-output.status', package=mount / 'Install.pkg')
             self.point(); before_census = self.stager.same_package_result_census()
@@ -1408,11 +1437,11 @@ class Resume:
             after_census = self.stager.same_package_result_census()
             request_id = fresh_installer_request_data(before_census, after_census)
             args.request_id = request_id
-            observed = self.stager.observation_command(args, original_release_readback=readback)
+            observed = self.observe_installation(args, readback)
             self.point(); need(self.stager.same_package_result_census() == after_census, 'resume-installer-result-census-post')
             need(set(after_census) == {request_id} and observed['requestId'] == request_id
                  and observed['originalInstallerReturnedZero'] is True and observed['originalWriterJoined'] is True
-                 and observed['sourceCommit'] == ORIGIN['source'] and observed['completedPackageSha256'] == ORIGIN['package']['sha256']
+                 and observed['sourceCommit'] == self.origin['source'] and observed['completedPackageSha256'] == self.origin['package']['sha256']
                  and observed['inventorySha256'] == row['inventorySha256'] and observed['runtimeManifestSha256'] == row['runtimeManifestSha256'],
                  'resume-current-installer-result-join')
             self.readback_known = True
