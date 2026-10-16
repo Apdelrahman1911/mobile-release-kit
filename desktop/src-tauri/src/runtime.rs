@@ -194,6 +194,16 @@ impl IOSArchiveInstalledProfile {
     }
 }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct LocalStorePreflightInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl LocalStorePreflightInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("local_store_preflight_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) struct OfflinePreflightInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl OfflinePreflightInstalledProfile {
@@ -1137,13 +1147,30 @@ fn hex(bytes: &[u8]) -> String {
 }
 fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
 
-pub fn safe_payload_path(path: &str) -> bool {
+pub fn safe_payload_path(path: &str) -> bool { safe_payload_path_in(path, None) }
+
+/// Mac Store DATA paths retain upstream templates and notices. Only this fixed
+/// owned prefix admits internal spaces/percent; all other payload paths retain
+/// the cross-platform grammar and depth. This is not source authentication.
+pub fn safe_macos_runtime_path(path: &str) -> bool { safe_payload_path_in(path, Some("store/")) }
+pub fn safe_macos_install_path(path: &str) -> bool { safe_payload_path_in(path, Some("runtime/store/")) }
+
+fn compiled_payload_path(path: &str) -> bool {
+    if cfg!(target_os = "macos") { safe_macos_runtime_path(path) } else { safe_payload_path(path) }
+}
+
+fn safe_payload_path_in(path: &str, store_prefix: Option<&str>) -> bool {
     if path.is_empty() || path.len() > 512 || !path.is_ascii() { return false; }
+    let prefix_depth = store_prefix.filter(|prefix| path.starts_with(prefix))
+        .map_or(0, |prefix| prefix.bytes().filter(|byte| *byte == b'/').count());
     let mut depth = 0;
     for part in path.split('/') {
         depth += 1;
-        if depth > TREE_DEPTH || part.is_empty() || part == "." || part == ".." || part.ends_with('.')
-            || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-+".contains(&b)) { return false; }
+        let store = prefix_depth > 0 && depth > prefix_depth;
+        if depth > TREE_DEPTH + prefix_depth || part.is_empty() || part == "." || part == ".."
+            || part.starts_with(' ') || part.ends_with(['.', ' '])
+            || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-+".contains(&b)
+                || store && b"% ".contains(&b)) { return false; }
         let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
         if ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
             || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT"))
@@ -1252,7 +1279,7 @@ fn exact_inventory(root: &Path, expected: &BTreeSet<String>, end: Instant) -> Re
     let mut entries = 0usize;
     while let Some((relative, depth)) = pending.pop() {
         deadline(end)?;
-        if depth > TREE_DEPTH { return Err(unavailable()); }
+        if depth > TREE_DEPTH + usize::from(cfg!(target_os = "macos")) { return Err(unavailable()); }
         let directory = root.join(&relative);
         anchored_path(&directory)?;
         for entry in fs::read_dir(&directory).map_err(|_| unavailable())? {
@@ -1261,10 +1288,10 @@ fn exact_inventory(root: &Path, expected: &BTreeSet<String>, end: Instant) -> Re
             if entries > ENTRY_COUNT { return Err(unavailable()); }
             let entry = entry.map_err(|_| unavailable())?;
             let filename = entry.file_name();
-            if !filename.to_str().is_some_and(safe_payload_path) { return Err(unavailable()); }
+            if !filename.to_str().is_some_and(|name| !name.contains('\\')) { return Err(unavailable()); }
             let next = relative.join(filename);
             let name = next.to_str().ok_or_else(unavailable)?.replace('\\', "/");
-            if !safe_payload_path(&name) { return Err(unavailable()); }
+            if !compiled_payload_path(&name) { return Err(unavailable()); }
             let metadata = fs::symlink_metadata(root.join(&next)).map_err(|_| unavailable())?;
             if !ordinary(&metadata) { return Err(unavailable()); }
             if metadata.is_dir() {
@@ -1935,6 +1962,18 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.offline_preflight_installed_profile()?, end, stop)
     }
+    pub(crate) fn local_store_preflight_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_local_store_preflight_installed(&self, originals: &mut crate::installed_runtime::StoreRuntimeSlots)
+        -> Result<VerifiedRuntime, BridgeError> {
+        if !self.local_store_preflight_installed_profile_available() { return Err(unavailable()); }
+        originals.inspect_preflight_once(LocalStorePreflightInstalledProfile { _private: () })
+    }
     pub(crate) fn artifact_inspection_installed_profile_available(&self)->bool {
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         { macos_bindings() }
@@ -2249,7 +2288,7 @@ impl RuntimeConfig {
         let mut previous: Option<&str> = None;
         let mut total = 0u64;
         for item in &manifest.files {
-            if !safe_payload_path(&item.path) || item.path == "manifest.json" || !sha(&item.sha256)
+            if !compiled_payload_path(&item.path) || item.path == "manifest.json" || !sha(&item.sha256)
                 || item.size > FILE_LIMIT
                 || item.path == "github-ca.pem" && (item.size == 0 || item.size > GITHUB_CA_LIMIT)
                 || previous.is_some_and(|value| value >= item.path.as_str())
@@ -2519,6 +2558,28 @@ pub(crate) fn installed_macos_evidence_profile_data_check() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mac_store_paths_are_scoped_and_depth_bounded() {
+        let suffix = "bundle/ruby/3.3.0/gems/fastlane-2.235.0/fastlane/lib/fastlane/plugins/template/lib/fastlane/plugin/%plugin_name%/helper/%plugin_name%_helper.rb.erb";
+        assert_eq!(suffix.split('/').count(), 16);
+        for suffix in [suffix, "bundle/gems/terminal-notifier/Terminal Notifier/Credits.rtf"] {
+            assert!(safe_macos_runtime_path(&format!("store/{suffix}")));
+            assert!(safe_macos_install_path(&format!("runtime/store/{suffix}")));
+            assert!(!safe_payload_path(&format!("store/{suffix}")));
+            assert!(!safe_macos_runtime_path(&format!("python/{suffix}")));
+            assert!(!safe_macos_install_path(&format!("app/Contents/{suffix}")));
+        }
+        assert!(!safe_macos_runtime_path(&format!("store/extra/{suffix}")));
+        assert!(!safe_macos_install_path(&format!("runtime/store/extra/{suffix}")));
+        for bad in ["../x", "a//b", "a/./b", " space/x", "space /x", "dot./x", "a\\b", "a:b", "a\tb", "NUL.txt", "COM1", "é"] {
+            assert!(!safe_macos_runtime_path(&format!("store/{bad}")), "{bad}");
+            assert!(!safe_macos_install_path(&format!("runtime/store/{bad}")), "{bad}");
+        }
+        assert!(!safe_macos_runtime_path("store%/file"));
+        assert!(!safe_macos_install_path("runtime/storeish/a b"));
+        assert!(safe_payload_path("python/lib/libstdc++.so.6"));
+    }
+
     #[test]
     fn installed_allowlist_is_exactly_the_read_only_project_draft_guidance_and_saved_services() {
         for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",

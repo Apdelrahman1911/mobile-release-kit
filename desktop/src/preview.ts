@@ -1,3 +1,4 @@
+import { localStoreError } from './localStorePreflightProtocol.ts';
 import { publicationError } from './githubPublicationProtocol.ts';
 import { artifactInspectionError } from './artifactInspectionProtocol.ts';
 import { initializationError } from './projectInitializationProtocol.ts';
@@ -218,6 +219,11 @@ export const previewApi: DesktopApi = {
   artifactInspectionStatus: artifactInspectionUnavailable,
   discardArtifactInspection: artifactInspectionUnavailable,
   subscribeArtifactInspection: artifactInspectionUnavailable,
+  prepareLocalStorePreflight:async()=>{throw localStoreError();},
+  startLocalStorePreflight:async()=>{throw localStoreError();},
+  localStorePreflightStatus:async()=>{throw localStoreError();},
+  cancelLocalStorePreflight:async()=>{throw localStoreError();},
+  subscribeLocalStorePreflight:async()=>{throw localStoreError();},
   prepareOfflinePreflight: offlineUnavailable,
   startOfflinePreflight: offlineUnavailable,
   offlinePreflightStatus: offlineUnavailable,

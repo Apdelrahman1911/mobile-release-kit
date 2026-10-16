@@ -744,14 +744,14 @@ def package_staple_observation_data(value):
 
 
 def final_package_receipt(body, environment, target, selection, profile_sha, notary_sha, package_size, package_sha,
-                          image_release, release_sha, *, remove=False):
+                          image_release, release_sha, *, remove=False, runtime_stager=None):
     """Closed preceding original observation AND the current immutable P.
 
     This is not a stand-alone cryptographic authority. The fixed workflow also
     requires the actual earlier helper0 and its held status original; this
     consumer repeats the complete Scripts audit before invoking the producer.
     """
-    need(type(remove) is bool, "final-package-receipt-purpose")
+    need(type(remove) is bool and not (remove and runtime_stager is not None), "final-package-receipt-purpose")
     value = final_package_json(body, 16384, "final-package-receipt-json")
     keys = {"schemaVersion", "phase", "target", "source", "packageRole", "workflowSource", "workflow", "runId", "runAttempt",
             "toolchain", "helperIdentifier", "originalCalls", "credentialOriginals", "credentialContexts", "targetRetired",
@@ -814,7 +814,7 @@ def final_package_receipt(body, environment, target, selection, profile_sha, not
          and final["packageBytes"] == package_size and final["packageSha256"] == package_sha
          and type(final["packageMode"]) is int and final["packageMode"] == 0o444
          and type(final["scriptFileCount"]) is int
-         and (final["scriptFileCount"] == 2 if remove else 0 < final["scriptFileCount"] <= 4096)
+         and (final["scriptFileCount"] == 2 if remove else 0 < final["scriptFileCount"] <= (runtime_stager.MAX_FILES if runtime_stager is not None else 4096))
          and all(sha(final[key]) for key in ("unsignedSha256", "signedSha256", "packageSha256", "originalPackageSha256",
                                            "packageInfoSha256", "installerProfileSha256", "notaryProfileSha256", "logSha256")),
          "final-package-receipt-byte-correspondence")
@@ -3374,23 +3374,32 @@ class Operation:
         self.notary_clock(work=work)
         self.recheck_directory(root)
         self.stager_io_pending = "notary-stager-tree"
-        files = self.stager.tree(path)
+        store_prefix = None
+        if getattr(self, "composed_runtime", False):
+            if path == self.work / "runtime":
+                store_prefix = "store"
+            elif path in (self.work / "input", self.work / self.target_name / "payload-input"):
+                store_prefix = "runtime/store"
+        if (getattr(self, "package_store_runtime", False) and not self.removal
+                and path == self.work / "scripts"):
+            store_prefix = "input/runtime/store"
+        files = self.stager.tree(path, mac_store_prefix=store_prefix)
         self.stager_io_pending = None
         self.notary_clock(work=work)
         result = {"directories": {}, "files": {}}
         observed, nodes = set(), [0]
         def visit(parent, prefix, depth):
             self.notary_clock(work=work)
-            need(depth <= 16, "notary-original-depth")
+            need(depth <= 16 + (len(store_prefix.split("/")) if store_prefix else 0), "notary-original-depth")
             self.recheck_directory(parent)
             names = sorted(os.listdir(parent["fd"]))
             nodes[0] += len(names)
-            need(nodes[0] <= (self.stager.MAX_ENTRIES if getattr(self, "composed_runtime", False) else 4096),
+            need(nodes[0] <= (self.stager.MAX_ENTRIES if store_prefix else 4096),
                  "notary-original-node-bound")
             result["directories"][prefix] = (parent["identity"], tuple(names))
             for name in names:
                 relative = name if not prefix else prefix + "/" + name
-                need(self.stager.safe_path(relative), "notary-original-path")
+                need(self.stager.safe_path(relative, mac_store_prefix=store_prefix), "notary-original-path")
                 before = os.stat(name, dir_fd=parent["fd"], follow_symlinks=False)
                 entry = None
                 try:
@@ -4671,7 +4680,7 @@ class Operation:
         audit = self.stager.audit_install_product_command if self.install_product else self.stager.audit_command
         try:
             result = self.final_package_io("final-package-original-audit", audit,
-                argparse.Namespace(target=self.target, fixture=False, scripts=self.work / self.scripts_name, package=path,
+                argparse.Namespace(target=self.target, fixture=False, store_runtime=self.selected_package_store(), scripts=self.work / self.scripts_name, package=path,
                                    original_package=self.work / self.packager_filename,
                                    **self.removal_package_audit_arguments()))
         except self.stager.Refused as error:
@@ -4809,7 +4818,7 @@ class Operation:
         component_sha = self.notary_stream(component)
         self.final_package_inputs.append((component, component_sha))
         component_audit = self.final_package_io("install-product-component-audit", self.stager.audit_command,
-            argparse.Namespace(target=self.target, fixture=False, scripts=self.work / self.scripts_name,
+            argparse.Namespace(target=self.target, fixture=False, store_runtime=self.selected_package_store(), scripts=self.work / self.scripts_name,
                 package=self.work / "package-component" / self.package_filename,
                 original_package=self.work / self.packager_filename))
         need(type(component_audit) is dict and component_audit.get("packageSha256") == component_sha
@@ -4896,6 +4905,22 @@ class Operation:
         self.install_component_inputs = None
         self.notary_post()
 
+    def selected_package_store(self):
+        """Hold the same fixed SOURCE selector for ordinary package consumers."""
+        if hasattr(self, "package_store_runtime"):
+            return self.package_store_runtime
+        mode = self.environment.get("MRK_MACOS_STORE_RUNTIME")
+        need(mode in (None, "signed-component"), "package-store-mode")
+        enabled = mode is not None and not self.removal
+        if enabled:
+            entry = self.source_original("desktop/" + self.stager.SIGNED_STORE_SELECTION,
+                "source-package-store-selection", self.stager.SIGNED_STORE_SELECTION_LIMIT)
+            body = self.read(entry)
+            self.stager.signed_store_selection_data(body, target=self.target)
+            self.package_sources.append((entry, body))
+        self.package_store_runtime = enabled
+        return enabled
+
     def finalize_package(self):
         need(self.removal_final_active() and self.signing is not None
              and (self.phase == "prepare-removal-observers" or not any(name in self.environment for name in CREDENTIAL_VARIABLES)), "final-package-configured-purpose")
@@ -4909,6 +4934,7 @@ class Operation:
             source = self.source_original("desktop/tools/" + filename, "source-final-package-driver",
                 HELPER_SOURCE_BYTES if filename == "macos_android_helper_package.py" else 512 * 1024)
             self.package_sources.append((source, self.read(source)))
+        self.selected_package_store()
         scripts = self.directory(self.work_entry, self.scripts_name, "final-package-scripts")
         self.notary_roots.append({"entry": scripts, "path": self.work / self.scripts_name,
                                   "snapshot": self.notary_snapshot(scripts, self.work / self.scripts_name)})
@@ -5018,7 +5044,8 @@ class Operation:
         receipt_body = self.read(receipt)
         value = final_package_receipt(receipt_body, self.environment, self.target, self.installer_selection,
                                       self.installer_profile_sha, digest(profile_body), len(body), digest(body),
-                                      self.image_release, digest(self.read(self.release_entry)), remove=self.removal)
+                                      self.image_release, digest(self.read(self.release_entry)), remove=self.removal,
+                                      runtime_stager=self.stager if self.selected_package_store() else None)
         need(self.read(original) == body, "package-finalization-package-post")
         self.package_outputs.extend(((status, digest(status_body)), (receipt, digest(receipt_body))))
         self.receipt["finalPackageReceiptSha256"] = digest(receipt_body)
@@ -7523,6 +7550,7 @@ class Operation:
         body = self.read(original)
         finalization = self.package_finalization_input(original, body)
         audit = self.package_stager_io("final-audit", argparse.Namespace(target=self.target, fixture=False,
+            store_runtime=self.selected_package_store(),
             scripts=self.work / "scripts", package=self.work / "package-final/MobileReleaseKit.pkg",
             original_package=self.work / "MobileReleaseKit-original.pkg"))
         need(audit["packageSha256"] == digest(body) and audit["packageSize"] == len(body)

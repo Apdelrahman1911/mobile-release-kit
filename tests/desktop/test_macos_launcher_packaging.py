@@ -3,12 +3,14 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from test_macos_installed_staging import MacAndroidHelperPackagingData, TOOL, ANDROID_HELPER as API
+import test_macos_installed_staging as staging
+
+TOOL, API = staging.TOOL, staging.ANDROID_HELPER
 
 
 class LauncherPackaging(unittest.TestCase):
     def test_nested_launcher_gets_own_ticket_in_same_submission_or_refuses(self):
-        helper = MacAndroidHelperPackagingData()
+        helper = staging.MacAndroidHelperPackagingData()
         cases = ((TOOL.ARM_TARGET, None), (TOOL.INTEL_TARGET, None),
                  (TOOL.ARM_TARGET, ("nonzero", "validate-launcher")),
                  (TOOL.ARM_TARGET, "signed-byte-change"),

@@ -31,7 +31,7 @@ const token = (value: unknown): value is string => typeof value === 'string' && 
 // Inspect descriptors before reading values, cloning or serialization. Every
 // returned object is our copy, not the supplied object and not its prototype.
 // Bounds apply during collection as well as to the final encoded closed DATA.
-function copyData(input: unknown, maxBytes: number, maxNodes = 4096): unknown {
+export function copyBoundedComparisonData(input: unknown, maxBytes: number, maxNodes = 4096): unknown {
   let nodes = 0, bytes = 0;
   const ancestors = new Set<object>();
   const charge = (amount: number) => { bytes += amount; if (bytes > maxBytes) throw new Error(); };
@@ -89,7 +89,7 @@ function content(value: unknown): value is SavedConfigContent {
     typeof value.sha256 === 'string' && value.sha256.length === 64 && /^[0-9a-f]{64}$/.test(value.sha256);
 }
 export function parseSavedConfigContent(value: unknown): SavedConfigContent | null {
-  try { const safe = copyData(value, 256, 16); return content(safe) ? { bytes: safe.bytes, sha256: safe.sha256 } : null; }
+  try { const safe = copyBoundedComparisonData(value, 256, 16); return content(safe) ? { bytes: safe.bytes, sha256: safe.sha256 } : null; }
   catch { return null; }
 }
 // This only extracts comparison DATA from the original saved observation. It
@@ -126,7 +126,7 @@ function context(value: unknown): value is OfflinePreflightContext {
 }
 export function copyOfflinePreflightRequest(command: OfflinePreflightCommand, value: unknown): PrepareOfflinePreflight | StartOfflinePreflight | OfflinePreflightIdentity | Record<string, never> | null {
   try {
-    const safe = copyData(value, 8192, 64);
+    const safe = copyBoundedComparisonData(value, 8192, 64);
     if (command === 'prepare_offline_preflight' && prepare(safe)) return safe;
     if (command === 'start_offline_preflight' && keys(safe, ['operationId', 'ownerGeneration', 'consentVersion']) &&
         identity(safe) && safe.consentVersion === OFFLINE_PREFLIGHT_CONSENT) return safe as unknown as StartOfflinePreflight;
@@ -164,7 +164,7 @@ function result(value: unknown): value is OfflinePreflightResult {
   return OFFLINE_CORE_STATUSES.every((key) => (shown[key] ?? 0) <= (counts[key] as number));
 }
 export function parseOfflinePreflightResult(value: unknown): OfflinePreflightResult | null {
-  try { const safe = copyData(value, 65536); return result(safe) ? safe : null; } catch { return null; }
+  try { const safe = copyBoundedComparisonData(value, 65536); return result(safe) ? safe : null; } catch { return null; }
 }
 export const offlineAvailabilityText: Record<OfflinePreflightAvailability, string> = {
   available: 'This installed build supports reviewing saved offline checks. Review and explicit Run are required; Run still checks the actual host and bundled runtime.',
@@ -220,7 +220,7 @@ export const offlineLimitationText: Record<OfflineLimitation, string> = {
 export const OFFLINE_PREFLIGHT_DISCLOSURE = 'This runs the selected project’s saved offline preflight, including its configured project checks. Only run a project you trust. Unsaved editor changes are not used. Core-managed builds are disabled; the toolkit does not request signing, artifact validation, credential loading or Store access. Configured checks are project code: they can modify files, run other programs, build things, read your account’s files or contact the network. “Offline” selects the core checking mode; it is not a network-isolation or sandbox guarantee. Cancel stops further owned work and waits for original cleanup; it does not undo effects already performed.';
 export function parseOfflinePreflightStatus(value: unknown): OfflinePreflightStatus | null {
   try {
-    const safe = copyData(value, 65536);
+    const safe = copyBoundedComparisonData(value, 65536);
     if (!keys(safe, ['schemaVersion', 'statusRevision', 'availability', 'operation']) || safe.schemaVersion !== 1 ||
         !offlineCounter(safe.statusRevision) || !oneOf(safe.availability, Object.keys(offlineAvailabilityText))) return null;
     const op = safe.operation;

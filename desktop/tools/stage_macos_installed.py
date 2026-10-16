@@ -569,14 +569,20 @@ def build_release_data(body, *, target=ARM_TARGET):
     return value
 
 
-def safe_path(value):
+def safe_path(value, *, mac_store_prefix=None):
     if type(value) is not str or not value or len(value) > 512 or not value.isascii():
         return False
-    parts = value.split("/")
-    if len(parts) > 16:
+    if mac_store_prefix not in (None, "store", "runtime/store", "input/runtime/store"):
         return False
-    for part in parts:
-        if not re.fullmatch(r"[A-Za-z0-9._+-]+", part) or part in (".", "..") or part.endswith("."):
+    parts = value.split("/")
+    scoped = mac_store_prefix is not None and value.startswith(mac_store_prefix + "/")
+    prefix_parts = len(mac_store_prefix.split("/")) if scoped else 0
+    if len(parts) > 16 + prefix_parts:
+        return False
+    for index, part in enumerate(parts):
+        pattern = r"[A-Za-z0-9._+% -]+" if scoped and index >= prefix_parts else r"[A-Za-z0-9._+-]+"
+        if (not re.fullmatch(pattern, part) or part in (".", "..")
+                or part.startswith(" ") or part.endswith((".", " "))):
             return False
         stem = part.split(".", 1)[0].upper()
         if stem in ("CON", "PRN", "AUX", "NUL") or re.fullmatch(r"(?:COM|LPT)[1-9]", stem):
@@ -694,7 +700,7 @@ def source_build_release(*, target=ARM_TARGET):
     return value["packageVersion"], value["release"]
 
 
-def directories(files):
+def directories(files, *, mac_store_prefix=None):
     result = set()
     for path in files:
         bits = path.split("/")
@@ -702,7 +708,7 @@ def directories(files):
     need(len(result) + len(files) <= MAX_ENTRIES, "directory-count")
     folded = set()
     for name in set(files) | result:
-        need(safe_path(name) and name.lower() not in folded, "path-alias-or-type-collision")
+        need(safe_path(name, mac_store_prefix=mac_store_prefix) and name.lower() not in folded, "path-alias-or-type-collision")
         folded.add(name.lower())
     need(not (set(files) & result), "file-directory-collision")
     return result
@@ -714,7 +720,7 @@ def packager_ids():
     return uid, gid
 
 
-def tree(path, *, installed=False, packager=False, max_bytes=MAX_BYTES, current_root_mode=None):
+def tree(path, *, installed=False, packager=False, max_bytes=MAX_BYTES, current_root_mode=None, mac_store_prefix=None):
     need(not (installed and packager), "conflicting-tree-owner")
     need(type(max_bytes) is int and 0 <= max_bytes <= MAX_BYTES, "tree-byte-bound")
     need(current_root_mode is None or (not installed and not packager
@@ -727,7 +733,7 @@ def tree(path, *, installed=False, packager=False, max_bytes=MAX_BYTES, current_
 
     def visit(fd, prefix, depth):
         nonlocal count, total
-        need(depth <= 16, "tree-depth")
+        need(depth <= 16 + (len(mac_store_prefix.split("/")) if mac_store_prefix else 0), "tree-depth")
         before = os.fstat(fd)
         if installed:
             need(before.st_uid == 0 and before.st_gid == 0 and stat.S_IMODE(before.st_mode) == 0o555, "installed-directory-mode-owner")
@@ -744,7 +750,7 @@ def tree(path, *, installed=False, packager=False, max_bytes=MAX_BYTES, current_
         for name in names:
             relative = prefix + name
             count += 1
-            need(count <= MAX_ENTRIES and safe_path(relative), "tree-path-bound")
+            need(count <= MAX_ENTRIES and safe_path(relative, mac_store_prefix=mac_store_prefix), "tree-path-bound")
             info = os.stat(name, dir_fd=fd, follow_symlinks=False)
             if stat.S_ISDIR(info.st_mode):
                 observed_directories.add(relative)
@@ -779,16 +785,16 @@ def tree(path, *, installed=False, packager=False, max_bytes=MAX_BYTES, current_
             need(signature(os.stat(name, dir_fd=fd, follow_symlinks=False)) == signature(before), "tree-root-name-changed")
         finally:
             close_once(root)
-    need(observed_directories == directories(found), "tree-unlisted-or-empty-directory")
+    need(observed_directories == directories(found, mac_store_prefix=mac_store_prefix), "tree-unlisted-or-empty-directory")
     return found
 
 
-def write_tree(output, files, *, root_mode=0o555, app_signing=False, current_owned=False):
+def write_tree(output, files, *, root_mode=0o555, app_signing=False, current_owned=False, mac_store_prefix=None):
     need(os.getuid() != 0 and os.getuid() == os.geteuid(), "builder-must-be-nonroot")
     need(type(current_owned) is bool and (not current_owned or (not app_signing and root_mode in (0o555, 0o700))),
          "current-output-policy")
     need(0 < len(files) <= MAX_FILES and sum(len(v[0]) for v in files.values()) <= MAX_BYTES, "output-bound")
-    dirs = directories(files)
+    dirs = directories(files, mac_store_prefix=mac_store_prefix)
     with parent(output) as (outer, name):
         os.mkdir(name, 0o700, dir_fd=outer)  # Exclusive fresh task output; no cleanup on failure.
         root = os.open(name, READ_FLAGS | os.O_DIRECTORY, dir_fd=outer)
@@ -830,7 +836,7 @@ def write_tree(output, files, *, root_mode=0o555, app_signing=False, current_own
             os.fsync(outer)
         finally:
             close_once(root)
-    actual = tree(output, current_root_mode=root_mode) if current_owned else tree(output)
+    actual = tree(output, current_root_mode=root_mode, mac_store_prefix=mac_store_prefix) if current_owned else tree(output, mac_store_prefix=mac_store_prefix)
     need(actual == files, "complete-output-readback")
 
 
@@ -854,14 +860,14 @@ def manifest_files(body, expected, *, current=False, target=ARM_TARGET):
     total = 0
     for row in rows:
         need(type(row) is dict and set(row) == {"path", "sha256", "size"}
-             and safe_path(row["path"]) and row["path"] != "manifest.json" and row["path"] not in files
+             and safe_path(row["path"], mac_store_prefix="store" if current else None) and row["path"] != "manifest.json" and row["path"] not in files
              and sha(row["sha256"]) and type(row["size"]) is int and 0 <= row["size"] <= MAX_BYTES, "runtime-inventory-entry")
         files[row["path"]] = row
         total += row["size"]
     need(list(files) == sorted(files) and total <= MAX_BYTES, "runtime-inventory-order-bound")
     need(bootstraps | {"core.zip", "github-ca.pem", "python/bin/python3"} <= set(files)
          and manifest["coreSha256"] == files["core.zip"]["sha256"], "runtime-required-members")
-    directories(files)
+    directories(files, mac_store_prefix="store" if current else None)
     return manifest, files
 
 
@@ -1660,6 +1666,8 @@ def current_source(*, history_provider=False, store_runtime=False):
     need(digest(core["_desktop_engine.py"][0]) == CURRENT_PROTOCOL, "current-protocol-source")
     captured = {"src/mobile_release/" + name: value for name, value in core.items()}
     fixed = {"desktop/" + name: 64 * 1024 for name in CURRENT_BOOTSTRAPS}
+    if store_runtime:
+        fixed["desktop/local_store_preflight_bootstrap.py"] = 64 * 1024
     fixed[CURRENT_CA_SOURCE] = 512 * 1024
     fixed[CURRENT_HELPER_SOURCE] = 64 * 1024
     if history_provider:
@@ -1805,7 +1813,7 @@ def current_core_matches(body, projection):
 def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, history_provider=None,
                           store_rows=()):
     target = mac_target(target)
-    files = tree(runtime, current_root_mode=0o700)
+    files = tree(runtime, current_root_mode=0o700, mac_store_prefix="store" if store_rows else None)
     preadmitted = supplier
     if history_provider is not None:
         need(type(history_provider) is bytes and 0 < len(history_provider) <= HISTORY_PROVIDER_LIMIT
@@ -1814,7 +1822,8 @@ def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, h
     expected_store = {"store/" + name: (sha, size) for name, sha, size in store_rows}
     need(len(expected_store) == len(store_rows) and not set(expected_store) & set(preadmitted),
          "current-store-input-collision")
-    required = set(preadmitted) | set(expected_store) | CURRENT_BOOTSTRAPS | {"core.zip", "github-ca.pem", "manifest.json"}
+    bootstraps = CURRENT_BOOTSTRAPS | ({"local_store_preflight_bootstrap.py"} if store_rows else set())
+    required = set(preadmitted) | set(expected_store) | bootstraps | {"core.zip", "github-ca.pem", "manifest.json"}
     need(set(files) == required, "current-runtime-complete-roster")
     for name, value in preadmitted.items():
         need(files[name] == value, "current-supplier-changed")
@@ -1831,7 +1840,7 @@ def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, h
     for name, row in rows.items():
         need(row["size"] == len(files[name][0]) and row["sha256"] == digest(files[name][0]),
              "current-runtime-manifest-correspondence")
-    for name in CURRENT_BOOTSTRAPS | {"github-ca.pem"}:
+    for name in bootstraps | {"github-ca.pem"}:
         need(files[name][0] == projection["desktop/" + name][0], "current-entrypoint-byte-correspondence")
     current_core_matches(files["core.zip"][0], projection)
     store_runtime_payload(files, current=True, target=target)
@@ -1897,7 +1906,7 @@ def current_runtime_command(args):
     if provider_enabled:
         capacity = history_provider_capacity(supplier_bytes=sum(len(body) for body, _ in supplier.values()),
             supplier_files=len(supplier), fixed_bytes=sum(len(projection["desktop/" + name][0])
-                for name in CURRENT_BOOTSTRAPS | {"github-ca.pem"}))
+                for name in CURRENT_BOOTSTRAPS | {"github-ca.pem"} | ({"local_store_preflight_bootstrap.py"} if store_enabled else set())))
         provider_scope = history_provider_original(args.history_provider, provider_nomination, capacity, target=target)
     with provider_scope as provider:
         provider_body, provider_post = (None, None) if provider is None else provider
@@ -1964,7 +1973,7 @@ def current_runtime_command(args):
                 current_output_absent(args.output, parents[args.output])
                 normalized = {name: (body, current_runtime_mode(name, body, provider_nomination, target=target))
                               for name, (body, _) in files.items()}
-                write_tree(args.output, normalized, current_owned=True)
+                write_tree(args.output, normalized, current_owned=True, mac_store_prefix="store" if store_enabled else None)
                 result["qualification"] = "current-source-staged-no-native-execution"
             if signed_inputs is not None:
                 need(fresh_supplier(args) == fresh_inputs
@@ -3280,7 +3289,7 @@ def runtime_tree(root, expected, *, current=False, target=ARM_TARGET):
     need(type(current) is bool, "runtime-manifest-profile")
     need(current or target == ARM_TARGET, "unqualified-intel-route")
     provider_nomination, provider_source = history_provider_source(target=target) if current else (None, None)
-    files = tree(root)
+    files = tree(root, mac_store_prefix="store" if current else None)
     need("manifest.json" in files, "runtime-manifest-missing")
     _, rows = manifest_files(files["manifest.json"][0], expected, current=current, target=target)
     need(set(files) == set(rows) | {"manifest.json"}, "runtime-complete-roster")
@@ -3394,7 +3403,7 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
     need(sum(len(data) for data, _mode in files.values()) + len(inventory) + INSTALLATION_RECORD_LIMIT
          + len(MAINTENANCE_GATE_BYTES) + len(REGISTRATION_GATE_BYTES) <= MAX_BYTES, "installer-complete-byte-bound")
     files["install-inventory.json"] = (inventory, 0o444)
-    write_tree(args.output, files)
+    write_tree(args.output, files, mac_store_prefix="runtime/store" if args.current_runtime else None)
     result = {"schemaVersion": 1, "packageRole": role, "inventorySha256": digest(inventory),
               "runtimeManifestSha256": args.expected_manifest, "androidSupportManifestSha256": support_sha,
               "androidSupportSignedManifestSha256": ANDROID_SIGNED_MANIFEST_SHA,
@@ -3408,14 +3417,15 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
 def scripts_command(args):
     selection = source_build_selection(command_target(args))
     need(type(args.expected_source) is str and re.fullmatch(r"[0-9a-f]{40}", args.expected_source), "installer-source-binding")
-    source = tree(args.input)
+    store_runtime = package_store_profile(args)
+    source = tree(args.input, mac_store_prefix="runtime/store" if store_runtime else None)
     need("install-inventory.json" in source and digest(source["install-inventory.json"][0]) == args.expected_inventory, "installer-input-anchor")
     installer = read(args.installer)
     macho(installer, target=selection.target)
     scripts = {"input/" + path: value for path, value in source.items()}
     scripts["mrk-macos-install"] = (installer, 0o555)
     scripts["postinstall"] = (read(DESKTOP / "macos-installed-inputs/postinstall", 8192), 0o555)
-    write_tree(args.output, scripts, root_mode=0o755)
+    write_tree(args.output, scripts, root_mode=0o755, mac_store_prefix="input/runtime/store" if store_runtime else None)
     return {"schemaVersion": 1, "installerSha256": digest(installer), "inventorySha256": args.expected_inventory,
             "sourceCommit": args.expected_source, "packageIdentifier": PACKAGE_ID + ("-fixture" if args.fixture else ""),
             "qualification": "scripts-only-input-must-pass-package-archive-audit"}
@@ -3463,7 +3473,16 @@ def xar_members(body, *, allocation_budget=None):
     return result
 
 
-def _cpio_members(body, owner, *, allocation_budget=None):
+def package_store_profile(args):
+    """Explicit selected ordinary Store composition, never inferred from DATA names."""
+    enabled = getattr(args, "store_runtime", False)
+    need(type(enabled) is bool and (not enabled or not getattr(args, "remove", False)), "package-store-purpose")
+    if enabled:
+        signed_store_selection(command_target(args))  # Fixed SOURCE nomination, no fallback.
+    return enabled
+
+
+def _cpio_members(body, owner, *, allocation_budget=None, store_runtime=False):
     # The only nonzero owner caller is original-package PREPARATION below.
     # Public cpio_members and final package acceptance are always fixed0:0.
     need(len(body) <= MAX_BYTES, "scripts-archive-bound")
@@ -3473,7 +3492,8 @@ def _cpio_members(body, owner, *, allocation_budget=None):
     copied_bytes = 0
     root_seen = False
     offset = 0
-    for _ in range(4098):
+    need(type(store_runtime) is bool, "scripts-store-profile")
+    for _ in range(MAX_ENTRIES + 2 if store_runtime else 4098):
         start = offset
         magic = body[start:start + 6]
         if magic == b"070707":
@@ -3516,7 +3536,8 @@ def _cpio_members(body, owner, *, allocation_budget=None):
             continue
         if name.startswith("./"):
             name = name[2:]
-        need(safe_path(name) and name not in entries and (uid, gid) == owner, "scripts-entry-owner")
+        need(safe_path(name, mac_store_prefix="input/runtime/store" if store_runtime else None)
+             and name not in entries and (uid, gid) == owner, "scripts-entry-owner")
         if stat.S_ISDIR(mode):
             need(size == 0 and stat.S_IMODE(mode) == 0o555, "scripts-directory-mode")
             entries[name] = (None, 0o555)
@@ -3529,8 +3550,8 @@ def _cpio_members(body, owner, *, allocation_budget=None):
     raise Refused("scripts-entry-count")
 
 
-def cpio_members(body, *, allocation_budget=None):
-    return _cpio_members(body, (0, 0), allocation_budget=allocation_budget)
+def cpio_members(body, *, allocation_budget=None, store_runtime=False):
+    return _cpio_members(body, (0, 0), allocation_budget=allocation_budget, store_runtime=store_runtime)
 
 
 def package_info(body, *, fixture=False, selection=None, remove=False, app_absence=False):
@@ -3552,10 +3573,11 @@ def package_info(body, *, fixture=False, selection=None, remove=False, app_absen
 
 
 def original_package(scripts_path, package_path, *, fixture=False, selection=None, remove=False, expected_remover=None,
-                     removal_fixture_role=None, removal_fixture_correlation=None, removal_fixture_binding=None, app_absence=False):
+                     removal_fixture_role=None, removal_fixture_correlation=None, removal_fixture_binding=None, app_absence=False, store_runtime=False):
+    need(type(store_runtime) is bool and not (store_runtime and remove), "package-store-purpose")
     selection = selected_build(selection)
     owner = packager_ids()
-    scripts = tree(scripts_path, packager=True)
+    scripts = tree(scripts_path, packager=True, mac_store_prefix="input/runtime/store" if store_runtime else None)
     if remove:
         need(sha(expected_remover), "remove-program-anchor")
         expected_script = (read(DESKTOP / "macos-installed-inputs/remove-postinstall", 8192)
@@ -3581,8 +3603,8 @@ def original_package(scripts_path, package_path, *, fixture=False, selection=Non
     archive = members["Scripts"]
     if archive[:2] == b"\x1f\x8b":
         archive = inflate(archive, MAX_BYTES, gzip=True)
-    actual = _cpio_members(archive, owner)
-    expected = {**scripts, **{name: (None, 0o555) for name in directories(scripts)}}
+    actual = _cpio_members(archive, owner, store_runtime=store_runtime)
+    expected = {**scripts, **{name: (None, 0o555) for name in directories(scripts, mac_store_prefix="input/runtime/store" if store_runtime else None)}}
     need(actual == expected, "complete-original-scripts-correspondence")
     return scripts, package, members, identifier, owner
 
@@ -3647,10 +3669,11 @@ def app_absence_final_command(args, compact):
 
 
 def prepare_package_command(args):
+    store_runtime = package_store_profile(args)
     selection = source_build_selection(command_target(args))
     removal = ({"expected_remover": getattr(args, "expected_remover", None), **removal_fixture_script_arguments(args)}
                if getattr(args, "remove", False) else {})
-    scripts, package, members, identifier, owner = original_package(args.scripts, args.package, fixture=args.fixture, selection=selection, remove=getattr(args, "remove", False), **removal)
+    scripts, package, members, identifier, owner = original_package(args.scripts, args.package, fixture=args.fixture, selection=selection, remove=getattr(args, "remove", False), store_runtime=store_runtime, **removal)
     # This is not archive extraction: only validated, unchanged PackageInfo
     # DATA is copied to a fixed literal name in an exclusively-created root.
     write_tree(args.output, {"PackageInfo": (members["PackageInfo"], 0o444)}, root_mode=0o700)
@@ -3668,10 +3691,11 @@ def package_format_input_command(args):
 
 
 def audit_command(args):
+    store_runtime = package_store_profile(args)
     selection = source_build_selection(command_target(args))
     removal = ({"expected_remover": getattr(args, "expected_remover", None), **removal_fixture_script_arguments(args)}
                if getattr(args, "remove", False) else {})
-    scripts, original, original_members, identifier, _owner = original_package(args.scripts, args.original_package, fixture=args.fixture, selection=selection, remove=getattr(args, "remove", False), **removal)
+    scripts, original, original_members, identifier, _owner = original_package(args.scripts, args.original_package, fixture=args.fixture, selection=selection, remove=getattr(args, "remove", False), store_runtime=store_runtime, **removal)
     package = read(args.package)
     members = xar_members(package)
     need(set(members) == {"PackageInfo", "Scripts"}, "final-package-roster")
@@ -3680,8 +3704,8 @@ def audit_command(args):
     archive = members["Scripts"]
     if archive[:2] == b"\x1f\x8b":
         archive = inflate(archive, MAX_BYTES, gzip=True)
-    actual = cpio_members(archive)
-    expected = {**scripts, **{name: (None, 0o555) for name in directories(scripts)}}
+    actual = cpio_members(archive, store_runtime=store_runtime)
+    expected = {**scripts, **{name: (None, 0o555) for name in directories(scripts, mac_store_prefix="input/runtime/store" if store_runtime else None)}}
     need(actual == expected, "complete-root-owned-scripts-correspondence")
     return {"schemaVersion": 1, "packageSha256": digest(package), "packageSize": len(package),
             "originalPackageSha256": digest(original), "packageInfoSha256": digest(members["PackageInfo"]),
@@ -4067,9 +4091,10 @@ def prepare_install_product_command(args):
 def audit_install_product_command(args):
     need(getattr(args, "fixture", False) is False and getattr(args, "remove", False) is False,
          "fixed-install-product-purpose")
+    store_runtime = package_store_profile(args)
     selection = source_build_selection(command_target(args))
     scripts, original, original_members, identifier, _owner = original_package(
-        args.scripts, args.original_package, selection=selection)
+        args.scripts, args.original_package, selection=selection, store_runtime=store_runtime)
     definition, readme = install_product_sources(selection)
     package = read(args.package)
     members = install_product_members(package)
@@ -4085,8 +4110,8 @@ def audit_install_product_command(args):
     archive = component["Scripts"]
     if archive[:2] == b"\x1f\x8b":
         archive = inflate(archive, MAX_BYTES, gzip=True)
-    actual = cpio_members(archive)
-    expected = {**scripts, **{name: (None, 0o555) for name in directories(scripts)}}
+    actual = cpio_members(archive, store_runtime=store_runtime)
+    expected = {**scripts, **{name: (None, 0o555) for name in directories(scripts, mac_store_prefix="input/runtime/store" if store_runtime else None)}}
     need(actual == expected, "complete-root-owned-scripts-correspondence")
     return {"schemaVersion": 1, "packageSha256": digest(package), "packageSize": len(package),
             "originalPackageSha256": digest(original), "packageInfoSha256": digest(component["PackageInfo"]),
@@ -4441,7 +4466,7 @@ def observation_inventory_bytes(body, expected_inventory, expected_manifest, *, 
     rows = {}
     for row in inventory["files"]:
         need(type(row) is dict and set(row) == {"path", "sha256", "size", "executable"}
-             and safe_path(row["path"]) and row["path"].startswith(("app/Contents/", "runtime/")) and row["path"] not in rows
+             and safe_path(row["path"], mac_store_prefix="runtime/store") and row["path"].startswith(("app/Contents/", "runtime/")) and row["path"] not in rows
              and sha(row["sha256"]) and type(row["size"]) is int and 0 <= row["size"] <= MAX_BYTES
              and type(row["executable"]) is bool
              and row["executable"] == (row["path"] in ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
@@ -4457,7 +4482,7 @@ def observation_inventory_bytes(body, expected_inventory, expected_manifest, *, 
          and {"app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/Contents/Info.plist", "app/" + PAYLOAD_INFO,
               "runtime/python/bin/python3", "runtime/manifest.json"} <= set(rows)
          and rows["runtime/manifest.json"]["sha256"] == expected_manifest, "observation-inventory-required")
-    directories(rows)
+    directories(rows, mac_store_prefix="runtime/store")
     return rows
 
 
@@ -5823,7 +5848,7 @@ def maintenance_generation_readback(root_fd, versions_fd, root_identity, generat
             verified_files = 0
             if current:
                 app = tree(INSTALL_ROOT / APP_NAME, installed=True)
-                runtime = tree(INSTALL_ROOT / "versions" / selection.release / "runtime", installed=True)
+                runtime = tree(INSTALL_ROOT / "versions" / selection.release / "runtime", installed=True, mac_store_prefix="store")
                 actual = {"app/" + name: value for name, value in app.items()}
                 actual.update({"runtime/" + name: value for name, value in runtime.items()})
                 byte_correspondence(actual, rows)
@@ -6167,7 +6192,7 @@ def fixture_observation_command(args):
                             with fixture_directory(root / "versions" / selection.release, members):
                                 runtime_path = root / "versions" / selection.release / "runtime"
                                 if runtime_published:
-                                    files = tree(runtime_path, installed=True)
+                                    files = tree(runtime_path, installed=True, mac_store_prefix="store")
                                     byte_correspondence({"runtime/" + key: value for key, value in files.items()}, published)
                                     runtime_files = len(files)
                                 else:
@@ -6302,6 +6327,7 @@ def main(argv=None):
     scripts.add_argument("--expected-inventory", required=True)
     scripts.add_argument("--expected-source", required=True)
     scripts.add_argument("--fixture", action="store_true")
+    scripts.add_argument("--store-runtime", action="store_true")
     scripts.add_argument("--output", required=True, type=Path)
     probe = commands.add_parser("package-format-input")
     probe.add_argument("--output", required=True, type=Path)
@@ -6310,6 +6336,7 @@ def main(argv=None):
         package.add_argument("--scripts", required=True, type=Path)
         package.add_argument("--package", required=True, type=Path)
         package.add_argument("--fixture", action="store_true")
+        package.add_argument("--store-runtime", action="store_true")
         if name == "prepare-package":
             package.add_argument("--output", required=True, type=Path)
         else:

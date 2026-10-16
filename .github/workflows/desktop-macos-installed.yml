@@ -1801,7 +1801,7 @@ jobs:
           installer="$CARGO_TARGET_DIR/$MRK_MACOS_TARGET/release/mrk-macos-install"
           /usr/bin/codesign --force --sign - --timestamp=none "$installer"
           /usr/bin/codesign --verify --strict "$installer"
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py scripts --fixture --target "$MRK_MACOS_TARGET" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py scripts --store-runtime --fixture --target "$MRK_MACOS_TARGET" \
             --input "$MRK_MACOS_WORK/input" --installer "$installer" \
             --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --output "$MRK_MACOS_WORK/scripts-fixture" > "$MRK_MACOS_WORK/scripts-fixture-result.json"
@@ -1809,7 +1809,7 @@ jobs:
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts-fixture" \
             --identifier dev.mobile-release-kit.desktop.installed-fixture --version 0.1.2 \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg"
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package --fixture --target "$MRK_MACOS_TARGET" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package --store-runtime --fixture --target "$MRK_MACOS_TARGET" \
             --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" \
             --output "$MRK_MACOS_WORK/package-fixture-parts" > "$MRK_MACOS_WORK/package-fixture-prepare.json"
           # Native tools only write fresh outputs as this nonroot account.
@@ -1841,7 +1841,7 @@ jobs:
           set -e
           printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-fixture-xar.status"
           [[ $xar_status == 0 ]] || exit "$xar_status"
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package --fixture --target "$MRK_MACOS_TARGET" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package --store-runtime --fixture --target "$MRK_MACOS_TARGET" \
             --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" \
             --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"
       - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector
@@ -1927,7 +1927,7 @@ jobs:
           MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
             "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-root-installer --target "$MRK_MACOS_TARGET"
           /usr/bin/codesign --verify --strict "$installer"
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py scripts --target "$MRK_MACOS_TARGET" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py scripts --store-runtime --target "$MRK_MACOS_TARGET" \
             --input "$MRK_MACOS_WORK/input" --installer "$installer" \
             --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --output "$MRK_MACOS_WORK/scripts" > "$MRK_MACOS_WORK/scripts-result.json"
@@ -1935,7 +1935,7 @@ jobs:
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts" \
             --identifier dev.mobile-release-kit.desktop.installed --version "$MRK_MACOS_SOURCE_PACKAGE_VERSION" \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg"
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package --target "$MRK_MACOS_TARGET" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package --store-runtime --target "$MRK_MACOS_TARGET" \
             --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" \
             --output "$MRK_MACOS_WORK/package-parts" > "$MRK_MACOS_WORK/package-prepare.json"
           # Native tools only write fresh outputs as this nonroot account.

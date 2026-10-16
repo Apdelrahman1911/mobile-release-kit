@@ -193,6 +193,8 @@ class StoreConsumerNotary(unittest.TestCase):
                 # Populate a complete synthetic Store runtime; these Mach-O
                 # bytes are never executed and are not cryptographic evidence.
                 store_files = StoreStaging().fixture(stager.ARM_TARGET)
+                from test_macos_store_paths import STORE_NAMES
+                store_files.update({"store/" + name: (b"inert retained template/notice", 0o444) for name in STORE_NAMES})
                 for name, (body, mode) in store_files.items():
                     path = op.work / 'runtime' / name
                     path.parent.mkdir(parents=True, exist_ok=True)
@@ -250,3 +252,37 @@ class StoreConsumerNotary(unittest.TestCase):
                         self.assertEqual(state.observations, [])
                         self.assertIsNone(op.notary_key)
                 self.assertEqual((op.checkout / 'desktop' / stager.SIGNED_RUNTIME_BINDING).read_bytes(), original_nomination)
+
+    def test_final_package_selected_scope_and_receipt_count_keep_legacy_bound(self):
+        import tempfile
+        import test_macos_installed_staging as staging
+        helper, api, stager = staging.MacAndroidHelperPackagingData(), staging.ANDROID_HELPER, staging.TOOL
+        with tempfile.TemporaryDirectory(prefix="mrk-store-final-package-data-") as temporary:
+            f = helper.final_package_fixture(Path(temporary))
+            op = f.operation
+            source = op.checkout / "desktop" / stager.SIGNED_STORE_SELECTION
+            source.write_bytes(stager.canonical(selection())); source.chmod(0o644)
+            op.environment["MRK_MACOS_STORE_RUNTIME"] = "signed-component"
+            with helper.final_package_fixture_call(f):
+                try:
+                    op.execute()
+                except api.Refused:
+                    self.fail(str(op.receipt.get("failure")))
+            self.assertTrue(op.package_store_runtime and op.receipt["passed"] and op.receipt["originalClosesKnown"])
+            self.assertTrue(any(entry["role"] == "source-package-store-selection" and entry["closed"] for entry in op.entries))
+            final = op.work / "package-final/MobileReleaseKit.pkg"
+            body = final.read_bytes()
+            release = (op.checkout / op.release_input).read_bytes()
+            arguments = (op.environment, op.target, f.credentials.installer,
+                api.digest((op.checkout / api.INSTALLER_PROFILE).read_bytes()),
+                api.digest((op.checkout / api.NOTARY_PROFILE).read_bytes()), len(body), api.digest(body),
+                stager.build_release_data(release, target=op.target)["release"], api.digest(release))
+            for count in (4097, stager.MAX_FILES):
+                row = copy.deepcopy(op.receipt)
+                row["finalPackage"]["scriptFileCount"] = count
+                raw = stager.canonical(row)
+                self.assertEqual(api.final_package_receipt(raw, *arguments, runtime_stager=stager)["scriptFileCount"], count)
+                with self.assertRaises(api.Refused): api.final_package_receipt(raw, *arguments)
+            row["finalPackage"]["scriptFileCount"] = stager.MAX_FILES + 1
+            with self.assertRaises(api.Refused):
+                api.final_package_receipt(stager.canonical(row), *arguments, runtime_stager=stager)

@@ -74,6 +74,8 @@ mod lifecycle_evidence_protocol;
 mod environment_diagnostics_protocol;
 mod environment_diagnostics_owner;
 mod offline_preflight_protocol;
+mod local_store_preflight_protocol;
+mod local_store_preflight_owner;
 mod artifact_inspection_protocol;
 mod offline_preflight_owner;
 mod android_build_protocol;

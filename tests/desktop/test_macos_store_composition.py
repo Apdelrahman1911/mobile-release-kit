@@ -31,7 +31,7 @@ def fixture():
                   "src/mobile_release/tooling.py": ("REQUIRED_TOOLING_FILES = " + repr(tuple(tooling)) + "\n").encode(),
                   TOOL.CURRENT_CA_SOURCE: b"synthetic CA, not usable TLS material\n",
                   TOOL.CURRENT_HELPER_SOURCE: helper, **tooling}
-        inputs.update({"desktop/" + name: b"# inert bootstrap\n" for name in TOOL.CURRENT_BOOTSTRAPS})
+        inputs.update({"desktop/" + name: b"# inert bootstrap\n" for name in TOOL.CURRENT_BOOTSTRAPS | {"local_store_preflight_bootstrap.py"}})
         for name, body in inputs.items():
             path = checkout / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +85,7 @@ class StoreComposition(unittest.TestCase):
             self.assertEqual(result["qualification"], "current-source-staged-no-native-execution")
             for name, body in f.tooling.items():
                 self.assertEqual(output["store/tooling/" + name], (body, 0o444))
+            self.assertEqual(output["local_store_preflight_bootstrap.py"], (b"# inert bootstrap\n", 0o444))
             self.assertNotIn("store/tooling/obsolete.rb", output)
             self.assertEqual((f.component / "tooling/fastlane/run_lane.rb").read_bytes(), b"# obsolete runner\n")
             self.assertEqual(output["python/bin/python3"], f.supplier["python/bin/python3"])
@@ -108,6 +109,7 @@ class StoreComposition(unittest.TestCase):
             TOOL.current_runtime_command(selection)
             files = TOOL.tree(selection.work / "runtime", current_root_mode=0o700)
             self.assertFalse(any(name.startswith("store/") for name in files))
+            self.assertNotIn("local_store_preflight_bootstrap.py", files)
             captured, _, _ = TOOL.current_source()
             self.assertTrue(set(f.tooling).isdisjoint(captured))
             rejected = args(f, "historical")

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use crate::{macos_install_maintenance::ReleaseData, macos_install_paths as paths,
-    protocol::{strict_json, strict_macos_inventory_json}, runtime::safe_payload_path};
+    protocol::{strict_json, strict_macos_inventory_json}, runtime::safe_macos_install_path};
 
 pub const INVENTORY_NAME: &str = "install-inventory.json";
 pub const RECORD_NAME: &str = "installation-v1.json";
@@ -118,8 +118,8 @@ impl Inventory {
         let mut directories = BTreeSet::from(["app".to_owned(), "runtime".to_owned()]);
         let mut total = 0u64; let mut previous = "";
         for item in &self.files {
-            check(item.path.is_ascii() && safe_payload_path(&item.path) && item.path.len() <= 1024
-                && item.path.split('/').count() <= 17
+            check(item.path.is_ascii() && safe_macos_install_path(&item.path) && item.path.len() <= 1024
+                && item.path.split('/').count() <= (if item.path.starts_with("runtime/store/") { 18 } else { 17 })
                 && (item.path.starts_with("app/Contents/") || item.path.starts_with("runtime/"))
                 && item.path.as_str() > previous && hex(&item.sha256, 64), "inventory-path")?;
             check(item.executable == (matches!(item.path.as_str(),

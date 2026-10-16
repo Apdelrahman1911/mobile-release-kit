@@ -3496,7 +3496,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual(argv[:4], ["/usr/bin/ditto", "-c", "-k", "--keepParent"])
                 self.assertEqual(Path(argv[-2]), private)
                 self.assertEqual(Path(argv[-1]), work / operation.target_name / module.NOTARY_ZIP_NAME)
-                copied = TOOL.tree(private)
+                copied = TOOL.tree(private, mac_store_prefix="runtime/store" if getattr(operation, "composed_runtime", False) else None)
                 self.assertIn("runtime/python/bin/python3", copied)
                 self.assertIn(module.NOTARY_APP_NAME + "/" + TOOL.APP_BINARY, copied)
                 # input_command normalizes only its copy: code555/resource444.

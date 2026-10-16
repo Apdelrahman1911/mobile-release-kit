@@ -1,9 +1,15 @@
 //! A private loan of an assigned local ADC snapshot, never a renderer path or
 //! environment map. This does not authorize Store execution or authenticate Google.
 use super::*;
+use crate::local_store_preflight_protocol as wire;
+use sha2::{Digest, Sha256};
+
+pub(crate) const MATERIAL_PREFIX: &[u8] = b"MRK-STORE-MATERIAL/1\n";
+pub(crate) const MATERIAL_SUFFIX: &[u8] = b"\nMRK-STORE-MATERIAL-END\n";
 
 pub(crate) struct SelectedStoreMaterial {
     native: Arc<NativeContext>, key: RecordKey, payload: Arc<Payload>,
+    command: Option<wire::Context>,
 }
 fn refused() -> BridgeError {
     BridgeError::new("local_store_credentials", "Select This Mac and assign the current Google Play service-account file for this release context, then review again.")
@@ -15,7 +21,42 @@ fn bytes(payload: &Payload) -> Option<&[u8]> {
 }
 impl SelectedStoreMaterial {
     pub(super) fn census_parts(&self) -> (&Arc<NativeContext>, &Arc<Payload>) { (&self.native, &self.payload) }
-    pub(super) fn own_retained_heap_bytes(&self) -> usize { self.key.id.0.capacity() }
+    pub(super) fn own_retained_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self.key.id.0.capacity();
+        if let Some(command) = &self.command {
+            for capacity in [command.project_id.capacity(), command.saved_config.sha256.capacity(),
+                command.saved_version.source.capacity(), command.saved_version.sha256.capacity(),
+                command.saved_version.name.capacity(), command.record_id.capacity()] {
+                bytes = bytes.checked_add(capacity)?;
+            }
+        }
+        Some(bytes)
+    }
+    pub(crate) fn matches(&self, context: &wire::Context, registration: u32, root: &asset_source::RegisteredRoot) -> bool {
+        self.command.as_ref() == Some(context) && self.native.registry_generation == registration && self.native.project == *root
+            && self.native.project_id == context.project_id && self.native.revision == context.credential_context_revision
+            && self.key.id.0 == context.record_id && self.key.revision == context.record_revision
+            && self.native.execution_mode == commands::ExecutionMode::Local && self.native.platform == Platform::Android
+            && matches!(self.native.purpose, Purpose::Full | Purpose::Store)
+    }
+    pub(crate) fn context_data(&self) -> Result<wire::Content, BridgeError> {
+        if self.command.is_none() { return Err(refused()); }
+        Ok(wire::Content { bytes: self.native.draft.len() as u32, sha256: format!("{:x}", Sha256::digest(&self.native.draft)) })
+    }
+    // Only the admitted original Session's private writer consumes these same
+    // payload bytes; holding the Arc keeps them alive until all original joins.
+    pub(crate) fn parts(&self) -> Result<Vec<(&'static str, &[u8])>, BridgeError> {
+        if self.command.is_none() { return Err(refused()); }
+        let mut parts = Vec::new(); parts.try_reserve_exact(1).map_err(|_| refused())?;
+        parts.push(("google-service-account", bytes(&self.payload).ok_or_else(refused)?));
+        Ok(parts)
+    }
+    pub(crate) fn header(&self) -> Result<Vec<u8>, BridgeError> {
+        let parts = self.parts()?;
+        let mut header = serde_json::to_vec(&serde_json::json!({"schemaVersion":1,
+            "files":[{"role":"google-service-account","bytes":parts[0].1.len()}]})).map_err(|_| refused())?;
+        header.push(b'\n'); if header.len() > 1024 { return Err(refused()); } Ok(header)
+    }
     pub(super) fn current(&self, state: &DocumentState, registration: u32, root: &asset_source::RegisteredRoot) -> bool {
         self.native.execution_mode == commands::ExecutionMode::Local && self.native.platform == Platform::Android
             && matches!(self.native.purpose, Purpose::Full | Purpose::Store)
@@ -40,11 +81,34 @@ pub(super) fn borrow_material(state: &DocumentState, record: commands::RecordRef
         && !v.project_id.is_empty() && !v.draft.is_empty() && v.draft.len() <= 512 * 1024).ok_or_else(refused)?.clone();
     let key = RecordKey { id: Token(record.record_id.into()), revision: record.expected_revision };
     let payload = github_secret::assigned(state, &key, Kind::GoogleServiceAccount, &native).ok_or_else(refused)?.clone();
-    let original = Arc::new(SelectedStoreMaterial { native, key, payload });
+    let original = Arc::new(SelectedStoreMaterial { native, key, payload, command: None });
     if !original.current(state, original.native.registry_generation, &original.native.project) { return Err(refused()); }
     Ok(original)
 }
+pub(super) fn borrow_preflight_material(state: &DocumentState, context: &wire::Context,
+    registration: u32, project: &asset_source::RegisteredRoot) -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
+    let mut original = borrow_material(state, commands::RecordRef { record_id: &context.record_id,
+        expected_revision: context.record_revision }, context.credential_context_revision)?;
+    Arc::get_mut(&mut original).ok_or_else(refused)?.command = Some(context.clone());
+    if !original.matches(context, registration, project) || !original.current(state, registration, project) { return Err(refused()); }
+    original.parts()?;
+    Ok(original)
+}
+
 impl DocumentBinding {
+    pub(super) fn review_store_preflight_material(&self, state: &DocumentState, context: &wire::Context,
+        registration: u32, project: &asset_source::RegisteredRoot) -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
+        if !cfg!(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))
+            || !self.native_qualified() || encrypted_mode(state) && !self.persistence_qualified() { return Err(refused()); }
+        borrow_preflight_material(state, context, registration, project)
+    }
+    pub(super) fn recheck_store_preflight_material(&self, state: &DocumentState, original: &Arc<SelectedStoreMaterial>,
+        registration: u32, project: &asset_source::RegisteredRoot) -> Result<(), BridgeError> {
+        if !cfg!(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))
+            || !self.native_qualified() || encrypted_mode(state) && !self.persistence_qualified()
+            || !original.current(state, registration, project) || original.command.is_none() { return Err(refused()); }
+        original.parts()?; Ok(())
+    }
     pub(super) fn review_store_material(&self, state: &DocumentState, record: commands::RecordRef<'_>, context_revision: u32)
         -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
         if !cfg!(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))
@@ -83,6 +147,34 @@ mod tests {
         state.assignments.push(Assignment { kind:Kind::GoogleServiceAccount,record_id:key.id,record_revision:1,context_revision:2,
             availability:AssignmentAvailability::Available }); state
     }
+    #[test]
+    fn store_command_loan_binds_canonical_context_and_retains_private_writer_bytes() {
+        let mut state=model(); let root=state.context.as_ref().unwrap().project.clone();
+        let value=serde_json::json!({"projectId":"inert-project","draftRevision":1,"baselineGeneration":1,
+            "savedConfig":{"bytes":999,"sha256":"d".repeat(64)},
+            "savedVersion":{"source":"release/version.properties","bytes":20,"sha256":"e".repeat(64),"name":"1.2.3","build":42},
+            "credentialContextRevision":2,"recordId":"a".repeat(32),"recordRevision":1,"executionMode":"local"});
+        let context=wire::prepare(&value).unwrap().context();
+        let unscoped=borrow_material(&state,commands::RecordRef {record_id:&context.record_id,expected_revision:1},2).unwrap();
+        assert!(unscoped.parts().is_err() && unscoped.context_data().is_err());
+        let original=borrow_preflight_material(&state,&context,7,&root).unwrap();
+        assert!(original.matches(&context,7,&root));
+        let mut changed=context.clone();changed.draft_revision+=1;assert!(!original.matches(&changed,7,&root));
+        changed=context.clone();changed.record_revision+=1;assert!(borrow_preflight_material(&state,&changed,7,&root).is_err());
+        let canonical=original.context_data().unwrap();
+        assert_eq!(canonical.bytes,2);assert_ne!(canonical,context.saved_config);
+        let parts=original.parts().unwrap();
+        assert_eq!(parts[0].0,"google-service-account");
+        assert_eq!(parts[0].1.as_ptr(),state.records[0].payload.material.as_ref().unwrap().bytes().as_ptr());
+        let header=String::from_utf8(original.header().unwrap()).unwrap();
+        assert!(!header.contains("PRIVATE") && !header.contains("client_email"));
+        let held=Arc::downgrade(&original.payload);
+        state.lock_pending=true;assert!(!original.current(&state,7,&root));
+        drop(unscoped);drop(state);assert!(held.upgrade().is_some());
+        assert!(!original.parts().unwrap()[0].1.is_empty()); // Already-admitted writer, not a new Start.
+        drop(original);assert!(held.upgrade().is_none());
+    }
+
     #[test]
     fn local_loan_uses_original_private_bytes_and_rejects_stale_context_or_assignment() {
         for change in 0..8 {

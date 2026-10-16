@@ -766,8 +766,10 @@ impl Book {
         let i = self.records.len(); self.records.push(Record { state: State::Reserved, fd: None, parent, name: name.into(), identity: None, android_flags: None }); Ok(i)
     }
     fn filesystem(&self, index: usize, identity: Identity, stopped: &mut dyn FnMut() -> bool) -> Result<()> {
+        if stopped(){return Err(AdmissionFailure::Stopped);}
         let fd = self.fd(index)?;
         let fs = statfs::fstatfs(fd).map_err(native_error)?;
+        if stopped(){return Err(AdmissionFailure::Stopped);}
         if fs.filesystem_type_name() != "apfs" || !fs.flags().contains(MntFlags::MNT_LOCAL)
             || fs.flags().intersects(MntFlags::MNT_UNION | MntFlags::MNT_AUTOMOUNTED | MntFlags::MNT_IGNORE_OWNERSHIP) {
             return Err(AdmissionFailure::Ownership);
@@ -849,15 +851,20 @@ impl Book {
         self.check_name(index, end, stop)?; Ok(index)
     }
     fn check_name(&self, index: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
-        self.point(end, stop)?;
+        self.check_name_with(index,&mut ||self.point(end,stop))
+    }
+    fn check_name_with(&self, index: usize, point: &mut dyn FnMut()->Result<()>) -> Result<()> {
+        point()?;
         let record = &self.records[index]; let identity = record.identity.ok_or(AdmissionFailure::Identity)?;
         let actual = stat::fstat(self.fd(index)?).map_err(native_error)?;
+        point()?;
         let named = if let Some(parent) = record.parent {
             stat::fstatat(self.fd(parent)?, record.name.as_str(), AtFlags::AT_SYMLINK_NOFOLLOW)
         } else { stat::lstat(Path::new("/")) }.map_err(native_error)?;
+        point()?;
         if Identity::of(&actual) != identity || Identity::of(&named) != identity
             || record.android_flags.is_some_and(|flags|actual.st_flags!=flags || named.st_flags!=flags) { return Err(AdmissionFailure::Identity); }
-        self.filesystem(index, identity, &mut || self.point(end, stop).is_err())?; self.point(end, stop)
+        self.filesystem(index, identity, &mut || point().is_err())?; point()
     }
     fn chain(&mut self, path: &Path, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
         let bytes = path.as_os_str().as_bytes();
@@ -922,8 +929,9 @@ impl Book {
                 let next = offset.checked_add(11+length).filter(|n| *n <= used).ok_or(AdmissionFailure::Inventory)?;
                 let name = std::str::from_utf8(&buffer[offset+11..next]).map_err(native_error)?.to_owned(); offset = next;
                 if name == "." || name == ".." { continue; }
-                if !runtime::safe_payload_path(&name) || name.contains('/') || inode == 0 || !local.insert(name.clone()) { return Err(AdmissionFailure::Inventory); }
+                if name.contains('/') || inode == 0 || !local.insert(name.clone()) { return Err(AdmissionFailure::Inventory); }
                 let path = if relative.is_empty() { name.clone() } else { format!("{relative}/{name}") };
+                if !runtime::safe_macos_runtime_path(&path) { return Err(AdmissionFailure::Inventory); }
                 if path == "manifest.json" { continue; }
                 if observed.len() >= crate::macos_install_record::ENTRY_LIMIT || !observed.insert(path.clone()) { return Err(AdmissionFailure::Bounds); }
                 let directory = directories.contains(&path);
@@ -1077,7 +1085,7 @@ impl Book {
         let mut files = BTreeMap::new(); let mut directories = BTreeSet::new(); let mut folded = BTreeSet::new(); let mut total = 0u64;
         let mut previous = String::new();
         for file in manifest.files {
-            if !runtime::safe_payload_path(&file.path) || !file.path.is_ascii() || file.path == "manifest.json" || !sha(&file.sha256)
+            if !runtime::safe_macos_runtime_path(&file.path) || !file.path.is_ascii() || file.path == "manifest.json" || !sha(&file.sha256)
                 || file.path <= previous || file.size > 512*1024*1024 { return Err(AdmissionFailure::Inventory); }
             total = total.checked_add(file.size).ok_or(AdmissionFailure::Bounds)?;
             if total > if store_present { 512*1024*1024 } else { 1024*1024*1024 }

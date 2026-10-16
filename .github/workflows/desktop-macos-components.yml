@@ -211,6 +211,16 @@ jobs:
           # linker/framework resolution; no live app, Store or signing action.
           rustup run 1.98.1 cargo build --locked --lib \
             --manifest-path desktop/helpers/macos-desktop-image/Cargo.toml
+          # The wrapper cdylib has test=false. Run only these two memory-only
+          # Mac Store ownership contracts in the same packaged feature graph;
+          # neither test inspects files, allocates native frames or starts work.
+          rustup run 1.98.1 cargo test --locked --no-default-features \
+            --manifest-path desktop/src-tauri/Cargo.toml \
+            --features macos-installed-desktop-image --lib -- \
+            installed_runtime::store_runtime::tests::store_cleanup_points_ignore_work_stop_but_keep_original_expiry_and_failures \
+            installed_runtime::store_runtime::tests::store_slots_do_not_lend_uninspected_or_settled_sources \
+            --exact --test-threads=1 | tee "$WORK_ROOT/store-contract-tests.log"
+          grep -Eq '^test result: ok\. 2 passed; 0 failed; 0 ignored;' "$WORK_ROOT/store-contract-tests.log"
       - name: Remove only this job's app compiler and frontend outputs
         if: always() && steps.work.outputs.root != ''
         shell: bash

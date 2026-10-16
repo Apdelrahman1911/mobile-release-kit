@@ -341,7 +341,7 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
         (package / "_desktop_engine.py").write_bytes(b"# inert protocol\n")
         (package / "tooling.py").write_bytes((_SOURCE / "src/mobile_release/tooling.py").read_bytes())
         (source / "desktop").mkdir()
-        for name in (*preparation.CURRENT_BOOTSTRAPS, preparation.GITHUB_CA_NAME):
+        for name in (*preparation.CURRENT_BOOTSTRAPS, preparation.STORE_BOOTSTRAP, preparation.GITHUB_CA_NAME):
             (source / "desktop" / name).write_bytes(b"inert first-party payload\n")
         (runtime / "python/bin").mkdir(parents=True)
         (runtime / "python/bin/python3").write_bytes(b"inert Python\n")
