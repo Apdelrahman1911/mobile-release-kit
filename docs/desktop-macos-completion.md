@@ -62,8 +62,12 @@ binding is now integrated with optional signed-Mac candidate creation, durable
 local journal checkpoints, and the existing UI/native operation. Review checks
 the current retained bundle; Abandon records cancellation and preserves files.
 Candidate creation does not upload to a Store or authorize a release. Local
-Store intent/authorization, execution and recovery remain unfinished. Current
-candidate integration still requires real Mac graph and installed-flow checks.
+Store intent/authority DATA now has separate closed Python/Ruby readers with
+shared business-rule validation; no local execution permission is created by
+parsing these records. Durable prepare, execution and recovery remain unfinished.
+Candidate integration passed the actual Mac app/helper graphs and 27 focused
+native tests on each architecture in run `38969579047/1` at `18a54582`; positive
+installed Create/Review/Abandon and Keychain flows remain unverified.
 
 ## API and compatibility boundaries
 

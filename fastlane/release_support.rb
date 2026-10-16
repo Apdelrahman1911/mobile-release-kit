@@ -159,6 +159,16 @@ module MobileReleaseKit
       raise ContractError, "Operation intent must be a bounded regular file"
     end
     document = strict_json(File.read(safe, encoding: "UTF-8"), label: "Operation intent")
+    payload, digest = sealed_operation_document(document)
+    unless payload["documentType"] == "store-operation-intent" && payload["schemaVersion"] == 1 &&
+           payload.keys.sort == CI_INTENT_FIELDS.sort
+      raise ContractError, "Operation intent document type/schemaVersion/fields are invalid"
+    end
+    [payload, digest]
+  end
+
+  def self.sealed_operation_document(document)
+    raise ContractError, "Operation intent must be an object" unless document.is_a?(Hash)
     integrity = document["integrity"]
     unless integrity.is_a?(Hash) && integrity.keys.sort == %w[algorithm sha256] &&
            integrity["algorithm"] == "sha256" &&
@@ -168,10 +178,113 @@ module MobileReleaseKit
     payload = document.reject { |key, _value| key == "integrity" }
     actual = Digest::SHA256.hexdigest(canonical_json(payload))
     raise ContractError, "Operation intent integrity mismatch" unless secure_equal(actual, integrity["sha256"])
-    unless payload["documentType"] == "store-operation-intent" && payload["schemaVersion"] == 1
-      raise ContractError, "Operation intent document type/schemaVersion is invalid"
-    end
     [payload, integrity.fetch("sha256")]
+  end
+
+  CI_INTENT_FIELDS = %w[documentType schemaVersion stage platform tooling repository candidateSource
+    operationSource authorizedBy confirmation application version destination configuration artifacts
+    signing predecessors storePrecondition privateStateCommitments createdAt].freeze
+  LOCAL_INTENT_FIELDS = (CI_INTENT_FIELDS - %w[repository authorizedBy] +
+    %w[origin project operationId candidateSha256 preparedBy]).freeze
+  LOCAL_AUTHORITY_FIELDS = %w[schemaVersion origin purpose project operationId candidateSha256
+    authorizationId source assignment confirmationSha256 intentSha256].freeze
+  LOCAL_PROJECT_FIELDS = %w[projectLocator projectBinding projectId keyId keyRevision].freeze
+  LOCAL_BRANCH = /\A(?!\/)(?!.*(?:\.\.|\/\/|@\{|\\|[ ~^:?*\[]))(?!.*[.\/]$).+\z/
+
+  # DATA only: neither this public record nor its hash proves original custody,
+  # native consent, journal authentication or that any Store request dispatched.
+  def self.local_need(value)
+    raise ContractError, "Invalid local Store intent or authority DATA" unless value
+  end
+
+  def self.local_keys(value, keys)
+    local_need(value.instance_of?(Hash) && value.keys.sort == keys.sort)
+    value
+  end
+
+  def self.local_hex(value, size)
+    value.instance_of?(String) && /\A[0-9a-f]{#{size}}\z/.match?(value)
+  end
+
+  def self.local_uuid(value)
+    value.instance_of?(String) && /\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/.match?(value)
+  end
+
+  def self.local_project(value)
+    local_keys(value, LOCAL_PROJECT_FIELDS)
+    local_need(%w[projectLocator projectBinding].all? { |k| local_hex(value[k], 64) } &&
+      %w[projectId keyId].all? { |k| local_uuid(value[k]) } && value["keyRevision"].instance_of?(Integer) && value["keyRevision"] == 1)
+  end
+
+  def self.local_source(value)
+    local_keys(value, %w[commit tree ref])
+    ref = value["ref"]
+    local_need(%w[commit tree].all? { |k| local_hex(value[k], 40) } && ref.instance_of?(String) &&
+      ref.length <= 266 && ref.start_with?("refs/heads/") && ref.each_codepoint.all? { |c| c >= 32 && c != 127 } &&
+      LOCAL_BRANCH.match?(ref.delete_prefix("refs/heads/")))
+  end
+
+  def self.local_json(content, maximum)
+    local_need(content.instance_of?(String) && content.bytesize.between?(1, maximum))
+    text = content.dup.force_encoding(Encoding::UTF_8)
+    local_need(text.valid_encoding? && !text.start_with?("\uFEFF"))
+    value = deep_sort(JSON.parse(text, object_class: DuplicateRejectingHash,
+      allow_duplicate_key: false, max_nesting: 65))
+    local_need(value.instance_of?(Hash))
+    value
+  end
+
+  def self.local_authority_data(value, purpose:)
+    local_keys(value, LOCAL_AUTHORITY_FIELDS)
+    local_need(%w[prepare execute recover].include?(purpose) && value["purpose"] == purpose &&
+      value["origin"] == "local-desktop" && value["schemaVersion"].instance_of?(Integer) && value["schemaVersion"] == 1)
+    local_project(value["project"])
+    local_source(value["source"])
+    local_need(%w[operationId authorizationId].all? { |k| local_uuid(value[k]) } &&
+      %w[candidateSha256 confirmationSha256].all? { |k| local_hex(value[k], 64) })
+    row = local_keys(value["assignment"], %w[kind recordId expectedRevision contextRevision])
+    local_need(row["kind"] == "google-service-account" && local_hex(row["recordId"], 32) &&
+      %w[expectedRevision contextRevision].all? { |k| row[k].instance_of?(Integer) && row[k].between?(1, 2**32 - 2) })
+    local_need(purpose == "prepare" ? value["intentSha256"].nil? : local_hex(value["intentSha256"], 64))
+    value
+  end
+
+  # The expected digest must come from an independently admitted original, NOT
+  # the adjacent carrier. Python's shared validator owns full platform policy;
+  # Ruby checks exact bytes/domain/identity before existing lane/state checks.
+  # No current lane dispatches here and no ambient-origin switch exists.
+  def self.local_operation_intent(content, expected_sha256:)
+    local_need(local_hex(expected_sha256, 64))
+    document = local_json(content, 2 * 1024 * 1024)
+    payload, digest = sealed_operation_document(document)
+    local_need(secure_equal(digest, expected_sha256))
+    local_keys(payload, LOCAL_INTENT_FIELDS)
+    local_need(payload["documentType"] == "local-store-operation-intent" && payload["schemaVersion"].instance_of?(Integer) &&
+      payload["schemaVersion"] == 1 && payload["origin"] == "local-desktop" && payload["stage"] == "candidate" && payload["platform"] == "android")
+    local_project(payload["project"])
+    local_need(local_uuid(payload["operationId"]) && local_hex(payload["candidateSha256"], 64))
+    %w[candidateSource operationSource].each { |k| local_source(payload[k]) }
+    local_need(payload["candidateSource"] == payload["operationSource"])
+    prepared = local_authority_data(payload["preparedBy"], purpose: "prepare")
+    local_need(%w[project operationId candidateSha256].all? { |k| prepared[k] == payload[k] } &&
+      prepared["source"] == payload["operationSource"] && payload["confirmation"].instance_of?(String) &&
+      prepared["confirmationSha256"] == Digest::SHA256.hexdigest(payload["confirmation"]))
+    local_need(payload["predecessors"] == {} && payload["privateStateCommitments"] == {})
+    [payload, digest]
+  rescue ContractError, JSON::ParserError, EncodingError, ArgumentError, TypeError, KeyError
+    raise ContractError, "Invalid local Store intent or authority DATA"
+  end
+
+  def self.local_execution_authority(content, intent_content:, expected_intent_sha256:, purpose:)
+    local_need(%w[execute recover].include?(purpose))
+    intent, digest = local_operation_intent(intent_content, expected_sha256: expected_intent_sha256)
+    value = local_authority_data(local_json(content, 8 * 1024), purpose: purpose)
+    prepared = intent.fetch("preparedBy")
+    local_need(value["intentSha256"] == digest && value["authorizationId"] != prepared["authorizationId"] &&
+      %w[project operationId candidateSha256 source assignment confirmationSha256].all? { |k| value[k] == prepared[k] })
+    value
+  rescue ContractError, JSON::ParserError, EncodingError, ArgumentError, TypeError, KeyError
+    raise ContractError, "Invalid local Store intent or authority DATA"
   end
 
   def self.execution_authority(environ)

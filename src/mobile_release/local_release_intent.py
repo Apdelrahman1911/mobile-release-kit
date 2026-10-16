@@ -1,4 +1,4 @@
-"""Local Store *draft* DATA, never permission to execute or recovery evidence.
+"""Local Store draft and closed intent DATA, never execution permission.
 
 No filesystem, Store, credential, journal, native or Git operation occurs here.
 The future original owner must authenticate its journal, obtain fresh consent,
@@ -308,3 +308,124 @@ def prepare_owned_local_release(data: bytes, *, source) -> LocalReleaseDraft:
     _need(draft.platform == "android" and draft.stage == "candidate")
     source._unchanged()  # Pure draft parsing performed no external work.
     return draft
+
+
+# These explicit DATA readers are not used by CI or an execution owner. A seal
+# proves bytes only; journal authentication, original custody and native consent
+# must independently precede any future Store effect.
+MAX_LOCAL_INTENT_BYTES = 2 * 1024 * 1024
+MAX_LOCAL_AUTHORITY_BYTES = 8 * 1024
+_LOCAL_BODY = {"tooling", "candidateSource", "operationSource", "confirmation", "application",
+    "version", "destination", "configuration", "artifacts", "signing", "predecessors",
+    "storePrecondition", "privateStateCommitments", "createdAt"}
+_LOCAL_INTENT = _LOCAL_BODY | {"documentType", "schemaVersion", "origin", "platform", "stage",
+    "project", "operationId", "candidateSha256", "preparedBy"}
+_LOCAL_AUTHORITY = {"schemaVersion", "origin", "purpose", "project", "operationId",
+    "candidateSha256", "authorizationId", "source", "assignment", "confirmationSha256", "intentSha256"}
+_LOCAL_FILES = (("android-aab", "app-release.aab", 1024**3),
+    ("store-metadata", "store-metadata.zip", 512 * 1024**2),
+    ("validation-report", "validation-report.json", 64 * 1024))
+
+
+class LocalIntentError(ValidationError):
+    def __init__(self):
+        super().__init__("Invalid local Store intent or authority DATA")
+
+
+def _local_json(data: bytes, maximum: int) -> dict:
+    _need(type(data) is bytes and 0 < len(data) <= maximum)
+    value = json.loads(data.decode("utf-8"), object_pairs_hook=_reject_duplicate_pairs,
+        parse_constant=lambda _: (_ for _ in ()).throw(LocalIntentError()))
+    _need(type(value) is dict)
+    # Existing bounded-depth/type/private-material/canonical UTF-8 policy.
+    canonical_json_bytes(value)
+    return value
+
+
+def _local_project(value: object) -> None:
+    from .local_release_journal import _enrollment
+    _enrollment(value)  # Exact same enrolled project/key identity; no key IO.
+
+
+def _local_source(value: object) -> None:
+    _keys(value, {"commit", "tree", "ref"})
+    _need(all(type(value[k]) is str and re.fullmatch(r"[0-9a-f]{40}", value[k]) for k in ("commit", "tree")))
+    ref = value["ref"]
+    _need(_text(ref, 266) and ref.startswith("refs/heads/") and BRANCH_RE.fullmatch(ref[11:]) is not None)
+
+
+def _local_authority(value: object, *, purpose: str) -> dict:
+    _keys(value, _LOCAL_AUTHORITY)
+    _need(type(purpose) is str and purpose in {"prepare", "execute", "recover"}
+        and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+        and value["origin"] == ORIGIN and value["purpose"] == purpose)
+    _local_project(value["project"])
+    _local_source(value["source"])
+    _need(_uuid(value["operationId"]) and _uuid(value["authorizationId"])
+        and _sha(value["candidateSha256"]) and _sha(value["confirmationSha256"]))
+    assignment = _keys(value["assignment"], {"kind", "recordId", "expectedRevision", "contextRevision"})
+    _need(assignment["kind"] == "google-service-account")
+    _assignments([assignment], "android")
+    _need(value["intentSha256"] is None if purpose == "prepare" else _sha(value["intentSha256"]))
+    return value
+
+
+def decode_local_authority(data: bytes, *, purpose: str) -> dict:
+    """Decode a fixed-purpose identity record, NEVER a native authorization grant."""
+    try:
+        return _local_authority(_local_json(data, MAX_LOCAL_AUTHORITY_BYTES), purpose=purpose)
+    except (ValidationError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        raise LocalIntentError() from None
+
+
+def decode_local_operation_intent(data: bytes) -> dict:
+    """Return checked sealed local DATA. No IO, authentication or release consent."""
+    from .provenance import verify_sealed, _validate_operation_intent_body
+    try:
+        document = _local_json(data, MAX_LOCAL_INTENT_BYTES)
+        intent = _keys(verify_sealed(document), _LOCAL_INTENT)
+        _need(intent["documentType"] == "local-store-operation-intent"
+            and type(intent["schemaVersion"]) is int and intent["schemaVersion"] == 1
+            and intent["origin"] == ORIGIN and intent["stage"] == "candidate" and intent["platform"] == "android")
+        _local_project(intent["project"])
+        _need(_uuid(intent["operationId"]) and _sha(intent["candidateSha256"]))
+        for name in ("candidateSource", "operationSource"):
+            _local_source(intent[name])
+        _need(intent["candidateSource"] == intent["operationSource"])
+        tooling = _keys(intent["tooling"], {"version", "commit"})
+        _need(type(tooling["version"]) is str and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", tooling["version"])
+            and type(tooling["commit"]) is str and re.fullmatch(r"[0-9a-f]{40}", tooling["commit"]))
+        # The exact original shared platform/Store body, never a fake CI envelope.
+        _validate_operation_intent_body(intent, stage="candidate", platform="android")
+        _need(ANDROID_ID_RE.fullmatch(intent["application"]["id"]) is not None)
+        _need(len(intent["artifacts"]) == len(_LOCAL_FILES))
+        for row, (logical, filename, maximum) in zip(intent["artifacts"], _LOCAL_FILES):
+            _need(row["logicalName"] == logical and row["fileName"] == filename
+                and _integer(row["size"], maximum))
+        prepared = _local_authority(intent["preparedBy"], purpose="prepare")
+        _need(all(prepared[k] == intent[k] for k in ("project", "operationId", "candidateSha256"))
+            and prepared["source"] == intent["operationSource"]
+            and prepared["confirmationSha256"] == hashlib.sha256(intent["confirmation"].encode("utf-8")).hexdigest())
+        return document
+    except (ValidationError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        raise LocalIntentError() from None
+
+
+def validate_local_execution_authority(data: bytes, *, intent_data: bytes, purpose: str) -> dict:
+    """Compare local DATA with exact intent bytes; not one-use/dispatch permission.
+
+    Fresh native consent, credential originals and journal/checkpoint custody are
+    missing by design here. A different authorization ID proves no prior call.
+    """
+    try:
+        _need(type(purpose) is str and purpose in {"execute", "recover"})
+        intent = decode_local_operation_intent(intent_data)
+        value = decode_local_authority(data, purpose=purpose)
+        prepared = intent["preparedBy"]
+        _need(value["intentSha256"] == intent["integrity"]["sha256"]
+            and value["authorizationId"] != prepared["authorizationId"]
+            and all(value[k] == prepared[k] for k in ("project", "operationId", "candidateSha256",
+                "source", "assignment", "confirmationSha256")))
+        return value
+    except (ValidationError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        raise LocalIntentError() from None

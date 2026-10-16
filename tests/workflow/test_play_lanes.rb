@@ -155,12 +155,17 @@ class PlayReleaseLanesTest < Minitest::Test
     ENV["MOBILE_RELEASE_ANDROID_MAPPING_PATH"] = "mapping.txt" if mapping
     lane(@lane_name)
     precondition = JSON.parse(File.read(File.join(@root, "precondition.json")))
-    @payload = {
+    # Keep the complete CI envelope; the scenario overrides below remain
+    # inert lane DATA, not a Python/native artifact qualification.
+    fixture_stage = { "candidate" => "candidate", "external-testing" => "external", "production-submit" => "production" }.fetch(stage)
+    envelope = JSON.parse(File.read(File.expand_path("../fixtures/intent-#{fixture_stage}-valid.json", __dir__)))
+    envelope.delete("integrity")
+    @payload = envelope.merge({
       "schemaVersion" => 1, "documentType" => "store-operation-intent", "stage" => stage, "platform" => "android",
       "storePrecondition" => precondition, "authorizedBy" => @authority.dup,
       "artifacts" => [{ "logicalName" => "android-aab", "fileName" => "candidate.aab", "size" => @aab.bytesize,
                         "sha256" => Digest::SHA256.hexdigest(@aab) }],
-    }
+    })
     if mapping
       @payload["artifacts"] << { "logicalName" => "android-mapping", "fileName" => "mapping.txt",
                                  "size" => File.size(File.join(@root, "mapping.txt")), "sha256" => Digest::SHA256.file(File.join(@root, "mapping.txt")).hexdigest }

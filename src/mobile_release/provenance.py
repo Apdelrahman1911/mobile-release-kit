@@ -1177,6 +1177,15 @@ def validate_operation_intent(value: Mapping[str, Any]) -> dict[str, Any]:
         for field in ("commit", "tree")
     ):
         raise ValidationError("external-testing intent must use the exact candidate source commit/tree")
+    _validate_operation_intent_body(intent, stage=stage, platform=platform)
+    return payload
+
+
+def _validate_operation_intent_body(intent: dict[str, Any], *, stage: str, platform: str) -> None:
+    """Shared operation DATA policy; caller must first validate its closed origin.
+
+    This is not authorization and never supplies repository/executor identity.
+    """
     expected_confirmation = f"{stage}:{platform}:{intent['version'].get('marketing') if isinstance(intent['version'], dict) else ''}:{intent['version'].get('build') if isinstance(intent['version'], dict) else ''}"
     if intent["confirmation"] != expected_confirmation:
         raise ValidationError("intent textual confirmation is invalid")
@@ -1387,7 +1396,6 @@ def validate_operation_intent(value: Mapping[str, Any]) -> dict[str, Any]:
     if commitment_mode and snapshot_commitments != commitments:
         raise ValidationError("intent private-state commitments differ from Store precondition")
     _validate_timestamp(intent["createdAt"], "intent.createdAt")
-    return payload
 
 
 def validate_evidence_document(value: Mapping[str, Any]) -> None:

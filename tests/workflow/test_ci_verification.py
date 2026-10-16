@@ -2556,7 +2556,7 @@ class CIControllerContractTests(unittest.TestCase):
         controller = controller_module()
         before = ("source-copy", "source-environment", "source-dependencies", "bundler", "bundle-install",
                   "editable-install", "source-freeze", "source-pip-check", "bundle-check")
-        ruby = ("ruby-support", "ruby-metadata-image-catalog", "ruby-store_document", "ruby-store_lane_lifetime",
+        ruby = ("ruby-support", "ruby-metadata-image-catalog", "ruby-local-store-intent", "ruby-store_document", "ruby-store_lane_lifetime",
                 "ruby-store_lane_nested_validation", "ruby-store_lane_resources", "ruby-store_lane_runtime",
                 "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture", "ruby-native-signal-observation",
                 "ruby-play_store", "ruby-play_lanes", "ruby-apple_store",
@@ -2587,7 +2587,7 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertEqual(set(expected["macos"]) - set(native_support), set(native_profiles))
         self.assertEqual(set(native_python) - set(native_support), set(native_profiles))
         catalogs = {}
-        for platform, scope, wanted, count in (("linux", "platform", expected["linux"], 59),
+        for platform, scope, wanted, count in (("linux", "platform", expected["linux"], 60),
                                                ("macos", "platform", expected["macos"], 41),
                                                ("macos", "native-python", native_python, 31),
                                                ("macos", "native-support", native_support, 39)):

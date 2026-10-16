@@ -134,7 +134,12 @@ class AppleReleaseLanesTest < Minitest::Test
       # a build that predates authorization just because setup crossed a second.
       @service.attributes("builds", "build-1")["uploadedDate"] = precondition.fetch("snapshot").fetch("serverObservedAt")
     end
-    @payload = {
+    # Keep the complete CI envelope; the scenario overrides below remain
+    # inert lane DATA, not a Python/native artifact qualification.
+    fixture_stage = { "candidate" => "candidate", "external-testing" => "external", "production-submit" => "production" }.fetch(stage)
+    envelope = JSON.parse(File.read(File.expand_path("../fixtures/intent-#{fixture_stage}-valid.json", __dir__)))
+    envelope.delete("integrity")
+    @payload = envelope.merge({
       "schemaVersion" => 1, "documentType" => "store-operation-intent", "stage" => stage, "platform" => "ios",
       "storePrecondition" => precondition, "authorizedBy" => @authority.dup,
       "privateStateCommitments" => precondition.fetch("snapshot").fetch("privateStateCommitments", {}),
@@ -142,7 +147,7 @@ class AppleReleaseLanesTest < Minitest::Test
         { "logicalName" => name, "size" => File.size(File.join(@root, file)),
           "sha256" => Digest::SHA256.file(File.join(@root, file)).hexdigest }
       end,
-    }
+    })
     @intent_digest = Digest::SHA256.hexdigest(MobileReleaseKit.canonical_json(@payload))
     File.write(File.join(@root, "intent.json"), JSON.generate(@payload.merge("integrity" => { "algorithm" => "sha256", "sha256" => @intent_digest })))
     ENV["MOBILE_RELEASE_STORE_MODE"] = "execute"
