@@ -9,7 +9,7 @@ cd desktop/src-tauri
 if [[ "$MRK_MACOS_AQUA_SCOPE" != android-registration-lifecycle && "$MRK_MACOS_AQUA_SCOPE" != vault-helper-shipping && "$MRK_MACOS_AQUA_SCOPE" != vault-helper-shipping-installation-inspection ]]; then
   set +e
   # The same locked graph builds both existing native DATA regressions.
-  PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --locked --no-default-features --jobs 2 --target "$MRK_MACOS_TARGET" \
+  PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --locked --no-default-features --jobs 2 --target "$MRK_MACOS_TARGET" \
     --package mobile-release-kit-desktop --package mrk-macos-installed-native \
     --lib --no-run --message-format=json \
     > "$MRK_MACOS_WORK/headless-build.jsonl" 2> "$MRK_MACOS_WORK/headless-build.stderr"
@@ -23,7 +23,7 @@ import hashlib, importlib.util, json, os, pathlib, re, shutil, stat, subprocess,
 build_target = os.environ["MRK_MACOS_TARGET"]
 if build_target not in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
     raise ValueError("headless-fixed-build-target")
-rust_bin = "/Users/runner/.rustup/toolchains/stable-" + build_target + "/bin"
+rust_bin = "/Users/runner/.rustup/toolchains/" + os.environ["RUSTUP_TOOLCHAIN"] + "-" + build_target + "/bin"
 work = pathlib.Path(os.environ["MRK_MACOS_WORK"])
 checkout = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
 android_lifecycle = os.environ["MRK_MACOS_AQUA_SCOPE"] == "android-registration-lifecycle"

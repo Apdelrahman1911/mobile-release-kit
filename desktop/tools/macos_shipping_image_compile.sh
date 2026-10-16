@@ -641,7 +641,7 @@ def main():
         node = tool(Path(node_selected).resolve(strict=True))
         npm = tool(Path(npm_selected).resolve(strict=True), executable=False)
         need(npm == node.parent.parent / 'lib/node_modules/npm/bin/npm-cli.js', 'compile-npm-same-distribution')
-        rust_bin = Path('/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin')
+        rust_bin = Path('/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin')
         tool(rust_bin / 'rustc'); tool(rust_bin / 'cargo')
         tool(Path(sys.executable).resolve(strict=True))
         need(tools[-1]['identity'] == tuple(controller['rows'][len(CONTROLLER_DIRS) + 1]['identity'])

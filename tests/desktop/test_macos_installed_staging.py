@@ -9784,7 +9784,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertEqual(selected["RUSTUP_TOOLCHAIN"], "1.98.1")
             self.assertEqual(selected["RUSTUP_AUTO_INSTALL"], "0")
             for target, toolchain in (("aarch64-apple-darwin", "1.98.1"), ("x86_64-apple-darwin", "1.98.0")):
-                directory = "/Users/runner/.rustup/toolchains/stable-" + target + "/bin"
+                directory = "/Users/runner/.rustup/toolchains/" + toolchain + "-" + target + "/bin"
                 selected_environment = dict(environment, RUSTUP_TOOLCHAIN=toolchain)
                 cleaned = module.build_environment(selected_environment, work, TOOL.RELEASE, target=target)
                 self.assertEqual(module.direct_rust_tools(target), (directory + "/cargo", directory + "/rustc"))
@@ -11582,25 +11582,24 @@ class MacInstalledData(unittest.TestCase):
         physical = raw.split(start, 1)[1].split("          PY_SHIPPING_SOURCE_ADMISSION\n", 1)[0]
         self.assertTrue(all(line.startswith("          ") for line in physical.splitlines(True)))
         program = "".join(line[10:] for line in physical.splitlines(True))
-        names = {"SCRIPT_PATH", "SCRIPT_BYTES", "SCRIPT_SHA256", "shipping_source_bytes"}
+        names = {"SCRIPT_PATH", "SCRIPT_LIMIT", "shipping_source_bytes"}
         selected = []
         for node in ast.parse(program).body:
             name = node.name if isinstance(node, ast.FunctionDef) else (
                 node.targets[0].id if isinstance(node, ast.Assign) and len(node.targets) == 1
                 and isinstance(node.targets[0], ast.Name) else None)
             if name in names: selected.append(node)
-        self.assertEqual(len(selected), 4)
+        self.assertEqual(len(selected), 3)
         namespace = dict(Path=Path, hashlib=hashlib, json=json, os=os, re=re, stat=stat, time=time)
         exec(compile(ast.Module(body=selected, type_ignores=[]), "<fixed-shipping-source-DATA>", "exec"), namespace)
         admit = namespace["shipping_source_bytes"]
         with (root / namespace["SCRIPT_PATH"]).open("rb") as stream:
-            source_body = stream.read(49513)
-        self.assertEqual(len(source_body), namespace["SCRIPT_BYTES"])
-        self.assertEqual(hashlib.sha256(source_body).hexdigest(), namespace["SCRIPT_SHA256"])
+            source_body = stream.read(namespace["SCRIPT_LIMIT"] + 1)
+        self.assertTrue(0 < len(source_body) <= namespace["SCRIPT_LIMIT"])
         self.assertTrue(source_body.endswith(b"\n") and not source_body.endswith(b"\n\n"))
         self.assertNotIn(b"\0", source_body)
         original_open, original_close, original_fstat, original_pread = os.open, os.close, os.fstat, os.pread
-        for fault in (None, "source-bytes", "source-blob", "source-context", "duplicate-row", "source-directory",
+        for fault in (None, "source-bytes", "source-blob", "source-size", "source-hash", "source-context", "duplicate-row", "source-directory",
                       "first-stat", "close", "primary-and-close", "late-source-change", "post-close-deadline"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 checkout, work = Path(directory) / "checkout", Path(directory) / "work"
@@ -11615,9 +11614,11 @@ class MacInstalledData(unittest.TestCase):
                     runId="123", runAttempt="1", workDirectory=[info.st_dev, info.st_ino, info.st_uid],
                     frontendAbsentAtAdmission=True, pythonController={})
                 source_row = dict(path=namespace["SCRIPT_PATH"], gitMode="100644", size=len(source_body),
-                    sha256=namespace["SCRIPT_SHA256"],
+                    sha256=hashlib.sha256(source_body).hexdigest(),
                     blob=hashlib.sha1(b"blob " + str(len(source_body)).encode() + b"\0" + source_body).hexdigest())
                 rows = [source_row]
+                if fault == "source-size": source_row["size"] = namespace["SCRIPT_LIMIT"] + 1
+                if fault == "source-hash": source_row["sha256"] = "not-a-digest"
                 if fault == "source-context": context["workflowSource"] = "b" * 40
                 if fault == "source-blob": source_row["blob"] = "b" * 40
                 if fault == "duplicate-row": rows.append(dict(source_row))

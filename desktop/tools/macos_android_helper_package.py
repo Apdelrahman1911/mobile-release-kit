@@ -1233,7 +1233,7 @@ def artifact(messages, checkout, target, *, build_target=ARM_TARGET):
 def direct_rust_tools(target=ARM_TARGET):
     """Closed SOURCE path selection only; actual workflow admission is separate."""
     build_profile(target)
-    directory = "/Users/runner/.rustup/toolchains/stable-" + target + "/bin"
+    directory = "/Users/runner/.rustup/toolchains/" + rust_toolchain(target) + "-" + target + "/bin"
     return directory + "/cargo", directory + "/rustc"
 
 
@@ -1243,7 +1243,7 @@ def prepare_roles(target):
 
 
 def rust_toolchain(target=ARM_TARGET):
-    """Expected current hosted label only; the original tool query is separate."""
+    """Pinned compiler release; the original tool query is separate."""
     build_profile(target)
     return "1.98.0" if target == INTEL_TARGET else "1.98.1"
 

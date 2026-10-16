@@ -299,3 +299,34 @@ builds must recheck availability rather than assume they remain downloadable.
 No current candidate artifact or new installation/readiness pass is claimed at
 this preparation checkpoint. Restore recovery remains detached and incomplete.
 Main and public releases remain untouched.
+
+### Candidate preparation fixes — 2026-10-16
+
+Candidate run `38905628857/1`, source `43441eef4b4aa8b8a9d2dcf2ada17c55f1fd4509`,
+failed before app compilation, credentials, signing, notarization or installation:
+
+- ARM job `116988351915`: the hosted `macos-26-arm64/20261013.0424` image
+  supplies Rust 1.99.0, not the required 1.98.1. The old opaque diagnostic does
+  not identify the first failed predicate. Install the exact numbered official
+  toolchain, use its versioned directory in all current consumers, and retain
+  compiler/host/configuration checks. Failures now identify a bounded stage.
+- Intel job `116988352035`: `compose-store-runtime` authenticates configured
+  Python before History selection but has no `configured_signing` CLI flag.
+  History's gate incorrectly required that absent flag. Admit this exact command
+  alongside the existing routes, without changing authentication or provider
+  custody. The regression reproduces the old refusal on **both** architectures.
+
+Independent production review accepted these fixes and the inventory-bound
+shipping loader. Focused local results: composition/Store **12 passed** (2.334s,
+nonroot, networkless, inert native boundaries); affected Aqua **4 passed**
+(0.101s); configured compiler environment **1 passed** (1.804s); shipping-loader
+failure injection **1 passed** (0.039s). Both workflow YAML files and 127 shell
+blocks parse; their actual Rust admission blocks are identical. Four historical
+installed inverse/source-snapshot tests were neither repaired nor reexecuted;
+this is focused validation, not a claim that all historical tests pass.
+
+The same necessary successor also runs the previously reviewed single
+Applications XCTest **after** candidate upload. It reuses the installed app and
+does not add another signing/notarization cycle. Native results remain pending.
+All local test workers joined; namespace scratch was disposed. No current Mac
+installer, installed UI pass, complete recovery or readiness verdict is inferred.

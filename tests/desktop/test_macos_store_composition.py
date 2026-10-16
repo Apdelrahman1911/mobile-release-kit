@@ -16,9 +16,10 @@ from test_macos_store_staging import StoreStaging
 
 
 @contextlib.contextmanager
-def fixture():
+def fixture(*, target=TOOL.ARM_TARGET):
     assert os.geteuid() != 0, "Run filesystem cases as a nonroot test user"
     helper = (Path(__file__).resolve().parents[2] / "desktop/tools/prepare_runtime.py").read_bytes()
+    intel_release = (TOOL.DESKTOP / "macos-installed-inputs/build-release-intel.json").read_bytes()
     with tempfile.TemporaryDirectory(prefix="mrk-store-composition-") as directory:
         root = Path(directory)
         checkout = root / "checkout"
@@ -30,7 +31,8 @@ def fixture():
                   "src/mobile_release/_desktop_engine.py": engine,
                   "src/mobile_release/tooling.py": ("REQUIRED_TOOLING_FILES = " + repr(tuple(tooling)) + "\n").encode(),
                   TOOL.CURRENT_CA_SOURCE: b"synthetic CA, not usable TLS material\n",
-                  TOOL.CURRENT_HELPER_SOURCE: helper, **tooling}
+                  TOOL.CURRENT_HELPER_SOURCE: helper,
+                  "desktop/macos-installed-inputs/build-release-intel.json": intel_release, **tooling}
         inputs.update({"desktop/" + name: b"# inert bootstrap\n" for name in TOOL.CURRENT_BOOTSTRAPS | {"local_store_preflight_bootstrap.py"}})
         for name, body in inputs.items():
             path = checkout / name
@@ -42,7 +44,7 @@ def fixture():
             "sourceManifestSha256": None, "targets": {TOOL.ARM_TARGET: None, TOOL.INTEL_TARGET: None}}))
         component = root / "component"
         component.mkdir()
-        component_files = StoreStaging().fixture(TOOL.ARM_TARGET)
+        component_files = StoreStaging().fixture(target)
         component_files.update({"store/tooling/" + name: (body, 0o444) for name, body in tooling.items()})
         component_files["store/tooling/fastlane/run_lane.rb"] = (b"# obsolete runner\n", 0o444)
         component_files["store/tooling/obsolete.rb"] = (b"# not part of current core\n", 0o444)

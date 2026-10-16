@@ -7,15 +7,26 @@ in `desktop-macos-installed.yml`. It reuses the nominated signed Python, Store,
 GitHub and Android components, builds the current application, and performs real
 application/package/image signing, notarization, installation and readback.
 It does not repeat the unrelated fixture Installer, broad DATA suites, separate
-Remove image or UI tests. Existing targeted component checks remain separate.
+Remove image or broad UI suites. Existing targeted component checks remain separate.
 
 Only after those package checks pass does it retain `MobileReleaseKit.dmg`,
 `PREVIEW.json` and an installation guide for 14 days. Use the complete DMG:
 the package requires its authenticated sibling files on the mounted image.
 This internal candidate is **not installed-UI-qualified or production-ready**.
 Testing the emitted carrier must not rebuild/re-sign it just to run UI checks.
+After retaining the candidate, one external XCTest checks the same installation's
+Applications launch, settings navigation and normal quit. This compiles only the
+test harness, not the application. Failure does not erase the candidate or turn
+its unqualified descriptor into a readiness claim.
 The package helper's existing bounded failure diagnostics appear directly in
 the job log; raw signing/notary captures and credentials do not.
+
+Installed/Aqua builds install the exact numbered Rust toolchain with standard
+Rustup (ARM 1.98.1, Intel 1.98.0), then verify the existing compiler identity and
+clean-configuration requirements. They do not assume the hosted image's moving
+`stable` distribution matches the required version. Shipping source loading uses
+the current Git inventory rather than a redundant hardcoded script size/hash;
+the bounded read and artifact/provenance checks remain intact.
 
 The routine desktop pipeline is `.github/workflows/desktop-ci.yml`:
 

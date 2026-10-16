@@ -1633,7 +1633,7 @@ def target_data(target):
             "sourceLock": "source-lock-intel.json" if intel else "source-lock.json",
             "releasePrefix": "macos26-x86_64-" if intel else "macos26-arm64-",
             "platform": "macOS26-x86_64" if intel else "macOS26-arm64",
-            "cargo": "/Users/runner/.rustup/toolchains/stable-" + target + "/bin/cargo",
+            "cargo": "/Users/runner/.rustup/toolchains/" + ("1.98.0" if intel else "1.98.1") + "-" + target + "/bin/cargo",
             "toolchain": "1.98.0" if intel else "1.98.1"}
 
 
@@ -5716,7 +5716,7 @@ SHIPPING_GATE_NATIVE_TESTS = tuple("vault_helper_filesystem::tests::" + name for
     "an_entered_unreturned_native_arm_is_never_empty_or_settled",
 ))
 SHIPPING_GATE_TEST = "vault_helper_filesystem::gate_custody_control::shipping_helper_retains_gate_after_parent_reference_close_until_actual_exit"
-SHIPPING_GATE_COMPILER_ARGV = ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "test", "--locked", "--no-default-features", "--jobs", "1",
+SHIPPING_GATE_COMPILER_ARGV = ["/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo", "test", "--locked", "--no-default-features", "--jobs", "1",
     "--target", "aarch64-apple-darwin", "--package", "mobile-release-kit-desktop",
     "--package", "mrk-macos-installed-native", "--lib", "--no-run", "--message-format=json",
     "--features", "mrk-macos-installed-native/installed-observation"]

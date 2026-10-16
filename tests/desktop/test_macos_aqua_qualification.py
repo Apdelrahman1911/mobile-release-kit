@@ -533,13 +533,13 @@ class AquaDataTests(unittest.TestCase):
             self.assertEqual(selected.public(), BINDING.public())  # Rust inner wire remains exactly three fields.
             self.assertEqual(selected.root(), BINDING.root())
             data = M.target_data(target)
+            toolchain = {"aarch64-apple-darwin": "1.98.1", "x86_64-apple-darwin": "1.98.0"}[target]
             self.assertEqual((data["machine"], data["runner"], data["releaseInput"], data["sourceLock"], data["platform"]),
                              (machine, runner, release, lock, platform))
-            self.assertEqual(data["cargo"], "/Users/runner/.rustup/toolchains/stable-" + target + "/bin/cargo")
+            self.assertEqual(data["cargo"], "/Users/runner/.rustup/toolchains/" + toolchain + "-" + target + "/bin/cargo")
             self.assertEqual(M.expected_result(selected, "first-save"), M.expected_result(BINDING, "first-save"))
             self.assertEqual(M._gate_new_report(selected, M.VAULT_HELPER_SCOPE)["platform"], platform)
             self.assertEqual(M._capacity_new_report(selected, M.VAULT_HELPER_SCOPE)["platform"], platform)
-            toolchain = {"aarch64-apple-darwin": "1.98.1", "x86_64-apple-darwin": "1.98.0"}[target]
             self.assertEqual(data["toolchain"], toolchain)
             self.assertEqual(M._gate_new_report(selected, M.VAULT_HELPER_SCOPE)["toolchain"], toolchain)
             self.assertEqual(M._capacity_new_report(selected, M.VAULT_HELPER_SCOPE)["toolchain"], toolchain)
@@ -5848,7 +5848,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Verify source stayed unchanged; retire only disposable owned build output",
         }
         toolchain = {
-            "Admit the fixed image Rust tools without installing a distribution":
+            "Install and verify the pinned Mac Rust toolchain":
                 "success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')",
         }
         classifiers = {
@@ -5873,7 +5873,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "One installed no-GO shipping-helper gate-custody control before any Aqua entry": "vault-helper-shipping",
             "Three serial shipping-helper journeys through the original document and invocation owner": "vault-helper-shipping",
             "One installation-inspection Aqua journey through the reviewed original invocation owner": "installation-inspection",
-            "Check pending recovery SOURCE and DATA contracts before native preparation": "project-recovery-pending",
+            "Check pending recovery behavior before native preparation": "project-recovery-pending",
             "One real pending iOS build-input recovery through ordinary Inspect and explicit Recover": "project-recovery-pending",
             "Check pending account SOURCE and DATA contracts before native preparation": "ios-recovery-pending",
             "One real pending account recovery through ordinary Inspect and exact Recover": "ios-recovery-pending",
@@ -5923,15 +5923,17 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
                 expected = [gate + " && steps.public_evidence.outcome == 'success'" for gate in expected]
             with self.subTest(step=name):
                 self.assertEqual(gates, expected)
-        clock = steps["Admit the fixed image Rust tools without installing a distribution"]
+        clock = steps["Install and verify the pinned Mac Rust toolchain"]
         self.assertNotIn("xcode-installed-classification", clock)
-        self.assertIn("timeout-minutes: 4", clock)
-        self.assertNotIn("rustup toolchain install", actual_source)
+        self.assertIn("timeout-minutes: 8", clock)
+        self.assertEqual(actual_source.count('rustup toolchain install "$RUSTUP_TOOLCHAIN"'), 1)
+        self.assertIn("aarch64-apple-darwin:1.98.1|x86_64-apple-darwin:1.98.0", clock)
+        self.assertIn("--profile minimal --no-self-update", clock)
         self.assertNotIn("rustup update", actual_source)
         self.assertNotIn("rustup override", actual_source)
-        self.assertLess(workflow.index("Bind the complete reviewed first-party checkout before compilation"), workflow.index("Admit the fixed image Rust tools without installing a distribution"))
-        self.assertLess(workflow.index("Admit the fixed image Rust tools without installing a distribution"), workflow.index("Compile headless Mac libraries"))
-        for required in ("('toolchains/stable-' + build_target + '/bin')", "line.partition(':')[0].strip() == 'commit-hash'",
+        self.assertLess(workflow.index("Bind the complete reviewed first-party checkout before compilation"), workflow.index("Install and verify the pinned Mac Rust toolchain"))
+        self.assertLess(workflow.index("Install and verify the pinned Mac Rust toolchain"), workflow.index("Compile headless Mac libraries"))
+        for required in ("('toolchains/' + rust_release + '-' + build_target + '/bin')", "line.partition(':')[0].strip() == 'commit-hash'",
                          "line.partition(':')[0].strip() == 'release'", "line.partition(':')[0].strip() == 'host'", "RUSTUP_AUTO_INSTALL='0'",
                          "owner = qualification.load_owner(checkout)", "pending_call = True",
                          "pending_call = False", "if not pending_call:", "no_configuration(); check_originals()",
@@ -6035,21 +6037,21 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
                                 self.assertEqual(admitted, label in ("valid", "cargo-commit-unpinned"))
         for forbidden in ("shutil.which", ".resolve(", "CARGO_NET_OFFLINE=", "cargo fetch", "os.chmod", "os.unlink", "os.mkdir"):
             self.assertNotIn(forbidden, clock)
-        direct = "/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo"
+        direct = "/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo"
         for name in ("Compile headless Mac libraries and run the exact selected DATA regressions first",
                      "Compile native wrapping variants once and run fixed cohorts and creator-reader pair",
                      "Build and sign the separate fixed vault helper before binding the app",
                      "Compile the fixed debug actual-main observer and normal embedded frontend once",
                      "Build the fixed one-shot root Installer and scripts-only package"):
-            selected_direct = direct if name == "Compile native wrapping variants once and run fixed cohorts and creator-reader pair" else '"/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo"'
+            selected_direct = direct if name == "Compile native wrapping variants once and run fixed cohorts and creator-reader pair" else '"/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo"'
             selected_source = (aqua_wrapping_source() if name == "Compile native wrapping variants once and run fixed cohorts and creator-reader pair"
                                else aqua_headless_source() if name == "Compile headless Mac libraries and run the exact selected DATA regressions first"
                                else steps[name])
             self.assertIn(selected_direct, selected_source)
             self.assertNotIn('["cargo",', selected_source)
         mixed = steps["Compile the fixed debug actual-main observer and normal embedded frontend once"]
-        self.assertLess(mixed.index("npm run build"), mixed.index('PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin"'))
-        self.assertIn('RUSTC="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc"', aqua_wrapping_source())
+        self.assertLess(mixed.index("npm run build"), mixed.index('PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin"'))
+        self.assertIn('RUSTC="/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc"', aqua_wrapping_source())
         classify = steps["Classify installed Xcode originals without preparing or selecting a toolchain"]
         self.assertIn("timeout-minutes: 2", classify)
         self.assertIn("shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}", classify)
@@ -6107,7 +6109,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         steps = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
         compiler = "Compile the fixed debug actual-main observer and normal embedded frontend once"
         self.assertEqual(workflow.count("      - name: " + compiler + "\n"), 1)
-        self.assertEqual(steps[compiler].count('"/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --locked'), 1)
+        self.assertEqual(steps[compiler].count('"/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --locked'), 1)
         self.assertEqual(steps[compiler].count("npm run build"), 1)
         private = steps["Compile native wrapping variants once and run fixed cohorts and creator-reader pair"]
         self.assertIn("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private'", private)
@@ -6117,7 +6119,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             '                                            ("qualification", ["installed-observation"], "--cfg mrk_wrapping_keychain_qualification")):',
             'target = work / ("wrapping-" + role + "-target")',
             'environment = dict(build_env, CARGO_TARGET_DIR=str(target), RUSTFLAGS=flags)',
-            'argv = ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "test", "--locked", "--no-default-features", "--jobs", "2",',
+            'argv = ["/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo", "test", "--locked", "--no-default-features", "--jobs", "2",',
             '"--manifest-path", str(native / "Cargo.toml"),',
             '"--lib", "--no-run", "--message-format=json"]',
             'owner = qualification.load_owner(checkout)',
@@ -6356,7 +6358,7 @@ class BeforeItemStopWorkflowTests(unittest.TestCase):
         self.assertEqual(len({row[3] for row in cohorts}), 3)
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
         private = aqua_wrapping_source()
-        self.assertEqual(private.count('argv = ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "test", "--locked"'), 1)
+        self.assertEqual(private.count('argv = ["/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo", "test", "--locked"'), 1)
         self.assertIn('owner = qualification.load_owner(checkout)', private)
         self.assertIn('for cohort in receipt["nativeCohorts"]:', private)
         self.assertIn('result, row = invoke(cohort["reportPrefix"], [str(cohort_binary["path"]), entry],', private)

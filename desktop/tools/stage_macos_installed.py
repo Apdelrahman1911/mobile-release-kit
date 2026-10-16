@@ -1541,7 +1541,8 @@ def history_provider_selection(args, origin, *, target=ARM_TARGET):
     if path is not None:
         need(isinstance(path, Path) and path.is_absolute() and signed_python_options(args),
              "history-provider-signed-input-required")
-        need(args.command == "describe-current-runtime" or getattr(args, "configured_signing", False) is True,
+        need(args.command in ("describe-current-runtime", "compose-store-runtime")
+             or getattr(args, "configured_signing", False) is True,
              "history-provider-configured-final-required")
     return nomination, snapshot
 

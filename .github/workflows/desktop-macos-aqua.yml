@@ -249,12 +249,22 @@ jobs:
               stream.flush()
               os.fsync(stream.fileno())
           PY_SOURCE
-      - name: Admit the fixed image Rust tools without installing a distribution
+      - name: Install and verify the pinned Mac Rust toolchain
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
-        timeout-minutes: 4
+        timeout-minutes: 8
         shell: bash
         run: |
           set -euo pipefail
+          # The hosted stable alias moves when the runner image updates. Install
+          # the already-reviewed exact compiler, without changing that alias.
+          case "$MRK_MACOS_TARGET:$RUSTUP_TOOLCHAIN" in
+            aarch64-apple-darwin:1.98.1|x86_64-apple-darwin:1.98.0) ;;
+            *) echo 'Unsupported pinned Mac compiler selection' >&2; exit 1 ;;
+          esac
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+            CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup \
+            /Users/runner/.cargo/bin/rustup toolchain install "$RUSTUP_TOOLCHAIN" \
+            --profile minimal --no-self-update
           "$MRK_PYTHON" -I -S -B - <<'PY_DIRECT_RUST'
           import importlib.util, os, re, stat, subprocess, sys, tomllib
           from pathlib import Path
@@ -270,7 +280,7 @@ jobs:
               "x86_64-apple-darwin": ("1.98.0", "88d9e12ae178fab0fb5cc050a94da85685d449ea"),
           }
           rust_release, rust_commit = rust_tuples[build_target]
-          bin_directory = rustup_home / ('toolchains/stable-' + build_target + '/bin')
+          bin_directory = rustup_home / ('toolchains/' + rust_release + '-' + build_target + '/bin')
           compiler_path = str(bin_directory) + ':/usr/bin:/bin:/usr/sbin:/sbin'
           def need(value, reason):
               if not value: raise ValueError(reason)
@@ -358,6 +368,7 @@ jobs:
           def check_originals():
               for row in originals: current(row)
 
+          stage = "input-files"
           try:
               directory(cargo_home); directory(rustup_home); directory(bin_directory)
               selected = original_file(checkout / 'desktop/rust-toolchain.toml')
@@ -368,7 +379,9 @@ jobs:
               current(selected)
               need(tomllib.loads(raw.decode('utf-8'))['toolchain']['channel'] == '1.98.0', 'direct-rust-repository-default')
               for tool in ('cargo', 'rustc'): original_file(bin_directory / tool, executable=True)
+              stage = "configuration"
               no_configuration(); check_originals()
+              stage = "owner-load"
               spec = importlib.util.spec_from_file_location('_mrk_direct_rust_existing_owner_loader', checkout / 'desktop/tools/macos_aqua_qualification.py')
               qualification = importlib.util.module_from_spec(spec)
               sys.modules[spec.name] = qualification
@@ -379,6 +392,7 @@ jobs:
                                  LANG='C', LC_ALL='C', TZ='UTC', DEVELOPER_DIR=os.environ['DEVELOPER_DIR'],
                                  MACOSX_DEPLOYMENT_TARGET=os.environ['MACOSX_DEPLOYMENT_TARGET'])
               for tool in ('rustc', 'cargo'):
+                  stage = tool + '-version'
                   no_configuration(); check_originals()
                   argv = [str(bin_directory / tool), '--version', '--verbose']
                   pending_call = True
@@ -407,8 +421,14 @@ jobs:
                       try: os.close(fd); row['closed'] = True
                       except OSError: close_errors.append('direct-rust-close-unknown')
           if failure is not None or pending_call or close_errors or not all(row['closed'] for row in originals):
-              raise SystemExit('Fixed direct Rust admission refused; no toolchain install or fallback.')
-          print('Fixed direct Rust' + rust_release + ' compiler and Cargo admitted; no distribution install performed.')
+              # Only fixed source labels; never exception prose or private output.
+              allowed = ('direct-rust-ambient-configuration', 'direct-rust-ambient-selector', 'direct-rust-clock-commit', 'direct-rust-close-unknown', 'direct-rust-configuration-bound', 'direct-rust-configuration-directory', 'direct-rust-configuration-disappeared', 'direct-rust-directory-policy', 'direct-rust-file-policy', 'direct-rust-fixed-directory-bound', 'direct-rust-host', 'direct-rust-original-bound', 'direct-rust-original-changed', 'direct-rust-original-return', 'direct-rust-original-unbound', 'direct-rust-repository-default', 'direct-rust-repository-default-bound', 'direct-rust-repository-default-read', 'direct-rust-source-route', 'direct-rust-target', 'direct-rust-target-route', 'direct-rust-version-host', 'direct-rust-version-return')
+              args = BaseException.args.__get__(failure) if failure is not None else ()
+              reason = (args[0] if type(failure) is ValueError and type(args) is tuple
+                        and len(args) == 1 and type(args[0]) is str and args[0] in allowed else
+                        "original-pending" if pending_call else "close-unknown" if close_errors else "unclassified")
+              raise SystemExit('Pinned Rust admission refused: ' + reason + '; stage=' + stage)
+          print('Fixed direct Rust' + rust_release + ' compiler and Cargo admitted from the versioned installation.')
           PY_DIRECT_RUST
       - name: Admit only a fresh independently pinned Python transport destination
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
@@ -608,7 +628,7 @@ jobs:
               "x86_64-apple-darwin": ("1.98.0", "88d9e12ae178fab0fb5cc050a94da85685d449ea"),
           }
           rust_release, rust_commit = rust_tuples[build_target]
-          rust_bin = "/Users/runner/.rustup/toolchains/stable-" + build_target + "/bin"
+          rust_bin = "/Users/runner/.rustup/toolchains/" + os.environ["RUSTUP_TOOLCHAIN"] + "-" + build_target + "/bin"
           rust_environment = dict(os.environ, PATH=rust_bin + ":/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC=rust_bin + "/rustc", RUSTUP_AUTO_INSTALL="0")
           tools = {}
           for name, command in (
@@ -953,7 +973,7 @@ jobs:
           set -o noclobber
           umask 077
           set +e
-          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/vault-helper-target" "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build \
+          PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/vault-helper-target" "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
             --manifest-path desktop/helpers/macos-vault-helper/Cargo.toml --locked --release \
             --target "$MRK_MACOS_TARGET" --message-format=json \
             > "$MRK_MACOS_WORK/vault-helper-build.jsonl" 2> "$MRK_MACOS_WORK/vault-helper-build.stderr"
@@ -1012,7 +1032,7 @@ jobs:
           npm run build
           cd src-tauri
           set +e
-          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --locked --no-default-features --features desktop-shell,custom-protocol,macos-installed-observation \
+          PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --locked --no-default-features --features desktop-shell,custom-protocol,macos-installed-observation \
             --target "$MRK_MACOS_TARGET" --test installed-shell-observation --no-run --message-format=json \
             > "$MRK_MACOS_WORK/observer-build.jsonl" 2> "$MRK_MACOS_WORK/observer-build.stderr"
           status=$?
@@ -1058,7 +1078,7 @@ jobs:
           # Same24-minute app-build budget; no independent timeout entitlement.
           # This current SOURCE role cannot embed its not-yet-created inventory.
           set +e
-          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/remover-target" /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build \
+          PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/remover-target" /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
             --locked --offline --release --jobs 1 --no-default-features --features macos-installed-remover --bin mrk-macos-remove \
             --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
             > "$MRK_MACOS_WORK/remover-build.jsonl" 2> "$MRK_MACOS_WORK/remover-build.stderr"
@@ -1201,7 +1221,7 @@ jobs:
           set -o noclobber
           (
             cd desktop/src-tauri
-            PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer \
+            PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer \
               --target "$MRK_MACOS_TARGET" --bin mrk-macos-install
           )
           installer="$CARGO_TARGET_DIR/$MRK_MACOS_TARGET/release/mrk-macos-install"

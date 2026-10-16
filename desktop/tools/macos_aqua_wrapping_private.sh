@@ -75,7 +75,7 @@ owner = qualification.load_owner(checkout)
 # Build environment only; never forwarded to the native cohort.
 # No Cargo/Rust wrapper, encoded flags or ambient target override.
 build_env = {key: os.environ[key] for key in ("DEVELOPER_DIR", "MACOSX_DEPLOYMENT_TARGET")}
-build_env.update(PATH="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc", RUSTUP_AUTO_INSTALL="0")
+build_env.update(PATH="/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC="/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc", RUSTUP_AUTO_INSTALL="0")
 build_env.update(LANG="C", LC_ALL="C", TZ="UTC", CARGO_INCREMENTAL="0", RUSTUP_TOOLCHAIN="1.98.1")
 # Deliberately no HOME/TMPDIR override and no fixture/password/token
 # input. The native selector obtains the real ordinary account.
@@ -1394,8 +1394,8 @@ try:
     # Version queries bind actual tools under the checked desktop
     # toolchain selection; no frontend/Tauri/installer/supplier work.
     for role, argv in (
-        ("rustc-version", ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc", "--version", "--verbose"]),
-        ("cargo-version", ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "--version", "--verbose"]),
+        ("rustc-version", ["/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc", "--version", "--verbose"]),
+        ("cargo-version", ["/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo", "--version", "--verbose"]),
         ("sdk-version", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"]),
         ("compiler-version", ["/usr/bin/xcrun", "--sdk", "macosx", "clang", "--version"]),
     ):
@@ -1408,7 +1408,7 @@ try:
     codec_target = work / "wrapping-codec-target"
     codec_target.mkdir(mode=0o700)
     codec_environment = dict(build_env, CARGO_TARGET_DIR=str(codec_target), RUSTFLAGS="")
-    codec_command = ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "test", "--locked", "--no-default-features", "--jobs", "2",
+    codec_command = ["/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo", "test", "--locked", "--no-default-features", "--jobs", "2",
                      "--target", "aarch64-apple-darwin", "--package", "mobile-release-kit-desktop",
                      "--manifest-path", str(app / "Cargo.toml"), "--lib", "--no-run", "--message-format=json"]
     result, build = invoke("codec-build", codec_command, environ=codec_environment, cwd=app,
@@ -1445,7 +1445,7 @@ try:
                                   ("qualification", ["installed-observation"], "--cfg mrk_wrapping_keychain_qualification")):
         target = work / ("wrapping-" + role + "-target")
         environment = dict(build_env, CARGO_TARGET_DIR=str(target), RUSTFLAGS=flags)
-        argv = ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "test", "--locked", "--no-default-features", "--jobs", "2",
+        argv = ["/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo", "test", "--locked", "--no-default-features", "--jobs", "2",
                 "--target", "aarch64-apple-darwin", "--package", "mrk-macos-installed-native",
                 "--manifest-path", str(native / "Cargo.toml"),
                 "--lib", "--no-run", "--message-format=json"]
@@ -1483,7 +1483,7 @@ try:
         if role == "qualification":
             # Finish both builds before signing/admitting final original FDs.
             # Cargo may refresh its one native archive during this example build.
-            reader_argv = ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "build", "--locked", "--no-default-features", "--jobs", "2",
+            reader_argv = ["/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo", "build", "--locked", "--no-default-features", "--jobs", "2",
                 "--target", "aarch64-apple-darwin", "--package", "mrk-macos-installed-native",
                 "--manifest-path", str(native / "Cargo.toml"), "--example", "wrapping_peer_reader", "--example", "wrapping_private_cohort",
                 "--features", "installed-observation", "--message-format=json"]

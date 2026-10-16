@@ -1,5 +1,6 @@
 """SOURCE selection/one-pass composition DATA; no native or network execution."""
 import copy
+import contextlib
 import io
 import json
 from pathlib import Path
@@ -101,14 +102,26 @@ class StoreConsumerData(unittest.TestCase):
 
 class StoreConsumerFilesystem(unittest.TestCase):
     def test_one_composition_latches_new_manifest_and_refuses_republication(self):
+        for target in TOOL.MAC_TARGETS:
+            with self.subTest(target=target):
+                self.check_composition(target)
+
+    def check_composition(self, target):
         # Fresh supplier/capsule/service authentication boundaries are inert;
-        # real current preparation, TAR correspondence, output and latching run.
-        with fixture() as f:
+        # real CLI, provider custody, preparation, TAR correspondence and latching run.
+        from test_macos_installed_staging import history_provider_macho_fixture
+        with fixture(target=target) as f:
             chosen = python_selection()
             chosen['signedPythonSha256'] = TOOL.digest(f.supplier['python/bin/python3'][0])
-            selected = TOOL.signed_store_selection_data(TOOL.canonical(selection()))
+            selected = TOOL.signed_store_selection_data(TOOL.canonical(selection()), target=target)
             source_snapshot = (TOOL.canonical(selection()), ('inert-source-original',))
             python_snapshot = ((b'inert Python SOURCE nomination',),)
+            provider_body = history_provider_macho_fixture(target=target)
+            provider = f.root / 'gh'; provider.write_bytes(provider_body); provider.chmod(0o555)
+            profile = {'schemaVersion': 1, 'version': TOOL.HISTORY_PROVIDER_VERSION,
+                'sourceManifestSha256': '1' * 64,
+                'targets': {name: TOOL.digest(history_provider_macho_fixture(target=name)) for name in TOOL.MAC_TARGETS}}
+            (f.checkout / TOOL.HISTORY_PROVIDER_PROFILE).write_bytes(TOOL.canonical(profile))
             root = f.root / 'signed-store-component'; root.mkdir(mode=0o700)
             runtime = root / 'extracted/runtime'
             shutil.copytree(f.component, runtime)
@@ -120,12 +133,12 @@ class StoreConsumerFilesystem(unittest.TestCase):
                         row.size = len(data); row.mode = path.stat().st_mode & 0o777
                         contents.addfile(row, io.BytesIO(data))
             archive_body = archive.getvalue()
-            receipt = {'kind': 'macos-store-signed-v1', 'target': TOOL.ARM_TARGET,
+            receipt = {'kind': 'macos-store-signed-v1', 'target': target,
                 **{key: selected[key] for key in ('source', 'runId', 'runAttempt')},
                 'signedArchiveSha256': TOOL.digest(archive_body), 'signedArchiveBytes': len(archive_body),
                 **{key: True for key in ('originalsClosed', 'sourcePost', 'inputPost', 'nonNativeUnchanged')}}
             receipt_body = TOOL.canonical(receipt)
-            origin = {'schema': 1, 'source': selected['source'], 'target': TOOL.ARM_TARGET,
+            origin = {'schema': 1, 'source': selected['source'], 'target': target,
                 **{key: int(selected[key]) for key in ('runId', 'runAttempt', 'artifactId')},
                 'receiptSha256': TOOL.digest(receipt_body), 'archiveSha256': TOOL.digest(archive_body),
                 'artifactDigest': 'sha256:' + 'c' * 64}
@@ -133,6 +146,7 @@ class StoreConsumerFilesystem(unittest.TestCase):
             (root / 'store-signed-receipt.json').write_bytes(receipt_body)
             (root / 'store-signed.tar.gz').write_bytes(archive_body)
             a = args(f, 'compose'); a.command = 'compose-store-runtime'; a.store_component = None
+            a.target = target; a.history_provider = provider
             a.signed_store_root = root; a.binding_output = f.root / 'runtime-binding.json'
             a.expected_source = a.expected_manifest = None
             a.output = f.root / 'runtime'
@@ -140,30 +154,75 @@ class StoreConsumerFilesystem(unittest.TestCase):
             for option, key in (('expected_signed_python', 'signedPythonSha256'), ('expected_signing_receipt', 'signingReceiptSha256'),
                     ('expected_signing_source', 'signingSourceCommit'), ('expected_signing_run', 'signingRunId'), ('expected_signing_attempt', 'signingRunAttempt')):
                 setattr(a, option, chosen[key])
-            a.expected_supplier = TOOL.SIGNED_ORIGINAL_SUPPLIERS[TOOL.ARM_TARGET]['receiptSha256']
+            a.expected_supplier = TOOL.SIGNED_ORIGINAL_SUPPLIERS[target]['receiptSha256']
+            options = {name: value for name, value in vars(a).items() if name != 'command' and value is not None}
+            def command_argv(command, options):
+                return [command] + [part for name, value in options.items()
+                                    for part in ('--' + name.replace('_', '-'), str(value))]
             fresh = (f.supplier, {'supplierOrigin': 'fresh-public-source'}, None, b'inert original receipt')
             with (mock.patch.object(TOOL, 'signed_runtime_inputs', return_value=(chosen, python_snapshot)),
                   mock.patch.object(TOOL, 'signed_store_selection', return_value=(selected, source_snapshot)),
-                  mock.patch.object(TOOL, 'fresh_supplier', return_value=fresh),
+                  mock.patch.object(TOOL, 'fresh_supplier', return_value=fresh) as supplier_reader,
                   mock.patch.object(TOOL, 'read_signed_python', return_value=((f.supplier['python/bin/python3'][0],), {}))):
-                result = TOOL.current_runtime_command(a)
+                no_python = {name: value for name, value in options.items() if name not in TOOL.SIGNED_OPTIONS}
+                missing_pin = {name: value for name, value in options.items() if name != 'expected_signing_receipt'}
+                no_provider = {name: value for name, value in options.items() if name != 'history_provider'}
+                unconfigured = {name: value for name, value in options.items()
+                                if name not in ('signed_store_root', 'binding_output')}
+                unconfigured.update(expected_source=chosen['sourceInputsSha256'],
+                                    expected_manifest=chosen['runtimeManifestSha256'])
+                cases = [('compose-store-runtime', no_python, 'configured-signing-required'),
+                         ('compose-store-runtime', missing_pin, 'signed-python-options'),
+                         ('compose-store-runtime', {**options, 'expected_signed_python': 'invalid'}, 'signed-python-options'),
+                         ('compose-store-runtime', {**options, 'expected_signing_run': '99'}, 'configured-signing-source-arguments'),
+                         ('compose-store-runtime', no_provider, 'history-provider-configured-input-required'),
+                         ('current-runtime', unconfigured, 'history-provider-configured-final-required')]
+                for command, rejected, reason in cases:
+                    with self.subTest(command=command, reason=reason), self.assertRaisesRegex(TOOL.Refused, reason):
+                        TOOL.main(command_argv(command, rejected))
+                    self.assertFalse(a.work.exists())
+                    self.assertFalse(a.output.exists())
+                    self.assertFalse(a.binding_output.exists())
+                    supplier_reader.assert_not_called()
+                stdout = io.StringIO()
+                with (contextlib.redirect_stdout(stdout),
+                      mock.patch.object(TOOL, 'current_runtime_command', wraps=TOOL.current_runtime_command) as dispatch):
+                    TOOL.main(command_argv('compose-store-runtime', options))
+                dispatch.assert_called_once()
+                a = dispatch.call_args.args[0]
+                self.assertFalse(hasattr(a, 'configured_signing'))
+                result = json.loads(stdout.getvalue())
+                nomination, _snapshot = TOOL.history_provider_selection(a, 'fresh-public-source', target=target)
+                self.assertEqual(nomination['sha256'], TOOL.digest(provider_body))
+                self.assertEqual(result['historyProvider']['sha256'], nomination['sha256'])
+                self.assertFalse(result['historyProvider']['nativeAuthority'])
+                for supplied in (a, SimpleNamespace(**{**vars(a), 'history_provider': None})):
+                    with self.assertRaisesRegex(TOOL.Refused, 'history-provider-fresh-only'):
+                        TOOL.history_provider_selection(supplied, 'historical', target=target)
+                output = TOOL.tree(a.output, current_root_mode=0o555, mac_store_prefix='store')
+                self.assertEqual(output[TOOL.HISTORY_PROVIDER_PATH], (provider_body, 0o555))
+                manifest = json.loads(output['manifest.json'][0])
+                self.assertEqual(manifest['target'], target)
+                self.assertEqual(next(row['sha256'] for row in manifest['files']
+                                      if row['path'] == TOOL.HISTORY_PROVIDER_PATH), nomination['sha256'])
+                self.assertEqual(result['qualification'], 'current-source-staged-no-native-execution')
                 self.assertEqual(result['runtimeBindingSha256'], TOOL.digest(a.binding_output.read_bytes()))
                 self.assertNotEqual(result['successorManifestSha256'], chosen['runtimeManifestSha256'])
                 self.assertFalse((f.root / 'source-binding.json').exists())
                 info = f.root.stat()
-                admission = {'target': TOOL.ARM_TARGET, 'runtimeCompositionPending': True,
+                admission = {'target': target, 'runtimeCompositionPending': True,
                     'workDirectory': [info.st_dev, info.st_ino, info.st_uid], 'signedPythonDerivation': {
                         'nominationSha256': TOOL.digest(python_snapshot[0][0]),
                         **{key: chosen[key] for key in ('signedPythonSha256', 'signingReceiptSha256', 'signingSourceCommit', 'producerProfileSha256', 'serviceProfileSha256')},
                         **{key: chosen[source] for key, source in (('runId', 'signingRunId'), ('runAttempt', 'signingRunAttempt'), ('artifactId', 'signingArtifactId'))}}}
                 (f.root / 'source-admission.json').write_bytes(TOOL.canonical(admission))
-                final = TOOL.finalize_runtime_binding_command(SimpleNamespace(target=TOOL.ARM_TARGET, work_root=f.root))
+                final = TOOL.finalize_runtime_binding_command(SimpleNamespace(target=target, work_root=f.root))
                 self.assertEqual(final['runtimeManifestSha256'], result['successorManifestSha256'])
                 source = json.loads((f.root / 'source-binding.json').read_bytes())
                 self.assertEqual(source['runtimeBindingSha256'], result['runtimeBindingSha256'])
                 self.assertEqual(source['signedStoreDerivation'], result['storeComponent'])
                 with self.assertRaises(TOOL.Refused):
-                    TOOL.finalize_runtime_binding_command(SimpleNamespace(target=TOOL.ARM_TARGET, work_root=f.root))
+                    TOOL.finalize_runtime_binding_command(SimpleNamespace(target=target, work_root=f.root))
                 (runtime / 'bin/ruby').chmod(0o600)
                 (runtime / 'bin/ruby').write_bytes(b'not the authenticated archive')
                 (runtime / 'bin/ruby').chmod(0o555)
