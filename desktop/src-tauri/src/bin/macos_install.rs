@@ -2148,7 +2148,7 @@ mod installer {
             pub history: Option<History>, pub old_app: Option<usize>, pub old_release: Option<usize>,
             pub intent: Option<IntentData>, pub intent_original: Option<usize>,
             controls: Option<ProducerControls>, pub(super) archives:Option<InstallArchiveObservation>,
-            launcher: Option<applications::Observation>,
+            pub(super) launcher: Option<applications::Observation>,
             launcher_removal: Option<applications::RemovalPreparation>,
         }
         // Same-book originals, not installed-file trust. An old pair is only
@@ -12560,7 +12560,7 @@ mod installer {
                     .and_then(|n| n.checked_add(6*65536+2*installation_record::RECORD_LIMIT))
                     .and_then(|n| n.checked_add(REMOVAL_REQUEST_RESERVE))
                     .ok_or("removal-control-bound")?;
-                check(bound<=(installation_record::CONTROL_LIMIT as u64),"removal-control-bound")?;
+                check(bound<=installation_record::CONTROL_LIMIT,"removal-control-bound")?;
                 book.removal_live_reserved=3;
                 book.removal_control_reserved=bound as u64;
                 let input=completed_package::Input::open_removal(book,completed_path)?;
@@ -15749,7 +15749,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     .and_then(|n|n.checked_add(RemovalProducerVerifier::project_owned_upper_bound()?))
                     .and_then(|n|n.checked_add(ProducerVerifier::project_owned_upper_bound()?))
                     .and_then(|n|n.checked_add(REMOVAL_RESUME_RAW+512*1024+std::mem::size_of::<Self>()))
-                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-resume-resource")?;
+                    .filter(|n|*n<=installation_record::CONTROL_LIMIT).ok_or("removal-resume-resource")?;
                 book.removal_control_reserved=bound as u64;
                 let path=std::env::current_exe().map_err(|_|"removal-resume-executed-image")?;
                 let executed=path.to_str().filter(|s|removal_resume_path_data(s)).ok_or("removal-resume-executed-image")?.to_owned();
@@ -16672,7 +16672,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     .and_then(|n|n.checked_add(native::install_producer::ProducerVerifier::project_owned_upper_bound()?))
                     .and_then(|n|n.checked_add(2*1024*1024+REINSTALL_RAW+512*1024+std::mem::size_of::<Self>()))
                     .and_then(|n|n.checked_add(incoming_memory))
-                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("reinstall-source-reservation")?;
+                    .filter(|n|*n<=installation_record::CONTROL_LIMIT).ok_or("reinstall-source-reservation")?;
                 book.removal_control_reserved=prior_control.checked_add(quote as u64)
                     .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("reinstall-source-reservation")?;
                 maintenance::reserve_removal_snapshot_work(book)?;
