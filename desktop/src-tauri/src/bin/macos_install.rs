@@ -7995,9 +7995,25 @@ mod installer {
                 assert!(removal_archive_test_parse(&corrupt[..26],false).is_err());
                 let selection_length=23+1+14+32+32+40+4*64;
                 for length in [0u32,16385] {corrupt=bytes.clone();corrupt[selection_length..selection_length+4].copy_from_slice(&length.to_be_bytes());
-                    assert!(removal_archive_test_parse(&corrupt[..selection_length+4],false).is_err());}
-                for count in [0u16,489] {corrupt=bytes.clone();corrupt[header-2..header].copy_from_slice(&count.to_be_bytes());
-                    assert!(removal_archive_test_parse(&corrupt[..header],false).is_err());}
+                    assert!(removal_archive_test_parse(&corrupt[..selection_length+4],false).is_err(),
+                        "invalid selection length accepted: intel={intel} length={length}");}
+                // Declared counts at/below the current closed ceiling are
+                // legal INCOMPLETE headers, never sealed successful snapshots.
+                // The old 489 sentinel became legal when phase controls joined
+                // this roster; test the actual boundary with useful attribution.
+                let maximum=u16::try_from(SNAPSHOT_CONTROLS).unwrap();
+                for count in [maximum-1,maximum] {
+                    corrupt=bytes.clone();corrupt[header-2..header].copy_from_slice(&count.to_be_bytes());
+                    assert!(!removal_archive_test_parse(&corrupt[..header],false).unwrap().0,
+                        "incomplete header unexpectedly complete: intel={intel} count={count}");
+                    assert!(removal_archive_test_parse(&corrupt[..header],true).is_err(),
+                        "sealed truncated header accepted: intel={intel} count={count}");
+                }
+                for count in [0u16,maximum.checked_add(1).unwrap()] {
+                    corrupt=bytes.clone();corrupt[header-2..header].copy_from_slice(&count.to_be_bytes());
+                    assert!(removal_archive_test_parse(&corrupt[..header],false).is_err(),
+                        "invalid control count accepted: intel={intel} count={count} maximum={maximum}");
+                }
                 corrupt=bytes.clone();corrupt[header]=5;assert!(removal_archive_test_parse(&corrupt[..header+1],false).is_err());
                 let identity=header+1+2+"control.json".len();
                 corrupt=bytes.clone();corrupt[identity+16..identity+20].copy_from_slice(&0o100600u32.to_be_bytes());
