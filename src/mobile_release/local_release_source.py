@@ -309,6 +309,11 @@ class LocalSourceObservation:
             actual = hashlib.sha1(b"blob " + str(len(expected)).encode("ascii") + b"\0" + expected).hexdigest().encode("ascii")
             _need(actual == row[1], "input")
         self._clean()
+        metadata = getattr(self, "_metadata_owner", None)
+        if metadata is not None:
+            from .local_release_metadata import LocalMetadataSource
+            _need(type(metadata) is LocalMetadataSource and metadata.source is self, "owner")
+            metadata._accept_tracked(self, tracked)
         return GitContext(None, None, head, tree, "refs/heads/" + self.branch, self.branch, False)
 
     def acquire(self):

@@ -852,7 +852,7 @@ class FiniteScratch:
         _need(type(content) is bytes, "selected input must be immutable bytes")
         return self._publish(role, iter((content,)))
 
-    def metadata_archive(self, root: Path, *, platform: str) -> InputSnapshot:
+    def metadata_archive(self, root: Path, *, platform: str, _source=None) -> InputSnapshot:
         """Build the existing deterministic public ZIP into original private custody.
 
         ZIP assembly uses bounded memory, not a second pathname writer whose
@@ -866,39 +866,51 @@ class FiniteScratch:
         self._owner()
         _need(self.layout == "store-metadata" and platform in ("android", "ios"),
               "metadata requires its fixed original role")
-        _need(root.is_dir(), "metadata directory is missing")
-        files = _safe_platform_files(root, (platform,))
-        _need(len(files) <= MAX_FILE_COUNT, "metadata file count exceeds its bound")
-        total = sum(path.stat().st_size for path in files)
-        _need(total <= MAX_ARCHIVE_SIZE, "metadata archive exceeds its input bound")
-        with io.BytesIO() as buffer:
-            with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
-                written = 0
-                for path in files:
-                    self.cancellation.check()
-                    # Existing selected public source, but with the original
-                    # checked bounded reader/close path rather than read_bytes.
-                    observed = _read_file(self.parent.fd, str(path), self.cancellation,
-                                          MAX_FILE_SIZE)
-                    _need(observed is not None, "selected metadata file disappeared")
-                    data = observed[1]
-                    written += len(data)
-                    _need(written <= MAX_ARCHIVE_SIZE, "metadata grew beyond its input bound")
-                    info = zipfile.ZipInfo(path.relative_to(root).as_posix(),
-                                           date_time=(1980, 1, 1, 0, 0, 0))
-                    info.compress_type, info.external_attr = zipfile.ZIP_STORED, 0o100644 << 16
-                    archive.writestr(info, data)
-                    _need(buffer.tell() <= self._spec("metadata").limit,
+        from contextlib import nullcontext
+        if _source is None:
+            _need(root.is_dir(), "metadata directory is missing")
+            selected = _safe_platform_files(root, (platform,))
+            _need(len(selected) <= MAX_FILE_COUNT, "metadata file count exceeds its bound")
+            total = sum(path.stat().st_size for path in selected)
+            _need(total <= MAX_ARCHIVE_SIZE, "metadata archive exceeds its input bound")
+            context = nullcontext(selected)
+        else:
+            from .local_release_metadata import LocalMetadataSource
+            _need(type(_source) is LocalMetadataSource, "metadata requires its original source")
+            context = _source._archive(self, root, platform)
+        with context as files:
+            _need(len(files) <= MAX_FILE_COUNT, "metadata file count exceeds its bound")
+            with io.BytesIO() as buffer:
+                with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+                    written = 0
+                    for path in files:
+                        self.cancellation.check()
+                        # Existing selected public source, but with the original
+                        # checked bounded reader/close path rather than read_bytes.
+                        if _source is None:
+                            observed = _read_file(self.parent.fd, str(path), self.cancellation,
+                                                  MAX_FILE_SIZE)
+                            _need(observed is not None, "selected metadata file disappeared")
+                            data = observed[1]
+                        else:
+                            data = _source._read(path)
+                        written += len(data)
+                        _need(written <= MAX_ARCHIVE_SIZE, "metadata grew beyond its input bound")
+                        info = zipfile.ZipInfo(path.relative_to(root).as_posix(),
+                                               date_time=(1980, 1, 1, 0, 0, 0))
+                        info.compress_type, info.external_attr = zipfile.ZIP_STORED, 0o100644 << 16
+                        archive.writestr(info, data)
+                        _need(buffer.tell() <= self._spec("metadata").limit,
+                              "metadata ZIP exceeds its output bound")
+                view = buffer.getbuffer()
+                try:
+                    _need(len(view) <= self._spec("metadata").limit,
                           "metadata ZIP exceeds its output bound")
-            view = buffer.getbuffer()
-            try:
-                _need(len(view) <= self._spec("metadata").limit,
-                      "metadata ZIP exceeds its output bound")
-                return self._publish("metadata", (
-                    bytes(view[offset:offset + 1024**2]) for offset in range(0, len(view), 1024**2)
-                ))
-            finally:
-                view.release()
+                    return self._publish("metadata", (
+                        bytes(view[offset:offset + 1024**2]) for offset in range(0, len(view), 1024**2)
+                    ))
+                finally:
+                    view.release()
 
     def copy_from_fd(self, role: str, source_fd: int, *, maximum_bytes: int,
                      expected_sha256: str) -> InputSnapshot:
