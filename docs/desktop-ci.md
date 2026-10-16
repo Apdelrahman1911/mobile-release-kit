@@ -1,5 +1,22 @@
 # Desktop CI
 
+## Current Mac candidate package
+
+The fixed `verify/desktop-macos-candidate` branch selects a package-only route
+in `desktop-macos-installed.yml`. It reuses the nominated signed Python, Store,
+GitHub and Android components, builds the current application, and performs real
+application/package/image signing, notarization, installation and readback.
+It does not repeat the unrelated fixture Installer, broad DATA suites, separate
+Remove image or UI tests. Existing targeted component checks remain separate.
+
+Only after those package checks pass does it retain `MobileReleaseKit.dmg`,
+`PREVIEW.json` and an installation guide for 14 days. Use the complete DMG:
+the package requires its authenticated sibling files on the mounted image.
+This internal candidate is **not installed-UI-qualified or production-ready**.
+Testing the emitted carrier must not rebuild/re-sign it just to run UI checks.
+The package helper's existing bounded failure diagnostics appear directly in
+the job log; raw signing/notary captures and credentials do not.
+
 The routine desktop pipeline is `.github/workflows/desktop-ci.yml`:
 
 1. Install `.[test]` and run the workflow's explicit Python modules with

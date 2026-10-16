@@ -5,6 +5,7 @@ on:
     branches:
       - verify/desktop-macos-installed
       - verify/desktop-macos-preview
+      - verify/desktop-macos-candidate
       - verify/desktop-macos-image-compile
       - verify/desktop-macos-removal-lifecycle
       - verify/desktop-macos-app-signature
@@ -21,7 +22,7 @@ concurrency:
 
 jobs:
   engineering-install:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update')
     environment: macos-developer-id
     name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}
     runs-on: ${{ matrix.runner }}
@@ -130,7 +131,7 @@ jobs:
               ;;
             *) exit 1 ;;
           esac
-          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update ) ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update || "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ) ]] || exit 1
           if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update ]]; then
             [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
           fi
@@ -355,6 +356,10 @@ jobs:
                    "actualAquaSaveGate": "pending"}
           if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-app-signature":
               value.update(scope="whole-app-signature-only", fixedFixtureCases=0, aclPrimitiveCases=0,
+                  selectedRegressionGroups=[], instrumented=False, applicationLaunched=False,
+                  fullUIQualified=False, distributionQualified=False, actualAquaSaveGate="not-selected")
+          if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-candidate":
+              value.update(scope="current-macos-candidate", fixedFixtureCases=0, aclPrimitiveCases=0,
                   selectedRegressionGroups=[], instrumented=False, applicationLaunched=False,
                   fullUIQualified=False, distributionQualified=False, actualAquaSaveGate="not-selected")
           if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-installed":
@@ -852,7 +857,7 @@ jobs:
             > "$MRK_MACOS_WORK/store-smoke/result.txt"
       - name: Build only the external normal-app XCTest runner, not an instrumented app
         id: normal_ui_build
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && (env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' || env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery') && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && (env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' || env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery') && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven')))
         timeout-minutes: 9
         shell: bash
         env:
@@ -950,7 +955,7 @@ jobs:
             exit "$build_status"
           fi
       - name: Fail fast on native Scripts ownership and package format (never Installer)
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature')
         timeout-minutes: 2
         shell: bash
         run: |
@@ -1462,7 +1467,7 @@ jobs:
           PY_EFFECTIVE_RUST
       - name: Compile and run only fixed native DATA contracts and exact host-Python regressions
         id: data_contracts
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update')
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update'))
         timeout-minutes: 28
         shell: bash
         run: |
@@ -1787,7 +1792,7 @@ jobs:
               os.fsync(stream.fileno())
           PY
       - name: Build the separate fixed eight-case Installer package from the same completed input
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != 'refs/heads/verify/desktop-macos-positive-update')
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != 'refs/heads/verify/desktop-macos-positive-update'))
         timeout-minutes: 8
         shell: bash
         run: |
@@ -1845,7 +1850,7 @@ jobs:
             --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" \
             --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"
       - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != 'refs/heads/verify/desktop-macos-positive-update')
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != 'refs/heads/verify/desktop-macos-positive-update'))
         timeout-minutes: 18
         shell: bash
         run: |
@@ -1884,7 +1889,7 @@ jobs:
           # Setup and each fixed case retain their own original120s endpoint.
           # Any unexpected native failure/Unknown stops subsequent cases. No retry.
       - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != 'refs/heads/verify/desktop-macos-positive-update')
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != 'refs/heads/verify/desktop-macos-positive-update'))
         timeout-minutes: 3
         shell: bash
         run: |
@@ -1992,12 +1997,14 @@ jobs:
           # Its private keychain closes before the bounded P8 notary wait;
           # Accepted, append-prefix POST, native validation and full audit all
           # precede final444 publication, P, the producer signature and Installer.
+          # Only the helper's finite failure diagnostic goes to the job log;
+          # native signing/notary captures remain private inside its owner.
           set +e
           MRK_MACOS_INSTALLER_P12_BASE64="$MRK_MACOS_INSTALLER_P12_BASE64" \
           MRK_MACOS_INSTALLER_P12_PASSWORD="$MRK_MACOS_INSTALLER_P12_PASSWORD" \
           MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
             "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py finalize-package --target "$MRK_MACOS_TARGET" \
-            > "$MRK_MACOS_WORK/package-finalization.stdout" 2> "$MRK_MACOS_WORK/package-finalization.stderr"
+            > "$MRK_MACOS_WORK/package-finalization.stdout"
           finalization_status=$?
           printf '%s\n' "$finalization_status" > "$MRK_MACOS_WORK/package-finalization.status"
           finalization_status_saved=$?
@@ -2114,7 +2121,7 @@ jobs:
           MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
           MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
             "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py package-install --target "$MRK_MACOS_TARGET" \
-            > "$MRK_MACOS_WORK/package-install.stdout" 2> "$MRK_MACOS_WORK/package-install.stderr"
+            > "$MRK_MACOS_WORK/package-install.stdout"
           package_status=$?
           printf '%s\n' "$package_status" > "$MRK_MACOS_WORK/package-install.status"
           package_status_saved=$?
@@ -2127,7 +2134,7 @@ jobs:
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Notarize, staple and verify only the final user image
         id: finalize_image
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-installed') && steps.package_install.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-installed') && steps.package_install.outcome == 'success'
         timeout-minutes: 32
         shell: bash
         env:
@@ -2146,7 +2153,7 @@ jobs:
           set +e
           MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
             "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py finalize-image --target "$MRK_MACOS_TARGET" \
-            > "$MRK_MACOS_WORK/image-finalization.stdout" 2> "$MRK_MACOS_WORK/image-finalization.stderr"
+            > "$MRK_MACOS_WORK/image-finalization.stdout"
           image_status=$?
           printf '%s\n' "$image_status" > "$MRK_MACOS_WORK/image-finalization.status"
           image_status_saved=$?
@@ -2156,6 +2163,74 @@ jobs:
           [[ "$image_status_saved" == 0 ]] || exit "$image_status_saved"
           # Neither a provisional file nor its receipt substitutes for this
           # actual original0. Preview has no fallback to the old image.
+      - name: Stage the current signed candidate only after actual installation and final-image verification
+        id: candidate_stage
+        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success'
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_REF=$GITHUB_REF" "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \
+            "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py preview --candidate-carrier --target "$MRK_MACOS_TARGET" \
+            --work "$MRK_MACOS_WORK" --expected-source "$MRK_EXPECTED_SHA" \
+            --output "$MRK_MACOS_WORK/candidate" > "$MRK_MACOS_WORK/candidate-result.json"
+      - name: Retain the complete candidate for independent installed-app testing
+        id: candidate_upload
+        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.candidate_stage.outcome == 'success'
+        timeout-minutes: 3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-release-kit-macos26-${{ matrix.target }}-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/candidate/MobileReleaseKit.dmg
+            ${{ steps.work.outputs.root }}/candidate/PREVIEW.json
+            ${{ steps.work.outputs.root }}/candidate/README.md
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Retire only the completed candidate's disposable compiler outputs
+        if: always() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.candidate_stage.outcome == 'success'
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$MRK_PYTHON" -I -S -B - <<'PY_CANDIDATE_CLEAN'
+          import json, os, re, shutil, stat
+          from pathlib import Path
+          root = Path(os.environ['MRK_MACOS_WORK'])
+          workspace = Path(os.environ['GITHUB_WORKSPACE'])
+          assert root.parent == Path('/Users/runner/work/_temp') and re.fullmatch(r'mrk-macos-installed\.[A-Za-z0-9]{8}', root.name)
+          assert workspace == Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
+          info = root.lstat()
+          assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() != 0 and shutil.rmtree.avoids_symlink_attacks
+          fd = os.open(root / 'source-binding.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+          try:
+              bound = os.fstat(fd)
+              assert stat.S_ISREG(bound.st_mode) and bound.st_nlink == 1 and 0 < bound.st_size <= 65536
+              raw = os.read(fd, 65537)
+              assert len(raw) == bound.st_size
+              binding = json.loads(raw)
+          finally:
+              os.close(fd)
+          assert binding['workDirectory'] == [info.st_dev, info.st_ino, info.st_uid]
+          assert binding['source'] == os.environ['GITHUB_SHA'] and binding['scope'] == 'current-macos-candidate'
+          assert binding['frontendAbsentAtAdmission'] is True
+          # All producing commands and mandatory native owners returned before
+          # candidate staging; no UI app or test process was started. Keep the
+          # complete candidate and package evidence, including if upload failed.
+          for path in (root / 'cargo-target', root / 'vault-helper-target', root / 'remover-target', root / 'npm-cache',
+                       workspace / 'desktop/node_modules', workspace / 'desktop/dist'):
+              try: current = path.lstat()
+              except FileNotFoundError: continue
+              assert stat.S_ISDIR(current.st_mode) and current.st_uid == os.getuid() and current.st_dev == info.st_dev
+              shutil.rmtree(path)
+          PY_CANDIDATE_CLEAN
       - name: Stage only the finalized ordinary image as an unqualified P0 carrier input
         id: p0_carrier_stage
         if: github.ref == 'refs/heads/verify/desktop-macos-installed' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled'
@@ -4928,7 +5003,7 @@ jobs:
           builtin source ./desktop/tools/macos_installed_data_contracts.sh
       - name: Project closed public verification facts without raw originals
         id: public_evidence
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.work.outputs.root != '')
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.work.outputs.root != ''))
         timeout-minutes: 1
         shell: bash
         run: |
@@ -4942,7 +5017,7 @@ jobs:
             --removal-case "$MRK_MACOS_REMOVAL_CASE"
       - name: Preserve bounded originals; upload success is never GUI/native acceptance
         id: evidence
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.work.outputs.root != '') && steps.public_evidence.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.work.outputs.root != '') && steps.public_evidence.outcome == 'success')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-macos-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}

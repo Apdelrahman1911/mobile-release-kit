@@ -271,3 +271,31 @@ native failures, credentials and the newly added direct Store route affect it.
   launcher callback separately from the payload launch event; neither a source
   review nor those tests establishes an actual installed launch. Native XCTest
   compilation and the real installed journey remain required.
+
+### Focused native follow-up and candidate preparation — 2026-10-16
+
+At `90cbec591eb5279118423bf8d5836e95577892b3`, all selected jobs passed on
+macOS 26 ARM64 and Intel, including each job's disposable-output cleanup:
+
+| Run / attempt | Actual scope | Result |
+| --- | --- | --- |
+| `38902482750/1` | Two memory-only Mac Store contracts per architecture | Passed |
+| `38902489232/1` | Corrected private-frame contract per architecture | Passed |
+| `38902495062/1` | External XCTest `build-for-testing` per architecture | Passed |
+
+Unselected jobs were intentionally skipped, not counted as passes. The earlier
+failed whole runs remain failed; their successful component builds are reused.
+The Applications launch/quit journey is compiled, **not yet executed**.
+
+The reviewed candidate route now separates packaging from unrelated fixture,
+removal and UI work. Six focused admission/export/failure tests passed locally
+as nonroot with a read-only checkout and no network; YAML and all 83 shell
+blocks parsed. Existing signing/notary/Installer/readback gates remain required.
+Metadata checks found all eleven required signed/source input artifacts available
+and unexpired; this is availability evidence, not a new native qualification.
+Four GitHub-tool artifacts expire on October 17 around 06:49–06:52 UTC, so later
+builds must recheck availability rather than assume they remain downloadable.
+
+No current candidate artifact or new installation/readiness pass is claimed at
+this preparation checkpoint. Restore recovery remains detached and incomplete.
+Main and public releases remain untouched.

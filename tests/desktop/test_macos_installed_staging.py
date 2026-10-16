@@ -10395,18 +10395,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         module.tool_data_context(selected,phase,target)
                 with self.assertRaisesRegex(module.Refused,"^hosted-source-bindings$"):
                     module.admit(dict(selected,GITHUB_WORKFLOW_SHA="b"*40),target=target,phase="prepare")
-        # The genuine parser must refuse unconfigured input for this route at BOTH
-        # main admission and the actual retained Operation profile read.
-        helper_source = Path(module.__file__).read_text()
-        helper_ast = ast.parse(helper_source)
-        main_node = next(n for n in helper_ast.body if isinstance(n,ast.FunctionDef) and n.name == "main")
-        operation_node = next(n for n in helper_ast.body if isinstance(n,ast.ClassDef) and n.name == "Operation")
-        execute_node = next(n for n in operation_node.body if isinstance(n,ast.FunctionDef) and n.name == "execute")
-        for callable_node, expected_guard in (
-                (main_node, 'get("GITHUB_REF") != APP_SIGNATURE_REF'),
-                (execute_node, 'get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF)')):
-            with self.subTest(signingProfileGuard=callable_node.name):
-                self.assertIn(expected_guard, ast.get_source_segment(helper_source, callable_node))
+        # Keep actual parser refusal, not a spelling assertion for the helper's
+        # closed ref allowlist. Candidate entrypoint refusal is exercised by
+        # test_macos_candidate_admission with the genuine main/profile parser.
         with self.assertRaises(TOOL.Refused):
             TOOL.packaging_signing_data(b"schema=1\nstate=unconfigured\n",module.UNCONFIGURED_PROFILE,
                                        allow_unconfigured=environment["GITHUB_REF"] != module.APP_SIGNATURE_REF)
@@ -12136,7 +12127,7 @@ class MacInstalledData(unittest.TestCase):
                 raise AssertionError("string subclass must not be inspected")
             def __hash__(self):
                 raise AssertionError("string subclass must not be hashed")
-        self.assertEqual(len(TOOL.CARRIER_REFUSAL_REASONS), 196)
+        self.assertEqual(len(TOOL.CARRIER_REFUSAL_REASONS), 197)
         self.assertTrue(all(re.fullmatch(r"[a-z0-9-]{1,49}", x) for x in TOOL.CARRIER_REFUSAL_REASONS))
         cli = ["preview", "--installed-passive-carrier", "--work", "/inert/work",
                "--expected-source", "a" * 40, "--output", "/inert/carrier"]
@@ -17575,10 +17566,10 @@ class MacNormalPreviewData(unittest.TestCase):
         values.update({work / name: TOOL.canonical(value) for name, value in documents.items()})
         return work, values, documents, expected, selection
 
-    def actual_workflow_binding(self, target, *, installed):
+    def actual_workflow_binding(self, target, *, installed, candidate=False):
         """Run only the actual passive producer nodes with synthetic public observations."""
         workflow = (Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text()
-        marker = '"$MRK_PYTHON" -I -S -B - "$root/source-binding.json" <<\'PY\'\n'
+        marker = '"$MRK_PYTHON" -I -S -B - "$root/source-admission.json" <<\'PY\'\n'
         self.assertEqual(workflow.count(marker), 1)
         block = workflow.split(marker, 1)[1].split("          PY\n", 1)[0]
         self.assertTrue(all(not line or line.startswith("          ") for line in block.splitlines()))
@@ -17587,11 +17578,13 @@ class MacNormalPreviewData(unittest.TestCase):
                        if isinstance(node, ast.Assign) and len(node.targets) == 1
                        and isinstance(node.targets[0], ast.Name)}
         refs = {"refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview"}
+        if candidate:
+            refs.add("refs/heads/verify/desktop-macos-candidate")
         selected = [node for node in parsed.body if isinstance(node, ast.If)
                     and isinstance(node.test, ast.Compare) and len(node.test.ops) == 1
                     and isinstance(node.test.ops[0], ast.Eq) and len(node.test.comparators) == 1
                     and isinstance(node.test.comparators[0], ast.Constant) and node.test.comparators[0].value in refs]
-        self.assertEqual(len(selected), 2)
+        self.assertEqual(len(selected), len(refs))
         self.assertTrue(all(ast.unparse(node.test.left) == "os.environ['GITHUB_REF']" for node in selected))
         program = ast.Module(body=[assignments["value"], *selected], type_ignores=[])
         # Admission producer calls are only local dict updates: never execute tools/Git/native owners.
@@ -17606,7 +17599,8 @@ class MacNormalPreviewData(unittest.TestCase):
         self.assertLessEqual(len(keys), 64)
         self.assertFalse(any(any(sensitive in key for sensitive in ("PASSWORD", "BASE64", "TOKEN")) for key in keys))
         env = {key: "c" * 64 for key in keys}
-        env.update(GITHUB_REF="refs/heads/verify/desktop-macos-installed" if installed else "refs/heads/verify/desktop-macos-preview",
+        env.update(GITHUB_REF="refs/heads/verify/desktop-macos-candidate" if candidate else
+                   "refs/heads/verify/desktop-macos-installed" if installed else "refs/heads/verify/desktop-macos-preview",
                    GITHUB_SHA="a" * 40, GITHUB_WORKFLOW_SHA="a" * 40, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1",
                    MRK_MACOS_PACKAGE_ROLE="ordinary-image", MRK_MACOS_TARGET=target, DEVELOPER_DIR="/synthetic-sdk")
         namespace = {"os": os, "build_target": target, "tools": {}, "source_tree": "b" * 40,
@@ -17616,7 +17610,8 @@ class MacNormalPreviewData(unittest.TestCase):
             exec(compile(program, "actual-passive-workflow-binding", "exec"), namespace)
         binding = namespace["value"]
         self.assertIs(binding["instrumented"], False)
-        self.assertEqual(binding["scope"], "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only"
+        self.assertEqual(binding["scope"], "current-macos-candidate" if candidate else
+                         "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only"
                          if installed else "normal-macos-early-preview")
         self.assertFalse(binding["applicationLaunched"] or binding["fullUIQualified"] or binding["distributionQualified"])
         return binding
@@ -17782,6 +17777,135 @@ class MacNormalPreviewData(unittest.TestCase):
                             package=b"", descriptor=b"", signed=b"", original_image={}, package_owner=b"",
                             final_package=b"", release_body=b"", profiles=(), remove=True,
                             expected_workflow=TOOL._INSTALLED_FINAL_IMAGE_WORKFLOW)
+
+    def test_candidate_carrier_is_explicit_and_never_remove_authority(self):
+        cli = ["preview", "--candidate-carrier", "--work", "/inert/work", "--expected-source", "a" * 40,
+               "--output", "/inert/candidate"]
+        with mock.patch.object(TOOL, "preview_command", return_value={}) as action, contextlib.redirect_stdout(io.StringIO()):
+            TOOL.main(cli)
+        args = action.call_args.args[0]
+        self.assertIs(args.candidate_carrier, True)
+        self.assertIs(args.installed_passive_carrier, False)
+        for refused_cli in (cli + ["--installed-passive-carrier"], ["remove-preview", *cli[1:]]):
+            with (mock.patch.object(TOOL, "preview_command") as preview,
+                  mock.patch.object(TOOL, "remove_preview_command") as remove,
+                  contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as stopped):
+                TOOL.main(refused_cli)
+            self.assertEqual(stopped.exception.code, 2)
+            preview.assert_not_called(); remove.assert_not_called()
+        with mock.patch.object(TOOL, "read") as read:
+            with self.assertRaisesRegex(TOOL.Refused, "^preview-purpose$"):
+                TOOL.remove_preview_command(args)
+            for candidate, installed in ((True, True), (1, False), ("yes", False)):
+                invalid = TOOL.argparse.Namespace(**{**vars(args), "candidate_carrier": candidate,
+                                                    "installed_passive_carrier": installed})
+                with self.assertRaisesRegex(TOOL.Refused, "^preview-purpose$"):
+                    TOOL.preview_command(invalid)
+            with self.assertRaisesRegex(TOOL.Refused, "^final-image-receipt-purpose$"):
+                TOOL.final_image_receipt_data(b"not parsed", selection=None, binding={}, request=None,
+                    package=b"", descriptor=b"", signed=b"", original_image={}, package_owner=b"",
+                    final_package=b"", release_body=b"", profiles=(), remove=True,
+                    expected_workflow=TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW)
+            read.assert_not_called()
+        primary = TOOL.Refused("candidate-carrier-ci-context")
+        def refuse(parsed):
+            parsed._carrier_validation_group = "source-binding"
+            raise primary
+        diagnostic = io.StringIO()
+        with (mock.patch.object(TOOL, "preview_command", side_effect=refuse), contextlib.redirect_stderr(diagnostic),
+              self.assertRaises(TOOL.Refused) as stopped):
+            TOOL.main(cli)
+        self.assertIs(stopped.exception, primary)
+        self.assertEqual(diagnostic.getvalue(),
+            "::error title=MRK carrier refused::group=source-binding;reason=candidate-carrier-ci-context\n")
+
+    def test_candidate_carrier_checks_actual_workflow_and_original_final_image(self):
+        # Real bounded original reads/fresh writes. SOURCE/native observations are
+        # deliberately inert DATA ports, not signature, Installer or UI evidence.
+        faults = (None, "legacy-purpose", "wrong-scope", "wrong-role", "wrong-event", "wrong-ref", "wrong-attempt",
+                  "receipt-workflow", "unknown-close", "unknown-native", "install-status", "final-status",
+                  "changed-package", "changed-final-receipt", "changed-final-image", "collision")
+        for target in TOOL.MAC_TARGETS:
+            for fault in faults:
+                with self.subTest(target=target, fault=fault), tempfile.TemporaryDirectory() as directory:
+                    old_work, values, documents, expected, selection = self.preview_fixture(target)
+                    binding = self.actual_workflow_binding(target, installed=False, candidate=True)
+                    if fault == "wrong-scope": binding["scope"] = "normal-macos-early-preview"
+                    if fault == "wrong-role": binding["packageRole"] = "installed-shell-observation"
+                    documents["source-binding.json"] = binding
+                    receipt = documents["android-helper-finalize-image.json"]
+                    receipt["workflow"] = TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW
+                    if fault == "receipt-workflow": receipt["workflow"] = TOOL._PREVIEW_FINAL_IMAGE_WORKFLOW
+                    if fault == "unknown-close": receipt["originalClosesKnown"] = False
+                    if fault == "unknown-native": receipt["originalCalls"][0]["returned"] = False
+                    values.update({old_work / name: TOOL.canonical(value) for name, value in documents.items()})
+                    mutations = {"install-status": "package-install.status", "final-status": "image-finalization.status",
+                        "changed-package": "package-final/MobileReleaseKit.pkg",
+                        "changed-final-receipt": "android-helper-finalize-package.json",
+                        "changed-final-image": "distribution-final/MobileReleaseKit.dmg"}
+                    if fault in mutations: values[old_work / mutations[fault]] = b"changed\n"
+                    work = Path(directory) / "work"; work.mkdir(mode=0o700)
+                    source_values = {}
+                    for original, contents in values.items():
+                        if not original.is_relative_to(old_work):
+                            source_values[original] = contents
+                            continue
+                        path = work / original.relative_to(old_work)
+                        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        if path.name in ("normal-build.jsonl", "app-result.json"):
+                            contents = contents.replace(str(old_work).encode(), str(work).encode())
+                        path.write_bytes(contents); path.chmod(0o600)
+                    binary = work / "cargo-target" / target / "release/libmrk_desktop_image.dylib"
+                    documents["app-result.json"]["desktopImageCargoArtifact"] = TOOL.image_cargo_artifact(
+                        (work / "normal-build.jsonl").read_bytes(), binary, work / "cargo-target", binary.read_bytes(),
+                        "desktop", target=target)
+                    (work / "app-result.json").write_bytes(TOOL.canonical(documents["app-result.json"]))
+                    env = {"GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit", "GITHUB_EVENT_NAME": "push",
+                        "GITHUB_REF": "refs/heads/verify/desktop-macos-candidate",
+                        "GITHUB_WORKFLOW_REF": TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW,
+                        "GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40,
+                        "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}
+                    if fault == "wrong-event": env["GITHUB_EVENT_NAME"] = "workflow_dispatch"
+                    if fault == "wrong-ref": env["GITHUB_REF"] = "refs/heads/verify/desktop-macos-preview"
+                    if fault == "wrong-attempt": env["GITHUB_RUN_ATTEMPT"] = "2"
+                    output = work / "candidate"
+                    if fault == "collision": output.mkdir(mode=0o700); (output / "foreign").write_bytes(b"preserve")
+                    originals = {p: (p.read_bytes(), os.lstat(p)) for p in work.rglob("*") if p.is_file()}
+                    args = TOOL.argparse.Namespace(command="preview", work=work, output=output, target=target,
+                        expected_source="a" * 40, candidate_carrier=fault != "legacy-purpose")
+                    original_read = TOOL.read
+                    def read_source(path, *args):
+                        return source_values[path] if path in source_values else original_read(path, *args)
+                    with (mock.patch.dict(os.environ, env, clear=True), mock.patch.object(TOOL, "read", side_effect=read_source),
+                          mock.patch.object(TOOL, "source_build_selection", return_value=selection),
+                          mock.patch.object(TOOL, "observation_inventory", return_value=expected)):
+                        if fault is None:
+                            result = TOOL.preview_command(args)
+                            self.assertEqual(result["qualification"], "current-candidate-not-consumer-or-product-qualified")
+                            self.assertEqual(set(os.listdir(output)), {"MobileReleaseKit.dmg", "PREVIEW.json", "README.md"})
+                            self.assertEqual((output / "MobileReleaseKit.dmg").read_bytes(),
+                                             values[old_work / "distribution-final/MobileReleaseKit.dmg"])
+                            summary = TOOL.decode((output / "PREVIEW.json").read_bytes())
+                            self.assertEqual(summary["scope"], "current-macos-candidate")
+                            self.assertEqual(summary["workflowRef"], TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW)
+                            self.assertEqual(summary["finalImageReceiptSha256"], TOOL.digest(TOOL.canonical(receipt)))
+                            self.assertEqual((summary["automaticWindowOpen"], summary["normalQuit"]), ("unexecuted", "unexecuted"))
+                            self.assertFalse(summary["fullUIQualified"] or summary["productReady"] or summary["distributionQualified"])
+                            guide = (output / "README.md").read_bytes()
+                            self.assertEqual(guide, TOOL._CANDIDATE_GUIDE)
+                            self.assertIn(b"NOT READY", guide); self.assertIn(b"No Remove carrier", guide)
+                            self.assertEqual(stat.S_IMODE(os.stat(output).st_mode), 0o555)
+                            self.assertTrue(all(stat.S_IMODE(os.stat(p).st_mode) == 0o444 for p in output.iterdir()))
+                            output.chmod(0o700)  # Only the fixture's own sealed output, for disposal.
+                        else:
+                            with self.assertRaises((TOOL.Refused, OSError)): TOOL.preview_command(args)
+                            if fault == "collision": self.assertEqual((output / "foreign").read_bytes(), b"preserve")
+                            else: self.assertFalse(output.exists())
+                    for path, (body, before) in originals.items():
+                        after = os.lstat(path)
+                        for field in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"):
+                            self.assertEqual(getattr(after, field), getattr(before, field))
+                        self.assertEqual(path.read_bytes(), body)
 
     def test_failed_original_status_changed_package_or_unsettled_readback_cannot_publish(self):
         failures = [

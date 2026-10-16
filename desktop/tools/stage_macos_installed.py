@@ -330,6 +330,7 @@ CARRIER_REFUSAL_REASONS = frozenset({
     'image-role-header',
     'image-segment-command',
     'image-segment-sections',
+    'candidate-carrier-ci-context',
     'installed-carrier-ci-context',
     'installed-directory-mode-owner',
     'installed-file-owner',
@@ -436,7 +437,7 @@ def carrier_refusal_annotation(args, error):
         return
     fields = vars(args)
     if type(fields.get("command")) is not str or fields["command"] != "preview" \
-            or fields.get("installed_passive_carrier") is not True:
+            or not (fields.get("installed_passive_carrier") is True or fields.get("candidate_carrier") is True):
         return
     group = fields.get("_carrier_validation_group")
     reason = "other"
@@ -2435,6 +2436,30 @@ def removal_package_receipt_data(body, *, selection, binding, package, descripto
 
 _PREVIEW_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview'
 _INSTALLED_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed'
+_CANDIDATE_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-candidate'
+_CANDIDATE_GUIDE = b"""# Mobile Release Kit - unqualified macOS candidate
+
+This temporary engineering candidate is NOT READY for production or public release.
+PREVIEW.json binds its architecture, source, run/attempt, final disk image and
+package to the original build, signing/notary, Installer and installed readback
+observations. Artifact availability is not application or distribution acceptance.
+No fixture-eight, removal/recovery, UI, normal-Quit or downloaded Gatekeeper
+qualification is inferred. Independent checks may be missing, skipped or failed.
+
+Use only a fresh disposable macOS 26 system matching PREVIEW.json's architecture
+and synthetic project data. Do not supply live Store or production credentials.
+Open MobileReleaseKit.dmg in Finder, then Install.pkg inside the read-only image.
+Keep producer.json and producer.sig beside it; do not extract a standalone package.
+Installer requires normal administrator approval. After installation, the ordinary
+user launch entry is /Applications/Mobile Release Kit.app. Do not move the protected
+application/runtime files or delete maintenance state to work around a refusal.
+
+Preserve quarantine, Gatekeeper and macOS security settings. A refusal is a failed
+observation, not permission to bypass them. If the app opens, use its normal Quit.
+Keep PREVIEW.json with architecture, macOS version and concise observations; never
+send credentials, private project content or raw logs. No Remove carrier or Store
+mutation authority is included, and this candidate does not qualify live releases.
+"""
 
 
 def final_image_receipt_data(body, *, selection, binding, request, package, descriptor, signed,
@@ -2447,7 +2472,8 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
     Existing preview checks still bind Installer/readback/current producer DATA.
     """
     need(type(remove) is bool and type(expected_workflow) is str
-         and expected_workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _INSTALLED_FINAL_IMAGE_WORKFLOW)
+         and expected_workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _INSTALLED_FINAL_IMAGE_WORKFLOW,
+                                   _CANDIDATE_FINAL_IMAGE_WORKFLOW)
          and (not remove or expected_workflow == _PREVIEW_FINAL_IMAGE_WORKFLOW),
          "final-image-receipt-purpose")
     selection = selected_build(selection)
@@ -2542,18 +2568,21 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
 def preview_command(args):
     """Copy only an audited, normally built and read-back package to fresh output."""
     args._carrier_validation_group = 'source-selection'
+    installed = getattr(args, "installed_passive_carrier", False)
+    candidate = getattr(args, "candidate_carrier", False)
+    need(type(installed) is bool and type(candidate) is bool and not (installed and candidate), "preview-purpose")
     selection = source_build_selection(command_target(args))
     need(type(args.expected_source) is str and re.fullmatch(r"[0-9a-f]{40}", args.expected_source),
          "preview-source")
-    installed = getattr(args, "installed_passive_carrier", False)
-    need(type(installed) is bool, "preview-purpose")
-    workflow = _INSTALLED_FINAL_IMAGE_WORKFLOW if installed else _PREVIEW_FINAL_IMAGE_WORKFLOW
+    workflow = (_CANDIDATE_FINAL_IMAGE_WORKFLOW if candidate else
+                _INSTALLED_FINAL_IMAGE_WORKFLOW if installed else _PREVIEW_FINAL_IMAGE_WORKFLOW)
     work = Path(args.work)
     need(work.is_absolute(), "preview-work-absolute")
     args._carrier_validation_group = 'source-binding'
     binding = decode(read(work / "source-binding.json", 65536))
     source = decode(read(work / "source-inventory.json", 1024 * 1024))
-    expected_scope = ("engineering-acl-probe-five-regressions-fixed-fixture-package-install-only"
+    expected_scope = ("current-macos-candidate" if candidate else
+                      "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only"
                       if installed else "normal-macos-early-preview")
     need(type(binding) is dict and type(source) is dict
          and source.get("source") == binding.get("source") == args.expected_source
@@ -2565,17 +2594,19 @@ def preview_command(args):
          "preview-source-binding")
     need(all(type(binding.get(k)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", binding[k])
              for k in ("runId", "runAttempt")), "preview-run-binding")
-    if installed:
+    if installed or candidate:
         # Finite explicit CI context only; never ambient credential/native authority.
         expected_environment = {
             "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
-            "GITHUB_REF": "refs/heads/verify/desktop-macos-installed",
-            "GITHUB_WORKFLOW_REF": _INSTALLED_FINAL_IMAGE_WORKFLOW,
+            "GITHUB_REF": workflow.split("@", 1)[1],
+            "GITHUB_WORKFLOW_REF": workflow,
             "GITHUB_SHA": args.expected_source, "GITHUB_WORKFLOW_SHA": args.expected_source,
             "GITHUB_RUN_ID": binding["runId"], "GITHUB_RUN_ATTEMPT": binding["runAttempt"],
         }
+        if candidate:
+            expected_environment["GITHUB_EVENT_NAME"] = "push"
         need(all(os.environ.get(key) == expected for key, expected in expected_environment.items()),
-             "installed-carrier-ci-context")
+             "candidate-carrier-ci-context" if candidate else "installed-carrier-ci-context")
     args._carrier_validation_group = 'build-products'
     need(read(work / "normal-build.status", 4) == b"0\n"
          and read(work / "installer-output.status", 4) == b"0\n"
@@ -2716,18 +2747,25 @@ def preview_command(args):
         "automaticWindowOpen": "unexecuted", "normalQuit": "unexecuted", "manualUIAcceptance": "pending",
         "unexecutedReason": "original-normal-app-quit-custody-not-established",
         "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+    if candidate:
+        summary.update(scope="current-macos-candidate", workflowRef=workflow,
+                       unexecutedReason="candidate-export-before-independent-ui-verification")
     args._carrier_validation_group = 'output-write'
     files = {"MobileReleaseKit.dmg": (image, 0o444), "PREVIEW.json": (canonical(summary) + b"\n", 0o444)}
-    if not installed:
+    if candidate:
+        files["README.md"] = (_CANDIDATE_GUIDE, 0o444)
+    elif not installed:
         files["README.md"] = (read(DESKTOP / "packaging/macos-preview.md", 32768), 0o444)
     write_tree(args.output, files)
     return {"schemaVersion": 2, "sourceCommit": args.expected_source, "packageSha256": digest(package),
             "distributionSha256": digest(image), "fileCount": len(files),
-            "qualification": "installed-passive-carrier-not-consumer-or-product-qualified" if installed else
+            "qualification": "current-candidate-not-consumer-or-product-qualified" if candidate else
+                             "installed-passive-carrier-not-consumer-or-product-qualified" if installed else
                              "normal-early-preview-not-launched-or-product-qualified"}
 
 def remove_preview_command(args):
     """Stage only the separately completed Remove carrier; never execute removal."""
+    need(getattr(args, "candidate_carrier", False) is False, "preview-purpose")
     selection = source_build_selection(command_target(args))
     need(maintenance_hex(args.expected_source, 40) and Path(args.work).is_absolute(), "remove-preview-source")
     work = Path(args.work)
@@ -6288,8 +6326,11 @@ def main(argv=None):
     support.add_argument("--aapt2-archive", required=True, type=Path)
     support.add_argument("--android-support-signed-receipt", required=True, type=Path)
     preview = commands.add_parser("preview")
-    preview.add_argument("--installed-passive-carrier", action="store_true",
+    carrier = preview.add_mutually_exclusive_group()
+    carrier.add_argument("--installed-passive-carrier", action="store_true",
                          help="Only closed installed-verification image+descriptor; not preview/removal/publication authority")
+    carrier.add_argument("--candidate-carrier", action="store_true",
+                        help="Only the fixed candidate build/install/final-image carrier; no UI/removal/product qualification")
     preview.add_argument("--work", required=True, type=Path)
     preview.add_argument("--expected-source", required=True)
     preview.add_argument("--output", required=True, type=Path)

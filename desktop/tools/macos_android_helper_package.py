@@ -4520,7 +4520,7 @@ class Operation:
         need(self.phase in FINAL_IMAGE_PHASES and self.signing is not None
              and (self.environment.get("GITHUB_REF") == "refs/heads/verify/desktop-macos-preview"
                   or (self.phase == "finalize-image"
-                      and self.environment.get("GITHUB_REF") == "refs/heads/verify/desktop-macos-installed"))
+                      and self.environment.get("GITHUB_REF") in ("refs/heads/verify/desktop-macos-installed", CANDIDATE_REF)))
              and not any(name in self.environment for name in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES),
              "final-image-configured-purpose")
         self.notary_space(reserve=True)
@@ -7972,7 +7972,7 @@ class Operation:
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
                 allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + STORE_SIGNING_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
-                and self.environment.get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF))
+                and self.environment.get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF, CANDIDATE_REF))
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
             if self.phase in STORE_SIGNING_PHASES:
@@ -8233,13 +8233,15 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
              + APP_ABSENCE_PHASES, "app-absence-fixed-native-route")
     if ref == APP_SIGNATURE_REF:
         need(phase in APP_SIGNATURE_PHASES, "app-signature-fixed-native-phase")
+    if ref == CANDIDATE_REF:
+        need(scope == "disabled" and phase in CANDIDATE_PHASES, "candidate-fixed-native-phase")
     if ref == REMOVAL_REF:
         removal_context_data(environment, target)
         need(phase not in PYTHON_PHASES and phase not in FINAL_IMAGE_PHASES, "removal-only-existing-purpose-route")
     elif phase in REMOVAL_OWNER_PHASES:
         raise Refused("removal-fixture-fixed-ref-only")
     if phase == "finalize-image":
-        need(ref in ("refs/heads/verify/desktop-macos-preview", "refs/heads/verify/desktop-macos-installed"),
+        need(ref in ("refs/heads/verify/desktop-macos-preview", "refs/heads/verify/desktop-macos-installed", CANDIDATE_REF),
              "final-image-preview-ref-only")
     elif (phase in FINAL_IMAGE_PHASES or phase in REMOVE_PHASES) and ref != REMOVAL_REF:
         need(ref == "refs/heads/verify/desktop-macos-preview", "final-image-preview-ref-only")
@@ -8263,7 +8265,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     workflow = ("desktop-macos-android-support-signing.yml" if support_phase else
                 "desktop-macos-python-runtime-signing.yml" if python_phase or tool_phase or store_phase else
                 "desktop-macos-aqua.yml" if ref == "refs/heads/verify/desktop-macos-aqua" else
-                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF) else None)
+                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF, CANDIDATE_REF) else None)
     need(workflow is not None, "closed-workflow-route")
     sha = environment.get("GITHUB_SHA", "")
     required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": runner_arch,
@@ -8294,6 +8296,10 @@ APP_SIGNATURE_REF = "refs/heads/verify/desktop-macos-app-signature"
 APP_SIGNATURE_PHASES = ("prepare", "sign-vault-helper", "sign-remover", "sign-applications-launcher", "verify-before",
                         "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "verify-after")
 APP_SIGNATURE_DATA = ("select-github-tools-signed", "project-history-provider", "project-github-seal")
+# Only produce one current carrier; no fixture, runtime re-signing or UI claim.
+CANDIDATE_REF = "refs/heads/verify/desktop-macos-candidate"
+CANDIDATE_PHASES = APP_SIGNATURE_PHASES + ("notarize-payload", "sign-root-installer",
+    "finalize-package", "package-install", "finalize-image")
 APP_SIGNATURE_SUMMARY = "summarize-app-signature"
 APP_SIGNATURE_STEPS = ("work", "source", "app_runtime", "github_tools", "app_tools", "app_selection",
                        "android_helper", "app_vault", "app_build", "app_compiler", "app_assemble")
@@ -8543,11 +8549,11 @@ def tool_data_context(environment, phase, target):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "tool-data-platform")
     ref = environment.get("GITHUB_REF")
     build_selection = phase in TOOL_SELECTION_PHASES[:2]
-    if ref in (APP_SIGNATURE_REF, APP_ABSENCE_REF):
+    if ref in (APP_SIGNATURE_REF, APP_ABSENCE_REF, CANDIDATE_REF):
         need(phase in APP_SIGNATURE_DATA, "app-signature-fixed-data-phase")
     workflow = "desktop-macos-python-runtime-signing.yml" if build_selection else "desktop-macos-installed.yml"
     need(ref == TOOL_REF if build_selection else ref in
-         ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF), "tool-data-ref")
+         ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, CANDIDATE_REF), "tool-data-ref")
     sha = environment.get("GITHUB_SHA")
     need(tool_hex(sha, 40) and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py"
          and all(environment.get(k) == v for k, v in {
@@ -8680,7 +8686,7 @@ def main():
         main_stage = "profile-check"
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
                                      allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + STORE_SIGNING_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
-                                     and os.environ.get("GITHUB_REF") != APP_SIGNATURE_REF)
+                                     and os.environ.get("GITHUB_REF") not in (APP_SIGNATURE_REF, CANDIDATE_REF))
         if phase in FINAL_PACKAGE_PHASES or phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             need(installer_profile(stager.read(CHECKOUT / INSTALLER_PROFILE, 1024)) is not None, "installer-source-unconfigured")
         main_stage = "owner-load"
