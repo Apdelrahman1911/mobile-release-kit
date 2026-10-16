@@ -80,9 +80,12 @@ establish local Store execution or authentication.
 
 ### Small Mac component builds
 
-`desktop-macos-components.yml` compiles only the Applications launcher with the
+`desktop-macos-components.yml` compiles the Applications launcher with the
 native macOS SDK on Apple Silicon and Intel, then checks its plist and Mach-O
-architecture. It has no signing environment, Store credentials, installed app
+architecture. A separate job uses ordinary `cargo check` for the exclusive
+Installer and Remover roles on both architectures. Dispatch can select only
+the launcher, only the Installer/Remover check, or both. The produced native
+programs are not executed. The workflow has no signing environment, Store credentials, installed app
 invocation or retained carrier download. Its new temporary output and compiler
 cache are disposable and removed after their last consumer. This is component
 compilation, not launcher runtime, installation, signing or distribution evidence.

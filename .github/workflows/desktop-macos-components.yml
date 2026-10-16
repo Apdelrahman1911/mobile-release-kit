@@ -1,4 +1,4 @@
-name: Mac launcher component
+name: Mac native components
 
 on:
   push:
@@ -7,24 +7,45 @@ on:
       - desktop/native/macos-applications-launcher/**
       - desktop/src-tauri/tauri.conf.json
       - desktop/src-tauri/icons/icon.png
+      - desktop/src-tauri/src/macos_applications*.rs
+      - desktop/src-tauri/src/bin/macos_install.rs
+      - desktop/src-tauri/src/macos_install*.rs
+      - desktop/src-tauri/Cargo.toml
+      - desktop/src-tauri/Cargo.lock
+      - desktop/src-tauri/build.rs
+      - desktop/native/macos-installed-native/**
       - .github/workflows/desktop-macos-components.yml
   pull_request:
     paths:
       - desktop/native/macos-applications-launcher/**
       - desktop/src-tauri/tauri.conf.json
       - desktop/src-tauri/icons/icon.png
+      - desktop/src-tauri/src/macos_applications*.rs
+      - desktop/src-tauri/src/bin/macos_install.rs
+      - desktop/src-tauri/src/macos_install*.rs
+      - desktop/src-tauri/Cargo.toml
+      - desktop/src-tauri/Cargo.lock
+      - desktop/src-tauri/build.rs
+      - desktop/native/macos-installed-native/**
       - .github/workflows/desktop-macos-components.yml
   workflow_dispatch:
+    inputs:
+      component:
+        description: Compile only the changed native component
+        type: choice
+        default: all
+        options: [all, launcher, installer]
 
 permissions:
   contents: read
 
 concurrency:
-  group: mac-launcher-component-${{ github.ref }}
+  group: mac-native-component-${{ github.ref }}-${{ inputs.component || 'all' }}
   cancel-in-progress: false
 
 jobs:
   launcher:
+    if: github.event_name != 'workflow_dispatch' || inputs.component != 'installer'
     name: Compile launcher (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
@@ -72,6 +93,57 @@ jobs:
           WORK_ROOT: ${{ steps.work.outputs.root }}
         run: rm -rf -- "$WORK_ROOT"
 
-# No application launch, private runtime, signing identity, notarization or
-# installed-image qualification is involved. Native launch and integrated
-# Applications publication remain separate acceptance requirements.
+  installer-check:
+    name: Check installer and remover (${{ matrix.arch }})
+    if: github.event_name != 'workflow_dispatch' || inputs.component != 'launcher'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+          - runner: macos-26-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Allocate one task-owned compiler directory
+        id: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=$(mktemp -d "$RUNNER_TEMP/mrk-installer-check.XXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+      - name: Check both exclusive native roles without executing either
+        shell: bash
+        working-directory: desktop/src-tauri
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="$WORK_ROOT/cargo" RUSTUP_HOME="$WORK_ROOT/rustup"
+          export CARGO_TARGET_DIR="$WORK_ROOT/target" CARGO_INCREMENTAL=0
+          export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0
+          rustup toolchain install 1.98.0 --profile minimal --no-self-update
+          # Separate invocations keep the two mutually exclusive roles distinct;
+          # dependencies are compiled once in this job's shared target directory.
+          rustup run 1.98.0 cargo check --locked --no-default-features \
+            --features macos-installed-installer --bin mrk-macos-install
+          rustup run 1.98.0 cargo check --locked --no-default-features \
+            --features macos-installed-remover --bin mrk-macos-remove
+      - name: Remove only this job's disposable compiler and dependencies
+        if: always() && steps.work.outputs.root != ''
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: rm -rf -- "$WORK_ROOT"
+
+# No produced installer/remover runs. Standard compiler/build scripts execute,
+# but no application launch, private runtime, privileged installation, signing
+# or notarization is involved. Runtime and
+# installation/update/removal behavior still require native integration tests.
