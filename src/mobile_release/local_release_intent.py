@@ -8,12 +8,15 @@ Existing CI authorization and evidence readers do not consume this contract.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 import re
+from pathlib import Path
 from uuid import UUID
 
 from .config import (
-    ANDROID_ID_RE, BRANCH_RE, IOS_ID_RE, ReleaseConfig, ReleaseVersion,
+    ANDROID_ID_RE, BRANCH_RE, IOS_ID_RE, MAX_CONFIG_BYTES, MAX_VERSION_BYTES,
+    ReleaseConfig, ReleaseVersion, parse_config_text, parse_key_value_text,
     release_version_from_values, validate_config_data,
 )
 from .discovery import GitContext, valid_observed_source
@@ -149,8 +152,9 @@ def _artifacts(rows: object, platform: str, metadata_sha: str) -> None:
 
 def _assignments(rows: object, platform: str) -> None:
     _need(type(rows) is list and 1 <= len(rows) <= 8)
-    allowed = {"google-adc", "operation-commitment-key"} if platform == "android" else {
-        "asc-p8", "operation-commitment-key", "apple-review-contact", "apple-demo-account"}
+    # Use the real Desktop asset-kind names, not environment-variable aliases.
+    allowed = {"google-adc", "operation-commitment"} if platform == "android" else {
+        "asc-p8", "operation-commitment", "apple-review-contact", "apple-review-demo"}
     kinds: set[str] = set()
     records: set[str] = set()
     for row in rows:
@@ -245,3 +249,43 @@ def prepare_local_draft(data: bytes, *, observed_source: GitContext,
     _need(all(getattr(draft.source, key) == getattr(observed_source, key)
               for key in ("commit", "tree", "ref", "branch", "dirty")))
     return draft
+
+
+def prepare_local_release(data: bytes, *, observed_source: GitContext,
+                          configuration_bytes: bytes, version_bytes: bytes) -> LocalReleaseDraft:
+    """Bind draft DATA to the original caller's captured saved input bytes.
+
+    Unlike structural decoding, this cannot select a different application,
+    version file, version or branch from the supplied saved configuration. The
+    caller must capture release/mobile-release.json and its configured version
+    file using the existing owned readers, and retain/recheck those originals.
+    Supplying bytes here does not authenticate their source or grant execution.
+    Artifact/metadata custody, credentials, consent and journal admission remain
+    separate obligations. No file is read, resolved, created or mutated here.
+    """
+    try:
+        _need(type(configuration_bytes) is bytes and 0 < len(configuration_bytes) <= MAX_CONFIG_BYTES)
+        _need(type(version_bytes) is bytes and 0 < len(version_bytes) <= MAX_VERSION_BYTES)
+        config = ReleaseConfig(Path("release/mobile-release.json"), Path("."),
+                               parse_config_text(configuration_bytes.decode("utf-8")))
+        draft = prepare_local_draft(data, observed_source=observed_source,
+                                    policy=LocalStorePolicy.from_config(config))
+        value = draft.to_dict()
+        _need(value["configuration"]["path"] == "release/mobile-release.json")
+        _need(value["configuration"]["sha256"] == hashlib.sha256(configuration_bytes).hexdigest())
+        spec = config.section("version")
+        _need(value["versionSource"]["path"] == spec["source"])
+        _need(value["versionSource"]["sha256"] == hashlib.sha256(version_bytes).hexdigest())
+        release = release_version_from_values(parse_key_value_text(version_bytes.decode("utf-8")),
+            name_key=spec["nameKey"], build_key=spec["buildKey"],
+            ios_enabled=config.platform_enabled("ios"), source_label="local release version")
+        _need(draft.release == release)
+        platform = config.section(draft.platform)
+        _need(platform.get("enabled") is True and platform.get("identityStatus") == "approved")
+        _need(value["application"]["id"] == platform.get(
+            "applicationId" if draft.platform == "android" else "bundleId"))
+        if draft.platform == "ios":
+            _need(value["application"]["storeAppId"] == platform.get("appStoreAppId"))
+        return draft
+    except (ValidationError, ConfigurationError, ValueError, TypeError, KeyError, RecursionError):
+        raise LocalDraftError(_ERROR) from None

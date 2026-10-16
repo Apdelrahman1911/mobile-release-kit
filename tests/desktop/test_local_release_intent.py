@@ -1,5 +1,6 @@
 """Pure local Store draft DATA tests; no files, tools, credentials or Store calls."""
 import dataclasses
+import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from mobile_release.config import ReleaseConfig, default_config_data
 from mobile_release.discovery import GitContext
 from mobile_release.local_release_intent import (
     MAX_DRAFT_BYTES, LocalDraftError, LocalStorePolicy, decode_local_draft, prepare_local_draft,
+    prepare_local_release,
 )
 from mobile_release.provenance import _artifact_record, validate_operation_intent
 from mobile_release.errors import ValidationError
@@ -186,7 +188,7 @@ class LocalReleaseDraftTests(unittest.TestCase):
             value = fixture(); value["assignments"][0][key] = wrong; self.refuse(value)
         value = fixture(); value["assignments"][0]["privateKey"] = "never-echo-private-value"; self.refuse(value)
         value = fixture(); value["assignments"].append(value["assignments"][0].copy()); self.refuse(value)
-        value = fixture(); value["assignments"].append({"kind": "operation-commitment-key", "recordId": "4" * 32,
+        value = fixture(); value["assignments"].append({"kind": "operation-commitment", "recordId": "4" * 32,
             "expectedRevision": 1, "contextRevision": 2}); self.refuse(value)
         value = fixture(); value["assignments"] = []; self.refuse(value)
 
@@ -213,6 +215,129 @@ class LocalReleaseDraftTests(unittest.TestCase):
         copy["assignments"][0]["expectedRevision"] = 99
         self.assertEqual(draft.to_bytes(), original)
         self.assertEqual(draft.to_dict(), fixture())
+
+
+class LocalReleaseSavedInputTests(unittest.TestCase):
+    def inputs(self, platform="android", stage="candidate"):
+        draft = fixture(platform, stage)
+        config = default_config_data({platform: {
+            "applicationId" if platform == "android" else "bundleId": "com.example.reader"}})
+        config["source"]["localStoreEnabled"] = True
+        config[platform]["identityStatus"] = "approved"
+        if platform == "ios":
+            config[platform].update(appStoreAppId="123456789", teamId="ABCDE12345",
+                externalTestFlightGroup="Synthetic testers", distributionCertificateSha256="ab" * 32,
+                symbols={"policy": "disabled"},
+                review={"usesNonExemptEncryption": False, "demoAccountRequired": False})
+        else:
+            config[platform].update(externalTrack={"kind": "closed", "name": "beta"},
+                                    uploadCertificateSha256="ab" * 32)
+        return draft, config, b"# retained saved bytes\nVERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
+
+    def bind(self, draft, config, version):
+        raw = encoded(config)
+        draft["configuration"]["sha256"] = hashlib.sha256(raw).hexdigest()
+        draft["versionSource"]["sha256"] = hashlib.sha256(version).hexdigest()
+        return raw
+
+    def prepare(self, draft, config, version, source=SOURCE):
+        return prepare_local_release(encoded(draft), observed_source=source,
+            configuration_bytes=config, version_bytes=version)
+
+    def test_saved_inputs_bind_both_platforms_and_all_stages_without_github_authority(self):
+        for platform in ("android", "ios"):
+            for stage in ("candidate", "external-testing", "production-submit"):
+                draft, config, version = self.inputs(platform, stage)
+                raw = self.bind(draft, config, version)
+                result = self.prepare(draft, raw, version)
+                self.assertEqual(result.to_dict(), draft)
+                self.assertIsNone(result.source.repository)
+                with self.assertRaises(ValidationError):
+                    validate_operation_intent(result.to_dict())
+
+    def test_changed_original_bytes_are_refused_even_if_parsed_values_match(self):
+        draft, config, version = self.inputs()
+        raw = self.bind(draft, config, version)
+        for changed_config, changed_version in ((raw + b"\n", version), (raw, version + b"\n")):
+            with self.assertRaises(LocalDraftError):
+                self.prepare(draft, changed_config, changed_version)
+
+    def test_matching_digests_cannot_substitute_saved_identity_version_or_source(self):
+        cases = (("application", "id", "com.example.different"),
+                 ("configuration", "path", "other/config.json"),
+                 ("versionSource", "path", "other/version.properties"),
+                 ("versionSource", "path", "release/./version.properties"),
+                 ("version", "build", 8), ("version", "marketing", "2.0.0"))
+        for section, key, value in cases:
+            draft, config, version = self.inputs()
+            raw = self.bind(draft, config, version)
+            draft[section][key] = value
+            draft["confirmation"] = f'candidate:android:{draft["version"]["marketing"]}:{draft["version"]["build"]}'
+            with self.subTest(section=section, key=key), self.assertRaises(LocalDraftError):
+                self.prepare(draft, raw, version)
+        draft, config, version = self.inputs("ios")
+        raw = self.bind(draft, config, version)
+        draft["application"]["storeAppId"] = "987654321"
+        with self.assertRaises(LocalDraftError): self.prepare(draft, raw, version)
+
+    def test_actual_configuration_opt_in_identity_platform_and_branch_remain_required(self):
+        for change in ("opt-in", "unapproved", "disabled", "branch"):
+            draft, config, version = self.inputs()
+            if change == "opt-in": del config["source"]["localStoreEnabled"]
+            elif change == "unapproved": config["android"]["identityStatus"] = "unverified"
+            elif change == "disabled":
+                config["android"] = {"enabled": False}
+                config["ios"] = self.inputs("ios")[1]["ios"]
+            else: config["source"]["candidateBranch"] = "develop"
+            raw = self.bind(draft, config, version)
+            with self.subTest(change=change), self.assertRaises(LocalDraftError): self.prepare(draft, raw, version)
+        draft, config, version = self.inputs(stage="production-submit")
+        config["source"].update(candidateBranch="develop", productionBranch="release")
+        draft["source"].update(branch="release", ref="refs/heads/release")
+        raw = self.bind(draft, config, version)
+        self.assertEqual(self.prepare(draft, raw, version, dataclasses.replace(
+            SOURCE, branch="release", ref="refs/heads/release")).stage, "production-submit")
+
+    def test_configured_version_keys_and_full_enabled_platform_policy_are_used(self):
+        draft, config, _ = self.inputs()
+        config["version"].update(source="app/release.properties", nameKey="MARKETING", buildKey="COUNT")
+        draft["versionSource"]["path"] = "app/release.properties"
+        version = b"MARKETING=1.2.3\nCOUNT=7\n"
+        raw = self.bind(draft, config, version)
+        self.assertEqual(self.prepare(draft, raw, version).release.build, 7)
+        for invalid_version in (version + b"COUNT=7\n", b"MARKETING=1.2.3\nCOUNT=07\n", b"\xff"):
+            raw = self.bind(draft, config, invalid_version)
+            with self.assertRaisesRegex(LocalDraftError, "^Invalid local Store draft$"):
+                self.prepare(draft, raw, invalid_version)
+        # A shared version must still meet enabled iOS policy on an Android run.
+        draft, config, version = self.inputs()
+        config["ios"] = self.inputs("ios")[1]["ios"]
+        version = b"VERSION_NAME=1\nBUILD_NUMBER=7\n"
+        draft["version"]["marketing"] = "1"
+        draft["confirmation"] = "candidate:android:1:7"
+        raw = self.bind(draft, config, version)
+        with self.assertRaises(LocalDraftError): self.prepare(draft, raw, version)
+
+    def test_assigned_asset_kind_names_are_real_and_legacy_aliases_do_not_grant_access(self):
+        draft, config, version = self.inputs("ios", "production-submit")
+        for index, kind in enumerate(("operation-commitment", "apple-review-contact", "apple-review-demo"), start=4):
+            draft["assignments"].append({"kind": kind, "recordId": str(index) * 32,
+                "expectedRevision": 2, "contextRevision": 1})
+        raw = self.bind(draft, config, version)
+        self.assertEqual(self.prepare(draft, raw, version).to_dict()["assignments"], draft["assignments"])
+        for alias in ("operation-commitment-key", "apple-demo-account", "google-wif"):
+            draft["assignments"][-1]["kind"] = alias
+            with self.assertRaises(LocalDraftError): self.prepare(draft, raw, version)
+
+    def test_malformed_input_errors_never_reflect_private_values(self):
+        draft, config, version = self.inputs()
+        raw = self.bind(draft, config, version)
+        for bad in (b"", b"\xff", b'{"private":"never-echo-this"}', None, bytearray(raw)):
+            with self.assertRaisesRegex(LocalDraftError, "^Invalid local Store draft$"):
+                self.prepare(draft, bad, version)
+        for bad in (b"", b"never-echo-this", None, bytearray(version)):
+            with self.assertRaisesRegex(LocalDraftError, "^Invalid local Store draft$"):
+                self.prepare(draft, raw, bad)
 
 
 if __name__ == "__main__":

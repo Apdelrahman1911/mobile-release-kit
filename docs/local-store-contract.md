@@ -22,6 +22,18 @@ must supply that observation. Turning this setting on does not enable an
 unfinished UI action, grant consent, change CI authorization or execute a Store
 operation. Existing projects that omit it remain local-preparation disabled.
 
+`prepare_local_release` additionally binds the draft to supplied captured bytes
+of `release/mobile-release.json` and its exact configured version file. It uses
+the shared configuration/version parsers and checks the original-byte digests,
+configured release keys and values, enabled platform, approved application/Store
+identity and stage-specific branch. The existing original file readers must
+capture and retain those bytes; this pure function does not establish custody.
+The lower-level decoder remains suitable for inspecting historical draft DATA,
+not admitting a release. Draft assignment references use the actual Desktop
+asset kinds `operation-commitment`, `apple-review-contact` and
+`apple-review-demo`; old speculative aliases are rejected. `google-adc` remains
+reserved for the unfinished local credential route, not the GitHub WIF input.
+
 The draft binds local operation/project UUIDs, source commit/tree/branch, approved
 application identity, release/confirmation, configuration/version/metadata
 content digests, existing seven-field artifact records, and credential assignment
