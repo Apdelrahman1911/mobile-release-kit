@@ -330,3 +330,28 @@ Applications XCTest **after** candidate upload. It reuses the installed app and
 does not add another signing/notarization cycle. Native results remain pending.
 All local test workers joined; namespace scratch was disposed. No current Mac
 installer, installed UI pass, complete recovery or readiness verdict is inferred.
+
+### Real Fastlane layout correction — 2026-10-16
+
+Run `38911528887/1` at `08f76efe1e7597565a2869a1a1324be037fa2ba2`
+passed pinned Rust admission on both Macs, then failed runtime preparation before
+app compilation/signing. A bounded diagnostic successor (`014d33b1`, run
+`38912347149/1`) identified ARM's exact failing check: `prepare_runtime.py:282`,
+the required Store-file roster. Its Intel job failed earlier while downloading
+the selected seal helper; that is not another composition result.
+
+The locked official `fastlane-2.235.0.gem` contains `fastlane/lib/fastlane.rb`,
+not `lib/fastlane.rb`. All three runtime consumers had the same incorrect path.
+Correct the Python preparer, final stager and Rust installed-inventory validator;
+do not remove the required entry or change the signed dependency component.
+The official 1,182,208-byte gem matched `Gemfile.lock`; only passive archive
+inspection occurred, with no source execution or signed-carrier download.
+
+An independently specified real-layout fixture reproduces the old failure on
+both targets. Corrected Python checks passed: 19 executions, 15 distinct methods
+(four imported methods were redundantly discovered), 4.603s. The standalone
+Rust inventory test passed locally with rustc 1.98.0 and explicit GCC 13; the
+first isolated attempt could not resolve the host's `cc` alternatives link and
+did not run the test. All scratch/output was removed with its test namespace.
+Independent plan and distinct implementation review accepted the correction.
+Native candidate verification remains necessary; no readiness claim is made.

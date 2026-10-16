@@ -4,10 +4,16 @@ import unittest
 
 from test_macos_launcher_staging import TOOL, binary
 
+# Real member layout of the locked fastlane 2.235.0 gem. Do not derive this
+# entry from a consumer's required roster: a shared typo hid a packaging failure.
+FASTLANE_ENTRY = "store/bundle/ruby/3.3.0/gems/fastlane-2.235.0/fastlane/lib/fastlane.rb"
+
 
 class StoreStaging(unittest.TestCase):
     def fixture(self, target):
-        files = {"store/" + name: (b"inert resource", 0o444) for name in TOOL.STORE_RUNTIME_REQUIRED}
+        files = {"store/" + name: (b"inert resource", 0o444) for name in TOOL.STORE_RUNTIME_REQUIRED
+                 if not name.startswith("bundle/ruby/3.3.0/gems/fastlane-")}
+        files[FASTLANE_ENTRY] = (b"# inert Fastlane entry, never executed\n", 0o444)
         files["store/bin/ruby"] = (binary(target), 0o555)
         files["store/bin/bundle"] = (b"#!/bin/sh\n# inert wrapper\n", 0o555)
         extension = bytearray(binary(target))
@@ -33,6 +39,10 @@ class StoreStaging(unittest.TestCase):
 
     def test_partial_groups_ambient_interpreter_and_historical_profiles_refuse(self):
         TOOL.store_runtime_payload({}, current=False, target=TOOL.ARM_TARGET)
+        wrong_layout = self.fixture(TOOL.ARM_TARGET)
+        wrong_layout[FASTLANE_ENTRY.replace('/fastlane/lib/', '/lib/')] = wrong_layout.pop(FASTLANE_ENTRY)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.store_runtime_payload(wrong_layout, current=True, target=TOOL.ARM_TARGET)
         for name in TOOL.STORE_RUNTIME_REQUIRED:
             files = self.fixture(TOOL.ARM_TARGET)
             del files["store/" + name]

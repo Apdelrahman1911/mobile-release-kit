@@ -9,7 +9,7 @@ pub const CA: &str = "store/ca.pem";
 pub const TOOLING: &str = "store/tooling";
 pub const REQUIRED: &[&str] = &[
     RUBY, BUNDLE, BUNDLE_ENTRY, CA, "store/bin/mrk_bundle_setup.rb",
-    "store/bundle/ruby/3.3.0/gems/fastlane-2.235.0/lib/fastlane.rb",
+    "store/bundle/ruby/3.3.0/gems/fastlane-2.235.0/fastlane/lib/fastlane.rb",
     "store/tooling/Gemfile", "store/tooling/Gemfile.lock", "store/tooling/fastlane/Fastfile",
     "store/tooling/fastlane/run_lane.rb", "store/tooling/fastlane/native_process_spawn.rb",
     "store/licenses/Ruby-COPYING", "store/licenses/Ruby-BSDL", "store/licenses/Ruby-LEGAL",
@@ -43,6 +43,16 @@ mod tests {
     fn optional_store_runtime_is_complete_and_has_only_two_executable_roles() {
         assert_eq!(validate([("python/bin/python3", 1)]), Ok(false));
         assert_eq!(validate(REQUIRED.iter().map(|path| (*path, 1))), Ok(true));
+        // The upstream gem's real monorepo layout is independent of REQUIRED.
+        // Synthesizing every fixture from REQUIRED previously hid a shared typo.
+        let mut upstream: Vec<_> = REQUIRED.iter().filter(|p| !p.contains("/gems/fastlane-"))
+            .map(|path| (*path, 1)).collect();
+        let entry = "store/bundle/ruby/3.3.0/gems/fastlane-2.235.0/fastlane/lib/fastlane.rb";
+        upstream.push((entry, 1));
+        assert_eq!(validate(upstream.iter().copied()), Ok(true));
+        upstream.pop();
+        upstream.push(("store/bundle/ruby/3.3.0/gems/fastlane-2.235.0/lib/fastlane.rb", 1));
+        assert!(validate(upstream).is_err());
         for omitted in 0..REQUIRED.len() {
             assert!(validate(REQUIRED.iter().enumerate().filter(|(i, _)| *i != omitted)
                 .map(|(_, path)| (*path, 1))).is_err());

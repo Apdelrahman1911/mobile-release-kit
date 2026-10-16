@@ -1648,7 +1648,7 @@ def current_runtime_mode(name, body, nomination, *, target=ARM_TARGET):
 STORE_RUNTIME_REQUIRED = frozenset({
         "bin/ruby", "bin/bundle", "bin/mrk_bundle_setup.rb", "ca.pem",
         "lib/ruby/gems/3.3.0/gems/bundler-4.0.16/exe/bundle",
-        "bundle/ruby/3.3.0/gems/fastlane-2.235.0/lib/fastlane.rb",
+        "bundle/ruby/3.3.0/gems/fastlane-2.235.0/fastlane/lib/fastlane.rb",
         "tooling/Gemfile", "tooling/Gemfile.lock", "tooling/fastlane/Fastfile",
         "tooling/fastlane/run_lane.rb", "tooling/fastlane/native_process_spawn.rb",
         "licenses/Ruby-COPYING", "licenses/Ruby-BSDL", "licenses/Ruby-LEGAL",

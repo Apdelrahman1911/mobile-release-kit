@@ -52,7 +52,7 @@ MAX_GITHUB_CA_BYTES = 512 * 1024
 STORE_EXECUTABLES = frozenset({"bin/ruby", "bin/bundle"})
 STORE_REQUIRED_FILES = frozenset({
     *STORE_EXECUTABLES, "bin/mrk_bundle_setup.rb", "ca.pem", "lib/ruby/gems/3.3.0/gems/bundler-4.0.16/exe/bundle",
-    "bundle/ruby/3.3.0/gems/fastlane-2.235.0/lib/fastlane.rb",
+    "bundle/ruby/3.3.0/gems/fastlane-2.235.0/fastlane/lib/fastlane.rb",
     "licenses/Ruby-COPYING", "licenses/Ruby-BSDL", "licenses/Ruby-LEGAL",
     "licenses/OpenSSL-LICENSE.txt", "licenses/LibYAML-License", "licenses/locked-gem-licenses.txt",
 })
