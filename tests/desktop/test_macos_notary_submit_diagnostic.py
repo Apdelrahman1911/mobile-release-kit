@@ -261,12 +261,13 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
         def owned(argv, **kwargs):
             self.invocations.append(tuple(argv))
             return subprocess.CompletedProcess(argv, code, self.capture, PRIVATE)
-        def publish(name, body):
+        def publish(name, body, *, parent=None):
+            self.assertIsNone(parent)
             if publish_error and name == 'installer-output.txt':
                 raise RuntimeError('synthetic-publication-failure')
             self.publications[name] = body
         op = object.__new__(HELPER.Operation)
-        op.__dict__.update(phase='package-install', credential_known=lambda: True,
+        op.__dict__.update(phase='package-install', prepared_binding=None, prepared_staging=False, credential_known=lambda: True,
             credential_failed=False, credential_active=None, removal_final_active=lambda: False,
             errors=[], stager_io_pending=None, android_support=None, store_signing=None,
             app_absence=None, update=None, removal=False, removal_recorded_role=lambda role: role,
@@ -415,3 +416,192 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
                 self.assertNotIn(PRIVATE.decode(), json.dumps(value))
                 value['parent'][0]['category'] = PRIVATE.decode()
                 self.assertIsNone(HELPER.installer_markers_data(value))
+
+
+class PreparedInstallerLogTests(unittest.TestCase):
+    def args(self, stager, target):
+        env = {'GITHUB_RUN_ID': '38967044255', 'GITHUB_RUN_ATTEMPT': '1'}
+        package = HELPER.transport_mount_path_data(env, target, 'package-install') / stager.distribution_request_name('1' * 32)
+        return SimpleNamespace(fixture=False, target=target, package=package, request_id='1' * 32,
+            expected_source='2' * 40, expected_inventory='3' * 64, expected_manifest='4' * 64,
+            run_id=env['GITHUB_RUN_ID'], run_attempt=env['GITHUB_RUN_ATTEMPT'])
+
+    def test_real_transport_paths_bind_both_targets_and_refuse_other_cohorts(self):
+        stager = load('prepared_log_binding_data', 'stage_macos_installed.py')
+        for target in (HELPER.ARM_TARGET, HELPER.INTEL_TARGET):
+            args = self.args(stager, target)
+            self.assertEqual(stager.installer_log_binding(args)['packagePath'], str(args.package))
+            for key, value in (('target', HELPER.INTEL_TARGET if target == HELPER.ARM_TARGET else HELPER.ARM_TARGET),
+                               ('run_id', '38967044256'), ('run_attempt', '2'),
+                               ('package', Path('/Volumes/unrelated') / args.package.name),
+                               ('package', Path('/tmp/Volumes') / args.package.parent.name / args.package.name)):
+                bad = copy.copy(args); setattr(bad, key, value)
+                with self.subTest(target=target, key=key), self.assertRaisesRegex(stager.Refused, 'log-input-binding'):
+                    stager.installer_log_binding(bad)
+            # The old ordinary/fixture diagnostic grammar is not reinterpreted.
+            args.package = Path('/tmp/original/package-mount') / args.package.name
+            stager.installer_log_binding(args)
+            args.fixture = True; args.request_id = None
+            args.package = Path('/tmp/original/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg')
+            stager.installer_log_binding(args)
+
+    def operation(self, target):
+        import tempfile, time
+        from unittest import mock
+        from desktop.tools import macos_prepared_package as prepared
+        from test_macos_prepared_package import fixture
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        current = root / 'current'; old = current / 'prepared-built-source'; work = root / 'work'
+        (current / '.git').mkdir(parents=True); (current / 'desktop/tools').mkdir(parents=True)
+        old.mkdir(); work.mkdir(mode=0o700)
+        values, manifest, service, consumer = fixture(target)
+        consumer.update(source='6' * 40, tree='7' * 40)
+        binding = prepared.admit_data(values, service, consumer)
+        (current / '.git/HEAD').write_text(consumer['source'] + '\n')
+        (current / '.git/HEAD').chmod(0o644)
+        program = current / 'desktop/tools/stage_macos_installed.py'
+        program.write_bytes((ROOT / 'desktop/tools/stage_macos_installed.py').read_bytes()); program.chmod(0o644)
+        environment = dict(GITHUB_SHA=consumer['source'], GITHUB_WORKFLOW_SHA=consumer['source'],
+            GITHUB_RUN_ID=consumer['runId'], GITHUB_RUN_ATTEMPT=consumer['runAttempt'],
+            GITHUB_WORKFLOW_REF=prepared.REPOSITORY + '/' + prepared.WORKFLOW + '@refs/heads/' + prepared.BRANCH,
+            MRK_MACOS_PACKAGE_ROLE='ordinary-image')
+        stager = load('prepared_actual_log_stager_' + target, 'stage_macos_installed.py')
+        self.enterContext(mock.patch.object(HELPER, 'CHECKOUT', current))
+        op = HELPER.Operation(SimpleNamespace(run_owned=None), old, work, 'package-install', environment,
+            stager, target=target, prepared=binding)
+        op.open(); op.package_started = op.package_observed = time.monotonic_ns()
+        op.package_endpoint = op.package_started + 180_000_000_000
+        op.calls.extend({'role': role, 'entered': True, 'returned': True, 'capturesSettled': True, 'returncode': 0}
+            for role in HELPER._PACKAGE_DIAGNOSTIC_ROLES[:12])
+        return op, stager, program
+
+    def test_current_diagnostic_parser_and_original_selected_log_do_not_relabel_product(self):
+        from unittest import mock
+        for target in (HELPER.ARM_TARGET, HELPER.INTEL_TARGET):
+            with self.subTest(target=target):
+                op, stager, program = self.operation(target)
+                args = self.args(stager, target)
+                args.run_id = op.environment['GITHUB_RUN_ID']; args.run_attempt = op.environment['GITHUB_RUN_ATTEMPT']
+                args.package = HELPER.transport_mount_path_data(op.environment, target, 'package-install') / stager.distribution_request_name(args.request_id)
+                selected = (b'PackageKit: MRK_MACOS_POSTINSTALL_PHASE=pre-exec\n'
+                    b'PackageKit: Error Domain=PKInstallErrorDomain Code=112 private message\n' + PRIVATE + b'\n')
+                def diagnostic(parsed):
+                    # Native log input is inert. Real CLI/parser+binding, owner
+                    # call ledger, exclusive outputs/readbacks and closes remain.
+                    binding = stager.installer_log_binding(parsed)
+                    self.assertEqual(binding['packagePath'], str(args.package))
+                    row = dict(authority=stager.LOG_AUTHORITY, state='observed', binding=binding)
+                    if parsed.command == 'installer-log-capture':
+                        stager.write_log_selection(parsed.selected_output, selected)
+                        row.update(state='observed-project-correlated', selectedData=dict(
+                            file='installer-log-selected.txt', bytes=len(selected), sha256=HELPER.digest(selected)))
+                    return row, 0
+                def native(argv, **kwargs):
+                    if argv == ['inert-installer']:
+                        return subprocess.CompletedProcess(argv, 1, b'Installer failed without marker',
+                            b'Error Domain=NSPOSIXErrorDomain Code=13 private message')
+                    self.assertEqual(Path(argv[4]), program)
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output): status = stager.main(argv[5:])
+                    return subprocess.CompletedProcess(argv, status, output.getvalue().encode(), b'')
+                op.owner.run_owned = native
+                try:
+                    with mock.patch.object(stager, 'installer_log_diagnostic', side_effect=diagnostic):
+                        op.package_diagnostic(args, capture=False)
+                        with self.assertRaisesRegex(HELPER.Refused, 'original-nonzero-installer'):
+                            op.call('installer', ['inert-installer'], {}, cwd=op.work, timeout=20, limit=256*1024)
+                        op.package_diagnostic(args, capture=True)
+                    self.assertIs(op.stager, stager); self.assertEqual(op.checkout.name, 'prepared-built-source')
+                    self.assertEqual(op.environment['GITHUB_SHA'], '6' * 40)
+                    self.assertEqual(op.prepared_binding.source, '1' * 40)
+                    self.assertEqual(sum(e['role'] == 'diagnostic-source-root' for e in op.entries), 1)
+                    value = HELPER.failure_diagnostic(HELPER.Refused('helper-package-incomplete'), operation=op)
+                    slots = value['packageInstall']['calls']
+                    self.assertEqual(slots['installer']['returncode'], 1)
+                    self.assertEqual(slots['installer']['markers']['phases'], [])
+                    self.assertEqual(slots['installer-log-capture']['markers']['phases'], ['pre-exec'])
+                    self.assertEqual(slots['installer']['errors']['rows'], [{'domain':'NSPOSIXErrorDomain','code':13}])
+                    self.assertEqual(slots['installer-log-capture']['errors']['rows'], [{'domain':'PKInstallErrorDomain','code':112}])
+                    self.assertNotIn(PRIVATE.decode(), json.dumps(value))
+                    self.assertFalse(value['packageInstall']['systemServiceExitClaimed'])
+                    self.assertTrue(all(e['closed'] for e in op.entries if e['role'] == 'diagnostic-selected-log'))
+                    self.assertLess(sum(e['fd'] is not None for e in op.entries) + 40, 256)
+                    op.calls[13]['returncode'] = 0
+                    self.assertIsNone(HELPER.failure_diagnostic(HELPER.Refused('helper-package-incomplete'), operation=op)
+                        ['packageInstall']['calls']['installer-log-capture']['markers'])
+                finally:
+                    op.finish()
+                self.assertTrue(op.receipt['originalClosesKnown'])
+                self.assertTrue(all(e['closed'] and e['fd'] is None for e in op.entries))
+
+    def test_changed_current_source_and_unknown_selected_close_refuse_without_reopening(self):
+        from unittest import mock
+        op, stager, program = self.operation(HELPER.ARM_TARGET)
+        try:
+            self.assertEqual(op.package_diagnostic_program(), program)
+            original = program.read_bytes(); program.write_bytes(original + b'\n')
+            with self.assertRaisesRegex(HELPER.Refused, 'file-original-changed'):
+                op.package_diagnostic_program()
+            self.assertEqual(sum(e['role'] == 'diagnostic-source-root' for e in op.entries), 1)
+        finally: op.finish()
+        self.assertTrue(all(e['closed'] for e in op.entries))
+        # A change during the original child call must fail the current-source
+        # POST before its successful JSON can become a diagnostic record.
+        op, stager, program = self.operation(HELPER.ARM_TARGET)
+        def changed_child(argv, **kwargs):
+            program.write_bytes(program.read_bytes() + b'\n')
+            return subprocess.CompletedProcess(argv, 0,
+                json.dumps({'authority':stager.LOG_AUTHORITY, 'state':'observed'}).encode(), b'')
+        op.owner.run_owned = changed_child
+        try:
+            with self.assertRaisesRegex(HELPER.Refused, 'file-original-changed'):
+                op.package_diagnostic(self.args(stager, HELPER.ARM_TARGET), capture=False)
+            self.assertEqual(len(op.calls), 13)
+            self.assertTrue(op.calls[-1]['returned'] and op.calls[-1]['capturesSettled'])
+            self.assertNotIn('installerLog', op.calls[-1])
+            self.assertFalse((op.work / 'installer-log-cursor.json').exists())
+        finally: op.finish()
+        self.assertTrue(all(e['closed'] for e in op.entries))
+        op, stager, program = self.operation(HELPER.ARM_TARGET)
+        body = b'MRK_MACOS_POSTINSTALL_PHASE=pre-exec\n'
+        path = op.work / 'installer-log-selected.txt'; path.write_bytes(body); path.chmod(0o600)
+        document = dict(authority=stager.LOG_AUTHORITY, state='observed-project-correlated',
+            selectedData=dict(file=path.name, bytes=len(body), sha256=HELPER.digest(body)))
+        try:
+            wrong = copy.deepcopy(document); wrong['selectedData']['file'] = '../private'
+            with self.assertRaisesRegex(HELPER.Refused, 'installer-diagnostic-selected'):
+                op.package_log_markers(wrong)
+            self.assertFalse(any(e['role'] == 'diagnostic-selected-log' for e in op.entries))
+            real_close = HELPER.os.close
+            def consuming_unknown(fd):
+                real_close(fd)
+                raise OSError('synthetic lost close return')
+            with mock.patch.object(HELPER.os, 'close', side_effect=consuming_unknown):
+                with self.assertRaisesRegex(HELPER.Refused, 'installer-diagnostic-selected-close'):
+                    op.package_log_markers(document)
+        finally: op.finish()
+        self.assertFalse(op.receipt['originalClosesKnown'])
+        self.assertEqual(len(op.errors), 1)
+        self.assertEqual(sum(e['role'] == 'diagnostic-selected-log' for e in op.entries), 1)
+
+    def test_apple_error_projection_is_closed_bounded_and_never_freeform(self):
+        body = (b'Error Domain=PKInstallErrorDomain Code=112 "' + PRIVATE + b'"\n'
+            b'Underlying Error Domain=NSPOSIXErrorDomain Code=13\n'
+            b'Error Domain=NSOSStatusErrorDomain Code=-67062\n'
+            b'Error Domain=NSCocoaErrorDomain Code=513\n'
+            b'Error Domain=PKInstallErrorDomain Code=113\n')
+        value = HELPER.installer_errors(body, b'')
+        self.assertEqual(len(value['rows']), 4); self.assertTrue(value['omitted'])
+        self.assertNotIn(PRIVATE.decode(), json.dumps(value))
+        for invalid in (b'Error Domain=UnknownDomain Code=4', b'XError Domain=PKInstallErrorDomain Code=3',
+                        b'Error Domain=PKInstallErrorDomain Code=2147483648',
+                        b'Error Domain=PKInstallErrorDomain Code=-2147483649',
+                        b'Error Domain=PKInstallErrorDomain Code=12345678901',
+                        b'Error Domain=PKInstallErrorDomain Code=3secret',
+                        b'Error Domain=PKInstallErrorDomain Code=3.5'):
+            self.assertEqual(HELPER.installer_errors(invalid, b'')['rows'], [])
+        self.assertIsNone(HELPER.installer_errors(b'x' * (256*1024+1), b''))
+        for row in ({'domain':'NSPOSIXErrorDomain','code':True},
+                    {'domain':'NSPOSIXErrorDomain','code':13,'message':PRIVATE.decode()},
+                    {'domain':PRIVATE.decode(),'code':13}):
+            self.assertIsNone(HELPER.installer_errors_data({'rows':[row], 'omitted':False}))

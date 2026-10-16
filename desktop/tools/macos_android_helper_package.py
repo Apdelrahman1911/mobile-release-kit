@@ -1593,6 +1593,49 @@ def installer_markers(stdout, stderr):
         return None
 
 
+_INSTALLER_ERROR_DOMAINS = ("PKInstallErrorDomain", "NSCocoaErrorDomain", "NSPOSIXErrorDomain", "NSOSStatusErrorDomain")
+
+
+def installer_errors_data(value):
+    if (type(value) is not dict or set(value) != {"rows", "omitted"} or type(value["omitted"]) is not bool
+            or type(value["rows"]) is not list or len(value["rows"]) > 4):
+        return None
+    rows = []
+    for row in value["rows"]:
+        if (type(row) is not dict or set(row) != {"domain", "code"}
+                or type(row["domain"]) is not str or row["domain"] not in _INSTALLER_ERROR_DOMAINS
+                or type(row["code"]) is not int or not -(1 << 31) <= row["code"] < 1 << 31 or row in rows):
+            return None
+        rows.append(dict(row))
+    return {"rows": rows, "omitted": value["omitted"]}
+
+
+def installer_errors(stdout, stderr):
+    """Finite Apple error facts only; never descriptions, paths or attribution."""
+    if type(stdout) is not bytes or type(stderr) is not bytes or len(stdout) + len(stderr) > 256 * 1024:
+        return None
+    pattern = re.compile(rb"(?<![A-Za-z0-9_])Error[ \t]+Domain=(" +
+        b"|".join(v.encode("ascii") for v in _INSTALLER_ERROR_DOMAINS) +
+        rb")[ \t]+Code=(-?[0-9]{1,10})(?![A-Za-z0-9_+.-])")
+    value = {"rows": [], "omitted": False}
+    for body in (stdout, stderr):
+        for line in body.splitlines(keepends=True):
+            if len(line) > 16384:
+                value["omitted"] = True
+                continue
+            for match in pattern.finditer(line):
+                code = int(match[2])
+                if not -(1 << 31) <= code < 1 << 31:
+                    continue
+                row = {"domain": match[1].decode("ascii"), "code": code}
+                if row not in value["rows"]:
+                    if len(value["rows"]) == 4:
+                        value["omitted"] = True
+                    else:
+                        value["rows"].append(row)
+    return installer_errors_data(value)
+
+
 def installer_log_diagnostic_data(value):
     if type(value) is not dict or set(value) != {'state', 'reason', 'selection'}:
         return None
@@ -1609,6 +1652,8 @@ _FAILURE_REASONS = frozenset((*_FAILURE_NOTARY_REASONS, *FINAL_IMAGE_STAPLE_REAS
     'package-group-clock', 'package-io-finality-unknown', 'package-compiled-bindings',
     'package-source-signing-selection', 'package-final-audit-original', 'package-output-readback',
     'installer-original-clock-reserve', 'installer-diagnostic-original-status', 'installer-diagnostic-original-output',
+    'installer-diagnostic-source-purpose', 'installer-diagnostic-source-head',
+    'installer-diagnostic-selected', 'installer-diagnostic-selected-close',
     'producer-original-clock-reserve', 'producer-exact-descriptor-emission',
     'producer-tests-bound', 'producer-tests-framing', 'producer-tests-roster', 'producer-tests-result',
     'original-nonzero-producer-tests',
@@ -1978,11 +2023,23 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
                         and original_row.get("capturesSettled") is True
                         and type(original_row.get("returncode")) is int and original_row["returncode"] != 0)
                     slots[role]["markers"] = installer_markers_data(original_row.get("installerMarkers")) if known_failed else None
+                    slots[role]["errors"] = installer_errors_data(original_row.get("installerErrors")) if known_failed else None
                 else:
                     slots[role]["log"] = installer_log_diagnostic_data(original_row.get("installerLog")) if (
                         original_row.get("entered") is True and original_row.get("returned") is True
                         and original_row.get("capturesSettled") is True
                         and type(original_row.get("returncode")) is int and original_row["returncode"] in (0, 1)) else None
+        capture = slots.get("installer-log-capture")
+        installer = slots.get("installer")
+        if capture is not None:
+            capture["markers"] = (installer_markers_data(calls[14].get("installerLogMarkers"))
+                if capture["returned"] is True and capture["capturesSettled"] is True and capture["returncode"] == 0
+                and installer is not None and installer["returned"] is True and installer["capturesSettled"] is True
+                and type(installer["returncode"]) is int and installer["returncode"] != 0 else None)
+            capture["errors"] = (installer_errors_data(calls[14].get("installerLogErrors"))
+                if capture["returned"] is True and capture["capturesSettled"] is True and capture["returncode"] == 0
+                and installer is not None and installer["returned"] is True and installer["capturesSettled"] is True
+                and type(installer["returncode"]) is int and installer["returncode"] != 0 else None)
         package = {"calls": slots,
             "installerEntered": flag(state.get("installer_entered")),
             "installerZeroLatched": flag(state.get("installer_zero")),
@@ -2045,12 +2102,21 @@ def emit_failure_diagnostic(error, **context):
             body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
         package = value["packageInstall"]
         installer = package["calls"]["installer"] if package is not None else None
-        markers = installer.get("markers") if installer is not None else None
-        if markers is not None:
-            for key in ("acl", "parent", "phases", "refusals"):
-                while len(body) > 4096 and markers[key]:
-                    markers[key].pop()
-                    markers["omitted"] = True
+        capture = package["calls"]["installer-log-capture"] if package is not None else None
+        for original in (installer, capture):
+            markers = original.get("markers") if original is not None else None
+            if markers is not None:
+                for key in ("acl", "parent", "phases", "refusals"):
+                    while len(body) > 4096 and markers[key]:
+                        markers[key].pop()
+                        markers["omitted"] = True
+                        body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+        for original in (installer, capture):
+            errors = original.get("errors") if original is not None else None
+            if errors is not None:
+                while len(body) > 4096 and errors["rows"]:
+                    errors["rows"].pop()
+                    errors["omitted"] = True
                     body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
         if body.isascii() and len(body) <= 4096:
             written = sys.stderr.write(body)
@@ -2355,6 +2421,8 @@ class Operation:
             prepared.finalization_environment(environment)  # Exact current caller, no env mutation.
         self.prepared_binding = prepared
         self.prepared_staging = False
+        self.diagnostic_source_entry = None
+        self.diagnostic_program = None
         self.phase, self.environment, self.stager = phase, environment, stager
         # Exhaustive SOURCE-selected purpose. No filenames/roles come from DATA.
         self.removal = phase in REMOVE_PHASES + REMOVAL_OWNER_PHASES
@@ -2571,6 +2639,8 @@ class Operation:
             named = self.work.lstat()
         elif entry is self.source_entry:
             named = self.checkout.lstat()
+        elif entry is self.diagnostic_source_entry:
+            named = CHECKOUT.lstat()
         else:
             raise Refused("directory-original-unbound")
         need(directory_identity(os.fstat(entry["fd"])) == directory_identity(named)
@@ -2826,6 +2896,7 @@ class Operation:
         if self.phase == "package-install" and role == "installer" and result.returncode != 0:
             try:
                 record["installerMarkers"] = installer_markers(result.stdout, result.stderr)
+                record["installerErrors"] = installer_errors(result.stdout, result.stderr)
             except BaseException:
                 pass  # Diagnostics cannot change the original result or cleanup.
         if self.phase == "notarize-payload" and role == "payload-submit" and result.returncode != 0:
@@ -8147,11 +8218,58 @@ class Operation:
         except BaseException:
             pass
 
+    def package_diagnostic_program(self):
+        # Product readers/compiler remain rooted in the built source. Only the
+        # two nonroot diagnostic commands use the current admitted harness.
+        if self.prepared_binding is None:
+            return self.checkout / "desktop/tools/stage_macos_installed.py"
+        need(self.phase == "package-install", "installer-diagnostic-source-purpose")
+        self.prepared_binding.finalization_environment(self.environment)
+        if self.diagnostic_program is None:
+            fd = os.open(CHECKOUT, READ_FLAGS | os.O_DIRECTORY)
+            root = self.diagnostic_source_entry = self.register(fd, "diagnostic-source-root", "directory")
+            root["identity"] = directory_identity(os.fstat(fd))
+            self.recheck_directory(root)
+            head = self.original(self.descend(root, (".git",)), "HEAD", "diagnostic-source-head", 64, (0o444, 0o644))
+            body = self.read(head)
+            need(body == (self.environment["GITHUB_SHA"] + "\n").encode("ascii"), "installer-diagnostic-source-head")
+            self.package_sources.append((head, body))
+            entry = self.original(self.descend(root, ("desktop", "tools")), "stage_macos_installed.py",
+                "diagnostic-source-program", 1024 * 1024, (0o444, 0o644))
+            self.package_sources.append((entry, self.read(entry)))
+            self.diagnostic_program = CHECKOUT / "desktop/tools/stage_macos_installed.py"
+        self.package_post()  # Same retained originals, including on the second call.
+        return self.diagnostic_program
+
+    def package_log_markers(self, document):
+        # The current log reader's selected snapshot is diagnostic DATA only.
+        # Never read an arbitrary document path or replace Installer's own slot.
+        need(type(document) is dict and document.get("state") == "observed-project-correlated"
+             and document.get("authority") == self.stager.LOG_AUTHORITY, "installer-diagnostic-selected")
+        row = document.get("selectedData")
+        need(type(row) is dict and set(row) == {"file", "bytes", "sha256"}
+             and row["file"] == "installer-log-selected.txt" and type(row["bytes"]) is int
+             and 0 < row["bytes"] <= self.stager.LOG_SELECTED_BYTES
+             and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]),
+             "installer-diagnostic-selected")
+        entry = self.original(self.work_entry, "installer-log-selected.txt", "diagnostic-selected-log",
+            self.stager.LOG_SELECTED_BYTES, (0o600,))
+        try:
+            body = self.read(entry)
+            need((len(body), digest(body)) == (row["bytes"], row["sha256"])
+                 and self.read(entry) == body, "installer-diagnostic-selected")
+            result = {"markers": installer_markers(body, b""), "errors": installer_errors(body, b"")}
+        finally:
+            self.close(entry)
+        need(entry["closed"] and entry["fd"] is None, "installer-diagnostic-selected-close")
+        return result
+
     def package_diagnostic(self, args, *, capture):
         need(self.package_settled(), "package-io-finality-unknown")
         self.package_clock()
         command = "installer-log-capture" if capture else "installer-log-cursor"
-        argv = [sys.executable, "-I", "-S", "-B", str(self.checkout / "desktop/tools/stage_macos_installed.py"), command,
+        program = self.package_diagnostic_program()
+        argv = [sys.executable, "-I", "-S", "-B", str(program), command,
             "--target", self.target, "--package", str(args.package), "--request-id", args.request_id,
             "--expected-source", args.expected_source, "--expected-inventory", args.expected_inventory,
             "--expected-manifest", args.expected_manifest, "--run-id", args.run_id, "--run-attempt", args.run_attempt]
@@ -8161,6 +8279,8 @@ class Operation:
         # process owner. Its joined0/1 result cannot substitute for Installer0;
         # a child's uncertain file close cannot be disguised as our own close.
         result = self.package_call(command, argv, timeout=30, limit=self.stager.LOG_METADATA_BYTES)
+        if self.prepared_binding is not None:
+            self.package_post()
         need(result.returncode in (0, 1), "installer-diagnostic-original-status")
         document = self.stager.decode(result.stdout)
         need(type(document) is dict and document.get("authority") == self.stager.LOG_AUTHORITY,
@@ -8174,6 +8294,14 @@ class Operation:
                 "reason": document.get("reason"), "selection": document.get("selectedOutputState")})
             if self.calls and self.calls[-1].get("role") == command:
                 self.calls[-1]["installerLog"] = observed
+            if (capture and result.returncode == 0 and len(self.calls) == 15
+                    and self.calls[-1]["role"] == "installer-log-capture"
+                    and self.calls[13].get("role") == "installer"
+                    and self.calls[13].get("returned") is True and self.calls[13].get("capturesSettled") is True
+                    and type(self.calls[13].get("returncode")) is int and self.calls[13]["returncode"] != 0):
+                selected = self.package_log_markers(document)
+                self.calls[-1]["installerLogMarkers"] = selected["markers"]
+                self.calls[-1]["installerLogErrors"] = selected["errors"]
         except BaseException:
             pass
         self.package_clock()

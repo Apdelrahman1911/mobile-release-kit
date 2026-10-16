@@ -4624,7 +4624,10 @@ def installer_log_binding(args):
     need(type(package) is str and package.startswith("/") and len(os.fsencode(package)) <= 4096
          and all(ord(c) >= 32 and ord(c) != 127 for c in package)
          and all(part and part not in (".", "..") for part in package.split("/")[1:])
-         and package.split("/")[-2:] == [dirname, basename], "log-input-binding")
+         and (package.split("/")[-2:] == [dirname, basename]
+              or not args.fixture and package == str(Path("/Volumes") /
+                  ("MRK-Install-" + digest("\n".join((args.run_id, args.run_attempt,
+                      command_target(args), "package-install")).encode("ascii"))[:32]) / basename)), "log-input-binding")
     return {"packageKind": "fixture" if args.fixture else "ordinary", "packageIdentifier": PACKAGE_ID + ("-fixture" if args.fixture else ""),
             "packagePath": package, "sourceCommit": args.expected_source, "inventorySha256": args.expected_inventory,
             "runtimeManifestSha256": args.expected_manifest, "runId": args.run_id, "runAttempt": args.run_attempt,
