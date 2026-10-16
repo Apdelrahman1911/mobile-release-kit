@@ -5,7 +5,7 @@ use crate::{asset_source::LocalHistorySources,vault_keyring_macos as keyring};
 use mrk_macos_installed_native::{local_keychain_wire as keywire,local_project_lease::ProjectLease,vault_helper_wire::ClockBridge};
 use zeroize::{Zeroize,Zeroizing};
 use sha2::{Digest,Sha256};
-use hmac::{Hmac,Mac};
+use hmac::{Hmac,KeyInit,Mac};
 use std::path::Path;
 
 pub(super) struct State {

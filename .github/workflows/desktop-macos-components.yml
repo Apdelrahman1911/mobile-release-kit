@@ -279,8 +279,9 @@ jobs:
           fi
           if [[ "$APP_CHECKS" == local-keychain ]]; then
             # Separate Cargo invocation preserves helper-only native policy.
-            # Only closed DATA/DocumentState/driver contracts execute, never
-            # Keychain, real Document admission, filesystem or Installer work.
+            # Closed DATA/DocumentState/driver contracts plus an owned temporary
+            # directory and fixed child processes for real Darwin lease tests.
+            # No Keychain credentials, Document admission or Installer work.
             export CARGO_PROFILE_TEST_DEBUG=0
             # The role symbol is deliberately defined by the real helper main,
             # not by its dependency's standalone libtest executable. Link the
@@ -295,8 +296,10 @@ jobs:
               local_keychain_wire::tests::syntax_cannot_create_absence_or_value_and_context_cannot_alias \
               local_keychain_wire::tests::positive_absence_is_local_probe_only_and_never_a_key \
               local_keychain_wire::tests::local_lease_root_bounds_and_legacy_exact_request_length \
+              local_project_lease::tests::kernel_same_ofd_survives_participant_exit \
+              local_project_lease::tests::kernel_inherited_root_and_cloexec_refuse \
               --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-wire-tests.log"
-            grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-wire-tests.log"
+            grep -Eq '^test result: ok\. 7 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-wire-tests.log"
             rustup run 1.98.1 cargo test --locked --no-default-features \
               --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
               vault_keyring_macos::tests::local_failure_and_wrong_domain_never_mint_absence_or_vault_key \
@@ -307,8 +310,9 @@ jobs:
               local_release_history_protocol::tests::local_release_history_public_summary_cannot_hide_recovery_or_exceed_journal_bound \
               local_release_history_protocol::local_release_history_cleanup_tests::local_release_history_healthy_cleanup_does_not_manufacture_failure \
               saved_command_owner::local_history::native::tests::local_release_history_pre_admission_refusal_has_no_worker_to_join \
+              installed_runtime::local_history_runtime_audit_requires_original_claim_and_cleanup_clock \
               --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
-            grep -Eq '^test result: ok\. 8 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 9 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
             exit 0
           fi
           # The same Mac Store implementation is in the headless library graph.

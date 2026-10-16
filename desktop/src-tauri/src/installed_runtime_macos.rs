@@ -1305,6 +1305,84 @@ slots!(IOSArchiveRuntimeSlots, IOSArchiveInstalledRuntime, runtime::IOSArchiveIn
 slots!(LocalHistoryRuntimeSlots, LocalHistoryInstalledRuntime, runtime::LocalReleaseHistoryInstalledProfile);
 slots!(ArtifactInspectionRuntimeSlots, ArtifactInspectionInstalledRuntime, runtime::ArtifactInspectionInstalledProfile);
 
+impl LocalHistoryInstalledRuntime {
+    // These are audits of this domain's SAME original Book, not a new loan or
+    // launch authority. Only the generated prepare/claim lifecycle admits use.
+    fn check_local_with(&self, point: &mut dyn FnMut()->Result<()>) -> Result<()> {
+        let result = (|| {
+            point()?;
+            if !self.claimed || self.no_effect || !self.original.inspected || !self.original.prepared {
+                return Err(AdmissionFailure::AlreadyUsed);
+            }
+            // Includes admission/ACL custody and exact live/closed FD states.
+            if self.original.retained_original_count().is_none_or(|count| count == 0) {
+                return Err(AdmissionFailure::Unknown);
+            }
+            for (index, record) in self.original.records.iter().enumerate() {
+                if record.state == State::Owned { self.original.check_name_with(index, point)?; }
+            }
+            point()
+        })();
+        if let Err(failure) = result { self.original.note_acl(failure, Instant::now()); }
+        result
+    }
+    pub(crate) fn check_before_or_after_use(&self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        self.check_local_with(&mut || self.original.point(end, stop))
+    }
+    // Session.history_started retains/releases exactly one original settlement
+    // task after child/IO joins. Work STOP is expected here; use its existing
+    // first-failure-shortened cleanup endpoint, never a renewed work deadline.
+    pub(crate) fn check_before_settlement(&self,
+        expired: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>)->bool) -> Result<()> {
+        self.check_local_with(&mut || if expired(self.original.first_failure()) {
+            Err(AdmissionFailure::Deadline)
+        } else { Ok(()) })
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn local_history_runtime_audit_requires_original_claim_and_cleanup_clock() {
+    fn empty() -> LocalHistoryInstalledRuntime {
+        LocalHistoryInstalledRuntime { original: Book::new(), selection: VerifiedRuntime {
+            python: PathBuf::from("/unused/python"), bootstrap: PathBuf::from("/unused/bootstrap"),
+            core: PathBuf::from("/unused/core"), cwd: PathBuf::from("/unused"),
+        }, claimed: false, no_effect: false }
+    }
+    let mut capability = empty();
+    let (_sender, stop) = watch::channel(true);
+    assert_eq!(capability.check_before_or_after_use(Instant::now()+std::time::Duration::from_secs(10), &stop),
+        Err(AdmissionFailure::Stopped));
+    let original = capability.original.first_failure();
+    assert!(original.is_some_and(|(failure, _)| failure == AdmissionFailure::Stopped));
+    let mut calls = 0;
+    // Callback is reached despite work STOP, but no fake original claim is admitted.
+    assert_eq!(capability.check_before_settlement(&mut |first| { assert_eq!(first, original); calls+=1; false }),
+        Err(AdmissionFailure::AlreadyUsed));
+    assert_eq!(calls, 1);
+    assert_eq!(capability.original.first_failure(), original);
+    assert_eq!(capability.check_before_settlement(&mut |_| true), Err(AdmissionFailure::Deadline));
+    assert_eq!(capability.original.first_failure(), original);
+    assert_eq!(capability.original.settle(&mut |_| false), CloseOutcome::Settled);
+    assert!(capability.original.settled()); // Rejected audit did not suppress actual consume.
+
+    let mut capability = empty();
+    capability.claimed = true;
+    capability.original.inspected = true;
+    capability.original.prepared = true;
+    assert_eq!(capability.check_before_settlement(&mut |_| false), Err(AdmissionFailure::Unknown));
+    assert!(capability.original.first_failure().is_some_and(|(failure, _)| failure == AdmissionFailure::Unknown));
+    let mut capability = empty();
+    capability.claimed = true;
+    capability.no_effect = true;
+    assert_eq!(capability.check_before_settlement(&mut |_| false), Err(AdmissionFailure::AlreadyUsed));
+    let mut slots = LocalHistoryRuntimeSlots::new();
+    assert!(slots.capability().is_err() && slots.transfer_once().is_err());
+    assert_eq!(slots.settle_originals(&mut |_| false), CloseOutcome::Settled);
+    assert!(slots.settled() && slots.capability().is_err());
+}
+
+
 // Inert checks over the same COMMON Book used by both new action slots.
 // No SnapshotBook/native handle is created; entered/missing are negative DATA.
 #[cfg(test)]

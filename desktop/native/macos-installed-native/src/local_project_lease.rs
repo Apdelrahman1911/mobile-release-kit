@@ -72,9 +72,9 @@ pub unsafe fn inherit(original:BorrowedFd<'_>,root:ProjectRoot)->std::io::Result
     if result==0{Ok(())}else{Err(std::io::Error::from_raw_os_error(result))}
 }
 
-#[cfg(feature="vault-helper")]
+#[cfg(any(feature="vault-helper",test))]
 pub struct InheritedLease {fd:Option<ManuallyDrop<OwnedFd>>,root:Option<ProjectRoot>,facts:LeaseFacts,unknown:bool}
-#[cfg(feature="vault-helper")]
+#[cfg(any(feature="vault-helper",test))]
 impl InheritedLease {
     pub fn new()->Self{Self{fd:None,root:None,facts:LeaseFacts::default(),unknown:false}}
     pub fn admit(&mut self,root:ProjectRoot)->bool {
@@ -114,3 +114,7 @@ pub fn inherit_command(command:&mut std::process::Command,lease:std::sync::Arc<P
         inherit(original.as_fd(),root)
     });}Ok(())
 }
+
+#[cfg(test)]
+#[path="local_project_lease_tests.rs"]
+mod tests;

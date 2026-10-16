@@ -126,7 +126,7 @@ pub(super) async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, o
                     Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 {
-                    let post = if slots.no_child_effect() { Ok(()) } else { slots.check_claimed_before_settlement(&mut |first|original_owner.native_cleanup_expired(first)) };
+                    let post = if slots.no_child_effect() { Ok(()) } else { slots.capability().and_then(|capability| capability.check_before_settlement(&mut |first|original_owner.native_cleanup_expired(first))) };
                     if let Err(failure)=post { original_owner.publish_native_failure(Some((failure,Instant::now()))); }
                     let closed=slots.settle_originals(&mut |first| original_owner.native_cleanup_expired(first));
                     let sources=native::finish_sources(&original_owner);
@@ -154,23 +154,29 @@ pub(super) fn acquire_installed(inner:&Inner,owner:&Session,native:&Arc<Mutex<Lo
     if owner.domain!=SavedCommandDomain::LocalReleaseHistory || !inner.history_installed_selected(){inner.stop(owner,Reason::RuntimeUnavailable);return;}
     if native::check_source(owner).is_err(){inner.stop(owner,Reason::ContextChanged);return;}
     let mut slots=match native.lock(){Ok(slots)=>slots,Err(_)=>{inner.unknown(owner);return;}};
-    let mut loan=match slots.prepare_loan(&mut |first|owner.publish_native_failure(first)){
-        Ok(loan)=>loan,Err(failure)=>{owner.publish_native_failure(Some((failure,Instant::now())));inner.stop(owner,Reason::RuntimeUnavailable);return;}
+    let capability=match slots.capability(){
+        Ok(capability)=>capability,Err(failure)=>{owner.publish_native_failure(Some((failure,Instant::now())));inner.stop(owner,Reason::RuntimeUnavailable);return;}
     };
-    let selected=loan.python_runtime();
+    let stop=owner.stop.subscribe();
+    let selected=match capability.prepare_once_observed(owner.clocks.work,&stop,&mut |first|owner.publish_native_failure(first)){
+        Ok(selected)=>selected,Err(failure)=>{owner.publish_native_failure(Some((failure,Instant::now())));inner.stop(owner,Reason::RuntimeUnavailable);return;}
+    };
     let mut command=Command::new(&selected.python);
     command.args(["-I","-S","-B"]).arg(&selected.bootstrap).arg(&selected.core).current_dir(&selected.cwd)
         .env_clear().env("LANG","C").env("LC_ALL","C").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
-    if native::child_command(owner,&mut command).is_err(){loan.record_closed_spawn_gate();inner.stop(owner,Reason::ContextChanged);return;}
-    if crate::runtime::macos_installed_environment(&mut command).is_err(){loan.record_closed_spawn_gate();inner.stop(owner,Reason::RuntimeUnavailable);return;}
-    if let Err(failure)=loan.check_before_or_after_use(){
-        loan.record_closed_spawn_gate();owner.publish_native_failure(Some((failure,Instant::now())));inner.stop(owner,Reason::RuntimeUnavailable);return;
+    if let Err(failure)=capability.claim_once(){
+        owner.publish_native_failure(Some((failure,Instant::now())));inner.stop(owner,Reason::RuntimeUnavailable);return;
     }
-    let mut startup=match owner.startup.lock(){Ok(startup)=>startup,Err(_)=>{loan.record_closed_spawn_gate();inner.unknown(owner);return;}};
+    if native::child_command(owner,&mut command).is_err(){capability.record_closed_spawn_gate();inner.stop(owner,Reason::ContextChanged);return;}
+    if crate::runtime::macos_installed_environment(&mut command).is_err(){capability.record_closed_spawn_gate();inner.stop(owner,Reason::RuntimeUnavailable);return;}
+    if let Err(failure)=capability.check_before_or_after_use(owner.clocks.work,&stop){
+        capability.record_closed_spawn_gate();owner.publish_native_failure(Some((failure,Instant::now())));inner.stop(owner,Reason::RuntimeUnavailable);return;
+    }
+    let mut startup=match owner.startup.lock(){Ok(startup)=>startup,Err(_)=>{capability.record_closed_spawn_gate();inner.unknown(owner);return;}};
     let mut r=inner.lock();let now=Instant::now();inner.advance_locked(&mut r,owner,now);
-    if !claim_clear(inner,&r,owner,now){loan.record_closed_spawn_gate();return;}
+    if !claim_clear(inner,&r,owner,now){capability.record_closed_spawn_gate();return;}
     if startup.attempted||startup.returned||startup.failed||startup.child.is_some(){
-        loan.record_closed_spawn_gate();owner.resource_unknown.store(true,Ordering::SeqCst);inner.unknown_locked(&mut r,owner);return;
+        capability.record_closed_spawn_gate();owner.resource_unknown.store(true,Ordering::SeqCst);inner.unknown_locked(&mut r,owner);return;
     }
     startup.attempted=true;drop(r);
     match command.spawn(){
@@ -222,7 +228,9 @@ pub(super) async fn write_phases(inner:&Arc<Inner>,owner:&Arc<Session>,writer:&m
 #[path="saved_command_history_native.rs"]
 mod native;
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
-pub(super) use native::acquire_sources;
+pub(super) fn acquire_sources(owner:&Session,runtime:&Arc<Mutex<LocalHistoryRuntimeSlots>>)->Result<(),BridgeError>{
+    native::acquire_sources(owner,runtime)
+}
 
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
 pub(crate) use native::{Claim as LocalHistoryClaim,HelperClaim as LocalHistoryHelperClaim};
