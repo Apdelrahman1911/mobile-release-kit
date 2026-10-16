@@ -40,7 +40,7 @@ function observation(project, patch = {}) {
   return { schemaVersion: 2, source: project.snapshot.config.data.version.source, version: { name: '1.2.3', build: 42 },
     savedConfig: clone(project.savedConfigContent), savedVersion: clone(VERSION), observationScope: 'single-request-non-atomic', assurance: clone(assurance), ...patch };
 }
-const context = (request) => ({ ...clone(request), platform: 'android', operation: request.signing ? 'android-build-sign' : 'android-build-inspect' });
+const context = (request) => ({ ...clone(request), platform: 'android', operation: request.operation ?? (request.signing ? 'android-build-sign' : 'android-build-inspect') });
 const operation = (input, patch = {}) => ({ operationId: OP, ownerGeneration: OWNER, context: context(input), phase: 'awaiting-consent',
   intentUsable: true, outcome: null, reason: 'none', stage: null, activity: null, disposition: null, result: null, ...patch });
 const status = (revision = 0, op = null, availability = 'available') => ({ schemaVersion: 1, statusRevision: revision, availability, operation: op });
@@ -948,4 +948,42 @@ test('source setup uses its unsigned context through inspection and explicit cop
     h.controller.dispose();
     assert.ok(h.registrationSubscriptions.every(row => row.closed));
   }
+});
+
+
+test('candidate choice is default-off, signed Mac only, and freezes the distinct one-use token', async(t)=>{
+  const h=harness(t,{initialCatalog:readyCatalog({selected:TOOL_A}),initialAssets:signingAssets()});await savedSigningPolicy(h);
+  assert.equal(h.state.retainCandidateInputs,false);
+  h.controller.setRetainCandidateInputs(true);assert.equal(h.state.retainCandidateInputs,false);
+  h.controller.setBuildMode('signed');h.controller.setRetainCandidateInputs(true);
+  assert.equal(h.state.retainCandidateInputs,true);
+  const op=await reviewed(h,{operationId:'a'.repeat(12)+'4aaa8'+'a'.repeat(15)});
+  assert.equal(op.context.operation,'android-candidate-inputs');assert.equal(op.context.action,'create');
+  assert.ok(op.context.signing);assert.equal(op.context.artifactValidation.mode,'upload-signature');
+  const {call,done}=start(h,op);assert.equal(call.input.consentVersion,'local-android-candidate-inputs-v1');
+  h.controller.setRetainCandidateInputs(false);h.controller.setBuildMode('unsigned');
+  assert.equal(h.state.retainCandidateInputs,true);assert.equal(h.state.buildMode,'signed');
+  await h.controller.start(op.operationId,op.ownerGeneration);assert.equal(h.calls.filter(row=>row.kind==='start').length,1);
+  h.reply(call,status(2,terminal(op)));await done;
+  h.controller.setBuildMode('unsigned');assert.equal(h.state.retainCandidateInputs,false);
+});
+test('changing candidate choice retires the original review and cancels only its original intent',async(t)=>{
+  const h=harness(t,{initialCatalog:readyCatalog({selected:TOOL_A}),initialAssets:signingAssets()});await savedSigningPolicy(h);
+  h.controller.setBuildMode('signed');h.controller.setRetainCandidateInputs(true);
+  const op=await reviewed(h,{operationId:'a'.repeat(12)+'4aaa8'+'a'.repeat(15)});
+  h.controller.setAcknowledged(op.operationId,op.ownerGeneration,true);h.controller.setRetainCandidateInputs(false);await flush();
+  assert.equal(h.state.consent,null);assert.equal(h.state.retainCandidateInputs,false);
+  const cancel=h.calls.at(-1);assert.equal(cancel.kind,'cancel');assert.deepEqual(cancel.input,{operationId:op.operationId,ownerGeneration:op.ownerGeneration});
+  await h.controller.start(op.operationId,op.ownerGeneration);assert.equal(h.calls.filter(row=>row.kind==='start').length,0);
+  h.reply(cancel,status(2,terminal(op)));await flush();
+});
+
+test('candidate option never follows its prior project into a new project selection',async(t)=>{
+  const h=harness(t,{initialCatalog:readyCatalog({selected:TOOL_A}),initialAssets:signingAssets()});await savedSigningPolicy(h);
+  h.controller.setBuildMode('signed');h.controller.setRetainCandidateInputs(true);
+  const op=await reviewed(h,{operationId:'a'.repeat(12)+'4aaa8'+'a'.repeat(15)});
+  h.dispatch({type:'select',project:{id:'p2',name:'Other project',path:'/inert/other'}});await flush();
+  assert.equal(h.state.retainCandidateInputs,false);assert.equal(h.state.consent,null);
+  const cancel=h.calls.at(-1);assert.equal(cancel.kind,'cancel');assert.equal(cancel.input.operationId,op.operationId);
+  h.reply(cancel,status(2,terminal(op)));await flush();
 });

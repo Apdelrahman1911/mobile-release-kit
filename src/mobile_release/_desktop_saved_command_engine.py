@@ -83,6 +83,7 @@ class _SavedCommandEngine:
         self.frames = self.output_bytes = 0
         self.terminal_claimed = False
         self._android_handoff_close_claimed = False
+        self.candidate = None
         self._android_frames = None
         self._ios_frames = None
         if domain in {SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive}:
@@ -131,6 +132,12 @@ class _SavedCommandEngine:
             except BaseException as error:
                 first = error
                 self.guard._abort(error)
+        if self.candidate is not None:
+            try:
+                self.candidate.close()
+            except BaseException as error:
+                if first is None:first=error
+                self.guard._abort(error)
         try:
             self.input.close()
         except BaseException as error:
@@ -168,6 +175,8 @@ class _SavedCommandEngine:
             endpoint = self.started + (wire.FINALITY_SECONDS if terminal else wire.WORK_SECONDS)
             if terminal and self.domain in (SavedCommandDomain.IOSArchive,SavedCommandDomain.LocalReleaseHistory):
                 endpoint = self.input.hard_endpoint()
+            elif terminal and self.candidate is not None:
+                endpoint=self.input.hard_endpoint()
             elif terminal and self.input.first_failure is not None:
                 endpoint = min(endpoint, self.input.first_failure + (2 if self.domain is SavedCommandDomain.LocalReleaseHistory else 10))
             self._require(time.monotonic() < endpoint)
@@ -240,6 +249,10 @@ class _SavedCommandEngine:
             self._require(self._android_frames is None)
             self._android_frames = AndroidBuildFrames(self.request)
             self.service = AndroidBuildRun(self.request, self.guard, self.input)
+            from ._desktop_android_build_protocol import candidate_create
+            if candidate_create(self.request.context):
+                from .local_candidate_create import CandidateCreateRun
+                CandidateCreateRun(self)
         elif self.domain is SavedCommandDomain.ProjectRecovery:
             from .desktop_project_recovery import ProjectRecoveryRun
             self.service = ProjectRecoveryRun(self.request, self.guard, self.input)
@@ -264,6 +277,7 @@ class _SavedCommandEngine:
             self.service = LocalHistoryRun(self.request, self.guard, self.input)
         self.write(self._response("accepted", {"schemaVersion": 1, "context": dict(self.request.context)}))
         self.service.run()
+        if self.candidate is not None:self.candidate.finish_build()
 
     def terminal(self) -> None:
         self._require(self.request is not None and self.service is not None)
@@ -302,6 +316,8 @@ class _SavedCommandEngine:
         operation = self.input.require_operation()
         self._require(self.service is None or self.service.operation is operation)
         closed = operation.closed()
+        if self.candidate is not None:
+            closed=closed and self.candidate.originals_closed() and self.candidate.input.closed
         self._require(type(closed) is bool)
         return closed
 

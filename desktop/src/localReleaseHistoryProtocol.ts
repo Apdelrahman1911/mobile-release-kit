@@ -21,7 +21,8 @@ const hex=(v:unknown,n:number)=>typeof v==='string'&&new RegExp(`^[0-9a-f]{${n}}
 const bounded=(v:unknown,max:number)=>typeof v==='number'&&Number.isSafeInteger(v)&&v>=1&&v<=max;
 export const candidateHistoryAction=(action:unknown)=>action==='review-inputs'||action==='abandon-inputs';
 export function localHistoryConsent(request:PrepareLocalHistory){return candidateHistoryAction(request.action)?LOCAL_CANDIDATE_CONSENT:LOCAL_HISTORY_CONSENT;}
-function candidateInputs(v:unknown,operationId:unknown):boolean {
+// Predicate for already copied bounded DATA; both callers own descriptor-safe copying.
+export function candidateInputs(v:unknown,operationId:unknown):boolean {
  if(!keys(v,['operationId','candidateSha256','sourceCommit','sourceTree','applicationId','version','files','observation','priorCreateFinality'])||!uuid(v.operationId)||v.operationId!==operationId||!hex(v.candidateSha256,64)||!hex(v.sourceCommit,40)||!hex(v.sourceTree,40)||v.observation!=='current-bundle-only'||v.priorCreateFinality!=='not-established')return false;
  if(typeof v.applicationId!=='string'||v.applicationId.length>255||!/^([A-Za-z][A-Za-z0-9_]*\.)+[A-Za-z][A-Za-z0-9_]*$/.test(v.applicationId)||!keys(v.version,['name','build'])||typeof v.version.name!=='string'||!/^[0-9A-Za-z.+-]{1,64}$/.test(v.version.name)||!bounded(v.version.build,2100000000))return false;
  if(!Array.isArray(v.files)||v.files.length!==3)return false;

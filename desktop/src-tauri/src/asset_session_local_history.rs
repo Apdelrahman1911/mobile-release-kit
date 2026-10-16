@@ -92,7 +92,7 @@ impl DocumentBinding {
 }
 
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
-pub(crate) struct LocalHistoryKeyGrant {claim:crate::saved_command_owner::LocalHistoryClaim}
+pub(crate) struct LocalHistoryKeyGrant {pub(super) claim:crate::saved_command_owner::LocalHistoryClaim}
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
 impl LocalHistoryKeyGrant {
     pub(crate) fn into_parts(self)->(mrk_macos_installed_native::local_keychain_wire::Context,
@@ -105,8 +105,8 @@ impl LocalHistoryConsent {
         ->Result<(crate::vault_keyring_macos::LocalInput,KeyringMemoryAdmission),BridgeError>{
         let document=self.document.upgrade().ok_or_else(crate::local_release_history_owner::unavailable)?;
         let state=document.state.lock().map_err(|_|BridgeError::cleanup_unknown())?;
-        let(c,g,r)=claim.context();
-        if !std::ptr::eq(self,claim.consent().as_ref())||!self.matches(&document,&state,g,r)||!self.matches_context(c)||!document.bridge.local_history.claim_matches(&claim)||!claim.current(){return Err(crate::local_release_history_owner::unavailable());}
+        let Some((c,g,r))=claim.context() else{return Err(crate::local_release_history_owner::unavailable());};
+        if !claim.consent().is_some_and(|c|std::ptr::eq(self,c.as_ref()))||!self.matches(&document,&state,g,r)||!self.matches_context(c)||!document.bridge.local_history.claim_matches(&claim)||!claim.current(){return Err(crate::local_release_history_owner::unavailable());}
         let bytes=claim.own_backing().ok_or_else(BridgeError::cleanup_unknown)?;
         let admission=lookup_memory::local_history_admission(&document,&state,self,bytes).map_err(|_|BridgeError::cleanup_unknown())?;
         let input=crate::vault_keyring_macos::LocalInput::admitted(LocalHistoryKeyGrant{claim});Ok((input,admission))
@@ -115,8 +115,8 @@ impl LocalHistoryConsent {
         use crate::vault_keyring_macos::Problem;
         let document=self.document.upgrade().ok_or(Problem::Unavailable)?;
         let state=document.state.lock().map_err(|_|Problem::CleanupUnknown)?;
-        let(c,g,r)=claim.context();
-        if !std::ptr::eq(self,claim.consent().as_ref())||!self.matches(&document,&state,g,r)||!self.matches_context(c)||!document.bridge.local_history.helper_matches(claim){return Err(Problem::Interrupted);}
+        let Some((c,g,r))=claim.context() else{return Err(Problem::Protocol);};
+        if !claim.consent().is_some_and(|c|std::ptr::eq(self,c.as_ref()))||!self.matches(&document,&state,g,r)||!self.matches_context(c)||!document.bridge.local_history.helper_matches(claim){return Err(Problem::Interrupted);}
         claim.claim(go)
     }
 }

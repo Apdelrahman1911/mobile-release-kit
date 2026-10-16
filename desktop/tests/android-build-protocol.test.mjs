@@ -434,7 +434,7 @@ test('fixed reasons/help distinguish failure from cleanup and errors never relay
     'platform-disabled', 'module-required', 'toolchain-unavailable', 'toolchain-mismatch', 'project-admission-refused',
     'command-failed', 'command-incomplete', 'artifact-missing', 'artifact-ambiguous', 'artifact-unsafe', 'artifact-changed',
     'input-limit', 'result-limit', 'work-retained', 'cleanup-unknown', 'signing-input-missing', 'signing-input-invalid',
-    'signing-validation-failed', 'signing-command-failed', 'build-inputs-unrestored'];
+    'signing-validation-failed', 'signing-command-failed', 'build-inputs-unrestored', 'journal-unavailable', 'recovery-required', 'candidate-inputs-unavailable'];
   assert.deepEqual(Object.keys(androidBuildReasonText).sort(), reasons.sort());
   assert.deepEqual(Object.keys(androidBuildFindingText).sort(), [...ANDROID_BUILD_CHECK_IDS].sort());
   assert.deepEqual(Object.keys(androidBuildLimitationText).sort(), [...ANDROID_BUILD_LIMITATIONS, 'upload-signature-check-not-store-enrollment', 'local-signing-not-store-enrollment'].sort());
@@ -612,4 +612,56 @@ test('signing progress cannot be donated to unsigned status or rearmed as consen
     assert.equal(parseAndroidBuildStatus(status({ ...pending, context: context() })), null);
     assert.equal(parseAndroidBuildStatus(status({ ...pending, phase: 'awaiting-consent', intentUsable: true })), null);
   }
+});
+
+
+const CANDIDATE_ID = 'a'.repeat(12) + '4aaa8' + 'a'.repeat(15);
+const CANDIDATE_UUID = CANDIDATE_ID.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
+function candidateCompleted() {
+  const build = { ...uploadReport(), schemaVersion: 2, toolchainProfile: 'android-registered-macos-arm64-v1', signing: 'local-upload-key',
+    toolchainSelection: { instance: OTHER, ownerUid: 501, catalogGeneration: 1, recordSha256: 'a'.repeat(64), inventorySha256: 'b'.repeat(64), osProviderSha256: 'c'.repeat(64) } };
+  build.assurances.toolkitSigning = 'local-upload-key-verified';
+  build.limitations = build.limitations.map(item => item === 'toolkit-signing-not-requested' ? 'local-signing-not-store-enrollment' : item);
+  return { ...completed(build), operationId: CANDIDATE_ID,
+    context: { ...signedRequest(), platform: 'android', operation: 'android-candidate-inputs', action: 'create' },
+    result: { schemaVersion: 1, scope: 'local-android-candidate-inputs', headSequence: 3,
+      build, candidateInputs: { operationId: CANDIDATE_UUID, candidateSha256: '1'.repeat(64), sourceCommit: '2'.repeat(40), sourceTree: '3'.repeat(40),
+        applicationId: build.selection.applicationId, version: { name: build.usedVersion.name, build: build.usedVersion.build },
+        files: [{fileName:'app-release.aab', bytes:build.artifacts[0].size, sha256:build.artifacts[0].sha256},
+          {fileName:'store-metadata.zip', bytes:100, sha256:'4'.repeat(64)}, {fileName:'validation-report.json', bytes:50, sha256:'5'.repeat(64)}],
+        observation:'current-bundle-only', priorCreateFinality:'not-established' } } };
+}
+test('candidate Create is a separate signed context and public envelope, never an ordinary build result', () => {
+  const done=candidateCompleted(), {platform, ...prepare}=done.context;
+  assert.ok(encodeAndroidBuildRequest('prepare_android_build', prepare));
+  assert.ok(parseAndroidBuildStatus(status(done)));
+  assert.equal(parseAndroidBuildResult(done.result), null);
+  assert.ok(parseAndroidBuildResult(done.result.build));
+  for (const mutate of [x=>{delete x.action;}, x=>{x.action='review-inputs';}, x=>{delete x.signing;},
+      x=>{x.operation='android-build-sign';}, x=>{x.candidateOperationId=CANDIDATE_UUID;}, x=>{x.artifactValidation=request().artifactValidation;}]) {
+    const bad=clone(prepare);mutate(bad);assert.equal(encodeAndroidBuildRequest('prepare_android_build',bad),null);
+  }
+  for (const mutate of [x=>{x.operationId=OP;}, x=>{x.context.action=null;}, x=>{delete x.context.action;},
+      x=>{x.result=x.result.build;}, x=>{x.result.headSequence=2;}, x=>{x.result.headSequence=514;},
+      x=>{x.result.candidateInputs.operationId='b'+CANDIDATE_UUID.slice(1);},
+      x=>{x.result.candidateInputs.version.build++;}, x=>{x.result.candidateInputs.applicationId='org.other.app';},
+      x=>{x.result.candidateInputs.files[0].bytes++;}, x=>{x.result.candidateInputs.files[0].sha256='0'.repeat(64);},
+      x=>{x.result.candidateInputs.priorCreateFinality='established';}, x=>{x.result.candidateInputs.currentPath='/tmp/private';},
+      x=>{x.result.build.assurances.sourceBinding='established';}, x=>{x.result.build.toolchainProfile=ANDROID_BUILD_TOOLCHAIN_PROFILE;},
+      x=>{x.context.operation='android-build-sign';delete x.context.action;}, x=>{x.result.candidateInputs.files.reverse();}]) {
+    const bad=clone(done);mutate(bad);assert.equal(parseAndroidBuildStatus(status(bad)),null);
+  }
+});
+test('candidate status requires UUID4 in every phase and cannot leak interim inputs or reasons into ordinary builds', () => {
+  const done=candidateCompleted();
+  const pending=operation({operationId:CANDIDATE_ID, context:done.context});
+  assert.ok(parseAndroidBuildStatus(status(pending)));
+  assert.equal(parseAndroidBuildStatus(status({...pending,operationId:OP})),null);
+  assert.equal(parseAndroidBuildStatus(status({...pending,result:done.result})),null);
+  for(const reason of ['journal-unavailable','recovery-required','candidate-inputs-unavailable']) {
+    const failed={...pending, phase:'terminal',intentUsable:false,outcome:'refused',reason};
+    assert.ok(parseAndroidBuildStatus(status(failed)));
+    assert.equal(parseAndroidBuildStatus(status({...failed,context:{...signedRequest(),platform:'android',operation:'android-build-sign'}})),null);
+  }
+  assert.equal(parseAndroidBuildStatus(status({...done,phase:'unknown',outcome:'unknown',reason:'cleanup-unknown'})),null);
 });

@@ -58,8 +58,12 @@ CI mutation guard. A separately reviewed optional Android service hook now
 retains the same signed artifact and saved inputs through original producer
 closure, with bounded read-only consumption and focused failure tests. It adds
 no second artifact copy or Store call. The combined source/metadata/fresh-output
-binding, outer native finality, durable intent, local authorization, Store
-execution and UI integration remain required; preparation is not authorization.
+binding is now integrated with optional signed-Mac candidate creation, durable
+local journal checkpoints, and the existing UI/native operation. Review checks
+the current retained bundle; Abandon records cancellation and preserves files.
+Candidate creation does not upload to a Store or authorize a release. Local
+Store intent/authorization, execution and recovery remain unfinished. Current
+candidate integration still requires real Mac graph and installed-flow checks.
 
 ## API and compatibility boundaries
 
@@ -397,3 +401,24 @@ source is still required. The earlier candidate at `28d6dce7` is building/signin
 on both architectures in run `38957286639/1`; it does not contain these changes.
 Real three-holder lifetime, Keychain, installed journeys and direct Store
 execution remain unfinished. No new ready installer or main delivery is claimed.
+
+### Local candidate integration — 2026-10-16
+
+Create, Review and Abandon are integrated across UI, Rust and the shared core.
+Create keeps the original signed AAB plus its metadata/report/manifest; it does
+not rebuild for promotion or grant Store authority. Signing material is sent
+only after the pending journal checkpoint, and successful completion requires
+all four native acknowledgments, five helper joins and original build cleanup.
+Independent source review corrected cancellation cleanup, final-ACK/STOP timing
+and inconsistent negative-result handling before integration. Focused local
+checks passed: 77 UI/controller tests and TypeScript/production frontend build;
+58 core tests plus 5 successor codec tests; 48 Rust protocol-data tests. These
+counts overlap where successor checks reuse existing coverage. They are not
+installed Mac, actual Keychain, signing-build or Store-operation acceptance.
+
+Prepared package producers succeeded on both architectures at older source
+`28d6dce7` (run `38957286639/1`). Installer retry `38967044255/1` at current
+harness `e0671e4e` passed preparation but returned a nonzero Installer result.
+Its log diagnostic rejected the changed mount-path convention, so the actual
+Installer failure reason is not yet established. The diagnostic correction
+reuses the retained package; no successful installation is inferred.

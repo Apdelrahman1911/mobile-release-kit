@@ -15,6 +15,11 @@ impl Admitted {
     pub(crate) fn release(self) -> Status { if let Some(release) = self.release { let _ = release.send(()); } self.status }
 }
 impl AndroidBuildOwner {
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(crate) fn candidate_claim_matches(&self,claim:&crate::saved_command_owner::LocalHistoryClaim)->bool{claim.matches_owner(&self.saved)}
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(crate) fn candidate_helper_matches(&self,claim:&crate::saved_command_owner::LocalHistoryHelperClaim)->bool{claim.matches_owner(&self.saved)}
+
     pub(crate) fn new(runtime: RuntimeConfig, toolchain: Option<crate::android_toolchain::AndroidToolchainProfile>) -> Self {
         Self { saved: SavedCommandOwner::android_build(runtime, toolchain) }
     }

@@ -49,6 +49,7 @@ class AndroidBuildRun:
         self._candidate: dict | None = None
         self._local_handoff = None  # Internal opt-in; no request/wire authority.
         self._local_composition = None
+        self._candidate_inputs = None
         self._run_claimed = self._close_claimed = False
         # This constructor roots itself in source before any child owner can
         # fail construction. The engine has a fixed original-operation fallback
@@ -56,6 +57,7 @@ class AndroidBuildRun:
         self.operation = AndroidBuildOperation(request, guard, source)
 
     def remember(self, error: BaseException) -> None:
+        if getattr(self,"_candidate_inputs",None) is not None:self._candidate_inputs.remember(error)
         if getattr(self, "_local_composition", None) is not None:
             self._local_composition._fail(error)
         if getattr(self, "_local_handoff", None) is not None:
@@ -221,6 +223,10 @@ class AndroidBuildRun:
         error = self.primary
         from .local_release_candidate import LocalCandidateError
         from .local_release_source import LocalSourceError
+        from .local_candidate_bundle import CandidateBundleError
+        from .local_release_journal import LocalJournalError
+        if getattr(self,"_candidate_inputs",None) is not None and isinstance(error,(CandidateBundleError,LocalJournalError)):
+            return ("refused" if command["outcome"]=="not-dispatched" else "failed"),"protocol-error"
         if getattr(self, "_local_composition", None) is not None and isinstance(error, (LocalCandidateError, LocalSourceError)):
             reason = "protocol-error"
         elif isinstance(error, (AndroidSelectionRefused, AndroidBuildError, AndroidToolError, AndroidFileError)):
@@ -312,6 +318,8 @@ class AndroidBuildRun:
         terminal = {"schemaVersion": 1, "context": self.request.context,
                     "outcome": outcome, "reason": reason, "activity": activity,
                     "disposition": disposition, "result": result, "lifetime": lifetime}
+        if getattr(self,"_candidate_inputs",None) is not None:
+            return self._candidate_inputs.terminal(terminal)
         if getattr(self, "_local_composition", None) is not None:
             return self._local_composition._terminal(terminal)
         validate_terminal(terminal, self.request)

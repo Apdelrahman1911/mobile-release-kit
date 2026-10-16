@@ -27,6 +27,8 @@ pub(crate) use history_runtime::history_installed_slot_data_checks;
 
 #[path = "android_toolchain_macos.rs"]
 mod android_tools;
+pub(crate) const LOCAL_CANDIDATE_ANDROID_FDS:usize=MAC_RUNTIME_FDS+android_tools::LIVE_FDS+crate::android_shared_lease_macos::LIVE_READ_FDS;
+const MAC_RUNTIME_FDS:usize=48;
 pub(crate) use android_tools::AndroidToolchainSlots;
 #[cfg(not(feature = "macos-android-registration-helper"))]
 #[path = "android_leased_toolchain_macos.rs"]
@@ -762,7 +764,7 @@ impl Book {
     }
     fn fd(&self, index: usize) -> Result<&OwnedFd> { self.records.get(index).and_then(|r| r.fd.as_ref()).ok_or(AdmissionFailure::Unknown) }
     fn reserve(&mut self, parent: Option<usize>, name: &str) -> Result<usize> {
-        if self.records.len() >= crate::macos_install_record::RUNTIME_RECORD_LIMIT || self.records.iter().filter(|r| r.fd.is_some()).count() >= 48 { return Err(AdmissionFailure::Bounds); }
+        if self.records.len() >= crate::macos_install_record::RUNTIME_RECORD_LIMIT || self.records.iter().filter(|r| r.fd.is_some()).count() >= MAC_RUNTIME_FDS { return Err(AdmissionFailure::Bounds); }
         let i = self.records.len(); self.records.push(Record { state: State::Reserved, fd: None, parent, name: name.into(), identity: None, android_flags: None }); Ok(i)
     }
     fn filesystem(&self, index: usize, identity: Identity, stopped: &mut dyn FnMut() -> bool) -> Result<()> {

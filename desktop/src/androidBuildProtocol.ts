@@ -1,3 +1,5 @@
+import { candidateInputs, LOCAL_CANDIDATE_CONSENT } from './localReleaseHistoryProtocol.ts';
+import type { AndroidCandidateInputsResult, AndroidBuildPublishedResult } from './androidBuildTypes.ts';
 // Renderer-consumed closed DATA only. The four requests are original UTF-8 Raw
 // IPC, never InvokeBody::Json. Native owns duplicate-aware raw decoding, core
 // frame ordering/byte accounting, tool custody and original final joins. These
@@ -13,6 +15,7 @@ import type { AndroidBuildAbi, AndroidBuildActivity, AndroidBuildArtifact, Andro
 
 export const ANDROID_BUILD_EVENT = 'android-build-state-changed';
 export const ANDROID_BUILD_CONSENT = 'saved-android-build-inspect-v3';
+export const ANDROID_CANDIDATE_CONSENT = LOCAL_CANDIDATE_CONSENT;
 export const ANDROID_BUILD_SIGNED_CONSENT = 'saved-android-local-sign-v1';
 export const ANDROID_BUILD_SCOPE = 'local-post-build-artifact-observation';
 export const ANDROID_BUILD_TOOLCHAIN_PROFILE = 'android-local-linux-gnu-x86_64-v1';
@@ -174,8 +177,9 @@ export function parseAndroidSigningSelection(value: unknown): AndroidSigningSele
   try { const safe = copyData(value, 2048, 48); return signingSelection(safe) ? safe : null; } catch { return null; }
 }
 function prepare(value: unknown): value is PrepareAndroidBuild {
+  const candidate = record(value) && value.operation === 'android-candidate-inputs';
   const signed = record(value) && Object.hasOwn(value, 'signing');
-  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'artifactValidation', ...(signed ? ['signing'] : [])]) && projectId(value.projectId) &&
+  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'artifactValidation', ...(signed ? ['signing'] : []), ...(candidate ? ['operation', 'action'] : [])]) && (!candidate || signed && value.action === 'create') && projectId(value.projectId) &&
     androidBuildCounter(value.draftRevision) && androidBuildCounter(value.baselineGeneration) && content(value.savedConfig) && savedVersion(value.savedVersion) && artifactValidation(value.artifactValidation) &&
     (!signed || value.artifactValidation.mode === 'upload-signature' && signingSelection(value.signing));
 }
@@ -183,18 +187,19 @@ function identity(value: unknown): value is AndroidBuildIdentity {
   return record(value) && token(value.operationId) && token(value.ownerGeneration);
 }
 function context(value: unknown): value is AndroidBuildContext {
+  const candidate = record(value) && value.operation === 'android-candidate-inputs';
   const signed = record(value) && Object.hasOwn(value, 'signing');
-  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'artifactValidation', 'platform', 'operation', ...(signed ? ['signing'] : [])]) &&
-    value.platform === 'android' && value.operation === (signed ? 'android-build-sign' : 'android-build-inspect') && prepare({ projectId: value.projectId,
+  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'artifactValidation', 'platform', 'operation', ...(signed ? ['signing'] : []), ...(candidate ? ['action'] : [])]) &&
+    value.platform === 'android' && value.operation === (candidate ? 'android-candidate-inputs' : signed ? 'android-build-sign' : 'android-build-inspect') && prepare({ projectId: value.projectId,
       draftRevision: value.draftRevision, baselineGeneration: value.baselineGeneration, savedConfig: value.savedConfig, savedVersion: value.savedVersion,
-      artifactValidation: value.artifactValidation, ...(signed ? { signing: value.signing } : {}) });
+      artifactValidation: value.artifactValidation, ...(signed ? { signing: value.signing } : {}), ...(candidate ? { operation: value.operation, action: value.action } : {}) });
 }
 export function copyAndroidBuildRequest(command: AndroidBuildCommand, value: unknown): PrepareAndroidBuild | StartAndroidBuild | AndroidBuildIdentity | Record<string, never> | null {
   try {
     const safe = copyData(value, ANDROID_BUILD_IPC_LIMIT, 96);
     if (command === 'prepare_android_build' && prepare(safe)) return safe;
     if (command === 'start_android_build' && keys(safe, ['operationId', 'ownerGeneration', 'consentVersion']) &&
-        identity(safe) && [ANDROID_BUILD_CONSENT, ANDROID_BUILD_SIGNED_CONSENT].includes(safe.consentVersion as string)) return safe as unknown as StartAndroidBuild;
+        identity(safe) && [ANDROID_BUILD_CONSENT, ANDROID_BUILD_SIGNED_CONSENT, ANDROID_CANDIDATE_CONSENT].includes(safe.consentVersion as string)) return safe as unknown as StartAndroidBuild;
     if (command === 'cancel_android_build' && keys(safe, ['operationId', 'ownerGeneration']) && identity(safe)) return safe;
     if (command === 'android_build_status' && keys(safe, [])) return safe as Record<string, never>;
   } catch { /* No rejected data or exception text is reflected. */ }
@@ -324,6 +329,21 @@ function result(value: unknown): value is AndroidBuildResult {
 export function parseAndroidBuildResult(value: unknown): AndroidBuildResult | null {
   try { const safe = copyData(value, ANDROID_BUILD_STATUS_LIMIT); return result(safe) ? safe : null; } catch { return null; }
 }
+// No reinterpretation of ordinary build assurances: only unwrap parsed DATA.
+export function androidBuildObservation(value: AndroidBuildPublishedResult): AndroidBuildResult {
+  return value.scope === 'local-android-candidate-inputs' ? value.build : value;
+}
+function candidateResult(value: unknown, operationId: string): value is AndroidCandidateInputsResult {
+  if (!keys(value, ['schemaVersion', 'scope', 'headSequence', 'candidateInputs', 'build']) || value.schemaVersion !== 1 ||
+      value.scope !== 'local-android-candidate-inputs' || !integer(value.headSequence, 513, 3) ||
+      !result(value.build) || value.build.schemaVersion !== 2 || value.build.signing !== 'local-upload-key') return false;
+  const uuid = operationId.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
+  if (!candidateInputs(value.candidateInputs, uuid)) return false;
+  const candidate = value.candidateInputs as AndroidCandidateInputsResult['candidateInputs'], build = value.build;
+  return candidate.applicationId === build.selection.applicationId && candidate.version.name === build.usedVersion.name &&
+    candidate.version.build === build.usedVersion.build && candidate.files[0]?.bytes === build.artifacts[0]?.size &&
+    candidate.files[0]?.sha256 === build.artifacts[0]?.sha256;
+}
 function disposition(value: unknown): value is AndroidBuildDisposition {
   return keys(value, ['work', 'artifacts']) && oneOf(value.work, ['not-created', 'removed', 'retained-work', 'unknown']) &&
     oneOf(value.artifacts, ['not-created', 'removed', 'retained-local-result', 'retained-incomplete', 'unknown']);
@@ -333,9 +353,13 @@ function operation(value: unknown): value is AndroidBuildOperation {
       !identity(value) || !context(value.context) || !oneOf(value.phase, phases) || typeof value.intentUsable !== 'boolean' ||
       !(value.outcome === null || oneOf(value.outcome, outcomes)) || !oneOf(value.reason, Object.keys(androidBuildReasonText)) ||
       !(value.stage === null || oneOf(value.stage, ANDROID_BUILD_STAGES)) || !(value.activity === null || activity(value.activity)) ||
-      !(value.disposition === null || disposition(value.disposition)) || !(value.result === null || result(value.result))) return false;
+      !(value.disposition === null || disposition(value.disposition)) || !(value.result === null ||
+        (value.context.operation === 'android-candidate-inputs' ? candidateResult(value.result, value.operationId) : result(value.result)))) return false;
   const op = value as unknown as AndroidBuildOperation;
-  if (op.context.operation !== 'android-build-sign' && [op.stage, op.activity?.stage].some((stage) =>
+  const candidate = op.context.operation === 'android-candidate-inputs';
+  if (candidate ? !/^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$/.test(op.operationId) :
+      ['journal-unavailable', 'recovery-required', 'candidate-inputs-unavailable'].includes(op.reason)) return false;
+  if (op.context.operation === 'android-build-inspect' && [op.stage, op.activity?.stage].some((stage) =>
     stage === 'validating-signing' || stage === 'signing' || stage === 'restoring-inputs')) return false;
   if (op.activity !== null && (!inspectionMode(op.activity.findings, op.context.artifactValidation) ||
       op.activity.findings.some((row) => !['core-lifecycle', 'other-core-finding'].includes(row.check)) &&
@@ -350,13 +374,14 @@ function operation(value: unknown): value is AndroidBuildOperation {
     (op.phase !== 'starting' || op.stage === null);
   if (op.outcome === null || op.outcome === 'unknown' || (op.reason === 'none') !== (op.outcome === 'complete')) return false;
   if (op.outcome === 'complete') {
+    const build = op.result === null ? null : androidBuildObservation(op.result);
     return op.stage === 'disposing-work' && op.activity !== null && op.disposition?.work === 'removed' &&
-      op.disposition.artifacts === 'retained-local-result' && op.result !== null &&
-      sameAndroidBuildSavedPair(op.context, { savedConfig: op.result.usedConfig, savedVersion: op.result.usedVersion }) &&
-      sameAndroidBuildData(op.context.artifactValidation, op.result.artifactValidation) &&
-      (op.context.operation === 'android-build-sign') === (op.result.signing === 'local-upload-key') &&
-      sameAndroidBuildData(op.activity.selection, op.result.selection) && sameAndroidBuildData(op.activity.command, op.result.command) &&
-      sameAndroidBuildData(op.activity.findings, op.result.findings) && sameAndroidBuildData(op.activity.summary, op.result.summary);
+      op.disposition.artifacts === 'retained-local-result' && build !== null &&
+      sameAndroidBuildSavedPair(op.context, { savedConfig: build.usedConfig, savedVersion: build.usedVersion }) &&
+      sameAndroidBuildData(op.context.artifactValidation, build.artifactValidation) &&
+      (op.context.operation !== 'android-build-inspect') === (build.signing === 'local-upload-key') &&
+      sameAndroidBuildData(op.activity.selection, build.selection) && sameAndroidBuildData(op.activity.command, build.command) &&
+      sameAndroidBuildData(op.activity.findings, build.findings) && sameAndroidBuildData(op.activity.summary, build.summary);
   }
   // Native retirement preserves its first context/document/shutdown reason.
   // This is not the stricter provisional Python core-terminal stop predicate.
@@ -420,6 +445,9 @@ const savedConfigGuidance = 'Correct the saved configuration and refresh its sav
 const savedVersionGuidance = 'Correct the version file selected by the saved configuration, then refresh both saved comparisons after original cleanup settles.';
 // Exact fixed Python reason_guidance text, never a compiler/exception message.
 export const androidBuildReasonText: Record<AndroidBuildReason, string> = {
+  'journal-unavailable': 'Local release history could not be authenticated. Open Local release history and verify the existing enrollment; do not replace its key or delete retained files.',
+  'recovery-required': 'An earlier local candidate needs attention. Use Local release history to review or abandon its inputs after original cleanup settles; do not rebuild automatically.',
+  'candidate-inputs-unavailable': 'The local candidate bundle could not be completed. Keep retained files and inspect Local release history before another attempt.',
   none: 'Review the separate inspection findings. Task completion and retained local bytes are not release approval.',
   cancelled: 'Cancellation is not rollback. Check original status and output disposition; start no new run until original cleanup is confirmed.',
   'context-changed': 'The reviewed selection changed. Wait for the original run to settle, refresh saved inputs and provide new consent.',

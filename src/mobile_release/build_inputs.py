@@ -2186,6 +2186,13 @@ class _Project:
         return _directory(os.fstat(self.fd))
 
     def check(self) -> None:
+        android=getattr(self.guard,"_android_build_source",None)
+        candidate=getattr(android,"candidate_input",None) if android is not None else None
+        if candidate is not None:
+            from ._desktop_candidate_input_control import CandidateCreateInput
+            _need(type(candidate) is CandidateCreateInput and candidate.source is android,
+                  "candidate project lease is not original")
+            candidate.borrow_project(self)
         source = getattr(self.guard, "_ios_archive_source", None)
         if source is not None and source.recovery:
             signing = source.require_operation().signing
@@ -2218,7 +2225,14 @@ class _Project:
         try:
             with self.guard.deferred(check_on_exit=False):
                 local = getattr(self.guard, "_local_history_source", None)
-                if local is None:
+                android=getattr(self.guard,"_android_build_source",None)
+                candidate=getattr(android,"candidate_input",None) if android is not None else None
+                if candidate is not None:
+                    from ._desktop_candidate_input_control import CandidateCreateInput
+                    _need(type(candidate) is CandidateCreateInput and candidate.source is android and local is None,
+                          "candidate project lease is not original")
+                    candidate.borrow_project(self)
+                elif local is None:
                     fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 else:
                     local.borrow_project(self)  # SAME native-parent lease; never renderer/Boolean.

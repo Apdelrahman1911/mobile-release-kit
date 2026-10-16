@@ -368,7 +368,7 @@ impl Outcome {
     } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Reason { JournalUnavailable, EnrollmentExists, RecoveryRequired,
+enum Reason { CandidateInputsUnavailable, JournalUnavailable, EnrollmentExists, RecoveryRequired,
     SavedSourceChanged, SavedSourceInvalid, CredentialsUnavailable, QueryPrerequisites,
     None, Cancelled, ContextChanged, DocumentLost, Shutdown,
     TimedOut, ProtocolError, RuntimeUnavailable, IntentExpired, StaleIntent,
@@ -447,7 +447,7 @@ impl Reason {
         _ => return Err(BridgeError::protocol()),
     }) }
     fn store(self) -> Result<store_wire::Reason, BridgeError> { Ok(match self {
-        Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired => return Err(BridgeError::protocol()),
+        Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::None => store_wire::Reason::None,
         Self::Cancelled => store_wire::Reason::Cancelled,
         Self::ContextChanged => store_wire::Reason::ContextChanged,
@@ -503,7 +503,7 @@ impl Reason {
         artifact_wire::Reason::ResourcesUnavailable => Self::ResourcesUnavailable,
     } }
     fn artifact(self) -> Result<artifact_wire::Reason,BridgeError> { Ok(match self {
-        Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired => return Err(BridgeError::protocol()),
+        Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::None => artifact_wire::Reason::None,
         Self::Cancelled => artifact_wire::Reason::Cancelled,
@@ -542,7 +542,7 @@ impl Reason {
     }) }
 
     fn recovery(self) -> Result<recovery_wire::Reason, BridgeError> { Ok(match self {
-        Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired => return Err(BridgeError::protocol()),
+        Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::SelectionMissing | Self::SelectionChanged | Self::SelectionUnsafe | Self::ResourcesUnavailable => return Err(BridgeError::protocol()),
         Self::None => recovery_wire::Reason::None,
@@ -598,6 +598,8 @@ impl Reason {
             wire::Reason::CleanupUnknown => Self::CleanupUnknown,
     } }
     fn from_android(value: android_wire::Reason) -> Self { match value {
+            android_wire::Reason::JournalUnavailable=>Self::JournalUnavailable,android_wire::Reason::RecoveryRequired=>Self::RecoveryRequired,
+            android_wire::Reason::CandidateInputsUnavailable=>Self::CandidateInputsUnavailable,
             android_wire::Reason::None => Self::None, android_wire::Reason::Cancelled => Self::Cancelled, android_wire::Reason::ContextChanged => Self::ContextChanged,
             android_wire::Reason::DocumentLost => Self::DocumentLost, android_wire::Reason::Shutdown => Self::Shutdown, android_wire::Reason::TimedOut => Self::TimedOut,
             android_wire::Reason::ProtocolError => Self::ProtocolError, android_wire::Reason::RuntimeUnavailable => Self::RuntimeUnavailable, android_wire::Reason::IntentExpired => Self::IntentExpired,
@@ -667,7 +669,7 @@ impl Reason {
         ios_wire::Reason::CleanupUnknown => Self::CleanupUnknown,
     } }
     fn ios(self) -> Result<ios_wire::Reason, BridgeError> { Ok(match self {
-        Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired => return Err(BridgeError::protocol()),
+        Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::SelectionMissing | Self::SelectionChanged | Self::SelectionUnsafe | Self::ResourcesUnavailable => return Err(BridgeError::protocol()),
         Self::None => ios_wire::Reason::None,
@@ -723,7 +725,7 @@ impl Reason {
     }) }
     fn offline(self) -> Result<wire::Reason, BridgeError> {
         Ok(match self {
-        Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired => return Err(BridgeError::protocol()),
+        Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::SelectionMissing | Self::SelectionChanged | Self::SelectionUnsafe | Self::ResourcesUnavailable => return Err(BridgeError::protocol()),
             Self::None => wire::Reason::None, Self::Cancelled => wire::Reason::Cancelled, Self::ContextChanged => wire::Reason::ContextChanged,
@@ -744,7 +746,8 @@ impl Reason {
         })
     }
     fn android(self) -> Result<android_wire::Reason, BridgeError> { Ok(match self {
-        Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired => return Err(BridgeError::protocol()),
+        Self::JournalUnavailable=>android_wire::Reason::JournalUnavailable,Self::RecoveryRequired=>android_wire::Reason::RecoveryRequired,
+        Self::CandidateInputsUnavailable=>android_wire::Reason::CandidateInputsUnavailable,Self::EnrollmentExists=>return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::SelectionMissing | Self::SelectionChanged | Self::SelectionUnsafe | Self::ResourcesUnavailable => return Err(BridgeError::protocol()),
             Self::None => android_wire::Reason::None, Self::Cancelled => android_wire::Reason::Cancelled, Self::ContextChanged => android_wire::Reason::ContextChanged,
@@ -1186,6 +1189,8 @@ struct Session {
     fixture: Option<Arc<offline_tests::hosted::Permit>>,
 }
 impl Session {
+    fn candidate_android(&self)->bool{matches!(&self.context,Context::AndroidBuild(context) if context.candidate())}
+
     // Bounded DATA publication only: no Registry/Document acquisition while
     // original native books are borrowed. Preserve the actual native timestamp.
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -1676,8 +1681,10 @@ impl ReadEnd {
     }
 }
 struct Admitted { status: Status, release: Option<oneshot::Sender<()>> }
-fn nonce(domain: SavedCommandDomain) -> Result<String, BridgeError> {
+fn nonce(domain: SavedCommandDomain) -> Result<String, BridgeError> { nonce_selected(domain,false) }
+fn nonce_selected(domain:SavedCommandDomain,candidate:bool)->Result<String,BridgeError>{
     let mut bytes = [0u8; 16]; getrandom::fill(&mut bytes).map_err(|_| domain.unavailable())?;
+    if candidate {bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128;}
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut value = String::with_capacity(32);
     for byte in bytes { value.push(HEX[usize::from(byte >> 4)] as char); value.push(HEX[usize::from(byte & 15)] as char); } Ok(value)
@@ -1999,7 +2006,8 @@ impl SavedCommandOwner {
             observation.control.claim_slot(index)?;
         }
         let artifact_selection = match &context { Context::ArtifactInspection(c) => Some(Arc::new(r.artifact_inputs.loan(c,registration,&project)?)), _ => None };
-        let id = nonce(self.inner.domain)?; let generation = nonce(self.inner.domain)?;
+        let candidate=matches!(&context,Context::AndroidBuild(value) if value.candidate());
+        let id = nonce_selected(self.inner.domain,candidate)?; let generation = nonce(self.inner.domain)?;
         if r.last.as_ref().is_some_and(|last| last.operation_id == id || last.owner_generation == generation) { return Err(self.inner.domain.unavailable()); }
         let projection = RunProjection { operation_id: id, owner_generation: generation, context,
             phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None };
@@ -2832,7 +2840,7 @@ impl Inner {
         }
         // Only these two typed streams exist; crossing domains is a protocol
         // failure, never a reinterpretation of an Offline terminal as Android.
-        enum Incoming { Accepted(Option<Stage>), Progress(Stage), History(history_wire::Event), Terminal(Terminal) }
+        enum Incoming { Accepted(Option<Stage>), Progress(Stage), History(history_wire::Event), Candidate(android_wire::CandidateEvent), Terminal(Terminal) }
         let incoming = match (owner.domain, frame) {
             (SavedCommandDomain::LocalReleaseHistory,Frame::LocalReleaseHistory(history_wire::Frame::Accepted))=>Incoming::Accepted(None),
             (SavedCommandDomain::LocalReleaseHistory,Frame::LocalReleaseHistory(history_wire::Frame::Event(e)))=>Incoming::History(e),
@@ -2845,6 +2853,7 @@ impl Inner {
             (SavedCommandDomain::OfflinePreflight, Frame::OfflinePreflight(wire::Frame::Terminal(t))) => Incoming::Terminal(Terminal::OfflinePreflight(t)),
             (SavedCommandDomain::AndroidBuild, Frame::AndroidBuild(android_wire::Frame::Accepted)) => Incoming::Accepted(Some(Stage::AndroidBuild(android_wire::Stage::Accepted))),
             (SavedCommandDomain::AndroidBuild, Frame::AndroidBuild(android_wire::Frame::Progress(stage))) => Incoming::Progress(Stage::AndroidBuild(stage)),
+            (SavedCommandDomain::AndroidBuild, Frame::AndroidBuild(android_wire::Frame::Candidate(event)))=>Incoming::Candidate(event),
             (SavedCommandDomain::AndroidBuild, Frame::AndroidBuild(android_wire::Frame::Terminal(t))) => Incoming::Terminal(Terminal::AndroidBuild(t)),
             (SavedCommandDomain::ProjectRecovery, Frame::ProjectRecovery(recovery_wire::Frame::Accepted)) => Incoming::Accepted(None),
             (SavedCommandDomain::ProjectRecovery, Frame::ProjectRecovery(recovery_wire::Frame::Terminal(t))) => Incoming::Terminal(Terminal::ProjectRecovery(t)),
@@ -2860,6 +2869,9 @@ impl Inner {
         let mut signed_inputs_bound = false;
         let Some(a) = r.active.as_mut().filter(|a| a.owner.id == owner.id) else { return; };
         match incoming {
+            Incoming::Candidate(event) if owner.candidate_android()&&a.accepted&&!a.terminal&&!a.unknown&&a.first_stop.is_none()=>{
+                if owner.history.receive_candidate(event).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
+            },
             Incoming::History(event) if a.accepted && !a.terminal && !a.unknown && a.first_stop.is_none()=>{
                 if owner.history.receive(event).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
             },
@@ -2944,6 +2956,11 @@ async fn pipe_state(owner: &Session) -> Option<bool> {
         if state.changed().await.is_err() { return None; }
     }
 }
+async fn write_material(writer:&mut ChildStdin,material:&PrivateSigningMaterial,header:&[u8])->Result<(),std::io::Error>{
+    let parts=material.parts().map_err(|_|std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+    writer.write_all(material.prefix()).await?;writer.write_all(header).await?;
+    for(_,bytes)in parts{writer.write_all(bytes).await?;}writer.write_all(material.suffix()).await
+}
 async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard) -> WriteEnd {
     match pipe_state(&owner).await {
         Some(true) => {}, other => { guard.complete = other.is_some(); return WriteEnd { sent: false, closed: false, failed: other.is_none() }; }
@@ -2968,14 +2985,10 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
                     _ = stop.changed() => None,
                     result = async {
                         writer.write_all(bytes).await?;
-                        if let Some(material) = material.as_ref() {
+                        if let Some(material) = material.as_ref().filter(|_|!owner.candidate_android()) {
                             let header = header.as_ref().ok().and_then(Option::as_ref)
                                 .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
-                            let parts = material.parts().map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
-                            writer.write_all(material.prefix()).await?;
-                            writer.write_all(header).await?;
-                            for (_, bytes) in parts { writer.write_all(bytes).await?; }
-                            writer.write_all(material.suffix()).await?;
+                            write_material(writer,material,header).await?;
                         }
                         Ok::<(), std::io::Error>(())
                     } => Some(result),
@@ -2987,6 +3000,15 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
     }
     request.take(); drop(request); // Retire only this original bounded input.
     if failed { inner.stop(&owner, Reason::ProtocolError); }
+    if sent && !failed && owner.candidate_android() {
+        // Only the bounded request was sent above. Never let the broad STOP
+        // select cancel a phase future that owns an original helper join.
+        failed=match (input.io.as_mut(),material.as_ref(),header.as_ref().ok().and_then(Option::as_ref)) {
+            (Some(writer),Some(material),Some(header))=>local_history::write_candidate(&owner,writer,material,header).await.is_err(),
+            _=>true,
+        };
+        if failed{inner.stop(&owner,Reason::CommandIncomplete);}
+    }
     if sent && !failed && owner.domain==SavedCommandDomain::LocalReleaseHistory {
         if let Some(writer)=input.io.as_mut(){failed=local_history::write_phases(&inner,&owner,writer).await.is_err();}
         else{failed=true;}
@@ -3026,7 +3048,8 @@ impl OutputDecoder {
                         android_wire::FrameDecoder::new(&owner.id,&owner.generation,context).map(Self::AndroidBuild),
                     Profile::AndroidBuild(profile @ (android_wire::Profile::MacArm64 | android_wire::Profile::MacX64))=>{
                         let selected=owner.android_selection.as_ref().ok_or_else(BridgeError::protocol)?;
-                        android_wire::FrameDecoder::new_macos(&owner.id,&owner.generation,context,profile,selected.data()).map(Self::AndroidBuild)
+                        if context.candidate(){local_history::candidate_decoder(owner,context,profile,selected.data()).map(Self::AndroidBuild)}
+                        else{android_wire::FrameDecoder::new_macos(&owner.id,&owner.generation,context,profile,selected.data()).map(Self::AndroidBuild)}
                     },
                     _=>Err(BridgeError::protocol()),
                 }
@@ -3770,7 +3793,6 @@ fn spawn_android_original(inner:&Inner,owner:&Session,runtime:VerifiedRuntime,na
         inner.stop(owner,Reason::ToolchainUnavailable);return;
     }
     let Some(native)=native else{inner.stop(owner,Reason::ToolchainUnavailable);return;};
-    let mut native=match native.lock(){Ok(native)=>native,Err(_)=>{inner.unknown(owner);return;}};
     let mut command=Command::new(&runtime.python);
     command.args(["-I","-S","-B"]).arg(&runtime.bootstrap).arg(&runtime.core);
     command.current_dir(&runtime.cwd).env_clear().env("LANG","C").env("LC_ALL","C")
@@ -3781,6 +3803,8 @@ fn spawn_android_original(inner:&Inner,owner:&Session,runtime:VerifiedRuntime,na
     if crate::runtime::macos_installed_environment(&mut command).is_err(){
         owner.observe_android_failure(AdmissionFailure::Ownership,Instant::now());return;
     }
+    if owner.candidate_android()&&local_history::candidate_child(owner,&mut command).is_err(){inner.stop(owner,Reason::ContextChanged);return;}
+    let mut native=match native.lock(){Ok(native)=>native,Err(_)=>{inner.unknown(owner);return;}};
     if native.check_before_spawn(&runtime,owner.clocks.work,&owner.stop.subscribe(),
         &mut |failure,at|owner.observe_android_failure(failure,at)).is_err(){return;}
     let mut startup=match owner.startup.lock(){Ok(startup)=>startup,Err(_)=>{inner.unknown(owner);return;}};
@@ -4070,8 +4094,10 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
                 {
                     let native=native.ok_or_else(||domain.unavailable())?;
-                    let mut native=native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
-                    native.inspect_once(&runtime,end,&stop,&mut |failure,at|inspection_owner.observe_android_failure(failure,at))
+                    let selected={let mut book=native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                        book.inspect_once(&runtime,end,&stop,&mut |failure,at|inspection_owner.observe_android_failure(failure,at))?};
+                    if inspection_owner.candidate_android(){local_history::acquire_candidate_sources(&inspection_owner,&native)?;}
+                    Ok(selected)
                 }
                 #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
                     all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))))]
@@ -4132,11 +4158,15 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                 match binding {
                     Some(binding) if context.signed() => {
                         let construct = || {
-                            let material = owner.material.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                            let Some(PrivateSigningMaterial::Android(original)) = material.as_ref() else { return Err(owner.domain.invalid_owner()); };
-                            if !original.matches(context, owner.registration, &owner.project) { return Err(owner.domain.invalid_owner()); }
-                            android_wire::request_signed(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd,
-                                &binding, &original.context_data())
+                            let original={let material=owner.material.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                                let Some(PrivateSigningMaterial::Android(original))=material.as_ref() else{return Err(owner.domain.invalid_owner());};original.clone()};
+                            if !original.matches(context,owner.registration,&owner.project){return Err(owner.domain.invalid_owner());}
+                            if context.candidate(){
+                                #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+                                {local_history::candidate_request(owner,context,profile,&runtime,&binding,&original.context_data())}
+                                #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
+                                {Err(owner.domain.unavailable())}
+                            }else{android_wire::request_signed(&owner.id,&owner.generation,context,profile,&owner.project,&runtime.cwd,&binding,&original.context_data())}
                         };
                         construct()
                     },
@@ -4449,7 +4479,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
         let protocol = if startup.returned {
             let r = inner.lock();
             r.active.as_ref().is_some_and(|a| a.owner.id == owner.id && a.accepted && a.terminal
-                && a.projection.result.as_ref().is_some_and(Terminal::settled))
+                && a.projection.result.as_ref().is_some_and(|terminal|terminal.settled()
+                    &&(!owner.candidate_android()||terminal.outcome()!=Outcome::Complete||local_history::candidate_complete(&owner))))
                 && book.out_end.as_ref().is_some_and(|r| r.protocol_settled_for(&owner.context))
                 && book.err_end.as_ref().is_some_and(|r| r.frames == 0 && !r.failed)
                 && book.write_end.as_ref().is_some_and(|r| r.sent && !r.failed)
@@ -4494,7 +4525,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
         // the already-existing watchdog continues its independent control tick.
         let closed=if android_close_started {android_leased::join_start_close(&inner,&owner).await}
             else{owner.android_close.as_ref().is_some_and(|close|close.known())};
-        settled && closed && inner.endpoint(&owner).is_some()
+        let candidate_closed=if settled&&closed {local_history::finish_candidate(&inner,&owner).await}else{false};
+        settled && closed && candidate_closed && inner.endpoint(&owner).is_some()
     }else{settled};
     if !settled { inner.unknown(&owner); }
     // Final observer owns no unjoined child/IO/acquisition at this point. Its

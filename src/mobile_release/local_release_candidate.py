@@ -137,10 +137,10 @@ class LocalAndroidBuildHandoff:
         finally:
             self._capturing = False
 
-    def _blocks(self):
+    def _blocks(self, *, _candidate=None):
         self._point()
         _need(self.node is not None and not self._reading
-              and (self._capturing or self.producer_joined))
+              and (self._capturing or self.producer_joined or self._candidate_cut(_candidate)))
         self._reading = True
         complete = False
         try:
@@ -167,6 +167,31 @@ class LocalAndroidBuildHandoff:
             self._reading = False
             if not complete:
                 self.failed = True
+
+    def _candidate_cut(self, owner):
+        from .local_candidate_create import CandidateCreateRun
+        return (type(owner) is CandidateCreateRun and self.run._candidate_inputs is owner
+            and owner.composition.handoff is self and owner.build_settled and not owner.closed
+            and not self.producer_joined and self.run.operation.closed())
+
+    def _candidate_blocks(self, owner):
+        _need(self._candidate_cut(owner) and not owner.closing)
+        return self._blocks(_candidate=owner)
+
+    def _candidate_close(self, owner):
+        from .local_candidate_create import CandidateCreateRun
+        self._owner()
+        _need(type(owner) is CandidateCreateRun and self.run._candidate_inputs is owner
+            and owner.composition.handoff is self and owner.closing)
+        if self.closed:
+            if self.reader is not None:self.reader.assert_closed()
+            return
+        self.closed=True
+        if self._reading:self.failed=True
+        # Cleanup is permitted even when the build never reached the private
+        # cut. It grants no read/terminal permission and never sets joined.
+        if self.reader is not None:
+            self.reader.close();self.reader.assert_closed()
 
     def _terminal(self, run, terminal):
         try:
@@ -498,6 +523,8 @@ class LocalAndroidCandidateComposition:
             source=source.descriptor_quote(), bound_files=sum(s.close_state != "CLOSED" for s in op.files.slots),
             module_depth=module_depth, root_depth=len(op.root.parts),
             firebase=bound.config.section("services").get("androidFirebase") == "required")
+        create=getattr(self.run,"_candidate_inputs",None)
+        if create is not None:self.quote=create.reserve(self.quote)
         soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
         _need(soft == resource.RLIM_INFINITY or soft >= COMPOSITION_FDS)
         try:
@@ -506,7 +533,9 @@ class LocalAndroidCandidateComposition:
                 self.source_binding = {"commit": observed.commit, "tree": observed.tree,
                                        "ref": observed.ref, "branch": observed.branch}
                 self.metadata._reserve_composed(self, self.metadata_scratch)
+                if create is not None:self.quote=create.reserve(self.quote)
                 self._output = op.files.prepare_candidate_output(self)
+                if create is not None:create.before_build(bound)
                 try:
                     yield
                 except BaseException as error:

@@ -1697,7 +1697,7 @@ mod catalogue_budget_tests {
             saved_version:android_wire::SavedVersion{source:"version.properties".to_owned(),bytes:20,
                 sha256:"b".repeat(64),name:"1.0.0".to_owned(),build:1},
             artifact_validation:android_wire::ArtifactValidation{mode:android_wire::ValidationMode::StructureAndVersion,
-                upload_certificate_sha256:None},signing:None};
+                upload_certificate_sha256:None},signing:None,operation:None,action:None};
         let document=Arc::new(());
         let roots=AndroidRegistrationSourceSlots::catalogue_maximal_roots_data();
         let census=crate::asset_session::catalogue_census_data(project_id,&project,&roots);
@@ -1859,7 +1859,7 @@ mod lifecycle_book_tests {
                 saved_version: android_wire::SavedVersion { source: "version.properties".to_owned(), bytes: 20,
                     sha256: "b".repeat(64), name: "1.0.0".to_owned(), build: 1 },
                 artifact_validation: android_wire::ArtifactValidation { mode: android_wire::ValidationMode::StructureAndVersion,
-                    upload_certificate_sha256: None }, signing: None } };
+                    upload_certificate_sha256: None }, signing: None, operation: None, action: None } };
         let review_id = "inert-review".to_owned(); let instance = "c".repeat(32);
         let added = arc_bytes::<Operation>().unwrap() + operation_projection_bytes(&data).unwrap()
             + review_id.capacity() + instance.capacity() + control.retained_bytes().unwrap()

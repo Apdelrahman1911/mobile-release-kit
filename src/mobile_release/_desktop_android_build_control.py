@@ -16,6 +16,7 @@ class AndroidBuildInput(_SavedCommandInput):
         self.operation: AndroidBuildOperation | None = None
         self._engine: _Engine | None = None
         self.material = None
+        self.candidate_input = None
         self.material_pending = self.material_receiving = self.signed = False
 
     def _request_material(self, request) -> None:
@@ -23,6 +24,21 @@ class AndroidBuildInput(_SavedCommandInput):
         self._owner()
         self.signed = is_signed(request.context)
         self.material_pending = self.signed
+        from ._desktop_android_build_protocol import candidate_create
+        if candidate_create(request.context):
+            from ._desktop_candidate_input_control import CandidateCreateInput
+            CandidateCreateInput(self,request)
+            self.material_pending=False
+
+    def request(self):
+        request=super().request()
+        if self.candidate_input is not None:self.candidate_input.acquire()
+        return request
+
+    def hard_endpoint(self):
+        self._owner()
+        end=self.candidate_input.hard_end if self.candidate_input is not None else self.work_end+10
+        return min(end,self.first_failure+10) if self.first_failure is not None else end
 
     def receive_material(self, operation) -> None:
         self._owner()
@@ -42,11 +58,18 @@ class AndroidBuildInput(_SavedCommandInput):
         self.guard.check()
 
     def close(self) -> None:
-        super().close()
-        if self.signed:
-            self.buffer.clear()
-        if self.material is not None:
-            self.material.retire()
+        first=None
+        try:
+            super().close()
+            if self.signed:self.buffer.clear()
+            if self.material is not None:self.material.retire()
+        except BaseException as error:first=error
+        if self.candidate_input is not None:
+            try:self.candidate_input.close()
+            except BaseException as error:
+                self.guard._abort(error)
+                if first is None:first=error
+        if first is not None:raise first
 
     def material_closed(self) -> bool:
         self._owner()

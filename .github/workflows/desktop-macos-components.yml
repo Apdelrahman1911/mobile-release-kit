@@ -308,11 +308,22 @@ jobs:
               local_release_history_protocol::tests::local_release_history_real_decoder_requires_complete_closed_phase_sequence \
               local_release_history_protocol::tests::local_release_history_original_nonce_replay_and_truncated_terminal_refuse \
               local_release_history_protocol::tests::local_release_history_public_summary_cannot_hide_recovery_or_exceed_journal_bound \
+              local_release_history_protocol::tests::local_release_history_candidate_context_and_consent_are_action_specific \
+              local_release_history_protocol::tests::local_release_history_candidate_summary_cannot_create_old_finality_or_change_roster \
+              local_release_history_protocol::tests::local_release_history_candidate_phases_bind_successor_and_terminal_head \
+              android_build_protocol::tests::candidate_create_exact_consent_uuid_and_old_signed_domain \
+              android_build_protocol::tests::candidate_create_four_phases_fourteen_frames_match_original_selection \
+              android_build_protocol::tests::candidate_create_rejects_early_build_replayed_context_and_unfinished_success \
+              android_build_protocol::tests::candidate_create_source_only_failure_and_stop_before_ready_keep_real_ledger \
+              saved_command_owner::local_history::native::tests::local_release_history_candidate_helper_rosters_never_enroll \
+              saved_command_owner::local_history::native::tests::local_candidate_create_helpers_cannot_enroll_or_skip_checkpoint \
+              saved_command_owner::local_history::candidate_route_tests::local_candidate_create_phase_events_are_not_acknowledged_native_completion \
+              asset_session::android_signing::candidate_material_tests::local_candidate_create_comparison_material_cannot_mint_document_grant \
               local_release_history_protocol::local_release_history_cleanup_tests::local_release_history_healthy_cleanup_does_not_manufacture_failure \
               saved_command_owner::local_history::native::tests::local_release_history_pre_admission_refusal_has_no_worker_to_join \
               installed_runtime::local_history_runtime_audit_requires_original_claim_and_cleanup_clock \
               --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
-            grep -Eq '^test result: ok\. 9 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 20 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
             exit 0
           fi
           # The same Mac Store implementation is in the headless library graph.

@@ -191,17 +191,26 @@ pub(super) fn acquire_installed(inner:&Inner,owner:&Session,native:&Arc<Mutex<Lo
 
 /// One pending phase at a time; no queue of caller-selected native operations.
 pub(super) struct State {route:Mutex<Route>,changed:Notify,
+    candidate_close:AsyncMutex<Option<JoinHandle<bool>>>,candidate_close_started:AtomicBool,
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     native:Mutex<native::State>,
 }
-struct Route {original:Option<(String,String)>,received:u8,completed:u8,pending:Option<history_wire::Event>,reply_writing:bool,failed:bool}
+enum PhaseEvent {History(history_wire::Event),Candidate(android_wire::CandidateEvent)}
+struct Route {original:Option<(String,String)>,received:u8,completed:u8,pending:Option<PhaseEvent>,reply_writing:bool,failed:bool}
+impl Route {
+    fn candidate_replies_complete(&self)->bool{
+        self.original.is_some()&&!self.failed&&!self.reply_writing&&self.received==4&&self.completed==4&&self.pending.is_none()
+    }
+}
 impl State {
-    pub(super) fn new()->Self{Self{route:Mutex::new(Route{original:None,received:0,completed:0,pending:None,reply_writing:false,failed:false}),changed:Notify::new(),
+    pub(super) fn new()->Self{Self{route:Mutex::new(Route{original:None,received:0,completed:0,pending:None,reply_writing:false,failed:false}),changed:Notify::new(),candidate_close:AsyncMutex::new(None),candidate_close_started:AtomicBool::new(false),
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         native:Mutex::new(native::State::new()),}}
-    pub(super) fn receive(&self,event:history_wire::Event)->Result<(),BridgeError>{
+    pub(super) fn receive(&self,event:history_wire::Event)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::History(event),3)}
+    pub(super) fn receive_candidate(&self,event:android_wire::CandidateEvent)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::Candidate(event),4)}
+    fn receive_phase(&self,event:PhaseEvent,limit:u8)->Result<(),BridgeError>{
         let mut r=self.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
-        if r.failed||r.original.is_none()||r.pending.is_some()||!(r.received==r.completed||r.reply_writing&&r.received==r.completed+1)||r.received>=3{
+        if r.failed||r.original.is_none()||r.pending.is_some()||!(r.received==r.completed||r.reply_writing&&r.received==r.completed+1)||r.received>=limit{
             r.failed=true;return Err(BridgeError::protocol());
         }
         r.received+=1;r.pending=Some(event);drop(r);self.changed.notify_one();Ok(())
@@ -241,4 +250,64 @@ pub(super) fn sources_final(owner:&Session)->bool{
     {native::sources_final(owner)}
     #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
     {let _=owner;false}
+}
+
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+pub(super) fn acquire_candidate_sources(owner:&Session,runtime:&Arc<Mutex<AndroidNativeBooks>>)->Result<(),BridgeError>{native::acquire_candidate_sources(owner,runtime)}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+pub(super) fn candidate_request(owner:&Session,context:&android_wire::Context,profile:android_wire::Profile,runtime:&VerifiedRuntime,
+    binding:&android_wire::ToolchainBinding,signing:&android_wire::Content)->Result<Vec<u8>,BridgeError>{native::candidate_request(owner,context,profile,runtime,binding,signing)}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+pub(super) fn candidate_child(owner:&Session,command:&mut Command)->Result<(),BridgeError>{native::child_command(owner,command)?;native::check_source(owner)}
+pub(super) fn candidate_complete(owner:&Session)->bool{
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    {owner.history.route.try_lock().is_ok_and(|r|r.candidate_replies_complete())&&native::candidate_helpers_complete(owner)}
+    #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
+    {let _=owner;false}
+}
+pub(super) fn candidate_decoder(owner:&Session,context:&android_wire::Context,profile:android_wire::Profile,selected:&android_wire::MacToolchainSelection)->Result<android_wire::FrameDecoder,BridgeError>{
+    let route=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    let(nonce,digest)=route.original.as_ref().ok_or_else(BridgeError::protocol)?;
+    if route.failed{return Err(BridgeError::protocol());}
+    android_wire::FrameDecoder::new_candidate(&owner.id,&owner.generation,context,profile,selected,nonce,digest)
+}
+/// Stopped is only a quiet next-phase wait, never interrupted private IO or
+/// a dropped native helper future. Terminal/finality remain separate facts.
+#[derive(Clone,Copy,Debug,Eq,PartialEq)]
+pub(super) enum CandidateWrite {Complete,Stopped}
+pub(super) async fn write_candidate(owner:&Arc<Session>,writer:&mut ChildStdin,material:&PrivateSigningMaterial,header:&[u8])->Result<CandidateWrite,BridgeError>{
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    {native::write_candidate(owner,writer,material,header).await}
+    #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
+    {let _=(owner,writer,material,header);Err(BridgeError::protocol())}
+}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+pub(super) async fn finish_candidate(inner:&Arc<Inner>,owner:&Arc<Session>)->bool{
+    if !owner.candidate_android(){return true;}
+    // Called only after the genuine Android close-tail join. Own source books
+    // remain separate; no Resources or retired Android Book is borrowed here.
+    if owner.history.candidate_close_started.swap(true,Ordering::SeqCst){return false;}
+    let mut handle=owner.history.candidate_close.lock().await;
+    if handle.is_some(){return false;}
+    let original=owner.clone();let(release,enter)=oneshot::channel();
+    *handle=Some(tokio::task::spawn_blocking(move||{
+        if enter.blocking_recv().is_err(){return false;}native::finish_sources(&original)
+    }));let _=release.send(());
+    match join_with_clock(&mut handle,inner,owner).await{
+        Ok(closed)=>{handle.take();closed&&native::sources_final(owner)},Err(_)=>false,
+    }
+}
+
+#[cfg(test)]
+mod candidate_route_tests {
+    use super::*;
+    #[test]
+    fn local_candidate_create_phase_events_are_not_acknowledged_native_completion(){
+        // DATA state predicate only: no owner/IO/helper/native receipt is minted.
+        let mut route=Route{original:Some(("a".repeat(32),"b".repeat(64))),received:4,completed:3,
+            pending:Some(PhaseEvent::Candidate(android_wire::CandidateEvent::InputsReady(android_wire::CandidateHead{sequence:3,sha256:"c".repeat(64)}))),reply_writing:false,failed:false};
+        assert!(!route.candidate_replies_complete());route.pending=None;route.reply_writing=true;assert!(!route.candidate_replies_complete());
+        route.completed=4;assert!(!route.candidate_replies_complete());route.reply_writing=false;assert!(route.candidate_replies_complete());
+        route.failed=true;assert!(!route.candidate_replies_complete());route.failed=false;route.original=None;assert!(!route.candidate_replies_complete());
+    }
 }

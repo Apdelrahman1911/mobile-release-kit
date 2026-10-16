@@ -292,6 +292,14 @@ impl AndroidNativeBooks {
             .checked_add(AndroidUseControl::retained_control_charge()?)?
             .checked_add(AndroidCloseSlot::fixed_charge()?)
     }
+    pub(super) fn candidate_source_quote(&self)->Option<usize>{
+        if self.phase!=NativePhase::Ready||self.settlement_started||self.first_failure().is_some()||self.control.stopped(){return None;}
+        self.retained_now()?;Some(crate::installed_runtime::LOCAL_CANDIDATE_ANDROID_FDS)
+    }
+    pub(super) fn candidate_backing(&self)->Option<usize>{
+        if !matches!(self.phase,NativePhase::Ready|NativePhase::Claimed)||self.settlement_started||self.first_failure().is_some()||self.control.stopped(){return None;}
+        self.retained_now()
+    }
     pub(super) fn inspect_once(&mut self,runtime:&RuntimeConfig,_end:Instant,stop:&watch::Receiver<bool>,
         publish:&mut dyn FnMut(AdmissionFailure,Instant))->Result<VerifiedRuntime,BridgeError>{
         if self.phase!=NativePhase::New{return Err(BridgeError::cleanup_unknown());}

@@ -10,6 +10,8 @@ pub(crate) const MATERIAL_SUFFIX: &[u8] = b"\nMRK-ANDROID-MATERIAL-END\n";
 
 pub(crate) struct AndroidSigningMaterial {
     context: wire::Context,
+    // Present only when the actual Document minted this exact candidate loan.
+    candidate_document:Option<std::sync::Weak<Inner>>,
     native: Arc<NativeContext>,
     keys: Vec<RecordKey>,
     payloads: Vec<Arc<Payload>>,
@@ -92,6 +94,46 @@ impl AndroidSigningMaterial {
     }
 }
 
+impl AndroidSigningMaterial {
+    fn candidate_matches(&self,document:&Arc<Inner>,state:&DocumentState,context:&wire::Context,
+        registration:u32,root:&asset_source::RegisteredRoot)->bool{
+        context.candidate() && self.context==*context && self.candidate_document.as_ref().and_then(std::sync::Weak::upgrade)
+            .is_some_and(|original|Arc::ptr_eq(&original,document)) && !state.lost_observed&&!state.compatibility_picker_pending
+            &&self.current(state,registration,root)&&document.bridge.registry_generation()==registration
+            &&document.bridge.native_project(&context.project_id).is_ok_and(|(g,r)|g==registration&&r==*root)
+    }
+    pub(crate) fn candidate_current(&self,context:&wire::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool{
+        let Some(document)=self.candidate_document.as_ref().and_then(std::sync::Weak::upgrade) else{return false;};
+        let Ok(state)=document.state.lock() else{return false;};self.candidate_matches(&document,&state,context,registration,root)
+    }
+    pub(super) fn candidate_census(&self)->(&Arc<NativeContext>,&Vec<RecordKey>,&Vec<Arc<Payload>>,&wire::Context){
+        (&self.native,&self.keys,&self.payloads,&self.context)
+    }
+}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+impl AndroidSigningMaterial {
+    pub(crate) fn admit_candidate(&self,claim:crate::saved_command_owner::LocalHistoryClaim)
+        ->Result<(crate::vault_keyring_macos::LocalInput,KeyringMemoryAdmission),BridgeError>{
+        let document=self.candidate_document.as_ref().and_then(std::sync::Weak::upgrade).ok_or_else(invalid)?;
+        let state=document.state.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+        let Some((material,context,g,r))=claim.candidate_context() else{return Err(invalid());};
+        if !std::ptr::eq(self,material.as_ref()) || !self.candidate_matches(&document,&state,context,g,r)
+            ||!document.bridge.android_build.candidate_claim_matches(&claim)||!claim.current(){return Err(invalid());}
+        let bytes=claim.own_backing().ok_or_else(BridgeError::cleanup_unknown)?;
+        let admission=lookup_memory::local_candidate_admission(&document,&state,self,bytes).map_err(|_|BridgeError::cleanup_unknown())?;
+        Ok((crate::vault_keyring_macos::LocalInput::admitted(LocalHistoryKeyGrant{claim}),admission))
+    }
+    pub(crate) fn claim_candidate_helper(&self,claim:&crate::saved_command_owner::LocalHistoryHelperClaim,go:bool)->Result<(),crate::vault_keyring_macos::Problem>{
+        use crate::vault_keyring_macos::Problem;
+        let document=self.candidate_document.as_ref().and_then(std::sync::Weak::upgrade).ok_or(Problem::Unavailable)?;
+        let state=document.state.lock().map_err(|_|Problem::CleanupUnknown)?;
+        let Some((material,context,g,r))=claim.candidate_context() else{return Err(Problem::Protocol);};
+        if !std::ptr::eq(self,material.as_ref())||!self.candidate_matches(&document,&state,context,g,r)
+            ||!document.bridge.android_build.candidate_helper_matches(claim){return Err(Problem::Interrupted);}
+        claim.claim(go)
+    }
+}
+
 // DATA-only collection after native admission. Also exercised by focused
 // synthetic borrower tests; those tests grant no native profile or store proof.
 pub(super) fn borrow_material(state: &DocumentState, context: &wire::Context,
@@ -115,7 +157,7 @@ pub(super) fn borrow_material(state: &DocumentState, context: &wire::Context,
         if keys.iter().any(|previous: &RecordKey| previous.id == key.id) { return Err(invalid()); }
         keys.push(key); payloads.push(payload.clone());
     }
-    let original = Arc::new(AndroidSigningMaterial { context: context.clone(), native, keys, payloads });
+    let original = Arc::new(AndroidSigningMaterial { context: context.clone(), candidate_document:None, native, keys, payloads });
     original.parts()?;
     // Original draft DATA is canonical UTF-8, whereas saved_config identifies
     // raw file bytes. Core compares the same admitted parsed file against this
@@ -130,12 +172,17 @@ impl DocumentBinding {
         // Same actual document mutex. The existing saved-owner busy/disabled/
         // stopping gates exclude new asset allocation through its real finality.
         if !cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) || !self.native_qualified() || encrypted_mode(state) && !self.persistence_qualified() { return Err(invalid()); }
-        borrow_material(state, context, registration, project)
+        let mut original=borrow_material(state, context, registration, project)?;
+        if context.candidate(){
+            Arc::get_mut(&mut original).ok_or_else(invalid)?.candidate_document=Some(Arc::downgrade(&self.inner));
+        }
+        Ok(original)
     }
 
     pub(super) fn recheck_android_material(&self, state: &DocumentState, original: &Arc<AndroidSigningMaterial>,
         registration: u32, project: &asset_source::RegisteredRoot) -> Result<(), BridgeError> {
         if !cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) || !self.native_qualified() || encrypted_mode(state) && !self.persistence_qualified() || !original.current(state, registration, project) { return Err(invalid()); }
+        if original.context.candidate() && !original.candidate_matches(&self.inner,state,&original.context,registration,project){return Err(invalid());}
         original.parts()?; Ok(())
     }
 }
@@ -225,5 +272,29 @@ mod tests {
             }
             assert!(borrow_material(&state, &request, 7, &project).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod candidate_material_tests {
+    use super::*;
+    #[test]
+    fn local_candidate_create_comparison_material_cannot_mint_document_grant(){
+        // Actual comparison/currentness methods with inert context DATA. No
+        // source, usable payload, Document, native admission or RNG is created.
+        let context=wire::tests::candidate_context();
+        let root=asset_source::RegisteredRoot{path:"/inert/candidate".into(),
+            identity:asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity())};
+        let native=Arc::new(NativeContext{execution_mode:commands::ExecutionMode::Github,revision:2,
+            project_id:context.project_id.clone(),project:root.clone(),registry_generation:7,draft:b"{}".to_vec(),
+            platform:Platform::Android,stage:Stage::Candidate,purpose:Purpose::Signing});
+        let mut material=AndroidSigningMaterial{context:context.clone(),candidate_document:None,native,keys:vec![],payloads:vec![]};
+        assert!(material.matches(&context,7,&root));
+        assert!(!material.candidate_current(&context,7,&root));
+        material.candidate_document=Some(std::sync::Weak::new());
+        assert!(!material.candidate_current(&context,7,&root));
+        assert!(!material.matches(&context,8,&root));
+        assert!(!material.matches(&wire::tests::signed_context(),7,&root));
+        let mut other=root.clone();other.path="/inert/other".into();assert!(!material.matches(&context,7,&other));
     }
 }

@@ -1,3 +1,4 @@
+import type { LocalCandidateInputs } from './localReleaseHistoryTypes.ts';
 import type { AndroidToolchainCatalogApi } from './androidToolchainCatalogTypes.ts';
 import type { AndroidToolSourcesApi } from './androidToolSources.ts';
 import type { AndroidToolRegistrationApi } from './androidToolRegistration.ts';
@@ -13,11 +14,12 @@ export interface AndroidSigningAssignment {
 }
 export interface AndroidSigningSelection { mode: 'local-upload-key'; assignments: AndroidSigningAssignment[] }
 export interface PrepareAndroidBuild extends AndroidBuildSavedPair {
+  operation?: 'android-candidate-inputs'; action?: 'create';
   projectId: string; draftRevision: number; baselineGeneration: number; artifactValidation: AndroidBuildArtifactValidation; signing?: AndroidSigningSelection;
 }
 export interface AndroidBuildIdentity { operationId: string; ownerGeneration: string }
-export interface StartAndroidBuild extends AndroidBuildIdentity { consentVersion: 'saved-android-build-inspect-v3' | 'saved-android-local-sign-v1' }
-export interface AndroidBuildContext extends PrepareAndroidBuild { platform: 'android'; operation: 'android-build-inspect' | 'android-build-sign' }
+export interface StartAndroidBuild extends AndroidBuildIdentity { consentVersion: 'saved-android-build-inspect-v3' | 'saved-android-local-sign-v1' | 'local-android-candidate-inputs-v1' }
+export interface AndroidBuildContext extends Omit<PrepareAndroidBuild, 'operation'> { platform: 'android'; operation: 'android-build-inspect' | 'android-build-sign' | 'android-candidate-inputs' }
 export type AndroidBuildAvailability = 'available' | 'busy' | 'shutdown' | 'cleanup-unknown' | 'document-lost' |
   'unsupported-platform' | 'runtime-unqualified' | 'toolchain-unqualified';
 export type AndroidBuildPhase = 'awaiting-consent' | 'starting' | 'running' | 'stopping' | 'terminal' | 'unknown';
@@ -28,7 +30,7 @@ export type AndroidBuildReason = 'none' | 'cancelled' | 'context-changed' | 'doc
   'platform-disabled' | 'module-required' | 'toolchain-unavailable' | 'toolchain-mismatch' | 'project-admission-refused' |
   'command-failed' | 'command-incomplete' | 'artifact-missing' | 'artifact-ambiguous' | 'artifact-unsafe' | 'artifact-changed' |
   'input-limit' | 'result-limit' | 'work-retained' | 'cleanup-unknown' | 'signing-input-missing' | 'signing-input-invalid' |
-  'signing-validation-failed' | 'signing-command-failed' | 'build-inputs-unrestored';
+  'signing-validation-failed' | 'signing-command-failed' | 'build-inputs-unrestored' | 'journal-unavailable' | 'recovery-required' | 'candidate-inputs-unavailable';
 export type AndroidBuildStage = 'accepted' | 'inputs-bound' | 'validating-signing' | 'building' | 'capturing' | 'signing' | 'restoring-inputs' | 'inspecting' | 'disposing-work';
 export type AndroidBuildCoreStatus = 'PASS' | 'FAIL' | 'MISSING' | 'BLOCKED' | 'INVALID' | 'SKIP' | 'MANUAL' | 'CONFIGURED' | 'NOT_APPLICABLE';
 export type AndroidBuildCheckId = 'aab-structure' | 'aab-manifest' | 'application-id' | 'build-number' | 'version-name' |
@@ -73,6 +75,11 @@ export type AndroidBuildResult = AndroidBuildResultCommon & (
   { schemaVersion: 1; toolchainProfile: 'android-local-linux-gnu-x86_64-v1'; toolchainSelection?: never } |
   { schemaVersion: 2; toolchainProfile: 'android-registered-macos-arm64-v1' | 'android-registered-macos-x86_64-v1'; toolchainSelection: AndroidMacToolchainSelection }
 );
+export interface AndroidCandidateInputsResult {
+  schemaVersion: 1; scope: 'local-android-candidate-inputs'; headSequence: number;
+  candidateInputs: LocalCandidateInputs; build: AndroidBuildResult;
+}
+export type AndroidBuildPublishedResult = AndroidBuildResult | AndroidCandidateInputsResult;
 export interface AndroidBuildDisposition {
   work: 'not-created' | 'removed' | 'retained-work' | 'unknown';
   artifacts: 'not-created' | 'removed' | 'retained-local-result' | 'retained-incomplete' | 'unknown';
@@ -84,7 +91,7 @@ export interface AndroidBuildDisposition {
 export interface AndroidBuildOperation extends AndroidBuildIdentity {
   context: AndroidBuildContext; phase: AndroidBuildPhase; intentUsable: boolean; outcome: AndroidBuildOutcome | null;
   reason: AndroidBuildReason; stage: AndroidBuildStage | null; activity: AndroidBuildActivity | null;
-  disposition: AndroidBuildDisposition | null; result: AndroidBuildResult | null;
+  disposition: AndroidBuildDisposition | null; result: AndroidBuildPublishedResult | null;
 }
 export interface AndroidBuildStatus {
   schemaVersion: 1; statusRevision: number; availability: AndroidBuildAvailability; operation: AndroidBuildOperation | null;

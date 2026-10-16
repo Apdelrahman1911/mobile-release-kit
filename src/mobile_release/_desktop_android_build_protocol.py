@@ -16,6 +16,8 @@ from typing import Any
 from .config import ANDROID_ID_RE, MAX_CONFIG_BYTES, MAX_VERSION_BYTES
 
 PROTOCOL = "mrk-android-build/3"
+CANDIDATE_PROTOCOL = "mrk-android-candidate-inputs/1"
+CANDIDATE_CONSENT = "local-android-candidate-inputs-v1"
 CONSENT = "saved-android-build-inspect-v3"
 SIGNED_CONSENT = "saved-android-local-sign-v1"
 SCOPE = "local-post-build-artifact-observation"
@@ -186,6 +188,10 @@ def artifact_validation(value: object) -> dict:
     return dict(value)
 
 
+def candidate_create(value: object) -> bool:
+    return type(value) is dict and value.get("operation")=="android-candidate-inputs"
+
+
 def is_signed(value: dict) -> bool:
     return value.get("operation") == "android-build-sign" or "signing" in value
 
@@ -195,6 +201,7 @@ def stages(value: dict) -> tuple[str, ...]:
 
 
 def maximum_frames(value: dict) -> int:
+    if candidate_create(value): return 14
     return len(SIGNED_STAGES) + 2 if is_signed(value) else MAX_FRAMES
 
 
@@ -222,7 +229,9 @@ def _limitations(validation: dict, *, signed: bool = False) -> list[str]:
 
 def prepare(value: object) -> dict:
     signed = type(value) is dict and "signing" in value
-    value = _keys(value, _PREPARE_FIELDS | ({"signing"} if signed else set()))
+    candidate=candidate_create(value)
+    value = _keys(value, _PREPARE_FIELDS | ({"signing"} if signed else set()) | ({"operation","action"} if candidate else set()))
+    if candidate: require(signed and value["action"]=="create")
     require(_text(value["projectId"], _PROJECT) and integer(value["draftRevision"], 2**32 - 2)
             and integer(value["baselineGeneration"], 2**32 - 2))
     result = {**value, "savedConfig": content(value["savedConfig"]), "savedVersion": saved_version(value["savedVersion"]),
@@ -241,9 +250,10 @@ def parse_prepare(raw: bytes) -> dict:
 
 def context(value: object) -> dict:
     signed = type(value) is dict and "signing" in value
-    fields = _PREPARE_FIELDS | ({"signing"} if signed else set())
+    candidate=candidate_create(value)
+    fields = _PREPARE_FIELDS | ({"signing"} if signed else set()) | ({"operation","action"} if candidate else set())
     value = _keys(value, fields | {"platform", "operation"})
-    operation = "android-build-sign" if signed else "android-build-inspect"
+    operation = "android-candidate-inputs" if candidate else "android-build-sign" if signed else "android-build-inspect"
     require(value["platform"] == "android" and value["operation"] == operation)
     return {**prepare({key: value[key] for key in fields}), "platform": "android", "operation": operation}
 
@@ -278,8 +288,12 @@ def mac_toolchain_selection(value: object) -> dict:
     return dict(value)
 
 
-def _native(value: object, *, signed: bool = False) -> dict:
-    value = _keys(value, {"profile", "projectRoot", "rootIdentity", "cwd", "toolchain"} | ({"signingContext"} if signed else set()))
+def _native(value: object, *, signed: bool = False, candidate: bool = False) -> dict:
+    value = _keys(value, {"profile", "projectRoot", "rootIdentity", "cwd", "toolchain"} | ({"signingContext"} if signed else set()) | ({"candidateHistory"} if candidate else set()))
+    history=None
+    if candidate:
+        from .local_candidate_create_protocol import native_history
+        require(signed); history=native_history(value["candidateHistory"])
     require(_enum(value["profile"], PROFILES))
     mac = value["profile"] in MAC_TOOLCHAIN_PROFILES
     require(not signed or mac)
@@ -298,7 +312,8 @@ def _native(value: object, *, signed: bool = False) -> dict:
     return {"profile": value["profile"], "projectRoot": _path(value["projectRoot"]),
             "rootIdentity": _identity(value["rootIdentity"]), "cwd": _path(value["cwd"]),
             "toolchain": {**toolchain, "root": root, "rootIdentity": original},
-            **({"signingContext": content(value["signingContext"])} if signed else {})}
+            **({"signingContext": content(value["signingContext"])} if signed else {}),
+            **({"candidateHistory":history} if candidate else {})}
 
 
 @dataclass(frozen=True)
@@ -307,20 +322,28 @@ class AndroidBuildRequest:
     owner_generation: str
     context: dict
     native: dict
+    digest: str = ""
 
 
 def parse_request(raw: bytes) -> AndroidBuildRequest:
     value = _keys(_decode(raw, REQUEST_LIMIT, framed=True), {"protocol", "operationId", "ownerGeneration", "context", "native"})
-    require(value["protocol"] == PROTOCOL and _text(value["operationId"], _TOKEN) and _text(value["ownerGeneration"], _TOKEN))
-    selected = context(value["context"])
+    selected = context(value["context"]); candidate=candidate_create(selected)
+    require(value["protocol"] == (CANDIDATE_PROTOCOL if candidate else PROTOCOL)
+            and _text(value["operationId"], _TOKEN) and _text(value["ownerGeneration"], _TOKEN))
+    if candidate:
+        from uuid import UUID
+        require(UUID(hex=value["operationId"]).version==4)
+    import hashlib
     return AndroidBuildRequest(value["operationId"], value["ownerGeneration"], selected,
-                               _native(value["native"], signed=is_signed(selected)))
+                               _native(value["native"], signed=is_signed(selected),candidate=candidate),
+                               hashlib.sha256(raw).hexdigest() if candidate else "")
 
 
 def _request_binding(request: AndroidBuildRequest) -> dict:
     require(type(request) is AndroidBuildRequest and _text(request.operation_id, _TOKEN) and _text(request.owner_generation, _TOKEN))
     return {"operationId": request.operation_id, "ownerGeneration": request.owner_generation,
-            "context": context(request.context), "native": _native(request.native, signed=is_signed(request.context))}
+            "context": context(request.context), "native": _native(request.native, signed=is_signed(request.context),candidate=candidate_create(request.context)),
+            **({"requestSha256":request.digest} if candidate_create(request.context) else {})}
 
 
 def _selection(value: object) -> dict:
@@ -558,6 +581,7 @@ def _lifetime(value: object, *, signed: bool = False, command_limit: int | None 
 
 def validate_terminal(value: object, request: AndroidBuildRequest) -> None:
     # Ordinary wire contract remains signed6 and rejects every composed envelope.
+    require(not candidate_create(request.context))
     _validate_terminal(value, request)
 
 
@@ -684,8 +708,13 @@ class AndroidBuildFrames:
         self._frames = self._bytes = 0
         self._stage = -1
         self._terminal = self._failed = False
+        self._candidate_frames=None
+        if candidate_create(request.context):
+            from .local_candidate_create_protocol import CandidateFrames
+            self._candidate_frames=CandidateFrames(request)
 
     def response(self, kind: str, payload: dict) -> bytes:
+        if self._candidate_frames is not None:return self._candidate_frames.response(kind,payload)
         try:
             require(not self._failed and not self._terminal and self._frames < maximum_frames(self._request.context)
                     and _request_binding(self._request) == self._binding)

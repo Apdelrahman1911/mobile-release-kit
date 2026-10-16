@@ -165,7 +165,7 @@ fn candidate_field<'de,D:serde::Deserializer<'de>>(decoder:D)->Result<Option<Opt
 }
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
-struct CandidateInputs {operation_id:String,candidate_sha256:String,source_commit:String,source_tree:String,
+pub(crate) struct CandidateInputs {operation_id:String,candidate_sha256:String,source_commit:String,source_tree:String,
     application_id:String,version:CandidateVersion,files:[CandidateFile;3],observation:String,prior_create_finality:String}
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(deny_unknown_fields)]
@@ -174,7 +174,7 @@ struct CandidateVersion{name:String,build:u32}
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 struct CandidateFile{file_name:String,bytes:u64,sha256:String}
 impl CandidateInputs {
-    fn valid(&self,operation:&str)->bool{
+    pub(crate) fn valid(&self,operation:&str)->bool{
         let git=|v:&str|v.len()==40&&v.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b));
         let mut count=0;
         // Same selected Android application/version grammar as AndroidBuild.
@@ -189,6 +189,17 @@ impl CandidateInputs {
                 .all(|(file,(name,max))|file.file_name==name&&(1..=max).contains(&file.bytes)&&sha(&file.sha256))
             &&self.observation=="current-bundle-only"&&self.prior_create_finality=="not-established"
     }
+    pub(crate) fn matches_build(&self,app:&str,name:&str,build:u32,bytes:u64,hash:&str)->bool{
+        self.valid(&self.operation_id) && self.application_id==app && self.version.name==name && self.version.build==build
+            && self.files[0].bytes==bytes && self.files[0].sha256==hash
+    }
+    pub(crate) fn retained_heap_bytes(&self)->Option<usize>{
+        let mut bytes=0usize;
+        for value in [&self.operation_id,&self.candidate_sha256,&self.source_commit,&self.source_tree,&self.application_id,
+            &self.version.name,&self.observation,&self.prior_create_finality]{bytes=bytes.checked_add(value.capacity())?;}
+        for row in &self.files{bytes=bytes.checked_add(row.file_name.capacity())?.checked_add(row.sha256.capacity())?;}Some(bytes)
+    }
+
 }
 
 fn journal_uuid(v:&str)->bool{let b=v.as_bytes();b.len()==36&&b[8]==b'-'&&b[13]==b'-'&&b[18]==b'-'&&b[23]==b'-'&&b[14]==b'4'

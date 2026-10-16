@@ -23,7 +23,7 @@ import type { AndroidCatalogComparison, AndroidCatalogIdentity, AndroidToolchain
 import { androidCatalogActive, androidCatalogComparison, androidCatalogError, parseAndroidToolchainCatalogStatus, sameAndroidCatalogIdentity, sameAndroidCatalogSelection } from './androidToolchainCatalogProtocol.ts';
 import type { AndroidBuildApi, AndroidBuildArtifactValidation, AndroidBuildContext, AndroidBuildIdentity, AndroidBuildOperation, AndroidBuildSavedConfig,
   AndroidBuildSavedVersion, AndroidBuildSelection, AndroidBuildStatus, PrepareAndroidBuild, AndroidSigningAssignment, AndroidSigningSelection } from './androidBuildTypes.ts';
-import { ANDROID_BUILD_CONSENT, ANDROID_BUILD_SIGNED_CONSENT, parseAndroidSigningSelection, ANDROID_BUILD_CONSENT_MS, ANDROID_BUILD_COUNTER_MAX, androidBuildAvailabilityText,
+import { ANDROID_CANDIDATE_CONSENT, androidBuildObservation, ANDROID_BUILD_CONSENT, ANDROID_BUILD_SIGNED_CONSENT, parseAndroidSigningSelection, ANDROID_BUILD_CONSENT_MS, ANDROID_BUILD_COUNTER_MAX, androidBuildAvailabilityText,
   androidBuildCounter, androidBuildError, androidBuildOperationProgress, copyAndroidBuildRequest, parseAndroidBuildSavedConfig,
   parseAndroidBuildArtifactValidation, parseAndroidBuildSavedVersion, parseAndroidBuildStatus, sameAndroidBuildData, sameAndroidBuildIdentity, sameAndroidBuildSavedPair } from './androidBuildProtocol.ts';
 
@@ -56,7 +56,7 @@ interface AndroidToolServiceConsent {
 }
 export interface AndroidSigningObservation { selection: AndroidSigningSelection | null; issue: string | null }
 export interface AndroidBuildState {
-  mode: BridgeMode; buildMode: 'unsigned' | 'signed'; signing: AndroidSigningObservation; project: AndroidBuildProject | null; visible: boolean; selectionPending: boolean; verifyUploadSignature: boolean;
+  mode: BridgeMode; buildMode: 'unsigned' | 'signed'; retainCandidateInputs: boolean; signing: AndroidSigningObservation; project: AndroidBuildProject | null; visible: boolean; selectionPending: boolean; verifyUploadSignature: boolean;
   catalogStatus: AndroidToolchainCatalogStatus | null; catalogListening: boolean; catalogReadPending: boolean;
   catalogPending: 'refresh' | 'recover' | 'select' | null; catalogUnconfirmed: boolean; catalogCancelClaimed: AndroidCatalogIdentity | null; catalogCancelPending: boolean;
   catalogError: ApiError | null; catalogIssue: boolean;
@@ -225,7 +225,7 @@ export function androidBuildOwnerReason(state: AndroidBuildState): string | null
 }
 
 export class AndroidBuildController {
-  private state: AndroidBuildState = freeze<AndroidBuildState>({ mode: 'unavailable', buildMode: 'unsigned', signing: { selection: null, issue: 'Review saved upload-certificate policy and current credential assignments.' }, project: null, visible: false, selectionPending: false, verifyUploadSignature: false,
+  private state: AndroidBuildState = freeze<AndroidBuildState>({ mode: 'unavailable', buildMode: 'unsigned', retainCandidateInputs: false, signing: { selection: null, issue: 'Review saved upload-certificate policy and current credential assignments.' }, project: null, visible: false, selectionPending: false, verifyUploadSignature: false,
     connectionGeneration: 0, selectionGeneration: 0, contextGeneration: 0, requestGeneration: 0, listening: false, initialized: false, readPending: false,
     status: null, consent: null, pending: null, originalUnconfirmed: false, historical: false, cancelClaimed: null, error: null,
     catalogStatus: null, catalogListening: false, catalogReadPending: false, catalogPending: null, catalogUnconfirmed: false,
@@ -301,7 +301,13 @@ export class AndroidBuildController {
   versionIntent(): void { if (!this.disposed) this.retire(this.advance('contextGeneration')); }
   setBuildMode(buildMode: 'unsigned' | 'signed'): void {
     if (!this.disposed && ['unsigned', 'signed'].includes(buildMode) && buildMode !== this.state.buildMode &&
-        !(this.attempt?.startSent && !this.attempt.settled)) this.retire({ ...this.advance('contextGeneration'), buildMode });
+        !(this.attempt?.startSent && !this.attempt.settled)) this.retire({ ...this.advance('contextGeneration'), buildMode, retainCandidateInputs: false });
+  }
+  setRetainCandidateInputs(value: boolean): void {
+    if (this.disposed || typeof value !== 'boolean' || value === this.state.retainCandidateInputs ||
+        value && (this.state.buildMode !== 'signed' || !this.state.catalogStatus?.selected) ||
+        this.attempt?.startSent && !this.attempt.settled) return;
+    this.retire({ ...this.advance('contextGeneration'), retainCandidateInputs: value });
   }
   setVerifyUploadSignature(verifyUploadSignature: boolean): void {
     if (this.state.buildMode === 'signed') return;
@@ -328,12 +334,13 @@ export class AndroidBuildController {
     const projectChanged = !sameAndroidBuildData(next, this.state.project) || this.draftReference !== draft || this.snapshotReference !== snapshot ||
       this.versionReference !== result || this.versionBindingReference !== binding;
     if (!projectChanged && sameAndroidBuildData(signing, this.state.signing)) return;
-    const signingRelevant = this.attempt && !this.attempt.settled ? this.attempt.binding.context.operation === 'android-build-sign' : this.state.buildMode === 'signed';
+    const signingRelevant = this.attempt && !this.attempt.settled ? this.attempt.binding.context.operation !== 'android-build-inspect' : this.state.buildMode === 'signed';
     if (!projectChanged && !signingRelevant) { this.update({ signing }); return; }
     if (next?.projectId !== this.state.project?.projectId && this.observer) this.stopSources(this.observer);
     this.draftReference = draft; this.snapshotReference = snapshot; this.versionReference = result; this.versionBindingReference = binding;
     const badCounter = next !== null && ![next.draftRevision, next.baselineGeneration, next.observationGeneration].every(androidBuildCounter);
-    this.retire({ ...this.advance('contextGeneration'), project: next, signing, generationLost: this.state.generationLost || badCounter ||
+    this.retire({ ...this.advance('contextGeneration'), project: next, signing,
+      retainCandidateInputs: next?.projectId === this.state.project?.projectId && this.state.retainCandidateInputs, generationLost: this.state.generationLost || badCounter ||
       this.state.contextGeneration === ANDROID_BUILD_COUNTER_MAX });
   }
   setVisible(visible: boolean): void {
@@ -441,8 +448,9 @@ export class AndroidBuildController {
       sameAndroidBuildData(b.selection, p.selection) && b.context.projectId === p.projectId && b.context.draftRevision === p.draftRevision &&
       b.context.baselineGeneration === p.baselineGeneration && p.savedConfig !== null && p.savedVersion !== null &&
       sameAndroidBuildData(b.context.artifactValidation, this.artifactValidation()) &&
-      (b.context.operation === 'android-build-sign') === (this.state.buildMode === 'signed') &&
-      (b.context.operation !== 'android-build-sign' || this.state.signing.issue === null && sameAndroidBuildData(b.context.signing, this.state.signing.selection)) &&
+      (b.context.operation !== 'android-build-inspect') === (this.state.buildMode === 'signed') &&
+      (b.context.operation === 'android-candidate-inputs') === this.state.retainCandidateInputs &&
+      (b.context.operation === 'android-build-inspect' || this.state.signing.issue === null && sameAndroidBuildData(b.context.signing, this.state.signing.selection)) &&
       sameAndroidCatalogSelection(b.toolchainSelection, this.state.catalogStatus?.selected ?? null) &&
       sameAndroidBuildSavedPair(b.context, { savedConfig: p.savedConfig, savedVersion: p.savedVersion });
   }
@@ -492,7 +500,7 @@ export class AndroidBuildController {
       // but belongs to the old review, not this attempt's changed selection.
       const belongsToAttempt = sameAndroidBuildIdentity(attempt.identity, b) || this.originCandidate(attempt, status);
       if (belongsToAttempt && b?.result && !sameAndroidCatalogSelection(
-          b.result.schemaVersion === 2 ? b.result.toolchainSelection : null, attempt.binding.toolchainSelection)) {
+          androidBuildObservation(b.result).schemaVersion === 2 ? androidBuildObservation(b.result).toolchainSelection ?? null : null, attempt.binding.toolchainSelection)) {
         this.fail({ code: 'android_build_protocol' }, true); return null;
       }
       const selected = belongsToAttempt ? b?.activity?.selection : null;
@@ -1549,12 +1557,13 @@ export class AndroidBuildController {
     if (this.prepareReason() || !this.observer || !project?.savedConfig || !project.savedVersion || !project.selection || !project.versionObservation) return;
     const request = copyAndroidBuildRequest('prepare_android_build', { projectId: project.projectId, draftRevision: project.draftRevision,
       baselineGeneration: project.baselineGeneration, savedConfig: project.savedConfig, savedVersion: project.savedVersion,
-      artifactValidation: this.artifactValidation(), ...(this.state.buildMode === 'signed' ? { signing: this.state.signing.selection } : {}) }) as PrepareAndroidBuild | null;
+      artifactValidation: this.artifactValidation(), ...(this.state.buildMode === 'signed' ? { signing: this.state.signing.selection } : {}),
+      ...(this.state.retainCandidateInputs ? { operation: 'android-candidate-inputs', action: 'create' } : {}) }) as PrepareAndroidBuild | null;
     const now = this.now();
     if (!request || !Number.isFinite(now) || now < 0 || !Number.isFinite(now + ANDROID_BUILD_CONSENT_MS)) { this.fail({ code: 'android_build_invalid' }, true); return; }
     const counters = this.advance('requestGeneration'); if (counters.generationLost) { this.retire(counters); return; }
     const observer = this.observer;
-    const binding: AndroidBuildBinding = freeze({ context: { ...request, platform: 'android', operation: request.signing ? 'android-build-sign' : 'android-build-inspect' }, selection: project.selection,
+    const binding: AndroidBuildBinding = freeze({ context: { ...request, platform: 'android', operation: request.operation ?? (request.signing ? 'android-build-sign' : 'android-build-inspect') }, selection: project.selection,
       toolchainSelection: this.state.catalogStatus?.selected ?? null,
       observationGeneration: project.observationGeneration, versionObservation: project.versionObservation, connectionGeneration: this.state.connectionGeneration,
       selectionGeneration: this.state.selectionGeneration, contextGeneration: this.state.contextGeneration, requestGeneration: counters.requestGeneration! });
@@ -1609,7 +1618,7 @@ export class AndroidBuildController {
     this.update({ consent: null, pending: 'start', originalUnconfirmed: true, historical: false, error: null }); this.syncProject();
     if (!this.matches(attempt) || this.commonReason()) { this.retire(); return; }
     try {
-      const value = await attempt.observer.api.startAndroidBuild({ operationId, ownerGeneration, consentVersion: attempt.binding.context.operation === 'android-build-sign' ? ANDROID_BUILD_SIGNED_CONSENT : ANDROID_BUILD_CONSENT });
+      const value = await attempt.observer.api.startAndroidBuild({ operationId, ownerGeneration, consentVersion: attempt.binding.context.operation === 'android-candidate-inputs' ? ANDROID_CANDIDATE_CONSENT : attempt.binding.context.operation === 'android-build-sign' ? ANDROID_BUILD_SIGNED_CONSENT : ANDROID_BUILD_CONSENT });
       if (!attempt.observer.active || this.attempt !== attempt) return;
       const status = parseAndroidBuildStatus(value);
       if (!status?.operation || !sameAndroidBuildIdentity(status.operation, attempt.identity) || status.operation.phase === 'awaiting-consent') {
@@ -1719,4 +1728,13 @@ export const androidBuildLocalSigningHelp: HelpContent = {
   where: 'Get the existing .jks/.keystore, store password, key alias and key password from your signing-key owner or the secure backup made when that key was created. These are not your Google account password. Find the public upload-certificate SHA-256 in Play Console → App integrity → Upload key certificate.',
   format: 'In Project settings save android.uploadCertificateSha256 as 64 hexadecimal digits (colons are also accepted). In Credentials choose Android / Candidate / Build-signing, use Select file, enter the three values, then assess → keep → assign. If Firebase is required, select and assign its matching JSON there too. You do not copy or rename files in the project.',
   failure: 'A wrong password, alias, expired certificate, fingerprint mismatch or failed input restoration blocks success. Correct the original assignment after cleanup; never replace a production key simply to make this check pass. Gradle projects that require build-time credentials may need project changes; this action deliberately does not export your upload key to Gradle.',
+};
+
+export const androidCandidateInputsHelp: HelpContent = {
+  label: 'Keep local candidate inputs', requiredness: 'optional', requiredWhen: 'Only for a locally signed Mac build that you want to prepare for a later release.',
+  what: 'Keeps the signed AAB, metadata snapshot and validation report together and records them in local release history. It does not send anything to Google Play.',
+  why: 'A later release must refer to the same reviewed app and metadata, rather than silently rebuilding them.',
+  where: 'First save local Store opt-in and the candidate branch in Project settings, commit your intended project changes, and enroll Local release history. Select and assign your upload key in Credentials. The app manages the output folder.',
+  format: 'Choose this option before reviewing inputs. A clean supported Git project, saved version, matching candidate branch, registered Mac tools and an intact enrolled journal are required. No Google credential is needed for this local step.',
+  failure: 'If interrupted, wait for original cleanup and open Local release history to review or abandon that candidate. Abandon preserves its files. Do not delete history, replace its key, or repeat Build to recover an uncertain operation.',
 };

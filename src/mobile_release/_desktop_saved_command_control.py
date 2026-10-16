@@ -246,6 +246,13 @@ class _SavedCommandInput:
                 # another read. A large body is not a large public JSON frame.
                 return
             limit = 1 if active else min(64 * 1024, _protocol(self.domain).REQUEST_LIMIT + 1 - len(self.buffer))
+            if material_phase and self.domain is SavedCommandDomain.AndroidBuild:
+                candidate=getattr(self,"candidate_input",None)
+                if candidate is not None and candidate.reading:
+                    from ._desktop_candidate_input_control import CandidateCreateInput
+                    self._require(type(candidate) is CandidateCreateInput and candidate.source is self
+                                  and type(candidate.read_remaining) is int and 1<=candidate.read_remaining<=2048)
+                    limit=min(limit,candidate.read_remaining)
             self._require(limit > 0)
             try:
                 chunk = os.read(self.fd, limit)
