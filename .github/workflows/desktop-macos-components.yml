@@ -138,11 +138,13 @@ jobs:
             --features macos-installed-installer --bin mrk-macos-install
           rustup run 1.98.1 cargo check --locked --no-default-features \
             --features macos-installed-remover --bin mrk-macos-remove
-          # Only these three byte/data tests run. The Installer main, live
+          # Only launcher and existing recovery-contract byte/data tests run. The Installer main, live
           # filesystem adapter and removal entry point are not invoked.
           rustup run 1.98.1 cargo test --locked --no-default-features \
-            --features macos-installed-installer --bin mrk-macos-install \
-            installer::applications::tests:: -- --test-threads=1
+            --features macos-installed-installer --bin mrk-macos-install -- \
+            installer::applications::tests:: \
+            installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality \
+            --test-threads=1
       - name: Remove only this job's disposable compiler and dependencies
         if: always() && steps.work.outputs.root != ''
         shell: bash

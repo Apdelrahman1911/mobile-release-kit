@@ -185,6 +185,7 @@ mod installer {
         removal_observer_projection: Option<maintenance::RemovalObserverProjection>,
         payload_written: u64, payload_write_calls: u64,
         launcher_writes: applications::WriteCounts,
+        launcher_effects: Option<applications::Effects>,
         stage: Option<usize>, stage_name: Option<String>, app: Option<usize>, runtime: Option<usize>,
         runtime_publication: &'static str, app_publication: &'static str, payload_verified: bool,
         metadata: installation_record::Progress,
@@ -534,7 +535,7 @@ mod installer {
     impl Install {
         fn new() -> Self {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
-                worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),
+                worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),launcher_effects:None,
                 removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
                 #[cfg(feature = "macos-installed-removal-observer")]
                 removal_observer_projection:None,
@@ -557,7 +558,7 @@ mod installer {
             self.clock()?;
             let extra = (if self.worker_deadline.is_some() { worker::EXTRA_LIVE } else { 0 })
                 + self.removal_live_reserved;
-            check(self.originals.len() < 24576 && self.originals.iter().filter(|r| r.fd.is_some()).count() + extra < 96, "original-bound")?;
+            check(self.originals.len() < installation_record::ORIGINAL_LIMIT && self.originals.iter().filter(|r| r.fd.is_some()).count() + extra < 96, "original-bound")?;
             let n = self.originals.len(); self.originals.push(Original { fd: None, state: State::Reserved, role, parent, name: name.into(), identity: None }); Ok(n)
         }
         fn named(&self, parent: Option<usize>, name: &str) -> nix::Result<FileStat> {
@@ -1550,7 +1551,7 @@ mod installer {
             // existing <=17-deep traversal, not inside an invented flat input.
             let opens=files.checked_add(dirs.checked_mul(2).ok_or("complete-prefix-original-budget")?)
                 .and_then(|n|n.checked_add(4)).ok_or("complete-prefix-original-budget")?;
-            let rows=used.checked_add(opens).filter(|n|*n<=24576).ok_or("complete-prefix-original-budget")?;
+            let rows=used.checked_add(opens).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("complete-prefix-original-budget")?;
             check(live.checked_add(22).is_some_and(|n|n<=96),"complete-prefix-live-budget")?;
             let work=index.checked_mul(2).and_then(|n|n.checked_add(256*1024))
                 .ok_or("complete-prefix-memory")?;Ok((rows,work))
@@ -1598,7 +1599,7 @@ mod installer {
                 let bytes=u64::try_from(bytes).map_err(|_|"complete-prefix-memory")?;
                 complete_prefix_control_quote_data(removal_effective_control_bytes(book)?,
                     usize::try_from(bytes).map_err(|_|"complete-prefix-memory")?)?;
-                let next=book.removal_control_reserved.checked_add(bytes).filter(|n|*n<=16*1024*1024)
+                let next=book.removal_control_reserved.checked_add(bytes).filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64))
                     .ok_or("complete-prefix-memory")?;
                 self.charged=self.charged.checked_add(bytes).ok_or("complete-prefix-memory")?;
                 book.removal_control_reserved=next;Ok(())
@@ -1667,7 +1668,7 @@ mod installer {
                     .ok_or("complete-prefix-memory")?;
                 self.charge(book,base)?;
                 self.original_quote=COMPLETE_PREFIX_PRELUDE_ORIGINALS;
-                let end=book.originals.len().checked_add(self.original_quote).filter(|n|*n<=24576).ok_or("complete-prefix-original-budget")?;
+                let end=book.originals.len().checked_add(self.original_quote).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("complete-prefix-original-budget")?;
                 reserve_removal_original_storage(book,end)?;
                 check(complete_prefix_live_base(book,read)?.checked_add(12)
                     .is_some_and(|n|n<=96),"complete-prefix-live-budget")?;
@@ -1757,12 +1758,12 @@ mod installer {
                     complete_prefix_live_base(book,read)?,index)?;
                 self.charge(book,workspace)?;
                 self.original_quote=self.original_quote.checked_add(future.checked_sub(book.originals.len())
-                    .ok_or("complete-prefix-original-budget")?).filter(|n|*n<=24576).ok_or("complete-prefix-original-budget")?;
+                    .ok_or("complete-prefix-original-budget")?).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("complete-prefix-original-budget")?;
                 // Reserve the SAME full prefix pass before entering native B
                 // admission. Its actual B-derived Q is not the incoming C Q.
-                let prefix=partial_fresh_retry_original_quote_data(files,dirs)?;
+                let prefix=partial_fresh_inventory_quote_data(files,dirs,self.inventory.as_ref().ok_or("complete-prefix-inventory")?)?;
                 let end=self.original_start.ok_or("complete-prefix-originals")?.checked_add(self.original_quote)
-                    .and_then(|n|n.checked_add(prefix)).filter(|n|*n<=24576).ok_or("complete-prefix-original-budget")?;
+                    .and_then(|n|n.checked_add(prefix)).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("complete-prefix-original-budget")?;
                 reserve_removal_original_storage(book,end)?;
                 if self.context.as_ref().ok_or("complete-prefix-context")?.role.requires_signature_data() {
                     self.native_attempted=true;
@@ -1809,7 +1810,7 @@ mod installer {
                 context.post(book,read)
             }
             pub(super) fn quoted_originals_data(&self)->Result<usize> {
-                check(self.returned && self.original_quote<=24576,"complete-prefix-original-budget")?;Ok(self.original_quote)
+                check(self.returned && self.original_quote<=installation_record::ORIGINAL_LIMIT,"complete-prefix-original-budget")?;Ok(self.original_quote)
             }
             pub(super) fn settled_data(&self)->bool {self.state==CompletePrefixState::Retired && !self.pending_native_data()}
             pub(super) fn unentered_or_settled_data(&self)->bool {
@@ -1894,13 +1895,13 @@ mod installer {
         }
         fn complete_prefix_control_quote_data(effective:u64,bytes:usize)->Result<u64> {
             effective.checked_add(u64::try_from(bytes).map_err(|_|"complete-prefix-memory")?)
-                .filter(|n|*n<=16*1024*1024).ok_or("complete-prefix-memory")
+                .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("complete-prefix-memory")
         }
         fn complete_prefix_total_quote_data(start:usize,prelude:usize,source:usize,content:usize)->Result<usize> {
             check(prelude==1,"complete-prefix-original-budget")?;
             let total=prelude.checked_add(source).and_then(|n|n.checked_add(content))
-                .filter(|n|*n<=24576).ok_or("complete-prefix-original-budget")?;
-            check(start.checked_add(total).is_some_and(|n|n<=24576),"complete-prefix-original-budget")?;Ok(total)
+                .filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("complete-prefix-original-budget")?;
+            check(start.checked_add(total).is_some_and(|n|n<=installation_record::ORIGINAL_LIMIT),"complete-prefix-original-budget")?;Ok(total)
         }
         fn complete_prefix_intent_data(raw:&[u8],invocation:&str,selected:&ReleaseSetData)->Result<IntentData> {
             check(worker::invocation_valid(invocation),"complete-prefix-intent-invocation")?;
@@ -1956,7 +1957,7 @@ mod installer {
             reserve_removal_original_storage(book,start+initial)?;
             complete_prefix_control_quote_data(removal_effective_control_bytes(book)?,COMPLETE_PREFIX_INTENT_WORK)?;
             book.removal_control_reserved=book.removal_control_reserved.checked_add(COMPLETE_PREFIX_INTENT_WORK as u64)
-                .filter(|n|*n<=16*1024*1024).ok_or("complete-prefix-memory")?;
+                .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("complete-prefix-memory")?;
             let result:Result<CompleteGenerationPrefixAuditData>=(|| {
                 let (expected,intent_digest)=complete_prefix_intent(book,read,child,retry,invocation,role)?;
                 check(book.originals.len().checked_sub(start)==Some(1),"complete-prefix-prelude-originals")?;
@@ -2086,16 +2087,16 @@ mod installer {
             assert_eq!(source,237);assert_eq!(content,250);
             let total=complete_prefix_total_quote_data(0,1,source,content).unwrap();
             assert_eq!(total,488);
-            assert_eq!(complete_prefix_total_quote_data(24576-total,1,source,content).unwrap(),total);
-            assert!(complete_prefix_total_quote_data(24577-total,1,source,content).is_err());
+            assert_eq!(complete_prefix_total_quote_data(installation_record::ORIGINAL_LIMIT-total,1,source,content).unwrap(),total);
+            assert!(complete_prefix_total_quote_data((installation_record::ORIGINAL_LIMIT + 1)-total,1,source,content).is_err());
             assert!(complete_prefix_total_quote_data(0,0,source,content).is_err());
             assert!(complete_prefix_total_quote_data(0,1,usize::MAX,content).is_err());
             assert!(partial_fresh_retry_original_quote_data(1,2).unwrap()<content);
             assert!(complete_prefix_cost_data(10,17,6,75,4096).is_err());
-            assert!(complete_prefix_cost_data(24544,17,6,0,4096).is_err());
+            assert!(complete_prefix_cost_data((installation_record::ORIGINAL_LIMIT - 32),17,6,0,4096).is_err());
             assert!(complete_prefix_cost_data(0,1,usize::MAX,0,4096).is_err());
             assert!(complete_prefix_cost_data(0,1,1,0,usize::MAX).is_err());
-            let pool=16*1024*1024;
+            let pool=(installation_record::CONTROL_LIMIT as u64);
             assert_eq!(complete_prefix_control_quote_data(pool-32768,32768).unwrap(),pool);
             assert!(complete_prefix_control_quote_data(pool-32768,32769).is_err());
             assert!(complete_prefix_control_quote_data(pool,usize::MAX).is_err());
@@ -2147,6 +2148,8 @@ mod installer {
             pub history: Option<History>, pub old_app: Option<usize>, pub old_release: Option<usize>,
             pub intent: Option<IntentData>, pub intent_original: Option<usize>,
             controls: Option<ProducerControls>, pub(super) archives:Option<InstallArchiveObservation>,
+            launcher: Option<applications::Observation>,
+            launcher_removal: Option<applications::RemovalPreparation>,
         }
         // Same-book originals, not installed-file trust. An old pair is only
         // bounded retained DATA; the new package selects eligible generations.
@@ -2222,7 +2225,7 @@ mod installer {
             fn new_data(reference:PartialFreshRetryReferenceData,observed:usize,quoted:usize)->Result<Self> {
                 PartialFreshRetryReferenceData::from_fields_data(reference.fields_data())?;
                 check(reference.observed_originals_data()<=observed && reference.post_originals_data()<=quoted
-                    && observed<=quoted && quoted<=24576,"rehome-retry-outer-cost")?;
+                    && observed<=quoted && quoted<=installation_record::ORIGINAL_LIMIT,"rehome-retry-outer-cost")?;
                 Ok(Self{reference,observed,quoted})
             }
             fn same_input_data(reference:PartialFreshRetryReferenceData)->Result<Self> {
@@ -3308,13 +3311,13 @@ mod installer {
             for (count,one) in [(0,Some(single)),(1,None),(2,Some(single)),(65,None)]{
                 assert!(completed_entry_nomination_data(count,one,false).is_err());
             }
-            assert_eq!(completed_entry_original_quote_data(24576-66).unwrap(),24576);
-            assert!(completed_entry_original_quote_data(24576-65).is_err());
+            assert_eq!(completed_entry_original_quote_data(installation_record::ORIGINAL_LIMIT-66).unwrap(),installation_record::ORIGINAL_LIMIT);
+            assert!(completed_entry_original_quote_data(installation_record::ORIGINAL_LIMIT-65).is_err());
             assert!(completed_entry_original_quote_data(usize::MAX).is_err());
-            assert_eq!(completed_entry_locked_quote_data(24576-65).unwrap(),24576);
-            assert!(completed_entry_locked_quote_data(24576-64).is_err());
+            assert_eq!(completed_entry_locked_quote_data(installation_record::ORIGINAL_LIMIT-65).unwrap(),installation_record::ORIGINAL_LIMIT);
+            assert!(completed_entry_locked_quote_data(installation_record::ORIGINAL_LIMIT-64).is_err());
             assert!(completed_entry_locked_quote_data(usize::MAX).is_err());
-            assert_eq!(partial_fresh_parser_peak_data().unwrap(),448*1024);
+            assert_eq!(partial_fresh_parser_peak_data().unwrap(),448*1024+applications::PHASE_CONTROL_QUOTE as usize);
             assert!(std::mem::size_of::<[Option<CompletedIntentSummary>;64]>()<=8192);
             let invocation="1".repeat(32);let name=transaction::intent_name_data(&invocation).unwrap();
             assert_eq!(completed_entry_intent_leaf_data(&name).unwrap(),Some(invocation.as_str()));
@@ -3362,13 +3365,14 @@ mod installer {
             PARTIAL_FRESH_WORK.checked_add(transaction::INTENT_LIMIT.checked_mul(2).ok_or("entry-probe-memory")?)
                 .and_then(|n|n.checked_add(transaction::STATE_LIMIT.checked_mul(2)?))
                 .and_then(|n|n.checked_add(transaction::CAPSULE_LIMIT.checked_mul(2)?))
+                .and_then(|n|n.checked_add(applications::PHASE_CONTROL_QUOTE as usize))
                 .ok_or("entry-probe-memory")
         }
         fn completed_entry_original_quote_data(used:usize)->Result<usize> {
-            used.checked_add(COMPLETED_ENTRY_ORIGINALS).filter(|n|*n<=24576).ok_or("entry-probe-original-bound")
+            used.checked_add(COMPLETED_ENTRY_ORIGINALS).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("entry-probe-original-bound")
         }
         fn completed_entry_locked_quote_data(used:usize)->Result<usize>{
-            used.checked_add(COMPLETED_ENTRY_ORIGINALS-1).filter(|n|*n<=24576).ok_or("entry-probe-original-bound")
+            used.checked_add(COMPLETED_ENTRY_ORIGINALS-1).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("entry-probe-original-bound")
         }
         pub(super) fn completed_entry_probe_reserve(book:&mut Install)->Result<()> {
             let through=completed_entry_original_quote_data(book.originals.len())?;
@@ -3377,7 +3381,7 @@ mod installer {
             check(std::mem::size_of::<[Option<CompletedIntentSummary>;64]>()<=8192,
                 "entry-probe-summary-bound")?;
             check(removal_effective_control_bytes(book)?.checked_add(partial_fresh_parser_peak_data()? as u64)
-                .is_some_and(|n|n<=16*1024*1024),"entry-probe-memory")?;
+                .is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"entry-probe-memory")?;
             check(book.originals.iter().filter(|r|r.fd.is_some()).count().checked_add(1)
                 .is_some_and(|n|n<=96),"entry-probe-live-bound")?;book.clock()
         }
@@ -3429,7 +3433,7 @@ mod installer {
             reserve_removal_original_storage(book,through)?;
             let before=removal_archive_stat(book,root,true,0o755)?;
             check(removal_effective_control_bytes(book)?.checked_add(partial_fresh_parser_peak_data()? as u64)
-                .is_some_and(|n|n<=16*1024*1024),"entry-probe-memory")?;
+                .is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"entry-probe-memory")?;
             let first=book.originals.len();
             let rows=removal_root_roster(book,root)?;
             let mut seen:[Option<CompletedIntentSummary>;64]=[None;64];
@@ -3513,7 +3517,8 @@ mod installer {
         enum RemovalRosterKind {InstalledRoot,Archive,Rehome,RehomeWithRetries,Versions,Release,InstallPhases,RestorePhases}
         impl RemovalRosterKind {
             fn limit(self)->usize {match self {Self::InstalledRoot=>350,Self::Archive=>7,Self::Rehome=>REHOME_TOP_LIMIT,Self::RehomeWithRetries=>REHOME_TOP_LIMIT+REHOME_RETRY_LIMIT,
-                Self::Versions=>9,Self::Release=>2,Self::InstallPhases=>4,Self::RestorePhases=>3}}
+                Self::Versions=>9,Self::Release=>2,Self::InstallPhases=>4+transaction::INVOCATION_LIMIT,
+                Self::RestorePhases=>3+transaction::INVOCATION_LIMIT}}
             fn mode(self)->u32 {match self {Self::InstalledRoot|Self::Versions|Self::Release=>0o755,_=>0o700}}
             fn work(self)->usize {match self {Self::InstalledRoot|Self::Rehome|Self::RehomeWithRetries=>256*1024,_=>128*1024}}
         }
@@ -3705,7 +3710,7 @@ mod installer {
             let pending=table.rows.iter().filter(|row|row.files[0].is_none() && row.files[1].as_ref()
                 .is_some_and(|file|file.shape==RemovalArchiveShape::WritingPrefix)).count();
             let additional=pending.checked_mul(2).ok_or("removal-history-original-bound")?;
-            check(book.originals.len().checked_add(additional).is_some_and(|n|n<=24576),"removal-history-original-bound")?;
+            check(book.originals.len().checked_add(additional).is_some_and(|n|n<=installation_record::ORIGINAL_LIMIT),"removal-history-original-bound")?;
             for index in 0..table.rows.len() {
                 let row=&table.rows[index];
                 if row.files[0].is_some() || !row.files[1].as_ref().is_some_and(|file|file.shape==RemovalArchiveShape::WritingPrefix){continue;}
@@ -3997,6 +4002,7 @@ mod installer {
         struct RehomeReleaseData {name:String,inventory:[u8;32]}
         pub(super) struct RehomeMoveSetData<'a> {
             genesis:&'a RemovalGenesisData,moves:Vec<RehomeMoveData>,releases:Vec<RehomeReleaseData>,files:usize,bytes:u64,invocations:InstallInvocationSetData,
+            launcher_controls:Vec<(String,[u8;32])>,
         }
         impl<'a> RehomeMoveSetData<'a> {
             fn memory(&self,extra:usize)->Result<usize> {
@@ -4004,6 +4010,9 @@ mod installer {
                     .checked_mul(std::mem::size_of::<RehomeMoveData>()).ok_or("rehome-data-memory")?)
                     .and_then(|n|n.checked_add(self.releases.capacity().checked_mul(std::mem::size_of::<RehomeReleaseData>())?))
                     .and_then(|n|n.checked_add(extra)).ok_or("rehome-data-memory")?;
+                size=size.checked_add(self.launcher_controls.capacity().checked_mul(std::mem::size_of::<(String,[u8;32])>())
+                    .ok_or("rehome-data-memory")?).ok_or("rehome-data-memory")?;
+                for (name,_) in &self.launcher_controls {size=size.checked_add(name.capacity()).ok_or("rehome-data-memory")?;}
                 for name in self.moves.iter().map(|x|&x.name).chain(self.releases.iter().map(|x|&x.name)) {
                     size=size.checked_add(name.capacity()).ok_or("rehome-data-memory")?;
                 }
@@ -4052,7 +4061,7 @@ mod installer {
                 check(initial<=REHOME_WORK,"rehome-data-memory")?;
                 moves.try_reserve_exact(REHOME_TOP_LIMIT).map_err(|_|"rehome-data-allocation")?;
                 releases.try_reserve_exact(9).map_err(|_|"rehome-data-allocation")?;
-                let mut value=Self{genesis,moves,releases,files:0,bytes:0,invocations:InstallInvocationSetData::empty()};value.memory(selected_raw.capacity()+4096)?;
+                let mut value=Self{genesis,moves,releases,files:0,bytes:0,invocations:InstallInvocationSetData::empty(),launcher_controls:Vec::new()};value.memory(selected_raw.capacity()+4096)?;
                 drop(selected_raw);
                 value.metadata(transaction::STATE_NAME.to_owned(),Some(state.digest_data()))?;
                 value.add("versions".to_owned(),RehomeKindData::Versions)?;
@@ -4082,13 +4091,33 @@ mod installer {
                     ActionData::Uninstall=>return Err("rehome-data-install-action"),
                 }Ok(())
             }
+            fn add_launcher_phase(&mut self,invocation:&str,reference:mobile_release_desktop::macos_applications_launcher::PhaseReferenceData)->Result<()> {
+                check(reference.valid_data() && self.launcher_controls.len()<transaction::INVOCATION_LIMIT,"rehome-launcher-bound")?;
+                let top=format!(".install-{}",reference.stage_instance);
+                check(self.moves.iter().any(|row|row.name==top
+                    && matches!(row.kind,RehomeKindData::InstallPhases|RehomeKindData::RestorePhases)),"rehome-launcher-stage")?;
+                let path=rehome_path_data(&[&top,&applications::phase_name(invocation)?])?;
+                check(!self.launcher_controls.iter().any(|(name,_)|name==&path),"rehome-launcher-duplicate")?;
+                let expected=archive_hex_data::<32>(&reference.sha256)?;
+                check(*self.span(&path)?.digest_data()==expected,"rehome-launcher-digest")?;
+                if self.launcher_controls.capacity()==0 {
+                    self.memory(transaction::INVOCATION_LIMIT*std::mem::size_of::<(String,[u8;32])>()+path.capacity())?;
+                    self.launcher_controls.try_reserve_exact(transaction::INVOCATION_LIMIT).map_err(|_|"rehome-data-allocation")?;
+                }
+                self.launcher_controls.push((path,expected));self.memory(0)?;Ok(())
+            }
+            fn phase_names<'b>(&'b self,spec:&'b RehomeMoveData)->impl Iterator<Item=&'b str> {
+                spec.kind.phases().iter().copied().chain(self.launcher_controls.iter().filter_map(move |(path,_)|{
+                    let (top,leaf)=path.split_once('/')?;(top==spec.name).then_some(leaf)
+                }))
+            }
             fn finish_genesis(mut self)->Result<Self> {
                 self.moves.sort_unstable_by(|a,b| {
                     (a.kind==RehomeKindData::Versions).cmp(&(b.kind==RehomeKindData::Versions)).then(a.name.cmp(&b.name))
                 });
                 self.releases.sort_unstable_by(|a,b|a.name.cmp(&b.name));
                 let expected=self.moves.iter().map(|row|if row.kind==RehomeKindData::Metadata{1}else{row.kind.phases().len()})
-                    .sum::<usize>().checked_add(self.releases.len()*2).ok_or("rehome-data-control-count")?;
+                    .sum::<usize>().checked_add(self.releases.len()*2).and_then(|n|n.checked_add(self.launcher_controls.len())).ok_or("rehome-data-control-count")?;
                 let mut special=[false;5];
                 for row in self.genesis.controls_data() {
                     if row.kind_data()!=0 {
@@ -4135,6 +4164,9 @@ mod installer {
                 let path=row.path_data();
                 if row.kind_data()!=0 || row.identity_data().mode!=0o100444 || row.flags_data()!=0
                     || row.identity_data().links!=1 || row.len_data()==0 {return false;}
+                if let Some((_,expected))=self.launcher_controls.iter().find(|(name,_)|name==path) {
+                    return row.digest_data()==expected;
+                }
                 let mut parts=path.split('/');let Some(top)=parts.next()else{return false;};
                 let Some(spec)=self.moves.iter().find(|x|x.name==top)else{return false;};
                 match spec.kind {
@@ -4313,7 +4345,7 @@ mod installer {
             pub(super) fn audit_originals_data(&self)->Result<usize> {
                 let old=self.directories.checked_mul(2).and_then(|n|n.checked_add(self.files)).ok_or("rehome-audit-original-budget")?;
                 self.retries.iter().try_fold(old,|n,r|n.checked_add(1).and_then(|n|n.checked_add(r.post_originals_data()))
-                    .filter(|n|*n<=24576).ok_or("rehome-audit-original-budget"))
+                    .filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("rehome-audit-original-budget"))
             }
             fn encode(&self,out:&mut SnapshotBytes)->Result<()> {
                 rehome_retry_rows_data(&self.retries)?;
@@ -4336,7 +4368,7 @@ mod installer {
                 "rehome-data-audit-count")?;
             let records=directories.checked_mul(2).and_then(|n|n.checked_add(files)).and_then(|n|n.checked_mul(passes))
                 .and_then(|n|n.checked_add(existing_records)).ok_or("rehome-data-audit-budget")?;
-            check(records<=24576 && existing_live.checked_add(5).is_some_and(|n|n<=96)
+            check(records<=installation_record::ORIGINAL_LIMIT && existing_live.checked_add(5).is_some_and(|n|n<=96)
                 && plan_work<=REHOME_WORK && retained_work.checked_add(plan_work)
                     .and_then(|n|n.checked_add(65536+8192)).is_some_and(|n|n<=REMOVAL_SNAPSHOT_WORK as usize)
                 && other_storage.checked_add(control_storage).is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT),
@@ -4347,30 +4379,30 @@ mod installer {
         // callers still debit actual originals and retain the same Book. The
         // future names are only SOURCE-constructed <=255-byte components.
         fn removal_original_storage_quote_data(len:usize,capacity:usize,names:usize,end:usize)->Result<u64> {
-            check(len<=capacity && len<=end && end<=24576,"removal-original-storage-count")?;
+            check(len<=capacity && len<=end && end<=installation_record::ORIGINAL_LIMIT,"removal-original-storage-count")?;
             let unit=std::mem::size_of::<Original>();
             let old=capacity.checked_mul(unit).ok_or("removal-original-storage-memory")?;
             let growth=if end>capacity {end.checked_mul(unit).ok_or("removal-original-storage-memory")?}else{0};
             let future=(end-len).checked_mul(255).ok_or("removal-original-storage-memory")?;
             let total=old.checked_add(growth).and_then(|n|n.checked_add(names)).and_then(|n|n.checked_add(future))
                 .ok_or("removal-original-storage-memory")?;
-            check(total<=16*1024*1024,"removal-original-storage-memory")?;Ok(total as u64)
+            check(total<=installation_record::CONTROL_LIMIT,"removal-original-storage-memory")?;Ok(total as u64)
         }
         fn removal_original_storage_transition_data(control:u64,reserved:u64,observation:Option<u64>,observation_reserved:u64,
             quote:u64)->Result<(u64,u64,u64)> {
-            check(control<=16*1024*1024 && reserved<=control && quote<=16*1024*1024,"removal-original-storage-memory")?;
+            check(control<=(installation_record::CONTROL_LIMIT as u64) && reserved<=control && quote<=(installation_record::CONTROL_LIMIT as u64),"removal-original-storage-memory")?;
             let wanted=quote.max(reserved);let delta=wanted-reserved;
-            let next=control.checked_add(delta).filter(|n|*n<=16*1024*1024).ok_or("removal-original-storage-memory")?;
+            let next=control.checked_add(delta).filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-original-storage-memory")?;
             let effective=match observation {Some(observed)=>observed.checked_add(next.checked_sub(observation_reserved)
                     .ok_or("removal-original-storage-memory")?).ok_or("removal-original-storage-memory")?,None=>next};
-            check(effective<=16*1024*1024,"removal-original-storage-memory")?;Ok((next,wanted,effective))
+            check(effective<=(installation_record::CONTROL_LIMIT as u64),"removal-original-storage-memory")?;Ok((next,wanted,effective))
         }
         pub(super) fn removal_effective_control_bytes(book:&Install)->Result<u64> {
             let total=match book.removal_observation_control {
                 Some(observed)=>observed.checked_add(book.removal_control_reserved.checked_sub(book.removal_observation_reserved)
                     .ok_or("removal-original-storage-memory")?).ok_or("removal-original-storage-memory")?,
                 None=>book.removal_control_reserved};
-            check(total<=16*1024*1024,"removal-original-storage-memory")?;Ok(total)
+            check(total<=installation_record::CONTROL_LIMIT as u64,"removal-original-storage-memory")?;Ok(total)
         }
         pub(super) fn reserve_removal_original_storage(book:&mut Install,absolute_future_rows:usize)->Result<()> {
             book.clock()?;
@@ -4389,7 +4421,7 @@ mod installer {
             book.clock()
         }
         fn rehome_originals_before(book:&mut Install,count:usize)->Result<usize> {
-            let start=book.originals.len();let end=start.checked_add(count).filter(|n|*n<=24576)
+            let start=book.originals.len();let end=start.checked_add(count).filter(|n|*n<=installation_record::ORIGINAL_LIMIT)
                 .ok_or("rehome-audit-original-bound")?;
             reserve_removal_original_storage(book,end)?;Ok(start)
         }
@@ -4404,7 +4436,7 @@ mod installer {
             let unit=std::mem::size_of::<Original>();
             assert_eq!(removal_original_storage_quote_data(2,2,5,4).unwrap(),(6*unit+5+2*255) as u64);
             assert_eq!(removal_original_storage_quote_data(2,8,5,4).unwrap(),(8*unit+5+2*255) as u64);
-            for (len,cap,end) in [(3,2,3),(3,3,2),(0,0,24577),(usize::MAX,usize::MAX,usize::MAX)] {
+            for (len,cap,end) in [(3,2,3),(3,3,2),(0,0,(installation_record::ORIGINAL_LIMIT + 1)),(usize::MAX,usize::MAX,usize::MAX)] {
                 assert!(removal_original_storage_quote_data(len,cap,0,end).is_err());
             }
             assert!(removal_original_storage_quote_data(1,1,usize::MAX,2).is_err());
@@ -4418,8 +4450,8 @@ mod installer {
             assert_eq!(removal_original_storage_transition_data(control,reserved,None,0,quote+100).unwrap(),(control+100,reserved+100,effective+100));
             assert_eq!(removal_original_storage_transition_data(4096,0,Some(8192),2048,quote).unwrap(),
                 (4096+quote,quote,10240+quote));
-            assert!(removal_original_storage_transition_data(16*1024*1024,0,None,0,1).is_err());
-            assert!(removal_original_storage_transition_data(4096,0,Some(16*1024*1024),4096,1).is_err());
+            assert!(removal_original_storage_transition_data((installation_record::CONTROL_LIMIT as u64),0,None,0,1).is_err());
+            assert!(removal_original_storage_transition_data(4096,0,Some((installation_record::CONTROL_LIMIT as u64)),4096,1).is_err());
             assert!(removal_original_storage_transition_data(1024,0,Some(2048),2048,1).is_err());
             assert!(removal_original_storage_transition_data(u64::MAX,0,None,0,1).is_err());
             assert!(removal_original_storage_transition_data(0,u64::MAX,None,0,1).is_err());
@@ -4466,6 +4498,27 @@ mod installer {
                 let intent=IntentData::parse_recorded_data(&raw,&selected).map_err(|_|"rehome-plan-recorded-intent")?;drop(raw);
                 check(intent.invocation_data()==evidence.invocation,"rehome-plan-history-invocation")?;
                 plan.add_intent(&selected,&state,&intent)?;
+            }
+            // Read only the existing, authenticated capsule/intent controls;
+            // phase names and digests never originate from directory discovery.
+            // Detection only, never admission: legacy snapshots avoid any
+            // extra parse. Every extra control still needs the exact capsule
+            // binding below and finish_genesis's closed complete roster.
+            if genesis.controls_data().iter().any(|row|row.path_data().rsplit('/').next()
+                .is_some_and(|leaf|leaf.starts_with("launcher-"))) {
+            for invocation in std::iter::once(state.invocation_data()).chain(state.evidence_data().map(|row|row.invocation)) {
+                let raw=rehome_span_bytes_data(genesis,&data(transaction::capsule_name_data(invocation))?,transaction::CAPSULE_LIMIT,&mut read)?;
+                let capsule=CapsuleData::parse_recorded_data(&raw,&selected).map_err(|_|"rehome-launcher-capsule")?;drop(raw);
+                if let Some(reference)=capsule.launcher_data().and_then(|row|row.publication_phase.as_ref()) {
+                    let raw=rehome_span_bytes_data(genesis,&data(transaction::intent_name_data(invocation))?,transaction::INTENT_LIMIT,&mut read)?;
+                    let intent=IntentData::parse_recorded_data(&raw,&selected).map_err(|_|"rehome-launcher-intent")?;drop(raw);
+                    check(capsule.invocation_data()==invocation,"rehome-launcher-invocation")?;
+                    let path=rehome_path_data(&[&format!(".install-{}",reference.stage_instance),&applications::phase_name(invocation)?])?;
+                    let raw=rehome_span_bytes_data(genesis,&path,4096,&mut read)?;
+                    let reference=applications::archive_phase_reference(&capsule,&intent,&raw)?;
+                    plan.add_launcher_phase(invocation,reference)?;
+                }
+            }
             }
             let plan=plan.finish_genesis()?;Ok(RehomeParsedPlan {selected,state,plan})
         }
@@ -4707,9 +4760,9 @@ mod installer {
                         })?;
                     }
                 }else{
-                    check(rehome_exact_names_data(&children,spec.kind.phases().iter()),"rehome-audit-phase-roster")?;
+                    check(rehome_exact_names_data(&children,plan.phase_names(spec)),"rehome-audit-phase-roster")?;
                     fold.directory(&spec.name,before.0,before.1,&children)?;
-                    for leaf in spec.kind.phases() {
+                    for leaf in plan.phase_names(spec) {
                         let path=rehome_path_data(&[&spec.name,leaf])?;
                         let inode=removal_archive_inode(&children,leaf).ok_or("rehome-audit-source-missing")?;
                         rehome_audit_file(book,directory,leaf,&path,inode,plan,fold)?;
@@ -4865,7 +4918,7 @@ mod installer {
             let direct_q=if source.same_input_data() {Some(if count==0{0}else{partial_fresh_retry_quote(book,read.input)?})}else{None};
             let quote=direct_q.unwrap_or(0).checked_add(1).and_then(|n|n.checked_mul(count))
                 .ok_or("rehome-retry-original-budget")?;
-            let end=book.originals.len().checked_add(quote).filter(|n|*n<=24576).ok_or("rehome-retry-original-budget")?;
+            let end=book.originals.len().checked_add(quote).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("rehome-retry-original-budget")?;
             reserve_removal_original_storage(book,end)?;
             if let Some(q)=direct_q {if count!=0 {
                 check(partial_fresh_retry_quote(book,read.input)?==q,"rehome-retry-source-quote")?;
@@ -4903,7 +4956,7 @@ mod installer {
                 })?;
                 let actual=book.originals.len().checked_sub(start).ok_or("rehome-retry-original-budget")?;
                 let quoted=source.current_quote_data(&reference)?.checked_add(1).ok_or("rehome-retry-original-budget")?;
-                check(actual<=quoted && start.checked_add(quoted).is_some_and(|n|n<=24576)
+                check(actual<=quoted && start.checked_add(quoted).is_some_and(|n|n<=installation_record::ORIGINAL_LIMIT)
                     && book.originals[start..].iter().all(|o|o.name.len()<=255 && o.name.capacity()<=255),
                     "rehome-retry-original-budget")?;
                 rows.push(reference);
@@ -5463,10 +5516,10 @@ mod installer {
                 && v.retry_count<transaction::INVOCATION_LIMIT,"partial-fresh-attempt-bound")?;
             check(v.physical_bytes.checked_add(v.incoming_bytes).and_then(|n|n.checked_add(v.evidence_bytes))
                 .and_then(|n|n.checked_add(v.producer_bytes)).is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT)
-                && v.control_bytes<=16*1024*1024,"partial-fresh-storage-bound")?;
+                && v.control_bytes<=(installation_record::CONTROL_LIMIT as u64),"partial-fresh-storage-bound")?;
             let additional=v.directories.checked_mul(2).and_then(|n|n.checked_add(v.files))
                 .and_then(|n|n.checked_mul(v.audits));
-            check(additional.and_then(|n|n.checked_add(v.records)).is_some_and(|n|n<=24576)
+            check(additional.and_then(|n|n.checked_add(v.records)).is_some_and(|n|n<=installation_record::ORIGINAL_LIMIT)
                 && v.live<=96,"partial-fresh-original-bound")?;
             check(v.retained_work.checked_add(v.transient_work).is_some_and(|n|n<=PARTIAL_FRESH_WORK),
                 "partial-fresh-memory")
@@ -5665,8 +5718,7 @@ mod installer {
                     }
                     check(actual.mode!=0o040555 || !frontier,"partial-fresh-sealed-tree-incomplete")?;
                     let state=if actual.mode==0o040555 {PartialFreshFileState::Complete}else{PartialFreshFileState::Unfinished};
-                    check(files<=installation_record::FILE_LIMIT as u64 && directories<=installation_record::FILE_LIMIT as u64
-                        && bytes<=installation_record::PAYLOAD_LIMIT,"partial-fresh-tree-count")?;
+                    check(partial_fresh_counts_fit_data(files,directories) && bytes<=installation_record::PAYLOAD_LIMIT,"partial-fresh-tree-count")?;
                     if let Some((source,source_id))=source {
                         check(partial_fresh_directory(book,source)?==source_id,"partial-fresh-tree-post")?;
                     }
@@ -5917,7 +5969,7 @@ mod installer {
             partial_fresh_cost_data(cost).unwrap();
             for bad in [PartialFreshCostData{prior_invocations:64,..cost},PartialFreshCostData{retry_count:2,..cost},
                 PartialFreshCostData{physical_bytes:installation_record::PAYLOAD_LIMIT,..cost},
-                PartialFreshCostData{evidence_bytes:u64::MAX,..cost},PartialFreshCostData{records:24576,..cost},
+                PartialFreshCostData{evidence_bytes:u64::MAX,..cost},PartialFreshCostData{records:installation_record::ORIGINAL_LIMIT,..cost},
                 PartialFreshCostData{audits:usize::MAX,..cost},PartialFreshCostData{live:97,..cost},
                 PartialFreshCostData{retained_work:PARTIAL_FRESH_WORK,..cost}] {assert!(partial_fresh_cost_data(bad).is_err());}
             assert!(partial_fresh_json(b"{").unwrap().is_none());
@@ -6017,7 +6069,55 @@ mod installer {
                     slots:vec![PartialFreshTopOriginal{slot:PartialFreshTop::Intent,identity:id,side:PartialFreshSide::Current,
                         original:None,counts:PartialFreshTopCounts{bytes:3,files:1,directories:0,controls:3}}],
                     prefix:0,pending:None,unknown:false,first:None,returned_settled:false};
+                // Same phase writer/readback parser as recovery, with actual
+                // authenticated-intent DATA from the existing fixture. No FS,
+                // process, simulated receipt or execution grant is involved.
+                use mobile_release_desktop::macos_applications_launcher::OriginalIdentityData;
+                let identity=|inode|OriginalIdentityData{device:1,inode,birth_seconds:17,birth_nanoseconds:9};
+                let binding=intent.next_data().binding_data();
+                let phase=serde_json::json!({"schemaVersion":1,"phase":"launcher-prepublication",
+                    "invocation":invocation,"intentSha256":intent.digest_data(),"instance":invocation,
+                    "inventorySha256":binding.inventory_sha256,"sourceCommit":binding.source_commit,
+                    "runtimeManifestSha256":binding.runtime_manifest_sha256,"stage":identity(1),
+                    "workspace":identity(2),"staged":identity(3),"previous":null});
+                // Struct serialization order is the writer's order, not sorted
+                // arbitrary JSON. This literal mirrors the closed wire fields.
+                let phase_raw=format!("{{\"schemaVersion\":1,\"phase\":\"launcher-prepublication\",\"invocation\":{},\"intentSha256\":{},\"instance\":{},\"inventorySha256\":{},\"sourceCommit\":{},\"runtimeManifestSha256\":{},\"stage\":{},\"workspace\":{},\"staged\":{},\"previous\":null}}",
+                    phase["invocation"],phase["intentSha256"],phase["instance"],phase["inventorySha256"],phase["sourceCommit"],
+                    phase["runtimeManifestSha256"],serde_json::to_string(&identity(1)).unwrap(),serde_json::to_string(&identity(2)).unwrap(),
+                    serde_json::to_string(&identity(3)).unwrap()).into_bytes();
+                applications::partial_phase_record(&phase_raw,&intent,identity(1),Some(identity(2)),Some(identity(3)),None,true).unwrap();
+                applications::partial_phase_record(&phase_raw,&intent,identity(1),None,None,Some(identity(3)),true).unwrap();
+                for cut in [0,1,phase_raw.len()/2,phase_raw.len()-1] {
+                    applications::partial_phase_record(&phase_raw[..cut],&intent,identity(1),Some(identity(2)),Some(identity(3)),None,false).unwrap();
+                    assert!(applications::partial_phase_record(&phase_raw[..cut],&intent,identity(1),Some(identity(2)),Some(identity(3)),None,true).is_err());
+                    assert!(applications::partial_phase_record(&phase_raw[..cut],&intent,identity(1),None,None,Some(identity(3)),false).is_err());
+                }
+                for (stage,workspace,staged,recovered) in [
+                    (identity(9),Some(identity(2)),Some(identity(3)),None),
+                    (identity(1),Some(identity(9)),Some(identity(3)),None),
+                    (identity(1),Some(identity(2)),Some(identity(9)),None),
+                    (identity(1),Some(identity(2)),Some(identity(3)),Some(identity(3))),
+                    (identity(1),None,None,None),
+                ] {assert!(applications::partial_phase_record(&phase_raw,&intent,stage,workspace,staged,recovered,true).is_err());}
+                assert!(applications::partial_phase_record(b"not-json",&intent,identity(1),Some(identity(2)),Some(identity(3)),None,false).is_err());
+                let mut wrong=phase_raw.clone();wrong.push(b' ');
+                assert!(applications::partial_phase_record(&wrong,&intent,identity(1),Some(identity(2)),Some(identity(3)),None,true).is_err());
                 assert_eq!(partial_fresh_retry_original_quote_data(3,2).unwrap(),206);
+                let mut inventory=Inventory{schema_version:1,release:binding.release.into(),runtime_manifest_sha256:binding.runtime_manifest_sha256.into(),files:vec![]};
+                assert_eq!(partial_fresh_inventory_quote_data(3,2,&inventory).unwrap(),206);
+                inventory.files.push(Entry{path:format!("{}/Contents/Info.plist",mobile_release_desktop::macos_applications_launcher::BUNDLE),
+                    sha256:"1".repeat(64),size:1,executable:false});
+                assert_eq!(partial_fresh_inventory_quote_data(3,2,&inventory).unwrap(),206+PARTIAL_FRESH_LAUNCHER_ORIGINALS);
+                assert_eq!(PARTIAL_FRESH_LAUNCHER_ORIGINALS%2,0); // same source-half derivation remains conservative
+                let mut counts=PartialFreshTopCounts::default();
+                counts.add(109_751_295,6587,1000).unwrap();
+                assert!(partial_fresh_counts_fit_data(installation_record::FILE_LIMIT as u64,
+                    (installation_record::ENTRY_LIMIT-installation_record::FILE_LIMIT)as u64));
+                assert!(!partial_fresh_counts_fit_data(installation_record::FILE_LIMIT as u64+1,0));
+                assert!(!partial_fresh_counts_fit_data(installation_record::FILE_LIMIT as u64,
+                    (installation_record::ENTRY_LIMIT-installation_record::FILE_LIMIT)as u64+1));
+                assert!(!partial_fresh_counts_fit_data(1,u64::MAX));
                 assert!(partial_fresh_retry_original_quote_data(usize::MAX,2).is_err());
                 assert!(partial_fresh_retry_original_quote_data(2,usize::MAX).is_err());
                 assert_eq!(ledger().planned_retry_post_originals_data().unwrap(),201);
@@ -6074,11 +6174,11 @@ mod installer {
                 let mut value=fields();value.request=value.invocation;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
                 let mut value=fields();value.current=[1,1,0,1];assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
                 let mut value=fields();value.archived[3]=4;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
-                let mut value=fields();value.originals=24577;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
+                let mut value=fields();value.originals=(installation_record::ORIGINAL_LIMIT + 1);assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
                 let mut value=fields();value.prefix=2;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
                 let mut value=fields();value.root.mode=0o040755;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
                 let mut value=fields();value.quote=19;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
-                let mut value=fields();value.quote=24577;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
+                let mut value=fields();value.quote=(installation_record::ORIGINAL_LIMIT + 1);assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
                 let mut value=fields();value.invocation=[0;16];assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
                 let mut value=fields();value.content=[0;32];assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
                 let mut value=fields();value.root.ctime_ns=-1;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
@@ -6124,7 +6224,7 @@ mod installer {
             out.update(file.flags.to_le_bytes());out.update(file.digest);
             *bytes=bytes.checked_add(file.identity.size as u64).ok_or("partial-fresh-control-count")?;
             *files=files.checked_add(1).ok_or("partial-fresh-control-count")?;
-            check(*bytes<=16*1024*1024,"partial-fresh-control-count")
+            check(*bytes<=(installation_record::CONTROL_LIMIT as u64),"partial-fresh-control-count")
         }
         fn partial_fresh_fact_tree(out:&mut Sha256,name:&str,tree:PartialFreshTreeObserved,
             bytes:&mut u64,files:&mut u64,directories:&mut u64)->Result<()> {
@@ -6207,9 +6307,10 @@ mod installer {
                 let concurrent=PARTIAL_FRESH_WORK.checked_add(2*transaction::INTENT_LIMIT)
                     .and_then(|n|n.checked_add(2*transaction::STATE_LIMIT))
                     .and_then(|n|n.checked_add(2*transaction::CAPSULE_LIMIT))
-                    .and_then(|n|n.checked_add(index_peak)).ok_or("partial-fresh-memory")?;
+                    .and_then(|n|n.checked_add(index_peak)).and_then(|n|n.checked_add(applications::PHASE_CONTROL_QUOTE as usize))
+                    .ok_or("partial-fresh-memory")?;
                 check(removal_effective_control_bytes(book)?.checked_add(concurrent as u64)
-                    .is_some_and(|n|n<=16*1024*1024),"partial-fresh-memory")?;
+                    .is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"partial-fresh-memory")?;
                 let index=inventory.index()?;
                 check(index.files.len()==source_files && index.directories.len()==source_dirs,
                     "partial-fresh-index-quote")?;
@@ -6229,7 +6330,9 @@ mod installer {
                     partial_fresh_content_identity(&mut out,actual,true);
                     let rows=partial_fresh_fixed_roster(book,stage,PartialFreshFixedRole::Stage)?;
                     for (name,_) in &rows {
-                        check(name=="app" || name=="runtime" || PARTIAL_FRESH_RECEIPTS.iter().any(|phase|name==&format!("{phase}.json")),
+                        check(name=="app" || name=="runtime" || name==applications::WORK_NAME || name==applications::SOURCE_NAME
+                            || name==&applications::phase_name(invocation)?
+                            || PARTIAL_FRESH_RECEIPTS.iter().any(|phase|name==&format!("{phase}.json")),
                             "partial-fresh-stage-foreign")?;
                     }
                     for (phase,state) in receipt_states.iter_mut().enumerate() {
@@ -6242,6 +6345,59 @@ mod installer {
                             partial_fresh_fact_file(&mut out,&name,file,false,&mut control_bytes,&mut files)?;
                         }
                     }
+                    // Preserve a torn convenience copy with the SAME known
+                    // Fresh attempt. The enclosing Parent first withdrew any
+                    // phase-enrolled live original; this reader never mutates
+                    // Applications or turns an archived copy into enrollment.
+                    let phase_name=applications::phase_name(invocation)?;
+                    let has_phase=removal_archive_inode(&rows,&phase_name).is_some();
+                    let has_work=removal_archive_inode(&rows,applications::WORK_NAME).is_some();
+                    let recovered=removal_archive_inode(&rows,applications::SOURCE_NAME).is_some();
+                    if has_phase || has_work || recovered {removal_archive_scope(book,|book|{
+                        mobile_release_desktop::macos_applications_launcher::LauncherInventory::from_index(&index)?
+                            .ok_or("partial-fresh-launcher-source")?;
+                        check(!recovered || has_phase,"partial-fresh-launcher-phase-required")?;
+                        let workspace=if has_work {
+                            let original=book.open(Some(stage),applications::WORK_NAME,true)?;
+                            let identity=partial_fresh_directory(book,original)?;
+                            check(identity.mode==0o040700,"partial-fresh-launcher-workspace")?;
+                            let workspace_rows=partial_fresh_fixed_roster(book,original,PartialFreshFixedRole::LauncherWorkspace)?;
+                            check(workspace_rows.iter().all(|row|row.0==applications::SOURCE_NAME),"partial-fresh-launcher-roster")?;
+                            top_counts[PartialFreshTop::Stage as usize].add(0,0,1)?;directories+=1;
+                            out.update(b"launcher-workspace");partial_fresh_content_identity(&mut out,identity,false);
+                            Some((original,!workspace_rows.is_empty()))
+                        }else{None};
+                        check(!(recovered && workspace.is_some_and(|(_,copy)|copy)),"partial-fresh-launcher-duplicate")?;
+                        let parent=if recovered{Some(stage)}else{workspace.filter(|(_,copy)|*copy).map(|(original,_)|original)};
+                        let mut copied=None;
+                        if let Some(parent)=parent {
+                            let source_parent=if let Some(mut source)=app_source {
+                                for name in [app_leaf,"Contents","Helpers"] {
+                                    source=book.open(Some(source),name,true)?;
+                                    check(partial_fresh_directory(book,source)?.mode==0o040555,"partial-fresh-launcher-source")?;
+                                }Some(source)
+                            }else{None};
+                            let tree=partial_fresh_payload_tree(book,source_parent,applications::SOURCE_NAME,parent,applications::SOURCE_NAME,
+                                mobile_release_desktop::macos_applications_launcher::BUNDLE,&index,0,false,payload_read,None,&mut tree_work)?;
+                            if has_phase {check(tree.state==PartialFreshFileState::Complete,"partial-fresh-launcher-receipt-order")?;}
+                            top_counts[PartialFreshTop::Stage as usize].add(tree.bytes,tree.files,tree.directories)?;
+                            partial_fresh_fact_tree(&mut out,if recovered{"stage/recovered-launcher"}else{"stage/launcher-workspace/copy"},
+                                tree,&mut payload_bytes,&mut files,&mut directories)?;
+                            let original=book.open(Some(parent),applications::SOURCE_NAME,true)?;
+                            check(book.identity(original)?==tree.identity,"partial-fresh-launcher-original")?;
+                            copied=Some(applications::preservation_identity(book,original)?);
+                        }
+                        if has_phase {
+                            let (_,raw,file)=partial_fresh_writer_bytes(book,stage,&phase_name,applications::PHASE_LIMIT)?;
+                            applications::partial_phase_record(&raw,&intent,applications::preservation_identity(book,stage)?,
+                                workspace.map(|(original,_)|applications::preservation_identity(book,original)).transpose()?,
+                                if recovered{None}else{copied},if recovered{copied}else{None},file.state==PartialFreshFileState::Complete)?;
+                            top_counts[PartialFreshTop::Stage as usize].add(file.identity.size as u64,1,0)?;
+                            top_counts[PartialFreshTop::Stage as usize].control(file.identity.size as u64)?;
+                            partial_fresh_fact_file(&mut out,&phase_name,file,false,&mut control_bytes,&mut files)?;
+                        }
+                        Ok(())
+                    })?;}
                     if removal_archive_inode(&rows,"app").is_some() {
                         let tree=partial_fresh_payload_tree(book,app_source,app_leaf,stage,"app","app",&index,0,false,payload_read,root_app_source,&mut tree_work)?;
                         top_counts[PartialFreshTop::Stage as usize].add(tree.bytes,tree.files,tree.directories)?;
@@ -6403,7 +6559,7 @@ mod installer {
                 Ok((intent,request,facts,slots))
             })?;
             old.post(book)?;let (quote_files,quote_dirs,_)=old.incoming_index_peak(book)?;
-            let retry_quote=partial_fresh_retry_original_quote_data(quote_files,quote_dirs)?;
+            let retry_quote=partial_fresh_inventory_quote_data(quote_files,quote_dirs,old.incoming(book)?.1)?;
             let mut actual=PartialFreshAttemptAudit{invocation:invocation.to_owned(),request:result.1,intent:result.0,
                 facts:result.2,slots:result.3,retry,collision:None,retry_quote};
             actual.collision=old.check_attempt(book,&actual)?;old.post(book)?;Ok(actual)
@@ -6426,15 +6582,22 @@ mod installer {
         }
         #[derive(Clone,Copy,Default,PartialEq,Eq)]
         struct PartialFreshTopCounts {bytes:u64,files:u64,directories:u64,controls:u64}
+        // This module exists only in the Mac Installer. Use the same closed
+        // Mac inventory limits for actual and persisted retry counts, while
+        // keeping real payload/control bytes and cumulative reservations.
+        fn partial_fresh_counts_fit_data(files:u64,directories:u64)->bool {
+            files<=installation_record::FILE_LIMIT as u64
+                && files.checked_add(directories).is_some_and(|n|n<=installation_record::ENTRY_LIMIT as u64)
+        }
         impl PartialFreshTopCounts {
             fn control(&mut self,bytes:u64)->Result<()> {
-                self.controls=self.controls.checked_add(bytes).filter(|n|*n<=16*1024*1024).ok_or("partial-fresh-control-count")?;Ok(())
+                self.controls=self.controls.checked_add(bytes).filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("partial-fresh-control-count")?;Ok(())
             }
             fn add(&mut self,bytes:u64,files:u64,directories:u64)->Result<()> {
                 self.bytes=self.bytes.checked_add(bytes).ok_or("partial-fresh-top-count")?;
                 self.files=self.files.checked_add(files).ok_or("partial-fresh-top-count")?;
                 self.directories=self.directories.checked_add(directories).ok_or("partial-fresh-top-count")?;
-                check(self.bytes<=installation_record::PAYLOAD_LIMIT && self.files<=4096 && self.directories<=4096,
+                check(self.bytes<=installation_record::PAYLOAD_LIMIT && partial_fresh_counts_fit_data(self.files,self.directories),
                     "partial-fresh-top-count")
             }
         }
@@ -6465,7 +6628,7 @@ mod installer {
             // caller-owned retry open. Parent adds this to—not substitutes it
             // for—the existing full-census/root/closure quote before effects.
             pub(super) fn planned_retry_post_originals_data(&self)->Result<usize> {
-                self.retry_quote.checked_add(1).filter(|n|*n<=24576).ok_or("partial-fresh-original-budget")
+                self.retry_quote.checked_add(1).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("partial-fresh-original-budget")
             }
             pub(super) fn planned_preservation_originals_data(&self)->Result<usize> {
                 let source_half=self.retry_quote.checked_sub(192).filter(|n|n%2==0)
@@ -6477,12 +6640,12 @@ mod installer {
                     .ok_or("partial-fresh-original-budget")?;
                 let audits=self.slots.len().checked_sub(self.prefix).and_then(|n|n.checked_mul(2))
                     .and_then(|n|n.checked_add(4)).ok_or("partial-fresh-original-budget")?;
-                audits.checked_mul(per).filter(|n|*n<=24576).ok_or("partial-fresh-original-budget")
+                audits.checked_mul(per).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("partial-fresh-original-budget")
             }
             pub(super) fn planned_fresh_originals_data(&self)->Result<usize> {
                 // Same source-based existing Fresh worker/capsule allowance;
                 // separate from transport and final full census/POST phases.
-                self.retry_quote.checked_add(64).filter(|n|*n<=24576).ok_or("partial-fresh-original-budget")
+                self.retry_quote.checked_add(64).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("partial-fresh-original-budget")
             }
             pub(super) fn failed_data(&self)->bool{self.first.is_some() || self.unknown}
             fn fail(&mut self,why:&'static str){self.first.get_or_insert(why);}
@@ -6538,10 +6701,10 @@ mod installer {
             }
         }
         #[derive(Clone,Copy)]
-        enum PartialFreshFixedRole { Stage,Retry,Versions,Release }
+        enum PartialFreshFixedRole { Stage,Retry,Versions,Release,LauncherWorkspace }
         impl PartialFreshFixedRole {
-            fn bound(self)->usize{match self{Self::Stage=>6,Self::Retry=>8,Self::Versions=>1,Self::Release=>3}}
-            fn mode(self)->u32{match self{Self::Stage|Self::Retry=>0o700,Self::Versions|Self::Release=>0o755}}
+            fn bound(self)->usize{match self{Self::Stage=>9,Self::Retry=>8,Self::Versions=>1,Self::Release=>3,Self::LauncherWorkspace=>1}}
+            fn mode(self)->u32{match self{Self::Stage|Self::Retry|Self::LauncherWorkspace=>0o700,Self::Versions|Self::Release=>0o755}}
         }
         // Fixed construction roles only. No widening of the archive parser's
         // private7/installed350 contract, no caller-selected arbitrary limit.
@@ -6784,15 +6947,16 @@ mod installer {
                 .and_then(|n|n.checked_add(census.post_originals_data().ok()?.checked_mul(2)?))
                 .and_then(|n|n.checked_add(ledger.planned_retry_post_originals_data().ok()?.checked_mul(2)?))
                 .and_then(|n|n.checked_add(16)).ok_or("partial-fresh-original-budget")?;
-            check(records<=24576 && book.originals.iter().filter(|v|v.fd.is_some()).count()
+            check(records<=installation_record::ORIGINAL_LIMIT && book.originals.iter().filter(|v|v.fd.is_some()).count()
                 .checked_add(72).is_some_and(|n|n<=96),"partial-fresh-original-budget")?;
             reserve_removal_original_storage(book,records)?;
             let (_,inventory,raw_inventory)=context.incoming(book)?;
             let concurrent=index_peak.checked_add(PARTIAL_FRESH_WORK)
                 .and_then(|n|n.checked_add(2*transaction::INTENT_LIMIT+2*transaction::STATE_LIMIT+2*transaction::CAPSULE_LIMIT))
+                .and_then(|n|n.checked_add(applications::PHASE_CONTROL_QUOTE as usize))
                 .ok_or("partial-fresh-memory")?;
             check(removal_effective_control_bytes(book)?.checked_add(concurrent as u64)
-                .is_some_and(|n|n<=16*1024*1024),"partial-fresh-memory")?;
+                .is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"partial-fresh-memory")?;
             let index=inventory.index()?;
             check(index.files.len()==source_files && index.directories.len()==source_dirs,"partial-fresh-index-quote")?;
             // Current-root suffix alone is additional storage. Existing retry
@@ -6903,16 +7067,16 @@ mod installer {
                     prefix:self.prefix,tops:self.tops,originals:self.originals,quote:self.quote,role:self.role}
             }
             pub(super) fn from_fields_data(value:PartialFreshRetryFieldsData)->Result<Self> {
-                let valid_counts=|v:[u64;4]|v[0]<=installation_record::PAYLOAD_LIMIT && v[1]<=4096 && v[2]<=4096
-                    && v[3]<=16*1024*1024 && v[3]<=v[0] && (v[1]>0 || v[0]==0);
+                let valid_counts=|v:[u64;4]|v[0]<=installation_record::PAYLOAD_LIMIT && partial_fresh_counts_fit_data(v[1],v[2])
+                    && v[3]<=(installation_record::CONTROL_LIMIT as u64) && v[3]<=v[0] && (v[1]>0 || v[0]==0);
                 check(value.root.dev>0 && value.root.ino>0 && value.root.mode==0o040700 && value.root.uid==0 && value.root.gid==0
                     && value.root.links>0 && value.root.size>=0 && (0..1_000_000_000).contains(&value.root.mtime_ns)
                     && (0..1_000_000_000).contains(&value.root.ctime_ns) && value.invocation!=value.request && value.invocation!=[0;16] && value.request!=[0;16]
                     && [value.intent,value.selection,value.producer,value.signature,value.inventory,value.content].iter().all(|v|*v!=[0;32])
-                    && (1..=8).contains(&value.tops) && value.prefix<=value.tops && value.originals<=value.quote && value.quote<=24576
+                    && (1..=8).contains(&value.tops) && value.prefix<=value.tops && value.originals<=value.quote && value.quote<=installation_record::ORIGINAL_LIMIT
                     && valid_counts(value.archived) && valid_counts(value.current)
                     && value.archived[0].checked_add(value.current[0]).is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT)
-                    && value.archived[3].checked_add(value.current[3]).is_some_and(|n|n<=16*1024*1024)
+                    && value.archived[3].checked_add(value.current[3]).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64))
                     && (value.role!=PartialFreshRetryAuditRole::PreservedOnly || value.prefix==value.tops && value.current==[0;4]),
                     "partial-fresh-reference-shape")?;
                 let [bytes,files,directories,controls]=value.archived;let archived=PartialFreshTopCounts{bytes,files,directories,controls};
@@ -6948,7 +7112,7 @@ mod installer {
             check(reference.complete_data() && reference.reference.current_counts_data()==(0,0,0,0),ORIGINAL_PREFIX_INSTALL_REQUIRED)?;
             usize::try_from(reference.reference.archived.directories).ok().and_then(|n|n.checked_add(1)).and_then(|n|n.checked_mul(2))
                 .and_then(|n|n.checked_add(usize::try_from(reference.reference.files_data()).ok()?))
-                .and_then(|n|n.checked_add(192)).filter(|n|*n<=24576).ok_or("removal-conservation-original-budget")
+                .and_then(|n|n.checked_add(192)).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("removal-conservation-original-budget")
         }
         // Current reservation replaces only current costs. Every historical
         // inner/outer observed/quote value and containing commitment is untouched.
@@ -7007,7 +7171,7 @@ mod installer {
                     .ok_or("removal-conservation-inventory")?;
                 // Bound strict parser/index/raw overlap before inventory alloc.
                 let extra=removal_resume_inventory_quote_data(size as u64).ok_or("removal-conservation-memory")?;
-                check(removal_effective_control_bytes(book)?.checked_add(extra as u64).is_some_and(|n|n<=16*1024*1024),"removal-conservation-memory")?;
+                check(removal_effective_control_bytes(book)?.checked_add(extra as u64).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"removal-conservation-memory")?;
                 book.removal_control_reserved=book.removal_control_reserved.checked_add(extra as u64).ok_or("removal-conservation-memory")?;
                 *charged=charged.checked_add(extra as u64).ok_or("removal-conservation-memory")?;
                 let (i,inventory_raw)=metadata_original(book,release,installation_record::INVENTORY_NAME,size)?;
@@ -7044,7 +7208,7 @@ mod installer {
             // after scope has dropped all corresponding owned allocations.
             let extra=(2*mobile_release_desktop::macos_install_producer::DESCRIPTOR_LIMIT
                 +mobile_release_desktop::macos_install_producer::SIGNATURE_LIMIT+COMPLETE_PREFIX_INTENT_WORK+512*1024) as u64;
-            check(removal_effective_control_bytes(book)?.checked_add(extra).is_some_and(|n|n<=16*1024*1024),"removal-conservation-memory")?;
+            check(removal_effective_control_bytes(book)?.checked_add(extra).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"removal-conservation-memory")?;
             book.removal_control_reserved=book.removal_control_reserved.checked_add(extra).ok_or("removal-conservation-memory")?;
             let mut charged=extra;
             let result=removal_archive_scope(book,|book| {
@@ -7068,9 +7232,20 @@ mod installer {
             book.removal_control_reserved=book.removal_control_reserved.checked_sub(charged).ok_or("removal-conservation-memory")?;
             result
         }
+        // The installed convenience copy is a second, bounded projection of
+        // the same signed inventory. Preserve legacy persisted Q exactly when
+        // there is no such group; a path match only adds reservation, never
+        // grants admission (the full launcher parser is still required).
+        const PARTIAL_FRESH_LAUNCHER_ORIGINALS:usize=96;
+        fn partial_fresh_inventory_quote_data(files:usize,dirs:usize,inventory:&Inventory)->Result<usize> {
+            let nested=inventory.files.iter().any(|entry|entry.path.strip_prefix(
+                mobile_release_desktop::macos_applications_launcher::BUNDLE).is_some_and(|rest|rest.starts_with('/')));
+            partial_fresh_retry_original_quote_data(files,dirs)?.checked_add(if nested{PARTIAL_FRESH_LAUNCHER_ORIGINALS}else{0})
+                .filter(|n|*n<installation_record::ORIGINAL_LIMIT).ok_or("partial-fresh-original-budget")
+        }
         fn partial_fresh_retry_original_quote_data(files:usize,dirs:usize)->Result<usize> {
             dirs.checked_mul(4).and_then(|n|n.checked_add(files.checked_mul(2)?))
-                .and_then(|n|n.checked_add(192)).filter(|n|*n<24576).ok_or("partial-fresh-original-budget")
+                .and_then(|n|n.checked_add(192)).filter(|n|*n<installation_record::ORIGINAL_LIMIT).ok_or("partial-fresh-original-budget")
         }
         fn partial_fresh_existing_binding_data(reference:&PartialFreshRetryReferenceData,
             invocation:[u8;16],request:[u8;16],hashes:[[u8;32];6],quote:usize,retry:Identity)->bool {
@@ -7091,7 +7266,7 @@ mod installer {
             let producer:[u8;32]=Sha256::digest(producer).into();let signature:[u8;32]=Sha256::digest(signature).into();
             let inventory:[u8;32]=Sha256::digest(inventory).into();
             let (files,dirs,_)=source.incoming_index_peak(book)?;
-            let quote=partial_fresh_retry_original_quote_data(files,dirs)?;
+            let quote=partial_fresh_inventory_quote_data(files,dirs,source.incoming(book)?.1)?;
             check(partial_fresh_existing_binding_data(reference,archive_hex_data(&actual.invocation)?,archive_hex_data(&actual.request)?,
                 [archive_hex_data(actual.intent.digest_data())?,selection,producer,signature,inventory,actual.facts.digest],quote,observed),
                 "partial-fresh-existing-reference-binding")?;
@@ -7113,7 +7288,7 @@ mod installer {
         }
         pub(super) fn partial_fresh_retry_quote(book:&Install,input:&PrefixRead<'_>)->Result<usize> {
             input.post_source(book)?;let index=input.incoming_index_peak(book)?;
-            partial_fresh_retry_quote_for_index(book,index,input.prefix_read_role(book)?)
+            partial_fresh_retry_quote_for_index(book,index,input.incoming(book)?.1,input.prefix_read_role(book)?)
         }
         pub(super) fn partial_fresh_retry_quote_against_generation(book:&Install,input:&PrefixRead<'_>,
             generation:&CompleteGenerationPrefixView<'_,'_>)->Result<usize> {
@@ -7123,7 +7298,7 @@ mod installer {
             // index plus the common prefix evaluator only. The enclosing
             // census separately reserves/persists B admission+retirement cost.
             let index=generation.incoming_index_peak(book)?;
-            partial_fresh_retry_quote_for_index(book,index,input.prefix_read_role(book)?)
+            partial_fresh_retry_quote_for_index(book,index,generation.incoming(book)?.1,input.prefix_read_role(book)?)
         }
         // RemovalRead is minted only by the genuine closed removal source.
         // Its paired readonly PreservedOnly walk peaks at40, with4 headroom.
@@ -7137,11 +7312,11 @@ mod installer {
             };
             (peak<=96).then_some(peak)
         }
-        fn partial_fresh_retry_quote_for_index(book:&Install,(files,dirs,peak):(usize,usize,usize),role:worker::PrefixReadRole)->Result<usize> {
-            let originals=partial_fresh_retry_original_quote_data(files,dirs)?;
+        fn partial_fresh_retry_quote_for_index(book:&Install,(files,dirs,peak):(usize,usize,usize),inventory:&Inventory,role:worker::PrefixReadRole)->Result<usize> {
+            let originals=partial_fresh_inventory_quote_data(files,dirs,inventory)?;
             let concurrent=peak.checked_add(partial_fresh_parser_peak_data()?).ok_or("partial-fresh-memory")?;
             check(removal_effective_control_bytes(book)?.checked_add(concurrent as u64)
-                .is_some_and(|n|n<=16*1024*1024) && originals<=24576
+                .is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)) && originals<=installation_record::ORIGINAL_LIMIT
                 && partial_fresh_retry_live_peak_data(role,book.originals.iter().filter(|v|v.fd.is_some()).count(),
                     book.removal_live_reserved,book.worker_deadline.is_some()).is_some(),
                 "partial-fresh-cohort-bound")?;Ok(originals)
@@ -7166,7 +7341,7 @@ mod installer {
             let before=removal_archive_stat(book,retry,true,0o700)?.0;
             let quote=match generation {Some(value)=>partial_fresh_retry_quote_against_generation(book,input,value)?,
                 None=>partial_fresh_retry_quote(book,input)?};
-            let bound=book.originals.len().checked_add(quote).filter(|n|*n<=24576).ok_or("partial-fresh-original-budget")?;
+            let bound=book.originals.len().checked_add(quote).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("partial-fresh-original-budget")?;
             reserve_removal_original_storage(book,bound)?;let start=book.originals.len();
             let source=PartialFreshSource::Census(PartialFreshCensusInput{read:input,child,archives,role,generation});
             let actual=partial_fresh_attempt(book,source,invocation,Some(retry))?;
@@ -7277,9 +7452,9 @@ mod installer {
             assert_eq!(success.last_return_data(),None);success.begin_data(1).unwrap();success.returned_data(ReturnedData::KnownSuccess).unwrap();
             success.post_data(Ok(())).unwrap();assert_eq!(success.observed_prefix_data(),2);assert!(success.begin_data(1).is_err());
             let work=plan.owned_bytes_data().unwrap();let count=2*plan.directories_data()+plan.files_data();
-            assert_eq!(rehome_audit_quote_data(plan.directories_data(),plan.files_data(),2,24576-2*count,91,
-                REMOVAL_SNAPSHOT_WORK as usize-work-65536-8192,work,0,plan.bytes_data()).unwrap(),24576);
-            assert!(rehome_audit_quote_data(plan.directories_data(),plan.files_data(),2,24577-2*count,91,0,work,0,plan.bytes_data()).is_err());
+            assert_eq!(rehome_audit_quote_data(plan.directories_data(),plan.files_data(),2,installation_record::ORIGINAL_LIMIT-2*count,91,
+                REMOVAL_SNAPSHOT_WORK as usize-work-65536-8192,work,0,plan.bytes_data()).unwrap(),installation_record::ORIGINAL_LIMIT);
+            assert!(rehome_audit_quote_data(plan.directories_data(),plan.files_data(),2,(installation_record::ORIGINAL_LIMIT + 1)-2*count,91,0,work,0,plan.bytes_data()).is_err());
             assert!(rehome_audit_quote_data(plan.directories_data(),plan.files_data(),1,0,92,0,work,0,plan.bytes_data()).is_err());
             assert!(rehome_audit_quote_data(75,484,usize::MAX,0,0,0,0,0,0).is_err());
             assert!(rehome_audit_quote_data(76,484,1,0,0,0,0,0,0).is_err());
@@ -7382,8 +7557,8 @@ mod installer {
                 let (directories,files,_)=plan.range_counts(start,end).unwrap();
                 let consumed=(start..end).map(|i|rehome_entry_originals_data(&plan,i).unwrap()).sum::<usize>();
                 assert_eq!(2+consumed,2*directories+files);
-                assert!(removal_original_storage_quote_data(24576-consumed,24576,0,24576).is_ok());
-                assert!(removal_original_storage_quote_data(24576-consumed,24576,0,24577).is_err());
+                assert!(removal_original_storage_quote_data(installation_record::ORIGINAL_LIMIT-consumed,installation_record::ORIGINAL_LIMIT,0,installation_record::ORIGINAL_LIMIT).is_ok());
+                assert!(removal_original_storage_quote_data(installation_record::ORIGINAL_LIMIT-consumed,installation_record::ORIGINAL_LIMIT,0,(installation_record::ORIGINAL_LIMIT + 1)).is_err());
             }}
             assert!(rehome_entry_originals_data(&plan,total).is_err());
             assert!(rehome_entry_originals_data(&plan,usize::MAX).is_err());
@@ -7539,8 +7714,8 @@ mod installer {
                 let mut changed=body.0.clone();changed[offset]=value;assert!(rehome_retry_test_decode(&changed).is_err());
             }
             let mut zero=body.0.clone();zero[80..96].fill(0);assert!(rehome_retry_test_decode(&zero).is_err());
-            let mut over=body.0.clone();over[377..381].copy_from_slice(&24577u32.to_be_bytes());assert!(rehome_retry_test_decode(&over).is_err());
-            for (offset,value) in [(381,19u32),(385,219),(385,24577),(381,u32::MAX),(385,u32::MAX)] {
+            let mut over=body.0.clone();over[377..381].copy_from_slice(&((installation_record::ORIGINAL_LIMIT + 1) as u32).to_be_bytes());assert!(rehome_retry_test_decode(&over).is_err());
+            for (offset,value) in [(381,19u32),(385,219),(385,(installation_record::ORIGINAL_LIMIT + 1) as u32),(381,u32::MAX),(385,u32::MAX)] {
                 let mut changed=body.0.clone();changed[offset..offset+4].copy_from_slice(&value.to_be_bytes());
                 assert!(rehome_retry_test_decode(&changed).is_err());
             }
@@ -7610,10 +7785,10 @@ mod installer {
                 RehomeRetryReferenceData::new_data(inner,20,221).unwrap()] {
                 assert_ne!(baseline,one(row).retry_commitment_data());
             }
-            for (actual,quote) in [(19,220),(20,219),(221,220),(24577,24577),(usize::MAX,24576),(20,usize::MAX)] {
+            for (actual,quote) in [(19,220),(20,219),(221,220),((installation_record::ORIGINAL_LIMIT + 1),(installation_record::ORIGINAL_LIMIT + 1)),(usize::MAX,installation_record::ORIGINAL_LIMIT),(20,usize::MAX)] {
                 assert!(RehomeRetryReferenceData::new_data(inner,actual,quote).is_err());
             }
-            let mut q=pending.reference_data().fields_data();q.quote=24576;
+            let mut q=pending.reference_data().fields_data();q.quote=installation_record::ORIGINAL_LIMIT;
             let maximum=RehomeRetryReferenceData::same_input_data(PartialFreshRetryReferenceData::from_fields_data(q).unwrap()).unwrap();
             assert!(one(maximum).audit_originals_data().is_err());
             let facts=plan.invocations;assert_eq!(facts.len,1);
@@ -8332,22 +8507,22 @@ mod installer {
                 check(book.removal_payload_plan.is_none(),"removal-payload-plan-once")?;
                 let base_control=book.removal_observation_control.ok_or("removal-payload-plan-budget")?;
                 let initial=std::mem::size_of::<Self>() as u64;
-                check(base_control.checked_add(initial).is_some_and(|n|n<=16*1024*1024),"removal-payload-plan-budget")?;
+                check(base_control.checked_add(initial).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"removal-payload-plan-budget")?;
                 book.removal_control_reserved=book.removal_control_reserved.checked_add(initial)
-                    .filter(|n|*n<=16*1024*1024).ok_or("removal-payload-plan-budget")?;
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-payload-plan-budget")?;
                 book.removal_payload_plan=Some(Self { nodes:Vec::new(),generations:Vec::new(),stack:[0;17],stack_len:0,
                     active:None,forecast_files:0,forecast_directories:0,
                     base_control,charged:initial,failed:false,complete:false });Ok(())
             }
             fn growth(&self,extra:usize,overlap:usize)->Result<()> {
                 check(self.base_control.checked_add(self.charged).and_then(|n|n.checked_add(extra as u64))
-                    .and_then(|n|n.checked_add(overlap as u64)).is_some_and(|n|n<=16*1024*1024),"removal-payload-plan-budget")
+                    .and_then(|n|n.checked_add(overlap as u64)).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"removal-payload-plan-budget")
             }
             fn charge(&mut self,book:&mut Install,extra:usize)->Result<()> {
                 self.growth(extra,0)?;
                 self.charged=self.charged.checked_add(extra as u64).ok_or("removal-payload-plan-budget")?;
                 book.removal_control_reserved=book.removal_control_reserved.checked_add(extra as u64)
-                    .filter(|n|*n<=16*1024*1024).ok_or("removal-payload-plan-budget")?;Ok(())
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-payload-plan-budget")?;Ok(())
             }
             fn reserve_nodes(&mut self,book:&mut Install)->Result<()> {
                 check(self.nodes.len()<REMOVAL_PLAN_NODES,"removal-payload-plan-count")?;
@@ -8481,9 +8656,9 @@ mod installer {
         // Fixed removal-only capture of the SAME complete second observation.
         // These are comparison bytes/identities, never a parser-made permission.
         pub(super) const REMOVAL_SNAPSHOT_WORK: u64 = 2 * 1024 * 1024;
-        const SNAPSHOT_CONTROLS: usize = 488;
+        const SNAPSHOT_CONTROLS: usize = 488 + transaction::INVOCATION_LIMIT;
         const SNAPSHOT_DIRECTORIES: usize = 75;
-        const SNAPSHOT_CHILDREN: usize = 642;
+        const SNAPSHOT_CHILDREN: usize = 642 + transaction::INVOCATION_LIMIT;
         const SNAPSHOT_HEADER: usize = 1024 * 1024;
         pub(super) const REMOVAL_SNAPSHOT_LIMIT: u64 = 16 * 1024 * 1024;
         pub(super) const REMOVAL_SNAPSHOT_MAGIC: &[u8] = b"MRK-REMOVE-SNAPSHOT-V2\0";
@@ -8509,9 +8684,9 @@ mod installer {
         }
         struct RemovalRemainingGeneration {release:String,inventory:String,app_name:String,current:bool}
         fn removal_resume_memory_data(base:u64,reserved:u64,current:u64,owned:usize)->Option<u64> {
-            if current>16*1024*1024 {return None;}
+            if current>(installation_record::CONTROL_LIMIT as u64) {return None;}
             base.checked_add(current.checked_sub(reserved)?)?
-                .checked_add(u64::try_from(owned).ok()?).filter(|n|*n<=16*1024*1024)
+                .checked_add(u64::try_from(owned).ok()?).filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64))
         }
         pub(super) struct RemovalRemainingPlan {
             nodes:Vec<RemovalRemainingNode>,generations:Vec<RemovalRemainingGeneration>,
@@ -8523,7 +8698,7 @@ mod installer {
             fn new(book:&Install,source:worker::RemovalResumeRead<'_>,base:u64)->Result<Self> {
                 source.authenticated_selection(book)?;
                 let reserved=removal_effective_control_bytes(book)?;
-                check(base>=reserved && base<=16*1024*1024,"removal-resume-plan-budget")?;
+                check(base>=reserved && base<=(installation_record::CONTROL_LIMIT as u64),"removal-resume-plan-budget")?;
                 let plan=Self {nodes:Vec::new(),generations:Vec::new(),stack:[None;17],active:None,base,reserved,transient:0,
                     expected_files:0,present_files:0,present_bytes:0,expected_directories:0,current_app:None,complete:false};
                 plan.memory_with_book(book,0)?;Ok(plan)
@@ -8692,7 +8867,7 @@ mod installer {
         fn removal_payload_conversion_budget_data(control:u64,quote:usize,workspace:u64)->Result<u64> {
             let quote=u64::try_from(quote).map_err(|_|"removal-payload-conversion-memory")?;
             control.checked_add(quote).and_then(|n|n.checked_add(workspace))
-                .filter(|n|*n<=16*1024*1024).ok_or("removal-payload-conversion-memory")
+                .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-payload-conversion-memory")
         }
         impl RemovalRemainingPlan {
             fn conversion_quote_data(&self)->Result<usize> {
@@ -8803,7 +8978,7 @@ mod installer {
                 // Monotone debit BEFORE both allocations overlap. No credit
                 // from freeing old rows/count scratch or from an allocation error.
                 book.removal_control_reserved=book.removal_control_reserved.checked_add(quote as u64)
-                    .filter(|n|*n<=16*1024*1024).ok_or("removal-payload-conversion-memory")?;
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-payload-conversion-memory")?;
                 let layout=self.payload_layout_data()?;
                 let mut nodes=Vec::new();let mut generations=Vec::new();
                 nodes.try_reserve_exact(self.nodes.len()).map_err(|_|"removal-payload-conversion-allocation")?;
@@ -8853,10 +9028,10 @@ mod installer {
         pub(super) fn reserve_removal_snapshot_work(book:&mut Install)->Result<()> {
             if !book.removal_snapshot_work_reserved {
                 let reserved=book.removal_control_reserved.checked_add(REMOVAL_SNAPSHOT_WORK)
-                    .filter(|n|*n<=16*1024*1024).ok_or("removal-control-bound")?;
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-control-bound")?;
                 book.removal_control_reserved=reserved;book.removal_snapshot_work_reserved=true;
             }
-            check(book.removal_control_reserved>=REMOVAL_SNAPSHOT_WORK && book.removal_control_reserved<=16*1024*1024,
+            check(book.removal_control_reserved>=REMOVAL_SNAPSHOT_WORK && book.removal_control_reserved<=(installation_record::CONTROL_LIMIT as u64),
                 "removal-control-bound")
         }
         fn snapshot_path(book:&Install,root:usize,mut original:usize)->Result<String> {
@@ -8938,7 +9113,7 @@ mod installer {
             }
             fn set_resume_quote_data(&mut self,control:u64,storage:u64)->Result<()> {
                 check(!self.complete && !self.failed && self.prior_archives.is_none()
-                    && control<=16*1024*1024 && storage<=installation_record::PAYLOAD_LIMIT,
+                    && control<=(installation_record::CONTROL_LIMIT as u64) && storage<=installation_record::PAYLOAD_LIMIT,
                     "removal-resume-capture-quote")?;
                 // Existing initial and shared execution readers use (control,storage).
                 self.quote=Some((control,storage));Ok(())
@@ -9142,6 +9317,7 @@ mod installer {
             // Only immutable controls survive code withdrawal. This is not the
             // old full app/source POST with its missing-name checks suppressed.
             pub(super) fn payload_controls_post(&self,book:&Install)->Result<()> {
+                if let Some(removal) = self.inner.launcher_removal.as_ref() {removal.observed_post(book)?;}
                 held_inventory(book,self.inventory_original,self.inventory_bytes())?;
                 held_bytes(book,self.record_original,&self.record_bytes)?;
                 self.inner.controls_post(book)?;
@@ -9491,7 +9667,7 @@ mod installer {
             // indices, current scalar-read overlap and the caller's source cells.
             let quote=bytes.checked_mul(3).and_then(|n|n.checked_add(256*1024))
                 .and_then(|n|n.checked_add(removal_effective_control_bytes(book).ok()?))
-                .filter(|n|*n<=16*1024*1024).ok_or("removal-resume-history-bound")?;
+                .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-resume-history-bound")?;
             held_bytes(book,original,&raw)?;book.forward_close(original,"removal-resume-history-quote-close")?;Ok(quote)
         }
         fn removal_resume_known_root_names(book:&Install,history:&History,selected:&ReleaseSetData,root:usize)->Result<BTreeSet<String>> {
@@ -9547,12 +9723,12 @@ mod installer {
             // nodes cost no original; all signed nodes remain in this forecast.
             let one=files.checked_add(directories.checked_mul(2)?)?.checked_add(controls.checked_mul(2)?)?
                 .checked_add(scan)?.checked_add(post)?.checked_add(256)?;
-            (used as u64).checked_add(one.checked_mul(walks)?).filter(|n|*n<=24576)
+            (used as u64).checked_add(one.checked_mul(walks)?).filter(|n|*n<=installation_record::ORIGINAL_LIMIT as u64)
         }
         fn removal_resume_continuation_quote_data(used:usize,files:u64,directories:u64,controls:u64,post:u64)->Option<u64> {
             files.checked_mul(2)?.checked_add(directories.checked_mul(3)?)?
                 .checked_add(controls.checked_mul(2)?)?.checked_add(post)?.checked_add(64)?
-                .checked_add(used as u64).filter(|n|*n<=24576)
+                .checked_add(used as u64).filter(|n|*n<=installation_record::ORIGINAL_LIMIT as u64)
         }
         pub(super) fn removal_resume_rehome_matches_data(a:Option<&RehomeReferenceData>,b:Option<&RehomeReferenceData>)->bool {
             match (a,b) {(None,None)=>true,(Some(a),Some(b))=>a.matches_data(b),_=>false}
@@ -9575,7 +9751,7 @@ mod installer {
                 let span=source.genesis_control_data(book,&path)?;
                 check(*span.digest_data()==worker::removal_hex_data::<32>(binding.inventory_sha256)?,"removal-resume-generation-inventory")?;
                 let extra=removal_resume_inventory_quote_data(span.len_data()).ok_or("removal-resume-inventory-memory")?;
-                check(base.checked_add(extra as u64).is_some_and(|n|n<=16*1024*1024),"removal-resume-inventory-memory")?;
+                check(base.checked_add(extra as u64).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"removal-resume-inventory-memory")?;
                 let raw=source.read_genesis_control(book,&path)?;
                 let inventory=Inventory::parse_for_release(&raw,binding.runtime_manifest_sha256,binding.release)?;
                 let index=inventory.index()?;
@@ -9644,7 +9820,7 @@ mod installer {
                 .ok_or("removal-resume-current-memory")
         }
         fn removal_resume_current_original_end_data(used:usize)->Result<usize> {
-            used.checked_add(4).filter(|n|*n<=24576).ok_or("removal-resume-current-original-bound")
+            used.checked_add(4).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("removal-resume-current-original-bound")
         }
         fn removal_resume_reserve_walk_storage(book:&mut Install,end:usize,base:u64)->Result<u64> {
             let before=removal_effective_control_bytes(book)?;
@@ -9655,7 +9831,7 @@ mod installer {
             let (_,_,effective)=removal_original_storage_transition_data(book.removal_control_reserved,
                 book.removal_original_storage_reserved,book.removal_observation_control,book.removal_observation_reserved,quote)?;
             let expected=base.checked_add(effective.checked_sub(before).ok_or("removal-resume-original-storage-memory")?)
-                .filter(|n|*n<=16*1024*1024).ok_or("removal-resume-original-storage-memory")?;
+                .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-resume-original-storage-memory")?;
             reserve_removal_original_storage(book,end)?;
             check(removal_effective_control_bytes(book)?==effective,"removal-resume-original-storage-memory")?;Ok(expected)
         }
@@ -9759,9 +9935,9 @@ mod installer {
                 let plan_bytes=u64::try_from(self.plan.owned_bytes(0)?).map_err(|_|"removal-resume-control-bound")?;
                 let added=plan_bytes.checked_add(other as u64).ok_or("removal-resume-control-bound")?;
                 let effective=removal_effective_control_bytes(book)?.checked_add(added)
-                    .filter(|n|*n<=16*1024*1024).ok_or("removal-resume-control-bound")?;
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-resume-control-bound")?;
                 let reserved=book.removal_control_reserved.checked_add(added)
-                    .filter(|n|*n<=16*1024*1024).ok_or("removal-resume-control-bound")?;
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-resume-control-bound")?;
                 // Once-only actual retained capacity debit. The separate
                 // History was dropped; the capture remains in its original2MiB
                 // reserve. No Book credit is returned or counter reset.
@@ -9892,7 +10068,7 @@ mod installer {
                 payload=payload.checked_add(bytes).ok_or("removal-resume-storage")?;
                 check(versions_wanted.insert(binding.release.to_owned()),"removal-resume-generation-duplicate")?;
             }
-            for record in history.originals.values().chain(std::iter::once(&history.current)) {stage_roster(book,root,record,&mut evidence)?;}
+            for record in history.originals.values().chain(std::iter::once(&history.current)) {stage_roster(book,root,record,&mut evidence,&history)?;}
             let wanted=removal_resume_known_root_names(book,&history,selected,root)?;
             exact_roster(book,versions,&versions_wanted)?;
             if prior.is_none(){book.forward_close(versions,"removal-resume-versions-close")?;}
@@ -9924,7 +10100,7 @@ mod installer {
                 .checked_add(std::mem::size_of::<RemovalResumeObservation>()).ok_or("removal-resume-control-bound")?;
             plan.memory_with_book(book,other)?;
             let control=effective.checked_add(plan.owned_bytes(other)? as u64)
-                .filter(|n|*n<=16*1024*1024).ok_or("removal-resume-control-bound")?;
+                .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-resume-control-bound")?;
             let capture=if prior.is_some(){capture.set_resume_quote_data(control,storage)?;Some(capture)}else{drop(capture);None};
             source.final_original_post(book)?;
             Ok(RemovalResumeObservation {plan,forecast,storage,control,capture,controls,charged:false})
@@ -10003,15 +10179,15 @@ mod installer {
                 +std::mem::size_of::<RemovalPayloadLayout>());
             for (nodes,generations,names) in [(0,1,3),(REMOVAL_PLAN_NODES+1,1,3),(1,0,0),(1,10,3),(1,1,9*255+1),
                 (usize::MAX,usize::MAX,usize::MAX)] {assert!(removal_payload_conversion_quote_data(nodes,generations,names).is_err());}
-            assert_eq!(removal_resume_current_original_end_data(24572),Ok(24576));
-            assert!(removal_resume_current_original_end_data(24573).is_err());
+            assert_eq!(removal_resume_current_original_end_data((installation_record::ORIGINAL_LIMIT - 4)),Ok(installation_record::ORIGINAL_LIMIT));
+            assert!(removal_resume_current_original_end_data((installation_record::ORIGINAL_LIMIT - 3)).is_err());
             assert!(removal_resume_current_original_end_data(usize::MAX).is_err());
             assert_eq!(removal_resume_current_raw_quote_data(17,13).unwrap(),34+26+65536+8192+std::mem::size_of::<RemovalResumeControls>());
             for (inventory,record) in [(0,1),(1,0),(installation_record::INVENTORY_LIMIT as u64+1,1),
                 (1,installation_record::RECORD_LIMIT as u64+1),(u64::MAX,1),(1,u64::MAX)] {
                 assert!(removal_resume_current_raw_quote_data(inventory,record).is_err());
             }
-            let ceiling=16*1024*1024u64;
+            let ceiling=(installation_record::CONTROL_LIMIT as u64);
             // The very same q is checked before journal effects and charged at
             // conversion. Workspace debits cannot hide that future overlap.
             let conversion=remaining().conversion_quote_data().unwrap();assert_eq!(conversion,quote);
@@ -10040,7 +10216,7 @@ mod installer {
             let storage=32*1024*1024u64;moved.set_resume_quote_data(17,storage).unwrap();
             assert_eq!(moved.quote,Some((17,storage)));
             moved.set_resume_quote_data(23,storage).unwrap();assert_eq!(moved.quote,Some((23,storage)));
-            assert!(moved.set_resume_quote_data(16*1024*1024+1,storage).is_err());
+            assert!(moved.set_resume_quote_data((installation_record::CONTROL_LIMIT as u64)+1,storage).is_err());
             assert!(moved.set_resume_quote_data(23,installation_record::PAYLOAD_LIMIT+1).is_err());
             assert_eq!(moved.quote,Some((23,storage)));
             let mut not_second=capture();assert!(not_second.set_resume_quote_data(23,storage).is_err());
@@ -10061,8 +10237,8 @@ mod installer {
             assert!(!removal_resume_children_data(&wanted,&BTreeMap::from([("a".into(),0)])));
             let one=3+2*4+2*5+18*6+256;
             assert_eq!(removal_resume_original_quote_data(11,3,4,5,60,48,2),Some(11+2*one));
-            assert_eq!(removal_resume_original_quote_data((24576-2*one) as usize,3,4,5,60,48,2),Some(24576));
-            assert!(removal_resume_original_quote_data((24577-2*one) as usize,3,4,5,60,48,2).is_none());
+            assert_eq!(removal_resume_original_quote_data(((installation_record::ORIGINAL_LIMIT as u64)-2*one) as usize,3,4,5,60,48,2),Some((installation_record::ORIGINAL_LIMIT as u64)));
+            assert!(removal_resume_original_quote_data((((installation_record::ORIGINAL_LIMIT as u64) + 1)-2*one) as usize,3,4,5,60,48,2).is_none());
             for slot in 0..5 {
                 let mut values=[0;5];values[slot]=u64::MAX;
                 assert!(removal_resume_original_quote_data(0,values[0],values[1],values[2],values[3],values[4],2).is_none());
@@ -10078,8 +10254,8 @@ mod installer {
             }
             let continuation=2*3+3*4+2*5+48+64;
             assert_eq!(removal_resume_continuation_quote_data(11,3,4,5,48),Some(11+continuation));
-            assert_eq!(removal_resume_continuation_quote_data((24576-continuation) as usize,3,4,5,48),Some(24576));
-            assert!(removal_resume_continuation_quote_data((24577-continuation) as usize,3,4,5,48).is_none());
+            assert_eq!(removal_resume_continuation_quote_data(((installation_record::ORIGINAL_LIMIT as u64)-continuation) as usize,3,4,5,48),Some((installation_record::ORIGINAL_LIMIT as u64)));
+            assert!(removal_resume_continuation_quote_data((((installation_record::ORIGINAL_LIMIT as u64) + 1)-continuation) as usize,3,4,5,48).is_none());
             for slot in 0..4 {
                 let mut values=[0;4];values[slot]=u64::MAX;
                 assert!(removal_resume_continuation_quote_data(0,values[0],values[1],values[2],values[3]).is_none());
@@ -10111,8 +10287,8 @@ mod installer {
                 let plain=removal_resume_original_quote_data(11,3,4,5,10,8,walks).unwrap();
                 assert_eq!(removal_resume_original_quote_data(11,3,4,5,scan,post,walks),Some(plain+2*c*walks));
                 let required=removal_resume_original_quote_data(0,3,4,5,scan,post,walks).unwrap();
-                assert_eq!(removal_resume_original_quote_data((24576-required) as usize,3,4,5,scan,post,walks),Some(24576));
-                assert!(removal_resume_original_quote_data((24577-required) as usize,3,4,5,scan,post,walks).is_none());
+                assert_eq!(removal_resume_original_quote_data(((installation_record::ORIGINAL_LIMIT as u64)-required) as usize,3,4,5,scan,post,walks),Some((installation_record::ORIGINAL_LIMIT as u64)));
+                assert!(removal_resume_original_quote_data((((installation_record::ORIGINAL_LIMIT as u64) + 1)-required) as usize,3,4,5,scan,post,walks).is_none());
             }
             assert_eq!(removal_resume_continuation_quote_data(11,3,4,5,post),
                 removal_resume_continuation_quote_data(11,3,4,5,8).and_then(|n|n.checked_add(c)));
@@ -10135,10 +10311,14 @@ mod installer {
             plan.nodes[0].presence=RemovalRemainingPresence::Present {identity:Identity{ino:3,..id},flags:0};
             assert_ne!(first,plan.fingerprint().unwrap());
         }
-        fn stage_roster(book: &mut Install, root: usize, record: &Recorded, evidence_bytes: &mut u64) -> Result<()> {
-            stage_roster_intent(book,root,&record.intent,evidence_bytes)
+        fn stage_roster(book: &mut Install, root: usize, record: &Recorded, evidence_bytes: &mut u64,history:&History) -> Result<()> {
+            stage_roster_selected(book,root,&record.intent,evidence_bytes,None,Some(history))
         }
         fn stage_roster_intent(book:&mut Install,root:usize,intent:&IntentData,evidence_bytes:&mut u64)->Result<()> {
+            stage_roster_selected(book,root,intent,evidence_bytes,None,None)
+        }
+        fn stage_roster_selected(book:&mut Install,root:usize,intent:&IntentData,evidence_bytes:&mut u64,
+            launcher:Option<&applications::RemovalPreparation>,history:Option<&History>)->Result<()> {
             if intent.action_data() == ActionData::SamePackageNoop { return Ok(()); }
             let name = format!(".install-{}", intent.invocation_data());
             let stage = book.open(Some(root), &name, true)?; book.protected(stage, true, Some(0o700))?;
@@ -10148,7 +10328,20 @@ mod installer {
             let phases: &[&str] = if intent.action_data() == ActionData::RestoreFixedApp {
                 &["staging-created", "prepared", "app-publication-confirmed"]
             } else { &["staging-created", "prepared", "runtime-publication-confirmed", "both-publications-confirmed"] };
-            exact_roster(book, stage, &phases.iter().map(|phase| format!("{phase}.json")).collect())?;
+            let mut wanted: BTreeSet<String> = phases.iter().map(|phase| format!("{phase}.json")).collect();
+            if let Some(launcher) = launcher {
+                if launcher.allowed_stage(book,stage)? {wanted.insert(applications::WORK_NAME.into());}
+            }
+            let launcher_phases=history.map(|h|applications::recorded_phases(h,intent.invocation_data()))
+                .transpose()?.unwrap_or_default();
+            for record in &launcher_phases {
+                check(wanted.insert(applications::phase_name(record.intent.invocation_data())?),"launcher-phase-duplicate")?;
+            }
+            exact_roster(book,stage,&wanted)?;
+            for record in launcher_phases {
+                let size=applications::recorded_phase_post(book,stage,record)?;
+                *evidence_bytes=evidence_bytes.checked_add(size).ok_or("maintenance-control-bound")?;
+            }
             for phase in phases {
                 let body = metadata_bytes(book, stage, &format!("{phase}.json"), transaction::STATE_LIMIT)?;
                 *evidence_bytes = evidence_bytes.checked_add(body.len() as u64).ok_or("maintenance-control-bound")?;
@@ -10204,7 +10397,7 @@ mod installer {
                 census.scan_originals_data()?.checked_mul(full_scans)
                     .and_then(|n|n.checked_add(census.post_originals_data().ok()?.checked_mul(posts)?))
                     .and_then(|n|n.checked_add(extra)).and_then(|n|n.checked_add(book.originals.len()))
-                    .filter(|n|*n<=24576).ok_or("archived-original-budget")
+                    .filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("archived-original-budget")
             }
         }
         pub(super) fn observe_with_archives(book:&mut Install,prepared:PreparedFresh,selected:ReleaseSetData,
@@ -10218,7 +10411,7 @@ mod installer {
         pub(super) fn reserve_install_archive_context(book:&mut Install)->Result<()> {
             if book.archived_install_reserved{return book.clock();}
             let reserve=(ARCHIVED_NAMES_LIMIT+2*worker::INIT_LIMIT+2*transaction::STATE_LIMIT+std::mem::size_of::<InstallArchiveObservation>()) as u64;
-            check(removal_effective_control_bytes(book)?.checked_add(reserve).is_some_and(|n|n<=16*1024*1024),
+            check(removal_effective_control_bytes(book)?.checked_add(reserve).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),
                 "archived-context-control-budget")?;
             book.removal_control_reserved=book.removal_control_reserved.checked_add(reserve).ok_or("archived-context-control-budget")?;
             book.archived_install_reserved=true;book.clock()
@@ -10312,9 +10505,17 @@ mod installer {
             action==ActionData::SamePackageNoop && present==[true;2] && !intent && controls && current
         }
         impl RemovalObserved {
+            pub(super) fn retire_launcher_before_snapshot(&mut self,book:&mut Install)->Result<()> {
+                self.post(book)?;
+                if let Some(removal) = self.inner.launcher_removal.as_mut() {
+                    removal.retire_before_snapshot(book,&self.inner.prepared)?;
+                }
+                self.post(book)
+            }
             pub(super) fn inventory(&self) -> &Inventory { &self.inner.prepared.inventory }
             pub(super) fn inventory_bytes(&self) -> &[u8] { &self.inner.prepared.inventory_bytes }
             pub(super) fn post(&self, book: &Install) -> Result<()> {
+                if let Some(removal) = self.inner.launcher_removal.as_ref() {removal.observed_post(book)?;}
                 held_inventory(book,self.inventory_original,self.inventory_bytes())?;
                 held_bytes(book,self.record_original,&self.record_bytes)?;
                 self.inner.controls_post(book)?;
@@ -10478,7 +10679,9 @@ mod installer {
             exclusion.post(book,source)?; old.post(book)?;
             begin_removal_archive_census(book,source.root_original(),true)?;
             let RemovalObserved { inner,inventory_original,record_original,record_bytes }=old;
-            let Observed { prepared,selected,action,history,old_app,old_release,intent,intent_original,controls,archives }=inner;
+            let Observed { prepared,selected,action,history,old_app,old_release,intent,intent_original,controls,archives,launcher,launcher_removal }=inner;
+            if let Some(launcher) = launcher {launcher.close_for_reobservation(book)?;}
+            if let Some(removal) = launcher_removal {removal.close_before_second_census(book)?;}
             check(archives.is_none(),"removal-current-archive-context")?;
             check(action==ActionData::SamePackageNoop && intent.is_none() && intent_original.is_none(),"removal-current-only")?;
             let history=history.ok_or("removal-current-history")?;
@@ -10550,6 +10753,7 @@ mod installer {
             if book.registration.verified || book.worker_stderr_is_gate { root_names.insert(paths::REGISTRATION_GATE_NAME.into()); }
             let mut version_names = BTreeSet::new(); let mut costs = Vec::new(); let mut evidence_bytes = 0u64;
             let mut metadata_control = 0u64; let mut controls = None;
+            let mut launcher_removal = None;
             let (action, old_app, old_release, invocation_count) = if let Some(history) = &history {
                 root_names.insert(transaction::STATE_NAME.into()); evidence_bytes = history.bytes;
                 let generation = history.current.state.current_data();
@@ -10569,6 +10773,10 @@ mod installer {
                     root_names.insert(data(transaction::retained_app_name_data(generation.retained_invocation_data()
                         .ok_or("maintenance-retained-shape")?))?);
                 }
+                if removal_source.is_some() {
+                    check(same && app.is_some(),"launcher-removal-current-generation")?;
+                    launcher_removal = applications::RemovalPreparation::observe(book,&prepared,&generation,&history.current.capsule)?;
+                }
                 for record in history.originals.values().chain(std::iter::once(&history.current)) {
                     let invocation = record.intent.invocation_data();
                     root_names.insert(data(transaction::intent_name_data(invocation))?);
@@ -10577,7 +10785,7 @@ mod installer {
                         root_names.insert(data(transaction::archived_state_name_data(invocation))?);
                     }
                     if record.intent.action_data() != ActionData::SamePackageNoop { root_names.insert(format!(".install-{invocation}")); }
-                    stage_roster(book, root, record, &mut evidence_bytes)?;
+                    stage_roster_selected(book,root,&record.intent,&mut evidence_bytes,launcher_removal.as_ref(),Some(history))?;
                 }
                 let action = if same { if app.is_some() { ActionData::SamePackageNoop } else { ActionData::RestoreFixedApp } }
                     else {
@@ -10613,7 +10821,7 @@ mod installer {
             if let Some(archives)=archives.as_mut(){archives.capture_names(root_names,version_names)?;}
             let archive_index=if archives.is_some(){
                 let quote=worker::reinstall_index_quote_data(&prepared.inventory)?;
-                check(removal_effective_control_bytes(book)?.checked_add(quote.2 as u64).is_some_and(|n|n<=16*1024*1024),
+                check(removal_effective_control_bytes(book)?.checked_add(quote.2 as u64).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),
                     "archived-observer-index-memory")?;Some(quote)
             }else{None};
             let incoming = prepared.inventory.index()?;
@@ -10660,10 +10868,39 @@ mod installer {
                 .and_then(|n| n.checked_add(6 * transaction::PRODUCER_CONTROL_LIMIT as u64))
                 .and_then(|n| n.checked_add(book.removal_control_reserved))
                 .ok_or("maintenance-control-bound")?;
+            let wants_launcher = mobile_release_desktop::macos_applications_launcher::LauncherInventory::from_index(&incoming)?.is_some()
+                || history.as_ref().is_some_and(|h|h.current.capsule.launcher_data().is_some());
+            let launcher = if wants_launcher && removal_source.is_none() {
+                applications::Observation::capture(book,&prepared,history.as_ref(),old_release,action,control_bound)?
+            } else {None};
+            let control_bound = control_bound.checked_add(if launcher.is_some() {
+                applications::OBSERVATION_CONTROL_QUOTE } else {0}).ok_or("maintenance-control-bound")?;
+            // Convenience copies are physical bytes outside the embedded app.
+            // Charge the maximum old+new extent during update before any writes;
+            // none of the original file/storage/original-descriptor caps grow.
+            let mut copy_files = copy_files;
+            if let Some(launcher) = &launcher {
+                let (physical_files,physical_bytes,new_files) = launcher.planned_cost()?;
+                let cost = costs.first_mut().ok_or("maintenance-generation-missing")?;
+                cost.files = cost.files.checked_add(physical_files).ok_or("maintenance-payload-bound")?;
+                cost.bytes = cost.bytes.checked_add(physical_bytes).ok_or("maintenance-payload-bound")?;
+                copy_files = copy_files.checked_add(new_files).ok_or("maintenance-original-bound")?;
+            }
+            if let Some(removal) = &launcher_removal {
+                let (files,bytes) = removal.physical_cost();
+                let cost = costs.first_mut().ok_or("maintenance-generation-missing")?;
+                cost.files = cost.files.checked_add(files).ok_or("maintenance-payload-bound")?;
+                cost.bytes = cost.bytes.checked_add(bytes).ok_or("maintenance-payload-bound")?;
+            }
+            let creates_launcher_phase=launcher.as_ref().is_some_and(applications::Observation::creates_phase);
             let records = (book.originals.len() as u64).checked_add(copy_files.checked_mul(3).ok_or("maintenance-original-bound")?)
-                .and_then(|n| n.checked_add(incoming.directories.len() as u64 * 3 + 256 + 3)).ok_or("maintenance-original-bound")?;
+                .and_then(|n| n.checked_add(incoming.directories.len() as u64 * 3 + 256 + 3))
+                .and_then(|n| n.checked_add(if launcher.is_some() || launcher_removal.is_some() {256} else {0}))
+                .and_then(|n| n.checked_add(if creates_launcher_phase {applications::PHASE_ORIGINAL_QUOTE} else {0}))
+                .ok_or("maintenance-original-bound")?;
             let live = book.originals.iter().filter(|r| r.fd.is_some()).count() as u64 + 2 * 16 + 12 + 1
-                + book.removal_live_reserved as u64;
+                + book.removal_live_reserved as u64 + if launcher.is_some() || launcher_removal.is_some() {20} else {0}
+                + if creates_launcher_phase {applications::PHASE_LIVE_QUOTE} else {0};
             let budget=data(transaction::BudgetData::checked_data(&costs, invocation_count, planned_evidence, control_bound, records, live))?;
             if book.removal_control_reserved!=0 {
                 book.removal_observation_control=Some(control_bound);
@@ -10678,7 +10915,7 @@ mod installer {
                 check(!capture.complete && !capture.failed && capture.quote.is_none(),"removal-snapshot-quote-once")?;
                 capture.quote=Some((control_bound,complete_storage));
             }
-            Ok(Observed { prepared, selected, action, history, old_app, old_release, intent:None, intent_original:None,controls,archives })
+            Ok(Observed { prepared, selected, action, history, old_app, old_release, intent:None, intent_original:None,controls,archives,launcher,launcher_removal })
         }
         impl Observed {
             pub(super) fn controls_post(&self, book: &Install) -> Result<()> {
@@ -10758,15 +10995,18 @@ mod installer {
                     "capsuleSha256":h.current.capsule.digest_data()}));
                 let release_bytes = self.selected.encode_data().map_err(|_| "maintenance-selected-shape")?;
                 let releases = mobile_release_desktop::protocol::strict_json(&release_bytes).map_err(|_| "maintenance-selected-shape")?;
-                Ok(serde_json::json!({"action":self.action,"requestId":intent.request_id_data(),"releases":releases,"intentSha256":intent.digest_data(),
+                let mut value = serde_json::json!({"action":self.action,"requestId":intent.request_id_data(),"releases":releases,"intentSha256":intent.digest_data(),
                     "intentOriginal":worker::identity_data(book.identity(original)?),"previous":previous,
                     "producerControls":self.controls.as_ref().map(|pair| pair.binding(book)).transpose()?,
                     "installRoot":book.recorded_directory(self.prepared.destination)?,
                     "versionsRoot":book.recorded_directory(self.prepared.versions)?,
-                    "oldApp":self.old_app.map(|n| app_identity(book,n).map(|i| i.fields_data())).transpose()?}))
+                    "oldApp":self.old_app.map(|n| app_identity(book,n).map(|i| i.fields_data())).transpose()?});
+                if let Some(launcher) = &self.launcher { value["launcher"] = launcher.binding(book)?; }
+                Ok(value)
             }
             pub(super) fn selected_from_binding(value: &serde_json::Value) -> Result<ReleaseSetData> {
-                let fields = ["action","requestId","releases","intentSha256","intentOriginal","previous","producerControls","installRoot","versionsRoot","oldApp"];
+                let mut fields = vec!["action","requestId","releases","intentSha256","intentOriginal","previous","producerControls","installRoot","versionsRoot","oldApp"];
+                if value.get("launcher").is_some() {fields.push("launcher");}
                 let map = value.as_object().ok_or("maintenance-init-shape")?;
                 check(map.len() == fields.len() && fields.iter().all(|key| map.contains_key(*key)), "maintenance-init-shape")?;
                 data(transaction::export_name_data(value["requestId"].as_str().ok_or("maintenance-request-shape")?))?;
@@ -11007,8 +11247,10 @@ mod installer {
                 } else { invocation.to_owned() };
                 generation(book,observed,release,app,&instance)?
             };
+            applications::with_effects(book,|effects,book|effects.publish_before_state(book,&observed.prepared,&current,intent))?;
             let state = data(StateData::encode_applied_data(intent,observed.previous(),&current,&observed.selected))?;
-            publish_state(book,observed,state,false)
+            publish_state(book,observed,state,false)?;
+            applications::with_effects(book,applications::Effects::finish_after_state)
         }
         fn try_inverse(book: &mut Install, observed: &Observed, invocation: &str) -> Result<()> {
             check(observed.action == ActionData::Update && !book.unknown, "maintenance-inverse-not-eligible")?;
@@ -11040,17 +11282,20 @@ mod installer {
             }
             let returned = move_app(book,old,root,&quarantine,root,paths::APP_NAME);
             step(book,StepData::OldAppRestored,returned.returned,returned.result,true)?;
+            applications::with_effects(book,|effects,book|effects.restore_before_inverse_state(book,&observed.prepared))?;
             let bytes = data(StateData::encode_inverse_data(observed.intent.as_ref().ok_or("maintenance-intent-missing")?,
                 (&history.current.state,&history.current.capsule),true,book.runtime_publication == "confirmed",&observed.selected))?;
             publish_state(book,observed,bytes,true)
         }
-        pub(super) fn execute(book: &mut Install, observed: Observed, invocation: &str) -> Result<()> {
-            check(book.worker_stderr_is_gate && book.worker_go_eof && book.maintenance.is_none(), "maintenance-original-go-required")?;
+        pub(super) fn execute(book: &mut Install, mut observed: Observed, invocation: &str) -> Result<()> {
+            check(book.worker_stderr_is_gate && book.worker_go_eof && book.maintenance.is_none()
+                && book.launcher_effects.is_none(), "maintenance-original-go-required")?;
             book.registration_ready()?;
             let deadline = book.worker_deadline.as_ref().ok_or("worker-clock-missing")?;
             let at = deadline.check_work()?;
             let progress = data(ProgressData::new_data(observed.action,at,deadline.original_endpoint()))?;
             book.maintenance = Some(Effects { action:observed.action,progress,state:None,state_bytes:None,state_published:false,inverse:false });
+            book.launcher_effects = observed.launcher.take().map(applications::Effects::new);
             let result = forward(book,&observed,invocation);
             if let Err(error) = result {
                 let (at, uncertain) = timestamp(book);
@@ -11111,6 +11356,7 @@ mod installer {
             // endpoint; a prior successful checkpoint is not a lease.
             let timely = timely && !uncertain && book.worker_deadline.as_ref()
                 .is_some_and(|clock| at < clock.original_endpoint());
+            let launcher = book.launcher_effects.as_ref().map(|effects|effects.result_data(book,settled,timely));
             let Some(effects) = book.maintenance.as_mut() else {
                 return final_result_after_deadline(Err("maintenance-progress-missing"),settled,true,
                     book.runtime_publication,book.app_publication,timely);
@@ -11119,12 +11365,14 @@ mod installer {
             if effects.inverse { let _ = effects.progress.inverse_return_data(StepData::OriginalsSettled,returned,at); }
             else { let _ = effects.progress.forward_return_data(StepData::OriginalsSettled,returned,at); }
             let reason = result.err().or_else(|| (!settled).then_some("original-close-unknown"))
-                .or_else(|| (!timely).then_some("deadline"));
+                .or_else(|| (!timely).then_some("deadline"))
+                .or_else(|| launcher.as_ref().is_some_and(|row|!row.complete_data(effects.inverse)).then_some("launcher-finality"));
             let progress = effects.progress.outcome_data();
             let complete = reason.is_none() && settled && timely && !book.unknown && progress == ProgressOutcomeData::Recorded
                 && effects.state_published && effects.state.is_some();
             let inverse = reason.is_some() && settled && timely && !book.unknown && progress == ProgressOutcomeData::InverseRecorded
-                && effects.state_published && effects.state.is_some();
+                && effects.state_published && effects.state.is_some()
+                && launcher.as_ref().is_none_or(|row|row.complete_data(true));
             let published = book.runtime_publication == "confirmed" || book.app_publication == "confirmed" || effects.state_published;
             let state = if complete { match effects.action { ActionData::SamePackageNoop => "same-package",
                 ActionData::RestoreFixedApp => "restored-app", _ => "installed" } }
@@ -11566,7 +11814,7 @@ mod installer {
                     removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
                 #[cfg(feature = "macos-installed-removal-observer")]
                 removal_observer_projection:None,
-                    payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),
+                    payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),launcher_effects:None,
                     stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",
                     app_publication:"not-attempted",payload_verified:false,
                     metadata:installation_record::Progress::default(),gate:MaintenanceGate::new(),registration:RegistrationReservation::new(),maintenance:None,
@@ -11871,9 +12119,10 @@ mod installer {
         }
         struct MaintenanceReply {
             action: ActionData, progress: String, state_published: bool, state_bytes: Option<String>, inverse: bool,
+            launcher: Option<mobile_release_desktop::macos_applications_launcher::ObservationData>,
         }
         impl MaintenanceReply {
-            fn from_original(effects: &maintenance::Effects) -> Self {
+            fn from_original(effects: &maintenance::Effects, book: &Install, timely: bool) -> Self {
                 let progress = match effects.progress.outcome_data() {
                     transaction::ProgressOutcomeData::InProgress => "in-progress",
                     transaction::ProgressOutcomeData::Recorded => "recorded",
@@ -11885,14 +12134,25 @@ mod installer {
                     // The encoder emitted UTF-8 JSON. If its storage is invalid,
                     // omit it and fail the result predicate; never lossy-decode.
                     state_bytes:effects.state_bytes.as_ref().and_then(|b| std::str::from_utf8(b).ok()).map(str::to_owned),
-                    inverse:effects.inverse }
+                    inverse:effects.inverse,launcher:book.launcher_effects.as_ref()
+                        .map(|effects|effects.result_data(book,book.originals_settled(),timely)) }
             }
             fn data(&self) -> Value {
-                json!({"action":self.action,"progress":self.progress,"statePublished":self.state_published,
-                    "stateBytes":self.state_bytes,"inverseStarted":self.inverse})
+                let mut value = json!({"action":self.action,"progress":self.progress,"statePublished":self.state_published,
+                    "stateBytes":self.state_bytes,"inverseStarted":self.inverse});
+                if let Some(launcher) = &self.launcher {value["launcher"] = json!(launcher);}
+                value
             }
             fn parse(value: &Value) -> Result<Self> {
-                object(value,&["action","progress","statePublished","stateBytes","inverseStarted"])?;
+                let mut fields = vec!["action","progress","statePublished","stateBytes","inverseStarted"];
+                let launcher = if let Some(row) = value.get("launcher") {
+                    fields.push("launcher");
+                    let row:mobile_release_desktop::macos_applications_launcher::ObservationData =
+                        serde_json::from_value(row.clone()).map_err(|_|"launcher-result-shape")?;
+                    check(row.valid_data(),"launcher-result-shape")?;
+                    Some(row)
+                } else {None};
+                object(value,&fields)?;
                 let action: ActionData = serde_json::from_value(value["action"].clone()).map_err(|_| "maintenance-result-shape")?;
                 check(action != ActionData::Uninstall,"maintenance-result-shape")?;
                 let progress = value["progress"].as_str().ok_or("maintenance-result-shape")?;
@@ -11907,13 +12167,16 @@ mod installer {
                 };
                 let inverse = value["inverseStarted"].as_bool().ok_or("maintenance-result-shape")?;
                 check(!inverse || action == ActionData::Update,"maintenance-result-shape")?;
-                Ok(Self { action,progress:progress.into(),state_published,state_bytes,inverse })
+                Ok(Self { action,progress:progress.into(),state_published,state_bytes,inverse,launcher })
             }
             fn accepts(&self, returned: &PreExit) -> bool {
                 let published = returned.runtime == "confirmed" || returned.app == "confirmed" || self.state_published;
-                let finality = returned.originals && returned.payload && returned.verified && returned.timely && !returned.unknown;
+                let finality = returned.originals && returned.payload && returned.verified && returned.timely && !returned.unknown
+                    && self.launcher.as_ref().is_none_or(|row|row.complete_data(self.inverse));
                 let committed = self.progress == "recorded" && self.state_published && self.state_bytes.is_some() && !self.inverse;
                 matches!(returned.exit,0 | 1 | 20) && returned.bytes <= installation_record::PAYLOAD_LIMIT
+                    && self.launcher.as_ref().is_none_or(|row|returned.bytes.checked_add(row.write_bytes)
+                        .is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT))
                     && (returned.writes == 0) == (returned.bytes == 0) && returned.writes <= returned.bytes
                     && (!returned.originals || returned.payload)
                     && match returned.state.as_str() {
@@ -11947,7 +12210,7 @@ mod installer {
                     timely:result.deadline_met,unknown:book.unknown || book.worker_deadline.as_ref().is_some_and(Deadline::is_unknown),
                     writes:book.payload_write_calls,bytes:book.payload_written,
                     reason:result.reason.map(|label| closed_reason(label).to_owned()),
-                    maintenance:book.maintenance.as_ref().map(MaintenanceReply::from_original) }
+                    maintenance:book.maintenance.as_ref().map(|effects|MaintenanceReply::from_original(effects,book,result.deadline_met)) }
             }
             fn data(&self, invocation: &str, init_sha: &str) -> Value {
                 let mut value = json!({"schemaVersion":2,"kind":"pre-exit-writer-result","invocation":invocation,"initSha256":init_sha,
@@ -12297,7 +12560,7 @@ mod installer {
                     .and_then(|n| n.checked_add(6*65536+2*installation_record::RECORD_LIMIT))
                     .and_then(|n| n.checked_add(REMOVAL_REQUEST_RESERVE))
                     .ok_or("removal-control-bound")?;
-                check(bound<=16*1024*1024,"removal-control-bound")?;
+                check(bound<=(installation_record::CONTROL_LIMIT as u64),"removal-control-bound")?;
                 book.removal_live_reserved=3;
                 book.removal_control_reserved=bound as u64;
                 let input=completed_package::Input::open_removal(book,completed_path)?;
@@ -12482,7 +12745,7 @@ mod installer {
         }
         pub(super) fn removal_reobserve_budget_data(reserved:u64,retained_capacity:usize)->Result<u64> {
             check(retained_capacity>0 && retained_capacity<=transaction::STATE_LIMIT,"removal-state-overlap")?;
-            reserved.checked_add(retained_capacity as u64).filter(|n|*n<=16*1024*1024)
+            reserved.checked_add(retained_capacity as u64).filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64))
                 .ok_or("removal-control-bound")
         }
         // Held by the same Parent before publication. All fields come from
@@ -13038,7 +13301,7 @@ mod installer {
                         +std::mem::size_of::<RemovalPeerCompletion>()+20*std::mem::size_of::<BorrowedFd<'_>>()))
                     .and_then(|n|n.checked_add(transcript)).and_then(|n|n.checked_add(frame)).ok_or("removal-peer-storage")?;
                 check(total<=REMOVAL_REQUEST_RESERVE && self.book.removal_live_reserved==3
-                    && self.book.removal_control_reserved<=16*1024*1024
+                    && self.book.removal_control_reserved<=(installation_record::CONTROL_LIMIT as u64)
                     && self.book.removal_control_reserved>=REMOVAL_REQUEST_RESERVE as u64,"removal-peer-storage")
             }
             fn directory_post(&self,effects:&RemovalPeerOwnEffects)->Result<Identity> {
@@ -13524,10 +13787,10 @@ mod installer {
             check(prior_post>=prior*8 && (prior!=0 || prior_post==0),"removal-snapshot-budget")?;
             let future=controls.checked_mul(3).and_then(|n|n.checked_add(directories*2))
                 .and_then(|n|n.checked_add(prior_post)).and_then(|n|n.checked_add(16)).ok_or("removal-snapshot-budget")?;
-            let end=originals.checked_add(future).filter(|n|*n<=24576).ok_or("removal-snapshot-budget")?;
+            let end=originals.checked_add(future).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("removal-snapshot-budget")?;
             let table=if end>capacity { end.checked_mul(std::mem::size_of::<Original>()).ok_or("removal-snapshot-budget")? } else { 0 };
             let extra=table.checked_add(future.checked_mul(255).ok_or("removal-snapshot-budget")?).ok_or("removal-snapshot-budget")?;
-            let bound=control.checked_add(extra as u64).filter(|n|*n<=16*1024*1024).ok_or("removal-snapshot-budget")?;
+            let bound=control.checked_add(extra as u64).filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-snapshot-budget")?;
             check(storage.checked_add(snapshot).and_then(|n|n.checked_add(mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64))
                     .is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT)
                 && live.checked_add(external).and_then(|n|n.checked_add(6)).is_some_and(|n|n<=96),"removal-snapshot-budget")?;
@@ -13893,8 +14156,8 @@ mod installer {
         }
         pub(super) fn removal_lifecycle_originals_data(used:usize,files:usize,directories:usize,
             controls:usize,control_files:usize,post:usize,linked:bool)->Option<(usize,usize)> {
-            if used>24576 || files>9*installation_record::FILE_LIMIT || directories>9*installation_record::FILE_LIMIT
-                || controls>75 || control_files>488 || post>24576 {return None;}
+            if used>installation_record::ORIGINAL_LIMIT || files>9*installation_record::FILE_LIMIT || directories>9*installation_record::FILE_LIMIT
+                || controls>75 || control_files>488 || post>installation_record::ORIGINAL_LIMIT {return None;}
             let journal=if linked {8usize.checked_add(post.checked_mul(2)?)?}
                 else {control_files.checked_mul(3)?.checked_add(controls.checked_mul(2)?)?.checked_add(post)?.checked_add(16)?};
             let execution=files.checked_mul(2)?.checked_add(directories.checked_mul(3)?)?
@@ -13903,7 +14166,7 @@ mod installer {
             let future=journal.checked_add(execution)?.checked_add(terminal)?;
             #[cfg(feature="macos-installed-removal-abrupt-fixture")]
             let future=future.checked_add(5)?;
-            Some((future,used.checked_add(future).filter(|end|*end<=24576)?))
+            Some((future,used.checked_add(future).filter(|end|*end<=installation_record::ORIGINAL_LIMIT)?))
         }
         fn removal_lifecycle_workspace_data(nodes:usize)->Option<usize> {
             nodes.checked_mul(std::mem::size_of::<RemovalNodeState>())?
@@ -13912,7 +14175,7 @@ mod installer {
                 .checked_add(std::mem::size_of::<RemovalPayloadExecution>())?.checked_add(2*1024*1024)
         }
         fn removal_lifecycle_reserve(book:&mut Install,end:usize,nodes:usize,storage:u64,snapshot:u64)->Result<()> {
-            check(end>=book.originals.len() && end<=24576,"removal-lifecycle-original-budget")?;
+            check(end>=book.originals.len() && end<=installation_record::ORIGINAL_LIMIT,"removal-lifecycle-original-budget")?;
             let working=removal_lifecycle_workspace_data(nodes).ok_or("removal-lifecycle-memory")?;
             #[cfg(feature="macos-installed-removal-abrupt-fixture")]
             let working=working.checked_add(128*1024).ok_or("removal-fixture-export-memory")?;
@@ -13925,12 +14188,12 @@ mod installer {
             check(removal_payload_live_data(book.originals.iter().filter(|r|r.fd.is_some()).count(),external),
                 "removal-lifecycle-live-budget")?;
             book.removal_control_reserved=book.removal_control_reserved.checked_add(working as u64)
-                .filter(|n|*n<=16*1024*1024).ok_or("removal-lifecycle-memory")?;
+                .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-lifecycle-memory")?;
             maintenance::reserve_removal_original_storage(book,end)?;
             let old=book.originals.capacity();let future=end-book.originals.len();
             book.originals.try_reserve_exact(future).map_err(|_|"removal-lifecycle-allocation")?;
             check(book.originals.capacity()<=old.max(end),"removal-lifecycle-allocation")?;
-            check(maintenance::removal_effective_control_bytes(book)?<=16*1024*1024,"removal-lifecycle-memory")
+            check(maintenance::removal_effective_control_bytes(book)?<=(installation_record::CONTROL_LIMIT as u64),"removal-lifecycle-memory")
         }
         fn removal_payload_node_final_data(effect:RemovalNodeEffect,returned:Option<std::result::Result<(),i32>>,
             has_original:bool,known_closed:bool,absence_observed:bool)->bool {
@@ -13953,14 +14216,14 @@ mod installer {
         }
         fn removal_payload_original_budget_data(used:usize,files:usize,directories:usize,controls:usize,prior:usize)->Option<(usize,usize)> {
             let future=removal_payload_originals_data(files,directories,controls,prior)?;
-            let end=used.checked_add(future).filter(|n|*n<=24576)?;Some((future,end))
+            let end=used.checked_add(future).filter(|n|*n<=installation_record::ORIGINAL_LIMIT)?;Some((future,end))
         }
         fn removal_payload_original_budget_with_post_data(used:usize,files:usize,directories:usize,controls:usize,prior:usize,prior_post:usize)->Option<(usize,usize)> {
             let future=removal_payload_originals_with_post_data(files,directories,controls,prior,prior_post)?;
-            let end=used.checked_add(future).filter(|n|*n<=24576)?;Some((future,end))
+            let end=used.checked_add(future).filter(|n|*n<=installation_record::ORIGINAL_LIMIT)?;Some((future,end))
         }
         fn removal_payload_allocation_data(control:u64,extra:usize,storage:u64,snapshot:u64)->bool {
-            control.checked_add(extra as u64).is_some_and(|n|n<=16*1024*1024)
+            control.checked_add(extra as u64).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64))
                 && storage.checked_add(snapshot).and_then(|n|n.checked_add(5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64))
                     .is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT)
         }
@@ -14208,7 +14471,7 @@ mod installer {
                     && record.first_failure_data().is_none(),"removal-payload-admission")?;
                 self.record=Some(record);
                 let end=self.journal.original_end();
-                self.remaining_originals=end.checked_sub(book.originals.len()).filter(|_|end<=24576).ok_or("removal-payload-original-budget")?;
+                self.remaining_originals=end.checked_sub(book.originals.len()).filter(|_|end<=installation_record::ORIGINAL_LIMIT).ok_or("removal-payload-original-budget")?;
                 // This exact state/vector workspace was charged together with
                 // J+E+terminal BEFORE the journal's first mkdir. No second pool.
                 self.states.try_reserve_exact(self.plan.nodes.len()).map_err(|_|"removal-payload-allocation")?;
@@ -14873,7 +15136,7 @@ mod installer {
             let extra=if same_archive{3}else{4};
             let end=used.checked_add(extra)?;
             let peak=live.checked_add(external)?.checked_add(if worker{EXTRA_LIVE}else{0})?.checked_add(extra)?;
-            (end<=24576 && peak<=96).then_some(end)
+            (end<=installation_record::ORIGINAL_LIMIT && peak<=96).then_some(end)
         }
         fn load_removal_genesis(book:&mut Install,read:RemovalGenesisRead<'_>,census:maintenance::RemovalArchiveCensus,
             state_sha:[u8;32])->Result<RemovalResumeGenesis> {
@@ -14895,9 +15158,9 @@ mod installer {
                 // additional raw/parser allowance before any corresponding alloc.
                 let extra=(REMOVAL_RESUME_RAW+512*1024) as u64;
                 check(maintenance::removal_effective_control_bytes(book)?.checked_add(extra)
-                    .is_some_and(|n|n<=16*1024*1024),"removal-resume-memory")?;
+                    .is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"removal-resume-memory")?;
                 book.removal_control_reserved=book.removal_control_reserved.checked_add(extra)
-                    .filter(|n|*n<=16*1024*1024).ok_or("removal-resume-memory")?;
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-resume-memory")?;
             }
             maintenance::reserve_removal_original_storage(book,end)?;
             let row=&census.rows()[genesis_index];
@@ -15130,7 +15393,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let budget=RemovalRecoveryProgramVerifier::project_owned_upper_bound()
                     .and_then(|n|n.checked_add(RemovalProducerVerifier::project_owned_upper_bound()?))
                     .and_then(|n|n.checked_add(REMOVAL_RESUME_RAW+512*1024+std::mem::size_of::<Self>()))
-                    .filter(|n|*n<=16*1024*1024).ok_or("removal-fixture-own-budget")?;
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-fixture-own-budget")?;
                 book.removal_control_reserved=budget as u64;
                 // Existing Input/open/owned-root rules are unchanged. Neither
                 // the phase literals nor mounted target P grant code authority.
@@ -15339,7 +15602,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     .and_then(|n|n.checked_add(REMOVAL_RESUME_RAW+1024*1024+std::mem::size_of::<Self>()))
                     .ok_or("removal-observer-source-budget")?;
                 book.removal_control_reserved=book.removal_control_reserved.checked_add(extra as u64)
-                    .filter(|n|*n<=16*1024*1024).ok_or("removal-observer-source-budget")?;
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-observer-source-budget")?;
                 let input=completed_package::Input::open_removal(book,&target)?;
                 check(input.package_sha256_data()==hashes[0] && hash(input.descriptor_data())==hashes[1]
                     && hash(input.signature_data())==hashes[2],"removal-observer-target-literal-binding")?;
@@ -15486,7 +15749,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     .and_then(|n|n.checked_add(RemovalProducerVerifier::project_owned_upper_bound()?))
                     .and_then(|n|n.checked_add(ProducerVerifier::project_owned_upper_bound()?))
                     .and_then(|n|n.checked_add(REMOVAL_RESUME_RAW+512*1024+std::mem::size_of::<Self>()))
-                    .filter(|n|*n<=16*1024*1024).ok_or("removal-resume-resource")?;
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-resume-resource")?;
                 book.removal_control_reserved=bound as u64;
                 let path=std::env::current_exe().map_err(|_|"removal-resume-executed-image")?;
                 let executed=path.to_str().filter(|s|removal_resume_path_data(s)).ok_or("removal-resume-executed-image")?.to_owned();
@@ -15879,7 +16142,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 .checked_add(std::mem::size_of::<&mobile_release_desktop::macos_remove_record::RemovalRecordData>())?;
             let work=count.checked_mul(unit)?.checked_add(256*1024)?;
             let work=u64::try_from(work).ok()?;
-            if end>24576 || control.checked_add(work)?.checked_add(REMOVAL_LINKED_WORK)?>16*1024*1024{return None;}
+            if end>installation_record::ORIGINAL_LIMIT || control.checked_add(work)?.checked_add(REMOVAL_LINKED_WORK)?>(installation_record::CONTROL_LIMIT as u64){return None;}
             Some((end,work))
         }
         fn removal_resume_chain_indices(census:&maintenance::RemovalArchiveCensus,tip:usize,genesis:usize)
@@ -15938,11 +16201,11 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 .and_then(|n|n.checked_add(2)).is_some_and(|n|n<=96),"removal-chain-live")?;
             let prior_reserved=book.removal_control_reserved;
             book.removal_control_reserved=prior_reserved.checked_add(work)
-                .filter(|n|*n<=16*1024*1024).ok_or("removal-chain-memory")?;
+                .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-chain-memory")?;
             maintenance::reserve_removal_original_storage(book,end)?;
             let added=book.removal_control_reserved.checked_sub(prior_reserved).ok_or("removal-chain-memory")?;
             check(control.checked_add(added).and_then(|n|n.checked_add(REMOVAL_LINKED_WORK))
-                .is_some_and(|n|n<=16*1024*1024),"removal-chain-memory")?;
+                .is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"removal-chain-memory")?;
             let mut records:Vec<RemovalRecordData>=Vec::new();records.try_reserve_exact(count).map_err(|_|"removal-chain-allocation")?;
             let mut refs:Vec<&RemovalRecordData>=Vec::new();refs.try_reserve_exact(count).map_err(|_|"removal-chain-allocation")?;
             check(records.capacity()<=count && refs.capacity()<=count,"removal-chain-capacity")?;
@@ -16027,7 +16290,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     let total=storage.checked_add(5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64)
                         .filter(|n|*n<=installation_record::PAYLOAD_LIMIT).ok_or("removal-linked-storage")?;
                     check(maintenance::removal_effective_control_bytes(book)?.checked_add(REMOVAL_LINKED_WORK)
-                        .and_then(|n|n.checked_add(2*1024*1024)).is_some_and(|n|n<=16*1024*1024),"removal-linked-memory")?;
+                        .and_then(|n|n.checked_add(2*1024*1024)).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"removal-linked-memory")?;
                     Ok((end,total))
                 },
             }}
@@ -16114,8 +16377,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             ->Option<(usize,u64)> {
             let end=continuation.checked_add(8)?.checked_add(post.checked_mul(2)?)?;
             let bytes=storage.checked_add(5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64)?;
-            if end>24576 || bytes>installation_record::PAYLOAD_LIMIT
-                || control.checked_add(REMOVAL_LINKED_WORK)?>16*1024*1024 {return None;}
+            if end>installation_record::ORIGINAL_LIMIT || bytes>installation_record::PAYLOAD_LIMIT
+                || control.checked_add(REMOVAL_LINKED_WORK)?>(installation_record::CONTROL_LIMIT as u64) {return None;}
             Some((end,bytes))
         }
         fn removal_linked_record_data(raw:&[u8],expected:&[u8;32],request:&str,nonce:&str,count:usize,
@@ -16192,7 +16455,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     .and_then(|n|n.checked_add(if book.worker_deadline.is_some(){EXTRA_LIVE}else{0}))
                     .and_then(|n|n.checked_add(8)).is_some_and(|n|n<=96),"removal-linked-live")?;
                 book.removal_control_reserved=book.removal_control_reserved.checked_add(REMOVAL_LINKED_WORK)
-                    .filter(|n|*n<=16*1024*1024).ok_or("removal-linked-memory")?;
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-linked-memory")?;
                 let (nodes,prior_storage)=ready.allocation_data()?;
                 removal_lifecycle_reserve(book,end,nodes,prior_storage,0)?;
                 if let RemovalLinkedRead::Resume(value)=ready {value.observed.conversion_budget(book)?;}
@@ -16276,7 +16539,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             let mut edges=[[false;64];64];
             // Two fresh originals per genesis. Whole bytes stream once here;
             // no64 snapshots/control bodies are held simultaneously.
-            check(book.originals.len().checked_add(census.rows().len()*2+4).is_some_and(|n|n<=24576),
+            check(book.originals.len().checked_add(census.rows().len()*2+4).is_some_and(|n|n<=installation_record::ORIGINAL_LIMIT),
                 "reinstall-lineage-original-quote")?;
             for (index,row) in census.rows().iter().enumerate() {
                 if census.genesis_index_data(index)!=Some(index) || row.attempt_data().is_none(){continue;}
@@ -16409,9 +16672,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     .and_then(|n|n.checked_add(native::install_producer::ProducerVerifier::project_owned_upper_bound()?))
                     .and_then(|n|n.checked_add(2*1024*1024+REINSTALL_RAW+512*1024+std::mem::size_of::<Self>()))
                     .and_then(|n|n.checked_add(incoming_memory))
-                    .filter(|n|*n<=16*1024*1024).ok_or("reinstall-source-reservation")?;
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("reinstall-source-reservation")?;
                 book.removal_control_reserved=prior_control.checked_add(quote as u64)
-                    .filter(|n|*n<=16*1024*1024).ok_or("reinstall-source-reservation")?;
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("reinstall-source-reservation")?;
                 maintenance::reserve_removal_snapshot_work(book)?;
                 removal_resume_stat(book,root,true,Some(0o755))?;
                 // Missing R/M are never created/repaired by this branch.
@@ -16682,13 +16945,13 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             let records=reinstall_record_quote_data(book.originals.len(),plan.directories_data(),plan.files_data(),
                 plan.moves_data().len(),genesis.census.post_originals_data()?,genesis.census.scan_originals_data()?,
                 file_count,dir_count).ok_or("reinstall-original-budget")?;
-            check(records<=24576 && book.originals.iter().filter(|o|o.fd.is_some()).count()
+            check(records<=installation_record::ORIGINAL_LIMIT && book.originals.iter().filter(|o|o.fd.is_some()).count()
                 .checked_add(EXTRA_LIVE+12).is_some_and(|n|n<=96),"reinstall-original-budget")?;
             // Shared monotone reservation includes actual retained Original/name
             // capacities and old/new allocation overlap, not only liveFDs/rows.
             maintenance::reserve_removal_original_storage(book,records)?;
             check(maintenance::removal_effective_control_bytes(book)?.checked_add(index_peak as u64)
-                .is_some_and(|n|n<=16*1024*1024),"reinstall-control-budget")?;
+                .is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"reinstall-control-budget")?;
             let index=prepared.inventory.index()?;
             check(index.files.len()==file_count && index.directories.len()==dir_count,"reinstall-index-quote")?;
             // Previous child bytes are ALREADY in the physical census quote.
@@ -16723,9 +16986,10 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             started:bool,old_controls_observed:bool,child:Option<usize>,progress:Option<maintenance::RehomeProgressData>,
             moved:Option<usize>,created_child:bool,complete:bool,
             final_census:Option<maintenance::RemovalArchiveCensus>,fresh_versions:bool,partial:Option<maintenance::PartialFreshPreservation>,
+            launcher_recovery:Option<applications::FreshRecovery>,
         }
         impl ReinstallEffects {fn new()->Self{Self{started:false,old_controls_observed:false,child:None,progress:None,moved:None,
-            created_child:false,complete:false,final_census:None,fresh_versions:false,partial:None}}}
+            created_child:false,complete:false,final_census:None,fresh_versions:false,partial:None,launcher_recovery:None}}}
         fn reinstall_classification(book:&Install,source:&Source,producer:&ProducerAdmission,root:usize,
             genesis:&RemovalResumeGenesis,request:&str,nonce:&str)->Result<()> {
             use mobile_release_desktop::macos_remove_record as record;
@@ -17082,7 +17346,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         fn archived_writer_originals_data(used:usize,files:usize,dirs:usize,scan:usize,post:usize)->Option<usize> {
             used.checked_add(scan.checked_mul(2)?)?.checked_add(post.checked_mul(9)?)?
                 .checked_add(files.checked_mul(4)?)?.checked_add(dirs.checked_mul(6)?)?
-                .checked_add(512).filter(|n|*n<=24576)
+                .checked_add(512).filter(|n|*n<=installation_record::ORIGINAL_LIMIT)
         }
         #[derive(Clone,Copy,PartialEq,Eq)]
         enum ArchivedInstallMode { RehomedFresh, CurrentState }
@@ -17177,10 +17441,10 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let originals=completed_package::Input::private_path_originals_data(path)?;
                 check(archived_input_live_budget_data(book.originals.iter().filter(|r|r.fd.is_some()).count(),
                     book.removal_live_reserved,book.worker_deadline.is_some(),originals),"archived-input-live-budget")?;
-                let rows=book.originals.len().checked_add(originals).filter(|n|*n<=24576).ok_or("archived-input-original-budget")?;
+                let rows=book.originals.len().checked_add(originals).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("archived-input-original-budget")?;
                 maintenance::reserve_removal_original_storage(book,rows)?;
                 check(maintenance::removal_effective_control_bytes(book)?.checked_add(ARCHIVED_INPUT_WORK as u64)
-                    .is_some_and(|n|n<=16*1024*1024),"archived-input-control-budget")?;
+                    .is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"archived-input-control-budget")?;
                 book.removal_control_reserved=book.removal_control_reserved.checked_add(ARCHIVED_INPUT_WORK as u64)
                     .ok_or("archived-input-control-budget")?;
                 let input=completed_package::Input::open(book,path)?;
@@ -17463,7 +17727,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         struct CompletedEntryProbe {root:usize,through:usize,control:u64}
         impl CompletedEntryProbe {
             fn reserve(book:&mut Install,root:usize)->Result<Self> {
-                let through=book.originals.len().checked_add(66).filter(|n|*n<=24576)
+                let through=book.originals.len().checked_add(66).filter(|n|*n<=installation_record::ORIGINAL_LIMIT)
                     .ok_or("entry-probe-original-bound")?;
                 maintenance::completed_entry_probe_reserve(book)?;
                 Ok(Self{root,through,control:book.removal_control_reserved})
@@ -17778,6 +18042,28 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             fn preserve_archived_partial_matched(&mut self,invocation:&str,expected:Option<[u8;32]>)->Result<()> {
                 check(self.archive_handoff.is_none() && self.command.is_none() && self.child.is_none()
                     && self.reinstall.as_ref().is_some_and(|r|r.effects.partial.is_none()),"partial-parent-once")?;
+                {
+                    let admission=self.reinstall.as_mut().ok_or("partial-admission")?;
+                    if admission.purpose.is_none(){admission.bind_initial_entry(&self.book,
+                        self.source.as_ref().ok_or("partial-source")?,self.producer.as_ref().ok_or("partial-producer")?)?;}
+                    check(admission.purpose==Some(ReinstallArchivePurpose::RehomeRemoved)
+                        && admission.effects.launcher_recovery.is_none(),"partial-launcher-recovery-once")?;
+                }
+                let recovery={
+                    let view=ReinstallOldControlsObserved{admission:self.reinstall.as_ref().ok_or("partial-admission")?,
+                        producer:self.producer.as_ref().ok_or("partial-producer")?,source:self.source.as_ref().ok_or("partial-source")?,
+                        incoming:self.reinstall_input.as_ref().ok_or("partial-input")?};
+                    applications::FreshRecovery::observe(&mut self.book,&view,invocation,expected)?
+                };
+                self.reinstall.as_mut().ok_or("partial-admission")?.effects.launcher_recovery=recovery;
+                if let Some(mut recovery)=self.reinstall.as_mut().ok_or("partial-admission")?.effects.launcher_recovery.take() {
+                    let result={let view=ReinstallOldControlsObserved{admission:self.reinstall.as_ref().ok_or("partial-admission")?,
+                        producer:self.producer.as_ref().ok_or("partial-producer")?,source:self.source.as_ref().ok_or("partial-source")?,
+                        incoming:self.reinstall_input.as_ref().ok_or("partial-input")?};
+                        recovery.preserve(&mut self.book,&view)};
+                    self.reinstall.as_mut().ok_or("partial-admission")?.effects.launcher_recovery=Some(recovery);
+                    result?;
+                }
                 let ledger={
                     let view=ReinstallOldControlsObserved{admission:self.reinstall.as_ref().ok_or("partial-admission")?,
                         producer:self.producer.as_ref().ok_or("partial-producer")?,source:self.source.as_ref().ok_or("partial-source")?,
@@ -17928,7 +18214,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 maintenance::reserve_removal_original_storage(&mut self.book,future)?;
                 maintenance::reserve_install_archive_context(&mut self.book)?;
                 check(maintenance::removal_effective_control_bytes(&self.book)?.checked_add(index_peak as u64)
-                    .and_then(|n|n.checked_add((2*INIT_LIMIT+128*1024) as u64)).is_some_and(|n|n<=16*1024*1024),
+                    .and_then(|n|n.checked_add((2*INIT_LIMIT+128*1024) as u64)).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),
                     "archived-parent-control-budget")?;
                 // Both branches must prove exact current namespace before any
                 // intent or GO. CurrentState is not fallback after a failed Fresh.
@@ -18088,6 +18374,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 self.prepare_removal_request()?;self.prepare_removal_publication()?;
                 let peer=self.join_removal_peer(removal_ready_hint)?;
                 let exclusion=self.acquire_removal_exclusion(peer)?;
+                self.removal_observed.as_mut().ok_or("removal-current-missing")?
+                    .retire_launcher_before_snapshot(&mut self.book)?;
+                exclusion.post(&self.book,self.removal.as_ref().ok_or("removal-original-missing")?)?;
                 self.reobserve_removal_exclusive(&exclusion)?;
                 let linked={
                     let source=self.removal.as_ref().ok_or("removal-original-missing")?;
@@ -18505,7 +18794,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 // Include temporary ends of two pipes and the standard spawn
                 // error channel as headroom, not extra permitted live book FDs.
                 check(self.book.originals.iter().filter(|r| r.fd.is_some()).count() + EXTRA_LIVE + 2 + 6 < 96
-                    && self.book.originals.len() + 2 < 24576, "worker-original-bound")?;
+                    && self.book.originals.len() + 2 < installation_record::ORIGINAL_LIMIT, "worker-original-bound")?;
                 let command_n = self.book.worker_reserve("<private-command>")?;
                 self.command_original = Some(command_n);
                 let output_n = self.book.worker_reserve("<private-result>")?;
@@ -18727,6 +19016,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     "maintenance-request-binding")?;
                 let returned = joined.outcome.maintenance.as_ref().ok_or("maintenance-result-shape")?;
                 check(returned.action == observed.action,"maintenance-returned-action")?;
+                check(returned.launcher.is_some() == observed.launcher.is_some(),"launcher-result-presence")?;
                 let state = maintenance::state_after_join(&mut self.book,observed,&self.invocation,
                     returned.state_bytes.as_deref(),returned.inverse)?;
                 let writer_known = joined.outcome.originals && joined.outcome.payload && joined.outcome.timely && !joined.outcome.unknown;
@@ -18741,17 +19031,24 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         _ => transaction::RecordedOutcomeData::Unknown,
                     }};
                 let current = state.as_ref().map(transaction::StateData::current_data);
+                if writer_known && (joined.outcome.exit == 0 || joined.outcome.state == "inverse-recorded") {
+                    if let Some(launcher) = &observed.launcher {
+                        launcher.after_join(&mut self.book,observed.action,observed.history.as_ref(),&self.invocation,
+                            returned.inverse,returned.launcher.as_ref().ok_or("launcher-result-presence")?,
+                            observed.intent.as_ref().ok_or("maintenance-intent-missing")?)?;
+                    }
+                }
                 if writer_known && joined.outcome.exit == 0 {
                     let producer = self.producer.as_ref().ok_or("producer-original-missing")?;
                     observed.publish_controls(&mut self.book,state.as_ref().ok_or("maintenance-producer-state")?,
                         producer.input.descriptor_data(),producer.input.signature_data())?;
                 }
-                let capsule = transaction::CapsuleData::encode_data(observed.intent.as_ref().ok_or("maintenance-intent-missing")?,
+                let capsule = transaction::CapsuleData::encode_with_launcher_data(observed.intent.as_ref().ok_or("maintenance-intent-missing")?,
                     observed.previous(),state.as_ref(),current.as_ref().map(transaction::GenerationData::release_data),outcome,
                     transaction::WriterObservationData { returned:true,exit_code:Some(u8::try_from(joined.outcome.exit).map_err(|_| "maintenance-result-shape")?),
                         original_joined:true,result_eof:self.output_eof,original_closes_known:joined.outcome.originals && self.output_close && self.command_close,
                         within_original_deadline:joined.outcome.timely,payload_write_count:joined.outcome.writes,payload_write_bytes:joined.outcome.bytes },
-                    &observed.selected).map_err(|_| "maintenance-capsule-binding")?;
+                    returned.launcher.clone(),&observed.selected).map_err(|_| "maintenance-capsule-binding")?;
                 maintenance::persist_capsule(&mut self.book,observed,&self.invocation,&capsule)?;
                 if writer_known && joined.outcome.exit==0 {
                     if let Some(archives)=observed.archives.as_mut(){
@@ -18916,11 +19213,11 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let quote=reinstall_index_quote_data(&inventory)?;
                 let records=quote.0.checked_mul(3).and_then(|n|n.checked_add(quote.1.checked_mul(3)?))
                     .and_then(|n|n.checked_add(256)).and_then(|n|n.checked_add(book.originals.len()))
-                    .filter(|n|*n<=24576).ok_or("archived-worker-original-budget")?;
+                    .filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("archived-worker-original-budget")?;
                 maintenance::reserve_removal_original_storage(book,records)?;
                 let retained=reinstall_inventory_memory(&inventory,&inventory_bytes)?;
                 check(maintenance::removal_effective_control_bytes(book)?.checked_add(retained as u64)
-                    .and_then(|n|n.checked_add(quote.2 as u64)).is_some_and(|n|n<=16*1024*1024),"archived-worker-index-memory")?;
+                    .and_then(|n|n.checked_add(quote.2 as u64)).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"archived-worker-index-memory")?;
                 book.removal_control_reserved=book.removal_control_reserved.checked_add(retained as u64).ok_or("archived-worker-index-memory")?;
                 Some(quote)
             }else{None};
@@ -19180,8 +19477,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 // A separately accounted finite supervisor phase, not a second
                 // lifecycle allowance. Source native cells are already settled.
                 self.book.removal_control_reserved=self.book.removal_control_reserved.checked_add(128*1024)
-                    .filter(|n|*n<=16*1024*1024).ok_or("removal-fixture-supervisor-memory")?;
-                let original_end=self.book.originals.len().checked_add(64+5).filter(|n|*n<=24576)
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-fixture-supervisor-memory")?;
+                let original_end=self.book.originals.len().checked_add(64+5).filter(|n|*n<=installation_record::ORIGINAL_LIMIT)
                     .ok_or("removal-fixture-supervisor-original-budget")?;
                 maintenance::reserve_removal_original_storage(&mut self.book,original_end)?;
                 self.book.originals.try_reserve_exact(original_end-self.book.originals.len())
@@ -19397,7 +19694,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 // aliases and the exclusive output are a separate <=512KiB
                 // debit in the SAME 16MiB control pool, before any allocation.
                 self.book.removal_control_reserved=self.book.removal_control_reserved.checked_add(640*1024)
-                    .filter(|n|*n<=16*1024*1024).ok_or("removal-observer-output-budget")?;
+                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-observer-output-budget")?;
                 let phase=source.originals.phase;
                 maintenance::RemovalObserverProjection::begin(&mut self.book)?;
                 let facts=if matches!(phase,"before"|"after-cancel") {
@@ -19427,7 +19724,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 source.current_selection(&self.book)?;
                 check(self.prefix_source.as_ref().is_some_and(maintenance::CompleteGenerationPrefixSource::unentered_or_settled_data),
                     "removal-observer-prefix-finality")?;
-                let original_end=self.book.originals.len().checked_add(5).filter(|n|*n<=24576).ok_or("removal-observer-original-budget")?;
+                let original_end=self.book.originals.len().checked_add(5).filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("removal-observer-original-budget")?;
                 maintenance::reserve_removal_original_storage(&mut self.book,original_end)?;
                 let root=source.root_original();self.book.check_name(root,true)?;
                 let actual=stat::fstat(self.book.fd(root)?).map_err(|_|"removal-observer-root-stat")?;
@@ -19634,19 +19931,19 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 after.insert(paths::APP_NAME.into(),20);after.insert("foreign".into(),31);
                 assert!(!removal_snapshot_root_delta_data(&before,&after,&name,30));
                 assert!(removal_snapshot_budget_data(4*1024*1024,1024,4096,50,256,12,4,0,40,3).is_ok());
-                assert!(removal_snapshot_budget_data(16*1024*1024,1024,4096,50,50,12,4,0,40,3).is_err());
+                assert!(removal_snapshot_budget_data((installation_record::CONTROL_LIMIT as u64),1024,4096,50,50,12,4,0,40,3).is_err());
                 assert!(removal_snapshot_budget_data(0,installation_record::PAYLOAD_LIMIT,1,0,0,0,0,0,0,0).is_err());
-                assert!(removal_snapshot_budget_data(0,0,1,24576,24576,1,1,0,0,0).is_err());
+                assert!(removal_snapshot_budget_data(0,0,1,installation_record::ORIGINAL_LIMIT,installation_record::ORIGINAL_LIMIT,1,1,0,0,0).is_err());
                 assert!(removal_snapshot_budget_data(0,0,1,0,0,0,0,0,91,0).is_err());
                 assert!(removal_snapshot_budget_data(0,0,u64::MAX,0,0,0,0,0,0,0).is_err());
                 assert!(removal_snapshot_budget_data(0,0,1,0,0,0,0,64,0,0).is_err());
                 assert!(removal_snapshot_budget_data(0,0,1,0,0,0,0,63,0,0).is_ok());
-                let base=removal_snapshot_budget_data(0,0,1,0,24576,0,0,1,0,0).unwrap().0;
+                let base=removal_snapshot_budget_data(0,0,1,0,installation_record::ORIGINAL_LIMIT,0,0,1,0,0).unwrap().0;
                 let child=2+2*4+11;
-                assert_eq!(removal_snapshot_budget_with_post_data(0,0,1,0,24576,0,0,1,8+child,0,0).unwrap().0,base+child);
-                assert!(removal_snapshot_budget_with_post_data(0,0,1,0,24576,0,0,1,7,0,0).is_err());
-                assert!(removal_snapshot_budget_with_post_data(0,0,1,0,24576,0,0,0,1,0,0).is_err());
-                assert!(removal_snapshot_budget_with_post_data(0,0,1,0,24576,0,0,1,usize::MAX,0,0).is_err());
+                assert_eq!(removal_snapshot_budget_with_post_data(0,0,1,0,installation_record::ORIGINAL_LIMIT,0,0,1,8+child,0,0).unwrap().0,base+child);
+                assert!(removal_snapshot_budget_with_post_data(0,0,1,0,installation_record::ORIGINAL_LIMIT,0,0,1,7,0,0).is_err());
+                assert!(removal_snapshot_budget_with_post_data(0,0,1,0,installation_record::ORIGINAL_LIMIT,0,0,0,1,0,0).is_err());
+                assert!(removal_snapshot_budget_with_post_data(0,0,1,0,installation_record::ORIGINAL_LIMIT,0,0,1,usize::MAX,0,0).is_err());
                 // Other authenticated State epochs preserve history; only a
                 // current-epoch tip prevents a fresh genesis admission.
                 assert!(removal_snapshot_initial_history_data(1,false));
@@ -19682,8 +19979,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 assert_eq!(quote,rehome_tail+2*(10+full_child)+9*(8+full_child)+4*4+6*5+512);
                 assert_eq!(Some(quote),archived_writer_originals_data(rehome_tail,4,5,10+full_child,8+full_child));
                 let cost=reinstall_record_quote_data(0,2,3,2,8,10,4,5).unwrap();
-                assert_eq!(reinstall_record_quote_data(24576-cost,2,3,2,8,10,4,5),Some(24576));
-                assert!(reinstall_record_quote_data(24577-cost,2,3,2,8,10,4,5).is_none());
+                assert_eq!(reinstall_record_quote_data(installation_record::ORIGINAL_LIMIT-cost,2,3,2,8,10,4,5),Some(installation_record::ORIGINAL_LIMIT));
+                assert!(reinstall_record_quote_data((installation_record::ORIGINAL_LIMIT + 1)-cost,2,3,2,8,10,4,5).is_none());
                 for index in 0..8 {
                     let mut fields=[10,2,3,2,8,10,4,5];fields[index]=usize::MAX;
                     assert!(reinstall_record_quote_data(fields[0],fields[1],fields[2],fields[3],
@@ -19714,9 +20011,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 assert!(removal_epoch_tip_rows_data(target,[0;20],digests,[]).is_err());
                 assert!(removal_epoch_tip_rows_data(target,source,digests,[(64,target,source,prior)]).is_err());
                 assert!(removal_epoch_tip_rows_data(target,source,digests,std::iter::repeat((1,target,source,prior)).take(65)).is_err());
-                assert_eq!(removal_genesis_original_quote_data(24573,93,0,false,true),Some(24576));
-                assert_eq!(removal_genesis_original_quote_data(24572,84,4,true,false),Some(24576));
-                for (used,live,external,worker,same) in [(24574,0,0,false,true),(24573,0,0,false,false),
+                assert_eq!(removal_genesis_original_quote_data((installation_record::ORIGINAL_LIMIT - 3),93,0,false,true),Some(installation_record::ORIGINAL_LIMIT));
+                assert_eq!(removal_genesis_original_quote_data((installation_record::ORIGINAL_LIMIT - 4),84,4,true,false),Some(installation_record::ORIGINAL_LIMIT));
+                for (used,live,external,worker,same) in [((installation_record::ORIGINAL_LIMIT - 2),0,0,false,true),((installation_record::ORIGINAL_LIMIT - 3),0,0,false,false),
                     (0,94,0,false,true),(0,85,4,true,false),(usize::MAX,0,0,false,true),
                     (0,usize::MAX,0,false,true),(0,1,usize::MAX,true,true)] {
                     assert!(removal_genesis_original_quote_data(used,live,external,worker,same).is_none());
@@ -19856,9 +20153,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     #[cfg(feature="macos-installed-removal-abrupt-fixture")]
                     let expected=expected+5;
                     assert_eq!(removal_lifecycle_originals_data(0,2,3,4,8,8,linked),Some((expected,expected)));
-                    assert_eq!(removal_lifecycle_originals_data(24576-expected,2,3,4,8,8,linked),Some((expected,24576)));
-                    assert!(removal_lifecycle_originals_data(24577-expected,2,3,4,8,8,linked).is_none());
-                    assert!(removal_lifecycle_originals_data(24576-93,2,3,4,8,8,linked).is_none());
+                    assert_eq!(removal_lifecycle_originals_data(installation_record::ORIGINAL_LIMIT-expected,2,3,4,8,8,linked),Some((expected,installation_record::ORIGINAL_LIMIT)));
+                    assert!(removal_lifecycle_originals_data((installation_record::ORIGINAL_LIMIT + 1)-expected,2,3,4,8,8,linked).is_none());
+                    assert!(removal_lifecycle_originals_data(installation_record::ORIGINAL_LIMIT-93,2,3,4,8,8,linked).is_none());
                     let repeated_post=if linked {4}else{3};
                     assert_eq!(removal_lifecycle_originals_data(0,2,3,4,8,9,linked),
                         Some((expected+repeated_post,expected+repeated_post)));
@@ -19901,18 +20198,18 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 assert_eq!(removal_payload_originals_with_post_data(3,4,5,6,48+child),Some(future+child));
                 assert!(removal_payload_originals_with_post_data(3,4,5,6,47).is_none());
                 assert!(removal_payload_originals_with_post_data(0,0,0,0,1).is_none());
-                assert_eq!(removal_payload_original_budget_with_post_data(24576-future-child,3,4,5,6,48+child),Some((future+child,24576)));
-                assert!(removal_payload_original_budget_with_post_data(24577-future-child,3,4,5,6,48+child).is_none());
-                assert_eq!(removal_payload_original_budget_data(24576-future,3,4,5,6),Some((future,24576)));
-                assert!(removal_payload_original_budget_data(24577-future,3,4,5,6).is_none());
+                assert_eq!(removal_payload_original_budget_with_post_data(installation_record::ORIGINAL_LIMIT-future-child,3,4,5,6,48+child),Some((future+child,installation_record::ORIGINAL_LIMIT)));
+                assert!(removal_payload_original_budget_with_post_data((installation_record::ORIGINAL_LIMIT + 1)-future-child,3,4,5,6,48+child).is_none());
+                assert_eq!(removal_payload_original_budget_data(installation_record::ORIGINAL_LIMIT-future,3,4,5,6),Some((future,installation_record::ORIGINAL_LIMIT)));
+                assert!(removal_payload_original_budget_data((installation_record::ORIGINAL_LIMIT + 1)-future,3,4,5,6).is_none());
                 assert!(removal_payload_original_budget_data(usize::MAX,3,4,5,6).is_none());
                 let obsolete=3+3*4+2*5+4*6+32;
-                assert!(24576-obsolete+obsolete<=24576);
-                assert!(removal_payload_original_budget_data(24576-obsolete,3,4,5,6).is_none());
+                assert!(installation_record::ORIGINAL_LIMIT-obsolete+obsolete<=installation_record::ORIGINAL_LIMIT);
+                assert!(removal_payload_original_budget_data(installation_record::ORIGINAL_LIMIT-obsolete,3,4,5,6).is_none());
                 assert!(removal_payload_live_data(65,5));
                 assert!(!removal_payload_live_data(66,5));
                 assert!(!removal_payload_live_data(usize::MAX,0));
-                let control=16*1024*1024;let progress=5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64;
+                let control=(installation_record::CONTROL_LIMIT as u64);let progress=5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64;
                 let storage=installation_record::PAYLOAD_LIMIT-progress-1;
                 assert!(removal_payload_allocation_data(control-128,128,storage,1));
                 assert!(!removal_payload_allocation_data(control-127,128,storage,1));
@@ -19991,9 +20288,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     +std::mem::size_of::<mobile_release_desktop::macos_remove_record::RemovalRecordData>()
                     +std::mem::size_of::<&mobile_release_desktop::macos_remove_record::RemovalRecordData>();
                 assert_eq!(work,(count*unit+256*1024) as u64);
-                let pool=16*1024*1024-work-REMOVAL_LINKED_WORK;
-                assert_eq!(removal_resume_chain_quote_data(24576-2*count-post,count,post,pool),Some((24576,work)));
-                assert!(removal_resume_chain_quote_data(24577-2*count-post,count,post,pool).is_none());
+                let pool=(installation_record::CONTROL_LIMIT as u64)-work-REMOVAL_LINKED_WORK;
+                assert_eq!(removal_resume_chain_quote_data(installation_record::ORIGINAL_LIMIT-2*count-post,count,post,pool),Some((installation_record::ORIGINAL_LIMIT,work)));
+                assert!(removal_resume_chain_quote_data((installation_record::ORIGINAL_LIMIT + 1)-2*count-post,count,post,pool).is_none());
                 assert!(removal_resume_chain_quote_data(100,count,post,pool+1).is_none());
                 assert!(removal_resume_chain_quote_data(100,0,post,0).is_none());
                 assert!(removal_resume_chain_quote_data(100,65,post,0).is_none());
@@ -20025,11 +20322,11 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     RemovalBindingData{payload_roster_sha256:&different,..binding}).is_err());
                 let post=8;let extra=8+2*post;
                 let storage=installation_record::PAYLOAD_LIMIT-5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64;
-                let control_budget=16*1024*1024-REMOVAL_LINKED_WORK;
-                assert_eq!(removal_linked_quote_data(24576-extra,post,storage,control_budget),Some((24576,installation_record::PAYLOAD_LIMIT)));
-                assert!(removal_linked_quote_data(24577-extra,post,storage,control_budget).is_none());
-                assert!(removal_linked_quote_data(24576-extra,post,storage+1,control_budget).is_none());
-                assert!(removal_linked_quote_data(24576-extra,post,storage,control_budget+1).is_none());
+                let control_budget=(installation_record::CONTROL_LIMIT as u64)-REMOVAL_LINKED_WORK;
+                assert_eq!(removal_linked_quote_data(installation_record::ORIGINAL_LIMIT-extra,post,storage,control_budget),Some((installation_record::ORIGINAL_LIMIT,installation_record::PAYLOAD_LIMIT)));
+                assert!(removal_linked_quote_data((installation_record::ORIGINAL_LIMIT + 1)-extra,post,storage,control_budget).is_none());
+                assert!(removal_linked_quote_data(installation_record::ORIGINAL_LIMIT-extra,post,storage+1,control_budget).is_none());
+                assert!(removal_linked_quote_data(installation_record::ORIGINAL_LIMIT-extra,post,storage,control_budget+1).is_none());
                 assert!(removal_linked_quote_data(usize::MAX,post,storage,control_budget).is_none());
                 assert!(removal_linked_quote_data(0,usize::MAX,0,0).is_none());
                 assert!(removal_linked_quote_data(0,0,u64::MAX,0).is_none());
@@ -20105,8 +20402,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 assert!(!ReinstallArchivePurpose::PreserveHistorical.may_rehome_data());
                 let writer_cost=archived_writer_originals_data(0,3,4,5,6).unwrap();
                 assert_eq!(writer_cost,2*5+9*6+4*3+6*4+512);
-                assert_eq!(archived_writer_originals_data(24576-writer_cost,3,4,5,6),Some(24576));
-                assert!(archived_writer_originals_data(24577-writer_cost,3,4,5,6).is_none());
+                assert_eq!(archived_writer_originals_data(installation_record::ORIGINAL_LIMIT-writer_cost,3,4,5,6),Some(installation_record::ORIGINAL_LIMIT));
+                assert!(archived_writer_originals_data((installation_record::ORIGINAL_LIMIT + 1)-writer_cost,3,4,5,6).is_none());
                 for overflow in 0..5 {let mut fields=[0usize,3,4,5,6];fields[overflow]=usize::MAX;
                     assert!(archived_writer_originals_data(fields[0],fields[1],fields[2],fields[3],fields[4]).is_none());}
 
@@ -20276,7 +20573,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 assert_eq!(removal_reobserve_budget_data(1024,transaction::STATE_LIMIT),Ok(1024+transaction::STATE_LIMIT as u64));
                 assert!(removal_reobserve_budget_data(0,0).is_err());
                 assert!(removal_reobserve_budget_data(0,transaction::STATE_LIMIT+1).is_err());
-                assert!(removal_reobserve_budget_data(16*1024*1024,1).is_err());
+                assert!(removal_reobserve_budget_data((installation_record::CONTROL_LIMIT as u64),1).is_err());
                 assert!(removal_reobserve_budget_data(u64::MAX,1).is_err());
                 // Actual returned mkdir/file-entry effects alone may advance
                 // directory metadata. Full mode/owner/inode/flags remain fixed;
@@ -20383,7 +20680,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                             // This bounded frame does not confer StateData or
                             // package authority. The parent separately parses
                             // and reobserves the exact state after original wait.
-                            state_bytes:Some("{}".into()),inverse:false }) };
+                            state_bytes:Some("{}".into()),inverse:false,launcher:None }) };
                     let value = returned.data(invocation,&sha);
                     assert!(PreExit::parse(&value,invocation,&sha).is_ok(),"{state}");
                     for key in ["originalsClosed","payloadClosed","payloadVerified","withinOriginalDeadline"] {
@@ -20395,6 +20692,33 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         ("parentJoined",json!(true))] {
                         let mut changed = value.clone(); changed["maintenance"][key] = bad;
                         assert!(PreExit::parse(&changed,invocation,&sha).is_err(),"{state}/{key}");
+                    }
+                    // A convenience-copy write is separately accounted: it
+                    // may restore a missing launcher during a core zero-write
+                    // no-op, but cannot bypass original closes/readback/clock.
+                    let mut with_launcher = value.clone();
+                    with_launcher["maintenance"]["launcher"] = json!({
+                        "outcome":"restored","writeCount":1,"writeBytes":17,
+                        "originalsClosed":true,"withinOriginalDeadline":true,
+                        "readbackVerified":true,"workspaceCleared":true,
+                        "publishedIdentity":{"device":1,"inode":42,"birthSeconds":1,"birthNanoseconds":0},
+                        "publicationPhase":{"stageInstance":"1".repeat(32),"sha256":"2".repeat(64)}});
+                    assert!(PreExit::parse(&with_launcher,invocation,&sha).is_ok());
+                    for flag in ["originalsClosed","withinOriginalDeadline","readbackVerified","workspaceCleared"] {
+                        let mut bad = with_launcher.clone(); bad["maintenance"]["launcher"][flag] = json!(false);
+                        assert!(PreExit::parse(&bad,invocation,&sha).is_err(),"launcher/{flag}");
+                    }
+                    for (key,bad) in [("outcome",json!("refused")),("outcome",json!("unknown")),
+                        ("outcome",json!("inverse-restored")),("writeCount",json!(0)),
+                        ("writeBytes",json!(installation_record::PAYLOAD_LIMIT)),("extra",json!(true))] {
+                        let mut changed = with_launcher.clone(); changed["maintenance"]["launcher"][key] = bad;
+                        assert!(PreExit::parse(&changed,invocation,&sha).is_err());
+                    }
+                    let mut bad = with_launcher.clone(); bad["maintenance"]["launcher"] = Value::Null;
+                    assert!(PreExit::parse(&bad,invocation,&sha).is_err());
+                    if writes > 0 {
+                        let mut bad = with_launcher.clone(); bad["payloadWriteBytes"] = json!(installation_record::PAYLOAD_LIMIT);
+                        assert!(PreExit::parse(&bad,invocation,&sha).is_err());
                     }
                     let mut changed = value.clone(); changed["maintenance"]["stateBytes"] = json!("x".repeat(transaction::STATE_LIMIT+1));
                     assert!(PreExit::parse(&changed,invocation,&sha).is_err());
@@ -20410,8 +20734,16 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let inverse = PreExit { exit:20,state:"inverse-recorded".into(),originals:true,payload:true,verified:true,
                     runtime:"confirmed".into(),app:"confirmed".into(),timely:true,unknown:false,writes:17,bytes:17,
                     reason:Some("other-original-refusal".into()),maintenance:Some(MaintenanceReply { action:ActionData::Update,
-                        progress:"inverse-recorded".into(),state_published:true,state_bytes:Some("{}".into()),inverse:true }) };
+                        progress:"inverse-recorded".into(),state_published:true,state_bytes:Some("{}".into()),inverse:true,launcher:None }) };
                 let value = inverse.data(invocation,&sha); assert!(PreExit::parse(&value,invocation,&sha).is_ok());
+                let mut inverse_launcher = value.clone(); inverse_launcher["maintenance"]["launcher"] = json!({
+                    "outcome":"inverse-restored","writeCount":1,"writeBytes":17,
+                    "originalsClosed":true,"withinOriginalDeadline":true,"readbackVerified":true,"workspaceCleared":true,
+                        "publishedIdentity":{"device":1,"inode":42,"birthSeconds":1,"birthNanoseconds":0},
+                        "publicationPhase":{"stageInstance":"1".repeat(32),"sha256":"2".repeat(64)}});
+                assert!(PreExit::parse(&inverse_launcher,invocation,&sha).is_ok());
+                inverse_launcher["maintenance"]["launcher"]["outcome"] = json!("restored");
+                assert!(PreExit::parse(&inverse_launcher,invocation,&sha).is_err());
                 for (key,bad) in [("exitCode",json!(0)),("withinOriginalDeadline",json!(false)),("unknown",json!(true))] {
                     let mut changed = value.clone(); changed[key] = bad;
                     assert!(PreExit::parse(&changed,invocation,&sha).is_err());

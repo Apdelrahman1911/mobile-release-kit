@@ -1000,7 +1000,9 @@ mod tests {
             RecordedOutcomeData::SamePackage, writer(), None, &expected).unwrap());
         assert!(serde_json::from_slice::<Value>(&legacy_encoded).unwrap().get("launcher").is_none());
         assert!(CapsuleData::parse_data(&bytes(&legacy), &expected).unwrap().launcher_data().is_none());
-        let observation = ObservationData { outcome:OutcomeData::Restored,write_count:2,write_bytes:17,
+        let observation = ObservationData { outcome:OutcomeData::Restored,
+            published_identity:Some(crate::macos_applications_launcher::OriginalIdentityData {device:1,inode:42,birth_seconds:1,birth_nanoseconds:0}),
+            publication_phase:Some(crate::macos_applications_launcher::PhaseReferenceData {stage_instance:"1".repeat(32),sha256:"2".repeat(64)}),write_count:2,write_bytes:17,
             originals_closed:true,within_original_deadline:true,readback_verified:true,workspace_cleared:true };
         let encoded = CapsuleData::encode_with_launcher_data(&ip, previous, Some(&sp), Some(expected.current_data()),
             RecordedOutcomeData::SamePackage, writer(), Some(observation.clone()), &expected).unwrap();

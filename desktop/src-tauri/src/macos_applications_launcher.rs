@@ -129,10 +129,44 @@ pub fn decide(action: ActionData, current: Option<&LauncherInventory<'_>>,
 #[serde(rename_all = "kebab-case")]
 pub enum OutcomeData { VerifiedExisting, Published, Restored, InverseRestored, Refused, Unknown }
 
+// Persistent enrollment identifies the original, not merely matching signed
+// bytes. Birth time supplements device/inode against later inode reuse; ctime
+// is deliberately excluded because our exclusive rename legitimately changes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OriginalIdentityData {
+    pub device: i64, pub inode: u64, pub birth_seconds: i64, pub birth_nanoseconds: i64,
+}
+impl OriginalIdentityData {
+    pub fn valid_data(self) -> bool {
+        self.device >= 0 && self.inode != 0 && self.birth_seconds > 0
+            && (0..1_000_000_000).contains(&self.birth_nanoseconds)
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub struct PhaseReferenceData {pub stage_instance:String,pub sha256:String}
+impl PhaseReferenceData {
+    pub fn valid_data(&self)->bool {
+        let hex=|value:&str,n|value.len()==n && value.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        hex(&self.stage_instance,32) && self.stage_instance.bytes().any(|b|b!=b'0') && hex(&self.sha256,64)
+    }
+}
+fn required_phase<'de,D:serde::Deserializer<'de>>(deserializer:D)
+    ->std::result::Result<Option<PhaseReferenceData>,D::Error> {serde::Deserialize::deserialize(deserializer)}
+fn required_identity<'de, D: serde::Deserializer<'de>>(deserializer: D)
+    -> std::result::Result<Option<OriginalIdentityData>, D::Error> {
+    serde::Deserialize::deserialize(deserializer)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ObservationData {
     pub outcome: OutcomeData,
+    #[serde(deserialize_with = "required_identity")]
+    pub published_identity: Option<OriginalIdentityData>,
+    #[serde(deserialize_with="required_phase")]
+    pub publication_phase:Option<PhaseReferenceData>,
     pub write_count: u64,
     pub write_bytes: u64,
     pub originals_closed: bool,
@@ -145,7 +179,13 @@ impl ObservationData {
         // One new copied launcher; inverse uses the retained old original,
         // never a second arbitrary copy or widened payload quota.
         let limit = LIMITS.iter().copied().sum::<u64>() + TICKET_LIMIT;
-        (self.write_count == 0) == (self.write_bytes == 0)
+        self.publication_phase.as_ref().is_none_or(PhaseReferenceData::valid_data)
+            && match self.outcome {OutcomeData::Published|OutcomeData::Restored=>self.publication_phase.is_some(),
+                OutcomeData::VerifiedExisting=>self.publication_phase.is_none(),_=>true}
+            && self.published_identity.is_none_or(OriginalIdentityData::valid_data)
+            && (!matches!(self.outcome, OutcomeData::VerifiedExisting | OutcomeData::Published | OutcomeData::Restored)
+                || self.published_identity.is_some())
+            && (self.write_count == 0) == (self.write_bytes == 0)
             && self.write_count <= self.write_bytes && self.write_bytes <= limit
             && match self.outcome {
                 OutcomeData::VerifiedExisting => self.write_count == 0,
@@ -265,7 +305,8 @@ mod tests {
         use OutcomeData::*;
         for outcome in [VerifiedExisting, Published, Restored, InverseRestored, Refused, Unknown] {
             let writes = u64::from(matches!(outcome, Published | Restored));
-            let base = ObservationData { outcome, write_count: writes, write_bytes: writes,
+            let base = ObservationData { outcome, published_identity:Some(OriginalIdentityData {device:1,inode:42,birth_seconds:1,birth_nanoseconds:0}),
+                publication_phase:matches!(outcome,Published|Restored).then(||PhaseReferenceData {stage_instance:"1".repeat(32),sha256:"2".repeat(64)}), write_count: writes, write_bytes: writes,
                 originals_closed: true, within_original_deadline: true, readback_verified: true, workspace_cleared: true };
             assert!(base.valid_data());
             assert_eq!(base.complete_data(false), matches!(outcome, VerifiedExisting | Published | Restored));
@@ -282,12 +323,24 @@ mod tests {
             }
         }
         let value = serde_json::json!({"outcome":"restored","writeCount":1,"writeBytes":4,
+            "publishedIdentity":{"device":1,"inode":42,"birthSeconds":1,"birthNanoseconds":0},
+            "publicationPhase":{"stageInstance":"1".repeat(32),"sha256":"2".repeat(64)},
             "originalsClosed":true,"withinOriginalDeadline":true,"readbackVerified":true,"workspaceCleared":true});
         assert!(serde_json::from_value::<ObservationData>(value.clone()).unwrap().complete_data(false));
-        for key in ["writeCount", "writeBytes", "originalsClosed", "withinOriginalDeadline", "readbackVerified", "workspaceCleared"] {
+        for key in ["publicationPhase", "publishedIdentity", "writeCount", "writeBytes", "originalsClosed", "withinOriginalDeadline", "readbackVerified", "workspaceCleared"] {
             let mut missing = value.clone(); missing.as_object_mut().unwrap().remove(key);
             assert!(serde_json::from_value::<ObservationData>(missing).is_err());
         }
+        for identity in [serde_json::Value::Null,
+            serde_json::json!({"device":1,"inode":0,"birthSeconds":1,"birthNanoseconds":0}),
+            serde_json::json!({"device":1,"inode":42,"birthSeconds":0,"birthNanoseconds":0}),
+            serde_json::json!({"device":1,"inode":42,"birthSeconds":1,"birthNanoseconds":1_000_000_000})] {
+            let mut bad=value.clone();bad["publishedIdentity"]=identity;
+            assert!(!serde_json::from_value::<ObservationData>(bad).unwrap().complete_data(false));
+        }
+        let mut absent_inverse=value.clone();absent_inverse["outcome"]=serde_json::json!("inverse-restored");
+        absent_inverse["publishedIdentity"]=serde_json::Value::Null;
+        assert!(serde_json::from_value::<ObservationData>(absent_inverse).unwrap().complete_data(true));
         let mut extra = value; extra["trusted"] = serde_json::json!(true);
         assert!(serde_json::from_value::<ObservationData>(extra).is_err());
     }
