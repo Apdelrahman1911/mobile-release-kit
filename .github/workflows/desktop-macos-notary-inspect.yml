@@ -1,0 +1,37 @@
+name: Read-only Mac notarization diagnosis
+
+on:
+  push:
+    branches: [verify/desktop-macos-notary-inspect]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-notary-inspect
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-notary-inspect'
+    runs-on: macos-26
+    environment: macos-developer-id
+    timeout-minutes: 6
+    steps:
+      - name: Require disposable hosted Mac
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: test "$RUNNER_ENVIRONMENT" = github-hosted && test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Read history and one correlated log, with finite diagnostics only
+        timeout-minutes: 3
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_NOTARY_API_KEY_BASE64: ${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64 }}
+        run: python -I -B desktop/tools/macos_notary_inspect.py
