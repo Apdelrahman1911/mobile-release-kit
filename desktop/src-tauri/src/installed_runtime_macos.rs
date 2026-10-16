@@ -1302,6 +1302,7 @@ slots!(MetadataTextRuntimeSlots, MetadataTextInstalledRuntime, runtime::Metadata
 slots!(MetadataImagesRuntimeSlots, MetadataImagesInstalledRuntime, runtime::MetadataImagesInstalledProfile);
 slots!(ReleaseVersionRuntimeSlots, ReleaseVersionInstalledRuntime, runtime::ReleaseVersionInstalledProfile);
 slots!(IOSArchiveRuntimeSlots, IOSArchiveInstalledRuntime, runtime::IOSArchiveInstalledProfile);
+slots!(LocalHistoryRuntimeSlots, LocalHistoryInstalledRuntime, runtime::LocalReleaseHistoryInstalledProfile);
 slots!(ArtifactInspectionRuntimeSlots, ArtifactInspectionInstalledRuntime, runtime::ArtifactInspectionInstalledProfile);
 
 // Inert checks over the same COMMON Book used by both new action slots.
@@ -1924,6 +1925,14 @@ impl VaultHelperSlots{
         let result=self.command.prepare(&mut self.original).map_err(|_|AdmissionFailure::Unknown);
         #[cfg(feature="macos-android-registration-helper")]
         let result=Err(AdmissionFailure::Ownership);
+        if let Err(p)=result{self.fail(p);}result
+    }
+    pub(crate) fn prepare_local_command(&mut self,lease:std::sync::Arc<native::local_project_lease::ProjectLease>)->Result<()>{
+        if !self.inspected || self.claimed || self.first_failure().is_some(){return Err(self.fail(AdmissionFailure::AlreadyUsed));}
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        let result=self.command.prepare_local(&mut self.original,lease).map_err(|_|AdmissionFailure::Unknown);
+        #[cfg(feature="macos-android-registration-helper")]
+        let result={let _=lease;Err(AdmissionFailure::Ownership)};
         if let Err(p)=result{self.fail(p);}result
     }
     pub(crate) fn command_ready(&self)->bool{

@@ -1,3 +1,4 @@
+import type { LocalHistoryApi } from './localReleaseHistoryTypes.ts';
 import type { LocalStorePreflightApi } from './localStorePreflightTypes.ts';
 import type { PublicationApi } from './githubPublicationTypes.ts';
 import type { ArtifactInspectionApi } from './artifactInspectionTypes.ts';
@@ -412,7 +413,7 @@ export interface PrepareConfigEditRequest {
   baselineGeneration: number;
 }
 
-export interface DesktopApi extends LocalStorePreflightApi, PublicationApi, ArtifactInspectionApi, ProjectInitializationApi, AssetSessionApi, GitHubRemoteSetupApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, GitHubReleaseApi, GitHubHistoryApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi, IOSArchiveApi, ProjectRecoveryApi {
+export interface DesktopApi extends LocalHistoryApi, LocalStorePreflightApi, PublicationApi, ArtifactInspectionApi, ProjectInitializationApi, AssetSessionApi, GitHubRemoteSetupApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, GitHubReleaseApi, GitHubHistoryApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi, IOSArchiveApi, ProjectRecoveryApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   revealInstallation(): Promise<InstallationRevealResult>;

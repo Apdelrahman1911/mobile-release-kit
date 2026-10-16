@@ -147,6 +147,9 @@ class Journal:
                 or stat.S_IMODE(value.st_mode) != 0o400 or not 0 < value.st_size <= maximum):
             raise JournalError("Private preflight record custody differs")
 
+    def _may_create_directory(self) -> bool:
+        return True
+
     def open(self) -> Journal:
         self._time()
         if self.opened or self.closed or self.uid == 0 or self.uid != os.getuid() or self.gid != os.getgid():
@@ -167,7 +170,7 @@ class Journal:
             try:
                 fd = os.open(name, flags, dir_fd=parent)
             except FileNotFoundError:
-                if not create:
+                if not create or not self._may_create_directory():
                     raise JournalError("Private account home is unavailable") from None
                 # Only these four fixed names can be created. Existing
                 # directories are never chmodded, replaced or deleted.

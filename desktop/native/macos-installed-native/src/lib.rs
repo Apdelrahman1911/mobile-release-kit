@@ -70,6 +70,8 @@ pub mod wrapping_keychain;
 pub mod vault_filesystem;
 pub mod vault_helper_wire;
 pub mod local_keychain_wire;
+pub mod local_project_lease;
+pub mod local_account;
 pub mod vault_helper_filesystem;
 #[cfg(not(any(feature = "vault-helper", feature = "android-registration-helper")))]
 pub mod vault_helper_launch;

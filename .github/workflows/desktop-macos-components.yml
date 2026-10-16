@@ -279,7 +279,9 @@ jobs:
           fi
           if [[ "$APP_CHECKS" == local-keychain ]]; then
             # Separate Cargo invocation preserves helper-only native policy.
-            # Only memory/codec contracts execute, never Keychain or Installer.
+            # Only closed DATA/DocumentState/driver contracts execute, never
+            # Keychain, real Document admission, filesystem or Installer work.
+            export CARGO_PROFILE_TEST_DEBUG=0
             # The role symbol is deliberately defined by the real helper main,
             # not by its dependency's standalone libtest executable. Link the
             # actual helper; run portable wire tests in the ordinary native graph.
@@ -288,14 +290,25 @@ jobs:
               --manifest-path desktop/helpers/macos-vault-helper/Cargo.toml
             rustup run 1.98.1 cargo test --locked \
               --manifest-path desktop/native/macos-installed-native/Cargo.toml --lib -- \
-              local_keychain_wire::tests:: --test-threads=1 \
-              | tee "$WORK_ROOT/local-keychain-wire-tests.log"
-            grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-wire-tests.log"
+              local_keychain_wire::tests::local_exact_context_and_legacy_discriminator \
+              local_keychain_wire::tests::lookup_never_transports_a_proposal_and_bounds_are_original \
+              local_keychain_wire::tests::syntax_cannot_create_absence_or_value_and_context_cannot_alias \
+              local_keychain_wire::tests::positive_absence_is_local_probe_only_and_never_a_key \
+              local_keychain_wire::tests::local_lease_root_bounds_and_legacy_exact_request_length \
+              --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-wire-tests.log"
+            grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-wire-tests.log"
             rustup run 1.98.1 cargo test --locked --no-default-features \
               --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
-              vault_keyring_macos::tests::local_ --test-threads=1 \
-              | tee "$WORK_ROOT/local-keychain-owner-tests.log"
-            grep -Eq '^test result: ok\. 2 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+              vault_keyring_macos::tests::local_failure_and_wrong_domain_never_mint_absence_or_vault_key \
+              vault_keyring_macos::tests::local_unknown_close_and_late_join_cannot_publish_or_refund \
+              asset_session::local_history::tests::local_release_history_needs_registered_project_not_credential_context \
+              local_release_history_protocol::tests::local_release_history_real_decoder_requires_complete_closed_phase_sequence \
+              local_release_history_protocol::tests::local_release_history_original_nonce_replay_and_truncated_terminal_refuse \
+              local_release_history_protocol::tests::local_release_history_public_summary_cannot_hide_recovery_or_exceed_journal_bound \
+              local_release_history_protocol::local_release_history_cleanup_tests::local_release_history_healthy_cleanup_does_not_manufacture_failure \
+              saved_command_owner::local_history::native::tests::local_release_history_pre_admission_refusal_has_no_worker_to_join \
+              --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 8 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
             exit 0
           fi
           # The same Mac Store implementation is in the headless library graph.

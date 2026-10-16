@@ -32,6 +32,7 @@ class CandidateBootstrapTests(unittest.TestCase):
         host = work.parent / 'host-python'
         context = dict(target=target, helperSource='d' * 40, runId='51', runAttempt='2', work=work)
         row, preview, *_ = fixture(target)
+        preview['packageSize'] = 32  # Valid XAR minimum at the inert native boundary.
         zip_body, selected = archive(row, [('MobileReleaseKit.dmg', b'DATA'),
             ('PREVIEW.json', R.canonical(preview) + b'\n'), ('README.md', b'Inert guide\n')])
         if transport is not None: zip_body, selected = transport
@@ -40,8 +41,10 @@ class CandidateBootstrapTests(unittest.TestCase):
         for relative in (*C.HELPER_SOURCE_INPUTS, C.CONSUMER_PATH, C.LEGACY_PATH, C.PARSER_PATH):
             path = C.HELPER_ROOT / relative
             files[path] = (ROOT / relative).read_bytes() if (ROOT / relative).is_file() else b'inert source\n'
-        if purpose == "restore-install":
+        if purpose in ("restore-install", "acquire-restore"):
             files[C.HELPER_ROOT / C.FIXTURE_PATH] = (ROOT / C.FIXTURE_PATH).read_bytes()
+        if purpose == "acquire-restore":
+            files[C.HELPER_ROOT / "desktop/tools/macos_android_helper_package.py"] = (ROOT / "desktop/tools/macos_android_helper_package.py").read_bytes()
         files[C.HELPER_ROOT / C.SELECTION_PATH] = R.canonical({'schemaVersion': 1, 'targets': {target: selected}})
         for relative in (C.STAGER_PATH, *(path for path, _ in C.CANDIDATE_SOURCE_INPUTS)):
             files[C.CANDIDATE_ROOT / relative] = b'inert candidate source\n'
@@ -93,7 +96,7 @@ class CandidateBootstrapTests(unittest.TestCase):
                 parentIdentity=parent,privateIdentity=dict(parent,mode=stat.S_IFDIR|0o700,inode=123),
                 siblingCensusSha256='4'*64,siblingCount=0,rootAbsent=True,transportState='pending-original-exit'))
             files[root_baseline]=body; modes[root_baseline]=0o444
-            original = dict(bytes=len(body),sha256=R.sha(body),identity=list(R.identity(info(root_baseline))))
+            original = dict(bytes=len(body),sha256=R.sha(body),identity=list(H.signature(info(root_baseline))))
             if fault=='prior-manifest-malformed': acquisition['runtimeManifestSha256'] = '0'*64
             if fault=='prior-manifest-missing': del acquisition['runtimeManifestSha256']
             baseline_fault = 'close' if fault=='baseline-close' else fault if fault in ('prior-status','prior-manifest-malformed','prior-manifest-missing') else None
@@ -197,6 +200,7 @@ class CandidateBootstrapTests(unittest.TestCase):
             if path.name == 'macos_xcode_host_preparation.py':
                 return SimpleNamespace(DarwinAPI=lambda clock, target: SimpleNamespace(waitable_sigchld=lambda: effects.append(('host', target))))
             if path.name == 'macos_app_absence_fixture.py': return F
+            if path.name == 'macos_android_helper_package.py': return H
             effects.append(('candidate-stager-loaded',))
             return stage
 
@@ -218,6 +222,7 @@ class CandidateBootstrapTests(unittest.TestCase):
             owner.publish_owned(work / 'producer-key.pem', b'inert key')
             owner.publish_owned(work / 'producer-message.bin', b'inert domain')
             q.call(outer, 'file', work / 'producer-message.bin', 100)
+            if purpose == 'acquire-restore': owner._restore_originals = {}
             readback = owner.prepare_readback(mounted_result, b'inert inventory')
             if readback is False:
                 mounted.finish(); owner.mount_detached = True
@@ -256,11 +261,16 @@ class CandidateBootstrapTests(unittest.TestCase):
         def mkdir(path, *args, **kw):
             path = Path(path) if 'dir_fd' not in kw else next(e['path'] for e in books[0].entries if e['fd'] == kw['dir_fd']) / path
             effects.append(('mkdir',str(path))); dirs.add(path)
+        def materialize(owner, originals, inventory):
+            effects.append(('materialize-boundary',owner.quota.reserved,sum(e['fd'] is not None for b in owner.quota.books for e in b.entries)))
+            self.assertFalse(owner.installer_entered)
+            self.assertTrue(all(q['returned'] and q['capturesSettled'] for q in owner.calls))
+            if fault=='materialize': raise ValueError('inert materializer uncertain close')
         result = failure = None
         with ExitStack() as patches:
             for obj, name, value in ((C, 'entry_context', lambda args: context), (R, 'bootstrap_originals', lambda root: Book),
                     (R, 'load_module', module), (R, 'FixedSudoOriginals', Sudo),
-                    (R.Resume, 'install_image', native_install), (R, 'host_memory_data', lambda host, clock: (4096, 64 << 30)),
+                    (R.Resume, 'install_image', native_install), (H,'candidate_materialize',materialize), (R, 'host_memory_data', lambda host, clock: (4096, 64 << 30)),
                     (R, 'memory_data', lambda *a, **kw: {'availableEstimateBytes': 64 << 30}),
                     (C.os, 'stat', lambda path, **kw: info(Path(path) if 'dir_fd' not in kw else
                         next(e['path'] for e in books[0].entries if e['fd'] == kw['dir_fd']) / path)),
@@ -278,6 +288,20 @@ class CandidateBootstrapTests(unittest.TestCase):
             try: result = C.main(purpose)
             except BaseException as error: failure = error
         return result, failure, calls, effects, books, files
+
+    def test_acquire_restore_bootstrap_quotes_helper_source_and_stops_before_installer(self):
+        for target in F.TARGETS:
+            result,error,calls,effects,books,files=self.exercise(target,purpose='acquire-restore')
+            self.assertIsNone(error,repr(error));self.assertEqual(result['scope'],'candidate-closed-acquisition')
+            boundaries=[q for q in effects if q[0]=='materialize-boundary']
+            self.assertEqual(len(boundaries),1);self.assertLessEqual(boundaries[0][1],96)
+            self.assertEqual(boundaries[0][1],95)
+            self.assertFalse(result['installerEntered'])
+            self.assertTrue(all(e['closed'] for b in books for e in b.entries))
+            print('INERT acquire-restore reservation/live',boundaries[0][1:])
+            result,error,_,effects,_,_=self.exercise(target,'materialize',purpose='acquire-restore')
+            self.assertIsNone(result);self.assertIsNotNone(error)
+            self.assertNotIn(('full-native-quote',96),effects)
 
     def baseline_phase(self, acquisition, binding, original, fault=None):
         """Real phase/finish; only unavailable mount/native/root endpoints inert."""
@@ -305,6 +329,12 @@ class CandidateBootstrapTests(unittest.TestCase):
             op.package_call=native
             def image(owner,producer):
                 owner.app_absence['nativeBinding']=binding
+                owner.app_absence['preparationSha256']='a'*64
+                owner.app_absence['image']=dict(bytes=64,sha256='b'*64)
+                owner.app_absence['layout']={name:dict(name=name,bytes=(acquisition[key]['bytes'] if key else 100),
+                    sha256=(acquisition[key]['sha256'] if key else 'c'*64),mode=0o444,links=1)
+                    for name,key in [('Install.pkg','package'),('producer.json','descriptor'),('producer.sig','signature'),
+                        *[(name,None) for name in (*F.PHASE_NAMES,*F.CUT_PACKAGES)]]}
                 owner.app_absence['mount']=dict(entered=False,known=True,detached=False)
                 for role in F.roles(owner)[:3]: native(role,[])
             def detach(owner,role):
@@ -344,7 +374,9 @@ class CandidateBootstrapTests(unittest.TestCase):
             for path in ('/Library','/Library/Application Support'):
                 self.assertEqual(sum(str(entry['path'])==path for entry in entries),1)
             self.assertTrue(all(entry['closed'] for entry in entries))
-            self.assertEqual(sum('/resume-carrier/' in str(path) for path in files),3)
+            self.assertEqual(sum('/resume-carrier/' in str(path) for path in files),4)
+            self.assertEqual(result['installerStatusOriginal']['sha256'],R.sha(b'0\n'))
+            self.assertEqual(result['installerStatusOriginal']['bytes'],2)
 
     def test_restore_reuse_baseline_refuses_before_installer_and_unknown_close_preserves(self):
         for fault in ('baseline-drift','baseline-status','baseline-close','prior-status','prior-manifest-malformed','prior-manifest-missing','reuse-close'):

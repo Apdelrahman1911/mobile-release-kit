@@ -2,10 +2,11 @@
 //! exclusion, confirmation, helper finality or Store execution authority.
 use zeroize::{Zeroize, Zeroizing};
 use crate::{vault_helper_wire as vault, wrapping_keychain::{self as wrapping, transport}};
-pub const REQUEST_BYTES: usize = 128;
-pub const TERMINAL_BYTES: usize = 144 + 2 * transport::BYTES + 32;
+pub const REQUEST_BYTES: usize = 160;
+pub const TERMINAL_HEADER: usize = 192;
+pub const TERMINAL_BYTES: usize = TERMINAL_HEADER + 2 * transport::BYTES + 32;
 pub const MAX_SEQUENCE: u32 = 513;
-const _: () = assert!(REQUEST_BYTES == vault::REQUEST_BYTES && TERMINAL_BYTES + vault::NOTICE_BYTES <= vault::RESPONSE_LIMIT);
+const _: () = assert!(REQUEST_BYTES >= vault::REQUEST_BYTES && TERMINAL_BYTES + vault::NOTICE_BYTES <= vault::RESPONSE_LIMIT);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Purpose { LocalJournalKey, LocalCheckpoint }
 impl Purpose {
@@ -16,18 +17,41 @@ pub enum Operation { AddRead, ReadRequired, ProbeAbsent }
 impl Operation {
     pub fn code(self)->u32 { match self { Self::AddRead=>1, Self::ReadRequired=>2, Self::ProbeAbsent=>3 } }
 }
+/// Exact inherited directory role DATA; only the original native lease owner
+/// may supply it to LocalInput. A parsed number is never descriptor authority.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ProjectRoot { pub device:u64, pub inode:u64, pub mode:u32, pub uid:u32, pub gid:u32, pub descriptor:u32 }
+impl ProjectRoot {
+    pub fn valid(self)->bool {self.device!=0 && self.inode!=0 && self.mode & 0o170000==0o040000
+        && self.mode & 0o7022==0 && self.uid!=0 && (3..256).contains(&self.descriptor)}
+    pub fn encode(self,b:&mut[u8])->bool {
+        if b.len()!=32 || !self.valid(){return false;}
+        put64(b,0,self.device);put64(b,8,self.inode);put32(b,16,self.mode);
+        put32(b,20,self.uid);put32(b,24,self.gid);put32(b,28,self.descriptor);true
+    }
+    pub fn decode(b:&[u8])->Option<Self>{
+        if b.len()!=32{return None;}
+        let root=Self{device:u64_at(b,0),inode:u64_at(b,8),mode:u32_at(b,16),uid:u32_at(b,20),gid:u32_at(b,24),descriptor:u32_at(b,28)};
+        root.valid().then_some(root)
+    }
+}
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct LeaseFacts { pub admitted:bool, pub postchecked:bool, pub close_entered:bool, pub closed:bool }
+impl LeaseFacts {pub fn settled(self)->bool {self.admitted && self.postchecked && self.close_entered && self.closed}}
+
 /// Native-selected locator only; public DATA construction is not an owner loan.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Context { locator:[u8;32], purpose:Purpose, sequence:u32 }
+pub struct Context { locator:[u8;32], purpose:Purpose, sequence:u32, project:ProjectRoot }
 impl Context {
-    pub fn new(locator:[u8;32],purpose:Purpose,sequence:u32)->Option<Self> {
-        if locator==[0;32] || !match purpose { Purpose::LocalJournalKey=>sequence==0,
+    pub fn new(locator:[u8;32],purpose:Purpose,sequence:u32,project:ProjectRoot)->Option<Self> {
+        if !project.valid() || locator==[0;32] || !match purpose { Purpose::LocalJournalKey=>sequence==0,
             Purpose::LocalCheckpoint=>(1..=MAX_SEQUENCE).contains(&sequence) } { return None; }
-        Some(Self{locator,purpose,sequence})
+        Some(Self{locator,purpose,sequence,project})
     }
     pub fn locator(&self)->&[u8;32] { &self.locator }
     pub fn purpose(&self)->Purpose { self.purpose }
     pub fn sequence(&self)->u32 { self.sequence }
+    pub fn project(&self)->ProjectRoot {self.project}
 }
 pub struct Request { pub context:Context, pub operation:Operation, pub nonce:[u8;16],
     pub work:u64, pub maximum_cleanup:u64, pub value:Zeroizing<[u8;32]> }
@@ -41,7 +65,7 @@ impl Request {
             || u32_at(b,116)!=1 || u32_at(b,124)!=0 { return None; }
         let operation=match u32_at(b,12) {1=>Operation::AddRead,2=>Operation::ReadRequired,3=>Operation::ProbeAbsent,_=>return None};
         let purpose=match u32_at(b,112) {1=>Purpose::LocalJournalKey,2=>Purpose::LocalCheckpoint,_=>return None};
-        let context=Context::new(b[32..64].try_into().ok()?,purpose,u32_at(b,120))?;
+        let context=Context::new(b[32..64].try_into().ok()?,purpose,u32_at(b,120),ProjectRoot::decode(&b[128..160])?)?;
         let work=u64_at(b,64); let maximum_cleanup=u64_at(b,72);
         if work==0 || maximum_cleanup<work || maximum_cleanup-work>vault::CLEANUP_NS
             || operation!=Operation::AddRead && b[80..112]!=[0;32] { return None; }
@@ -52,6 +76,7 @@ impl Request {
         b.zeroize();b[..8].copy_from_slice(b"MRKLJQ01");put32(b,8,1);put32(b,12,self.operation.code());
         b[16..32].copy_from_slice(&self.nonce);b[32..64].copy_from_slice(self.context.locator());
         put64(b,64,self.work);put64(b,72,self.maximum_cleanup);b[80..112].copy_from_slice(&*self.value);
+        if !self.context.project().encode(&mut b[128..160]){return false;}
         put32(b,112,self.context.purpose().code());put32(b,116,1);put32(b,120,self.context.sequence());
         Self::decode(b).is_some()
     }
@@ -59,7 +84,7 @@ impl Request {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ResultKind { None, Value, Absent }
 impl ResultKind { fn code(self)->u32 { match self {Self::None=>0,Self::Value=>1,Self::Absent=>2} } }
-pub struct Terminal { pub common:vault::Terminal, pub result:ResultKind }
+pub struct Terminal { pub common:vault::Terminal, pub result:ResultKind, pub lease:LeaseFacts }
 impl Terminal {
     pub fn decode(b:&[u8],request:&Request)->Option<Self> {
         if b.len()!=TERMINAL_BYTES || &b[..8]!=b"MRKLJT01" || u32_at(b,8)!=1
@@ -67,28 +92,29 @@ impl Terminal {
             || u64_at(b,64)!=request.work || u64_at(b,72)!=request.maximum_cleanup
             || u32_at(b,128)!=request.context.purpose().code() || u32_at(b,132)!=1
             || u32_at(b,136)!=request.context.sequence() || (100..128).step_by(4).any(|at|u32_at(b,at)>1)
-            || u32_at(b,96)>3 { return None; }
+            || u32_at(b,96)>3 || ProjectRoot::decode(&b[144..176])?!=request.context.project()
+            || (176..192).step_by(4).any(|at|u32_at(b,at)>1) { return None; }
         let result=match u32_at(b,140) {0=>ResultKind::None,1=>ResultKind::Value,2=>ResultKind::Absent,_=>return None};
         let first=u64_at(b,80);let cleanup=u64_at(b,88);let effect=u32_at(b,96);
         if cleanup==0 || cleanup>request.maximum_cleanup || first!=0 && (cleanup<first || cleanup-first>vault::CLEANUP_NS)
             || request.operation!=Operation::AddRead && (effect!=0 || u32_at(b,104)!=0) { return None; }
         let receipt=|present:bool,at:usize,op| if present {transport::decode(&b[at..at+transport::BYTES],op).map(Some)}
             else {b[at..at+transport::BYTES].iter().all(|v|*v==0).then_some(None)};
-        let add=receipt(u32_at(b,104)==1,144,wrapping::Operation::AddOnly)?;
-        let lookup=receipt(u32_at(b,108)==1,144+transport::BYTES,wrapping::Operation::Lookup)?;
+        let add=receipt(u32_at(b,104)==1,TERMINAL_HEADER,wrapping::Operation::AddOnly)?;
+        let lookup=receipt(u32_at(b,108)==1,TERMINAL_HEADER+transport::BYTES,wrapping::Operation::Lookup)?;
         if add.as_ref().is_some_and(|r|r.effect_code()!=effect)
             || request.operation==Operation::AddRead && lookup.is_some() && !add.as_ref().is_some_and(transport::Receipt::added) {return None;}
         let candidate=u32_at(b,124)==1;
         if candidate!=(result==ResultKind::Value) {return None;}
         let value=Self{common:vault::Terminal{first,cleanup,effect,valid:u32_at(b,100)==1,add,lookup,
-            auth_settled:u32_at(b,112)==1,filesystem_settled:u32_at(b,116)==1,input_closed:u32_at(b,120)==1,candidate},result};
+            auth_settled:u32_at(b,112)==1,filesystem_settled:u32_at(b,116)==1,input_closed:u32_at(b,120)==1,candidate},result,lease:LeaseFacts{admitted:u32_at(b,176)==1,postchecked:u32_at(b,180)==1,close_entered:u32_at(b,184)==1,closed:u32_at(b,188)==1}};
         if result!=ResultKind::None && !value.success(request.operation) {return None;}
         if result!=ResultKind::Value && b[TERMINAL_BYTES-32..]!=[0;32] {return None;}
         Some(value)
     }
     pub fn success(&self,operation:Operation)->bool {
         let t=&self.common;
-        t.first==0 && t.valid && t.auth_settled && t.filesystem_settled && t.input_closed && match operation {
+        self.lease.settled() && t.first==0 && t.valid && t.auth_settled && t.filesystem_settled && t.input_closed && match operation {
             Operation::ProbeAbsent=>self.result==ResultKind::Absent && !t.candidate && t.effect==0 && t.add.is_none()
                 && t.lookup.as_ref().is_some_and(transport::Receipt::local_absent),
             Operation::ReadRequired=>self.result==ResultKind::Value && t.success(vault::Operation::Lookup),
@@ -105,7 +131,9 @@ pub fn terminal_encode(request:&Request,terminal:&Terminal,value:Option<&[u8;32]
     for(at,v) in [(100,t.valid),(104,t.add.is_some()),(108,t.lookup.is_some()),(112,t.auth_settled),
         (116,t.filesystem_settled),(120,t.input_closed),(124,t.candidate)] {put32(b,at,u32::from(v));}
     put32(b,128,request.context.purpose().code());put32(b,132,1);put32(b,136,request.context.sequence());put32(b,140,terminal.result.code());
-    for(at,r) in [(144,&t.add),(144+transport::BYTES,&t.lookup)] {if let Some(r)=r {if !transport::encode(r,&mut b[at..at+transport::BYTES]) {b.zeroize();return false;}}}
+    if !request.context.project().encode(&mut b[144..176]){return false;}
+    for(at,v) in [(176,terminal.lease.admitted),(180,terminal.lease.postchecked),(184,terminal.lease.close_entered),(188,terminal.lease.closed)] {put32(b,at,u32::from(v));}
+    for(at,r) in [(TERMINAL_HEADER,&t.add),(TERMINAL_HEADER+transport::BYTES,&t.lookup)] {if let Some(r)=r {if !transport::encode(r,&mut b[at..at+transport::BYTES]) {b.zeroize();return false;}}}
     if (terminal.result==ResultKind::Value)!=value.is_some() {b.zeroize();return false;}
     if let Some(v)=value {b[TERMINAL_BYTES-32..].copy_from_slice(v);}
     let valid=Terminal::decode(b,request).is_some();if !valid {b.zeroize();}valid
@@ -115,7 +143,8 @@ pub enum RequestEnvelope { Vault(vault::Request), Local(Request) }
 impl RequestEnvelope {
     pub fn decode(b:&[u8])->Option<Self> { match b.get(..8)? {
         b"MRKVKQ01"=>vault::Request::decode(b).map(Self::Vault),b"MRKLJQ01"=>Request::decode(b).map(Self::Local),_=>None} }
-    pub fn encode(&self,b:&mut[u8;REQUEST_BYTES])->bool {match self {Self::Vault(r)=>r.encode(b),Self::Local(r)=>r.encode(b)}}
+    pub fn encode(&self,b:&mut[u8;REQUEST_BYTES])->bool {match self {Self::Vault(r)=>{b.zeroize();r.encode((&mut b[..vault::REQUEST_BYTES]).try_into().unwrap())},Self::Local(r)=>r.encode(b)}}
+    pub fn request_bytes(&self)->usize {match self {Self::Vault(_)=>vault::REQUEST_BYTES,Self::Local(_)=>REQUEST_BYTES}}
     pub fn nonce(&self)->&[u8;16] {match self {Self::Vault(r)=>&r.nonce,Self::Local(r)=>&r.nonce}}
     pub fn work(&self)->u64 {match self {Self::Vault(r)=>r.work,Self::Local(r)=>r.work}}
     pub fn maximum_cleanup(&self)->u64 {match self {Self::Vault(r)=>r.maximum_cleanup,Self::Local(r)=>r.maximum_cleanup}}
@@ -136,24 +165,25 @@ impl TerminalEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn request(purpose:Purpose,sequence:u32,operation:Operation)->Request {Request{context:Context::new([7;32],purpose,sequence).unwrap(),operation,
+    fn project()->ProjectRoot {ProjectRoot{device:1,inode:2,mode:0o40700,uid:501,gid:20,descriptor:9}}
+    fn request(purpose:Purpose,sequence:u32,operation:Operation)->Request {Request{context:Context::new([7;32],purpose,sequence,project()).unwrap(),operation,
         nonce:[1;16],work:11,maximum_cleanup:12,value:Zeroizing::new([0;32])}}
     #[test]
     fn local_exact_context_and_legacy_discriminator() {
         for (purpose,sequence) in [(Purpose::LocalJournalKey,0),(Purpose::LocalCheckpoint,1),(Purpose::LocalCheckpoint,513)] {
             for operation in [Operation::AddRead,Operation::ReadRequired,Operation::ProbeAbsent] {
-                let r=request(purpose,sequence,operation);let mut b=[0;128];assert!(r.encode(&mut b));
+                let r=request(purpose,sequence,operation);let mut b=[0;REQUEST_BYTES];assert!(r.encode(&mut b));
                 assert!(Request::decode(&b).is_some());assert!(vault::Request::decode(&b).is_none());
                 for at in [8,12,112,116,124,127] {let mut bad=b;bad[at]^=128;assert!(Request::decode(&bad).is_none());}
                 assert!(Request::decode(&b[..127]).is_none());
             }
         }
-        assert!(Context::new([7;32],Purpose::LocalCheckpoint,0).is_none());assert!(Context::new([7;32],Purpose::LocalCheckpoint,514).is_none());
-        assert!(Context::new([7;32],Purpose::LocalJournalKey,1).is_none());assert!(Context::new([0;32],Purpose::LocalJournalKey,0).is_none());
+        assert!(Context::new([7;32],Purpose::LocalCheckpoint,0,project()).is_none());assert!(Context::new([7;32],Purpose::LocalCheckpoint,514,project()).is_none());
+        assert!(Context::new([7;32],Purpose::LocalJournalKey,1,project()).is_none());assert!(Context::new([0;32],Purpose::LocalJournalKey,0,project()).is_none());
     }
     #[test]
     fn lookup_never_transports_a_proposal_and_bounds_are_original() {
-        let mut r=request(Purpose::LocalCheckpoint,1,Operation::ProbeAbsent);let mut b=[0;128];r.value[0]=1;assert!(!r.encode(&mut b));
+        let mut r=request(Purpose::LocalCheckpoint,1,Operation::ProbeAbsent);let mut b=[0;REQUEST_BYTES];r.value[0]=1;assert!(!r.encode(&mut b));
         r.operation=Operation::AddRead;assert!(r.encode(&mut b));r.maximum_cleanup=r.work+vault::CLEANUP_NS+1;assert!(!r.encode(&mut b));
         r.maximum_cleanup=r.work-1;assert!(!r.encode(&mut b));
     }
@@ -164,6 +194,7 @@ mod tests {
         b[16..32].copy_from_slice(&r.nonce);b[32..64].copy_from_slice(r.context.locator());
         put64(&mut b,64,r.work);put64(&mut b,72,r.maximum_cleanup);put64(&mut b,88,r.maximum_cleanup);
         put32(&mut b,128,r.context.purpose().code());put32(&mut b,132,1);put32(&mut b,136,1);
+        assert!(r.context.project().encode(&mut b[144..176]));
         assert!(Terminal::decode(&b,&r).is_some());
         for at in [16,32,64,72,128,132,136] {let mut bad=b;bad[at]^=1;assert!(Terminal::decode(&bad,&r).is_none());}
         put32(&mut b,140,2);assert!(Terminal::decode(&b,&r).is_none());put32(&mut b,140,1);put32(&mut b,124,1);assert!(Terminal::decode(&b,&r).is_none());
@@ -172,14 +203,26 @@ mod tests {
     fn positive_absence_is_local_probe_only_and_never_a_key() {
         let r=request(Purpose::LocalCheckpoint,513,Operation::ProbeAbsent);
         let t=Terminal{common:vault::Terminal{first:0,cleanup:12,effect:0,valid:true,add:None,
-            lookup:Some(transport::local_absence_fixture()),auth_settled:true,filesystem_settled:true,input_closed:true,candidate:false},result:ResultKind::Absent};
+            lookup:Some(transport::local_absence_fixture()),auth_settled:true,filesystem_settled:true,input_closed:true,candidate:false},result:ResultKind::Absent,lease:LeaseFacts{admitted:true,postchecked:true,close_entered:true,closed:true}};
         let mut b=[0;TERMINAL_BYTES];assert!(terminal_encode(&r,&t,None,&mut b));
         assert!(Terminal::decode(&b,&r).unwrap().success(Operation::ProbeAbsent));
         assert!(!t.success(Operation::ReadRequired));assert!(!t.success(Operation::AddRead));
         assert!(!t.common.success(vault::Operation::Lookup));
         assert!(!terminal_encode(&r,&t,Some(&[9;32]),&mut b));
         assert!(terminal_encode(&r,&t,None,&mut b));b[TERMINAL_BYTES-1]=1;assert!(Terminal::decode(&b,&r).is_none());
-        for at in [80,100,112,116,120] {assert!(terminal_encode(&r,&t,None,&mut b));b[at]^=1;assert!(Terminal::decode(&b,&r).is_none());}
+        for at in [80,100,112,116,120,144,152,160,164,168,172,176,180,184,188] {assert!(terminal_encode(&r,&t,None,&mut b));b[at]^=1;assert!(Terminal::decode(&b,&r).is_none());}
+    }
+
+    #[test]
+    fn local_lease_root_bounds_and_legacy_exact_request_length(){
+        let root=project();
+        for bad in [ProjectRoot{descriptor:2,..root},ProjectRoot{descriptor:256,..root},ProjectRoot{uid:0,..root},
+            ProjectRoot{mode:0o40777,..root},ProjectRoot{mode:0o100600,..root},ProjectRoot{inode:0,..root}]{assert!(!bad.valid());}
+        let vault=crate::vault_helper_wire::Request{operation:vault::Operation::Lookup,nonce:[1;16],vault:[2;16],generation:[3;16],
+            work:11,maximum_cleanup:12,initial_key:Zeroizing::new([0;32])};
+        let request=RequestEnvelope::Vault(vault);let mut raw=[0;REQUEST_BYTES];assert!(request.encode(&mut raw));
+        assert_eq!(request.request_bytes(),128);assert!(vault::Request::decode(&raw[..request.request_bytes()]).is_some());
+        assert!(RequestEnvelope::decode(&raw).is_none());assert!(raw[128..].iter().all(|b|*b==0));
     }
 
 }

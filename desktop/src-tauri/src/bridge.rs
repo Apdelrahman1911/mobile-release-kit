@@ -208,6 +208,7 @@ pub struct DesktopBridge {
     pub edits: EditOwner,
     pub(crate) diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner,
     pub(crate) preflight: crate::offline_preflight_owner::OfflinePreflightOwner,
+    pub(crate) local_history: crate::local_release_history_owner::LocalReleaseHistoryOwner,
     pub(crate) local_store: crate::local_store_preflight_owner::LocalStorePreflightOwner,
     pub(crate) android_build: crate::android_build_owner::AndroidBuildOwner,
     pub(crate) project_recovery: crate::project_recovery_owner::ProjectRecoveryOwner,
@@ -270,6 +271,7 @@ impl DesktopBridge {
             supervisor: Supervisor::new(runtime.clone()), edits: EditOwner::new(runtime.clone()),
             diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime.clone()),
             preflight: crate::offline_preflight_owner::OfflinePreflightOwner::new(runtime.clone()),
+            local_history: crate::local_release_history_owner::LocalReleaseHistoryOwner::new(runtime.clone()),
             local_store: crate::local_store_preflight_owner::LocalStorePreflightOwner::new(runtime.clone()),
             project_recovery: crate::project_recovery_owner::ProjectRecoveryOwner::new(runtime.clone()),
             // Retain the owner and compiled profile DATA only; neither is tool
@@ -438,7 +440,7 @@ impl DesktopBridge {
         Ok(())
     }
     pub fn open_config_edit(&self, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
-        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?;
+        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_history.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
         self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
@@ -452,7 +454,7 @@ impl DesktopBridge {
         self.edits.open(window, project_id, root)
     }
     pub(crate) fn open_config_edit_published(&self, publisher: &crate::saved_command_owner::AndroidRegistrationPublisher, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
-        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?;
+        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_history.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
         self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
@@ -711,7 +713,7 @@ impl DesktopBridge {
     }
     #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
     pub(crate) fn register_picked_project(&self, path: PathBuf) -> Result<Project, BridgeError> {
-        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?;
+        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_history.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
         self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;

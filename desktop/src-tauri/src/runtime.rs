@@ -194,6 +194,16 @@ impl IOSArchiveInstalledProfile {
     }
 }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct LocalReleaseHistoryInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl LocalReleaseHistoryInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("local_release_history_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) struct LocalStorePreflightInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl LocalStorePreflightInstalledProfile {
@@ -1961,6 +1971,18 @@ impl RuntimeConfig {
     pub(crate) fn resolve_offline_preflight_installed(&self, originals: &mut crate::installed_runtime::OfflinePreflightRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.offline_preflight_installed_profile()?, end, stop)
+    }
+    pub(crate) fn local_release_history_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_local_release_history_installed(&self, originals: &mut crate::installed_runtime::LocalHistoryRuntimeSlots, end:Instant, stop:&tokio::sync::watch::Receiver<bool>)
+        -> Result<VerifiedRuntime, BridgeError> {
+        if !self.local_release_history_installed_profile_available() { return Err(unavailable()); }
+        originals.inspect_once(LocalReleaseHistoryInstalledProfile { _private: () },end,stop)
     }
     pub(crate) fn local_store_preflight_installed_profile_available(&self) -> bool {
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]

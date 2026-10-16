@@ -138,7 +138,7 @@ BOOTSTRAPS = {"engine_bootstrap.py", "config_edit_bootstrap.py", "github_connect
 # composed payloads include every fixed current domain without rewriting them.
 CURRENT_BOOTSTRAPS = BOOTSTRAPS | {
     "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
-    "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py",
+    "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
 }
 CURRENT_CA_SOURCE = "desktop/cpython-source-inputs/github-ca.pem"
 CURRENT_HELPER_SOURCE = "desktop/tools/prepare_runtime.py"
@@ -3741,9 +3741,14 @@ def app_absence_scripts_data(scripts, expected_program, expected_inventory, *, r
              and mode == (0o555 if row["executable"] else 0o444), "app-absence-app-correspondence")
 
 
-def app_absence_original_command(args):
-    """Genuine original decoder, compacted before the independent final pass."""
-    selection = source_build_selection(command_target(args))
+def app_absence_original_command(args, *, selection=None):
+    """Genuine decoder; optional selection is internal candidate fixture DATA.
+
+    CLI remains source-selected. The separate candidate owner authenticates its
+    candidate source before supplying this nonshipping-only selection.
+    """
+    selection = source_build_selection(command_target(args)) if selection is None else selection
+    need(type(selection) is BuildSelection and selection.target == command_target(args), "app-absence-selection")
     scripts, original, members, identifier, owner = original_package(args.scripts, args.original_package,
         selection=selection, app_absence=True)
     app_absence_scripts_data(scripts, args.expected_program, args.expected_inventory, restore_cut=getattr(args, "restore_cut", None), selection=selection)
@@ -3759,11 +3764,12 @@ def app_absence_original_command(args):
             "scriptFileCount": len(scripts), "packagerUid": owner[0], "packagerGid": owner[1]}
 
 
-def app_absence_final_command(args, compact):
+def app_absence_final_command(args, compact, *, selection=None):
     """Same decoder/strict root ownership; only compact original facts remain."""
     need(type(compact) is dict and set(compact) == {"rows", "packageInfo", "packageIdentifier", "originalPackageSha256",
          "originalPackageSize", "scriptFileCount", "packagerUid", "packagerGid"}, "app-absence-original-facts")
-    selection = source_build_selection(command_target(args))
+    selection = source_build_selection(command_target(args)) if selection is None else selection
+    need(type(selection) is BuildSelection and selection.target == command_target(args), "app-absence-selection")
     package = read(args.package, MAX_BYTES)
     members = xar_members(package)
     need(set(members) == {"PackageInfo", "Scripts"} and members["PackageInfo"] == compact["packageInfo"],

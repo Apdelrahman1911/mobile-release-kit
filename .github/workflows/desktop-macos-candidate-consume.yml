@@ -1,0 +1,223 @@
+name: Same-candidate interrupted Restore observation
+
+on:
+  push:
+    branches: [verify/desktop-macos-candidate-consume]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: desktop-macos-candidate-consume
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate-consume'
+    name: candidate-restore-${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            target: aarch64-apple-darwin
+            python-architecture: arm64
+            rust-version: 1.98.1
+            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
+          - runner: macos-26-intel
+            target: x86_64-apple-darwin
+            python-architecture: x64
+            rust-version: 1.98.0
+            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      # DETACHED DRAFT: replace together with the genuine SOURCE nomination.
+      # This is checkout routing, not artifact/source admission authority.
+      MRK_CANDIDATE_SOURCE: '0000000000000000000000000000000000000000'
+      MRK_MACOS_TARGET: ${{ matrix.target }}
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - name: Require the disposable hosted target and a selected candidate
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$GITHUB_WORKSPACE" = /Users/runner/work/mobile-release-kit/mobile-release-kit
+          test "$RUNNER_TEMP" = /Users/runner/work/_temp
+          test "$MRK_CANDIDATE_SOURCE" != 0000000000000000000000000000000000000000
+          test "$(/usr/bin/id -u)" != 0
+      - name: Check out the actual candidate at the canonical application source root
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.MRK_CANDIDATE_SOURCE }}
+          persist-credentials: false
+      - name: Require the separate helper checkout path to be absent
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          test ! -e "$GITHUB_WORKSPACE/.candidate-consumer-helper"
+          test ! -L "$GITHUB_WORKSPACE/.candidate-consumer-helper"
+      - name: Check out the current consumer without changing candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .candidate-consumer-helper
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+          architecture: ${{ matrix.python-architecture }}
+      - name: Prepare only the ordinary private copied host interpreter
+        timeout-minutes: 2
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          work=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
+          export MRK_MACOS_WORK="$work"
+          printf 'MRK_MACOS_WORK=%s\n' "$work" >> "$GITHUB_ENV"
+          helper="$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py"
+          # Private shell capture only; no base paths/rosters enter Actions outputs.
+          export MRK_HOST_BASE_CONTEXT
+          MRK_HOST_BASE_CONTEXT=$(python3 -I -S -B "$helper" host-base)
+          python3 -I -S -B -m venv --copies --without-pip --without-scm-ignore-files "$work/host-python"
+          "$work/host-python/bin/python3" -I -S -B "$helper" bind-host
+          unset MRK_HOST_BASE_CONTEXT
+      - name: Prepare only the fixed source compiler and locked fixture dependencies
+        timeout-minutes: 10
+        shell: bash
+        env:
+          RUSTUP_TOOLCHAIN: ${{ matrix.rust-version }}
+          EXPECTED_RUST_COMMIT: ${{ matrix.rust-commit }}
+        run: |
+          set -euo pipefail
+          umask 077
+          unset GITHUB_TOKEN GH_TOKEN
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+            CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup \
+            /Users/runner/.cargo/bin/rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+          toolbin="/Users/runner/.rustup/toolchains/$RUSTUP_TOOLCHAIN-$MRK_MACOS_TARGET/bin"
+          /usr/bin/env -i PATH="$toolbin:/usr/bin:/bin:/usr/sbin:/sbin" HOME=/Users/runner \
+            "$toolbin/rustc" -vV > "$MRK_MACOS_WORK/fixture-rust-version.txt"
+          /usr/bin/grep -Fx "release: $RUSTUP_TOOLCHAIN" "$MRK_MACOS_WORK/fixture-rust-version.txt"
+          /usr/bin/grep -Fx "commit-hash: $EXPECTED_RUST_COMMIT" "$MRK_MACOS_WORK/fixture-rust-version.txt"
+          /usr/bin/grep -Fx "host: $MRK_MACOS_TARGET" "$MRK_MACOS_WORK/fixture-rust-version.txt"
+          /usr/bin/env -i PATH="$toolbin:/usr/bin:/bin:/usr/sbin:/sbin" HOME=/Users/runner \
+            CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup RUSTC="$toolbin/rustc" \
+            RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 \
+            "$toolbin/cargo" fetch --manifest-path "$GITHUB_WORKSPACE/desktop/src-tauri/Cargo.toml" --locked --target "$MRK_MACOS_TARGET"
+      - name: Acquire once and materialize only verified full P and nonshipping thin inputs
+        timeout-minutes: 12
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          set +e
+          "$MRK_MACOS_WORK/host-python/bin/python3" -I -S -B \
+            "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py" acquire-restore \
+            > "$MRK_MACOS_WORK/candidate-acquisition.json"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/candidate-acquisition.status"
+          test "$status" = 0 || exit "$status"
+      - name: Build and audit same-source nonshipping observer and three cut packages
+        timeout-minutes: 56
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          unset GITHUB_TOKEN GH_TOKEN
+          set +e
+          "$MRK_MACOS_WORK/host-python/bin/python3" -I -S -B \
+            "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py" prepare-restore \
+            > "$MRK_MACOS_WORK/android-helper-prepare-app-absence.json"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/app-absence-preparation.status"
+          test "$status" = 0 || exit "$status"
+      - name: Observe original absence before any candidate Installer
+        timeout-minutes: 14
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          unset GITHUB_TOKEN GH_TOKEN
+          set +e
+          "$MRK_MACOS_WORK/host-python/bin/python3" -I -S -B \
+            "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py" restore-baseline \
+            > "$MRK_MACOS_WORK/resume-carrier/candidate-baseline.json"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/resume-carrier/candidate-baseline.status"
+          test "$status" = 0 || exit "$status"
+      - name: Reuse exact acquired candidate for fresh joined Installer and full runtime readback
+        timeout-minutes: 12
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          unset GITHUB_TOKEN GH_TOKEN
+          set +e
+          "$MRK_MACOS_WORK/host-python/bin/python3" -I -S -B \
+            "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py" restore-install \
+            > "$MRK_MACOS_WORK/candidate-install.json"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/candidate-install.status"
+          test "$status" = 0 || exit "$status"
+      - name: Withdraw app and observe three actual interruption cuts followed by ordinary Restore
+        timeout-minutes: 14
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          unset GITHUB_TOKEN GH_TOKEN
+          set +e
+          "$MRK_MACOS_WORK/host-python/bin/python3" -I -S -B \
+            "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py" restore-chain \
+            > "$MRK_MACOS_WORK/candidate-restore.json"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/candidate-restore.status"
+          test "$status" = 0 || exit "$status"
+          # Private baseline/installed controls and carriers remain on this
+          # disposable runner. Never delete an unknown or active fixture.
+      - name: Retain only the finite joined Restore observation, never carrier or private controls
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-restore-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MRK_MACOS_WORK }}/candidate-restore.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

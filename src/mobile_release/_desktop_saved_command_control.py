@@ -31,6 +31,7 @@ class SavedCommandDomain(Enum):
     ArtifactInspection = "artifact-inspection"
     GitHubHistory = "github-history"
     LocalStorePreflight = "local-store-preflight"
+    LocalReleaseHistory = "local-release-history"
 
 
 def _protocol(domain: SavedCommandDomain):
@@ -56,6 +57,9 @@ def _protocol(domain: SavedCommandDomain):
     if domain is SavedCommandDomain.LocalStorePreflight:
         from . import _desktop_store_preflight_protocol
         return _desktop_store_preflight_protocol
+    if domain is SavedCommandDomain.LocalReleaseHistory:
+        from . import _desktop_local_history_protocol
+        return _desktop_local_history_protocol
     raise ValueError("Invalid saved-command domain")
 
 
@@ -82,6 +86,9 @@ def source_domain(source: object) -> SavedCommandDomain:
     from ._desktop_store_preflight_control import StorePreflightInput
     if type(source) is StorePreflightInput and source.domain is SavedCommandDomain.LocalStorePreflight:
         return SavedCommandDomain.LocalStorePreflight
+    from ._desktop_local_history_control import LocalHistoryInput
+    if type(source) is LocalHistoryInput and source.domain is SavedCommandDomain.LocalReleaseHistory:
+        return SavedCommandDomain.LocalReleaseHistory
     raise ValueError("Invalid original saved-command input")
 
 
@@ -215,7 +222,7 @@ class _SavedCommandInput:
         if time.monotonic() >= self.work_end:
             self.stop("timed-out")
             return
-        material_phase = self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.LocalStorePreflight) and self.material_pending
+        material_phase = self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory) and self.material_pending
         active = self.active and not material_phase
         if active and self.buffer:
             self.stop()
@@ -231,7 +238,8 @@ class _SavedCommandInput:
                            SavedCommandDomain.IOSArchive: "Original saved build input changed",
                            SavedCommandDomain.ArtifactInspection: "Original artifact inspection input changed",
                            SavedCommandDomain.GitHubHistory: "Original History input changed",
-                           SavedCommandDomain.LocalStorePreflight: "Original Store access-check input changed"}[self.domain]
+                           SavedCommandDomain.LocalStorePreflight: "Original Store access-check input changed",
+                           SavedCommandDomain.LocalReleaseHistory: "Original local history input changed"}[self.domain]
                 raise _protocol(self.domain).ProtocolError(message)
             if material_phase and (not self.material_receiving or self.buffer):
                 # The original bounded private reader drains this buffer before

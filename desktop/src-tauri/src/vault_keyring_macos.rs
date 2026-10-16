@@ -22,10 +22,11 @@ impl LookupInput{
         Ok(Self{identity,proposal:Some(proposal)})
     }
 }
-/// Deliberately no constructor yet: native current-root/nonce/project-lease
-/// enrollment/append ownership must be implemented before any local helper GO.
-/// A renderer locator, disk journal, bool or vault initialization cannot mint it.
-pub(crate) struct LocalInput { context:local::Context, operation:local::Operation, value:Zeroizing<[u8;32]> }
+/// Constructible only from the current Document's original LOCAL step grant.
+pub(crate) struct LocalInput { context:local::Context, operation:local::Operation, value:Zeroizing<[u8;32]>, lease:std::sync::Arc<mrk_macos_installed_native::local_project_lease::ProjectLease> }
+impl LocalInput {pub(crate) fn admitted(grant:crate::asset_session::LocalHistoryKeyGrant)->Self{
+    let(context,operation,value,lease)=grant.into_parts();Self{context,operation,value,lease}
+}}
 enum AttemptInput { Vault(LookupInput), Local(LocalInput) }
 /// These cells are constructed only after the SAME native/process/original
 /// finality as a vault key. No serde/Clone/Debug or public field constructors.
@@ -79,7 +80,7 @@ pub(crate) struct LookupBook{
     charge:Option<KeyringMemoryAdmission>,input:Option<AttemptInput>,slots:Option<VaultHelperSlots>,
     launch:Launch,child:Option<ManuallyDrop<Child>>,exit:Option<ExitStatus>,
     wait_entered:bool,wait_failed:bool,kill_attempted:bool,kill_failed:bool,pipes:[Pipe;3],
-    clock:Option<ClockBridge>,request:Option<RequestEnvelope>,request_bytes:Zeroizing<[u8;wire::REQUEST_BYTES]>,
+    clock:Option<ClockBridge>,request:Option<RequestEnvelope>,request_bytes:Zeroizing<[u8;local::REQUEST_BYTES]>,
     go:bool,write_attempted:bool,request_sent:bool,stop_attempted:bool,stop_sent:bool,
     output:Zeroizing<[u8;wire::RESPONSE_LIMIT+1]>,used:usize,notice_seen:bool,terminal_start:usize,
     terminal:Option<TerminalEnvelope>,terminal_seen:bool,output_failed:bool,stderr_seen:bool,
@@ -100,7 +101,7 @@ pub(crate) const LOOKUP_WIRE_BYTES:usize=2*wire::RESPONSE_LIMIT+2*wire::REQUEST_
 impl LookupBook{
     pub(crate) fn new()->Self{Self{entered:false,driver_entered:false,driver_returned:false,joined:false,driver_result:None,
         charge:None,input:None,slots:None,launch:Launch::Unstarted,child:None,exit:None,wait_entered:false,wait_failed:false,
-        kill_attempted:false,kill_failed:false,pipes:std::array::from_fn(|_|Pipe::new()),clock:None,request:None,request_bytes:Zeroizing::new([0;wire::REQUEST_BYTES]),
+        kill_attempted:false,kill_failed:false,pipes:std::array::from_fn(|_|Pipe::new()),clock:None,request:None,request_bytes:Zeroizing::new([0;local::REQUEST_BYTES]),
         go:false,write_attempted:false,request_sent:false,stop_attempted:false,stop_sent:false,output:Zeroizing::new([0;wire::RESPONSE_LIMIT+1]),
         used:0,notice_seen:false,terminal_start:0,terminal:None,terminal_seen:false,output_failed:false,stderr_seen:false,
         work:None,cleanup:None,first:None,uncertain:false,effect:0,candidate:None,disposed:false,postchecked:false,
@@ -162,6 +163,7 @@ impl LookupBook{
             let input=self.input.take().ok_or(Problem::CleanupUnknown)?;
             let mut nonce=[0;16];getrandom::fill(&mut nonce).map_err(|_|Problem::Crypto)?;
             if nonce==[0;16]{return Err(Problem::Crypto);}
+            let mut local_lease=None;
             let request=match input {
                 AttemptInput::Vault(input)=>{
                     let operation=if input.proposal.is_some(){wire::Operation::Initialize}else{wire::Operation::Lookup};
@@ -170,12 +172,19 @@ impl LookupBook{
                     RequestEnvelope::Vault(Request{operation,nonce,vault:*input.identity.vault.bytes(),generation:*input.identity.generation.bytes(),
                         work,maximum_cleanup,initial_key})
                 },
-                AttemptInput::Local(input)=>RequestEnvelope::Local(local::Request{context:input.context,operation:input.operation,
-                    nonce,work,maximum_cleanup,value:input.value}),
+                AttemptInput::Local(input)=>{
+                    let (_,root)=input.lease.checked().map_err(|_|Problem::InvalidInput)?;
+                    if root!=input.context.project(){return Err(Problem::InvalidInput);}
+                    local_lease=Some(input.lease);
+                    RequestEnvelope::Local(local::Request{context:input.context,operation:input.operation,
+                        nonce,work,maximum_cleanup,value:input.value})
+                },
             };
             self.clock=Some(clock);self.request=Some(request);
             if !self.request.as_ref().unwrap().encode(&mut self.request_bytes){return Err(Problem::InvalidInput);}
-            self.slots.as_mut().ok_or(Problem::CleanupUnknown)?.prepare_command().map_err(|_|Problem::CleanupUnknown)?;
+            let slots=self.slots.as_mut().ok_or(Problem::CleanupUnknown)?;
+            match local_lease {Some(lease)=>slots.prepare_local_command(lease),None=>slots.prepare_command()}
+                .map_err(|_|Problem::CleanupUnknown)?;
             Ok(())
         })();
         if let Err(p)=result{
@@ -270,9 +279,10 @@ impl LookupBook{
     fn write_control(&mut self){
         if self.go && !self.write_attempted && self.first.is_none(){
             self.write_attempted=true;
-            let result=match self.pipes[0].original(){Some(fd)=>unistd::write(fd,&*self.request_bytes),None=>{self.fail(Problem::CleanupUnknown);return;}};
+            let size=self.request.as_ref().map(RequestEnvelope::request_bytes).unwrap_or(0);
+            let result=match self.pipes[0].original(){Some(fd)=>unistd::write(fd,&self.request_bytes[..size]),None=>{self.fail(Problem::CleanupUnknown);return;}};
             match result{
-                Ok(n) if n==wire::REQUEST_BYTES=>{self.request_sent=true;},
+                Ok(n) if n==size && size!=0=>{self.request_sent=true;},
                 // No retry or GO reconstruction after ambiguous/partial write.
                 _=>{self.fail(Problem::CleanupUnknown);}
             }
@@ -577,7 +587,7 @@ impl LookupBook{
 mod tests {
     use super::*;
     fn local_request()->RequestEnvelope {RequestEnvelope::Local(local::Request{
-        context:local::Context::new([7;32],local::Purpose::LocalCheckpoint,513).unwrap(),
+        context:local::Context::new([7;32],local::Purpose::LocalCheckpoint,513,local::ProjectRoot{device:1,inode:2,mode:0o40700,uid:501,gid:20,descriptor:7}).unwrap(),
         operation:local::Operation::ProbeAbsent,nonce:[1;16],work:11,maximum_cleanup:12,value:Zeroizing::new([0;32])})}
     #[test]
     fn local_failure_and_wrong_domain_never_mint_absence_or_vault_key() {
@@ -588,6 +598,8 @@ mod tests {
         for (at,value) in [(8,1u32),(12,3),(100,1),(128,2),(132,1),(136,513)] {b[at..at+4].copy_from_slice(&value.to_le_bytes());}
         b[16..32].copy_from_slice(&[1;16]);b[32..64].copy_from_slice(&[7;32]);
         for (at,value) in [(64,11u64),(72,12),(88,12)] {b[at..at+8].copy_from_slice(&value.to_le_bytes());}
+        let RequestEnvelope::Local(request)=book.request.as_ref().unwrap() else {panic!("local fixture")};
+        assert!(request.context.project().encode(&mut b[144..176]));
         book.used=local::TERMINAL_BYTES;book.consume_frames();
         assert!(book.terminal_seen);assert_eq!(book.problem(),Some(Problem::Unavailable));
         assert!(book.candidate.is_none());assert!(!book.resources_settled());
@@ -599,7 +611,7 @@ mod tests {
     #[test]
     fn local_unknown_close_and_late_join_cannot_publish_or_refund() {
         let mut book=LookupBook::new();book.request=Some(local_request());book.entered=true;
-        let context=local::Context::new([7;32],local::Purpose::LocalCheckpoint,513).unwrap();
+        let context=local::Context::new([7;32],local::Purpose::LocalCheckpoint,513,local::ProjectRoot{device:1,inode:2,mode:0o40700,uid:501,gid:20,descriptor:7}).unwrap();
         book.candidate=Some(SettledCandidate::Local(LocalResult::Absent(LocalAbsence{context})));
         book.work=Some(Instant::now()+Duration::from_secs(1));book.fail(Problem::CleanupUnknown);
         assert!(book.candidate.is_none());assert!(!book.dispose_settled_storage());

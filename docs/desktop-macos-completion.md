@@ -368,3 +368,32 @@ first isolated attempt could not resolve the host's `cc` alternatives link and
 did not run the test. All scratch/output was removed with its test namespace.
 Independent plan and distinct implementation review accepted the correction.
 Native candidate verification remains necessary; no readiness claim is made.
+
+### 2026-10-16 joined local-history/recovery implementation
+
+Local-history UI now joins the actual Document/Saved Session, original project
+lease, sequential Keychain helper and shared Python journal. Enrollment and
+verification remain separate from build or Store authority. Source review fixed
+healthy cleanup incorrectly creating a failure, pre-admission refusal preventing
+lease closure, ordinary unused-source refusal becoming cleanup-unknown, and an
+unnecessary credential-context prerequisite. Unknown closes still refuse.
+Independent helper workspace lockfiles now include the same existing HMAC edges.
+
+The same-candidate interrupted-Restore adapter is integrated but its workflow
+nomination remains inactive until an actual suitable candidate exists. Signed
+checkpoint reuse now tolerates unrelated later producer-job failure only when
+all three required checkpoint steps succeeded. The installation UI accepts the
+native 16,384-file scalar bound; the former 2,048 limit rejected the Store bundle.
+
+The joined Linux core/checkpoint/Restore tests passed **24/24** (2.408s). Separate
+source-bound evidence includes 16 installation tests, 11 history/frontend tests,
+full TypeScript checking, 38 lower-native DATA tests and 4 protocol tests. These
+are not installed Mac acceptance. A full Linux library-test codegen was SIGKILLed
+and is not a pass; its disposable compiler outputs/workers were removed.
+
+Existing Mac component selection now checks the app/helper graphs and runs only
+5 native-wire plus 8 headless app contract tests. Native execution of that joined
+source is still required. The earlier candidate at `28d6dce7` is building/signing
+on both architectures in run `38957286639/1`; it does not contain these changes.
+Real three-holder lifetime, Keychain, installed journeys and direct Store
+execution remain unfinished. No new ready installer or main delivery is claimed.

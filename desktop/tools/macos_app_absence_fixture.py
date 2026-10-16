@@ -222,7 +222,7 @@ CUT_POSTINSTALL = (b'#!/bin/sh\nset -eu\nd="${0%/*}"\np="${1%/*}/Install.pkg"\n'
 
 
 def recovery_mode(op):
-    if op.phase == "candidate-baseline": return True
+    if op.phase == "candidate-baseline" or getattr(op, "candidate_restore_context", None) is not None: return True
     return op.environment.get("GITHUB_REF") == RECOVERY_REF
 
 
@@ -583,11 +583,18 @@ def selected(op):
 
 
 def input_rows(op):
+    cached = getattr(op, "candidate_inventory_original", None)
+    if cached is not None:
+        entry, rows = cached
+        need(original_hash(op, entry) == op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"], "candidate-inventory-original-post")
+        return entry, rows
     entry, sha = retained(op, op.directory(op.work_entry, "input", "app-absence-input"),
                           op.stager.INSTALLATION_INVENTORY_NAME, op.stager.INVENTORY_BYTES, (0o444,))
     body = op.read(entry)
     need(sha == op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"], "app-absence-input-anchor")
     rows = op.stager.observation_inventory_bytes(body, sha, op.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"], selection=selected(op))
+    if getattr(op, "candidate_restore_context", None) is not None:
+        op.candidate_inventory_original = (entry, rows)
     return entry, rows
 
 
@@ -722,6 +729,7 @@ def prepare_one(op, cut=None):
     inventory, rows = input_rows(op)
     environment = api.build_environment(op.environment, op.work, op.image_release, target=op.target)
     environment.update(CARGO_TARGET_DIR=str(op.work / op.target_name), TMPDIR=str(op.work / op.target_name / "tmp"),
+        MRK_MACOS_INSTALL_SOURCE_COMMIT=op.image_source,
         MRK_MACOS_INSTALL_INVENTORY_SHA256=op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"],
         MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=op.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
         MRK_BUNDLED_PROTOCOL_SHA256=op.stager.CURRENT_PROTOCOL,
@@ -744,7 +752,9 @@ def prepare_one(op, cut=None):
     binary_sha = original_hash(op, binary)
     pure_tests = None
     if cut is None:
-        tests_entry = op.source_original("desktop/src-tauri/src/macos_app_absence_fixture.rs", "source-app-absence-data-tests", 2*MIB)
+        tests_entry = getattr(op, "candidate_fixture_source_original", None)
+        if tests_entry is None:
+            tests_entry = op.source_original("desktop/src-tauri/src/macos_app_absence_fixture.rs", "source-app-absence-data-tests", 2*MIB)
         tests_source = op.read(tests_entry)
         names = re.findall(rb"#\[test\]\s*fn ([A-Za-z0-9_]+)\(", tests_source)
         need(len(names) == 6 and {name.decode("ascii") for name in names} == {name.rsplit("::", 1)[1] for name in NATIVE_DATA_TESTS}
@@ -786,7 +796,10 @@ def prepare_one(op, cut=None):
         package=op.work / (prefix + "-prepared") / "fixture.pkg", expected_program=program_sha,
         expected_inventory=op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"])
     input_post(op)
-    compact = io(op, "original-audit", op.stager.app_absence_original_command, args)
+    fixture_stager = getattr(op, "candidate_fixture_stager", op.stager)
+    options = {} if fixture_stager is op.stager else {
+        "selection": fixture_stager.BuildSelection(op.target, selected(op).package_version, op.image_release)}
+    compact = io(op, "original-audit", fixture_stager.app_absence_original_command, args, **options)
     need(compact["originalPackageSha256"] == original_sha, "app-absence-original-audit-post")
     output(op, prepared, "PackageInfo", compact["packageInfo"])
     allocation("archive")
@@ -800,7 +813,7 @@ def prepare_one(op, cut=None):
     os.fchmod(fixture["fd"], 0o444); fixture["identity"] = api.signature(os.fstat(fixture["fd"]))
     fixture_sha = original_hash(op, fixture)
     op.app_absence["outputs"].append((fixture, fixture_sha))
-    audit = io(op, "final-audit", op.stager.app_absence_final_command, args, compact)
+    audit = io(op, "final-audit", fixture_stager.app_absence_final_command, args, compact, **options)
     del compact
     need(audit["packageSha256"] == fixture_sha and audit["packageSize"] == fixture["identity"][6], "app-absence-final-audit-post")
     op.app_absence["roots"].append((prepared, {program_name, "PackageInfo", "Scripts", "fixture.pkg"}))
@@ -817,10 +830,12 @@ def prepare_one(op, cut=None):
 
 
 
-def recovery_builder_quote_data(files, directories, depth, retained, live):
+def recovery_builder_quote_data(files, directories, depth, retained, live, *, sequential=False):
     need(all(type(n) is int and n >= 0 for n in (files, directories, depth, retained, live))
-         and depth <= 15 and 24 * (files + 1 + directories) + retained + 512 <= 24576
-         and live + 4 * 11 + 7 + 2 * depth + 8 <= 96, "restore-chain-complete-original-quote")
+         and type(sequential) is bool and depth <= 15
+         and 24 * (files + 1 + directories) + retained + 512 <= 24576
+         and live + (11 + 2 + max(2 * depth + 2, 8) if sequential else 4 * 11 + 7 + 2 * depth + 8) <= 96, "restore-chain-complete-original-quote")
+
 
 
 def prepare(op):
@@ -833,14 +848,23 @@ def prepare(op):
             paths.update("/".join(parts[:i]) for i in range(1, len(parts)))
         # Four sequential SAME-owner copy+two POST traversals. Reserve their
         # complete original ledger before any scripts, not only the next copy.
-        # At most11 retained top-level originals per builder,7 shared source/
-        # compiler ancestors, paired traversal depth and8 native/temporary ends.
-        # Conservative coexistence: no future close credit or FD cap increase.
+        # Candidate bootstrap already holds source ancestry/test bytes; reuse
+        # the same inventory original and add only2 compiler directories.
+        # Native8 endpoints never overlap paired copy/POST traversal. Default
+        # owner keeps its original conservative four-builder formula.
         recovery_builder_quote_data(len(rows), len(paths), max((name.count("/") for name in rows), default=0),
-            len(op.entries), sum(entry["fd"] is not None for entry in op.entries))
+            len(op.entries), sum(entry["fd"] is not None for entry in op.entries),
+            sequential=getattr(op, "candidate_restore_context", None) is not None)
     data = prepare_one(op)
     if recovery_mode(op):
-        data["restoreCuts"] = {cut: prepare_one(op, cut) for cut in CUTS}
+        if getattr(op, "candidate_restore_context", None) is not None:
+            op.app_absence_api.candidate_builder_retire(op, None)
+            data["restoreCuts"] = {}
+            for cut in CUTS:
+                data["restoreCuts"][cut] = prepare_one(op, cut)
+                op.app_absence_api.candidate_builder_retire(op, cut)
+        else:
+            data["restoreCuts"] = {cut: prepare_one(op, cut) for cut in CUTS}
         # Quote the three later transport copies once from independently
         # decoded completed originals, not three times their maximum ceiling.
         op.app_absence["future"]["cutCopies"] = sum(row["fixturePackageBytes"] for row in data["restoreCuts"].values())
@@ -911,7 +935,7 @@ def receipt_data(op, value, phase, expected_roles):
     need(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1
          and value.get("phase") == phase and value.get("target") == op.target
          and value.get("source") == value.get("workflowSource")
-         and value.get("source") == (op.environment["GITHUB_SHA"] if op.phase == "candidate-baseline" else op.image_source)
+         and value.get("source") == (op.environment["GITHUB_SHA"] if op.phase == "candidate-baseline" or getattr(op, "candidate_restore_context", None) is not None else op.image_source)
          and value.get("workflow") == op.environment["GITHUB_WORKFLOW_REF"]
          and value.get("runId") == op.environment["GITHUB_RUN_ID"] and value.get("runAttempt") == op.environment["GITHUB_RUN_ATTEMPT"]
          and value.get("packageRole") == "ordinary-image" and value.get("cleanupErrors") == []
@@ -941,7 +965,12 @@ def image_prepare(op, producer):
     originals = {}
     rows = {}
     for name, limit in (("Install.pkg", PRODUCT_LIMIT), ("producer.json", 16384), ("producer.sig", 512)):
-        old, sha = retained(op, producer, name, limit, (0o444,))
+        old = getattr(op, "candidate_producer_originals", {}).get(name)
+        if old is None:
+            old, sha = retained(op, producer, name, limit, (0o444,))
+        else:
+            need(old.get("parent_entry") is producer, "candidate-producer-parent")
+            sha = original_hash(op, old)
         originals[name] = old
         rows[name] = {"name": name, "bytes": old["identity"][6], "sha256": sha, "mode": 0o444, "links": 1}
     for name in PHASE_NAMES:
@@ -974,6 +1003,8 @@ def image_prepare(op, producer):
     op.app_absence["outputs"].append((entry, image_sha))
     op.app_absence["image"] = {"bytes": entry["identity"][6], "sha256": image_sha}
     call(op, "app-absence-image-verify", ["/usr/bin/hdiutil", "verify", str(path)], maximum=120)
+    if getattr(op, "candidate_restore_context", None) is not None:
+        op.app_absence_api.candidate_carrier_retire(op)
     attach(op, "app-absence-baseline-attach", rows)
 
 
@@ -1171,11 +1202,12 @@ def candidate_baseline(op, acquisition_entry, acquisition_status, producer, nomi
     binding = binding_data(dict(fixtureSource=nomination['source'], productSource=nomination['source'],
                                 runId=run, runAttempt=attempt, target=op.target))
     now = time.monotonic_ns()
-    op.app_absence = dict(binding=binding, started=now, observed=now, workSeconds=660, hardSeconds=720,
+    started = getattr(op, "candidate_restore_context", {}).get("started", now)
+    op.app_absence = dict(binding=binding, started=started, observed=now, workSeconds=660, hardSeconds=720,
         outputs=[], roots=[], mount=None, pendingRoot=None, complete=False, pendingCut=None,
         future={key:OUTPUTS[key] for key in ('copies','product','image')}, summary=None)
     op.package_started = op.package_observed = now
-    op.package_endpoint = now + 660_000_000_000
+    op.package_endpoint = started + 660_000_000_000
     # Hold the real prior owner output through native baseline and final POST.
     op.package_sources.extend(((acquisition_entry, body), (acquisition_status, b"0\n")))
     reserve(op)
@@ -1209,6 +1241,7 @@ def candidate_baseline_result(op, nomination, helper_tree):
         acquisition=state['candidateAcquisition'], binding=state['nativeBinding'],
         baselineSha256=state['baselineSha256'], baselineOriginal=state['baselineOriginal'],
         baselineObservation=state['baselineObservation'], helperSource=op.environment['GITHUB_SHA'],
+        preparationReceiptSha256=state['preparationSha256'], layout=state['layout'], image=state['image'],
         helperTree=helper_tree, consumerRunId=op.environment['GITHUB_RUN_ID'],
         consumerRunAttempt=op.environment['GITHUB_RUN_ATTEMPT'],
         originalCalls=[dict(role=row['role'], entered=True, returned=row['returned'],
@@ -1249,7 +1282,8 @@ def candidate_baseline_receipt_data(value, nomination, helper_source, helper_tre
     """
     fields = {"schemaVersion", "scope", "acquisition", "binding", "baselineSha256", "baselineOriginal",
               "baselineObservation", "helperSource", "helperTree", "consumerRunId", "consumerRunAttempt",
-              "originalCalls", "originalClosesKnown", "originalMountDetached", "productReady"}
+              "originalCalls", "originalClosesKnown", "originalMountDetached", "productReady",
+              "preparationReceiptSha256", "layout", "image"}
     need(type(value) is dict and set(value) == fields and type(value['schemaVersion']) is int
          and value['schemaVersion'] == 1 and value['scope'] == 'candidate-closed-baseline'
          and (value['helperSource'],value['helperTree'],value['consumerRunId'],value['consumerRunAttempt'])
@@ -1281,6 +1315,17 @@ def candidate_baseline_receipt_data(value, nomination, helper_source, helper_tre
          and observation['originalOuterExitRequired'] is True
          and observation['systemServiceExitClaimed'] is observation['productReady'] is False,
          'candidate-baseline-native-observation')
+    need(nonzero_hex_data(value['preparationReceiptSha256'],64), 'candidate-baseline-preparation')
+    need(type(value['layout']) is dict and set(value['layout']) == set(CARRIER_NAMES + CUT_PACKAGES),
+         'candidate-baseline-transport')
+    transport_layout_data(list(value['layout'].values()), recovery=True)
+    need(all(value['layout'][name]['sha256'] == binding[key] for name,key in
+             (('Install.pkg','packageSha256'),('producer.json','producerDescriptorSha256'),
+              ('producer.sig','producerSignatureSha256'))), 'candidate-baseline-transport-binding')
+    image = value['image']
+    need(type(image) is dict and set(image) == {'bytes','sha256'} and type(image['bytes']) is int
+         and 0 < image['bytes'] <= FIXTURE_IMAGE_LIMIT and nonzero_hex_data(image['sha256'],64),
+         'candidate-baseline-image')
     original = value['baselineOriginal']
     need(type(original) is dict and set(original) == {'bytes','sha256','identity'}
          and type(original['bytes']) is int and 0 < original['bytes'] <= RECORD_LIMIT
@@ -1380,6 +1425,15 @@ def restore(op):
          and previous.get("preparationReceiptSha256") == op.app_absence["preparationSha256"]
          and previous.get("productReady") is False and previous.get("systemServiceExitClaimed") is False,
          "app-absence-baseline-owner")
+    return restore_from_initial(op, previous, body)
+
+
+def restore_from_initial(op, previous, body, *, initial_status=None):
+    """Common effect path AFTER the caller's real predecessor admission.
+
+    Legacy restore keeps its exact old receipt checks; candidate_restore uses
+    the independently closed acquisition/baseline/Installer chain instead.
+    """
     rows = previous["layout"]
     transport_layout(op, list(rows.values()))
     need(previous["binding"] == binding_for(op, rows), "app-absence-same-native-binding")
@@ -1393,13 +1447,16 @@ def restore(op):
     for name in carrier_names(op):
         entry, sha = retained(op, carrier, name, PRODUCT_LIMIT, (0o444,))
         need(rows[name]["bytes"] == entry["identity"][6] and rows[name]["sha256"] == sha, "app-absence-carrier-post")
+    if getattr(op, "candidate_restore_context", None) is not None:
+        op.app_absence_api.candidate_carrier_retire(op)
     attach(op, "app-absence-restore-attach", rows)
     initial = previous["initial"]
     args = SimpleNamespace(target=op.target, fixture=False, input=op.work / "input", expected_source=op.image_source,
         expected_inventory=op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"], expected_manifest=op.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
         request_id=initial["requestId"], expected_package=previous["binding"]["packageSha256"],
         producer_descriptor=op.work / "app-absence-mount/producer.json", producer_signature=op.work / "app-absence-mount/producer.sig",
-        installer_status=op.work / "installer-output.status", package=op.work / "app-absence-mount/Install.pkg")
+        installer_status=initial_status if initial_status is not None else op.work / "installer-output.status",
+        package=op.work / "app-absence-mount/Install.pkg")
     observed = io(op, "initial-readback", op.stager.observation_command, args)
     initial_readback(op, observed)
     need(op.app_absence["initial"] == initial, "app-absence-initial-state-post")
@@ -1407,7 +1464,7 @@ def restore(op):
     case = op.package_directory("app-absence-case")
     projected = mkdir(op, case, "input")
     inventory, _rows = input_rows(op)
-    copy(op, inventory, projected, op.stager.INSTALLATION_INVENTORY_NAME, MIB)
+    copy(op, inventory, projected, op.stager.INSTALLATION_INVENTORY_NAME, op.stager.INVENTORY_BYTES)
     op.app_absence["roots"].append((projected, {op.stager.INSTALLATION_INVENTORY_NAME}))
     op.app_absence["case"] = case
     args.input = op.work / "app-absence-case/input"

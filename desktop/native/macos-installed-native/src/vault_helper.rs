@@ -120,12 +120,13 @@ impl Pipes{
             unsafe{OwnedFd::from_raw_fd(i as i32)}))),state:[1;3]}
     }
     fn descriptor(&self,i:usize)->Option<&OwnedFd>{self.fd[i].as_ref().map(|fd|&**fd)}
-    fn read_request(&self,b:&mut[u8;wire::REQUEST_BYTES])->bool{
-        let Some(fd)=self.descriptor(0) else{return false;};let mut used=0;
-        while used<b.len(){
-            match unistd::read(fd,&mut b[used..]){Ok(0)|Err(_)=>return false,Ok(n)=>used+=n}
+    fn read_request(&self,b:&mut[u8;local::REQUEST_BYTES])->Option<usize>{
+        let fd=self.descriptor(0)?;let mut used=0;let mut size=wire::REQUEST_BYTES;
+        loop{
+            while used<size {match unistd::read(fd,&mut b[used..size]){Ok(0)|Err(_)=>return None,Ok(n)=>used+=n}}
+            if size==wire::REQUEST_BYTES && &b[..8]==b"MRKLJQ01" {size=local::REQUEST_BYTES;continue;}
+            return Some(size);
         }
-        true
     }
     fn nonblocking(&self)->bool{
         for i in 0..3{
@@ -162,32 +163,38 @@ impl Pipes{
 }
 struct Work{pipes:Pipes,filesystem:Option<CodeOriginals>,auth:Option<AuthBook>,clock:Option<wire::ClockBridge>,
     request:Option<RequestEnvelope>,add:Option<wrapping::NativeResult<()>>,lookup:Option<wrapping::NativeResult<wrapping::WrappingKeyCandidate>>,
-    probe:Option<wrapping::NativeResult<()>>,absent:bool,
+    probe:Option<wrapping::NativeResult<()>>,absent:bool,lease:crate::local_project_lease::InheritedLease,
     key:Zeroizing<[u8;32]>,consumed:bool,panic:[Option<Box<dyn std::any::Any+Send>>;2]}
-const _:()=assert!(std::mem::size_of::<Work>()+wire::REQUEST_BYTES+local::TERMINAL_BYTES<=wire::HELPER_CONTROL_ALLOWANCE);
+const _:()=assert!(std::mem::size_of::<Work>()+local::REQUEST_BYTES+local::TERMINAL_BYTES<=wire::HELPER_CONTROL_ALLOWANCE);
 impl Work{
     fn new()->Self{Self{pipes:Pipes::inherited(),filesystem:None,auth:None,clock:None,request:None,add:None,lookup:None,
-        probe:None,absent:false,key:Zeroizing::new([0;32]),consumed:false,panic:[None,None]}}
+        probe:None,absent:false,lease:crate::local_project_lease::InheritedLease::new(),key:Zeroizing::new([0;32]),consumed:false,panic:[None,None]}}
     fn run(&mut self)->bool{
-        let mut input=Zeroizing::new([0;wire::REQUEST_BYTES]);
-        if !self.pipes.read_request(&mut input){return false;}
-        self.request=RequestEnvelope::decode(&*input);input.zeroize();
+        let mut input=Zeroizing::new([0;local::REQUEST_BYTES]);
+        let Some(size)=self.pipes.read_request(&mut input)else{return false;};
+        self.request=RequestEnvelope::decode(&input[..size]);input.zeroize();
         let Some(request)=self.request.as_ref() else{return false;};
         if !self.pipes.nonblocking() || unsafe{mrk_vault_control_begin(request.nonce().as_ptr(),request.work(),request.maximum_cleanup())}!=1{return false;}
         // One retained bridge for subsequent Rust filesystem F; no clock or
         //deadline is restarted when a later cleanup callback reports that F.
         self.clock=wire::ClockBridge::capture();if self.clock.is_none(){fail();return false;}
+        if let RequestEnvelope::Local(request)=request {
+            if !self.lease.admit(request.context.project()){fail();return false;}
+        }
         self.filesystem=Some(CodeOriginals::new());self.auth=Some(AuthBook::new());
         let filesystem=self.filesystem.as_mut().unwrap();
         if filesystem.acquire(&mut ||admission(false)!=Admission::Continue).is_err(){
             local_failure(&mut self.clock,filesystem.first_failure().map(|(_,at)|at));fail();return false;
         }
         let auth=self.auth.as_mut().unwrap();if !auth.begin(){fail();return false;}
+        let lease=&mut self.lease;
+        let local_request=matches!(request,RequestEnvelope::Local(_));
         let mut forward=|checkpoint:Checkpoint,_facts:&wrapping::Facts|->Admission{
             // Native original-only closes use cleanup admission; an earlier
             //forward callback failure cannot re-enter/poison restore slots3/4.
             let cleanup=checkpoint==Checkpoint::BeforeRelease;
             let gate=admission(cleanup);if gate!=Admission::Continue{return gate;}
+            if !cleanup && local_request && !lease.post(){fail();return Admission::Unknown;}
             if !cleanup && !auth.current(){fail();return Admission::Unknown;}Admission::Continue
         };
         match request {
@@ -262,8 +269,14 @@ impl Work{
         } else {self.consumed && !self.absent
             && terminal.lookup.as_ref().is_some_and(transport::Receipt::candidate_consumed)
             && if request.is_add() {terminal.add.as_ref().is_some_and(transport::Receipt::added)} else {terminal.add.is_none()}};
-        let ready=success && self.panic.iter().all(Option::is_none) && native_ready && stderr_ok
+        let mut ready=success && self.panic.iter().all(Option::is_none) && native_ready && stderr_ok
             && auth_ok && fs_ok && input_ok && admission(false)==Admission::Continue;
+        if matches!(request,RequestEnvelope::Local(_)) {
+            // Failed/unknown native restoration retains the lock through kernel
+            // exit; it is not reclassified as a known original close.
+            if ready {ready=self.lease.finish().settled();}
+            else {let _=self.lease.post();}
+        }
         if !ready{fail();}
         // Closing notice publication cannot renew or disable admission. It
         //merely prevents a later diagnostic frame from splicing the terminal.
@@ -276,7 +289,7 @@ impl Work{
         let result=if !published {local::ResultKind::None} else if request.is_probe() {local::ResultKind::Absent} else {local::ResultKind::Value};
         let mut envelope=match request {
             RequestEnvelope::Vault(_)=>local::TerminalEnvelope::Vault(terminal),
-            RequestEnvelope::Local(_)=>local::TerminalEnvelope::Local(local::Terminal{common:terminal,result}),
+            RequestEnvelope::Local(_)=>local::TerminalEnvelope::Local(local::Terminal{common:terminal,result,lease:self.lease.facts()}),
         };
         if published && !envelope.success_for(request) {
             published=false;fail();
@@ -311,7 +324,7 @@ unsafe extern "C"{fn mrk_vault_helper_gate_admit(descriptor:i32,parent_pid:i32)-
 // This is not a bound on opaque allocator/native/process-RSS storage.
 const GATE_STARTUP_CONTROL_BYTES:usize=8192;
 const _:()=assert!(GATE_STARTUP_CONTROL_BYTES+std::mem::size_of::<Work>()
-    +wire::REQUEST_BYTES+local::TERMINAL_BYTES<=wire::HELPER_CONTROL_ALLOWANCE);
+    +local::REQUEST_BYTES+local::TERMINAL_BYTES<=wire::HELPER_CONTROL_ALLOWANCE);
 pub fn main_entry()->i32{
     std::panic::set_hook(Box::new(|_|{})); // Before any credentials; no panic output.
     // Keep empty parent-supplied env; only the bounded same-real-UID CF

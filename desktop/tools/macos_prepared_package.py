@@ -478,10 +478,19 @@ def selected_job_data(body, source, run, target, *, completed):
          and len(value['jobs']) == value['total_count'] <= 100, 'prepared-jobs-page-complete')
     rows = [row for row in value['jobs'] if type(row) is dict and row.get('name') == 'normal-installed-' + target]
     if completed:
-        # All-attempt API page: only one genuine successful original may be
-        # selected. A carried producer survives failed-job reruns; multiple
-        # successful rebuild attempts refuse instead of guessing latest.
-        rows = [row for row in rows if row.get('status') == 'completed' and row.get('conclusion') == 'success']
+        # All-attempt API page: select the exact successful checkpoint cut,
+        # not its whole job's conclusion. Later unrelated cleanup may fail;
+        # multiple completed checkpoint attempts still refuse, never latest.
+        closed = []
+        for row in rows:
+            if row.get('status') != 'completed':
+                continue
+            try:
+                producer_steps_data(row)
+            except ValueError:
+                continue
+            closed.append(row)
+        rows = closed
     need(len(rows) == 1, 'prepared-one-target-job')
     row = rows[0]
     need(type(row.get('id')) is int and row['id'] > 0 and type(row.get('run_id')) is int and row['run_id'] == int(run)

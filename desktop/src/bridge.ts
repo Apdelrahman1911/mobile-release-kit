@@ -1,3 +1,6 @@
+import { LOCAL_HISTORY_EVENT, encodeLocalHistoryRequest, parseLocalHistoryStatus, localHistoryError } from './localReleaseHistoryProtocol.ts';
+import type { LocalHistoryCommand } from './localReleaseHistoryProtocol.ts';
+import type { LocalHistoryStatus } from './localReleaseHistoryTypes.ts';
 import { STORE_EVENT, encodeLocalStoreRequest, parseLocalStoreStatus, localStoreError } from './localStorePreflightProtocol.ts';
 import type { StoreCommand } from './localStorePreflightProtocol.ts';
 import type { LocalStoreStatus } from './localStorePreflightTypes.ts';
@@ -73,7 +76,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-store-preflight-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -218,6 +221,12 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!status) throw { code: 'ios_archive_protocol' };
       return status;
     } catch (error) { throw iosArchiveError(error); }
+  };
+  const localHistoryCall = async (command:LocalHistoryCommand,value:unknown):Promise<LocalHistoryStatus>=>{
+    try{if(mode!=='native')throw localHistoryError();const body=encodeLocalHistoryRequest(command,value);
+      if(!body)throw localHistoryError();const status=parseLocalHistoryStatus(await invoke<unknown>(command,body));
+      if(!status)throw localHistoryError();return status;
+    }catch(error){throw localHistoryError(error);}
   };
   const storeCall = async (command:StoreCommand,value:unknown):Promise<LocalStoreStatus>=>{
     try{if(mode!=='native')throw localStoreError();const body=encodeLocalStoreRequest(command,value);
@@ -525,6 +534,14 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (mode !== 'native' || !listen) throw { code: 'ios_archive_unavailable' };
         return await listen(IOS_ARCHIVE_EVENT, (value) => onStatus(parseIOSArchiveStatus(value)));
       } catch (error) { throw iosArchiveError(error); }
+    },
+    prepareLocalReleaseHistory:request=>localHistoryCall('prepare_local_release_history',request),
+    startLocalReleaseHistory:request=>localHistoryCall('start_local_release_history',request),
+    localReleaseHistoryStatus:()=>localHistoryCall('local_release_history_status',{}),
+    cancelLocalReleaseHistory:(operationId,ownerGeneration)=>localHistoryCall('cancel_local_release_history',{operationId,ownerGeneration}),
+    subscribeLocalReleaseHistory:async onStatus=>{
+      if(mode!=='native'||!listen)throw localHistoryError();
+      return await listen(LOCAL_HISTORY_EVENT,value=>onStatus(parseLocalHistoryStatus(value)));
     },
     prepareLocalStorePreflight:request=>storeCall('prepare_local_store_preflight',request),
     startLocalStorePreflight:request=>storeCall('start_local_store_preflight',request),

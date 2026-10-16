@@ -192,6 +192,23 @@ int mrk_vault_gate_child_inherit(int descriptor, int32_t parent_pid) {
     return flags == 0 ? 0 : EPERM;
 }
 
+/* LOCAL history only. Same original OFD; child flags are private after fork.
+ * This never locks/unlocks/duplicates, allocates, discovers a path or logs. */
+int mrk_local_lease_child_inherit(int fd, uint64_t dev, uint64_t ino,
+                                uint32_t mode, uint32_t uid, uint32_t gid) {
+    if (fd < 3 || fd > 255 || !dev || !ino || !uid || (mode & S_IFMT) != S_IFDIR
+        || (mode & 07022) || getuid() != uid || geteuid() != uid || getgid() != getegid()) return EPERM;
+    struct stat value;
+    if (fstat(fd, &value)) return errno ? errno : EIO;
+    if ((uint64_t)value.st_dev != dev || value.st_ino != ino || value.st_mode != mode
+        || value.st_uid != uid || value.st_gid != gid || value.st_flags) return EPERM;
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0) return errno ? errno : EIO;
+    if ((flags & O_ACCMODE) != O_RDONLY || fcntl(fd, F_GETFD) != FD_CLOEXEC) return EPERM;
+    if (fcntl(fd, F_SETFD, 0)) return errno ? errno : EIO;
+    return fcntl(fd, F_GETFD) == 0 ? 0 : EPERM;
+}
+
 static int vault_original_gate = -1;
 static pid_t vault_original_process = 0;
 static unsigned vault_admission_entered = 0;

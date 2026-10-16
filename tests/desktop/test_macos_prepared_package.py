@@ -245,14 +245,30 @@ class PreparedPackageData(unittest.TestCase):
 
     def test_all_attempt_selection_keeps_the_unique_successful_old_producer(self):
         values,manifest,service,consumer=fixture()
-        old=dict(service['job'],status='completed',conclusion='success')
+        # All three authenticated checkpoint steps closed successfully. An
+        # unrelated later cleanup failure cannot revoke their uploaded bytes.
+        old=dict(service['job'],status='completed',conclusion='failure', steps=[
+            *service['job']['steps'], dict(name='Retire disposable compiler outputs', number=4,
+                                        status='completed', conclusion='failure')])
         install=dict(old,id=99,run_attempt=2,name='prepared-installed-'+P.TARGETS[0],conclusion='failure')
-        failed_build=dict(old,id=101,run_attempt=2,conclusion='failure')
+        failed_steps=copy.deepcopy(old['steps'])
+        failed_steps[1]['conclusion']='failure'
+        failed_build=dict(old,id=101,run_attempt=2,steps=failed_steps)
         latest=P.canonical(dict(total_count=2,jobs=[install,failed_build]))
         with self.assertRaises(ValueError):P.selected_job_data(latest,'1'*40,'41',P.TARGETS[0],completed=True)
         all_attempts=P.canonical(dict(total_count=3,jobs=[install,old,failed_build]))
         selected=P.selected_job_data(all_attempts,'1'*40,'41',P.TARGETS[0],completed=True)
+        self.assertEqual(selected,old)
         self.assertEqual(selected['run_attempt'],1)
+        # Whole-job success is neither necessary nor sufficient for the cut.
+        succeeded=dict(old,conclusion='success')
+        self.assertEqual(P.selected_job_data(P.canonical(dict(total_count=1,jobs=[succeeded])),
+            '1'*40,'41',P.TARGETS[0],completed=True),succeeded)
+        for wrong in (dict(failed_build,conclusion='success'), dict(old,status='in_progress'),
+                      dict(old,head_sha='6'*40), dict(old,run_id=42)):
+            with self.subTest(job=wrong['id'], status=wrong['status']),self.assertRaises(ValueError):
+                P.selected_job_data(P.canonical(dict(total_count=1,jobs=[wrong])),
+                    '1'*40,'41',P.TARGETS[0],completed=True)
         with self.assertRaises(ValueError):
             P.selected_job_data(P.canonical(dict(total_count=2,jobs=[old,dict(old,id=103,run_attempt=3)])),
                 '1'*40,'41',P.TARGETS[0],completed=True)

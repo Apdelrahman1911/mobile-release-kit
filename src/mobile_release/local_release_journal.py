@@ -158,6 +158,26 @@ class LocalReleaseJournal(_Custodian):
         self.failed = False
         self._rows = []
         self._operations = {}
+        self._existing_only = False
+
+    def _may_create_directory(self):
+        return not self._existing_only
+
+    def open_existing(self):
+        _need(not self.opened and not self.closed)
+        self._existing_only = True
+        return self.open()
+
+    def history_summary(self):
+        self._point()
+        self._post()
+        result = []
+        final = {row["operationId"]: row for row, _ in self._rows if row["operationId"] is not None}
+        _need(len(final) <= MAX_OPERATIONS)
+        for operation, row in final.items():
+            result.append({"operationId": operation, "phase": row["phase"],
+                           "recoveryRequired": row["phase"] not in {"settled-success", "settled-failure"}})
+        return result
 
     def _leaf_limit(self, name):
         return MAX_RECORD_BYTES

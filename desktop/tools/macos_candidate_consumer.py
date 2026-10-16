@@ -35,7 +35,7 @@ CONSUMER_PATH = 'desktop/tools/macos_candidate_consumer.py'
 FIXTURE_PATH = 'desktop/tools/macos_app_absence_fixture.py'
 BASELINE_RECEIPT = 'candidate-baseline.json'
 BASELINE_STATUS = 'candidate-baseline.status'
-PURPOSES = ('install', 'acquire', 'restore-install')
+PURPOSES = ('install', 'acquire', 'acquire-restore', 'restore-install')
 CANDIDATE_SOURCE_INPUTS = (
     ('desktop/macos-installed-inputs/build-release.json', 4096),
     ('desktop/macos-installed-inputs/build-release-intel.json', 4096),
@@ -257,7 +257,8 @@ class CandidateResume(resume.Resume):
                               PARSER_PATH: self.source(PARSER_PATH, PARSER_SOURCE_LIMIT)}
         self.child_bootstrap = (acquisition_bootstrap(self.root, self.child_sources)
                                 if self.purpose != "restore-install" else "")
-        fixture_body = self.source(FIXTURE_PATH, 128 << 10) if self.purpose == "restore-install" else None
+        fixture_body = self.source(FIXTURE_PATH, 128 << 10) if self.purpose in ("restore-install", "acquire-restore") else None
+        package_body = self.source("desktop/tools/macos_android_helper_package.py", resume.SOURCE_MODULE_LIMIT) if self.purpose == "acquire-restore" else None
         bodies = {}
         for relative, cap in ((STAGER_PATH, resume.SOURCE_MODULE_LIMIT), *CANDIDATE_SOURCE_INPUTS):
             entry, body = self.quota.call(self.outer, 'file', self.candidate_root / relative, cap, uid=os.getuid())
@@ -267,6 +268,8 @@ class CandidateResume(resume.Resume):
         self.verify_sources()
         if fixture_body is not None:
             self.fixture_api = resume.load_module("_mrk_candidate_fixture", self.root / FIXTURE_PATH, fixture_body)
+        if package_body is not None:
+            self.package_api = resume.load_module("_mrk_candidate_package", self.root / "desktop/tools/macos_android_helper_package.py", package_body)
         self.stager = resume.load_module('_mrk_candidate_stager', self.candidate_root / STAGER_PATH, bodies[STAGER_PATH])
         resume.need(self.stager.DESKTOP == self.candidate_root / 'desktop', 'candidate-stager-source-root')
         self.selection = self.stager.source_build_selection(self.target)
@@ -380,7 +383,9 @@ class CandidateResume(resume.Resume):
                     'candidate-baseline-protected-original')
         api.baseline_value_data(self.stager.maintenance_json(baseline_body, api.RECORD_LIMIT),
                                 value['binding'], parent_id)
-        observed = {'bytes':len(baseline_body), 'sha256':resume.sha(baseline_body), 'identity':list(entry['identity'])}
+        q = entry['identity']
+        observed = {'bytes':len(baseline_body), 'sha256':resume.sha(baseline_body),
+                    'identity':list(q[:3] + (q[5],q[3],q[4]) + q[6:])}  # Existing fixture stat order.
         resume.need(observed == value['baselineOriginal'] and observed['sha256'] == value['baselineSha256'],
                     'candidate-baseline-original-binding')
         self.baseline, self.baseline_entry = value, entry
@@ -420,6 +425,7 @@ class CandidateResume(resume.Resume):
                                                allocation_budget=self.allocation_budget, candidate=True)
         self.point()
         self.__binding = resume.canonical(row)
+        if self.purpose == "acquire-restore": self._restore_originals = originals
         return originals, row, result, inventory
 
     def install_image(self, image, preview):
@@ -434,11 +440,17 @@ class CandidateResume(resume.Resume):
         # artifact pins do not replace the native signature checks in this body.
         return super().install_image(image, preview)
 
+    def decode_fixture_scripts(self, packed, retained):
+        return resume.scripts_archive_data(packed, self.stager, retained, self.allocation_budget)
+
     def prepare_readback(self, result, inventory):
         # This hook runs only AFTER actual mounted producer signature POST.
-        if self.purpose == 'acquire':
+        if self.purpose in ('acquire', 'acquire-restore'):
             self.acquisition_result = {key: result[key] for key in ('package','descriptor','signature','inventory')}
             self.acquisition_result.update(runtimeManifestSha256=result['release']['runtimeManifestSha256'])
+            if self.purpose == 'acquire-restore':
+                self.package_api.candidate_materialize(self, self._restore_originals, inventory)
+                del self._restore_originals
             return False  # Existing owner detaches without ever entering Installer.
         if self.purpose == 'restore-install':
             self.baseline_post()
@@ -467,7 +479,8 @@ class CandidateResume(resume.Resume):
             return super().retire()
         self.point()
         keep = {target_names(self.target) + '-candidate.zip'}
-        if self.purpose == 'restore-install': keep.update((BASELINE_RECEIPT, BASELINE_STATUS))
+        if self.purpose == 'restore-install':
+            keep.update((BASELINE_RECEIPT, BASELINE_STATUS, 'installer-output.status'))
         for book in self.quota.books:
             if isinstance(book, resume.FixedSudoOriginals): continue
             for entry in book.entries:
@@ -504,7 +517,7 @@ class CandidateResume(resume.Resume):
             # producer key/message/read3, input directory/inventory/status3 and
             # the three transport iterators. These are lifetime cells, not live
             # FD credits; every later acquisition still uses OriginalQuota.
-            pending = 17 if self.purpose == 'restore-install' else 20
+            pending = 17 if self.purpose in ('restore-install','acquire','acquire-restore') else 20
             resume.need(self.quota.reserved + pending <= resume.MAX_ORIGINALS, 'candidate-original-ledger-capacity')
             self.admit_resources(retained, host_bytes)
             artifact = self.reuse_candidate() if self.purpose == 'restore-install' else self.acquire_candidate()
@@ -520,9 +533,9 @@ class CandidateResume(resume.Resume):
             self.clock.check()
             resume.need(all(row['returned'] and row['capturesSettled'] for row in self.calls)
                         and self.mount_detached and ((not self.installer_entered and self.acquisition_result is not None)
-                        if self.purpose == 'acquire' else (self.installer_zero and self.readback_known)),
+                        if self.purpose in ('acquire','acquire-restore') else (self.installer_zero and self.readback_known)),
                         'candidate-original-terminal-finality')
-            if self.purpose == 'acquire':
+            if self.purpose in ('acquire','acquire-restore'):
                 return {'schemaVersion':1, 'scope':'candidate-closed-acquisition', 'nomination':self.nomination,
                     'helperSource':self.helper_source, 'helperTree':self.helper_tree,
                     'consumerRunId':self.run_id, 'consumerRunAttempt':self.run_attempt,
@@ -544,6 +557,12 @@ class CandidateResume(resume.Resume):
                 result['privateOutputsRetired'] = False  # Prior original handoffs remain for the chain.
                 result['baselineSha256'] = self.baseline['baselineSha256']
                 result['initial'] = resume.decode(resume.canonical(self._initial))
+                # This is the ORIGINAL status published after native Installer0,
+                # not a status synthesized from this wrapper's future return.
+                status = self.private.get('installer-output.status')
+                resume.need(status is not None and status[6] == 2, 'candidate-installer-status-original')
+                result['installerStatusOriginal'] = {'bytes': 2, 'sha256': resume.sha(b'0\n'),
+                                                     'identity': list(status)}
             return result
         except BaseException as error:
             primary = error
@@ -558,6 +577,88 @@ class CandidateResume(resume.Resume):
             if not settled:
                 if primary is None: raise resume.Refused('candidate-original-final-closes')
                 BaseException.add_note(primary, 'candidate-original-final-closes')
+
+
+def resume_identity(entry):
+    """Explicit adapter between the existing owners' different stat field order."""
+    q = entry["identity"]
+    resume.need(type(q) is tuple and len(q) == 9, "candidate-helper-original-shape")
+    return q[:3] + (q[4],q[5],q[3]) + q[6:]
+
+
+def candidate_install_receipt_data(api, value, nomination, helper_source, helper_tree, run, attempt, baseline):
+    """The genuine closed candidate Installer handoff, not old package status."""
+    need, nonzero_hex_data = resume.need, api.nonzero_hex_data
+    expected = {'scope':'candidate-baseline-fresh-installer-observation', 'target':nomination['target'],
+        'producerSource':nomination['source'], 'producerTree':nomination['tree'],
+        'artifactId':nomination['artifactId'], 'artifactSha256':nomination['artifactSha256'],
+        'producerRunId':nomination['runId'], 'producerRunAttempt':nomination['runAttempt'],
+        'producerJobId':nomination['jobId'], 'helperSource':helper_source, 'helperTree':helper_tree,
+        'consumerRunId':run, 'consumerRunAttempt':attempt, 'originalInstallerReturnedZero':True,
+        'sameRequestReadback':True, 'originalMountDetached':True, 'originalClosesKnown':True,
+        'workloadsKnownSettled':True, 'privateOutputsRetired':False, 'productReady':False,
+        'uiQualified':False, 'p0Qualified':False, 'baselineSha256':baseline['baselineSha256']}
+    need(type(value) is dict and set(value) == set(expected) | {'initial','installerStatusOriginal'}
+         and all(type(value[k]) is type(v) and value[k] == v for k,v in expected.items()),
+         'candidate-restore-installer-handoff')
+    initial = value['initial']
+    need(type(initial) is dict and set(initial) == {'requestId','invocation','stateSha256','resultSha256','instance'}
+         and all(nonzero_hex_data(initial[k],32 if k in ('requestId','invocation','instance') else 64)
+                 for k in initial), 'candidate-restore-initial-data')
+    status = value['installerStatusOriginal']
+    need(type(status) is dict and set(status) == {'bytes','sha256','identity'} and type(status['bytes']) is int
+         and status['bytes'] == 2 and status['sha256'] == resume.sha(b'0\n')
+         and type(status['identity']) is list and len(status['identity']) == 9
+         and all(type(v) is int for v in status['identity']), 'candidate-restore-native-status')
+    return value
+
+
+def candidate_restore(op, baseline_entry, baseline_status, installed_entry, installed_status, native_status):
+    """Only the closed candidate bootstrap calls this existing-chain adapter."""
+    context = getattr(op, 'candidate_restore_context', None)
+    api = op.app_absence_module
+    need = resume.need
+    need(op.phase == api.RESTORE and type(context) is dict and op.app_absence is not None
+         and not op.calls and not op.errors and not op.credential_calls and not op.credential_contexts,
+         'candidate-restore-owner')
+    for entry in (baseline_entry,baseline_status,installed_entry,installed_status,native_status):
+        need(op.entry_registry.get(id(entry)) is entry, 'candidate-restore-original')
+    need(op.read(baseline_status) == op.read(installed_status) == b'0\n', 'candidate-restore-caller-zero')
+    baseline_body, installed_body = op.read(baseline_entry), op.read(installed_entry)
+    value = api.candidate_baseline_receipt_data(op.app_absence_api.tool_json(baseline_body), context['nomination'],
+        context['helperSource'], context['helperTree'], context['runId'], context['runAttempt'])
+    installed = candidate_install_receipt_data(api, op.app_absence_api.tool_json(installed_body), context['nomination'],
+        context['helperSource'], context['helperTree'], context['runId'], context['runAttempt'], value)
+    native_body = op.read(native_status)
+    need(native_body == b'0\n' and installed['installerStatusOriginal'] == {
+        'bytes':len(native_body), 'sha256':resume.sha(native_body), 'identity':list(resume_identity(native_status))},
+        'candidate-restore-native-status-original')
+    api.preparation_input(op)
+    need(value['preparationReceiptSha256'] == op.app_absence['preparationSha256'],
+         'candidate-restore-preparation-original')
+    op.package_sources.extend(((baseline_entry,baseline_body),(baseline_status,b'0\n'),
+        (installed_entry,installed_body),(installed_status,b'0\n'),(native_status,native_body)))
+    previous = {key:value[key] for key in ('binding','layout','image','baselineSha256','baselineOriginal')}
+    previous['initial'] = installed['initial']
+    # Only an internal common-body input is assembled; no legacy owner receipt,
+    # role list, source/run relabel or future native result is manufactured.
+    need(native_status['name'] == 'installer-output.status'
+         and native_status['parent_entry'] is op.directory(op.work_entry, 'resume-carrier', 'candidate-transport'),
+         'candidate-restore-native-status-route')
+    status_path = op.work / 'resume-carrier' / 'installer-output.status'
+    api.restore_from_initial(op, previous, baseline_body, initial_status=status_path)
+    need(op.read(baseline_entry) == baseline_body and op.read(installed_entry) == installed_body
+         and op.read(native_status) == native_body, 'candidate-restore-handoff-post')
+
+
+def fixture_main(purpose):
+    context = entry_context((purpose,))
+    context["started"] = STARTED_NS
+    os.environ.pop("GITHUB_TOKEN", None)
+    path = HELPER_ROOT / "desktop/tools/macos_android_helper_package.py"
+    original, body = resume.host_read(path, resume.SOURCE_MODULE_LIMIT)
+    module = resume.load_module("_mrk_candidate_fixture_phase", path, body)
+    return module.candidate_fixture_phase(sys.modules[__name__], context, purpose, STARTED_NS, (original,path,body))
 
 
 def entry_context(arguments):
@@ -656,7 +757,7 @@ def bind_host():
 def main(purpose="install"):
     """Hosted acquire/install only. No workflow currently activates this entry."""
     resume.need(type(purpose) is str and purpose in PURPOSES, 'candidate-purpose')
-    context = entry_context(())
+    context = entry_context(() if purpose == "install" else (purpose,))
     clock = resume.Deadline(started=STARTED_NS)
     quota = resume.OriginalQuota()
     session, primary = None, None
@@ -743,9 +844,20 @@ def main(purpose="install"):
 
 if __name__ == '__main__':
     try:
-        result = host_base() if sys.argv[1:] == ['host-base'] else bind_host() if sys.argv[1:] == ['bind-host'] else main()
-    except BaseException:
-        # No environment, exception text, URLs, token, carrier or native capture.
-        sys.stderr.write('candidate-consumer-refused\n')
+        arguments = sys.argv[1:]
+        result = (host_base() if arguments == ['host-base'] else bind_host() if arguments == ['bind-host'] else
+                  fixture_main(arguments[0]) if len(arguments) == 1 and arguments[0] in ('prepare-restore','restore-baseline','restore-chain') else
+                  main(arguments[0]) if len(arguments) == 1 and arguments[0] in PURPOSES[1:] else main())
+    except BaseException as error:
+        # Exact public labels only; never arbitrary exception text/captures.
+        allowed = {'candidate-hosted-context', 'candidate-source-identity', 'candidate-source-tree',
+            'candidate-original-ledger-capacity', 'candidate-materialize-whole-original-quote',
+            'candidate-bootstrap-original-post', 'candidate-fixture-entry', 'candidate-fixture-terminal',
+            'candidate-native-original-quote', 'candidate-source-query-quote', 'candidate-carrier-close-unknown',
+            'candidate-baseline-original-binding', 'restore-chain-complete-original-quote',
+            'app-absence-original-deadline', 'candidate-restore-native-status-original'}
+        parts = BaseException.args.__get__(error)
+        reason = parts[0] if type(parts) is tuple and len(parts) == 1 and type(parts[0]) is str and parts[0] in allowed else 'unavailable'
+        sys.stderr.write('candidate-consumer-refused reason=' + reason + '\n')
         raise SystemExit(1) from None
     sys.stdout.buffer.write(resume.canonical(result) + b'\n')

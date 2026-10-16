@@ -258,6 +258,42 @@ async fn cancel_environment_diagnostics(webview: Webview, request: tauri::ipc::R
     result
 }
 #[tauri::command]
+async fn prepare_local_release_history(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::local_release_history_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::local_release_history_protocol::invalid())?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::local_release_history_protocol::invalid()); };
+    let value = crate::local_release_history_protocol::raw_request(bytes)?;
+    let args = crate::local_release_history_protocol::prepare(&value)?;
+    state.document.prepare_local_release_history(args)
+}
+#[tauri::command]
+async fn start_local_release_history(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::local_release_history_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::local_release_history_protocol::invalid())?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::local_release_history_protocol::invalid()); };
+    let value = crate::local_release_history_protocol::raw_request(bytes)?;
+    let args = crate::local_release_history_protocol::start(&value)?;
+    state.document.start_local_release_history(args)
+}
+#[tauri::command]
+async fn local_release_history_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::local_release_history_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::local_release_history_protocol::invalid())?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::local_release_history_protocol::invalid()); };
+    let value = crate::local_release_history_protocol::raw_request(bytes)?;
+    crate::local_release_history_protocol::status_request(&value)?;
+    state.document.local_release_history_status()
+}
+#[tauri::command]
+async fn cancel_local_release_history(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::local_release_history_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::local_release_history_protocol::invalid())?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::local_release_history_protocol::invalid()); };
+    let value = crate::local_release_history_protocol::raw_request(bytes)?;
+    let args = crate::local_release_history_protocol::cancel(&value)?;
+    state.document.cancel_local_release_history(args)
+}
+#[tauri::command]
 async fn prepare_local_store_preflight(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::local_store_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::local_store_preflight_protocol::invalid())?;
@@ -1870,6 +1906,10 @@ fn trusted_document(url: &tauri::Url) -> bool {
         && url.query().is_none() && url.fragment().is_none() && matches!(url.path(), "" | "/")
 }
 
+struct LocalHistoryRelayGuard { document: DocumentBinding, closed: bool }
+impl Drop for LocalHistoryRelayGuard {
+    fn drop(&mut self) { if !self.closed { self.document.local_release_history_relay_lost(); } }
+}
 struct StorePreflightRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for StorePreflightRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.local_store_preflight_relay_lost(); } }
@@ -1899,6 +1939,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let mut revisions = edits.subscribe();
     let mut assets = document.subscribe();
     let mut diagnostics = document.environment_diagnostics_subscribe();
+    let mut local_history = document.local_release_history_subscribe();
+    let local_history_guard = LocalHistoryRelayGuard { document: document.clone(), closed: false };
     let mut local_store = document.local_store_preflight_subscribe();
     let local_store_guard = StorePreflightRelayGuard { document: document.clone(), closed: false };
     let mut preflight = document.offline_preflight_subscribe();
@@ -1915,6 +1957,9 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let removal_notice=document.removal_notice_runtime();
     let (start, enter) = oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
+        let mut local_history_guard = local_history_guard;
+        let mut local_history_revision = None;
+        let mut local_history_relay_failed = false;
         let mut local_store_guard = local_store_guard;
         let mut local_store_revision = None;
         let mut local_store_relay_failed = false;
@@ -1952,7 +1997,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
         let mut removal_notice_open=removal_notice.is_some();
         loop {
-            if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; return; }
+            if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; return; }
             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
             document.finish_macos_maintenance(app.clone());
             // status() releases its native locks before any renderer callback.
@@ -2053,6 +2098,17 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 if diagnostics_revision != Some(status.status_revision) {
                     diagnostics_revision = Some(status.status_revision);
                     let _ = app.emit_to(MAIN_WINDOW, crate::environment_diagnostics_protocol::EVENT, &status);
+                }
+            }
+            if !local_history_relay_failed {
+                match document.local_release_history_status() {
+                    Ok(status) => if local_history_revision != Some(status.status_revision) {
+                        local_history_revision = Some(status.status_revision);
+                        if app.emit_to(MAIN_WINDOW, crate::local_release_history_protocol::EVENT, &status).is_err() {
+                            local_history_relay_failed=true;document.local_release_history_relay_lost();
+                        }
+                    },
+                    Err(_) => {local_history_relay_failed=true;document.local_release_history_relay_lost();},
                 }
             }
             if !local_store_relay_failed {
@@ -2194,10 +2250,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             };
             tokio::select! {
                 biased;
-                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; return; } },
+                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; return; } },
                 result = revisions.changed() => { if result.is_err() { return; } },
                 result = assets.changed() => { if result.is_err() { return; } },
                 result = diagnostics.changed() => { if result.is_err() { return; } },
+                result = local_history.changed() => { if result.is_err() { return; } },
                 result = local_store.changed() => { if result.is_err() { return; } },
                 result = preflight.changed() => { if result.is_err() { return; } },
                 result = android_build.changed() => { if result.is_err() { return; } },
@@ -3705,6 +3762,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             artifact_evidence_choose, artifact_evidence_status, artifact_evidence_observe, artifact_evidence_cancel,
             release_evidence_choose, release_evidence_status, release_evidence_observe, release_evidence_cancel,
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,
+            prepare_local_release_history, start_local_release_history, local_release_history_status, cancel_local_release_history,
             prepare_local_store_preflight, start_local_store_preflight, local_store_preflight_status, cancel_local_store_preflight,
             prepare_offline_preflight, start_offline_preflight, offline_preflight_status, cancel_offline_preflight,
             prepare_android_build, start_android_build, android_build_status, cancel_android_build,

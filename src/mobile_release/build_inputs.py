@@ -1772,6 +1772,8 @@ class InvocationCustody:
             guard._ios_archive_source.require_operation().bind_invocation(self)
         elif getattr(guard, "_artifact_inspection_source", None) is not None:
             guard._artifact_inspection_source.require_operation().bind_invocation(self)
+        elif getattr(guard, "_local_history_source", None) is not None:
+            guard._local_history_source.require_operation().bind_invocation(self)
         elif getattr(guard, "_store_preflight_source", None) is not None:
             guard._store_preflight_source.require_operation().bind_invocation(self)
 
@@ -1851,6 +1853,12 @@ class InvocationCustody:
             _need(operation.invocation is self, "iOS project requires its original invocation")
             expected = operation.request.native["rootIdentity"]
             expected_root = (int(expected["device"]), int(expected["inode"]), expected["mode"], expected["uid"], expected["gid"])
+        local = getattr(self.cancellation, "_local_history_source", None)
+        if local is not None:
+            operation = local.require_operation()
+            _need(operation.invocation is self, "local history requires original invocation")
+            expected = operation.request.native["rootIdentity"]
+            expected_root = (int(expected["device"]), int(expected["inode"]), expected["mode"], expected["uid"], expected["gid"])
         project = _Project(self.root, self.cancellation, recovery=False, expected_root=expected_root)
         self._original_project = project
         self.project_owner, self.signing_lease = project, signing_lease
@@ -1862,8 +1870,9 @@ class InvocationCustody:
 
     @contextmanager
     def materialization(self, *, signing_lease: SigningLease | None) -> Iterator[BuildInputs]:
-        _need(getattr(self.cancellation, "_artifact_inspection_source", None) is None,
-              "artifact observation cannot borrow build materialization")
+        _need(getattr(self.cancellation, "_artifact_inspection_source", None) is None
+              and getattr(self.cancellation, "_local_history_source", None) is None,
+              "observation cannot borrow build materialization")
         self.require(root=self.root, cancellation=self.cancellation, signing_lease=signing_lease)
         _need(self.mode == "build" and self.project_owner is not None and self.child is None,
               "one materializer requires continuous project admission")
@@ -2208,7 +2217,12 @@ class _Project:
         self.rename = _rename_function()
         try:
             with self.guard.deferred(check_on_exit=False):
-                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                local = getattr(self.guard, "_local_history_source", None)
+                if local is None:
+                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    local.borrow_project(self)  # SAME native-parent lease; never renderer/Boolean.
+
         except BlockingIOError:
             raise BuildInputBusy("build inputs: another owner holds this project") from None
         self.check()
@@ -2230,8 +2244,9 @@ class _Project:
         self.check()
 
     def ensure_meta(self) -> int:
-        _need(getattr(self.guard, "_artifact_inspection_source", None) is None,
-              "artifact inspection cannot create project metadata")
+        _need(getattr(self.guard, "_artifact_inspection_source", None) is None
+              and getattr(self.guard, "_local_history_source", None) is None,
+              "observation cannot create project metadata")
         self.check()
         source = getattr(self.guard, "_android_build_source", None)
         if source is None:

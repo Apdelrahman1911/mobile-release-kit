@@ -105,7 +105,9 @@ export function parseInstallationStatus(value: unknown): InstallationStatus | nu
   let assessment: InstallationMatching | null = null;
   if (row.assessment !== null) {
     const matching = record(row.assessment, ['files', 'bytes', 'assurance', 'maintenance']);
-    if (!matching || !counter(matching.files, true) || matching.files > 2048
+    // Match the native macOS installation count, including bundled Store tools.
+    // This is a scalar summary, not permission to read a renderer-supplied roster.
+    if (!matching || !counter(matching.files, true) || matching.files > 16_384
       || !counter(matching.bytes) || matching.bytes > 512 * 1024 * 1024
       || matching.assurance !== 'read-only-correspondence' || matching.maintenance !== 'unavailable') return null;
     assessment = { files: matching.files, bytes: matching.bytes, assurance: matching.assurance, maintenance: matching.maintenance };

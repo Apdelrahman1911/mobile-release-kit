@@ -27,6 +27,7 @@ int mrk_registration_acquire_shared(mrk_entry_book *book);
 int mrk_registration_retire(mrk_entry_book *book);
 /* Private vault role: child-only transfer and process-lifetime admission. */
 int mrk_vault_gate_child_inherit(int descriptor, int32_t parent_pid);
+int mrk_local_lease_child_inherit(int fd, uint64_t dev, uint64_t ino, uint32_t mode, uint32_t uid, uint32_t gid);
 int mrk_vault_helper_gate_admit(int descriptor, int32_t parent_pid);
 /* Root resident admission remains a separate facade role; mrk_user never
  * grows a privileged exception. Inherited admission remains metadata-only. */

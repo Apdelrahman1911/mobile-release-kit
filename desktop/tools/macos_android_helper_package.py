@@ -2536,7 +2536,10 @@ class Operation:
                  and sum(e["fd"] is not None or not e["closed"] for e in self.entries) + 40 <= 256,
                  "prepared-original-ledger-bound")
         if self.app_absence is not None or self.update is not None:
-            need(len(self.entries) <= 24576 and sum(e["fd"] is not None for e in self.entries) <= 96,
+            external = getattr(self, "candidate_external_originals", None)
+            extra = 0 if external is None else external()
+            need(type(extra) is int and extra >= 0 and len(self.entries) + getattr(self, "candidate_bootstrap_originals", 0) + (24 if getattr(self, "candidate_restore_context", None) is not None else 0) <= 24576
+                 and extra + sum(e["fd"] is not None for e in self.entries) <= 96,
                  "app-absence-original-ledger-bound")
         if self.store_signing is not None:
             need(len(self.entries) <= self.store_signing_module.ORIGINAL_LIMIT
@@ -7304,6 +7307,8 @@ class Operation:
         return result
 
     def package_call(self, role, argv, *, environment=None, timeout=30, limit=65536, cwd=None):
+        if getattr(self, "candidate_restore_context", None) is not None:
+            need(sum(e["fd"] is not None for e in self.entries) + 8 <= 96, "candidate-native-original-quote")
         if self.phase == "prepare-removal-observers":
             return self.removal_prepare_call(role, argv, maximum=timeout, limit=limit, cwd=cwd, environment=environment)
         if self.phase in FINAL_IMAGE_PHASES:
@@ -8983,6 +8988,355 @@ def tool_data_main(phase, target):
     need(sys.stdout.write(body.decode("ascii")) == len(body), "tool-selection-short-output")
     sys.stdout.flush()
     return 0
+
+
+def candidate_builder_retire(op, cut):
+    """Close this completed builder, never credit its disk bytes as removed.
+
+    Later baseline is a separate original owner and re-admits the exact completed
+    packages. Shared source/input/compiler ancestors remain held here. This
+    scoped candidate path never reopens its consumed builder directories.
+    """
+    f = op.app_absence_module
+    need(getattr(op, "candidate_restore_context", None) is not None and op.phase == f.PREPARE
+         and cut in (None, *f.CUTS) and not op.errors, "candidate-builder-retirement-purpose")
+    prefix = "app-absence" if cut is None else "app-absence-cut-" + cut
+    names = {prefix + "-prepared", prefix + "-scripts", prefix + "-original.pkg"}
+    f.input_post(op); f.post(op); op.package_post()
+    def belongs(entry):
+        while entry.get("parent_entry") is not None and entry["parent_entry"] is not op.work_entry:
+            entry = entry["parent_entry"]
+        return entry.get("parent_entry") is op.work_entry and entry.get("name") in names
+    retiring = [entry for entry in op.entries if belongs(entry)]
+    need(retiring and all(any(entry.get("parent_entry") is op.work_entry and entry.get("name") == name
+                             for entry in retiring) for name in names), "candidate-builder-original-roots")
+    for entry in reversed(retiring):
+        if entry["fd"] is not None:
+            op.close(entry)
+        need(entry["closed"] and entry["fd"] is None and not op.errors, "candidate-builder-close-unknown")
+    # Never erase an unresolved original from the operation's lifetime ledger.
+    # Only remove settled entries from future live POST lists after all closes.
+    ids = {id(entry) for entry in retiring}
+    op.app_absence["outputs"] = [row for row in op.app_absence["outputs"] if id(row[0]) not in ids]
+    op.app_absence["roots"] = [row for row in op.app_absence["roots"] if id(row[0]) not in ids]
+    del op.app_absence["inputCopies"]
+    f.clock(op)
+
+
+def candidate_carrier_retire(op):
+    """Last copied-source use before independently admitted read-only mount.
+
+    Never delete disk bytes, retire product/bootstrap controls, or retry closes.
+    The next fixed attach must verify every mounted leaf against the complete
+    layout before any root observer/Installer effect.
+    """
+    f = op.app_absence_module
+    need(getattr(op, "candidate_restore_context", None) is not None
+         and op.phase in ("candidate-baseline", f.RESTORE) and not op.errors
+         and op.package_settled() and op.app_absence["mount"] is None
+         and not op.app_absence.get("candidateCopiedOriginalsRetired")
+         and len(op.calls) == (2 if op.phase == "candidate-baseline" else 0), "candidate-carrier-last-use")
+    f.post(op); op.package_post()
+    names = {"app-absence-prepared", *("app-absence-cut-" + cut + "-prepared" for cut in f.CUTS)}
+    def belongs(entry):
+        if entry.get("parent_entry") is not None and entry["parent_entry"].get("parent_entry") is op.work_entry \
+                and entry["parent_entry"].get("name") == "app-absence-carrier":
+            return entry.get("kind") == "file" and entry.get("name") in f.carrier_names(op)
+        while entry.get("parent_entry") is not None and entry["parent_entry"] is not op.work_entry:
+            entry = entry["parent_entry"]
+        return entry.get("parent_entry") is op.work_entry and entry.get("name") in names
+    selected = [entry for entry in op.entries if belongs(entry)]
+    need(len(selected) == 12 + len(f.carrier_names(op)) and all(any(entry.get("parent_entry") is op.work_entry
+         and entry.get("name") == name for entry in selected) for name in names), "candidate-carrier-original-roster")
+    for entry in reversed(selected):
+        op.close(entry)
+        need(entry["closed"] and entry["fd"] is None and not op.errors, "candidate-carrier-close-unknown")
+    retired = {id(entry) for entry in selected}
+    op.app_absence["outputs"] = [row for row in op.app_absence["outputs"] if id(row[0]) not in retired]
+    op.app_absence["roots"] = [row for row in op.app_absence["roots"] if id(row[0]) not in retired]
+    op.app_absence["candidateCopiedOriginalsRetired"] = True
+    f.clock(op)
+
+
+def candidate_materialize(session, originals, inventory):
+    """Thin fixture inputs under the SAME verified acquisition, no native call.
+
+    Full P remains byte-identical. Runtime bytes remain in P and its signed
+    inventory; only this nonshipping source tree has an empty runtime folder.
+    The caller still owns mount/source/finality and cannot return before our
+    original copies/readback/closes. No ordinary acquire/install calls here.
+    """
+    f = session.fixture_api
+    need(session.purpose == "acquire-restore" and session.package_api is sys.modules[__name__]
+         and session.acquisition_result is not None and not session.installer_entered
+         and all(row["returned"] and row["capturesSettled"] for row in session.calls),
+         "candidate-materialize-admission")
+    session.point()
+    selected = session.origin
+    for key in ("package", "descriptor", "signature"):
+        row = selected[key]; body, mode = originals[row["name"]]
+        need(mode == 0o444 and (len(body), digest(body)) == (row["bytes"], row["sha256"]),
+             "candidate-materialize-full-product")
+    stager = session.stager
+    rows = stager.observation_inventory_bytes(inventory, selected["inventorySha256"],
+        selected["runtimeManifestSha256"], selection=session.selection)
+    apps = f.app_rows(rows)
+    members = stager.install_product_members(originals["Install.pkg"][0], allocation_budget=session.allocation_budget)
+    component = (stager.xar_members(members[stager.INSTALL_COMPONENT], allocation_budget=session.allocation_budget)
+        if stager.INSTALL_COMPONENT in members else
+        {key:members[stager.INSTALL_COMPONENT + "/" + key] for key in ("PackageInfo", "Scripts")})
+    del members
+    stager.package_info(component["PackageInfo"], selection=session.selection)
+    packed = component["Scripts"]
+    archive = session.decode_fixture_scripts(packed, sum(len(value) for value in component.values()))
+    scripts = stager.cpio_members(archive, allocation_budget=session.allocation_budget, store_runtime=True)
+    del archive, component, packed
+    need(scripts.get("input/" + stager.INSTALLATION_INVENTORY_NAME) == (inventory, 0o444),
+         "candidate-materialize-inventory")
+    expected = {}
+    for name, row in apps.items():
+        body, mode = scripts["input/" + name]
+        need(type(body) is bytes and (len(body), digest(body), mode) ==
+             (row["size"], row["sha256"], 0o555 if row["executable"] else 0o444),
+             "candidate-materialize-app")
+        expected[name] = (body, mode)
+    expected[stager.INSTALLATION_INVENTORY_NAME] = (inventory, 0o444)
+    del scripts
+    dirs = {"", "runtime"}
+    for name in expected:
+        parts = name.split("/")
+        need(len(parts) <= 16, "candidate-materialize-depth")
+        dirs.update("/".join(parts[:i]) for i in range(1, len(parts)))
+    def external():
+        return sum(entry["fd"] is not None for book in session.quota.books for entry in book.entries)
+    depth = max((name.count("/") for name in expected), default=0)
+    need(session.quota.reserved + 3 * (len(expected) + len(dirs)) + 16 <= 24576
+         and external() + max(depth + 4, 7) <= 96, "candidate-materialize-whole-original-quote")
+    environment = dict(GITHUB_SHA=session.helper_source, GITHUB_WORKFLOW_SHA=session.helper_source,
+        GITHUB_RUN_ID=session.run_id, GITHUB_RUN_ATTEMPT=session.run_attempt,
+        GITHUB_WORKFLOW_REF="Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-consume.yml@refs/heads/verify/desktop-macos-candidate-consume")
+    op = Operation(None, session.candidate_root, session.work.parent, f.PREPARE, environment, stager, target=session.target)
+    op.app_absence_module, op.app_absence_api = f, sys.modules[__name__]
+    op.candidate_external_originals = external
+    op.app_absence = dict(started=session.clock.started, observed=session.clock.check(), workSeconds=540, hardSeconds=600,
+        pendingRoot=None, pendingCut=None, mount=None, roots=[], outputs=[], complete=False)
+    original_ids = {}
+    try:
+        op.open()
+        destination = op.package_directory("input")
+        def write(parent, prefix):
+            names = {name[len(prefix):].split("/")[0] for name in (*expected, *dirs) if name.startswith(prefix) and name != prefix.rstrip("/")}
+            for name in sorted(names):
+                path = prefix + name
+                if path in expected:
+                    body, mode = expected[path]
+                    entry = op.package_file(parent, name, body)
+                    if mode != 0o444:
+                        os.fchmod(entry["fd"], mode); os.fsync(entry["fd"])
+                        entry["identity"] = signature(os.fstat(entry["fd"]))
+                    original_ids[path] = entry["identity"]
+                    op.package_outputs.remove(next(row for row in op.package_outputs if row[0] is entry))
+                    op.close(entry); need(entry["closed"], "candidate-materialize-close")
+                else:
+                    child = f.tree_directory(op, parent, name, create=True)
+                    write(child, path + "/")
+                    original_ids[path] = child["identity"]
+                    op.close(child); need(child["closed"], "candidate-materialize-close")
+            need(set(os.listdir(parent["fd"])) == names, "candidate-materialize-roster")
+            os.fchmod(parent["fd"], 0o555); os.fsync(parent["fd"])
+            parent["identity"] = directory_identity(os.fstat(parent["fd"]))
+        write(destination, "")
+        def post(parent, prefix):
+            names = {name[len(prefix):].split("/")[0] for name in (*expected, *dirs) if name.startswith(prefix) and name != prefix.rstrip("/")}
+            need(set(os.listdir(parent["fd"])) == names, "candidate-materialize-post-roster")
+            for name in sorted(names):
+                path = prefix + name
+                if path in expected:
+                    body, mode = expected[path]
+                    entry = f.tree_leaf(op, parent, name, (len(body), digest(body), mode))
+                else:
+                    entry = f.tree_directory(op, parent, name); post(entry, path + "/")
+                need(entry["identity"] == original_ids[path], "candidate-materialize-original-post")
+                op.close(entry); need(entry["closed"], "candidate-materialize-close")
+            op.recheck_directory(parent)
+        post(destination, "")
+        producer = op.package_directory("candidate-producer")
+        for name in ("Install.pkg", "producer.json", "producer.sig"):
+            op.package_file(producer, name, originals[name][0])
+        op.package_roots.append((producer, set(originals)))
+        op.package_post(); session.point()
+        op.app_absence["complete"] = True
+    finally:
+        op.finish()
+    need(op.app_absence["complete"] and op.receipt["originalClosesKnown"] is True
+         and op.receipt["targetRetired"] is True and not op.errors
+         and all(entry["closed"] for entry in op.entries), "candidate-materialize-finality")
+    session.point()
+
+
+def candidate_fixture_phase(consumer, context, purpose, started, bootstrap):
+    """Fixed dual-source bootstrap for the three existing nonshipping owners.
+
+    No native qualification or nominal legacy receipt is manufactured here.
+    All retained source, host, handoff and phase originals share Operation's
+    ledger. The existing bounded native owner is unchanged.
+    """
+    r = consumer.resume
+    phase = {"prepare-restore":"prepare-app-absence", "restore-baseline":"candidate-baseline",
+             "restore-chain":"app-absence-restore"}.get(purpose)
+    need(phase is not None and {k:v for k,v in context.items() if k != "started"} == consumer.context_data(os.environ, consumer.ROOT, consumer.platform.machine())
+         and bootstrap[1] == (consumer.HELPER_ROOT / "desktop/tools/macos_android_helper_package.py"),
+         "candidate-fixture-entry")
+    work = context["work"].parent
+    # These two tiny SOURCE bootstrap reads have already consumed their only
+    # originals before creating Operation. Each is retained and compared below.
+    fixture_path = consumer.HELPER_ROOT / consumer.FIXTURE_PATH
+    fixture_id, fixture_body = r.host_read(fixture_path, 96 << 10)
+    f = r.load_module("_mrk_candidate_phase_fixture", fixture_path, fixture_body)
+    need(phase in (f.PREPARE, "candidate-baseline", f.RESTORE), "candidate-fixture-phase")
+    hard = 3240 if phase == f.PREPARE else 720
+    work_seconds = hard - 60
+    env = {key:os.environ[key] for key in ("GITHUB_SHA", "GITHUB_WORKFLOW_SHA", "GITHUB_WORKFLOW_REF",
+        "GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")}
+    env.update(HOME="/Users/runner", DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer",
+        MACOSX_DEPLOYMENT_TARGET="26.0", MRK_MACOS_PACKAGE_ROLE="ordinary-image", MRK_MACOS_SAME_PACKAGE_SCOPE="disabled")
+    op = Operation(None, consumer.CANDIDATE_ROOT, work, phase, env, None, target=context["target"])
+    op.app_absence_module, op.app_absence_api = f, sys.modules[__name__]
+    op.app_absence = dict(started=started, observed=time.monotonic_ns(), workSeconds=work_seconds, hardSeconds=hard,
+        pendingRoot=None, pendingCut=None, mount=None, roots=[], outputs=[], complete=False,
+        future=dict(f.OUTPUTS) if phase == f.PREPARE else {"withdrawn":f.OUTPUTS["withdrawn"]} if phase == f.RESTORE else {})
+    op.package_started = op.package_observed = started
+    op.package_endpoint = started + work_seconds * 1_000_000_000
+    op.candidate_restore_context = dict(context)
+    files, originals, source_phase = {}, {}, None
+    op.candidate_bootstrap_originals = 6  # Two closed bootstrap reads + four sequential existing owner-loader reads.
+    try:
+        f.clock(op)
+        op.open()
+        helper_files = tuple(dict.fromkeys((*consumer.HELPER_SOURCE_INPUTS, consumer.CONSUMER_PATH,
+            consumer.LEGACY_PATH, consumer.PARSER_PATH, consumer.FIXTURE_PATH, consumer.SELECTION_PATH,
+            "desktop/tools/macos_android_helper_package.py", "desktop/tools/macos_normal_ui_runner.py", consumer.STAGER_PATH)))
+        candidate_files = (consumer.STAGER_PATH, *(path for path,cap in consumer.CANDIDATE_SOURCE_INPUTS),
+                           "desktop/src-tauri/src/macos_app_absence_fixture.rs")
+        for helper, paths in ((True,helper_files),(False,candidate_files)):
+            for relative in paths:
+                full = (".candidate-consumer-helper/" if helper else "") + relative
+                entry = op.source_original(full, "candidate-source", r.SOURCE_MODULE_LIMIT)
+                body = op.read(entry); op.package_sources.append((entry,body))
+                files[(helper,relative)], originals[(helper,relative)] = body, entry
+        need(consumer.resume_identity(originals[(True,consumer.FIXTURE_PATH)]) == fixture_id
+             and files[(True,consumer.FIXTURE_PATH)] == fixture_body
+             and consumer.resume_identity(originals[(True,"desktop/tools/macos_android_helper_package.py")]) == bootstrap[0]
+             and files[(True,"desktop/tools/macos_android_helper_package.py")] == bootstrap[2],
+             "candidate-bootstrap-original-post")
+        nomination = consumer.selection_data(files[(True,consumer.SELECTION_PATH)], op.target)
+        op.candidate_restore_context["nomination"] = nomination
+        def module(leaf, name, helper=True):
+            path = "desktop/tools/" + leaf
+            return r.load_module(name, (consumer.HELPER_ROOT if helper else consumer.CANDIDATE_ROOT)/path, files[(helper,path)])
+        normal = module("macos_normal_ui_runner.py", "_mrk_candidate_phase_clock")
+        phase_clock = normal.PhaseClock(work_seconds, started=started)
+        qualification = module("macos_aqua_qualification.py", "_mrk_candidate_phase_owner")
+        need(sum(e["fd"] is not None for e in op.entries) + 1 <= 96, "candidate-owner-load-quote")
+        op.owner = qualification.load_owner(consumer.HELPER_ROOT)
+        clean = dict(PATH="/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", LANG="C", LC_ALL="C", TZ="UTC",
+            TMPDIR=str(work/op.target_name/"tmp")+"/", DEVELOPER_DIR=env["DEVELOPER_DIR"],
+            GIT_CONFIG_NOSYSTEM="1",GIT_CONFIG_GLOBAL="/dev/null",GIT_NO_REPLACE_OBJECTS="1",GIT_OPTIONAL_LOCKS="0",GIT_TERMINAL_PROMPT="0")
+        source_phase = normal.NormalPhase(op.owner,clean,op.checkout,phase_clock)
+        def sources():
+            op.package_post()
+            for helper, root, sha, paths in ((True,consumer.HELPER_ROOT,context["helperSource"],helper_files),
+                                            (False,consumer.CANDIDATE_ROOT,nomination["source"],candidate_files)):
+                prefix=["/usr/bin/git","-C",str(root),"-c","core.fsmonitor=false","-c","core.hooksPath=/dev/null","--no-optional-locks","--literal-pathspecs"]
+                need(sum(e["fd"] is not None for e in op.entries) + 8 <= 96, "candidate-source-query-quote")
+                op.stager_io_pending = "candidate-source-query"
+                result=source_phase.call("helper-source" if helper else "candidate-source",prefix+["rev-parse","HEAD","HEAD^{tree}"],15,8192)
+                need(result.returncode == 0 and result.stderr == b"", "candidate-source-query")
+                values=result.stdout.splitlines()
+                need(len(values)==2 and values[0]==sha.encode("ascii") and re.fullmatch(rb"[0-9a-f]{40}",values[1]), "candidate-source-identity")
+                tree=values[1].decode("ascii")
+                if helper:
+                    need(op.candidate_restore_context.get("helperTree",tree)==tree,"candidate-helper-tree-post")
+                    op.candidate_restore_context["helperTree"]=tree
+                else: need(tree==nomination["tree"],"candidate-source-tree")
+                result=source_phase.call("helper-source" if helper else "candidate-source",prefix+["ls-tree","-z","--full-tree",sha,"--",*sorted(paths)],15,8192)
+                need(result.returncode == 0 and result.stderr == b"", "candidate-source-query")
+                consumer.source_rows_data(result.stdout,{path:files[(helper,path)] for path in paths})
+                op.stager_io_pending = None
+            op.package_post()
+        sources()
+        op.stager = module("stage_macos_installed.py", "_mrk_candidate_fixture_stager",False)
+        op.candidate_fixture_stager = module("stage_macos_installed.py", "_mrk_candidate_fixture_auditor")
+        need(op.stager.DESKTOP == op.checkout/"desktop", "candidate-fixture-product-source")
+        selection = op.stager.source_build_selection(op.target)
+        op.image_source,op.image_release = nomination["source"],selection.release
+        op.release_entry = originals[(False,op.release_input)]
+        op.candidate_fixture_source_original = originals[(False,"desktop/src-tauri/src/macos_app_absence_fixture.rs")]
+        host = module("macos_xcode_host_preparation.py", "_mrk_candidate_fixture_host")
+        host.DarwinAPI(phase_clock,target=op.target).waitable_sigchld()
+        host_root=work/"host-python"
+        def directory(path):
+            entry=op.descend(op.work_entry,Path(path).relative_to(work).parts)
+            return entry["identity"],os.listdir(entry["fd"])
+        def read_file(path,limit):
+            path=Path(path); parent=op.descend(op.work_entry,path.parent.relative_to(work).parts)
+            entry=op.original(parent,path.name,"candidate-host",limit,(0o600,0o644,0o755))
+            body=op.read(entry);op.package_outputs.append((entry,digest(body)))
+            return consumer.resume_identity(entry),body
+        _,host_body=read_file(host_root/"host-binding.json",32768)
+        snapshot,cfg=r.host_snapshot(host_root,directory,read_file,sidecar=True)
+        r.host_selection_data(r.decode(host_body),snapshot,cfg,host_root,
+            dict(executable=str(Path(sys.executable).resolve()),prefix=sys.prefix,basePrefix=sys.base_prefix,
+                 baseExecutable=str(Path(sys._base_executable).resolve())),context["helperSource"],context["runId"],context["runAttempt"])
+        def handoff(parent,name,cap=65536):
+            return op.original(parent,name,"candidate-handoff",cap,(0o600,))
+        acquired=handoff(op.work_entry,"candidate-acquisition.json")
+        acquired_status=handoff(op.work_entry,"candidate-acquisition.status",4)
+        need(op.read(acquired_status)==b"0\n","candidate-acquisition-caller-zero")
+        acquired_body=op.read(acquired)
+        value=f.candidate_acquisition_data(tool_json(acquired_body),nomination,context["helperSource"],op.candidate_restore_context["helperTree"],context["runId"],context["runAttempt"])
+        op.package_sources.extend(((acquired,acquired_body),(acquired_status,b"0\n")))
+        env.update(MRK_MACOS_INSTALL_SOURCE_COMMIT=nomination["source"],MRK_MACOS_INSTALL_INVENTORY_SHA256=value["inventory"]["sha256"],
+                   MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=value["runtimeManifestSha256"])
+        producer = None
+        if phase != f.RESTORE:
+            producer=op.directory(op.work_entry,"candidate-producer","candidate-producer")
+            need(set(os.listdir(producer["fd"]))=={"Install.pkg","producer.json","producer.sig"},"candidate-producer-roster")
+            for key in ("package","descriptor","signature"):
+                row=value[key];entry=op.original(producer,row["name"],"candidate-original-product",row["bytes"],(0o444,))
+                need(entry["identity"][6]==row["bytes"] and f.original_hash(op,entry)==row["sha256"],"candidate-product-post")
+                op.package_outputs.append((entry,row["sha256"]))
+            op.package_roots.append((producer,{"Install.pkg","producer.json","producer.sig"}))
+            op.candidate_producer_originals = {entry["name"]:entry for entry,sha in op.package_outputs if entry.get("parent_entry") is producer}
+        binding=f.binding_data(dict(fixtureSource=nomination["source"],productSource=nomination["source"],runId=context["runId"],runAttempt=context["runAttempt"],target=op.target))
+        op.app_absence["binding"]=binding
+        if phase == f.PREPARE:
+            f.reserve(op);f.prepare(op)
+        elif phase == "candidate-baseline":
+            op.app_absence=None
+            f.candidate_baseline(op,acquired,acquired_status,producer,nomination,op.candidate_restore_context["helperTree"])
+        else:
+            retained=op.directory(op.work_entry,"resume-carrier","candidate-transport")
+            consumer.candidate_restore(op,handoff(retained,consumer.BASELINE_RECEIPT),handoff(retained,consumer.BASELINE_STATUS,4),
+                handoff(op.work_entry,"candidate-install.json"),handoff(op.work_entry,"candidate-install.status",4),
+                op.original(retained,"installer-output.status","candidate-native-installer-status",4,(0o600,)))
+        sources()
+        need(len(source_phase.records)==8 and op.app_absence["complete"],"candidate-fixture-source-finality")
+        op.receipt["candidateSource"]={key:op.candidate_restore_context[key] for key in ("helperSource","helperTree","runId","runAttempt")}
+        op.receipt["candidateSource"].update(productSource=nomination["source"],productTree=nomination["tree"],originalQueryCount=8,originalQueriesReturned=True)
+    finally:
+        if op.app_absence is not None:
+            try: f.clock(op, work=False)
+            except BaseException: op.errors.append({"stage":"candidate-retirement-clock","type":"deadline"})
+        op.finish()
+    need(op.receipt["originalClosesKnown"] is True and op.receipt["targetRetired"] is True and not op.errors
+         and op.app_absence["complete"] and len(op.calls)==len(f.roles(op))
+         and all(row["returned"] and row["capturesSettled"] for row in op.calls),"candidate-fixture-terminal")
+    f.clock(op, work=False)
+    if phase == "candidate-baseline":
+        return f.candidate_baseline_result(op,nomination,op.candidate_restore_context["helperTree"])
+    op.receipt["passed"]=True
+    return op.receipt
 
 
 def main():

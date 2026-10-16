@@ -50,7 +50,8 @@ class _SavedCommandEngine:
                    SavedCommandDomain.ProjectRecovery: "Project recovery custody did not settle",
                    SavedCommandDomain.IOSArchive: "Saved build custody did not settle",
                    SavedCommandDomain.ArtifactInspection: "Artifact inspection custody did not settle",
-                   SavedCommandDomain.LocalStorePreflight: "Store access-check custody did not settle"}[domain]
+                   SavedCommandDomain.LocalStorePreflight: "Store access-check custody did not settle",
+                   SavedCommandDomain.LocalReleaseHistory: "Local history custody did not settle"}[domain]
         self.guard = DefaultCancellation(ProcessCleanupError, message)
         if domain is SavedCommandDomain.OfflinePreflight:
             from ._desktop_preflight_control import PreflightInput
@@ -70,6 +71,9 @@ class _SavedCommandEngine:
         elif domain is SavedCommandDomain.LocalStorePreflight:
             from ._desktop_store_preflight_control import StorePreflightInput
             self.input = StorePreflightInput(started)
+        elif domain is SavedCommandDomain.LocalReleaseHistory:
+            from ._desktop_local_history_control import LocalHistoryInput
+            self.input = LocalHistoryInput(started)
         else:
             raise ValueError("Invalid saved-command domain")
         self.output, self.error_output = _Output(1), _Output(2)
@@ -119,7 +123,7 @@ class _SavedCommandEngine:
             except BaseException as error:
                 first = error
                 self.guard._abort(error)
-        elif (self.domain in {SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight} and self.input.operation is not None
+        elif (self.domain in {SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory} and self.input.operation is not None
               and not self._android_handoff_close_claimed):
             self._android_handoff_close_claimed = True
             try:
@@ -142,6 +146,8 @@ class _SavedCommandEngine:
                       and self.output_bytes + len(raw) <= wire.RESPONSE_LIMIT)
         if self.domain in (SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight):
             self._require(self.frames == (1 if terminal else 0))
+        elif self.domain is SavedCommandDomain.LocalReleaseHistory:
+            self._require(1 <= self.frames < 8 if terminal else self.frames < 7)
         elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):
             # Preserve a slot for the one terminal. Each original build DATA
             # encoder separately enforces accepted/stage/terminal sequencing.
@@ -160,10 +166,10 @@ class _SavedCommandEngine:
             if not terminal:
                 self.guard.check()
             endpoint = self.started + (wire.FINALITY_SECONDS if terminal else wire.WORK_SECONDS)
-            if terminal and self.domain is SavedCommandDomain.IOSArchive:
+            if terminal and self.domain in (SavedCommandDomain.IOSArchive,SavedCommandDomain.LocalReleaseHistory):
                 endpoint = self.input.hard_endpoint()
             elif terminal and self.input.first_failure is not None:
-                endpoint = min(endpoint, self.input.first_failure + 10)
+                endpoint = min(endpoint, self.input.first_failure + (2 if self.domain is SavedCommandDomain.LocalReleaseHistory else 10))
             self._require(time.monotonic() < endpoint)
             self._require(self.output.owned and not self.output.close_claimed)
             value = os.fstat(1)
@@ -177,6 +183,8 @@ class _SavedCommandEngine:
 
     def _response(self, kind: str, payload: dict) -> bytes:
         wire = _protocol(self.domain)
+        if self.domain is SavedCommandDomain.LocalReleaseHistory:
+            return wire.response(self.request, kind, payload, self.frames)
         if self.domain in (SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight):
             return wire.response(self.request, kind, payload)
         if self.domain is SavedCommandDomain.AndroidBuild:
@@ -215,6 +223,8 @@ class _SavedCommandEngine:
             self.guard._install_artifact_inspection_source(self.input)
         elif self.domain is SavedCommandDomain.LocalStorePreflight:
             self.guard._install_store_preflight_source(self.input)
+        elif self.domain is SavedCommandDomain.LocalReleaseHistory:
+            self.guard._install_saved_command_source(self.input)
         else:
             self._require(False)
         self._acquire_output(self.output)
@@ -245,8 +255,13 @@ class _SavedCommandEngine:
         elif self.domain is SavedCommandDomain.LocalStorePreflight:
             from .desktop_store_preflight import StorePreflightRun
             self.service = StorePreflightRun(self.request, self.guard, self.input)
+        elif self.domain is SavedCommandDomain.LocalReleaseHistory:
+            pass  # Construct the exact fixed local service immediately below.
         else:
             self._require(False)
+        if self.domain is SavedCommandDomain.LocalReleaseHistory:
+            from .local_release_history import LocalHistoryRun
+            self.service = LocalHistoryRun(self.request, self.guard, self.input)
         self.write(self._response("accepted", {"schemaVersion": 1, "context": dict(self.request.context)}))
         self.service.run()
 
@@ -279,7 +294,7 @@ class _SavedCommandEngine:
             return self.service is None or self.service.budget.closed
         if self.domain is SavedCommandDomain.ProjectRecovery:
             return self.input.resources_closed()
-        self._require(self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight))
+        self._require(self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory))
         if self.service is None and self.input.operation is None:
             # A constructor's lost handoff must not discard an already-bound
             # original operation, even though no terminal can then be emitted.
@@ -315,6 +330,8 @@ def run_engine(engine: _SavedCommandEngine) -> int:
         from ._desktop_artifact_inspection_engine import _Engine as ExpectedEngine
     elif engine.domain is SavedCommandDomain.LocalStorePreflight:
         from ._desktop_store_preflight_engine import _Engine as ExpectedEngine
+    elif engine.domain is SavedCommandDomain.LocalReleaseHistory:
+        from ._desktop_local_history_engine import _Engine as ExpectedEngine
     else:
         raise ValueError("Invalid original saved-command engine")
     if type(engine) is not ExpectedEngine:

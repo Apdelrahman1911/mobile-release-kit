@@ -108,6 +108,8 @@ mod lifecycle_evidence_protocol;
 mod environment_diagnostics_protocol;
 mod environment_diagnostics_owner;
 mod offline_preflight_protocol;
+mod local_release_history_protocol;
+mod local_release_history_owner;
 mod local_store_preflight_protocol;
 mod local_store_preflight_owner;
 mod artifact_inspection_protocol;

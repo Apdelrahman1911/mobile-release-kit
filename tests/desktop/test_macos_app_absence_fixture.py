@@ -292,6 +292,128 @@ class ThinRestoreProjectionData(unittest.TestCase):
 
 
 class MacAppAbsenceFixtureData(unittest.TestCase):
+    def test_candidate_acquisition_materializes_full_p_and_exact_thin_tree(self):
+        import sys
+        import time
+        for bad in (None, "app", "quote", "close"):
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp); work.chmod(0o700); (work / "resume-carrier").mkdir(mode=0o700)
+                inventory = b"inert full signed inventory of 5001 leaves"
+                app = b"inert application leaf"
+                rows = {"runtime/store/gem/f" + str(i):dict(size=1,sha256="f"*64,executable=False) for i in range(5000)}
+                rows["app/Contents/program"] = dict(size=len(app),sha256=hashlib.sha256(app).hexdigest(),executable=True)
+                originals = {name:(body,0o444) for name,body in (("Install.pkg",b"unchanged signed P"),("producer.json",b"descriptor"),("producer.sig",b"signature"))}
+                origin = {key:dict(name=name,bytes=len(originals[name][0]),sha256=hashlib.sha256(originals[name][0]).hexdigest())
+                          for key,name in (("package","Install.pkg"),("descriptor","producer.json"),("signature","producer.sig"))}
+                origin.update(inventorySha256=hashlib.sha256(inventory).hexdigest(),runtimeManifestSha256="c"*64)
+                stage = SimpleNamespace(INSTALL_COMPONENT="component",INSTALLATION_INVENTORY_NAME="install-inventory.json",MAX_BYTES=512<<20,
+                    observation_inventory_bytes=lambda *a,**k:rows,
+                    install_product_members=lambda *a,**k:{"component":b"container"},
+                    xar_members=lambda *a,**k:{"PackageInfo":b"info","Scripts":b"raw cpio"},package_info=lambda *a,**k:None,
+                    cpio_members=lambda *a,**k:{"input/install-inventory.json":(inventory,0o444),
+                        "input/app/Contents/program":(b"changed" if bad=="app" else app,0o555)})
+                now=time.monotonic_ns()
+                session=SimpleNamespace(purpose="acquire-restore",package_api=HELPER,fixture_api=FIXTURE,stager=stage,
+                    acquisition_result={},installer_entered=False,calls=[],point=lambda:None,origin=origin,
+                    selection=SimpleNamespace(),allocation_budget=lambda *a:None,decode_fixture_scripts=lambda body,live:body,candidate_root=work,
+                    work=work/"resume-carrier",helper_source="a"*40,run_id="1",run_attempt="1",target=FIXTURE.TARGETS[0],
+                    clock=SimpleNamespace(started=now,check=lambda:time.monotonic_ns()),
+                    quota=SimpleNamespace(reserved=70,books=[SimpleNamespace(entries=[dict(fd=1) for _ in range(90 if bad=="quote" else 60)])]))
+                close=HELPER.Operation.close
+                def closing(op,entry):
+                    close(op,entry)
+                    if bad=="close" and entry.get("name")=="program":
+                        entry["closed"]=False;op.errors.append(dict(stage="close",type="OSError"))
+                with patch.dict(sys.modules,{HELPER.__name__:HELPER}),patch.object(HELPER.Operation,"close",closing):
+                    if bad:
+                        with self.assertRaises(ValueError): HELPER.candidate_materialize(session, originals, inventory)
+                        if bad in ("app","quote"):self.assertEqual(set(p.name for p in work.iterdir()),{"resume-carrier"})
+                        if bad=="close":self.assertTrue((work/"android-helper-prepare-app-absence").exists())
+                    else:
+                        HELPER.candidate_materialize(session, originals, inventory)
+                        self.assertEqual((work/"input/install-inventory.json").read_bytes(),inventory)
+                        self.assertEqual((work/"input/app/Contents/program").read_bytes(),app)
+                        self.assertEqual((work/"input/app/Contents/program").stat().st_mode&0o777,0o555)
+                        self.assertEqual(list((work/"input/runtime").iterdir()),[])
+                        for name,(body,_) in originals.items():self.assertEqual((work/"candidate-producer"/name).read_bytes(),body)
+                        self.assertFalse((work/"android-helper-prepare-app-absence").exists())
+                # This test owns all small inert data, including refused output.
+                for path in work.rglob("*"):
+                    if path.is_dir():path.chmod(0o700)
+
+    def test_candidate_sequential_builder_closes_only_completed_private_originals(self):
+        for fault in (False, True):
+            with tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp); work.chmod(0o700)
+                op = HELPER.Operation(None, work, work, FIXTURE.PREPARE, dict(GITHUB_SHA="a"*40, GITHUB_WORKFLOW_SHA="a"*40, GITHUB_RUN_ID="1", GITHUB_RUN_ATTEMPT="1", GITHUB_WORKFLOW_REF="inert"), None)
+                op.open(); op.app_absence_api = HELPER; op.app_absence_module = FIXTURE
+                op.app_absence = state(); op.candidate_restore_context = {"inert": True}
+                shared = FIXTURE.mkdir(op, op.work_entry, "input")
+                roots = [FIXTURE.mkdir(op, op.work_entry, "app-absence-" + name) for name in ("prepared", "scripts")]
+                for parent in roots:
+                    leaf = FIXTURE.output(op, parent, "inert", b"preserved bytes")
+                    op.app_absence["roots"].append((parent, {"inert"}))
+                FIXTURE.output(op, op.work_entry, "app-absence-original.pkg", b"inert original archive")
+                op.app_absence["inputCopies"] = (shared, roots[1], {}, {})
+                paths = {path: path.read_bytes() for path in work.rglob("*") if path.is_file()}
+                before = len(op.entries)
+                close = op.close
+                def closing(entry):
+                    close(entry)
+                    if fault and entry.get("name") == "app-absence-original.pkg":
+                        entry["closed"] = False
+                        op.errors.append({"stage": "close", "type": "OSError"})
+                try:
+                    with patch.object(FIXTURE, "clock"), patch.object(FIXTURE, "input_post"), \
+                         patch.object(op, "package_post"), patch.object(op, "close", side_effect=closing):
+                        if fault:
+                            with self.assertRaisesRegex(ValueError, "candidate-builder-close-unknown"):
+                                HELPER.candidate_builder_retire(op, None)
+                            self.assertTrue(op.app_absence["outputs"])
+                            self.assertTrue(op.app_absence["roots"])
+                            self.assertIn("inputCopies", op.app_absence)
+                        else:
+                            HELPER.candidate_builder_retire(op, None)
+                            self.assertEqual(op.app_absence["outputs"], [])
+                            self.assertEqual(op.app_absence["roots"], [])
+                            self.assertNotIn("inputCopies", op.app_absence)
+                            self.assertTrue(all(e["closed"] for e in op.entries if e not in
+                                                (op.work_entry, op.target_entry, shared)))
+                    self.assertEqual(len(op.entries), before)
+                    self.assertIsNotNone(shared["fd"])
+                    self.assertEqual({path:path.read_bytes() for path in paths}, paths)
+                finally:
+                    for entry in reversed(op.entries): close(entry)
+
+    def test_candidate_sequential_preparation_never_advances_after_unknown_close(self):
+        for fault in (None, "app-write"):
+            op = inert_operation(); op.phase = FIXTURE.PREPARE; op.entries = []
+            op.candidate_restore_context = {}; op.app_absence_api = HELPER; op.environment["GITHUB_REF"] = "candidate-ref"
+            op.receipt = {}; op.app_absence.update(future={})
+            events = []
+            def build(owner, cut=None):
+                events.append(("build", cut)); return {"fixturePackageBytes": 32, "fixturePackageSha256": "a" * 64}
+            def retire(owner, cut):
+                events.append(("closed", cut))
+                if fault == cut and cut is not None: raise ValueError("candidate-builder-close-unknown")
+            with patch.object(FIXTURE, "input_rows", return_value=(None, {"app/leaf": {"size":1}})), \
+                 patch.object(FIXTURE, "prepare_one", side_effect=build), \
+                 patch.object(HELPER, "candidate_builder_retire", side_effect=retire), patch.object(FIXTURE, "reserve"):
+                if fault:
+                    with self.assertRaisesRegex(ValueError, "candidate-builder-close-unknown"): FIXTURE.prepare(op)
+                    self.assertEqual(events, [("build", None), ("closed", None), ("build", fault), ("closed", fault)])
+                    self.assertNotIn("appAbsencePreparation", op.receipt)
+                else:
+                    FIXTURE.prepare(op)
+                    self.assertEqual(events, [event for cut in (None, *FIXTURE.CUTS)
+                                              for event in (("build", cut), ("closed", cut))])
+                    self.assertEqual(op.app_absence["future"]["cutCopies"], 96)
+        FIXTURE.recovery_builder_quote_data(1, 2, 3, 80, 75, sequential=True)
+        with self.assertRaisesRegex(ValueError, "restore-chain-complete-original-quote"):
+            FIXTURE.recovery_builder_quote_data(1, 2, 3, 70, 64)
+        with self.assertRaisesRegex(ValueError, "restore-chain-complete-original-quote"):
+            FIXTURE.recovery_builder_quote_data(1, 2, 3, 80, 76, sequential=True)
+
     def test_fixed_bindings_layout_and_stricter_script_quote(self):
         FIXTURE.fixed_binding_and_layout_data_checks()
         FIXTURE.ownership_and_finality_data_checks()

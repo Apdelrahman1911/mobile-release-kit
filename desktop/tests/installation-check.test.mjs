@@ -53,7 +53,7 @@ test('installation DTOs are closed, bounded and cannot claim maintenance or succ
     { ...observed(), reason: 'cancelled' }, { ...observed(), settlement: 'late-known' },
     { ...observed(), assessment: null }, { ...initial(), assessment: observed().assessment },
     { ...initial(), operationId: 1 }, { ...observed(), operationId: null },
-    ...[0, 2049, 1.5, Infinity].map((files) => ({ ...observed(), assessment: { ...observed().assessment, files } })),
+    ...[0, 16_385, 1.5, Infinity].map((files) => ({ ...observed(), assessment: { ...observed().assessment, files } })),
     ...[-1, 512 * 1024 * 1024 + 1, NaN].map((bytes) => ({ ...observed(), assessment: { ...observed().assessment, bytes } })),
     { ...observed(), assessment: { ...observed().assessment, assurance: 'signature-verified' } },
     { ...observed(), assessment: { ...observed().assessment, maintenance: 'repair-authorized' } },
@@ -69,6 +69,29 @@ test('installation DTOs are closed, bounded and cannot claim maintenance or succ
   for (const value of [null, {}, { operationId: 0 }, { operationId: -1 }, { operationId: 1.5 },
     { operationId: 2 ** 32 }, { operationId: '1' }, { operationId: 1, path: 'elsewhere' }]) assert.equal(parseInstallationCancel(value), null);
   assert.deepEqual(parseInstallationCancel({ operationId: 0xffffffff }), { operationId: 0xffffffff });
+});
+
+test('complete Mac runtime file counts survive native bridge and installation display without granting maintenance', async () => {
+  // 8,622 is the native inventory regression's Store+Python-sized fixture;
+  // 16,384 is macos_install_record::FILE_LIMIT, not a renderer roster allocation.
+  for (const files of [8622, 16_384]) {
+    const result = { ...observed(), assessment: { ...observed().assessment, files, bytes: 512 * 1024 * 1024 } };
+    const calls = [];
+    const api = createNativeApi('native', async (command, input) => {
+      calls.push({ command, input });
+      assert.equal(command, 'installation_status');
+      return result;
+    });
+    const controller = new InstallationCheckController(api, true);
+    try {
+      // Refresh only: no implicit inspect, cancellation, repair or release.
+      await controller.refresh();
+      assert.equal(controller.snapshot().error, null);
+      assert.deepEqual(controller.snapshot().status, result);
+      assert.equal(controller.snapshot().status.assessment.maintenance, 'unavailable');
+      assert.deepEqual(calls, [{ command: 'installation_status', input: {} }]);
+    } finally { controller.dispose(); }
+  }
 });
 
 test('native commands are fixed and preview/unavailable cannot invoke installation reads or cancellation', async () => {
