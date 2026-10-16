@@ -289,3 +289,22 @@ def prepare_local_release(data: bytes, *, observed_source: GitContext,
         return draft
     except (ValidationError, ConfigurationError, ValueError, TypeError, KeyError, RecursionError):
         raise LocalDraftError(_ERROR) from None
+
+
+def prepare_owned_local_release(data: bytes, *, source) -> LocalReleaseDraft:
+    """Prepare candidate DATA using the live observed project, not Git hints.
+
+    This performs no Store operation and mints no durable intent/authorization.
+    The source's original scope must remain live through any subsequent build;
+    its exit and the separate producer closes still gate publication. Existing
+    callers of prepare_local_release retain the unchanged DATA-only contract.
+    """
+    from .local_release_source import LocalSourceObservation
+
+    _need(type(source) is LocalSourceObservation)
+    observed = source.check()
+    draft = prepare_local_release(data, observed_source=observed,
+        configuration_bytes=source.configuration_bytes, version_bytes=source.version_bytes)
+    _need(draft.platform == "android" and draft.stage == "candidate")
+    source._unchanged()  # Pure draft parsing performed no external work.
+    return draft

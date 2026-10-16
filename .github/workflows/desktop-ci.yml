@@ -72,12 +72,14 @@ jobs:
             test_metadata_images test_metadata_images_protocol test_release_version \
             test_workflow_edit_protocol test_workflow_recovery_engine \
             test_offline_preflight test_project_recovery test_macos_workflow_admission \
-            test_macos_android_ui_result test_local_release_intent
+            test_macos_android_ui_result test_local_release_intent test_local_release_source
           # Own process for the finite private-input/stdio failure fixtures;
           # explicit module names avoid the historical native/package suite.
           python -B -m unittest \
             unit.test_desktop_store_preflight \
             test_macos_store_consumer test_macos_store_paths \
+            test_macos_candidate_consumer test_macos_candidate_bootstrap \
+            test_macos_notary_submit_diagnostic \
             test_macos_launcher_packaging \
             test_macos_installed_staging.MacAndroidHelperPackagingData.test_fixed_workflow_signing_roles_use_original_inputs_and_identity
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6

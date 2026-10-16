@@ -48,6 +48,15 @@ mutations require separate owner approval.
    guided safe uninstall; approved Developer ID/Installer signatures, notarized
    and stapled distribution artifacts, installation and launch verification.
 
+### Current local-source preparation slice
+
+Owned Android-candidate preparation now observes the actual clean local Git
+source and holds the selected config/version and Git controls through its scope.
+It uses eight bounded Git calls, refuses executable filters and unsupported
+repository layouts, supports packed nested branches, and preserves the existing
+CI mutation guard. This is preparation DATA only: artifact handoff, durable
+intent, local authorization, Store execution and UI integration remain required.
+
 ## API and compatibility boundaries
 
 - UI calls typed Rust application commands and the existing core, not CLI-text
