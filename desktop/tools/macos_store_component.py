@@ -19,6 +19,7 @@ import zipfile
 REPOSITORY = 'Apdelrahman1911/mobile-release-kit'
 WORKFLOW = '.github/workflows/desktop-macos-store-runtime.yml'
 BRANCH = 'verify/desktop-macos-store-runtime'
+ASSEMBLY_BRANCH = 'task/ci-simplification-20261015'
 VERSIONS = {'ruby': '3.3.12', 'openssl': '3.5.8', 'libyaml': '0.2.5', 'deploymentTarget': '26.0'}
 LIMIT = 512 * 1024 * 1024
 ROOT = Path(__file__).resolve().parents[2]
@@ -77,10 +78,11 @@ def positive(value):
     return int(value)
 
 
-def artifact_name(arch, source, attempt):
+def artifact_name(arch, source, attempt, *, assembled=False):
     if arch not in ('arm64', 'x86_64') or type(attempt) is not int or attempt <= 0:
         raise ValueError('Invalid base architecture/attempt')
-    return f'mac-store-base-{arch}-{checked_source(source)}-{attempt}'
+    kind = 'runtime' if assembled else 'base'
+    return f'mac-store-{kind}-{arch}-{checked_source(source)}-{attempt}'
 
 
 def api(path):
@@ -92,22 +94,26 @@ def api(path):
     return json.loads(result.stdout)
 
 
-def validate_origin(run, workflow, artifact, jobs, *, run_id, source, arch, attempt):
-    """Whole-run failure is allowed: only the original base job must succeed."""
+def validate_origin(run, workflow, artifact, jobs, *, run_id, source, arch, attempt, assembled=False):
+    """Whole-run failure is allowed: the original selected producer must pass."""
+    admitted_ref = (run.get('head_branch') == BRANCH and run.get('event') in ('push', 'workflow_dispatch'))
+    if assembled and run.get('head_branch') == ASSEMBLY_BRANCH and run.get('event') == 'workflow_dispatch':
+        admitted_ref = True
     if (run.get('id') != run_id or run.get('repository', {}).get('full_name') != REPOSITORY
             or run.get('head_repository', {}).get('full_name') != REPOSITORY
-            or run.get('head_branch') != BRANCH or run.get('event') not in ('push', 'workflow_dispatch')
+            or not admitted_ref
             or run.get('head_sha') != checked_source(source)
             or workflow.get('path') != WORKFLOW or run.get('workflow_id') != workflow.get('id')):
         raise ValueError('Base workflow origin differs')
-    if (artifact.get('expired') is not False or artifact.get('name') != artifact_name(arch, source, attempt)
+    if (artifact.get('expired') is not False or artifact.get('name') != artifact_name(arch, source, attempt, assembled=assembled)
             or artifact.get('workflow_run', {}).get('id') != run_id
             or artifact.get('workflow_run', {}).get('head_sha') != source
             or type(artifact.get('size_in_bytes')) is not int
             or not 0 < artifact['size_in_bytes'] <= LIMIT + 1024 * 1024
             or not re.fullmatch(r'sha256:[0-9a-f]{64}', artifact.get('digest', ''))):
         raise ValueError('Base artifact binding differs')
-    selected = [job for job in jobs if job.get('name') == f'Native Ruby base ({arch})']
+    job_name = 'Assemble Store runtime' if assembled else 'Native Ruby base'
+    selected = [job for job in jobs if job.get('name') == f'{job_name} ({arch})']
     if (len(selected) != 1 or selected[0].get('run_id') != run_id
             or selected[0].get('run_attempt') != attempt
             or selected[0].get('head_sha') != source
@@ -140,11 +146,11 @@ def archive_base(base, output, source, arch, run_id, attempt):
     (output / 'base.json').write_text(json.dumps(metadata, sort_keys=True) + '\n')
 
 
-def extract_base(archive, output):
+def _extract_component(archive, output, root_name):
     # Inspect each archive entry once. data_filter can be called AGAIN for
     # directory permission fixups; duplicate accounting must not live in it.
     count = total = 0
-    names = set()
+    names, inventory = set(), {}
     output.mkdir(mode=0o700)
     with tarfile.open(archive, 'r:gz') as source:
         members = []
@@ -154,16 +160,88 @@ def extract_base(archive, output):
             name = member.name[:-1] if member.isdir() and member.name.endswith('/') else member.name
             parts = name.split('/')
             if (count > 100_000 or total > LIMIT or member.size < 0 or name in names
-                    or parts[0] != 'ruby-base' or any(part in ('', '.', '..') for part in parts)
+                    or parts[0] != root_name or any(part in ('', '.', '..') for part in parts)
                     or not (member.isdir() or member.isfile())):
                 raise ValueError('Nonordinary/oversize base archive')
             names.add(name)
+            # Include implicit parents: TAR need not contain directory headers.
+            # The full plan must have one spelling and type for every Mac name.
+            for end in range(1, len(parts) + 1):
+                path = '/'.join(parts[:end])
+                node = (path, end < len(parts) or member.isdir())
+                previous = inventory.setdefault(path.casefold(), node)
+                if previous != node or len(inventory) > 100_000:
+                    raise ValueError('Aliased/conflicting base archive path')
             members.append(member)
         source.extractall(output, members=members, filter=tarfile.data_filter)
-    base = output / 'ruby-base'
+    base = output / root_name
     if not base.is_dir() or not (base / 'bin/ruby').is_file():
         raise ValueError('Missing native Ruby base')
     return base
+
+
+def extract_base(archive, output):
+    return _extract_component(archive, output, 'ruby-base')
+
+
+def restore_runtime(output, run_id, source, arch, artifact_id):
+    """Restore one completed unsigned assembly; never execute or sign its code.
+
+    This is the existing Actions supplier boundary, not another release or
+    native-signature authority. There is deliberately no latest-artifact mode.
+    """
+    checked_source(source)
+    if any(type(value) is not int or value <= 0 for value in (run_id, artifact_id)):
+        raise ValueError('Expected exact original runtime run/artifact identifiers')
+    run = api(f'actions/runs/{run_id}')
+    workflow = api('actions/workflows/desktop-macos-store-runtime.yml')
+    artifact = api(f'actions/artifacts/{artifact_id}')
+    match = re.fullmatch(re.escape(f'mac-store-runtime-{arch}-{source}-') + r'([1-9][0-9]*)', artifact.get('name', ''))
+    if artifact.get('id') != artifact_id or match is None:
+        raise ValueError('Runtime artifact identity differs')
+    attempt = int(match[1])
+    jobs = api(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
+    if jobs.get('total_count', 101) > 100:
+        raise ValueError('Unexpected original assembly job roster')
+    validate_origin(run, workflow, artifact, jobs['jobs'], run_id=run_id, source=source,
+                    arch=arch, attempt=attempt, assembled=True)
+    output.mkdir(mode=0o700)
+    transport = output / 'artifact.zip'
+    with transport.open('xb') as stream:
+        subprocess.run(['gh', 'api', f'repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip'],
+                       stdout=stream, check=True, timeout=180)
+    if transport.stat().st_size != artifact['size_in_bytes']:
+        raise ValueError('Runtime artifact transport size differs')
+    with transport.open('rb') as stream:
+        if 'sha256:' + hashlib.file_digest(stream, 'sha256').hexdigest() != artifact['digest']:
+            raise ValueError('Runtime artifact service digest differs')
+    with zipfile.ZipFile(transport) as zipped:
+        entries = zipped.infolist()
+        if len(entries) != 2 or {row.filename for row in entries} != {'base-origin.json', 'store-runtime.tar.gz'}:
+            raise ValueError('Unexpected runtime artifact entries')
+        for row in entries:
+            maximum = 32 * 1024 if row.filename == 'base-origin.json' else LIMIT
+            if row.file_size <= 0 or row.file_size > maximum or row.flag_bits & 1:
+                raise ValueError('Oversize/encrypted runtime artifact')
+            with zipped.open(row) as original, (output / row.filename).open('xb') as target:
+                shutil.copyfileobj(original, target, 1024 * 1024)
+    base = json.loads((output / 'base-origin.json').read_bytes())
+    if (type(base) is not dict or type(base.get('schema')) is not int or base.get('schema') != 1 or base.get('arch') != arch
+            or base.get('versions') != VERSIONS or base.get('nativeInputs') != native_inputs()):
+        raise ValueError('Runtime original native inputs differ')
+    archive = output / 'store-runtime.tar.gz'
+    runtime = _extract_component(archive, output / 'extracted', 'runtime')
+    # Keep the original base provenance verbatim. The independent assembly
+    # source and service binding are descriptive reuse facts, not signing proof.
+    (output / 'runtime-origin.json').write_text(json.dumps({
+        'schema': 1, 'source': source, 'arch': arch, 'runId': run_id,
+        'runAttempt': attempt, 'artifactId': artifact_id,
+        'artifactDigest': artifact['digest'], 'signed': False,
+    }, sort_keys=True) + '\n')
+    transport.unlink()
+    archive.unlink()
+    print(f'Restored unsigned {arch} runtime artifact {artifact_id}, source {source}, attempt {attempt}.')
+    return runtime
 
 
 def restore(output, run_id, source, arch, artifact_id=None):
@@ -250,7 +328,10 @@ def main():
     get = sub.add_parser('restore')
     get.add_argument('output', type=Path)
     get.add_argument('--artifact-id', default='')
-    for item in (pack, get):
+    runtime = sub.add_parser('restore-runtime', help='Restore an exact successful unsigned assembly, without executing it')
+    runtime.add_argument('output', type=Path)
+    runtime.add_argument('--artifact-id', required=True)
+    for item in (pack, get, runtime):
         item.add_argument('--source', required=True)
         item.add_argument('--arch', choices=['arm64', 'x86_64'], required=True)
         item.add_argument('--run-id', required=True)
@@ -261,6 +342,9 @@ def main():
     elif args.command == 'archive':
         archive_base(args.base, args.output, checked_source(args.source), args.arch,
                      positive(args.run_id), positive(args.attempt))
+    elif args.command == 'restore-runtime':
+        restore_runtime(args.output, positive(args.run_id), checked_source(args.source), args.arch,
+                        positive(args.artifact_id))
     else:
         restore(args.output, positive(args.run_id), checked_source(args.source), args.arch,
                 positive(args.artifact_id) if args.artifact_id else None)

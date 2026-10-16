@@ -135,5 +135,115 @@ class StoreComponent(unittest.TestCase):
                     TOOL.restore(root / 'expired', 100, SOURCE, 'arm64', 300)
                 self.assertEqual(called.call_count, 3)  # Metadata refusal before download.
 
+    def runtime_origin(self, arch='arm64'):
+        run, workflow, artifact, jobs = self.origin()
+        run.update(head_branch=TOOL.ASSEMBLY_BRANCH, event='workflow_dispatch')
+        artifact['name'] = TOOL.artifact_name(arch, SOURCE, 1, assembled=True)
+        jobs[0]['name'] = f'Assemble Store runtime ({arch})'
+        return run, workflow, artifact, jobs
+
+    def test_runtime_requires_its_actual_successful_assembly_not_just_native_base(self):
+        for arch in ('arm64', 'x86_64'):
+            original = self.runtime_origin(arch)
+            TOOL.validate_origin(*original, run_id=100, source=SOURCE, arch=arch, attempt=1, assembled=True)
+            for index, key, value in [(0, 'event', 'pull_request'), (0, 'event', 'push'), (0, 'head_branch', 'main'),
+                    (0, 'head_repository', {'full_name': 'someone/fork'}),
+                    (1, 'path', 'other.yml'), (2, 'expired', True),
+                    (2, 'name', TOOL.artifact_name(arch, SOURCE, 1)),
+                    (2, 'workflow_run', {'id': 101, 'head_sha': SOURCE})]:
+                data = copy.deepcopy(original); data[index][key] = value
+                with self.subTest(arch=arch, key=key), self.assertRaises(ValueError):
+                    TOOL.validate_origin(*data, run_id=100, source=SOURCE, arch=arch, attempt=1, assembled=True)
+        base = self.origin()
+        base[0].update(head_branch=TOOL.ASSEMBLY_BRANCH, event='workflow_dispatch')
+        with self.assertRaises(ValueError):
+            TOOL.validate_origin(*base, run_id=100, source=SOURCE, arch='arm64', attempt=1)
+            for key, value in [('name', f'Native Ruby base ({arch})'), ('conclusion', 'failure'),
+                               ('status', 'in_progress'), ('run_attempt', 2), ('head_sha', 'f' * 40)]:
+                data = copy.deepcopy(original); data[3][0][key] = value
+                with self.subTest(arch=arch, key=key), self.assertRaises(ValueError):
+                    TOOL.validate_origin(*data, run_id=100, source=SOURCE, arch=arch, attempt=1, assembled=True)
+        with mock.patch.object(TOOL, 'api', side_effect=AssertionError('no discovery')):
+            for missing in (None, 0, True):
+                with self.assertRaises(ValueError): TOOL.restore_runtime(Path('/not-created'), 100, SOURCE, 'arm64', missing)
+
+    def test_restore_runtime_checks_service_bytes_and_preserves_distinct_original_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = io.BytesIO()
+            with tarfile.open(fileobj=archive, mode='w:gz') as target:
+                body = b'INERT Ruby fixture; never executed'
+                row = tarfile.TarInfo('runtime/bin/ruby'); row.size = len(body); row.mode = 0o755
+                target.addfile(row, io.BytesIO(body))
+            base = {'schema': 1, 'source': 'd' * 40, 'arch': 'arm64', 'runId': 90,
+                    'runAttempt': 1, 'versions': TOOL.VERSIONS, 'nativeInputs': TOOL.native_inputs()}
+            transport = io.BytesIO()
+            with zipfile.ZipFile(transport, 'w') as target:
+                target.writestr('store-runtime.tar.gz', archive.getvalue())
+                target.writestr('base-origin.json', json.dumps(base))
+            payload = transport.getvalue()
+            run, workflow, artifact, jobs = self.runtime_origin()
+            artifact.update(size_in_bytes=len(payload), digest='sha256:' + hashlib.sha256(payload).hexdigest())
+            responses = {'actions/runs/100': run, 'actions/workflows/desktop-macos-store-runtime.yml': workflow,
+                'actions/artifacts/300': artifact,
+                'actions/runs/100/attempts/1/jobs?per_page=100': {'total_count': 1, 'jobs': jobs}}
+            def download(argv, *, stdout, check, timeout):
+                self.assertEqual(argv, ['gh', 'api', f'repos/{TOOL.REPOSITORY}/actions/artifacts/300/zip'])
+                stdout.write(payload)
+            with mock.patch.object(TOOL, 'api', side_effect=lambda path: responses[path]), \
+                    mock.patch.object(TOOL.subprocess, 'run', side_effect=download) as called:
+                restored = TOOL.restore_runtime(root / 'restored', 100, SOURCE, 'arm64', 300)
+                self.assertEqual((restored / 'bin/ruby').read_bytes(), body)
+                self.assertEqual(json.loads((root / 'restored/base-origin.json').read_bytes()), base)
+                receipt = json.loads((root / 'restored/runtime-origin.json').read_bytes())
+                self.assertEqual((receipt['source'], receipt['runAttempt'], receipt['artifactId'], receipt['signed']),
+                                 (SOURCE, 1, 300, False))
+                self.assertFalse((root / 'restored/artifact.zip').exists())
+                with self.assertRaises(FileExistsError): TOOL.restore_runtime(root / 'restored', 100, SOURCE, 'arm64', 300)
+                with mock.patch.object(TOOL, 'native_inputs', return_value={'recipe': 'changed'}):
+                    with self.assertRaises(ValueError): TOOL.restore_runtime(root / 'changed-input', 100, SOURCE, 'arm64', 300)
+                self.assertFalse((root / 'changed-input/extracted').exists())
+                artifact['digest'] = 'sha256:' + 'f' * 64
+                with self.assertRaises(ValueError): TOOL.restore_runtime(root / 'bad-digest', 100, SOURCE, 'arm64', 300)
+                self.assertFalse((root / 'bad-digest/extracted').exists())
+                artifact['id'] = 301
+                with self.assertRaises(ValueError): TOOL.restore_runtime(root / 'wrong-id', 100, SOURCE, 'arm64', 300)
+                self.assertFalse((root / 'wrong-id').exists())
+                self.assertEqual(called.call_count, 3)
+
+    def test_runtime_archive_refuses_traversal_links_duplicates_and_mac_case_aliases(self):
+        for case in ('traversal', 'symlink', 'hardlink', 'duplicate', 'case', 'wrong-root', 'size',
+                     'implicit-case', 'implicit-file-first', 'implicit-file-last', 'explicit-case-parent'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); archive = root / 'runtime.tar.gz'
+                with tarfile.open(archive, 'w:gz') as target:
+                    name = 'runtime/bin/ruby'
+                    if case == 'traversal': name = 'runtime/../../escaped'
+                    if case == 'wrong-root': name = 'ruby-base/bin/ruby'
+                    row = tarfile.TarInfo(name); row.size = 1
+                    if case in ('symlink', 'hardlink'):
+                        row.type = tarfile.SYMTYPE if case == 'symlink' else tarfile.LNKTYPE
+                        row.linkname = '/outside'; row.size = 0
+                    target.addfile(row, io.BytesIO(b'x'))
+                    if case in ('duplicate', 'case'):
+                        if case == 'case': row.name = 'runtime/bin/Ruby'
+                        target.addfile(row, io.BytesIO(b'x'))
+                    if case.startswith('implicit-') or case == 'explicit-case-parent':
+                        paths = {
+                            'implicit-case': ('runtime/Lib/a', 'runtime/lib/b'),
+                            'implicit-file-first': ('runtime/lib', 'runtime/lib/b'),
+                            'implicit-file-last': ('runtime/lib/b', 'runtime/lib'),
+                            'explicit-case-parent': ('runtime/Lib/a', 'runtime/lib'),
+                        }[case]
+                        for index, name in enumerate(paths):
+                            row = tarfile.TarInfo(name); row.size = 1
+                            if case == 'explicit-case-parent' and index == 1:
+                                row.type = tarfile.DIRTYPE; row.size = 0
+                            target.addfile(row, io.BytesIO(b'x'))
+                with mock.patch.object(TOOL, 'LIMIT', 0 if case == 'size' else TOOL.LIMIT):
+                    with self.assertRaises((ValueError, tarfile.FilterError)):
+                        TOOL._extract_component(archive, root / 'output', 'runtime')
+                self.assertFalse((root / 'escaped').exists())
+
 
 if __name__ == '__main__': unittest.main()
