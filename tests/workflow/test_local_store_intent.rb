@@ -86,4 +86,27 @@ class LocalStoreIntentContractTest < Minitest::Test
     error=assert_raises(M::ContractError) { M.local_execution_authority(JSON.generate(value),intent_content:@raw,expected_intent_sha256:@digest,purpose:"execute") }
     assert_equal "Invalid local Store intent or authority DATA",error.message
   end
+  def test_local_attempt_key_matches_python_fixture_without_ci_dispatch_authority
+    args={intent_content:@raw, authority_content:JSON.generate(authority),expected_intent_sha256:@digest,purpose:"execute"}
+    expected="4ac8941d05da26dbe491363baeb9cf501558b5c49efd93b2dded2683c687128f"
+    assert_equal expected,M.local_execution_attempt_key(**args)
+    assert_equal expected,M.local_execution_attempt_key(**args.merge(authority_content:JSON.pretty_generate(authority)))
+    assert_equal @digest,JSON.parse(File.binread(File.join(ROOT,"local-execution-receipt-valid.json")))["operationIntentSha256"]
+    recovered=args.merge(authority_content:JSON.generate(authority("recover")),purpose:"recover")
+    refute_equal expected,M.local_execution_attempt_key(**recovered)
+    value=authority.merge("authorizationId"=>"66666666-6666-4666-8666-666666666666")
+    refute_equal expected,M.local_execution_attempt_key(**args.merge(authority_content:JSON.generate(value)))
+    assert_raises(M::ContractError) { M.execution_authority({"MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON"=>JSON.generate(authority)}) }
+  end
+  def test_local_attempt_key_refuses_invalid_originals_and_wrong_purpose
+    args={intent_content:@raw,authority_content:JSON.generate(authority),expected_intent_sha256:@digest,purpose:"execute"}
+    ci=JSON.parse(File.read(File.join(ROOT,"intent-candidate-valid.json")))
+    [{expected_intent_sha256:"f"*64},{intent_content:JSON.generate(ci)},
+     {authority_content:JSON.generate(ci["authorizedBy"])},{purpose:"prepare"},
+     {authority_content:JSON.generate(authority.merge("intentSha256"=>"f"*64))}].each do |change|
+      error=assert_raises(M::ContractError) { M.local_execution_attempt_key(**args.merge(change)) }
+      assert_equal "Invalid local Store receipt or attempt DATA",error.message
+    end
+  end
+
 end

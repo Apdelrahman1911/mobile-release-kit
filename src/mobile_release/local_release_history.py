@@ -40,6 +40,7 @@ class LocalHistoryRun:
         self.operation=self
         self.root=Path(request.native["projectRoot"])
         self.invocation=self.journal=self.bundle=None
+        self.prepared_readers=[];self.prepared_iterator=None;self.prepared_scan_state="new"
         self.primary=self.report=None
         self._ran=self._close_claimed=False
         self._request_bytes=wire.canonical([request.context,request.native])
@@ -62,6 +63,10 @@ class LocalHistoryRun:
         project=len(self.root.parts)
         home=len(Path(self.request.native["home"]).parts)
         wire.require(project+1+home+5+6 <=256)
+        if self.request.context["action"]=="review-prepared":
+            # Original project+journal plus independent fixed4-dir namespace,
+            # one leaf/iterator, inherited input and stdio. No tool child.
+            wire.require(2*project+home+18 <=256)
         wire.require(513*8192*8 + 32768 <=96*1024*1024)  # raw+closed-shape decoded/parser reserve.
     def _candidate_inputs(self, enrollment):
         action=self.request.context["action"]
@@ -116,12 +121,17 @@ class LocalHistoryRun:
                     wire.require(self.journal.head()==head)
                     candidate=None
                     if wire.candidate_action(self.request.context):
-                        candidate=self._candidate_inputs(enrollment)
+                        if self.request.context["action"]=="review-prepared":
+                            from .local_prepared_review import review_prepared
+                            candidate=review_prepared(self,enrollment)
+                        else:candidate=self._candidate_inputs(enrollment)
                         head=self.journal.head()
                     result={"schemaVersion":1,"scope":"local-release-history","enrolled":True,
                         "headSequence":head["sequence"],"history":self.journal.history_summary(),
                         "limitations":["no-store-authority","no-build-or-publishing","keychain-intact-rollback-boundary"]}
-                    if wire.candidate_action(self.request.context):result["candidateInputs"]=candidate
+                    if wire.candidate_action(self.request.context):
+                        key="preparedIntent" if self.request.context["action"]=="review-prepared" else "candidateInputs"
+                        result[key]=candidate
                     self.journal.close();self.checkpoint()
                     self.report=result
         except BaseException as error:
@@ -149,7 +159,9 @@ class LocalHistoryRun:
                                                for slot in (*p.directory.slots,p.meta)))
         bundle=(self.bundle is None or self.bundle.closed and self.bundle.iterator is None and self.bundle.scan_state in {"new","closed"}
                 and all(slot.state in {"UNACQUIRED","CLOSED"} for slot in self.bundle.reader.descriptors))
-        return self._close_claimed and journal and invocation and project and bundle
+        prepared=(self.prepared_iterator is None and self.prepared_scan_state in {"new","closed"}
+                  and all(p.closed() for p in self.prepared_readers))
+        return self._close_claimed and journal and invocation and project and bundle and prepared
     def terminal(self):
         v=self.guard.lifetime_ledger.verdict()
         if v.commands or v.profile_calls:self.guard._abort(wire.ProtocolError());v=self.guard.lifetime_ledger.verdict()

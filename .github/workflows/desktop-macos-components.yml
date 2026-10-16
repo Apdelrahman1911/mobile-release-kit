@@ -250,6 +250,40 @@ jobs:
           set -euo pipefail
           root=$(mktemp -d "$RUNNER_TEMP/mrk-app-check.XXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          # Stable cache paths are required for the Actions cache version. The
+          # fresh job owns these directories; do not adopt a checkout fixture.
+          cache="$GITHUB_WORKSPACE/desktop/.ci-component-cargo"
+          test ! -e "$cache" && test ! -L "$cache"
+          mkdir -m 700 "$cache"
+          printf 'cache_owned=true\n' >> "$GITHUB_OUTPUT"
+          mkdir -m 700 "$cache/registry" "$cache/git" "$cache/target"
+      - name: Identify the actual native SDK for compiler cache isolation
+        id: cache-profile
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          {
+            /usr/bin/xcodebuild -version
+            /usr/bin/xcrun --sdk macosx --show-sdk-version
+            /usr/bin/xcrun --sdk macosx --show-sdk-build-version
+            /usr/bin/xcrun --sdk macosx --show-sdk-path
+          } > "$WORK_ROOT/sdk-profile.txt"
+          sdk=$(shasum -a 256 "$WORK_ROOT/sdk-profile.txt" | awk '{print $1}')
+          printf 'sdk=%s\n' "$sdk" >> "$GITHUB_OUTPUT"
+      - name: Restore this architecture's credential-free compiler cache
+        id: cargo-cache
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        continue-on-error: true
+        with:
+          path: |
+            desktop/.ci-component-cargo/registry
+            desktop/.ci-component-cargo/git
+            desktop/.ci-component-cargo/target
+          # Exact SDK/Rust/profile/dependency key only. Source changes still
+          # run Cargo, including build.rs SOURCE/release env invalidation.
+          key: mac-components-v1-${{ matrix.arch }}-rust1.98.1-dev0-test0-inc0-macos26-${{ steps.cache-profile.outputs.sdk }}-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/build.rs', 'desktop/helpers/macos-desktop-image/Cargo.lock', 'desktop/helpers/macos-desktop-image/Cargo.toml', 'desktop/helpers/macos-desktop-image/build.rs', 'desktop/helpers/macos-vault-helper/Cargo.lock', 'desktop/helpers/macos-vault-helper/Cargo.toml', 'desktop/helpers/macos-vault-helper/build.rs', 'desktop/native/macos-installed-native/Cargo.lock', 'desktop/native/macos-installed-native/Cargo.toml', 'desktop/native/macos-installed-native/build.rs') }}
       - name: ${{ inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test two Mac Store contracts only' || 'Compile packaged app and test Mac Store contracts' }}
         shell: bash
         env:
@@ -260,9 +294,9 @@ jobs:
           APP_CHECKS: ${{ inputs.component }}
         run: |
           set -euo pipefail
-          export CARGO_HOME="$WORK_ROOT/cargo" RUSTUP_HOME="$WORK_ROOT/rustup"
-          export CARGO_TARGET_DIR="$WORK_ROOT/target" CARGO_INCREMENTAL=0
-          export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0
+          export CARGO_HOME="$GITHUB_WORKSPACE/desktop/.ci-component-cargo" RUSTUP_HOME="$WORK_ROOT/rustup"
+          export CARGO_TARGET_DIR="$CARGO_HOME/target" CARGO_INCREMENTAL=0
+          export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
           export npm_config_cache="$WORK_ROOT/npm-cache"
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
           if [[ "$APP_CHECKS" != app-contracts ]]; then
@@ -324,6 +358,9 @@ jobs:
               local_release_history_protocol::local_release_history_cleanup_tests::local_release_history_healthy_cleanup_does_not_manufacture_failure \
               saved_command_owner::local_history::native::tests::local_release_history_pre_admission_refusal_has_no_worker_to_join \
               installed_runtime::local_history_runtime_audit_requires_original_claim_and_cleanup_clock \
+              local_release_history_protocol::tests::local_release_history_prepared_review_is_exact_read_only_summary_not_prepare_finality \
+              local_release_history_protocol::tests::local_release_history_prepared_review_requires_selected_prepared_row_not_global_latest \
+              local_release_history_protocol::tests::local_release_history_prepared_review_keeps_original_phase_and_failure_finality \
               local_store_prepare_protocol::tests::local_prepare_requires_exact_candidate_consent_not_access_or_execute \
               local_store_prepare_protocol::tests::local_prepare_decoder_requires_original_order_and_final_checkpoint \
               local_store_prepare_protocol::tests::local_prepare_success_binds_candidate_version_ledger_and_known_closes \
@@ -339,7 +376,7 @@ jobs:
               installed_runtime::store_runtime::tests::store_cleanup_points_ignore_work_stop_but_keep_original_expiry_and_failures \
               installed_runtime::store_runtime::tests::store_slots_do_not_lend_uninspected_or_settled_sources \
               --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
-            grep -Eq '^test result: ok\. 34 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 37 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
             exit 0
           fi
           # The same Mac Store implementation is in the headless library graph.
@@ -352,11 +389,49 @@ jobs:
             installed_runtime::store_runtime::tests::store_slots_do_not_lend_uninspected_or_settled_sources \
             --exact --test-threads=1 | tee "$WORK_ROOT/store-contract-tests.log"
           grep -Eq '^test result: ok\. 2 passed; 0 failed; 0 ignored;' "$WORK_ROOT/store-contract-tests.log"
+      - name: Bound successful compiler cache publication
+        id: cache-size
+        if: success() && steps.cargo-cache.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Bound logical file bytes (including sparse files), with per-entry
+          # archive overhead. Oversized output does not seed a cache; it does
+          # not undo successful compiler/tests. No source/artifact qualification.
+          python3 - <<'PY'
+          import os, stat
+          from pathlib import Path
+          root = Path("desktop/.ci-component-cargo")
+          size = 0
+          def unreadable(error):
+              raise error
+          for name in ("registry", "git", "target"):
+              for parent, dirs, files in os.walk(root / name, followlinks=False, onerror=unreadable):
+                  for leaf in dirs + files:
+                      value = (Path(parent) / leaf).lstat()
+                      assert stat.S_ISREG(value.st_mode) or stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode)
+                      size += value.st_size + 1024
+                      if size > 4 * 1024**3:
+                          raise SystemExit(0)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("save=true\n")
+          PY
+      - name: Save only successful bounded compiler outputs
+        if: success() && steps.cache-size.outputs.save == 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        continue-on-error: true
+        with:
+          path: |
+            desktop/.ci-component-cargo/registry
+            desktop/.ci-component-cargo/git
+            desktop/.ci-component-cargo/target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
       - name: Remove only this job's app compiler and frontend outputs
         if: always() && steps.work.outputs.root != ''
         shell: bash
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
+          CARGO_CACHE_OWNED: ${{ steps.work.outputs.cache_owned }}
         run: |
           python3 - <<'PY'
           import os, shutil
@@ -364,7 +439,8 @@ jobs:
           work = Path(os.environ["WORK_ROOT"])
           assert work.parent == Path(os.environ["RUNNER_TEMP"])
           assert work.name.startswith("mrk-app-check.") and not work.is_symlink()
-          for path in (work, Path("desktop/node_modules"), Path("desktop/dist")):
+          cache = (Path("desktop/.ci-component-cargo"),) if os.environ["CARGO_CACHE_OWNED"] == "true" else ()
+          for path in (work, *cache, Path("desktop/node_modules"), Path("desktop/dist")):
               if path.exists():
                   assert path.is_dir() and not path.is_symlink()
                   shutil.rmtree(path)

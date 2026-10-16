@@ -287,6 +287,21 @@ module MobileReleaseKit
     raise ContractError, "Invalid local Store intent or authority DATA"
   end
 
+  # Fixed local DATA refusal-key preparation only. No current marker/Store
+  # owner calls this; it cannot prove original custody or a previous dispatch.
+  # Full platform intent/receipt policy still belongs to the shared Python body.
+  def self.local_execution_attempt_key(intent_content:, authority_content:, expected_intent_sha256:, purpose:)
+    authority = local_execution_authority(authority_content, intent_content: intent_content,
+      expected_intent_sha256: expected_intent_sha256, purpose: purpose)
+    raw = canonical_json(authority).b
+    local_need(raw.bytesize <= 8 * 1024)
+    lane = "android_internal_upload".b
+    Digest::SHA256.hexdigest("mrk-local-store-attempt-v1\0".b + [expected_intent_sha256].pack("H*") +
+      [raw.bytesize].pack("N") + raw + [lane.bytesize].pack("C") + lane)
+  rescue ContractError, JSON::ParserError, EncodingError, ArgumentError, TypeError, KeyError
+    raise ContractError, "Invalid local Store receipt or attempt DATA"
+  end
+
   def self.execution_authority(environ)
     raw = required_environment(environ, "MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON", strip: true)
     value = strict_json(raw, label: "Execution authority")

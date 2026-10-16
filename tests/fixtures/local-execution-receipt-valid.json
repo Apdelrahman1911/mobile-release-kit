@@ -1,0 +1,95 @@
+{
+  "project": {
+    "projectLocator": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "projectBinding": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "projectId": "11111111-1111-4111-8111-111111111111",
+    "keyId": "22222222-2222-4222-8222-222222222222",
+    "keyRevision": 1
+  },
+  "operationId": "33333333-3333-4333-8333-333333333333",
+  "candidateSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "preparedBy": {
+    "schemaVersion": 1,
+    "origin": "local-desktop",
+    "purpose": "prepare",
+    "project": {
+      "projectLocator": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "projectBinding": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "projectId": "11111111-1111-4111-8111-111111111111",
+      "keyId": "22222222-2222-4222-8222-222222222222",
+      "keyRevision": 1
+    },
+    "operationId": "33333333-3333-4333-8333-333333333333",
+    "candidateSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "authorizationId": "44444444-4444-4444-8444-444444444444",
+    "source": {
+      "commit": "2222222222222222222222222222222222222222",
+      "tree": "3333333333333333333333333333333333333333",
+      "ref": "refs/heads/main"
+    },
+    "assignment": {
+      "kind": "google-service-account",
+      "recordId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "expectedRevision": 1,
+      "contextRevision": 2
+    },
+    "confirmationSha256": "d1f54ec25d8a1c16e3f84ecc23d45e73ffbefced5ef1f3334a20b82b1f97a013",
+    "intentSha256": null
+  },
+  "documentType": "local-store-execution-receipt",
+  "schemaVersion": 1,
+  "origin": "local-desktop",
+  "operationIntentSha256": "ec42c954de8998ded7906d00ddfccaa0f401ffd4c471491b4acec6e898105a39",
+  "executedBy": {
+    "schemaVersion": 1,
+    "origin": "local-desktop",
+    "purpose": "execute",
+    "project": {
+      "projectLocator": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "projectBinding": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "projectId": "11111111-1111-4111-8111-111111111111",
+      "keyId": "22222222-2222-4222-8222-222222222222",
+      "keyRevision": 1
+    },
+    "operationId": "33333333-3333-4333-8333-333333333333",
+    "candidateSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "authorizationId": "55555555-5555-4555-8555-555555555555",
+    "source": {
+      "commit": "2222222222222222222222222222222222222222",
+      "tree": "3333333333333333333333333333333333333333",
+      "ref": "refs/heads/main"
+    },
+    "assignment": {
+      "kind": "google-service-account",
+      "recordId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "expectedRevision": 1,
+      "contextRevision": 2
+    },
+    "confirmationSha256": "d1f54ec25d8a1c16e3f84ecc23d45e73ffbefced5ef1f3334a20b82b1f97a013",
+    "intentSha256": "ec42c954de8998ded7906d00ddfccaa0f401ffd4c471491b4acec6e898105a39"
+  },
+  "operation": "android_internal_upload",
+  "platform": "android",
+  "appIdentity": "com.example.reader",
+  "marketingVersion": "1.2.3",
+  "buildNumber": 42,
+  "observedAt": "2026-10-16T00:00:00Z",
+  "result": "accepted",
+  "state": "available-to-testers",
+  "destinationTrack": "internal",
+  "releaseStatus": "completed",
+  "versionCode": 42,
+  "storeEditId": "readback-edit",
+  "storeState": {
+    "canonicalization": "mrk-play-track-state-v2",
+    "mode": "mutation",
+    "readbackEditId": "readback-edit",
+    "mutationEditId": "mutation-edit",
+    "destinationBeforeSha256": "ada011349b750526e1d4a7ac17913384d14fea9c0d67f2c49e4ddb7ad801475d",
+    "destinationExpectedSha256": "56be7fd32daa036c2619ff1c101b4b15aef3c427bf01e29eb134df8e3875811e",
+    "destinationCommittedSha256": "56be7fd32daa036c2619ff1c101b4b15aef3c427bf01e29eb134df8e3875811e",
+    "unrelatedBeforeSha256": "d29df4c391084898c9e1235849f1114ed9b174a335a72299a80fa7d1a2822a36",
+    "unrelatedCommittedSha256": "d29df4c391084898c9e1235849f1114ed9b174a335a72299a80fa7d1a2822a36",
+    "targetReleaseSha256": "5963887b276cde9c2924e2a31e043f645fea098407f678c326e50163d550a693"
+  }
+}

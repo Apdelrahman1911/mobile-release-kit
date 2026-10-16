@@ -547,7 +547,7 @@ impl Reason {
 pub(crate) fn candidate_id(value:&str)->bool{
     token(value) && value.as_bytes()[12]==b'4' && matches!(value.as_bytes()[16],b'8'|b'9'|b'a'|b'b')
 }
-fn candidate_uuid(value:&str)->Option<String>{
+pub(crate) fn candidate_uuid(value:&str)->Option<String>{
     candidate_id(value).then(||format!("{}-{}-{}-{}-{}",&value[..8],&value[8..12],&value[12..16],&value[16..20],&value[20..]))
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]

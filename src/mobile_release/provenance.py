@@ -2370,6 +2370,64 @@ def validate_store_receipt(
     )
 
 
+def _validate_android_store_receipt_body(
+    receipt: Mapping[str, Any], *, platform_config: Mapping[str, Any],
+    release: ReleaseVersion, stage: str, outcome: str, intent: Mapping[str, Any],
+) -> None:
+    """Shared platform DATA only; callers must validate their exact authority envelope."""
+    for field in ("destinationTrack", "releaseStatus", "versionCode"):
+        if field not in receipt:
+            raise ValidationError(f"Android Store receipt is missing {field}")
+    if isinstance(receipt["versionCode"], bool) or receipt["versionCode"] != release.build:
+        raise ValidationError("Play versionCode does not match the committed build number")
+    if not receipt.get("storeEditId") and not receipt.get("releaseId"):
+        raise ValidationError("Android Store receipt lacks authoritative edit/release readback")
+    for field in ("storeEditId", "releaseId"):
+        if field in receipt and (
+            not isinstance(receipt[field], str)
+            or not receipt[field].strip()
+            or len(receipt[field]) > 255
+        ):
+            raise ValidationError(f"Android Store receipt {field} is invalid")
+    _validate_play_store_state(
+        receipt.get("storeState"),
+        stage=stage,
+        outcome=outcome,
+        store_edit_id=receipt.get("storeEditId"),
+    )
+    _validate_play_state_intent(receipt["storeState"], intent)
+    expected_track = {
+        "candidate": "internal",
+        "external-testing": platform_config.get("externalTrack", {}).get("name"),
+        "production-submit": "production",
+    }[stage]
+    if receipt["destinationTrack"] != expected_track:
+        raise ValidationError("Play destination track does not match configured lifecycle stage")
+    if stage == "external-testing" and receipt.get("sourceTrack") != "internal":
+        raise ValidationError("External Play promotion must read from internal")
+    if (
+        stage == "external-testing"
+        and platform_config.get("externalTrack", {}).get("kind") == "closed"
+        and receipt.get("closedTesterAssignmentVerified") is not True
+    ):
+        raise ValidationError(
+            "Closed Play promotion lacks an API-verified nonempty tester-group assignment"
+        )
+    if stage == "production-submit" and receipt.get("sourceTrack") != platform_config.get(
+        "externalTrack", {}
+    ).get("name"):
+        raise ValidationError("Production Play draft must promote the configured external track")
+    if stage == "production-submit":
+        if receipt["releaseStatus"] != "draft":
+            raise ValidationError("Play production preparation must remain draft")
+        if receipt["state"] != "draft":
+            raise ValidationError("Play production readback state must explicitly be draft")
+    elif receipt["releaseStatus"] != "completed":
+        raise ValidationError("Play testing releases must be completed on their testing track")
+    elif receipt["state"] != "available-to-testers":
+        raise ValidationError("Play testing readback must prove availability to testers")
+
+
 def _validate_store_receipt_document(
     receipt: Mapping[str, Any], *, platform_config: Mapping[str, Any],
     release: ReleaseVersion, stage: str, platform: str,
@@ -2497,57 +2555,8 @@ def _validate_store_receipt_document(
     _validate_timestamp(receipt["observedAt"], "Store receipt observedAt")
 
     if platform == "android":
-        for field in ("destinationTrack", "releaseStatus", "versionCode"):
-            if field not in receipt:
-                raise ValidationError(f"Android Store receipt is missing {field}")
-        if isinstance(receipt["versionCode"], bool) or receipt["versionCode"] != release.build:
-            raise ValidationError("Play versionCode does not match the committed build number")
-        if not receipt.get("storeEditId") and not receipt.get("releaseId"):
-            raise ValidationError("Android Store receipt lacks authoritative edit/release readback")
-        for field in ("storeEditId", "releaseId"):
-            if field in receipt and (
-                not isinstance(receipt[field], str)
-                or not receipt[field].strip()
-                or len(receipt[field]) > 255
-            ):
-                raise ValidationError(f"Android Store receipt {field} is invalid")
-        _validate_play_store_state(
-            receipt.get("storeState"),
-            stage=stage,
-            outcome=outcome,
-            store_edit_id=receipt.get("storeEditId"),
-        )
-        _validate_play_state_intent(receipt["storeState"], intent)
-        expected_track = {
-            "candidate": "internal",
-            "external-testing": platform_config.get("externalTrack", {}).get("name"),
-            "production-submit": "production",
-        }[stage]
-        if receipt["destinationTrack"] != expected_track:
-            raise ValidationError("Play destination track does not match configured lifecycle stage")
-        if stage == "external-testing" and receipt.get("sourceTrack") != "internal":
-            raise ValidationError("External Play promotion must read from internal")
-        if (
-            stage == "external-testing"
-            and platform_config.get("externalTrack", {}).get("kind") == "closed"
-            and receipt.get("closedTesterAssignmentVerified") is not True
-        ):
-            raise ValidationError(
-                "Closed Play promotion lacks an API-verified nonempty tester-group assignment"
-            )
-        if stage == "production-submit" and receipt.get("sourceTrack") != platform_config.get(
-            "externalTrack", {}
-        ).get("name"):
-            raise ValidationError("Production Play draft must promote the configured external track")
-        if stage == "production-submit":
-            if receipt["releaseStatus"] != "draft":
-                raise ValidationError("Play production preparation must remain draft")
-            if receipt["state"] != "draft":
-                raise ValidationError("Play production readback state must explicitly be draft")
-        elif receipt["releaseStatus"] != "completed":
-            raise ValidationError("Play testing releases must be completed on their testing track")
-        elif receipt["state"] != "available-to-testers":
-            raise ValidationError("Play testing readback must prove availability to testers")
+        _validate_android_store_receipt_body(receipt, platform_config=platform_config,
+            release=release, stage=stage, outcome=outcome, intent=intent)
     else:
         for field in ("appStoreAppId", "buildResourceId", "processingState"):
             if (

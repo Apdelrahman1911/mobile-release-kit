@@ -1,14 +1,18 @@
+import type { LocalPreparedIntent } from './localStorePrepareTypes.ts';
 import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
-export type LocalHistoryAction = 'enroll' | 'verify' | 'review-inputs' | 'abandon-inputs';
+export type LocalHistoryAction = 'enroll' | 'verify' | 'review-inputs' | 'abandon-inputs' | 'review-prepared';
 export type PrepareLocalHistory = { projectId: string; executionMode: 'local' } & (
   { action: 'enroll' | 'verify'; candidateOperationId?: never } |
-  { action: 'review-inputs' | 'abandon-inputs'; candidateOperationId: string }
+  { action: 'review-inputs' | 'abandon-inputs' | 'review-prepared'; candidateOperationId: string }
 );
 export interface LocalCandidateInputs {
   operationId: string; candidateSha256: string; sourceCommit: string; sourceTree: string;
   applicationId: string; version: { name: string; build: number };
   files: { fileName: 'app-release.aab' | 'store-metadata.zip' | 'validation-report.json'; bytes: number; sha256: string }[];
   observation: 'current-bundle-only'; priorCreateFinality: 'not-established';
+}
+export interface LocalPreparedIntentReview extends LocalPreparedIntent {
+  observation: 'current-prepared-files-only'; priorPrepareFinality: 'not-established';
 }
 export interface LocalHistoryIdentity { operationId: string; ownerGeneration: string }
 export type LocalHistoryReason = 'none'|'cancelled'|'context-changed'|'document-lost'|'shutdown'|'timed-out'|'protocol-error'|'runtime-unavailable'|'intent-expired'|'stale-intent'|'saved-source-changed'|'saved-source-invalid'|'credentials-unavailable'|'query-prerequisites'|'command-incomplete'|'cleanup-unknown'|'journal-unavailable'|'enrollment-exists'|'recovery-required'|'project-busy';
@@ -18,6 +22,7 @@ export interface LocalHistoryResult {
   history: { operationId: string; phase: LocalJournalPhase; recoveryRequired: boolean }[];
   limitations: ['no-store-authority', 'no-build-or-publishing', 'keychain-intact-rollback-boundary'];
   candidateInputs?: LocalCandidateInputs | null;
+  preparedIntent?: LocalPreparedIntentReview;
 }
 export interface LocalHistoryOperation extends LocalHistoryIdentity {
   context: PrepareLocalHistory; phase: OfflinePreflightPhase; intentUsable: boolean;

@@ -1,3 +1,4 @@
+import type { LocalPreparedIntent } from './localStorePrepareTypes.ts';
 import { copyBoundedComparisonData, sameOfflineData } from './offlinePreflightProtocol.ts';
 import type { ApiError } from './types.ts';
 import type { LocalHistoryStatus, PrepareLocalHistory } from './localReleaseHistoryTypes.ts';
@@ -19,7 +20,7 @@ const contextKeys=['projectId','executionMode','action'];
 const uuid=(v:unknown):v is string=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v);
 const hex=(v:unknown,n:number)=>typeof v==='string'&&new RegExp(`^[0-9a-f]{${n}}$`).test(v);
 const bounded=(v:unknown,max:number)=>typeof v==='number'&&Number.isSafeInteger(v)&&v>=1&&v<=max;
-export const candidateHistoryAction=(action:unknown)=>action==='review-inputs'||action==='abandon-inputs';
+export const candidateHistoryAction=(action:unknown)=>action==='review-inputs'||action==='abandon-inputs'||action==='review-prepared';
 export function localHistoryConsent(request:PrepareLocalHistory){return candidateHistoryAction(request.action)?LOCAL_CANDIDATE_CONSENT:LOCAL_HISTORY_CONSENT;}
 // Predicate for already copied bounded DATA; both callers own descriptor-safe copying.
 export function candidateInputs(v:unknown,operationId:unknown):boolean {
@@ -28,6 +29,19 @@ export function candidateInputs(v:unknown,operationId:unknown):boolean {
  if(!Array.isArray(v.files)||v.files.length!==3)return false;
  const names=['app-release.aab','store-metadata.zip','validation-report.json'],bounds=[1073741824,536870912,65536];
  return v.files.every((file,index)=>keys(file,['fileName','bytes','sha256'])&&file.fileName===names[index]&&bounded(file.bytes,bounds[index]!)&&hex(file.sha256,64));
+}
+const preparedLimits = ['non-publishing', 'prepare-not-execute', 'temporary-edit-may-expire',
+  'current-bundle-not-historical-finality', 'saved-inputs-not-atomic'];
+// Predicate for already copied bounded DATA; no native/file/Store authority.
+export function preparedIntentSummary(i: unknown, operationId: unknown): i is LocalPreparedIntent {
+  if (!keys(i, ['operationId', 'candidateSha256', 'intentSha256', 'storePreconditionSha256', 'sourceCommit', 'sourceTree', 'applicationId', 'version', 'destination', 'observedAt', 'limitations']) ||
+    !uuid(i.operationId) || i.operationId !== operationId || !hex(i.candidateSha256, 64) || !hex(i.intentSha256, 64) || !hex(i.storePreconditionSha256, 64) || !hex(i.sourceCommit, 40) || !hex(i.sourceTree, 40) ||
+    typeof i.applicationId !== 'string' || i.applicationId.length > 255 || !/^([A-Za-z][A-Za-z0-9_]*\.)+[A-Za-z][A-Za-z0-9_]*$/.test(i.applicationId) ||
+    !keys(i.version, ['name', 'build']) || typeof i.version.name !== 'string' || !/^[0-9A-Za-z.+-]{1,64}$/.test(i.version.name) ||
+    !counter(i.version.build) || i.version.build < 1 || i.version.build > 2100000000 ||
+    !sameOfflineData(i.destination, { channel: 'internal', releaseStatus: 'completed' }) || !sameOfflineData(i.limitations, preparedLimits) ||
+    typeof i.observedAt !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(i.observedAt) || !Number.isFinite(Date.parse(i.observedAt))) return false;
+  return new Date(i.observedAt).toISOString() === i.observedAt.replace('Z', '.000Z');
 }
 function request(v:unknown):boolean{
  const candidate=object(v)&&candidateHistoryAction(v.action);
@@ -53,7 +67,7 @@ export function parseLocalHistoryStatus(input:unknown):LocalHistoryStatus|null{
  else if(op.phase==='unknown'){if(op.outcome!=='unknown'||op.reason!=='cleanup-unknown'||op.intentUsable||op.result!==null)return null;}
  else if(op.outcome!==null||op.result!==null||op.intentUsable&&op.phase!=='awaiting-consent')return null;
  if(op.result!==null){const r=op.result;
-  if(op.phase!=='terminal'||op.outcome!=='complete'||op.reason!=='none'||!keys(r,['schemaVersion','scope','enrolled','headSequence','history','limitations',...(candidate?['candidateInputs']:[])])||r.schemaVersion!==1||r.scope!=='local-release-history'||r.enrolled!==true||!counter(r.headSequence)||r.headSequence<1||r.headSequence>513||!sameOfflineData(r.limitations,limits)||!Array.isArray(r.history)||r.history.length>64||r.history.length>r.headSequence-1)return null;
+  if(op.phase!=='terminal'||op.outcome!=='complete'||op.reason!=='none'||!keys(r,['schemaVersion','scope','enrolled','headSequence','history','limitations',...(context.action==='review-prepared'?['preparedIntent']:candidate?['candidateInputs']:[])])||r.schemaVersion!==1||r.scope!=='local-release-history'||r.enrolled!==true||!counter(r.headSequence)||r.headSequence<1||r.headSequence>513||!sameOfflineData(r.limitations,limits)||!Array.isArray(r.history)||r.history.length>64||r.history.length>r.headSequence-1)return null;
   const ids=new Set<string>();
   for(const row of r.history){
    if(!keys(row,['operationId','phase','recoveryRequired'])||typeof row.operationId!=='string'||!/^([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.test(row.operationId)||ids.has(row.operationId)||!member(journalPhases,row.phase)||row.recoveryRequired!==!['settled-success','settled-failure'].includes(row.phase as string))return null;
@@ -62,7 +76,12 @@ export function parseLocalHistoryStatus(input:unknown):LocalHistoryStatus|null{
   if(candidate){
    const selected=r.history.find(row=>row.operationId===context.candidateOperationId);
    if(!selected)return null;
-   if(context.action==='abandon-inputs'){
+   if(context.action==='review-prepared'){
+    const prepared=r.preparedIntent;
+    if((r.headSequence as number)<5||selected.phase!=='prepared'||!object(prepared)||prepared.observation!=='current-prepared-files-only'||prepared.priorPrepareFinality!=='not-established')return null;
+    const {observation:_,priorPrepareFinality:__,...summary}=prepared;
+    if(!preparedIntentSummary(summary,context.candidateOperationId))return null;
+   }else if(context.action==='abandon-inputs'){
     if(selected.phase!=='settled-failure'||r.history.at(-1)!==selected||r.candidateInputs!==null)return null;
    }else if(selected.phase==='inputs-ready'){
     if(!candidateInputs(r.candidateInputs,context.candidateOperationId))return null;

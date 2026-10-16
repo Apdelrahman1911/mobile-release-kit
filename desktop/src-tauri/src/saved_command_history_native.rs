@@ -252,9 +252,9 @@ fn helper_step(action:history_wire::Action,index:usize)->Option<Step>{
     match(action,index){
         (Action::Enroll,0)=>Some(Step::KeyAbsent),(Action::Enroll,1)=>Some(Step::GenesisAbsent),
         (Action::Enroll,2)=>Some(Step::KeyAdd),(Action::Enroll,3)=>Some(Step::AnchorAdd),
-        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs,0)=>Some(Step::KeyRead),
-        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs,1)=>Some(Step::AnchorRead),
-        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs,2)=>Some(Step::NextAbsent),
+        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared,0)=>Some(Step::KeyRead),
+        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared,1)=>Some(Step::AnchorRead),
+        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared,2)=>Some(Step::NextAbsent),
         (Action::AbandonInputs,3)=>Some(Step::AnchorAdd),_=>None,
     }
 }
@@ -404,7 +404,7 @@ pub(super) async fn write_phases(_inner:&Arc<Inner>,owner:&Arc<Session>,writer:&
                 helper(owner,Step::AnchorAdd,1,Some(digest(&head.sha256)?)).await?;
                 write_reply(owner,writer,"checkpoint-settled",step,serde_json::json!({}),false).await?;
             },
-            (history_wire::Action::Verify|history_wire::Action::ReviewInputs|history_wire::Action::AbandonInputs,2,history_wire::Event::HistoryHead(head))=>{
+            (history_wire::Action::Verify|history_wire::Action::ReviewInputs|history_wire::Action::AbandonInputs|history_wire::Action::ReviewPrepared,2,history_wire::Event::HistoryHead(head))=>{
                 if context.action==history_wire::Action::AbandonInputs&&head.sequence==513{return Err(BridgeError::protocol());}
                 helper(owner,Step::AnchorRead,head.sequence,Some(digest(&head.sha256)?)).await?;
                 if head.sequence<513{helper(owner,Step::NextAbsent,head.sequence+1,None).await?;}
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn local_release_history_candidate_helper_rosters_never_enroll(){
         use history_wire::Action;
-        for action in [Action::Verify,Action::ReviewInputs,Action::AbandonInputs]{
+        for action in [Action::Verify,Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared]{
             assert_eq!(helper_step(action,0),Some(Step::KeyRead));
             assert_eq!(helper_step(action,1),Some(Step::AnchorRead));
             assert_eq!(helper_step(action,2),Some(Step::NextAbsent));
@@ -650,7 +650,7 @@ pub(super) fn prepare_request(owner:&Session,runtime:&VerifiedRuntime)->Result<V
     let mut nonce=[0;16];getrandom::fill(&mut nonce).map_err(|_|BridgeError::protocol())?;
     let native=prepare_wire::Native{home:source.home().map_err(|_|owner.domain.unavailable())?.into(),lease_fd:root.descriptor,
         nonce:hex(&nonce),work_end_ns:clock.endpoint(owner.clocks.work).ok_or_else(BridgeError::protocol)?,
-        hard_end_ns:clock.endpoint(owner.clocks.finality).ok_or_else(BridgeError::protocol)?,authorization_id:uuid::Uuid::new_v4().to_string(),
+        hard_end_ns:clock.endpoint(owner.clocks.finality).ok_or_else(BridgeError::protocol)?,authorization_id:android_wire::candidate_uuid(&super::super::nonce_selected(owner.domain,true)?).ok_or_else(BridgeError::protocol)?,
         // These values were required by this actual Book's signed manifest
         // and protected-app admission, before source acquisition above.
         tooling_version:crate::runtime::CORE_VERSION,tooling_commit:option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT").ok_or_else(BridgeError::protocol)?};
@@ -668,6 +668,10 @@ mod prepare_tests{
         assert_eq!((0..6).map(prepare_helper_step).collect::<Vec<_>>(),vec![Some(Step::KeyRead),Some(Step::AnchorRead),Some(Step::NextAbsent),Some(Step::AnchorAdd),Some(Step::AnchorAdd),None]);
         assert_eq!(prepare_helper_step(usize::MAX),None);
         let state=State::new();assert!(state.untouched());
+        let first=super::super::super::nonce_selected(SavedCommandDomain::LocalStorePrepare,true).unwrap();
+        let second=super::super::super::nonce_selected(SavedCommandDomain::LocalStorePrepare,true).unwrap();
+        assert_ne!(first,second);
+        for fresh in [first,second]{assert!(crate::local_release_history_protocol::journal_uuid(&android_wire::candidate_uuid(&fresh).unwrap()));}
         // Untouched closure is not a five-helper completion witness.
         assert!(state.attempts.is_empty());
     }

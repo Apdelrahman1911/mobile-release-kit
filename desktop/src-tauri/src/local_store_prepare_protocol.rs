@@ -33,7 +33,7 @@ pub(crate) use crate::local_release_history_protocol::Head;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Operation { LocalStorePrepare }
-fn uuid(v:&str)->bool { uuid::Uuid::parse_str(v).is_ok_and(|u|u.get_version_num()==4 && u.get_variant()==uuid::Variant::RFC4122 && u.to_string()==v) }
+fn uuid(v:&str)->bool { crate::local_release_history_protocol::journal_uuid(v) }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Context {
@@ -151,26 +151,38 @@ struct Version {name:String,build:u32}
 struct Destination {channel:String,release_status:String}
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
-struct PreparedIntent {operation_id:String,candidate_sha256:String,intent_sha256:String,store_precondition_sha256:String,
+pub(crate) struct PreparedIntent {operation_id:String,candidate_sha256:String,intent_sha256:String,store_precondition_sha256:String,
     source_commit:String,source_tree:String,application_id:String,version:Version,destination:Destination,observed_at:String,limitations:Vec<Limitation>}
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct ResultData {schema_version:u32,scope:String,head_sequence:u32,prepared_intent:PreparedIntent}
-impl ResultData {
-    fn valid(&self,c:&Context)->bool {
-        let p=&self.prepared_intent;
+// Shared bounded summary DATA, not a Store/runtime/Document grant. Review uses
+// this same grammar without manufacturing an earlier Prepare Context/finality.
+impl PreparedIntent {
+    pub(crate) fn valid_for(&self,operation:&str)->bool {
+        let p=self;
         let hex=|v:&str,n|v.len()==n&&v.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b));
         let app=p.application_id.len()<=255&&p.application_id.split('.').count()>=2&&p.application_id.split('.').all(|v|
             v.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)&&v.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'));
         let date=p.observed_at.as_bytes();
         let timestamp=date.len()==20&&date.iter().enumerate().all(|(i,b)|match i{4|7=>*b==b'-',10=>*b==b'T',13|16=>*b==b':',19=>*b==b'Z',_=>b.is_ascii_digit()});
-        self.schema_version==1&&self.scope=="local-android-store-prepare"&&(1..=513).contains(&self.head_sequence)
-            &&p.operation_id==c.candidate_operation_id&&uuid(&p.operation_id)&&p.candidate_sha256==c.candidate_sha256
+        p.operation_id==operation&&uuid(operation)&&sha(&p.candidate_sha256)
             &&sha(&p.intent_sha256)&&sha(&p.store_precondition_sha256)&&hex(&p.source_commit,40)&&hex(&p.source_tree,40)
-            &&app&&p.version.name==c.saved_version.name&&p.version.build==c.saved_version.build
+            &&app&&!p.version.name.is_empty()&&p.version.name.len()<=64
+            &&p.version.name.bytes().all(|b|b.is_ascii_alphanumeric()||b".+-".contains(&b))
+            &&(1..=2_100_000_000).contains(&p.version.build)
             &&p.destination.channel=="internal"&&p.destination.release_status=="completed"&&timestamp&&p.limitations==LIMITATIONS
     }
 }
+impl ResultData {
+    fn valid(&self,c:&Context)->bool {
+        self.schema_version==1&&self.scope=="local-android-store-prepare"&&(1..=513).contains(&self.head_sequence)
+            &&self.prepared_intent.valid_for(&c.candidate_operation_id)
+            &&self.prepared_intent.candidate_sha256==c.candidate_sha256
+            &&self.prepared_intent.version.name==c.saved_version.name&&self.prepared_intent.version.build==c.saved_version.build
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum CoreStop { None, Cancelled, TimedOut }
@@ -311,6 +323,12 @@ pub(crate) mod tests {
         assert!(start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":CONSENT})).is_ok());
         assert!(raw_request(b"{\"projectId\":\"a\",\"projectId\":\"b\"}").is_err());
         assert!(crate::local_store_preflight_protocol::prepare(&input()).is_err());
+        // Same canonical UUID4 grammar as the authenticated journal, not a permissive parser.
+        for id in ["", "12345678123442348234123456789abc", "12345678-1234-1234-8234-123456789abc",
+            "12345678-1234-4234-7234-123456789abc", "12345678-1234-4234-8234-123456789ABC",
+            "12345678-1234-4234-8234-123456789abé"] {
+            let mut bad=input();bad["candidateOperationId"]=json!(id);assert!(prepare(&bad).is_err());
+        }
     }
     #[test]
     fn local_prepare_decoder_requires_original_order_and_final_checkpoint(){

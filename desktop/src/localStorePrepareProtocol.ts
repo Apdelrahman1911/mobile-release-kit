@@ -1,3 +1,4 @@
+import { preparedIntentSummary } from './localReleaseHistoryProtocol.ts';
 import { copyBoundedComparisonData, sameOfflineData } from './offlinePreflightProtocol.ts';
 import { parseLocalStoreRequest } from './localStorePreflightProtocol.ts';
 import type { ApiError } from './types.ts';
@@ -6,8 +7,6 @@ import type { LocalStorePrepareStatus, PrepareLocalStoreIntent } from './localSt
 export const STORE_PREPARE_EVENT = 'local-store-prepare-state-changed';
 export const STORE_PREPARE_CONSENT = 'local-android-store-prepare-v1' as const;
 export type StorePrepareCommand = 'prepare_local_store_prepare' | 'start_local_store_prepare' | 'local_store_prepare_status' | 'cancel_local_store_prepare';
-const limits = ['non-publishing', 'prepare-not-execute', 'temporary-edit-may-expire',
-  'current-bundle-not-historical-finality', 'saved-inputs-not-atomic'];
 const phases = ['awaiting-consent', 'starting', 'running', 'stopping', 'terminal', 'unknown'];
 const outcomes = ['complete', 'refused', 'cancelled', 'timed-out', 'failed', 'unknown'];
 const reasons = ['none', 'cancelled', 'context-changed', 'document-lost', 'shutdown', 'timed-out', 'protocol-error', 'runtime-unavailable', 'intent-expired', 'stale-intent', 'saved-source-changed', 'saved-source-invalid', 'credentials-unavailable', 'query-prerequisites', 'command-incomplete', 'cleanup-unknown', 'prepare-unavailable'];
@@ -56,12 +55,8 @@ export function parseLocalStorePrepareStatus(input: unknown): LocalStorePrepareS
       const r = op.result;
       if (op.phase !== 'terminal' || op.outcome !== 'complete' || op.reason !== 'none' || !keys(r, ['schemaVersion', 'scope', 'headSequence', 'preparedIntent']) || r.schemaVersion !== 1 || r.scope !== 'local-android-store-prepare' || !counter(r.headSequence) || r.headSequence < 1 || r.headSequence > 513) return null;
       const i = r.preparedIntent;
-      if (!keys(i, ['operationId', 'candidateSha256', 'intentSha256', 'storePreconditionSha256', 'sourceCommit', 'sourceTree', 'applicationId', 'version', 'destination', 'observedAt', 'limitations']) ||
-        i.operationId !== prepared.candidateOperationId || i.candidateSha256 !== prepared.candidateSha256 || !hex(i.intentSha256, 64) || !hex(i.storePreconditionSha256, 64) || !hex(i.sourceCommit, 40) || !hex(i.sourceTree, 40) ||
-        typeof i.applicationId !== 'string' || i.applicationId.length > 255 || !/^([A-Za-z][A-Za-z0-9_]*\.)+[A-Za-z][A-Za-z0-9_]*$/.test(i.applicationId) ||
-        !sameOfflineData(i.version, { name: prepared.savedVersion.name, build: prepared.savedVersion.build }) ||
-        !sameOfflineData(i.destination, { channel: 'internal', releaseStatus: 'completed' }) || !sameOfflineData(i.limitations, limits) ||
-        typeof i.observedAt !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(i.observedAt) || new Date(i.observedAt).toISOString() !== i.observedAt.replace('Z', '.000Z')) return null;
+      if (!preparedIntentSummary(i, prepared.candidateOperationId) || i.candidateSha256 !== prepared.candidateSha256 ||
+        !sameOfflineData(i.version, { name: prepared.savedVersion.name, build: prepared.savedVersion.build })) return null;
     } else if (op.outcome === 'complete') return null;
     return v as unknown as LocalStorePrepareStatus;
   } catch { return null; }

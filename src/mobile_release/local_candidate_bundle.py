@@ -65,7 +65,7 @@ class CandidateBundleReview:
     def __init__(self, owner, *, operation_id, enrollment, pending, candidate_sha256):
         from .local_release_history import LocalHistoryRun
         from .local_store_prepare import LocalStorePrepareRun
-        admitted=(type(owner) is LocalHistoryRun and owner.request.context["action"]=="review-inputs"
+        admitted=(type(owner) is LocalHistoryRun and owner.request.context["action"] in {"review-inputs","review-prepared"}
                   or type(owner) is LocalStorePrepareRun and owner.request.context["operation"]=="local-store-prepare")
         need(admitted and owner.bundle is None and not owner._close_claimed
              and owner.request.context["candidateOperationId"]==operation_id

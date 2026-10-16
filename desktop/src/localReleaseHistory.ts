@@ -32,11 +32,11 @@ export class LocalReleaseHistoryController {
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
  setAction=(action:LocalHistoryAction)=>{if(action!==this.action||this.candidateOperationId!==undefined){this.action=action;this.candidateOperationId=undefined;this.candidateProjectId=null;this.syncProject();}};
- selectCandidate=(action:'review-inputs'|'abandon-inputs',operationId:string):boolean=>{
+ selectCandidate=(action:'review-inputs'|'abandon-inputs'|'review-prepared',operationId:string):boolean=>{
   const op=this.state.status?.operation;
   if(localHistoryOwnerReason(this.state)||this.state.historical||!op?.result||op.context.projectId!==this.source.projectId())return false;
   const row=op.result.history.find(row=>row.operationId===operationId);
-  if(!row||!['inputs-pending','inputs-ready','settled-failure'].includes(row.phase)||action==='abandon-inputs'&&(row.phase==='settled-failure'||op.result.history.at(-1)!==row))return false;
+  if(!row||(action==='review-prepared'?row.phase!=='prepared':!['inputs-pending','inputs-ready','settled-failure'].includes(row.phase))||action==='abandon-inputs'&&(row.phase==='settled-failure'||op.result.history.at(-1)!==row))return false;
   this.action=action;this.candidateOperationId=operationId;this.candidateProjectId=op.context.projectId;this.syncProject();return this.state.request?.candidateOperationId===operationId&&this.state.request.action===action;
  };
  setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started)this.invalidate();};
@@ -67,6 +67,7 @@ export class LocalReleaseHistoryController {
   }catch{this.fail();}finally{this.update({pending:false});}}
  acknowledge(value:boolean){if(this.state.consentUntil!==null&&this.now()<this.state.consentUntil)this.update({acknowledged:value});}
  async start(){this.syncProject();const a=this.attempt,api=this.api,op=this.state.status?.operation;
+  if(a?.started)return; // A queued second click cannot cancel the running original.
   if(!a||!api||a.retired||a.started||!a.id||a.epoch!==this.epoch||!sameId(a.id,op)||!op?.intentUsable||!this.state.acknowledged||this.state.consentUntil===null||this.now()>=this.state.consentUntil||this.source.otherOperationReason()){this.invalidate();return;}
   a.started=true;this.clearTimer();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});
   try{this.receive(await api.startLocalReleaseHistory({...a.id,consentVersion:localHistoryConsent(a.request)}));}catch{this.fail();}finally{this.update({pending:false});}}

@@ -141,8 +141,16 @@ mod tests {
         assert!(consent.matches_context(&context));
         context.candidate_operation_id=Some("12345678-1234-4234-9234-123456789abd".into());
         assert!(!consent.matches_context(&context));
-        context.candidate_operation_id=consent.candidate_operation_id.clone();context.action=wire::Action::AbandonInputs;
+        context.candidate_operation_id=consent.candidate_operation_id.clone();
+        for action in [wire::Action::AbandonInputs,wire::Action::ReviewPrepared]{
+            context.action=action;assert!(!consent.matches_context(&context));
+        }
+        consent.action=wire::Action::ReviewPrepared;
+        assert!(consent.matches_context(&context));
+        context.candidate_operation_id=Some("12345678-1234-4234-9234-123456789abd".into());
         assert!(!consent.matches_context(&context));
+        context.candidate_operation_id=consent.candidate_operation_id.clone();
+        assert!(!consent.current(&context,7,&root)); // Comparison DATA cannot mint a Document grant.
         consent.action=wire::Action::Enroll;consent.candidate_operation_id=None;
         assert!(!consent.current(&wire::Context{project_id:"registered-project".into(),execution_mode:wire::ExecutionMode::Local,action:wire::Action::Enroll,candidate_operation_id:None},7,&root)); // No synthetic Document grant.
         let context=Arc::new(NativeContext{revision:1,project_id:"unrelated-assets".into(),project:root.clone(),registry_generation:7,
