@@ -406,3 +406,40 @@ same installation. It is **not upgrade continuity**: the engineering installer
 does not implement occupied-install update/repair/uninstall. Original POSIX exit
 and all-worker finality remain unavailable to XCTest UI observation; native
 owners, helper/provider and filesystem qualification remain separate obligations.
+
+## Current-source local Android candidate and history
+
+`testSyntheticProjectAndroidCandidateInputs` is a separate, explicit one-case
+selection (`--normal-android-candidate-inputs-test`, then the matching summary).
+It requires the current candidate ref, source, target and same-job authenticated
+synthetic Android input handoff. The old signed-build selector retains its old
+ref and behavior. No older carrier or source relabel is admitted.
+
+The existing outer phase owner creates one tiny public Git project from the
+bundled Android fixture, with its authenticated disposable public upload
+certificate and local Store preparation setting already saved. Five fixed owned
+Git calls run before XCTest; no Swift process launcher or user repository edit
+is added. The runner derives and publishes `android-candidate-fixture.json` and
+supplies its fixed environment key itself. Fixture/Git originals remain held
+through the test. This comparison handoff is not native project registration,
+consent, enrollment or release authority.
+
+The real picker registers that project. The app enrolls local history through
+its actual Keychain owner, selects the existing Android tool service and
+memory-only synthetic signing assignment, then creates one retained candidate
+using the explicit checkbox and exact consent. The same operation is verified,
+reviewed, separately abandoned and verified again (journal checkpoints1/3/4).
+The four retained files and this project's four journal records are checked
+through their original descriptors; Review does not establish earlier Create
+finality, and Abandon preserves bytes. No Store request is made. Never repair a
+Keychain prompt, reset enrollment, delete history or repeat a failed operation.
+
+The existing900-second case and1020-second outer test cap remain. Normal Quit,
+original owner/gate closure, xcodebuild0 and exactly1passed/0failed/0skipped are
+required. Only the closed `android-candidate-inputs.facts.json` and finite
+`android-candidate-inputs.failure.json` may be exported: raw stdout, screenshots
+and xcresult contents stay private because secure-field typing may be captured.
+The existing filesystem DATA method additionally checks the candidate-only
+four-file roster, original replacement/missing/body refusal and preservation.
+Those DATA checks do not exercise the application or Keychain. Installed
+positive qualification is pending until this exact current-source case passes.

@@ -47,7 +47,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 '24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5',550,773497465,465051546),
                ('x86_64-apple-darwin','x86_64','X64',20434472,
                 '0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb',548,750044172,459778775))
-        env={'GITHUB_SHA':'a'*40,'GITHUB_RUN_ID':'42','GITHUB_RUN_ATTEMPT':'1'}
+        env={'GITHUB_SHA':'a'*40,'GITHUB_RUN_ID':'42','GITHUB_RUN_ATTEMPT':'1','GITHUB_REF':helper.UI_REF}
         for target,machine,arch,size,sha,jdk_count,tool_bytes,archive_bytes in fixed:
             with self.subTest(target=target):
                 selected=helper.ui_selection(target)
@@ -80,6 +80,18 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                         with patch.object(helper,'read',side_effect=original):
                             return helper.ui_acquisition_receipt(Path('/inert'),object(),target=target)
                     self.assertEqual(admit(receipt),receipt)
+                    # Admission is caller/context-selected, not borrowed from
+                    # an adjacent receipt for a different workflow ref.
+                    for ref in helper.UI_REFS:
+                        with patch.dict(helper.os.environ, {'GITHUB_REF': ref}):
+                            self.assertEqual(helper.ui_reference(helper.os.environ), ref)
+                            matching = dict(receipt, ref=ref)
+                            self.assertEqual(admit(matching), matching)
+                            foreign = next(value for value in helper.UI_REFS if value != ref)
+                            with self.assertRaises(helper.Refused): admit(dict(matching, ref=foreign))
+                    for ref in ('refs/heads/main', 'refs/heads/verify/desktop-macos-preview', '', None, True):
+                        with self.assertRaises(helper.Refused): helper.ui_reference({'GITHUB_REF': ref})
+
                     other=helper.ui_selection('x86_64-apple-darwin' if target==helper.UI_TARGET else helper.UI_TARGET)
                     for key,value in (('target','unsupported'),('catalogueSha256',other[3][1]),('archives',other[4]),
                                       ('archiveBytes',archive_bytes+1),('protectedRegistration',True),('uiQualification',True),
@@ -1028,8 +1040,8 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                     umask = [0o022]; masks = []; private = None; result = None; caught = None
                     primary = KeyboardInterrupt('inert-original-key-command-unknown')
                     environment = {'GITHUB_REPOSITORY': 'Apdelrahman1911/mobile-release-kit', 'GITHUB_EVENT_NAME': 'push',
-                        'GITHUB_REF': helper.UI_REF, 'GITHUB_SHA': sha, 'GITHUB_WORKFLOW_SHA': sha,
-                        'GITHUB_WORKFLOW_REF': 'Apdelrahman1911/mobile-release-kit/' + helper.UI_WORKFLOW + '@' + helper.UI_REF,
+                        'GITHUB_REF': helper.UI_REFS[1] if failure is None else helper.UI_REF, 'GITHUB_SHA': sha, 'GITHUB_WORKFLOW_SHA': sha,
+                        'GITHUB_WORKFLOW_REF': 'Apdelrahman1911/mobile-release-kit/' + helper.UI_WORKFLOW + '@' + (helper.UI_REFS[1] if failure is None else helper.UI_REF),
                         'GITHUB_WORKSPACE': str(ROOT), 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
                         'RUNNER_ENVIRONMENT': 'github-hosted', 'RUNNER_OS': 'macOS', 'RUNNER_ARCH': 'ARM64',
                         'MRK_MACOS_TARGET': helper.UI_TARGET, 'MRK_ANDROID_PREPARATION_WORK': str(work)}
@@ -1076,12 +1088,14 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                             self.assertEqual((cwd, output_limit), (ROOT, 16384)); self.assertLessEqual(timeout, 900)
                             self.assertEqual(environ['MRK_ANDROID_ACQUISITION_CHILD'], '1')
                             self.assertEqual(environ['GITHUB_RUN_ID'], '123')
+                            self.assertEqual(environ['GITHUB_REF'], environment['GITHUB_REF'])
+                            self.assertEqual(environ['GITHUB_WORKFLOW_REF'], environment['GITHUB_WORKFLOW_REF'])
                             self.assertTrue(all(key not in environ for key in helper.UI_PASSWORD_ENV))
                             for relative in helper.UI_ROOTS.values(): (stage / 'tools' / relative).mkdir(parents=True, mode=0o755, exist_ok=True)
                             value = {'schemaVersion': 1, 'scope': 'four-supplier-sources-no-native-execution',
                                 'status': 'closed-awaiting-original-caller', 'sourceCommit': sha, 'target': helper.UI_TARGET,
                                 'runId': '124' if failure == 'child-binding' else '123', 'runAttempt': '2',
-                                'workflow': helper.UI_WORKFLOW, 'ref': helper.UI_REF, 'archives': helper.ARCHIVES[:4],
+                                'workflow': helper.UI_WORKFLOW, 'ref': environ['GITHUB_REF'], 'archives': helper.ARCHIVES[:4],
                                 'archiveBytes': 465051546, 'catalogueSha256': helper.UI_CATALOGUE_PIN[1],
                                 'toolRosterSha256': tools[0], 'sdkMetadata': helper.SDK_METADATA, 'toolBytes': tools[1],
                                 'readBytes': 100, 'files': tools[2], 'entries': 6, 'directoryCount': tools[3],
@@ -1136,6 +1150,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                         handoff = json.loads(handoff_path.read_bytes()); status_raw = status_path.read_bytes()
                         status = json.loads(status_raw)
                         self.assertEqual((handoff['runId'], handoff['runAttempt'], handoff['parentReturncodeRequired']), ('123', '2', 0))
+                        self.assertEqual(handoff['ref'], helper.UI_REFS[1])
                         self.assertEqual(set(handoff['files']), {'upload.jks', 'upload.der', 'scalars.json'})
                         self.assertEqual(set(handoff['roots']), {'jdk', 'sdk', 'gradle'})
                         self.assertEqual(len(handoff['rootFacts']), 10); self.assertEqual(len(handoff['credentialDirectoryFacts']), 10)

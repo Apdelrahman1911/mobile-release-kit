@@ -392,15 +392,16 @@ class RunnerProducts:
         return False
 
 
-def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, ios_pending=False, removal_case=None, credential_segment=None):
+def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, android_candidate=False, ios_unsigned=False, ios_pending=False, removal_case=None, credential_segment=None):
     machine, _ = normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60)), "engineering-fixed-test-selection")
     need(type(output_data) is bool and (not output_data or (not engineering and target == ARM_TARGET
          and tuple(methods) == (OUTPUT_DATA_METHOD,) and allowance == 60)), "output-data-fixed-test-selection")
+    need(type(android_candidate) is bool and (not android_candidate or android_positive), "candidate-fixed-selection")
     need(type(android_positive) is bool and (not android_positive or (not engineering and not output_data
-         and tuple(methods) == (CLASS + ANDROID_METHOD,) and allowance == 900
-         and Path(result).name == ANDROID_RESULT)), "android-signed-fixed-test-selection")
+         and tuple(methods) == (CLASS + (ANDROID_CANDIDATE_METHOD if android_candidate else ANDROID_METHOD),) and allowance == 900
+         and Path(result).name == (ANDROID_CANDIDATE_RESULT if android_candidate else ANDROID_RESULT))), "android-signed-fixed-test-selection")
     need(type(ios_unsigned) is bool and (not ios_unsigned or (not engineering and not output_data and not android_positive
          and tuple(methods) == (CLASS + IOS_UNSIGNED_METHOD,) and allowance == 900 and Path(result).name == IOS_UNSIGNED_RESULT)),
          "ios-unsigned-fixed-test-selection")
@@ -431,15 +432,16 @@ def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TAR
         "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
 
 
-def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, ios_pending=False, removal_case=None, credential_segment=None):
+def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, android_candidate=False, ios_unsigned=False, ios_pending=False, removal_case=None, credential_segment=None):
     normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60 and timeout == 180)), "engineering-fixed-test-owner")
     need(type(output_data) is bool and (not output_data or (not engineering and target == ARM_TARGET
          and tuple(methods) == (OUTPUT_DATA_METHOD,) and allowance == 60 and timeout == 120)), "output-data-fixed-test-owner")
+    need(type(android_candidate) is bool and (not android_candidate or android_positive), "candidate-fixed-selection")
     need(type(android_positive) is bool and (not android_positive or (not engineering and not output_data
-         and tuple(methods) == (CLASS + ANDROID_METHOD,) and allowance == 900
-         and timeout == 1020 and Path(result).name == ANDROID_RESULT)), "android-signed-fixed-test-owner")
+         and tuple(methods) == (CLASS + (ANDROID_CANDIDATE_METHOD if android_candidate else ANDROID_METHOD),) and allowance == 900
+         and timeout == 1020 and Path(result).name == (ANDROID_CANDIDATE_RESULT if android_candidate else ANDROID_RESULT))), "android-signed-fixed-test-owner")
     need(type(ios_unsigned) is bool and (not ios_unsigned or (not engineering and not output_data and not android_positive
          and tuple(methods) == (CLASS + IOS_UNSIGNED_METHOD,) and allowance == 900 and timeout == 1020
          and Path(result).name == IOS_UNSIGNED_RESULT)), "ios-unsigned-fixed-test-owner")
@@ -463,7 +465,7 @@ def run_admitted_test(call, derived, result, methods, allowance, timeout, *, tar
                    if credential_segment is not None else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, removal_case=removal_case)
                    if removal_case is not None else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, ios_pending=True)
                    if ios_pending else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, ios_unsigned=True)
-                   if ios_unsigned else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, android_positive=True)
+                   if ios_unsigned else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, android_positive=True, android_candidate=android_candidate)
                    if android_positive else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, engineering=True)
                    if engineering else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, output_data=True)
                    if output_data else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target))
@@ -733,6 +735,11 @@ def normal_request(arguments, temporary):
         value = dict(phase="test" if testing else "summary", derived=normal / "DerivedData", result=normal / basename,
             methods=(CLASS + method,) if testing else (), allowance=300 if testing else None,
             timeout=420 if testing else 30, phaseSeconds=585 if testing else 90, credentialUpdate=segment)
+    elif arguments in (["--normal-android-candidate-inputs-test"], ["--normal-android-candidate-inputs-summary"]):
+        testing = arguments[0].endswith("-test")
+        value = dict(phase="test" if testing else "summary", derived=normal / "DerivedData", result=normal / ANDROID_CANDIDATE_RESULT,
+            methods=(CLASS + ANDROID_CANDIDATE_METHOD,) if testing else (), allowance=900 if testing else None,
+            timeout=1020 if testing else 30, phaseSeconds=1245 if testing else 90, androidPositive=True, androidCandidate=True)
     elif arguments in (["--normal-android-signed-build-test"], ["--normal-android-signed-build-summary"]):
         testing = arguments[0].endswith("-test")
         value = dict(phase="test" if testing else "summary", derived=normal / "DerivedData", result=normal / ANDROID_RESULT,
@@ -1061,8 +1068,15 @@ def normal_source_state(phase, source):
 # product authority, vendor acceptance, source mutation or private-file deletion.
 ANDROID_RESULT = "android-signed-build-test.xcresult"
 ANDROID_METHOD = "testSyntheticProjectAndroidSignedBuild"
+ANDROID_CANDIDATE_METHOD = "testSyntheticProjectAndroidCandidateInputs"
+ANDROID_CANDIDATE_RESULT = "android-candidate-inputs-test.xcresult"
+ANDROID_CANDIDATE_ENV = "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_CANDIDATE_FIXTURE"
+ANDROID_CANDIDATE_DATA = "desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-android-positive-v1.json"
+ANDROID_CANDIDATE_XML = "desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/android-positive-verification-v1.xml"
+ANDROID_CANDIDATE_TEMP = Path("/private/tmp")
 ANDROID_WORKFLOW = ".github/workflows/desktop-macos-installed.yml"
 ANDROID_REF = "refs/heads/verify/desktop-macos-installed"
+ANDROID_CANDIDATE_REF = "refs/heads/verify/desktop-macos-candidate"
 ANDROID_INPUT_ENV = "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_INPUT_FIXTURE"
 ANDROID_RUN_ENV = "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_RUN_ID"
 ANDROID_ATTEMPT_ENV = "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"
@@ -1077,9 +1091,10 @@ def android_catalogue(target):
             "0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb")
 
 
-def android_input_document(body, *, source, run, attempt, root, target=ARM_TARGET):
+def android_input_document(body, *, source, run, attempt, root, target=ARM_TARGET, expected_ref=ANDROID_REF):
     """Closed PRIVATE DATA only; actual producer0 remains a separate owner gate."""
     need(type(body) is bytes and 0 < len(body) <= 16384, "android-input-document-bound")
+    need(type(expected_ref) is str and expected_ref in (ANDROID_REF, ANDROID_CANDIDATE_REF), "android-input-trusted-ref")
     catalogue = android_catalogue(target)
     value = document(body)
     need(set(value) == {"schemaVersion", "scope", "sourceCommit", "target", "runId", "runAttempt",
@@ -1091,7 +1106,7 @@ def android_input_document(body, *, source, run, attempt, root, target=ARM_TARGE
          and value["scope"] == "one-owned-android-ui-inputs" and value["sourceCommit"] == source
          and type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source)
          and value["target"] == target and value["workflow"] == ANDROID_WORKFLOW
-         and value["ref"] == ANDROID_REF and value["root"] == str(root)
+         and value["ref"] == expected_ref and value["root"] == str(root)
          and value["runId"] == run and value["runAttempt"] == attempt
          and all(type(x) is str and re.fullmatch(r"[1-9][0-9]{0,19}", x) for x in (run, attempt))
          and value["sourceCatalogueSha256"] == catalogue
@@ -1152,8 +1167,10 @@ def android_input_scalars(body):
 
 class AndroidPrivateInputs:
     """At most14 retained directories+4 leaves; no vendor traversal or execution."""
-    def __init__(self, phase, source, normal, *, target=ARM_TARGET):
+    def __init__(self, phase, source, normal, *, target=ARM_TARGET, expected_ref=ANDROID_REF):
         normal_target_data(target)
+        need(type(expected_ref) is str and expected_ref in (ANDROID_REF, ANDROID_CANDIDATE_REF), "android-input-trusted-ref")
+        self.expected_ref = expected_ref
         self.target = target
         self.phase, self.source, self.normal = phase, source, Path(normal)
         self.root = self.normal / "android-inputs"
@@ -1202,7 +1219,7 @@ class AndroidPrivateInputs:
             normal = fd
             body, _, _ = self.read(normal, "android-input-fixture.json", 16384)
             value = android_input_document(body, source=self.source,
-                run=self.phase.environment[ANDROID_RUN_ENV], attempt=self.phase.environment[ANDROID_ATTEMPT_ENV], root=self.root, target=self.target)
+                run=self.phase.environment[ANDROID_RUN_ENV], attempt=self.phase.environment[ANDROID_ATTEMPT_ENV], root=self.root, target=self.target, expected_ref=self.expected_ref)
             root, root_facts = self.adopt_directory(normal, "android-inputs", full=True, private=True)
             credentials, credential_facts = self.adopt_directory(root, "credentials", full=True, private=True)
             need(decimal(root_facts) == value["rootFacts"] and decimal(credential_facts) == value["credentialDirectoryFacts"],
@@ -1297,6 +1314,202 @@ class AndroidPrivateInputs:
         return False
 
 
+class AndroidCandidateFixture:
+    """One new public project, retained across one XCTest; never a product grant.
+
+    Git runs only through the containing original phase owner. No Swift child,
+    existing repository, private material, journal or Keychain is manufactured.
+    """
+    MAX_ENTRIES, MAX_FDS, MAX_BYTES = 144, 144, 2 << 20
+    def __init__(self, phase, source, normal, inputs, target):
+        self.phase, self.source, self.normal, self.inputs, self.target = phase, source, Path(normal), inputs, target
+        self.fds, self.dirs, self.files = [], {}, {}
+        self.root, self.closed, self.failed, self.public = None, False, False, None
+    def _adopt(self, fd):
+        if fd >= 0:
+            self.fds.append(fd)  # Original custody before the first fallible check.
+        need(fd >= 0 and len(self.fds) <= self.MAX_FDS, "candidate-fixture-original-budget")
+        return fd
+    def _open(self, name, flags, *, parent=None):
+        self.phase.clock.check()
+        need(len(self.fds) < self.MAX_FDS, "candidate-fixture-original-budget")
+        return self._adopt(os.open(name, flags | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent))
+    def _read(self, parent, name, maximum):
+        self.phase.clock.check()
+        fd = self._open(name, os.O_RDONLY | os.O_NONBLOCK, parent=parent)
+        before = saved_version_facts(os.fstat(fd))
+        need(stat.S_ISREG(before[2]) and before[5] == 1 and before[9] == 0
+             and before[6] <= maximum, "candidate-fixture-file-shape")
+        raw, _, digest = original_body(fd, maximum, collect=True)
+        need(before == saved_version_facts(os.fstat(fd)) == saved_version_facts(os.stat(name, dir_fd=parent, follow_symlinks=False)),
+             "candidate-fixture-file-original")
+        return (fd, parent, name, before, raw, digest)
+    def _sources(self):
+        import base64
+        values = []
+        for path, limit in ((ANDROID_CANDIDATE_DATA, 65536), (ANDROID_CANDIDATE_XML, 131072)):
+            parent = self._open((self.phase.root / path).parent, os.O_RDONLY | os.O_DIRECTORY)
+            values.append(self._read(parent, Path(path).name, limit))
+        self.sources = values
+        document_data = document(values[0][4])
+        need(set(document_data) == {"schemaVersion", "files", "stages"} and document_data["schemaVersion"] == 1
+             and document_data["stages"] == {} and len(document_data["files"]) == 16, "candidate-fixture-source-data")
+        self.bodies = {name: base64.b64decode(raw, validate=True) for name, raw in document_data["files"].items()}
+        self.bodies["project/gradle/verification-metadata.xml"] = values[1][4]
+        need(all(type(name) is str and name.startswith("project/") and not any(p in ("", ".", "..", ".git") for p in name.split("/"))
+                 and len(raw) <= 131072 for name, raw in self.bodies.items())
+             and sum(map(len, self.bodies.values())) <= 256 << 10, "candidate-fixture-public-roster")
+        config = document(self.bodies["project/release/mobile-release.json"])
+        need(config["source"] == {"candidateBranch":"main", "productionBranch":"main"}
+             and "uploadCertificateSha256" not in config["android"], "candidate-fixture-original-policy")
+        config["source"]["localStoreEnabled"] = True
+        config["android"]["uploadCertificateSha256"] = self.inputs.public_certificate
+        self.bodies["project/release/mobile-release.json"] = encoded(config) + b"\n"
+    def _new(self, parent, name, body):
+        fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent)
+        try:
+            os.fchmod(fd, 0o600)
+            offset = 0
+            while offset < len(body):
+                count = os.write(fd, body[offset:]); need(count > 0, "candidate-fixture-write"); offset += count
+            os.fsync(fd)
+            need(original_body(fd, max(1, len(body)), collect=True)[0] == body, "candidate-fixture-write-readback")
+        finally: os.close(fd)
+        os.fsync(parent)
+    def _git(self):
+        # No include/system/global/template, hook, prompt, signing or network input.
+        original_env = self.phase.environment
+        self.phase.environment = dict(original_env, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+            GIT_CONFIG_SYSTEM="/dev/null", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0",
+            GIT_AUTHOR_NAME="MRK synthetic UI", GIT_AUTHOR_EMAIL="ui-fixture@example.invalid",
+            GIT_COMMITTER_NAME="MRK synthetic UI", GIT_COMMITTER_EMAIL="ui-fixture@example.invalid",
+            GIT_AUTHOR_DATE="2026-01-01T00:00:00Z", GIT_COMMITTER_DATE="2026-01-01T00:00:00Z")
+        prefix = ["/usr/bin/git", "--literal-pathspecs", "-C", str(self.root / "project"),
+            "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "gc.auto=0",
+            "-c", "commit.gpgSign=false", "-c", "core.attributesFile=/dev/null"]
+        commands = (("init", ["init", "-q", "--initial-branch=main", "--template=" + str(self.root / "template")]),
+            ("add", ["add", "--", *sorted(name[8:] for name in self.bodies)]),
+            ("commit", ["commit", "-q", "--no-gpg-sign", "-m", "Owned synthetic Android candidate fixture"]),
+            ("identity", ["rev-parse", "HEAD", "HEAD^{tree}"]),
+            ("clean", ["status", "--porcelain=v1", "--untracked-files=all"]))
+        try:
+            for role, argv in commands:
+                self.inputs.post()
+                value = self.phase.call("candidate-fixture-git-" + role, prefix + argv, 15, 65536)
+                need(value.returncode == 0 and value.stderr == b"", "candidate-fixture-git-original-zero")
+                if role == "identity":
+                    rows = value.stdout.splitlines()
+                    need(len(rows) == 2 and all(re.fullmatch(rb"[0-9a-f]{40}", x) for x in rows), "candidate-fixture-git-identity")
+                    self.commit, self.tree = (x.decode("ascii") for x in rows)
+                else: need(value.stdout == b"", "candidate-fixture-git-closed-output")
+        finally: self.phase.environment = original_env
+    def _capture(self, path, parent, name, depth=0):
+        self.phase.clock.check()
+        need(depth <= 12 and len(self.dirs) + len(self.files) < self.MAX_ENTRIES, "candidate-fixture-census-bound")
+        observed = saved_version_facts(os.stat(name, dir_fd=parent, follow_symlinks=False))
+        need(observed[3:5] == (os.getuid(), os.getgid()) and not observed[9], "candidate-fixture-owner")
+        if stat.S_ISDIR(observed[2]):
+            fd = self.created_root if path == "" else self._open(name, os.O_RDONLY | os.O_DIRECTORY, parent=parent)
+            need(saved_version_facts(os.fstat(fd)) == observed, "candidate-fixture-directory-original")
+            # Only newly created owned fixture directories, before admission.
+            os.fchmod(fd, 0o700)
+            facts = saved_version_facts(os.fstat(fd))
+            names = []
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    need(len(names) < self.MAX_ENTRIES and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", entry.name)
+                         and entry.name not in (".", ".."), "candidate-fixture-name")
+                    names.append(entry.name)
+            self.dirs[path] = (fd, parent, name, facts, frozenset(names))
+            for child in sorted(names): self._capture(path + "/" + child if path else child, fd, child, depth+1)
+        else:
+            need(stat.S_ISREG(observed[2]) and observed[5] == 1 and observed[6] <= 131072, "candidate-fixture-leaf")
+            # Git creates some objects readonly; configure only this fresh fixture.
+            fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            try: os.fchmod(fd, 0o600)
+            finally: os.close(fd)
+            self.files[path] = self._read(parent, name, 131072)
+            need(sum(len(row[4]) for row in self.files.values()) <= self.MAX_BYTES, "candidate-fixture-bytes")
+    def __enter__(self):
+        import tempfile
+        import resource
+        try:
+            # Own fixture<=144 + existing private18 + conservative normal/native52.
+            # This finite roster is not whole-app/runtime FD qualification.
+            need(resource.getrlimit(resource.RLIMIT_NOFILE)[0] >= 256, "candidate-fixture-fd-admission")
+            self.inputs.post(); self._sources()
+            self.temporary = self._open(ANDROID_CANDIDATE_TEMP, os.O_RDONLY | os.O_DIRECTORY)
+            self.temporary_identity = saved_version_facts(os.fstat(self.temporary))[:5]
+            self.root = Path(tempfile.mkdtemp(prefix="mrk-normal-project-", dir=ANDROID_CANDIDATE_TEMP))
+            root_fd = self._open(self.root.name, os.O_RDONLY | os.O_DIRECTORY, parent=self.temporary)
+            self.created_root = root_fd
+            temporary_dirs = {"":root_fd}
+            try:
+                os.fchown(root_fd, -1, os.getgid()); os.fchmod(root_fd, 0o700)
+                leaves = dict(self.bodies, **{"template/info/exclude":b""})
+                dirs = {str(p) for name in leaves for p in Path(name).parents if str(p) != "."}
+                for path in sorted(dirs, key=lambda p:(p.count("/"), p)):
+                    parent, name = posixpath.split(path); os.mkdir(name, 0o700, dir_fd=temporary_dirs[parent])
+                    temporary_dirs[path] = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=temporary_dirs[parent])
+                for path, body in sorted(leaves.items()):
+                    parent, name = posixpath.split(path); self._new(temporary_dirs[parent], name, body)
+            finally:
+                errors=[]
+                for path, fd in reversed(list(temporary_dirs.items())):
+                    if path == "": continue  # Same root stays owned across Git and XCTest.
+                    try: os.close(fd)
+                    except OSError as error: errors.append(error)
+                need(not errors, "candidate-fixture-created-original-close")
+            self._git()
+            self._capture("", self.temporary, self.root.name)
+            for name, body in self.bodies.items(): need(self.files[name][4] == body, "candidate-fixture-public-source-changed")
+            handoff = dict(schemaVersion=1, scope="one-owned-android-candidate-project", root=str(self.root),
+                sourceCommit=self.source, target=self.target, runId=self.phase.environment[ANDROID_RUN_ENV],
+                runAttempt=self.phase.environment[ANDROID_ATTEMPT_ENV], publicCertificateSha256=self.inputs.public_certificate,
+                projectCommit=self.commit, projectTree=self.tree,
+                directories={name:decimal(row[3]) for name,row in sorted(self.dirs.items())},
+                files={name:dict(facts=decimal(row[3]),sha256=row[5]) for name,row in sorted(self.files.items())})
+            self.public = handoff
+            body = encoded(handoff)+b"\n"; need(len(body) <= 65536, "candidate-fixture-handoff-bound")
+            exclusive_output(self.normal / "android-candidate-fixture.json", body, 65536)
+            parent = self._open(self.normal, os.O_RDONLY | os.O_DIRECTORY)
+            self.handoff = self._read(parent, "android-candidate-fixture.json", 65536)
+            self.post(); return self
+        except BaseException:
+            self.failed=True; self.close(); raise
+    def _post_file(self, row):
+        fd,parent,name,before,body,digest=row
+        need(before == saved_version_facts(os.fstat(fd)) == saved_version_facts(os.stat(name,dir_fd=parent,follow_symlinks=False)), "candidate-fixture-file-post")
+        need(original_body(fd,max(1,len(body)),collect=True)[0] == body
+             and before == saved_version_facts(os.fstat(fd)), "candidate-fixture-body-post")
+    def post(self):
+        need(not self.closed and not self.failed, "candidate-fixture-closed")
+        self.phase.clock.check(); self.inputs.post()
+        need(saved_version_facts(os.fstat(self.temporary))[:5] == self.temporary_identity
+             == saved_version_facts(os.stat(ANDROID_CANDIDATE_TEMP, follow_symlinks=False))[:5], "candidate-fixture-temporary-original")
+        for row in [*self.sources, *self.files.values(), self.handoff]: self._post_file(row)
+        for path,(fd,parent,name,before,names) in self.dirs.items():
+            current=saved_version_facts(os.fstat(fd))
+            need(current[:5] == before[:5] and current[9] == before[9]
+                 and current == saved_version_facts(os.stat(name,dir_fd=parent,follow_symlinks=False)), "candidate-fixture-directory-post")
+            actual=set(os.listdir(fd)); allowed={".mobile-release"} if path=="project" else {"build"} if path=="project/app" else set()
+            if path=="project": allowed.add("build")
+            need(actual - allowed == names and actual <= names | allowed, "candidate-fixture-directory-roster-post")
+        self.phase.clock.check()
+    def close(self):
+        if self.closed: return
+        self.closed=True; errors=[]
+        while self.fds:
+            try: os.close(self.fds.pop())
+            except OSError as error: errors.append(error)
+        need(not errors, "candidate-fixture-original-close")
+    def __exit__(self, kind, error, trace):
+        try:
+            if kind is None: self.post()
+        finally: self.close()
+        return False
+
+
 ANDROID_FACTS_SCOPE = "one-ordinary-local-signed-android-build"
 ANDROID_FACTS_PREFIX = b"MRK_MACOS_ANDROID_SIGNED_BUILD_UI="
 
@@ -1304,18 +1517,19 @@ ANDROID_FACTS_PREFIX = b"MRK_MACOS_ANDROID_SIGNED_BUILD_UI="
 def publish_android_signed_failure(request, stage, code):
     need(stage in {"request", "context", "loader", "phase", "execute", "diagnostic", "publication", "finalize"}
          and type(code) is int and code != 0, "android-signed-failure-shape")
-    body = encoded(dict(schemaVersion=1, scope="android-signed-ui-closed-failure", stage=stage,
+    body = encoded(dict(schemaVersion=1, scope="android-candidate-ui-closed-failure" if request.get("androidCandidate") is True else "android-signed-ui-closed-failure", stage=stage,
         originalStatus=code, qualification=False, cleanupAuthorized=False)) + b"\n"
-    exclusive_output(request["derived"].parent / "android-signed-build.failure.json", body, 1024)
+    exclusive_output(request["derived"].parent / ("android-candidate-inputs.failure.json" if request.get("androidCandidate") is True else "android-signed-build.failure.json"), body, 1024)
 
 
-def android_signed_facts(value, *, source, run, attempt, target=ARM_TARGET):
+def android_signed_facts(value, *, source, run, attempt, target=ARM_TARGET, candidate=False):
     """Safe public fields only; command/credential relations remain PRIVATE."""
     normal_target_data(target)
     need(type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source)
          and all(type(item) is str and re.fullmatch(r"[1-9][0-9]{0,19}", item) for item in (run, attempt)),
          "android-signed-public-context")
-    fixed = dict(schemaVersion=1, scope=ANDROID_FACTS_SCOPE, sourceCommit=source,
+    need(type(candidate) is bool, "candidate-ui-facts-domain")
+    fixed = dict(schemaVersion=1, scope="one-local-android-candidate-inputs-ui" if candidate else ANDROID_FACTS_SCOPE, sourceCommit=source,
         target=target, runId=run, runAttempt=attempt, sourceRegistrationObserved=True,
         serviceEnabledObserved=True, vendorAcknowledgementAutomated=True,
         nativeSigningVerified=True, privateOriginalsClosed=True, memorySessionDiscarded=True, parentReturncodeRequired=0,
@@ -1323,12 +1537,19 @@ def android_signed_facts(value, *, source, run, attempt, target=ARM_TARGET):
     variable = {"operationId", "ownerGeneration", "publicCertificateSha256", "artifactSha256", "artifactBytes",
                 "outputEntries", "outputNameBytes", "outputLogicalBytes", "moduleLogicalBytes", "outputCensusSha256",
                 "serviceRegistrationRequested", "protectedCopyInstance"}
+    if candidate:
+        fixed.update(historyCheckpoint=4,candidateReviewed=True,candidateAbandoned=True,bundlePreserved=True,storeActionPerformed=False)
+        variable.update(("candidateSha256","projectCommit","projectTree"))
     need(type(value) is dict and set(value) == set(fixed) | variable
          and all(type(value[k]) is type(v) and value[k] == v for k, v in fixed.items())
          and len(encoded(value)) <= 16384, "android-signed-public-facts")
     need(type(value["serviceRegistrationRequested"]) is bool, "android-signed-service-request-observation")
     for key in ("operationId", "ownerGeneration", "protectedCopyInstance"):
         need(type(value[key]) is str and re.fullmatch(r"[0-9a-f]{32}", value[key]), "android-signed-current-id")
+    if candidate:
+        need(re.fullmatch(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}", value["operationId"]) is not None
+             and all(type(value[k]) is str and re.fullmatch(r"[0-9a-f]{40}",value[k]) for k in ("projectCommit","projectTree"))
+             and type(value["candidateSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}",value["candidateSha256"]), "candidate-ui-context")
     for key in ("publicCertificateSha256", "artifactSha256", "outputCensusSha256"):
         need(type(value[key]) is str and re.fullmatch(r"[0-9a-f]{64}", value[key]), "android-signed-public-digest")
     bounds = {"artifactBytes": 64 << 20, "outputEntries": 100000, "outputNameBytes": 2 << 20,
@@ -1361,6 +1582,51 @@ def android_signed_summary(body):
     need(all(type(value.get(key)) is int and value[key] == count for key, count in counts.items()),
          "android-signed-exact-one-pass")
     return counts
+
+
+def android_candidate_marker(stdout, *, source, run, attempt, certificate, fixture, target):
+    need(type(stdout) is bytes and len(stdout) <= 1048576, "candidate-ui-output-bound")
+    selected = b"-[MRKNormalAppUITests.NormalAppUITests " + ANDROID_CANDIDATE_METHOD.encode() + b"]"
+    lines = stdout.splitlines(); prefix = b"MRK_MACOS_ANDROID_CANDIDATE_INPUTS_UI="
+    need(lines.count(b"Test Case '" + selected + b"' started.") == 1
+         and sum(re.fullmatch(rb"Test Case '"+re.escape(selected)+rb"' passed \([0-9.]+ seconds\)\.", line) is not None for line in lines) == 1
+         and lines.count(ORIGINAL_MARKER.encode()) == 1
+         and not any(b"MRK_MACOS_UI_FAILURE_CLEANUP=" in line for line in lines), "candidate-ui-one-original-test")
+    markers=[line[len(prefix):] for line in lines if line.startswith(prefix)]
+    need(len(markers)==1 and 0<len(markers[0])<=16384, "candidate-ui-one-marker")
+    facts=android_signed_facts(document(markers[0]),source=source,run=run,attempt=attempt,target=target,candidate=True)
+    need(encoded(facts)==markers[0] and facts["publicCertificateSha256"]==certificate
+         and facts["projectCommit"]==fixture.commit and facts["projectTree"]==fixture.tree, "candidate-ui-fixture-result-binding")
+    return facts
+
+
+def execute_android_candidate_phase(phase, request, source, file_limit):
+    normal=request["derived"].parent; before=normal_source_state(phase,source)
+    run,attempt=phase.environment[ANDROID_RUN_ENV],phase.environment[ANDROID_ATTEMPT_ENV]
+    public=None
+    if request["phase"]=="test":
+        with AndroidPrivateInputs(phase,source,normal,target=request["target"],expected_ref=ANDROID_CANDIDATE_REF) as inputs:
+            with AndroidCandidateFixture(phase,source,normal,inputs,request["target"]) as fixture:
+                original,runner=run_admitted_test(phase.call,request["derived"],request["result"],request["methods"],
+                    900,1020,target=request["target"],android_positive=True,android_candidate=True)
+                if original.returncode==0:
+                    public=android_candidate_marker(original.stdout,source=source,run=run,attempt=attempt,
+                        certificate=inputs.public_certificate,fixture=fixture,target=request["target"])
+        facts=dict(runnerAdmission=runner,parentPrivateOriginalsClosed=True,parentFixtureOriginalsClosed=True,observation=public)
+    else:
+        need(request["phase"]=="summary", "candidate-ui-phase")
+        observed=os.stat(request["result"],follow_symlinks=False)
+        need(stat.S_ISDIR(observed.st_mode) and observed.st_uid==os.getuid() and not observed.st_mode&0o022,"candidate-ui-result-directory")
+        original=phase.call("normal-ui-summary",["/usr/bin/xcrun","xcresulttool","get","test-results","summary","--path",str(request["result"]),"--compact"],30,262144)
+        facts=dict(testCounts=android_signed_summary(original.stdout) if original.returncode==0 else None)
+    need(normal_source_state(phase,source)==before,"candidate-ui-source-pre-post")
+    facts.update(schemaVersion=1,scope="android-candidate-ui-original-admission",phase=request["phase"],
+        sourceCommit=source,target=request["target"],runId=run,runAttempt=attempt,resultBundle=ANDROID_CANDIDATE_RESULT,
+        originalReturncode=original.returncode,commands=phase.records,sourcePrePostMatched=True,
+        fileLimitBytes=list(file_limit),phaseClock=phase.clock.before_publication(),releaseQualified=False)
+    exclusive_output(normal/("android-candidate-inputs-"+request["phase"]+".runner-admission.json"),encoded(facts)+b"\n",32768)
+    if public is not None:exclusive_output(normal/"android-candidate-inputs.facts.json",encoded(public)+b"\n",16384)
+    phase.clock.check();return original
 
 
 def execute_android_signed_phase(phase, request, source, file_limit):
@@ -3218,6 +3484,8 @@ def execute_normal_phase(phase, request, source, file_limit):
         return execute_credential_update_phase(phase, request, source, file_limit)
     if request.get("outputData") is True:
         return execute_output_data_phase(phase, request, source, file_limit)
+    if request.get("androidCandidate") is True:
+        return execute_android_candidate_phase(phase, request, source, file_limit)
     if request.get("androidPositive") is True:
         return execute_android_signed_phase(phase, request, source, file_limit)
     target = request["target"]
@@ -4584,12 +4852,13 @@ def normal_context(request, *, diagnostics=None):
     environment.update(resume_environment)
     if request.get("androidPositive") is True or request.get("iosPending") is True:
         env = os.environ
+        expected_ref = ANDROID_CANDIDATE_REF if request.get("androidCandidate") is True else ANDROID_REF
         need(sys.version_info[:3] == (3, 14, 7)
              and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
              and env.get("GITHUB_REPOSITORY") == "Apdelrahman1911/mobile-release-kit"
-             and env.get("GITHUB_EVENT_NAME") == "push" and env.get("GITHUB_REF") == ANDROID_REF
+             and env.get("GITHUB_EVENT_NAME") == "push" and env.get("GITHUB_REF") == expected_ref
              and env.get("GITHUB_SHA") == source == env.get("GITHUB_WORKFLOW_SHA")
-             and env.get("GITHUB_WORKFLOW_REF") == "Apdelrahman1911/mobile-release-kit/" + ANDROID_WORKFLOW + "@" + ANDROID_REF
+             and env.get("GITHUB_WORKFLOW_REF") == "Apdelrahman1911/mobile-release-kit/" + ANDROID_WORKFLOW + "@" + expected_ref
              and env.get("GITHUB_WORKSPACE") == str(root) and env.get("RUNNER_ENVIRONMENT") == "github-hosted"
              and env.get("RUNNER_OS") == "macOS" and env.get("RUNNER_ARCH") == ("ARM64" if request["target"] == ARM_TARGET else "X64")
              and all(re.fullmatch(r"[1-9][0-9]{0,19}", env.get(k, "")) for k in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
@@ -4599,6 +4868,8 @@ def normal_context(request, *, diagnostics=None):
             # Derived from this admitted fixed work, never a caller-supplied private path.
             environment.update({ANDROID_INPUT_ENV: handoff, ANDROID_RUN_ENV: env["GITHUB_RUN_ID"],
                                 ANDROID_ATTEMPT_ENV: env["GITHUB_RUN_ATTEMPT"]})
+            if request.get("androidCandidate") is True:
+                environment[ANDROID_CANDIDATE_ENV] = str(derived.parent / "android-candidate-fixture.json")
         else:
             environment.update({IOS_PENDING_RUN: env["GITHUB_RUN_ID"], IOS_PENDING_ATTEMPT: env["GITHUB_RUN_ATTEMPT"]})
     if request.get("credentialUpdate") is not None:

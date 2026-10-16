@@ -1148,6 +1148,15 @@ class NormalPhaseDataTests(unittest.TestCase):
         def admit(item):
             return MODULE.android_input_document(MODULE.encoded(item)+b'\n', source=source, run=run, attempt=attempt, root=root)
         self.assertEqual(admit(value), value)
+        candidate = dict(value, ref=MODULE.ANDROID_CANDIDATE_REF)
+        self.assertEqual(MODULE.android_input_document(MODULE.encoded(candidate)+b'\n',source=source,
+            run=run,attempt=attempt,root=root,expected_ref=MODULE.ANDROID_CANDIDATE_REF),candidate)
+        with self.assertRaises(MODULE.Refused): admit(candidate) # Never infer trust from the handoff.
+        for selected, expected in ((value,MODULE.ANDROID_CANDIDATE_REF),(candidate,MODULE.ANDROID_REF),
+                                   (candidate,'refs/heads/main'),(candidate,None)):
+            with self.subTest(expected_ref=expected),self.assertRaises(MODULE.Refused):
+                MODULE.android_input_document(MODULE.encoded(selected)+b'\n',source=source,
+                    run=run,attempt=attempt,root=root,expected_ref=expected)
         for target_value in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
             selected = dict(value, target=target_value, sourceCatalogueSha256=MODULE.android_catalogue(target_value))
             self.assertEqual(MODULE.android_input_document(MODULE.encoded(selected)+b'\n', source=source,
@@ -1190,6 +1199,25 @@ class NormalPhaseDataTests(unittest.TestCase):
             publicCertificateSha256='d'*64,artifactSha256='5'*64,artifactBytes=3,outputEntries=20,
             outputNameBytes=1000,outputLogicalBytes=12,moduleLogicalBytes=9,outputCensusSha256='6'*64)
         self.assertEqual(MODULE.android_signed_facts(public,source=source,run=run,attempt=attempt),public)
+        candidate=dict(public,scope='one-local-android-candidate-inputs-ui',operationId='a'*12+'4'+'a'*3+'8'+'a'*15,
+            historyCheckpoint=4,candidateReviewed=True,candidateAbandoned=True,bundlePreserved=True,storeActionPerformed=False,
+            candidateSha256='8'*64,projectCommit='9'*40,projectTree='0'*40)
+        self.assertEqual(MODULE.android_signed_facts(candidate,source=source,run=run,attempt=attempt,candidate=True),candidate)
+        selected=b'-[MRKNormalAppUITests.NormalAppUITests '+MODULE.ANDROID_CANDIDATE_METHOD.encode()+b']'
+        def candidate_marker(row):
+            return b'\n'.join([b"Test Case '"+selected+b"' started.",MODULE.ORIGINAL_MARKER.encode(),
+                b'MRK_MACOS_ANDROID_CANDIDATE_INPUTS_UI='+MODULE.encoded(row),b"Test Case '"+selected+b"' passed (2.000 seconds)."])+b'\n'
+        fixture=SimpleNamespace(commit='9'*40,tree='0'*40)
+        def parse_candidate(raw):
+            return MODULE.android_candidate_marker(raw,source=source,run=run,attempt=attempt,certificate='d'*64,fixture=fixture,target=MODULE.ARM_TARGET)
+        self.assertEqual(parse_candidate(candidate_marker(candidate)),candidate)
+        for key,replacement in [('candidateReviewed',False),('candidateAbandoned',False),('bundlePreserved',False),
+                                ('storeActionPerformed',True),('historyCheckpoint',3),('operationId','a'*32),
+                                ('projectCommit','a'*40),('projectTree','a'*40),('publicCertificateSha256','e'*64)]:
+            with self.subTest(candidate_fact=key),self.assertRaises(MODULE.Refused):
+                parse_candidate(candidate_marker(dict(candidate,**{key:replacement})))
+        with self.assertRaises(MODULE.Refused):parse_candidate(candidate_marker(candidate)+candidate_marker(candidate))
+        with self.assertRaises(MODULE.Refused):MODULE.android_signed_facts(candidate,source=source,run=run,attempt=attempt)
         for target_value in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
             selected_public = dict(public, target=target_value)
             self.assertEqual(MODULE.android_signed_facts(selected_public, source=source, run=run,
@@ -4791,6 +4819,80 @@ class NormalIOSPendingRecoveryDataTests(unittest.TestCase):
                 self.assertTrue(phase.clock.finalized)
                 with self.assertRaisesRegex(MODULE.Refused, "normal-phase-terminal"):
                     phase.clock.allowance(15)
+
+
+class AndroidCandidateProjectTests(unittest.TestCase):
+    @contextmanager
+    def prepared(self, *, fail=None):
+        # Actual Git is confined to this test's owned empty namespace; no app,
+        # credential, native gate, product grant or library-process proof.
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);normal=root/'normal-ui';normal.mkdir(mode=0o700)
+            calls=[]
+            def run(argv,**kw):
+                self.assertEqual(argv[0],'/usr/bin/git')
+                calls.append(argv)
+                if fail is not None and fail(argv):return subprocess.CompletedProcess(argv,1,b'',b'fixed failure')
+                return subprocess.run(argv,cwd=kw['cwd'],env=kw['environ'],timeout=kw['timeout'],capture_output=True,check=False)
+            phase=MODULE.NormalPhase(SimpleNamespace(run_owned=run),
+                {'PATH':'/usr/bin:/bin','HOME':str(root),'LANG':'C','LC_ALL':'C',MODULE.ANDROID_RUN_ENV:'12',MODULE.ANDROID_ATTEMPT_ENV:'1'},
+                ROOT,MODULE.PhaseClock(120))
+            inputs=SimpleNamespace(public_certificate='a'*64,post=lambda:None)
+            with patch.object(MODULE,'ANDROID_CANDIDATE_TEMP',root):
+                fixture=MODULE.AndroidCandidateFixture(phase,'b'*40,normal,inputs,MODULE.ARM_TARGET)
+                try:yield fixture,phase,calls
+                finally:fixture.close()
+    def test_owned_git_fixture_has_exact_saved_public_inputs_and_known_closed_roster(self):
+        with self.prepared() as (fixture,phase,calls):
+            with fixture:
+                self.assertEqual(len(calls),5)
+                self.assertEqual(len(fixture.bodies),17)
+                self.assertEqual({name for name,row in fixture.dirs.items() if not row[4]},
+                    {'project/.git/objects/info','project/.git/objects/pack','project/.git/refs/tags'})
+                config=json.loads(fixture.bodies['project/release/mobile-release.json'])
+                self.assertIs(config['source']['localStoreEnabled'],True)
+                self.assertEqual(config['android']['uploadCertificateSha256'],'a'*64)
+                self.assertFalse((fixture.root/'project/.mobile-release').exists())
+                self.assertNotIn('GIT_AUTHOR_NAME',phase.environment)
+                source=subprocess.run(['/usr/bin/git','-C',str(fixture.root/'project'),'ls-tree','-r','--name-only','HEAD'],
+                    capture_output=True,check=True,timeout=5,env={'PATH':'/usr/bin:/bin','GIT_CONFIG_NOSYSTEM':'1','GIT_CONFIG_GLOBAL':'/dev/null'})
+                self.assertEqual(set(source.stdout.decode().splitlines()),{p[8:] for p in fixture.bodies})
+                fixture.post()
+                # Same source originals may coexist with the narrowly permitted output roots.
+                for output in ('project/build','project/app/build','project/.mobile-release'):
+                    (fixture.root/output).mkdir(mode=0o700)
+                fixture.post()
+                self.assertLessEqual(len(fixture.fds),fixture.MAX_FDS)
+            self.assertTrue(fixture.closed);self.assertEqual(fixture.fds,[])
+    def test_original_file_change_or_extra_git_object_is_not_adopted(self):
+        for mutation in ('body','extra','replacement','root-replacement'):
+            with self.subTest(mutation=mutation),self.prepared() as (fixture,phase,calls):
+                fixture.__enter__()
+                path=fixture.root/'project/release/version.properties'
+                if mutation=='body':path.write_bytes(b'foreign')
+                elif mutation=='extra':(fixture.root/'project/.git/objects/foreign').write_bytes(b'foreign')
+                elif mutation=='root-replacement':
+                    fixture.root.rename(fixture.root.with_name(fixture.root.name+'-moved'));fixture.root.mkdir(mode=0o700)
+                else:
+                    body=path.read_bytes();path.rename(path.with_name('moved'));path.write_bytes(body)
+                with self.assertRaises(MODULE.Refused):fixture.post()
+                self.assertEqual(len(calls),5)
+    def test_failed_owned_git_preparation_closes_originals_and_never_emits_handoff(self):
+        with self.prepared(fail=lambda argv:'commit' in argv) as (fixture,phase,calls):
+            with self.assertRaisesRegex(MODULE.Refused,'candidate-fixture-git-original-zero'):fixture.__enter__()
+            self.assertEqual(len(calls),3);self.assertTrue(fixture.closed);self.assertEqual(fixture.fds,[])
+            self.assertFalse((fixture.normal/'android-candidate-fixture.json').exists())
+            self.assertNotIn('GIT_AUTHOR_NAME',phase.environment)
+    def test_candidate_selector_cannot_be_relabelled_as_ordinary(self):
+        derived=Path('/Users/runner/work/_temp/mrk-macos-installed.abcdefgh/normal-ui/DerivedData')
+        result=derived.parent/MODULE.ANDROID_CANDIDATE_RESULT
+        args=MODULE.xcode_test_arguments(derived/'Build/Products/test.xctestrun',result,
+            (MODULE.CLASS+MODULE.ANDROID_CANDIDATE_METHOD,),900,android_positive=True,android_candidate=True)
+        self.assertIn('-only-testing:'+MODULE.CLASS+MODULE.ANDROID_CANDIDATE_METHOD,args)
+        for candidate,method in ((False,MODULE.ANDROID_CANDIDATE_METHOD),(True,MODULE.ANDROID_METHOD)):
+            with self.assertRaises(MODULE.Refused):
+                MODULE.xcode_test_arguments(derived/'Build/Products/test.xctestrun',result,
+                    (MODULE.CLASS+method,),900,android_positive=True,android_candidate=candidate)
 
 
 if __name__ == "__main__":

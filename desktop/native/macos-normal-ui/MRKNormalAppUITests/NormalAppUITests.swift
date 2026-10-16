@@ -1872,7 +1872,7 @@ final class NormalAppUITests: XCTestCase {
     }
 
     private final class LocalFixture {
-        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery, releaseEvidence, androidSignedBuild, iosUnsignedArchive }
+        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery, releaseEvidence, androidSignedBuild, androidCandidateInputs, iosUnsignedArchive }
         enum StoreChange { case initialize, saveP12, saveProfile, replaceP12, deleteProfile, deleteUpdateP12 }
         static let config = "project/release/mobile-release.json"
         static let version = "project/release/version.properties"
@@ -1946,6 +1946,89 @@ final class NormalAppUITests: XCTestCase {
         private var current: [String: File] = [:]
         private var acceptedStages: Set<String> = []
         private var androidPositiveProfile = false
+        // Outer Phase owns preparation; XCTest borrows only comparison originals.
+        // Real project registration/consent/Keychain remain ordinary app actions.
+        private var androidCandidateProfile = false
+        private var candidateEmptyDirectories: Set<String> = []
+        private(set) var candidateCommit = "", candidateTree = "", candidateSHA256 = ""
+        private var candidateHandoff: (Directory, File)?
+        private func adoptAndroidCandidate(_ temporary: Directory, certificate: String) throws {
+            let env = ProcessInfo.processInfo.environment
+            guard let path = env["MRK_NORMAL_UI_ANDROID_CANDIDATE_FIXTURE"],
+                  path.range(of: #"^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}/normal-ui/android-candidate-fixture\.json$"#, options: .regularExpression) != nil else {
+                throw Refusal.condition("fixture: candidate owner handoff unavailable")
+            }
+            var parent = try adoptDirectory(open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: nil, name: "/")
+            anchors.append(parent)
+            for name in path.split(separator: "/").dropLast().map(String.init) {
+                parent = try adoptDirectory(openat(parent.fd,name,O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),parent:parent.fd,name:name)
+                anchors.append(parent)
+                try Self.need((parent.facts.uid == 0 || parent.facts.uid == getuid()) && parent.facts.mode & 0o022 == 0,
+                              "candidate handoff ancestor policy")
+            }
+            let file = try readLeaf(parent,name:"android-candidate-fixture.json",privateOnly:true,limit:65536)
+            guard let row = try JSONSerialization.jsonObject(with:file.bytes) as? [String:Any],
+                  Set(row.keys) == ["schemaVersion","scope","root","sourceCommit","target","runId","runAttempt","publicCertificateSha256","projectCommit","projectTree","directories","files"],
+                  row["schemaVersion"] as? Int == 1, row["scope"] as? String == "one-owned-android-candidate-project",
+                  row["sourceCommit"] as? String == env["MRK_NORMAL_UI_HARNESS_SOURCE"],
+                  row["sourceCommit"] as? String == env["MRK_NORMAL_UI_APPLICATION_SOURCE"],
+                  row["target"] as? String == AndroidInputs.target,
+                  row["runId"] as? String == env["MRK_NORMAL_UI_ANDROID_RUN_ID"],
+                  row["runAttempt"] as? String == env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"],
+                  row["publicCertificateSha256"] as? String == certificate,
+                  let root = row["root"] as? String,
+                  root.range(of:#"^/private/tmp/mrk-normal-project-[A-Za-z0-9_-]{6,16}$"#,options:.regularExpression) != nil,
+                  let commit = row["projectCommit"] as? String, let tree = row["projectTree"] as? String,
+                  [commit,tree].allSatisfy({$0.range(of:#"^[0-9a-f]{40}$"#,options:.regularExpression) != nil}),
+                  let dirs = row["directories"] as? [String:[String]], let files = row["files"] as? [String:[String:Any]],
+                  dirs.count + files.count <= 144 else {throw Refusal.condition("fixture: candidate closed handoff")}
+            var canonical = row; canonical["schemaVersion"] = 1
+            try Self.need(try JSONSerialization.data(withJSONObject:canonical,options:[.sortedKeys,.withoutEscapingSlashes]) + Data([10]) == file.bytes,
+                          "candidate handoff canonical bytes")
+            guard let saved = originals[Self.config], var config = try JSONSerialization.jsonObject(with:saved) as? [String:Any],
+                  var source = config["source"] as? [String:Any], var android = config["android"] as? [String:Any] else {
+                throw Refusal.condition("fixture: candidate source configuration absent")
+            }
+            source["localStoreEnabled"] = true; android["uploadCertificateSha256"] = certificate
+            config["source"] = source; config["android"] = android
+            originals[Self.config] = try JSONSerialization.data(withJSONObject:config,options:[.sortedKeys,.withoutEscapingSlashes]) + Data([10])
+            originals["template/info/exclude"] = Data()
+            let gitControls: Set<String> = ["HEAD","config","index","COMMIT_EDITMSG","refs/heads/main","logs/HEAD","logs/refs/heads/main","info/exclude"]
+            let extra = Set(files.keys).subtracting(originals.keys)
+            try Self.need(!extra.isEmpty && extra.allSatisfy { name in
+                name.hasPrefix("project/.git/") && (gitControls.contains(String(name.dropFirst(13))) ||
+                    name.range(of:#"^project/\.git/objects/[0-9a-f]{2}/[0-9a-f]{38}$"#,options:.regularExpression) != nil)
+            } && Set(files.keys).isSuperset(of:originals.keys),"candidate Git closed leaf roles")
+            candidateEmptyDirectories = ["project/.git/objects/info","project/.git/objects/pack","project/.git/refs/tags"]
+            let expectedDirs = Set(Self.ancestors(Set(files.keys))).union(candidateEmptyDirectories)
+            try Self.need(Set(dirs.keys) == expectedDirs && expectedDirs.count + anchors.count + 18 + 34 <= 256,
+                          "candidate original directory census")
+            rootPath = root
+            let name = String(root.dropFirst("/private/tmp/".count))
+            directories[""] = try adoptDirectory(openat(temporary.fd,name,O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),parent:temporary.fd,name:name)
+            for path in expectedDirs.sorted(by: {$0.split(separator:"/").count == $1.split(separator:"/").count ? $0 < $1 : $0.split(separator:"/").count < $1.split(separator:"/").count}) where !path.isEmpty {
+                let (prefix,leaf) = Self.parts(path), p = directories[prefix]!
+                directories[path] = try adoptDirectory(openat(p.fd,leaf,O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),parent:p.fd,name:leaf)
+            }
+            for (path,directory) in directories {
+                try Self.need(directory.facts.mode & 0o7777 == 0o700 && directory.facts.uid == getuid() && directory.facts.gid == getgid()
+                    && Self.wireFacts(directory.facts) == dirs[path],"candidate retained directory identity")
+            }
+            for path in files.keys.sorted() {
+                let observed = try path == Self.androidVerificationPath ? readAndroidVerificationOriginal() : read(path)
+                guard let expected = files[path], Set(expected.keys) == ["facts","sha256"],
+                      expected["facts"] as? [String] == Self.wireFacts(observed.facts),
+                      expected["sha256"] as? String == SHA256.hash(data:observed.bytes).map({String(format:"%02x",$0)}).joined() else {
+                    throw Refusal.condition("fixture: candidate retained leaf identity")
+                }
+                try Self.need(observed.facts.mode & 0o7777 == 0o600 && observed.facts.uid == getuid() && observed.facts.gid == getgid(),"candidate leaf policy")
+                if let expected = originals[path] {try Self.need(expected == observed.bytes,"candidate public fixture correspondence")}
+                current[path] = observed
+            }
+            candidateCommit = commit; candidateTree = tree; candidateHandoff = (parent,file)
+            try assertUnchanged()
+        }
+
         private var closeErrors: [String] = []
         private var applicationSupport: Directory?
         private var applicationDirectory: Directory?
@@ -2258,7 +2341,7 @@ final class NormalAppUITests: XCTestCase {
                 do { try check() } catch { if primary == nil { primary = error } }
                 if let primary { throw primary }
             }
-            private func load(normal: Directory, path: String, source: String, run: String, attempt: String,
+            private func load(normal: Directory, path: String, source: String, run: String, attempt: String, candidate:Bool,
                               check: () throws -> Void) throws {
                 rootPath = path + "/android-inputs"
                 let handoff = try leaf(normal, name: "android-input-fixture.json", limit: 16 * 1024, check: check)
@@ -2271,7 +2354,7 @@ final class NormalAppUITests: XCTestCase {
                     && object["target"] as? String == Self.target && object["runId"] as? String == run
                     && object["runAttempt"] as? String == attempt && object["root"] as? String == rootPath
                     && object["workflow"] as? String == ".github/workflows/desktop-macos-installed.yml"
-                    && object["ref"] as? String == "refs/heads/verify/desktop-macos-installed"
+                    && object["ref"] as? String == (candidate ? "refs/heads/verify/desktop-macos-candidate" : "refs/heads/verify/desktop-macos-installed")
                     && object["sourceCatalogueSha256"] as? String == Self.catalogue,
                     "Android private current context differs")
                 object["schemaVersion"] = 1; object["parentReturncodeRequired"] = 0
@@ -2363,7 +2446,7 @@ final class NormalAppUITests: XCTestCase {
                                       "Android private complete original census differs")
                 try post(check: check)
             }
-            static func admit(check: () throws -> Void) throws -> AndroidInputs {
+            static func admit(candidate:Bool=false, check: () throws -> Void) throws -> AndroidInputs {
                 let env = ProcessInfo.processInfo.environment
                 guard let source = env["MRK_NORMAL_UI_HARNESS_SOURCE"], Self.matches(source, #"^[0-9a-f]{40}$"#),
                       env["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source,
@@ -2382,7 +2465,7 @@ final class NormalAppUITests: XCTestCase {
                         let mode: mode_t? = name == "normal-ui" || name.hasPrefix("mrk-macos-installed.") ? 0o700 : nil
                         parent = try value.directory(parent, name: name, mode: mode, check: check)
                     }
-                    try value.load(normal: parent, path: normal, source: source, run: run, attempt: attempt, check: check)
+                    try value.load(normal: parent, path: normal, source: source, run: run, attempt: attempt, candidate:candidate, check: check)
                     return value
                 } catch {
                     let primary = error
@@ -2678,6 +2761,129 @@ final class NormalAppUITests: XCTestCase {
             let artifactSHA256: String
             let artifactBytes: Int64
         }
+        private struct CandidateLeaf { let fd:Int32; let parent:Directory; let name:String; let facts:StatFacts; let digest:String; let bytes:Data }
+        private var candidateLeaves:[String:CandidateLeaf] = [:]
+        private var candidateBundleDirectories:[Directory] = []
+        private var candidateJournal:Directory?
+        private var candidateJournalNames:Set<String> = []
+        private var candidateJournalParent:Directory?
+        private var candidateJournalSuffix:[String] = []
+        private(set) var candidateOperation = ""
+        private func candidateRead(_ parent:Directory,_ name:String,limit:Int,collect:Bool=false,journal:Bool=false,check:()throws->Void)throws->CandidateLeaf {
+            try check();try checkDirectory(parent)
+            let fd=openat(parent.fd,name,O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+            try Self.need(fd >= 0,"candidate original leaf open");descriptors.append(fd)
+            let before=try Self.facts(fd)
+            try Self.need(before.mode & mode_t(S_IFMT)==mode_t(S_IFREG) && before.mode & 0o7777==(journal ? 0o400 : 0o600)
+                && before.uid==getuid() && before.gid==getgid() && before.links==1 && before.flags==0
+                && before.bytes>0 && before.bytes<=limit && before==Self.named(parent.fd,name),"candidate original leaf admission")
+            var digest=SHA256(), body=Data(), offset=0, buffer=[UInt8](repeating:0,count:65536)
+            while offset<Int(before.bytes) {
+                try check()
+                let count=buffer.withUnsafeMutableBytes {pread(fd,$0.baseAddress!,min($0.count,Int(before.bytes)-offset),off_t(offset))}
+                try Self.need(count>0 && count<=Int(before.bytes)-offset,"candidate original leaf read")
+                let block=Data(buffer.prefix(count));digest.update(data:block);if collect {body.append(block)};offset+=count
+            }
+            var end:UInt8=0
+            try Self.need(pread(fd,&end,1,off_t(offset))==0 && before==Self.facts(fd) && before==Self.named(parent.fd,name),"candidate original EOF POST")
+            return CandidateLeaf(fd:fd,parent:parent,name:name,facts:before,digest:digest.finalize().map({String(format:"%02x",$0)}).joined(),bytes:body)
+        }
+        private func candidatePostLeaf(_ row:CandidateLeaf,check:()throws->Void)throws {
+            try check();try checkDirectory(row.parent)
+            try Self.need(row.facts==Self.facts(row.fd) && row.facts==Self.named(row.parent.fd,row.name),"candidate retained original replaced")
+            var digest=SHA256(),offset=0,buffer=[UInt8](repeating:0,count:65536)
+            while offset<Int(row.facts.bytes) {
+                try check()
+                let n=buffer.withUnsafeMutableBytes {pread(row.fd,$0.baseAddress!,min($0.count,Int(row.facts.bytes)-offset),off_t(offset))}
+                try Self.need(n>0 && n<=Int(row.facts.bytes)-offset,"candidate retained original read")
+                digest.update(data:Data(buffer.prefix(n)));offset+=n
+            }
+            var end:UInt8=0
+            try Self.need(pread(row.fd,&end,1,off_t(offset))==0 && digest.finalize().map({String(format:"%02x",$0)}).joined()==row.digest
+                && row.facts==Self.facts(row.fd) && row.facts==Self.named(row.parent.fd,row.name),"candidate retained original changed")
+        }
+        func prepareCandidateJournalObservation(check:()throws->Void)throws {
+            try Self.need(androidCandidateProfile && candidateJournalParent==nil,"candidate journal observation repeated")
+            var locator=Data("MRK-LOCAL-PROJECT-LOCATOR/1\0".utf8),uid=UInt32(getuid()).bigEndian,length=UInt32(projectPath.utf8.count).bigEndian
+            withUnsafeBytes(of:&uid){locator.append(contentsOf:$0)};withUnsafeBytes(of:&length){locator.append(contentsOf:$0)}
+            locator.append(Data(projectPath.utf8))
+            let leaf=SHA256.hash(data:locator).map({String(format:"%02x",$0)}).joined()
+            var parent=try adoptDirectory(open("/",O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),parent:nil,name:"/");anchors.append(parent)
+            let parts=["Users","runner",".local","share","mobile-release-kit","local-releases",leaf]
+            for (index,name) in parts.enumerated() {
+                try check();var facts=stat();let result=fstatat(parent.fd,name,&facts,AT_SYMLINK_NOFOLLOW),code=errno
+                if result == -1 && code == ENOENT {
+                    candidateJournalParent=parent;candidateJournalSuffix=Array(parts[index...]);return
+                }
+                try Self.need(result==0 && index<parts.count-1,"candidate enrollment must start absent")
+                parent=try adoptDirectory(openat(parent.fd,name,O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),parent:parent.fd,name:name)
+                anchors.append(parent)
+                try Self.need((parent.facts.uid==0 || parent.facts.uid==getuid()) && parent.facts.mode & 0o022==0,"candidate journal ancestor policy")
+            }
+            throw Refusal.condition("candidate enrollment already exists")
+        }
+        func observeCandidateJournal(_ sequence:Int,operation:String?=nil,check:()throws->Void)throws {
+            try Self.need(androidCandidateProfile && [1,3,4].contains(sequence),"candidate journal finite cut")
+            if candidateJournal==nil {
+                guard var parent=candidateJournalParent else {throw Refusal.condition("candidate original absence missing")}
+                for name in candidateJournalSuffix {
+                    try check();try checkDirectory(parent)
+                    parent=try adoptDirectory(openat(parent.fd,name,O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),parent:parent.fd,name:name)
+                    anchors.append(parent)
+                    try Self.need(parent.facts.uid==getuid() && parent.facts.mode & 0o7777==0o700,"candidate created journal directory")
+                }
+                candidateJournal=parent
+            }
+            let parent=candidateJournal!,names=Set((1...sequence).map{String(format:"%04d.json",$0)})
+            try Self.need(try children(parent)==names,"candidate exact journal prefix")
+            for n in 1...sequence {
+                let name=String(format:"%04d.json",n),key="journal/"+name
+                if candidateLeaves[key]==nil {candidateLeaves[key]=try candidateRead(parent,name,limit:32768,collect:true,journal:true,check:check)}
+                let original=candidateLeaves[key]!;try candidatePostLeaf(original,check:check)
+                guard let row=try JSONSerialization.jsonObject(with:original.bytes) as? [String:Any],row["sequence"] as? Int==n,
+                      row["origin"] as? String=="local-desktop",row["phase"] as? String==["genesis","inputs-pending","inputs-ready","settled-failure"][n-1] else {
+                    throw Refusal.condition("candidate observed journal cut differs")
+                }
+                if n>1 {try Self.need(row["operationId"] as? String==operation,"candidate observed journal operation")}
+            }
+            candidateJournalNames=names
+        }
+        func holdCandidateBundle(_ identity:AndroidBuildIdentity,artifactBytes:Int,artifactSHA:String,check:()throws->Void)throws {
+            try Self.need(androidCandidateProfile && candidateBundleDirectories.isEmpty,"candidate bundle custody repeated")
+            let value=identity.operationID
+            try Self.need(value.range(of:#"^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"#,options:.regularExpression) != nil,"candidate UUID original")
+            candidateOperation=String(value.prefix(8))+"-"+String(value.dropFirst(8).prefix(4))+"-"+String(value.dropFirst(12).prefix(4))+"-"+String(value.dropFirst(16).prefix(4))+"-"+String(value.dropFirst(20))
+            var parent=directories["project"]!
+            for name in [".mobile-release","desktop-android-build",value,"artifacts"] {
+                try checkDirectory(parent)
+                parent=try adoptDirectory(openat(parent.fd,name,O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),parent:parent.fd,name:name)
+                candidateBundleDirectories.append(parent)
+                try Self.need(parent.facts.uid==getuid() && parent.facts.gid==getgid() && parent.facts.mode & 0o7777==0o700,"candidate bundle directory policy")
+            }
+            let caps=["app-release.aab":64<<20,"store-metadata.zip":512<<20,"validation-report.json":65536,"candidate-inputs.json":16384]
+            try Self.need(try children(parent)==Set(caps.keys),"candidate exact four retained files")
+            for name in caps.keys.sorted(){candidateLeaves["bundle/"+name]=try candidateRead(parent,name,limit:caps[name]!,collect:name=="candidate-inputs.json",check:check)}
+            let aab=candidateLeaves["bundle/app-release.aab"]!,manifest=candidateLeaves["bundle/candidate-inputs.json"]!
+            try Self.need(aab.facts.bytes==artifactBytes && aab.digest==artifactSHA,"candidate original signed AAB correspondence")
+            guard let row=try JSONSerialization.jsonObject(with:manifest.bytes) as? [String:Any],
+                  row["scope"] as? String=="local-android-candidate-inputs",row["operationId"] as? String==candidateOperation,
+                  row["sourceCommit"] as? String==candidateCommit,row["sourceTree"] as? String==candidateTree,
+                  let files=row["files"] as? [[String:Any]],files.count==3 else {throw Refusal.condition("candidate retained manifest context")}
+            for (n,name) in ["app-release.aab","store-metadata.zip","validation-report.json"].enumerated(){
+                let leaf=candidateLeaves["bundle/"+name]!
+                try Self.need(files[n]["fileName"] as? String==name && files[n]["bytes"] as? Int==Int(leaf.facts.bytes)
+                    && files[n]["sha256"] as? String==leaf.digest,"candidate manifest retained file correspondence")
+            }
+            candidateSHA256=manifest.digest
+        }
+        func candidateOriginalsPost(check:()throws->Void)throws {
+            for directory in candidateBundleDirectories {try checkDirectory(directory)}
+            if let parent=candidateBundleDirectories.last {try Self.need(try children(parent)==["app-release.aab","store-metadata.zip","validation-report.json","candidate-inputs.json"],"candidate bundle preserved exact names")}
+            if let parent=candidateJournal {try Self.need(try children(parent)==candidateJournalNames,"candidate journal unchanged exact head")}
+            for leaf in candidateLeaves.values {try candidatePostLeaf(leaf,check:check)}
+            try check()
+        }
+
         private enum AndroidOutputStage: Equatable { case reviewed, running, complete }
         private struct AndroidOutputState {
             let identity: AndroidBuildIdentity
@@ -2715,7 +2921,7 @@ final class NormalAppUITests: XCTestCase {
             try Self.need(closeErrors.isEmpty, "Android input consuming close failed")
         }
         private func androidInputRoster(outputsMayExist: Bool) throws {
-            let leaves = Set(current.keys), expectedDirectories = Set(Self.ancestors(leaves))
+            let leaves = Set(current.keys), expectedDirectories = Set(Self.ancestors(leaves)).union(candidateEmptyDirectories)
             try Self.need(Set(directories.keys) == expectedDirectories, "Android input directory roster")
             for path in expectedDirectories.sorted() {
                 guard let original = directories[path] else { throw Refusal.condition("fixture: Android input parent absent") }
@@ -2734,8 +2940,9 @@ final class NormalAppUITests: XCTestCase {
             try Self.need(closeErrors.isEmpty, "Android input roster consuming close failed")
         }
         func beginAndroidOutputObservation(_ identity: AndroidBuildIdentity, check: () throws -> Void) throws {
-            try Self.need(androidOutput == nil && (androidPositiveProfile
-                ? acceptedStages == ["android-public-certificate"] : acceptedStages.isEmpty),
+            try Self.need(androidOutput == nil && (androidCandidateProfile
+                ? androidPositiveProfile && acceptedStages.isEmpty
+                : androidPositiveProfile ? acceptedStages == ["android-public-certificate"] : acceptedStages.isEmpty),
                           "Android output observation repeated or mixed with Save")
             // Unconfigured ordinary profiles cannot activate this seam. Future
             // positive input admission owns actual reviewed project/locks/keys;
@@ -2871,7 +3078,7 @@ final class NormalAppUITests: XCTestCase {
                     } else if path == "project/.mobile-release/desktop-android-build/" + identity.operationID {
                         try Self.need(names == ["artifacts"], "Android work or journal remains")
                     } else if path == "project/.mobile-release/desktop-android-build/" + identity.operationID + "/artifacts" {
-                        try Self.need(names == ["app-release.aab"], "Android retained artifact roster")
+                        try Self.need(names == (androidCandidateProfile ? ["app-release.aab","candidate-inputs.json","store-metadata.zip","validation-report.json"] : ["app-release.aab"]), "Android retained artifact roster")
                     } else if path == "project/build" {
                         try Self.need(names == ["reports"], "Android root build output roster")
                     } else if path == "project/build/reports" {
@@ -2901,7 +3108,7 @@ final class NormalAppUITests: XCTestCase {
                         try Self.need(size <= Self.androidModuleLimit - census.moduleBytes, "Android module output byte bound")
                         census.moduleBytes += size
                     } else {
-                        try Self.need(path == artifact || path == Self.androidReport, "Android unrecognized output leaf")
+                        try Self.need(path == artifact || path == Self.androidReport || androidCandidateProfile && ["candidate-inputs.json","store-metadata.zip","validation-report.json"].contains(name) && path == String(artifact.dropLast("app-release.aab".count)) + name, "Android unrecognized output leaf")
                     }
                     if path == Self.androidReport { try Self.need(size <= Self.androidReportLimit, "Android report byte bound") }
                     if path == Self.androidAAB || path == artifact {
@@ -3009,7 +3216,8 @@ final class NormalAppUITests: XCTestCase {
             for scenario in ["valid", "late-close", "extra-operation", "work", "journal", "project-cache", "extra-artifact",
                              "symlink", "hardlink", "depth", "mode", "input", "wrong-result", "identity", "repeated-start",
                              "ios-valid", "ios-work", "ios-extra-operation", "ios-foreign-output", "ios-symlink",
-                             "ios-replacement", "ios-partial-open", "ios-late-close", "ios-input"] {
+                             "ios-replacement", "ios-partial-open", "ios-late-close", "ios-input",
+                             "candidate-valid", "candidate-replacement", "candidate-missing", "candidate-body", "candidate-extra", "ordinary-candidate-files"] {
                 try check()
                 let fixture = LocalFixture()
                 let temporary = open("/private/tmp", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -3224,6 +3432,8 @@ final class NormalAppUITests: XCTestCase {
                             }
                         }
                     } else {
+                    fixture.androidCandidateProfile = scenario.hasPrefix("candidate-")
+                    fixture.androidPositiveProfile = fixture.androidCandidateProfile
                     for path in ["project", "project/app", "project/app/src", "project/app/src/main", "project/gradle"] {
                         try makeDirectory(path, input: true)
                     }
@@ -3249,7 +3459,13 @@ final class NormalAppUITests: XCTestCase {
                     try makeFile(operation + "/artifacts/app-release.aab", captured)
                     try makeFile(androidReport, Data("private HTML is metadata only\n".utf8))
                     let artifactDigest = SHA256.hash(data: captured).map { String(format: "%02x", $0) }.joined()
+                    if fixture.androidCandidateProfile || scenario == "ordinary-candidate-files" {
+                        for name in ["candidate-inputs.json","store-metadata.zip","validation-report.json"] {
+                            try makeFile(operation + "/artifacts/" + name,Data("inert candidate reader DATA\n".utf8))
+                        }
+                    }
                     switch scenario {
+                    case "candidate-extra": try makeFile(operation + "/artifacts/foreign",Data([1]))
                     case "extra-operation": try makeDirectory("project/.mobile-release/desktop-android-build/" + String(repeating: "c", count: 32), input: false)
                     case "work": try makeDirectory(operation + "/work", input: false)
                     case "journal": try makeDirectory("project/.mobile-release/build-inputs", input: false)
@@ -3282,7 +3498,44 @@ final class NormalAppUITests: XCTestCase {
                         try closeTemporary(opened)
                     default: break
                     }
-                    if scenario == "valid" || scenario == "late-close" {
+                    if ["candidate-valid","candidate-replacement","candidate-missing","candidate-body"].contains(scenario) {
+                        _ = try fixture.finishAndroidOutputObservation(identity,artifactBytes:Int64(captured.count),artifactSHA256:artifactDigest,check:check)
+                        let (fd,name,opened) = try parent(operation + "/artifacts")
+                        let bundle:Directory
+                        do { bundle = try fixture.adoptDirectory(openat(fd,name,O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),parent:fd,name:name) }
+                        catch {try? closeTemporary(opened);throw error}
+                        // Parent originals stay retained until this DATA block's POST.
+                        defer {for value in opened {if Darwin.close(value) != 0 {fixture.closeErrors.append("candidate-DATA-parent-close")}}}
+                        fixture.candidateBundleDirectories=[bundle]
+                        for name in ["app-release.aab","candidate-inputs.json","store-metadata.zip","validation-report.json"] {
+                            fixture.candidateLeaves[name]=try fixture.candidateRead(bundle,name,limit:65536,check:check)
+                        }
+                        try fixture.candidateOriginalsPost(check:check)
+                        let leaf=fixture.candidateLeaves["app-release.aab"]!
+                        if scenario == "candidate-body" {
+                            let writable=openat(bundle.fd,leaf.name,O_WRONLY | O_NOFOLLOW | O_CLOEXEC)
+                            try need(writable>=0,"candidate DATA original write")
+                            var byte:UInt8=0
+                            let changed=pwrite(writable,&byte,1,0), closed=Darwin.close(writable)
+                            cleanupRows[operation + "/artifacts/" + leaf.name]=try named(bundle.fd,leaf.name)
+                            try need(changed==1 && closed==0,"candidate DATA changed body close")
+                            try refused("candidate retained original replaced") {try fixture.candidatePostLeaf(leaf,check:check)}
+                        } else if scenario != "candidate-valid" {
+                            let old=operation + "/artifacts/" + leaf.name, moved=operation + "/artifacts/retained-original"
+                            try need(renameat(bundle.fd,leaf.name,bundle.fd,"retained-original")==0,"candidate DATA owned rename")
+                            cleanupRows[moved]=cleanupRows.removeValue(forKey:old)
+                            if let index=created.firstIndex(of:old){created[index]=moved}
+                            if scenario == "candidate-replacement" {try makeFile(old,captured)}
+                            // Missing and same-byte replacement cannot become a fresh original.
+                            var rejected=false
+                            do {try fixture.candidatePostLeaf(leaf,check:check)} catch {rejected=true}
+                            try need(rejected,"candidate DATA substituted original admitted")
+                        } else {
+                            try fixture.candidateOriginalsPost(check:check)
+                            try fixture.closeAndroidOriginals(identity,check:check)
+                            try need(faccessat(cleanupRoot,operation + "/artifacts/app-release.aab",F_OK,AT_EACCESS)==0,"candidate DATA observation removed bundle")
+                        }
+                    } else if scenario == "valid" || scenario == "late-close" {
                         let census = try fixture.finishAndroidOutputObservation(identity, artifactBytes: Int64(captured.count),
                                                                                artifactSHA256: artifactDigest, check: check)
                         try need(census.entries > 0 && census.logicalBytes > 0, "Android DATA census accounting")
@@ -3325,7 +3578,8 @@ final class NormalAppUITests: XCTestCase {
                         let wrong = try AndroidBuildIdentity(operationID: String(repeating: "d", count: 32), ownerGeneration: identity.ownerGeneration)
                         try refused("Android terminal original identity differs") { _ = try fixture.finishAndroidOutputObservation(wrong, artifactBytes: Int64(captured.count), artifactSHA256: artifactDigest, check: check) }
                     } else {
-                        let reasons = ["extra-operation": "Android operation output roster", "work": "Android work or journal remains",
+                        let reasons = ["candidate-extra":"Android retained artifact roster", "ordinary-candidate-files":"Android retained artifact roster",
+                            "extra-operation": "Android operation output roster", "work": "Android work or journal remains",
                             "journal": "Android private root output roster", "project-cache": "Android unexpected input-adjacent output",
                             "extra-artifact": "Android retained artifact roster", "symlink": "Android output original open",
                             "hardlink": "Android output regular leaf shape", "depth": "Android output depth bound",
@@ -3577,7 +3831,7 @@ final class NormalAppUITests: XCTestCase {
         private func checkRoster() throws {
             for value in anchors { try checkDirectory(value) }
             let leafPaths = Set(current.keys)
-            let expectedDirectories = Set(Self.ancestors(leafPaths))
+            let expectedDirectories = Set(Self.ancestors(leafPaths)).union(candidateEmptyDirectories)
             try Self.need(Set(directories.keys) == expectedDirectories, "unexpected registered directory")
             for path in expectedDirectories.sorted() {
                 guard let directory = directories[path] else { throw Refusal.condition("fixture: directory absent") }
@@ -3593,7 +3847,7 @@ final class NormalAppUITests: XCTestCase {
                 try Self.need(try children(directory) == expected, "unexpected owned output under " + path)
             }
             let project = directories["project"]!
-            for name in Self.controls + [".git"] {
+            for name in Self.controls + (androidCandidateProfile ? [] : [".git"]) {
                 if savedVersionPending && name == ".mobile-release-version" { continue }
                 var s = stat()
                 let returned = fstatat(project.fd, name, &s, AT_SYMLINK_NOFOLLOW)
@@ -3602,10 +3856,11 @@ final class NormalAppUITests: XCTestCase {
             }
             try Self.need(closeErrors.isEmpty, "a consuming file/roster close failed")
         }
-        func prepare(_ profile: Profile = .projectEdits) throws {
+        func prepare(_ profile: Profile = .projectEdits, candidateCertificate: String? = nil) throws {
             try Self.need(rootPath.isEmpty && current.isEmpty, "fixture preparation was repeated")
             let projectData = profile != .persistentCredentials
-            let androidPositive = profile == .androidSignedBuild
+            let androidPositive = profile == .androidSignedBuild || profile == .androidCandidateInputs
+            androidCandidateProfile = profile == .androidCandidateInputs
             let iosUnsigned = profile == .iosUnsignedArchive
             let resourceName = iosUnsigned ? "normal-ios-unsigned-v1" : androidPositive ? "normal-android-positive-v1" : projectData ? "normal-project-v1" : "normal-persistence-v1"
             guard let url = Bundle(for: NormalAppUITests.self).url(forResource: resourceName, withExtension: "json") else {
@@ -3773,6 +4028,11 @@ final class NormalAppUITests: XCTestCase {
             let temporary = try adoptDirectory(openat(privateDirectory.fd, "tmp", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
                 parent: privateDirectory.fd, name: "tmp")
             anchors.append(temporary)
+            if androidCandidateProfile {
+                guard let certificate = candidateCertificate else {throw Refusal.condition("fixture: candidate certificate missing")}
+                try adoptAndroidCandidate(temporary, certificate: certificate)
+                return
+            }
             if profile == .savedVersionRecovery {
                 try adoptSavedVersion(data, temporary: temporary)
                 return
@@ -4123,12 +4383,16 @@ final class NormalAppUITests: XCTestCase {
             return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         }
         func androidSavedDigest(_ path: String) throws -> String {
-            try Self.need(androidPositiveProfile && acceptedStages == ["android-public-certificate"]
+            try Self.need(androidPositiveProfile && (androidCandidateProfile && acceptedStages.isEmpty || acceptedStages == ["android-public-certificate"])
                 && [Self.config, Self.version].contains(path), "Android saved public digest role")
             guard let value = current[path] else { throw Refusal.condition("Android saved public original absent") }
             return SHA256.hash(data: value.bytes).map { String(format: "%02x", $0) }.joined()
         }
         func assertUnchanged() throws {
+            if let (parent,old) = candidateHandoff {
+                let now = try readLeaf(parent,name:"android-candidate-fixture.json",privateOnly:true,limit:65536)
+                try Self.need(now.bytes == old.bytes && now.facts == old.facts,"candidate handoff original changed")
+            }
             for path in current.keys.sorted() {
                 let old = current[path]!
                 let observed = try androidPositiveProfile && path == Self.androidVerificationPath ? readAndroidVerificationOriginal() : read(path)
@@ -6817,6 +7081,40 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor func testSyntheticProjectAndroidSignedBuild() throws {
+        try syntheticAndroidBuild(candidateInputs:false)
+    }
+    @MainActor func testSyntheticProjectAndroidCandidateInputs() throws {
+        try syntheticAndroidBuild(candidateInputs:true)
+    }
+    @MainActor private func candidateHistoryAction(_ renderer:XCUIElement,action:String,checkpoint:Int,operation:String?=nil)throws->XCUIElement {
+        try press(renderer,"Releases",renderer:renderer)
+        let history=try waitElement(named(renderer,"Local release history"),in:renderer)
+        if action=="enroll" || action=="verify" {
+            try select(history,label:"History action",value:action=="enroll" ? "Enroll this project for the first time" : "Verify existing history",renderer:renderer)
+            try press(history,action=="enroll" ? "Review enrollment" : "Review history verification",renderer:renderer,timeout:48)
+        } else {
+            try require(operation != nil,"candidate history selection missing")
+            try press(history,action=="review" ? "Review inputs" : "Review abandonment",renderer:renderer,timeout:48)
+        }
+        let consent=try waitElement(history.checkBoxes.matching(identifier:"I authorize this specific local action."),in:history,enabled:true,timeout:48)
+        try require((consent.value as? String)=="0" || (consent.value as? NSNumber)?.intValue==0,"candidate history consent unexpectedly checked")
+        if let operation, action=="review" || action=="abandon" {try require(try androidPublicText(history).contains(operation),"candidate history current operation differs")}
+        try reveal(consent,in:renderer);consent.click()
+        let label=["enroll":"Enroll project","verify":"Verify history","review":"Review candidate inputs","abandon":"Abandon input operation"][action]!
+        // Candidate actions retain a disabled same-labelled Prepare button.
+        // Select the unique enabled original consent action, never its index.
+        let start=try waitElement(history.buttons.matching(identifier:label).matching(NSPredicate(format:"enabled == true")),in:history,enabled:true,timeout:48)
+        try reveal(start,in:renderer);start.click()
+        try waitGone(consent,timeout:48)
+        _=try waitElement(history.staticTexts.matching(identifier:"Verified local history"),in:history,timeout:48,
+            failures:["journal unavailable","recovery required","cleanup unknown","runtime unavailable"])
+        _=try waitElement(history.staticTexts.matching(NSPredicate(format:"label BEGINSWITH %@","Checkpoint \(checkpoint).")),in:history,timeout:48)
+        if let operation {try require(try androidPublicText(history).contains(operation),"candidate history returned different operation")}
+        try require(!(try androidPublicText(history)).contains("Earlier project context"),"candidate history is historical")
+        return history
+    }
+
+    @MainActor private func syntheticAndroidBuild(candidateInputs:Bool) throws {
         continueAfterFailure = false
         executionTimeAllowance = 900
         try beginCase(seconds: 900, androidPositive: true)
@@ -6825,11 +7123,11 @@ final class NormalAppUITests: XCTestCase {
         var inputs: LocalFixture.AndroidInputs?
         var certificate = ""
         try stage("android-private-admission") {
-            let admitted = try LocalFixture.AndroidInputs.admit { _ = try self.remaining(5) }
+            let admitted = try LocalFixture.AndroidInputs.admit(candidate:candidateInputs) { _ = try self.remaining(5) }
             ownedAndroidInputs = admitted; inputs = admitted
             certificate = admitted.publicCertificate
-            try fixture.prepare(.androidSignedBuild)
-            try fixture.prepareAndroidCertificate(certificate)
+            if candidateInputs {try fixture.prepare(.androidCandidateInputs,candidateCertificate:certificate)}
+            else {try fixture.prepare(.androidSignedBuild);try fixture.prepareAndroidCertificate(certificate)}
         }
         guard let initialInputs = inputs else { throw Refusal.condition("Android private input admission absent") }
         let (app, window, renderer) = try launchForJourney()
@@ -6841,6 +7139,7 @@ final class NormalAppUITests: XCTestCase {
                                 in: renderer, failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "Android project selection differs")
             _ = try waitElement(renderer.staticTexts.matching(identifier: "org.example.saved"), in: renderer)
+            if !candidateInputs {
             try press(renderer, "Project settings", renderer: renderer)
             let settings = try waitElement(named(renderer, "Settings section"), in: renderer)
             try press(settings, "Android", renderer: renderer)
@@ -6858,6 +7157,17 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Submitted configuration saved")),
                                 in: review, timeout: 48, failures: Self.configurationFailures)
             try fixture.accept("android-public-certificate")
+            } else {
+                try press(renderer,"Project settings",renderer:renderer)
+                let settings=try waitElement(named(renderer,"Settings section"),in:renderer)
+                try press(settings,"General",renderer:renderer)
+                let local=try waitElement(renderer.checkBoxes.matching(NSPredicate(format:"label BEGINSWITH %@","Allow local Store release preparation")),in:renderer)
+                try require((local.value as? String)=="1" || (local.value as? NSNumber)?.intValue==1,"candidate saved local policy not enabled")
+                try fixture.prepareCandidateJournalObservation {_ = try self.remaining(5)}
+                let enrolled=try candidateHistoryAction(renderer,action:"enroll",checkpoint:1)
+                try require(try androidPublicText(enrolled).contains("No release operations recorded."),"candidate enrollment not empty")
+                try fixture.observeCandidateJournal(1) {_ = try self.remaining(5)}
+            }
             try initialInputs.post { _ = try self.remaining(5) }
         }
         try stage("android-saved-input-read") {
@@ -7063,6 +7373,11 @@ final class NormalAppUITests: XCTestCase {
             try reveal(signing, in: renderer); signing.click()
             _ = try waitElement(renderer.staticTexts.matching(identifier:
                 "Current inputs are assigned. Passwords, private-key use and certificate policy will be checked during the owned run; file-format assessment alone is not signing verification."), in: renderer)
+            if candidateInputs {
+                let retain=try waitElement(renderer.checkBoxes.matching(identifier:"Keep local candidate inputs for a later release"),in:renderer,enabled:true)
+                try require((retain.value as? String)=="0" || (retain.value as? NSNumber)?.intValue==0,"candidate retain starts opt-in")
+                try reveal(retain,in:renderer);retain.click()
+            }
             try press(renderer, "Review saved inputs", renderer: renderer, timeout: 48)
             let review = try waitElement(controls(renderer, [.group], label: "Confirm this saved Android-build intent"), in: renderer, timeout: 48)
             let text = try androidPublicText(review)
@@ -7071,6 +7386,9 @@ final class NormalAppUITests: XCTestCase {
                 try require(text.contains(fact), "Android signed review saved-input binding differs")
             }
             let original = try androidCurrentBuildIdentity(review)
+            if candidateInputs {
+                try require(text.contains("Create local candidate inputs once?") && original.operationID.range(of:#"^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"#,options:.regularExpression) != nil,"candidate original consent UUID/domain")
+            }
             identity = original
             try fixture.beginAndroidOutputObservation(original) { _ = try self.remaining(5) }
             let consent = try unique(review.checkBoxes.matching(NSPredicate(format: "label BEGINSWITH %@",
@@ -7080,7 +7398,7 @@ final class NormalAppUITests: XCTestCase {
             try reveal(consent, in: renderer); consent.click()
             try require(try androidCurrentBuildIdentity(review) == original, "Android consent identity changed")
             try fixture.confirmAndroidStart(original) { _ = try self.remaining(5) }
-            try press(review, "Build, sign and validate", renderer: renderer, timeout: 48) // The sole Start.
+            try press(review, candidateInputs ? "Create local candidate inputs" : "Build, sign and validate", renderer: renderer, timeout: 48) // The sole Start.
         }
         guard let identity else { throw Refusal.condition("Android original build identity missing") }
         var artifact: (Int, String)?
@@ -7095,6 +7413,13 @@ final class NormalAppUITests: XCTestCase {
                 "Task work: removed. Local artifacts: retained-local-result. Disposition is not permission for blanket deletion or a rerun."), in: status)
             try require(try androidCurrentBuildIdentity(status) == identity, "Android terminal status identity differs")
             artifact = try androidResult(terminal, identity: identity, certificate: certificate)
+            if candidateInputs {
+                let panel=try waitElement(named(terminal,"Created local candidate inputs"),in:terminal)
+                try require(try androidPublicText(panel).contains(fixture.candidateCommit),"candidate source commit result differs")
+                try fixture.holdCandidateBundle(identity,artifactBytes:artifact!.0,artifactSHA:artifact!.1) {_ = try self.remaining(5)}
+                try require(try androidPublicText(panel).contains(fixture.candidateOperation),"candidate result operation differs")
+                try fixture.observeCandidateJournal(3,operation:fixture.candidateOperation) {_ = try self.remaining(5)}
+            }
             // Original private POST -> ALL18 consuming closes -> clock -> drop
             // scalar-owning references. No private reopening after this boundary.
             try initialInputs.finish { _ = try self.remaining(5) }
@@ -7110,6 +7435,26 @@ final class NormalAppUITests: XCTestCase {
             try privateRecordCount(storage, count: 0, assigned: 0)
         }
         guard let artifact else { throw Refusal.condition("Android native artifact observation missing") }
+        if candidateInputs {
+            try stage("candidate-original-history-review-and-abandon") {
+                let id=fixture.candidateOperation
+                let verified=try candidateHistoryAction(renderer,action:"verify",checkpoint:3,operation:id)
+                try require(try androidPublicText(verified).contains("inputs ready"),"candidate history not ready")
+                let reviewed=try candidateHistoryAction(renderer,action:"review",checkpoint:3,operation:id)
+                let text=try androidPublicText(reviewed)
+                try require(text.contains("Inputs currently verified · Not submitted") && text.contains("earlier creation finished cleanly")
+                    && ["app-release.aab","store-metadata.zip","validation-report.json"].allSatisfy({text.contains($0)}),"candidate current-only review missing")
+                try fixture.candidateOriginalsPost {_ = try self.remaining(5)}
+                let abandoned=try candidateHistoryAction(renderer,action:"abandon",checkpoint:4,operation:id)
+                try require(try androidPublicText(abandoned).contains("Its files were preserved; no Store action was performed."),"candidate abandonment observation missing")
+                try fixture.observeCandidateJournal(4,operation:id) {_ = try self.remaining(5)}
+                try fixture.candidateOriginalsPost {_ = try self.remaining(5)}
+                let final=try candidateHistoryAction(renderer,action:"verify",checkpoint:4,operation:id)
+                let finalText=try androidPublicText(final)
+                try require(finalText.contains("settled failure") && !finalText.contains("Review before retrying"),"candidate final history not settled")
+                try fixture.candidateOriginalsPost {_ = try self.remaining(5)}
+            }
+        }
         var summary: LocalFixture.AndroidOutputSummary?
         try stage("android-output-census-and-normal-quit") {
             summary = try fixture.finishAndroidOutputObservation(identity, artifactBytes: Int64(artifact.0), artifactSHA256: artifact.1) {
@@ -7123,6 +7468,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try quitSheet(app, window)
             try click(sheet.buttons.matching(identifier: "Quit"), "Android ordinary Quit unavailable")
             try completeNormalQuit(app)
+            if candidateInputs {try fixture.candidateOriginalsPost {_ = try self.remaining(5)}}
             try fixture.closeAndroidOriginals(identity) { _ = try self.remaining(5) }
             ownedFixture = nil
         }
@@ -7131,7 +7477,7 @@ final class NormalAppUITests: XCTestCase {
                     && protectedCopyInstance.count == 32, "Android fresh-copy observations incomplete")
         try acceptFinalScenario()
         let env = ProcessInfo.processInfo.environment
-        let facts: [String: Any] = ["schemaVersion": 1, "scope": "one-ordinary-local-signed-android-build",
+        var facts: [String: Any] = ["schemaVersion": 1, "scope": candidateInputs ? "one-local-android-candidate-inputs-ui" : "one-ordinary-local-signed-android-build",
             "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": LocalFixture.AndroidInputs.target,
             "runId": env["MRK_NORMAL_UI_ANDROID_RUN_ID"] ?? "", "runAttempt": env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"] ?? "",
             "sourceRegistrationObserved": sourceRegistrationObserved, "serviceEnabledObserved": serviceEnabledObserved,
@@ -7143,10 +7489,14 @@ final class NormalAppUITests: XCTestCase {
             "artifactSha256": artifact.1, "artifactBytes": artifact.0, "outputEntries": summary.entries,
             "outputNameBytes": summary.nameBytes, "outputLogicalBytes": summary.logicalBytes,
             "moduleLogicalBytes": summary.moduleBytes, "outputCensusSha256": summary.censusSHA256]
+        if candidateInputs {
+            facts.merge(["candidateSha256":fixture.candidateSHA256,"projectCommit":fixture.candidateCommit,"projectTree":fixture.candidateTree,
+                "historyCheckpoint":4,"candidateReviewed":true,"candidateAbandoned":true,"bundlePreserved":true,"storeActionPerformed":false]) {_,new in new}
+        }
         let raw = try JSONSerialization.data(withJSONObject: facts, options: [.sortedKeys, .withoutEscapingSlashes])
         try require(raw.count <= 16 * 1024, "Android safe public result bound")
         _ = try remaining(5)
-        print("MRK_MACOS_ANDROID_SIGNED_BUILD_UI=" + String(decoding: raw, as: UTF8.self))
+        print((candidateInputs ? "MRK_MACOS_ANDROID_CANDIDATE_INPUTS_UI=" : "MRK_MACOS_ANDROID_SIGNED_BUILD_UI=") + String(decoding: raw, as: UTF8.self))
     }
 
     override func tearDown() async throws {

@@ -5363,6 +5363,8 @@ jobs:
     environment: macos-developer-id
     name: prepared-installed-${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    # All phases share this job cap. Their maximum allowances do not imply
+    # a worst-case fit; timeout is a failure, never UI or cleanup acceptance.
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -5656,6 +5658,85 @@ jobs:
             -default-test-execution-time-allowance 60 -maximum-test-execution-time-allowance 60 \
             -disableAutomaticPackageResolution
           ui applications-summary --normal-summary applications-test.xcresult
+          # Keep this same compiled harness for the candidate journey below.
+          # A failed/unknown phase never starts the next test.
+      - name: Prepare private Android tools and disposable signing inputs for this candidate
+        id: candidate_android_inputs
+        if: github.event_name == 'push' && steps.candidate_applications_ui.outcome == 'success'
+        timeout-minutes: 22
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1
+          # The unchanged owner admits the actual source/ref/run/host and owns
+          # four vendor acquisitions plus two disposable keytool calls. Nothing
+          # here uses the Developer ID/notary secrets or contacts a Store.
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=C LC_ALL=C TZ=UTC \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \
+            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" \
+            "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" "MRK_ANDROID_PREPARATION_WORK=$MRK_MACOS_WORK" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_dependency_preparation.py prepare-ui-inputs \
+            > "$MRK_MACOS_WORK/normal-ui/android-inputs.stdout" 2> "$MRK_MACOS_WORK/normal-ui/android-inputs.stderr"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/normal-ui/android-inputs.status"
+          printf 'MRK_CANDIDATE_ANDROID_INPUTS=originalReturncode=%s;uiQualified=false\n' "$status"
+          exit "$status"
+      - name: Exercise installed candidate creation, review and abandonment without Store access
+        id: candidate_android_ui
+        if: github.event_name == 'push' && steps.candidate_android_inputs.outcome == 'success'
+        timeout-minutes: 23
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -f 1048576
+          ui() {
+            local label=$1
+            shift
+            set +e
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
+              LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+              "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_INPUT_FIXTURE=$MRK_MACOS_WORK/normal-ui/android-input-fixture.json" \
+              "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_RUN_ID=$GITHUB_RUN_ID" \
+              "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+              "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" "$@" \
+              > "$MRK_MACOS_WORK/normal-ui/$label.log" 2>&1
+            local status=$?
+            set -e
+            printf '%s\n' "$status" > "$MRK_MACOS_WORK/normal-ui/$label.status"
+            # Raw XCTest text can contain synthetic secure-field keystrokes.
+            # Keep it private; no transcript or credential file is uploaded.
+            printf 'MRK_CANDIDATE_ANDROID_PHASE=%s;originalReturncode=%s;qualification=observation-only\n' "$label" "$status"
+            return "$status"
+          }
+          ui android-candidate-inputs-test --normal-android-candidate-inputs-test
+          ui android-candidate-inputs-summary --normal-android-candidate-inputs-summary
+      - name: Remove the joined candidate UI harness build output
+        if: github.event_name == 'push' && steps.candidate_android_ui.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
           # All original phase owners joined successfully; remove only their build output.
           "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/normal-ui/DerivedData" <<'PY_UI_CLEAN'
           import os, shutil, stat, sys

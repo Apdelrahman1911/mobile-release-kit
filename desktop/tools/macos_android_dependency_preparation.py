@@ -867,10 +867,11 @@ def acquire(work, *, private=None):
 
 
 # This fixed role is deliberately not selected by RUN_SCOPE. It is prepared for
-# the ordinary installed job only; A/B keep their original five-archive route.
+# the ordinary installed and same-source candidate jobs; A/B keep their original five-archive route.
 UI_SCOPE = 'prepare-ui-inputs'
 UI_WORKFLOW = '.github/workflows/desktop-macos-installed.yml'
 UI_REF = 'refs/heads/verify/desktop-macos-installed'
+UI_REFS = (UI_REF, 'refs/heads/verify/desktop-macos-candidate')
 UI_TARGET = 'aarch64-apple-darwin'
 UI_CATALOGUE = 'desktop/src-tauri/src/android_supplier_macos_catalogue.rs'
 UI_CATALOGUE_PIN = [20409744, '24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5']
@@ -896,8 +897,16 @@ def ui_selection(target):
             [jdk, *ARCHIVES[1:4]], {'Jdk': 548, 'Sdk': 14197, 'Gradle': 322}, 750044172)
 
 
+def ui_reference(environment):
+    """An explicit current workflow ref, never inferred from supplier output."""
+    ref = environment.get('GITHUB_REF')
+    need(type(ref) is str and ref in UI_REFS, 'ui-fixed-installed-ref')
+    return ref
+
+
 def ui_context():
     env = os.environ
+    ref = ui_reference(env)
     target = env.get('MRK_MACOS_TARGET')
     machine, runner_arch, *_ = ui_selection(target)
     need(RUN_SCOPE == UI_SCOPE and sys.platform == 'darwin' and os.uname().machine == machine
@@ -905,10 +914,10 @@ def ui_context():
          and sys.version_info[:3] == (3, 14, 7)
          and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode, 'ui-fixed-python-host')
     need(env.get('GITHUB_REPOSITORY') == 'Apdelrahman1911/mobile-release-kit'
-         and env.get('GITHUB_EVENT_NAME') == 'push' and env.get('GITHUB_REF') == UI_REF
+         and env.get('GITHUB_EVENT_NAME') == 'push' and env.get('GITHUB_REF') == ref
          and env.get('GITHUB_WORKFLOW_SHA') == env.get('GITHUB_SHA')
          and re.fullmatch('[0-9a-f]{40}', env.get('GITHUB_SHA', ''))
-         and env.get('GITHUB_WORKFLOW_REF') == env['GITHUB_REPOSITORY'] + '/' + UI_WORKFLOW + '@' + UI_REF
+         and env.get('GITHUB_WORKFLOW_REF') == env['GITHUB_REPOSITORY'] + '/' + UI_WORKFLOW + '@' + ref
          and env.get('GITHUB_WORKSPACE') == str(SOURCE) and Path.cwd() == SOURCE
          and env.get('RUNNER_ENVIRONMENT') == 'github-hosted'
          and env.get('RUNNER_OS') == 'macOS' and env.get('RUNNER_ARCH') == runner_arch
@@ -1134,6 +1143,7 @@ def ui_tool_post(work, clock, expected):
 
 
 def acquire_ui_inputs(work, *, private=None, target=UI_TARGET):
+    ref = ui_reference(os.environ)
     _, _, _, pin, archives, _, _ = ui_selection(target)
     need(RUN_SCOPE == UI_SCOPE and private is not None
          and os.environ.get('MRK_ANDROID_ACQUISITION_CHILD') == '1', 'ui-acquisition-original-required')
@@ -1157,7 +1167,7 @@ def acquire_ui_inputs(work, *, private=None, target=UI_TARGET):
     value = {'schemaVersion': 1, 'scope': 'four-supplier-sources-no-native-execution',
         'status': 'closed-awaiting-original-caller', 'sourceCommit': os.environ['GITHUB_SHA'],
         'target': target, 'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
-        'workflow': UI_WORKFLOW, 'ref': UI_REF, 'archives': archives,
+        'workflow': UI_WORKFLOW, 'ref': ref, 'archives': archives,
         'archiveBytes': sum(item['bytes'] for item in archives), 'catalogueSha256': pin[1],
         'toolRosterSha256': roster_sha, 'sdkMetadata': SDK_METADATA, 'toolBytes': a.writes,
         'readBytes': a.reads, 'files': a.files, 'entries': a.entries, 'directoryCount': len(a.directories),
@@ -1169,6 +1179,7 @@ def acquire_ui_inputs(work, *, private=None, target=UI_TARGET):
 
 
 def ui_acquisition_receipt(work, clock, *, target=UI_TARGET):
+    ref = ui_reference(os.environ)
     _, _, _, pin, archives, _, _ = ui_selection(target)
     raw, state = read(work / 'acquisition.json', 16384, clock=clock)
     value = N.document(raw)
@@ -1181,7 +1192,7 @@ def ui_acquisition_receipt(work, clock, *, target=UI_TARGET):
          and value['status'] == 'closed-awaiting-original-caller'
          and value['sourceCommit'] == os.environ['GITHUB_SHA'] and value['target'] == target
          and value['runId'] == os.environ['GITHUB_RUN_ID'] and value['runAttempt'] == os.environ['GITHUB_RUN_ATTEMPT']
-         and value['workflow'] == UI_WORKFLOW and value['ref'] == UI_REF
+         and value['workflow'] == UI_WORKFLOW and value['ref'] == ref
          and value['archives'] == archives and value['archiveBytes'] == sum(item['bytes'] for item in archives)
          and value['catalogueSha256'] == pin[1] and value['sdkMetadata'] == SDK_METADATA
          and value['protectedRegistration'] is False and value['uiQualification'] is False
@@ -1284,6 +1295,7 @@ def ui_key_arguments(stage, passwords):
 
 
 def prepare_ui_inputs(work, *, private=None, target=UI_TARGET):
+    ref = ui_reference(os.environ)
     _, _, _, pin, archives, _, _ = ui_selection(target)
     need(RUN_SCOPE == UI_SCOPE and private is not None and private['path'] == work,
          'ui-preparation-original-required')
@@ -1387,7 +1399,7 @@ def prepare_ui_inputs(work, *, private=None, target=UI_TARGET):
             handoff = {'schemaVersion': 1, 'scope': 'one-owned-android-ui-inputs',
                 'sourceCommit': os.environ['GITHUB_SHA'], 'target': target,
                 'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
-                'workflow': UI_WORKFLOW, 'ref': UI_REF, 'root': str(stage),
+                'workflow': UI_WORKFLOW, 'ref': ref, 'root': str(stage),
                 'rootFacts': [str(v) for v in stage_facts],
                 'credentialDirectoryFacts': [str(v) for v in N.saved_version_facts(os.fstat(originals.held[0][-1]))],
                 'sourceCatalogueSha256': pin[1], 'sourceRosterSha256': tools[0], 'roots': roots,
