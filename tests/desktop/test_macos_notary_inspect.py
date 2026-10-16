@@ -66,6 +66,14 @@ class NotaryInspectTests(unittest.TestCase):
         self.assertEqual(result['issues'][1]['category'], 'unclassified')
         exported = json.dumps(result)
         for secret in ('private', ID, M.ARCHIVE): self.assertNotIn(secret, exported)
+        nested = log()
+        nested['issues'] = [dict(nested['issues'][0], path=(
+            'private/store/bundle/ruby/3.3.0/cache/terminal-notifier-2.0.0.gem/'
+            'data.tar.gz/vendor/terminal-notifier/terminal-notifier.app/Contents/MacOS/terminal-notifier'))]
+        self.assertEqual(M.log_projection(encoded(nested), selected)['issues'][0]['component'],
+                         'optional-terminal-notifier-cache')
+        nested['issues'][0]['path'] = 'private/store/bundle/ruby/3.3.0/cache/another.gem/native'
+        self.assertEqual(M.log_projection(encoded(nested), selected)['issues'][0]['component'], 'gem-install-cache')
         for changes in ({'jobId': OLD_ID}, {'archiveFilename': 'other'}, {'status': 'Accepted'},
                         {'uploadDate': '2026-10-15T14:40:00Z'}, {'statusCode': True}):
             value = log(); value.update(changes)

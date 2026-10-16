@@ -92,7 +92,10 @@ def log_projection(body, submission, start=START, end=END):
         need(number is None or type(number) is int and 0 <= number <= 999999)
         # These literal classes, never path/message text or sanitized suffixes,
         # are sufficient to locate the failing component without publishing logs.
-        component = ('launcher' if '/MobileReleaseKitLauncher.app/' in path else
+        component = ('optional-terminal-notifier-cache'
+                     if 'terminal-notifier-2.0.0.gem' in path.split('/') and '/terminal-notifier.app/' in path else
+                     'gem-install-cache' if '/cache/' in path and '.gem/' in path else
+                     'launcher' if '/MobileReleaseKitLauncher.app/' in path else
                      'store-runtime' if '/store/' in path else 'python-runtime' if '/python/' in path else
                      'desktop-payload' if '/MobileReleaseKitPayload.app/' in path else 'other')
         key = (issue['severity'], number, MESSAGES.get(message, 'unclassified'), component)

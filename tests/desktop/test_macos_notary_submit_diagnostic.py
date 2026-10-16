@@ -1,7 +1,10 @@
 """Passive same-original notarization diagnostics; no Apple or native execution."""
 import copy
+import contextlib
 import hashlib
 import importlib.util
+import io
+import json
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -75,14 +78,14 @@ class NotarySubmitDiagnosticTests(unittest.TestCase):
                 credential_failed=False, credential_active=None, removal_final_active=lambda: False,
                 notary_retiring=False, notary_unknown=False, errors=[], stager_io_pending=None,
                 calls=[{"role": role, "returned": True, "capturesSettled": True} for role in HELPER.NOTARY_ROLES[:5]],
-                notary_mutation_pending=False, notary_clock=lambda: None, android_support=None,
+                notary_mutation_pending=False, notary_clock=lambda: None, android_support=None, store_signing=None,
                 app_absence=None, update=None, removal=False, removal_recorded_role=lambda role: role,
                 owner=SimpleNamespace(run_owned=owned), work=Path("/synthetic-unopened-work"),
                 checkout=Path("/synthetic-unopened-source"), publish=publish)
             if fault == "return-zero":
                 HELPER.Operation.call(op, "payload-submit", argv, {}, cwd=op.work, timeout=20, limit=65536)
             else:
-                with self.assertRaises(HELPER.Refused if fault is None else RuntimeError):
+                with self.assertRaises(HELPER.Refused if fault is None else RuntimeError) as failure:
                     HELPER.Operation.call(op, "payload-submit", argv, {}, cwd=op.work, timeout=20, limit=65536)
             self.assertEqual(invoked, [tuple(argv)])
             row = op.calls[-1]
@@ -93,6 +96,72 @@ class NotarySubmitDiagnosticTests(unittest.TestCase):
                 self.assertEqual(row["notarySubmitDiagnostic"]["errorClass"], "network-dns")
                 self.assertNotIn(PRIVATE.decode(), str(row))
                 self.assertEqual(len(published), 3)
+                self.assertEqual(HELPER.failure_exception(failure.exception)["reason"],
+                                 "original-nonzero-payload-submit")
+
+    def test_log_parser_failures_and_invalid_submission_have_finite_distinct_diagnostics(self):
+        private = PRIVATE.decode()
+        submission_id = "11111111-2222-3333-4444-555555555555"
+        log = {"logFormatVersion": 1, "jobId": submission_id, "status": "Accepted",
+            "archiveFilename": HELPER.NOTARY_ZIP_NAME, "issues": None, "ticketContents": None}
+        encode = lambda value: json.dumps(value).encode("ascii")
+        cases = (
+            ("Invalid", encode(dict(log, status="Invalid")), "notary-submission-invalid"),
+            ("Accepted", encode(dict(log, archiveFilename=private)), "notary-log-binding"),
+            ("Accepted", encode(dict(log, statusCode=1)), "notary-log-status-code"),
+            ("Accepted", encode(dict(log, ticketContents=[{"path": private, "arch": None,
+                "digestAlgorithm": "SHA-256", "cdhash": "a" * 40}])), "notary-log-ticket-shape"),
+            ("Accepted", encode(dict(log, issues=[{"severity": "error", "path": private,
+                "message": private}])), "notary-log-success-with-errors"),
+            ("Accepted", b'{"logFormatVersion":1,"logFormatVersion":1}', "notary-json-format"),
+            ("Accepted", b'{' + PRIVATE, "notary-json-format"),
+        )
+        for status, body, reason in cases:
+            with self.subTest(reason=reason):
+                submission = HELPER.notary_submit_data(encode({"id": submission_id, "status": status}))
+                with self.assertRaises(HELPER.Refused) as failure:
+                    HELPER.notary_log_data(body, submission, "a" * 64)
+                    # Same terminal Invalid refusal after an otherwise valid
+                    # log; this passive fixture grants no owner/finality facts.
+                    HELPER.need(submission["status"] != "Invalid", "notary-submission-invalid")
+                captured = HELPER.failure_exception(failure.exception)
+                self.assertEqual(captured["reason"], reason)
+                operation = object.__new__(HELPER.Operation)
+                operation.__dict__.update(receipt={"failure": {"stage": "payload-log", "reason": reason},
+                    "notarySubmission": submission, "private": private, "passed": False},
+                    diagnostic_failure=captured, calls=[{"role": role, "entered": True, "returned": True,
+                        "capturesSettled": True, "returncode": 0, "stdout": body, "argv": [private]}
+                        for role in HELPER.notary_roles(True)[:8]], credential_calls=[], credential_contexts=[], errors=[])
+                before = copy.deepcopy(operation.__dict__)
+                output = io.StringIO()
+                with contextlib.redirect_stderr(output):
+                    HELPER.emit_failure_diagnostic(HELPER.Refused("helper-package-incomplete"),
+                        phase="notarize-payload", target=HELPER.ARM_TARGET,
+                        main_stage="operation-execute", operation=operation)
+                encoded = output.getvalue()
+                value = json.loads(encoded)
+                self.assertEqual(value["terminal"]["reason"], "helper-package-incomplete")
+                self.assertEqual((value["originalFailure"]["stage"], value["originalFailure"]["reason"]),
+                                 ("payload-log", reason))
+                self.assertEqual((value["lastRecordedNative"]["role"], value["lastRecordedNative"]["returncode"],
+                    value["counts"]["native"]), ("payload-log", 0, 8))
+                self.assertTrue(value["diagnosticOnly"])
+                self.assertFalse(value["productReady"])
+                self.assertLessEqual(len(encoded.encode("ascii")), 4096)
+                for forbidden in (private, submission_id, "notarySubmission", "stdout", "argv"):
+                    self.assertNotIn(forbidden, encoded)
+                self.assertEqual(operation.__dict__, before)
+        # No prefix-based admission of a notary-looking private value.
+        unknown = "notary-log-" + private
+        operation = object.__new__(HELPER.Operation)
+        operation.__dict__.update(receipt={"failure": {"stage": unknown, "reason": unknown}},
+            diagnostic_failure=HELPER.failure_exception(HELPER.Refused(unknown)), calls=[{"role": unknown}])
+        value = HELPER.failure_diagnostic(HELPER.Refused(unknown), operation=operation)
+        self.assertEqual(value["terminal"]["reason"], "unclassified")
+        self.assertEqual(value["originalFailure"]["stage"], "unclassified")
+        self.assertEqual(value["originalFailure"]["reason"], "unclassified")
+        self.assertEqual(value["lastRecordedNative"]["role"], "unclassified")
+        self.assertNotIn(private, json.dumps(value))
 
     def test_public_projection_binds_diagnostic_to_failed_original_not_success(self):
         body = b"HTTP status code: 429\n" + PRIVATE

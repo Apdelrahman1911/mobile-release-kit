@@ -1399,7 +1399,22 @@ FINAL_IMAGE_INPUT_STAGER_REASONS = frozenset((
     'source-service-profile',
 ))
 
-_FAILURE_REASONS = frozenset((*FINAL_IMAGE_STAPLE_REASONS, *DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,
+# Existing notary guards only. A zero log command can still carry an Invalid
+# submission or fail its strict DATA parser; neither is native success evidence.
+_FAILURE_NOTARY_REASONS = (
+    'notary-submission-invalid', 'notary-fixed-archive-name', 'notary-uuid',
+    'notary-json-bound', 'notary-json-keys', 'notary-json-constant', 'notary-json-format', 'notary-json-object',
+    'notary-submit-terminal', 'notary-submit-metadata', 'notary-submit-archive',
+    'notary-log-binding', 'notary-log-metadata', 'notary-log-status-code', 'notary-log-upload-sha256',
+    'notary-log-issues-bound', 'notary-log-issue-shape', 'notary-log-issue-metadata', 'notary-log-issue-code',
+    'notary-log-tickets-bound', 'notary-log-ticket-shape', 'notary-log-success-with-errors',
+    'notary-monotonic-clock', 'notary-group-deadline', 'notary-io-unknown', 'notary-fixed-role-order',
+    'notary-child-timeout', 'notary-child-settlement-reserve', 'notary-key-role',
+    'notary-authentication-not-retired', 'notary-final-stdout-short-write',
+    *("original-nonzero-" + role for role in notary_roles(True)),
+)
+
+_FAILURE_REASONS = frozenset((*_FAILURE_NOTARY_REASONS, *FINAL_IMAGE_STAPLE_REASONS, *DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,
     'producer-tests-bound', 'producer-tests-framing', 'producer-tests-roster', 'producer-tests-result',
     'original-nonzero-producer-tests',
     'same-package-baseline-export', 'same-package-case', 'same-package-census', 'same-package-final-carrier', 'same-package-final-carrier-bytes', 'same-package-final-carrier-root', 'same-package-final-carrier-roster', 'same-package-finalizer-original', 'same-package-fixed-purpose', 'same-package-fresh-baseline', 'same-package-immediate-predecessor', 'same-package-input-', 'same-package-inventory', 'same-package-inventory-binding', 'same-package-inventory-input', 'same-package-live-readback', 'same-package-noop', 'same-package-notary-source', 'same-package-original-boundary', 'same-package-original-input', 'same-package-originals-unknown', 'same-package-parent-entry-bound', 'same-package-previous-shape', 'same-package-readback', 'same-package-readonly-mount', 'same-package-result-delta', 'same-package-result-namespace', 'same-package-result-post', 'same-package-source-scope', 'same-package-status-absence', 'same-package-status-post', 'same-package-status-purpose',
@@ -1465,6 +1480,7 @@ _FAILURE_REASONS = frozenset((*FINAL_IMAGE_STAPLE_REASONS, *DISTRIBUTION_STAGER_
 ))
 _FAILURE_STAGES = (
     *FINAL_IMAGE_STAPLE_STAGES, *FINAL_IMAGE_INPUT_STAGES,
+    *notary_roles(True), 'notary-preflight-input', 'notary-final-input', 'notary-known-private-retirement',
     "package-producer-tests",
     "same-package-noop",
     "owned-directory-admission", "source-image-binding", "resident-dependency-fetch", "separate-resident-image-compiler",
@@ -1759,7 +1775,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
             "errno": integer(captured.get("errno", original.get("errno")), 1, 65535),
         },
         "lastRecordedNative": {
-            "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES),
+            "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES + notary_roles(True)),
             **{key: flag(native.get(key)) for key in ("entered", "returned", "capturesSettled", "dispatched", "contained", "cleanup_complete")},
             "returncode": integer(native.get("returncode"), -65536, 65535),
             "originalFailure": {"available": flag(owned.get("available")),
