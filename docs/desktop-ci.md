@@ -21,6 +21,19 @@ its unqualified descriptor into a readiness claim.
 The package helper's existing bounded failure diagnostics appear directly in
 the job log; raw signing/notary captures and credentials do not.
 
+Current-candidate reuse preparation now has a small inert parser in
+`desktop/tools/macos_candidate_carrier.py`. It binds the exact nominated
+per-architecture push/run/attempt/job/artifact and requires successful Installer,
+final-image, candidate-staging and upload steps; a later UI failure is not
+mistaken for a failed package. It authenticates the three-member candidate
+archive and preserves the preview's unqualified status. ZIP metadata allocation
+is bounded before parsing, including rejection of ZIP64 limit overrides.
+Seven focused local methods passed, followed by the targeted ZIP64 regression;
+independent implementation review accepted the slice. The existing old ARM
+origin and execution route are unchanged. **Fresh candidate acquisition,
+installation and retained-carrier UI workflow integration are still unfinished.**
+No signed carrier was downloaded locally or native operation run for this slice.
+
 Installed/Aqua builds install the exact numbered Rust toolchain with standard
 Rustup (ARM 1.98.1, Intel 1.98.0), then verify the existing compiler identity and
 clean-configuration requirements. They do not assume the hosted image's moving

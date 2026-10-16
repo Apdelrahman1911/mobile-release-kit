@@ -42,6 +42,8 @@ OUTPUT_LIMIT = 2 << 20
 TERMINAL_LIMIT = 64 << 10
 TRANSPORT_LIMIT = LIMIT
 MEMBERS = {'MobileReleaseKit.dmg': LIMIT, 'PREVIEW.json': 16384, 'public-verification-evidence.json': 128 << 10}
+CANDIDATE_MEMBERS = {'MobileReleaseKit.dmg': LIMIT, 'PREVIEW.json': 16384, 'README.md': 32768}
+
 STATE = {'phase': 'admission', 'firstFailurePhase': None, 'lastRole': None, 'originalClosesKnown': False,
          'privateOutputsRetired': False, 'workloadsKnownSettled': False, 'resourceAdmission': None, 'installerObservation': None}
 SCOPE = 'fixed-ce644-arm-carrier-ios-unsigned-only'
@@ -443,11 +445,11 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def member_stream_complete(stream, info, data_start, central_start, deadline=None):
+def member_stream_complete(stream, info, data_start, central_start, deadline=None, *, limits=MEMBERS):
     """Same original span, real codec EOF and CRC; never ZipExtFile private state."""
     need(type(data_start) is int and type(central_start) is int and data_start >= 0
          and type(info.compress_size) is int and 0 < info.compress_size <= TRANSPORT_LIMIT
-         and type(info.file_size) is int and 0 < info.file_size <= MEMBERS[info.filename]
+         and type(info.file_size) is int and 0 < info.file_size <= limits[info.filename]
          and data_start + info.compress_size <= central_start, 'collector-public-compressed-span')
     stored = info.compress_type == zipfile.ZIP_STORED
     need(stored or info.compress_type == zipfile.ZIP_DEFLATED, 'collector-public-compression')
@@ -498,16 +500,31 @@ def member_stream_complete(stream, info, data_start, central_start, deadline=Non
          'collector-public-compressed-crc')
 
 
+def zip_directory_data(body, count):
+    """Bound central metadata before ZipFile allocates per-member objects."""
+    need(type(body) is bytes and len(body) >= 22, 'p0-zip-central')
+    # ZipFile honors this locator even without sentinel values in the ordinary
+    # footer, replacing its count/size/offset. This bounded profile needs no ZIP64.
+    need(body[-42:-38] != b'PK\x06\x07', 'p0-zip64-unavailable')
+    end = struct.unpack('<4s4H2LH', body[-22:])
+    need(end[0] == b'PK\x05\x06' and end[1:3] == (0, 0) and end[3] == end[4] == count
+         and 0 < end[5] <= 16384 and end[6] + end[5] == len(body) - 22 and end[7] == 0, 'p0-zip-central')
+    return end
+
+
 def zip_data(body, selected, clock):
     maximum = 256 << 10 if selected['kind'] == 'qualification' else LIMIT
     need(type(body) is bytes and len(body) == selected['bytes'] and 22 <= len(body) <= maximum
          and sha(body) == selected['sha256'], 'p0-zip-original')
     wanted = selected['members']; names = {v['name'] for v in wanted}
-    need(len(names) == len(wanted) in (1, 2) and sum(v['bytes'] for v in wanted) <= maximum, 'p0-zip-roster')
+    candidate = selected['kind'] == 'candidate'
+    limits = CANDIDATE_MEMBERS if candidate else MEMBERS
+    need((len(wanted) == 3 and names == set(CANDIDATE_MEMBERS) if candidate else
+          len(names) == len(wanted) in (1, 2) and names <= set(MEMBERS))
+         and all(type(v['bytes']) is int and 0 < v['bytes'] <= limits[v['name']] for v in wanted)
+         and sum(v['bytes'] for v in wanted) <= maximum, 'p0-zip-roster')
     stream = io.BytesIO(body)
-    end = struct.unpack('<4s4H2LH', body[-22:])
-    need(end[0] == b'PK\x05\x06' and end[1:3] == (0, 0) and end[3] == end[4] == len(wanted)
-         and 0 < end[5] <= 16384 and end[6] + end[5] == len(body) - 22 and end[7] == 0, 'p0-zip-central')
+    end = zip_directory_data(body, len(wanted))
     result, span = {}, 0
     with zipfile.ZipFile(stream) as archive:
         infos = sorted(archive.infolist(), key=lambda v: v.header_offset)
@@ -533,7 +550,7 @@ def zip_data(body, selected, clock):
                 need(local[6] in (0, info.CRC) and local[7] in (0, info.compress_size)
                      and local[8] in (0, info.file_size), 'p0-zip-local-size')
             data_start = stream.tell()
-            member_stream_complete(stream, info, data_start, end[6], clock)
+            member_stream_complete(stream, info, data_start, end[6], clock, limits=limits)
             span = data_start + info.compress_size
             if info.flag_bits & 8:
                 stream.seek(span); prefix = stream.read(4)
