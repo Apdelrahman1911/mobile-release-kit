@@ -13,6 +13,30 @@ pub(super) const WORK_NAME: &str = ".applications-launcher-v1";
 const SOURCE_NAME: &str = "MobileReleaseKitLauncher.app";
 const RETAINED_NAME: &str = "previous.app";
 
+// Returned copy writes are accounted separately so restoring a missing
+// convenience launcher cannot turn a core same-package no-op into a rewrite.
+// A bound failure is absorbing and retained AFTER the actual returned write.
+#[derive(Default)]
+pub(super) struct WriteCounts {
+    pub(super) calls: u64, pub(super) bytes: u64, pub(super) failed: bool,
+}
+impl WriteCounts {
+    pub(super) fn record_returned(&mut self, count: u64, core_bytes: u64) -> Result<()> {
+        let calls = self.calls.checked_add(1);
+        let bytes = self.bytes.checked_add(count);
+        self.calls = calls.unwrap_or(u64::MAX);
+        self.bytes = bytes.unwrap_or(u64::MAX);
+        self.failed |= count == 0 || calls.is_none() || bytes.is_none()
+            || self.calls > self.bytes
+            || self.bytes > launcher::LIMITS.iter().copied().sum::<u64>() + launcher::TICKET_LIMIT
+            || core_bytes.checked_add(self.bytes).is_none_or(|n| n > installation_record::PAYLOAD_LIMIT);
+        check(!self.failed, "launcher-write-bound")
+    }
+}
+fn selected_copy_bytes(indexed: &InventoryIndex<'_>) -> Result<u64> {
+    Ok(launcher::LauncherInventory::from_index(indexed)?.ok_or("launcher-inventory-missing")?.total_bytes())
+}
+
 // A workspace belongs to the installed generation's original creation stage.
 // The instance survives no-op and restore operations; no new root-level name
 // or directory selected by scanning is introduced.
@@ -147,7 +171,7 @@ impl Workspace {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Returned { NotAttempted, Attempting, Refused, Published, Quarantined, Unknown }
+pub(super) enum Returned { NotAttempted, Attempting, Refused, Published, Quarantined, Withdrawn, Restored, Unknown }
 
 // Returned effects live in the caller's original book-owned operation. An
 // error after rename does not erase the syscall effect or allow another try.
@@ -243,7 +267,11 @@ impl Operation {
             current = child;
         }
         book.absent(workspace.original, SOURCE_NAME)?;
-        let bundle = book.copy_tree(launcher::BUNDLE, current, workspace.original, &indexed.files, &indexed.directories, 0)?;
+        check(!book.launcher_writes.failed && book.launcher_writes.calls == 0, "launcher-copy-once")?;
+        check(book.payload_written.checked_add(selected_copy_bytes(&indexed)?)
+            .is_some_and(|n| n <= installation_record::PAYLOAD_LIMIT), "launcher-copy-budget")?;
+        let bundle = book.copy_tree_with_role(launcher::BUNDLE, current, workspace.original,
+            &indexed.files, &indexed.directories, 0, Role::LauncherWriter)?;
         for original in opened.into_iter().rev() {
             book.check_name(original, true)?;
             book.forward_close(original, "launcher-source-close")?;
@@ -329,6 +357,113 @@ impl Operation {
         self.parent_post(book)?;
         self.verified = true;
         Ok(bundle)
+    }
+}
+
+// One pre-state inverse using the exact original quarantine, not a new copy.
+// It never retries a rename or treats restored convenience UI as core recovery.
+// The enclosing maintenance failure remains first even if this inverse works.
+pub(super) struct Inverse {
+    entered: bool,
+    pub(super) withdrawn: Returned,
+    pub(super) restored: Returned,
+    pub(super) first_failure: Option<&'static str>,
+    pub(super) verified: bool,
+}
+impl Inverse {
+    pub(super) fn new() -> Self {
+        Self { entered:false,withdrawn:Returned::NotAttempted,restored:Returned::NotAttempted,
+            first_failure:None,verified:false }
+    }
+    pub(super) fn restore(&mut self, book: &mut Install, workspace: &Workspace,
+        previous: &Operation, previous_inventory: &InventoryIndex<'_>,
+        next: Option<(&Operation, &InventoryIndex<'_>)>) -> Result<()> {
+        check(!self.entered, "launcher-inverse-once")?;
+        self.entered = true;
+        let result = self.restore_inner(book, workspace, previous, previous_inventory, next);
+        if let Err(error) = result { self.first_failure = Some(error); }
+        result
+    }
+    fn restore_inner(&mut self, book: &mut Install, workspace: &Workspace,
+        previous: &Operation, previous_inventory: &InventoryIndex<'_>,
+        next: Option<(&Operation, &InventoryIndex<'_>)>) -> Result<()> {
+        Operation::mutation_ready(book)?;
+        check(!book.unknown && book.maintenance.as_ref().is_some_and(|effects|
+            effects.action == mobile_release_desktop::macos_install_maintenance::ActionData::Update
+            && !effects.state_published), "launcher-inverse-before-state")?;
+        workspace.post(book)?;
+        previous.parent_post(book)?;
+        check(previous.returned == Returned::Quarantined && previous.verified,
+            "launcher-inverse-quarantine")?;
+        let old = previous.bundle.ok_or("launcher-original-missing")?;
+        check(book.originals[old].parent == Some(workspace.original)
+            && book.originals[old].name == RETAINED_NAME, "launcher-inverse-original")?;
+        launcher::LauncherInventory::from_index(previous_inventory)?.ok_or("launcher-inventory-missing")?;
+        maintenance::audit_tree(book, old, launcher::BUNDLE, previous_inventory, 0)?;
+        book.check_name(old, true)?;
+        if let Some((published, expected)) = next {
+            published.parent_post(book)?;
+            check(published.returned == Returned::Published && published.verified
+                && book.identity(published.applications)?.same_object(book.identity(previous.applications)?),
+                "launcher-inverse-publication")?;
+            let new = published.bundle.ok_or("launcher-original-missing")?;
+            check(book.originals[new].parent == Some(published.applications)
+                && book.originals[new].name == launcher::APPLICATIONS_NAME, "launcher-inverse-new-original")?;
+            launcher::LauncherInventory::from_index(expected)?.ok_or("launcher-inventory-missing")?;
+            maintenance::audit_tree(book, new, launcher::BUNDLE, expected, 0)?;
+            book.check_name(new, true)?;
+            book.absent(workspace.original, SOURCE_NAME)?;
+            check(book.identity(workspace.original)?.dev == book.identity(published.applications)?.dev,
+                "launcher-filesystem")?;
+            book.clock()?;
+            self.withdrawn = Returned::Attempting;
+            match native::publish_directory(book.fd(published.applications)?.as_fd(), launcher::APPLICATIONS_NAME,
+                book.fd(workspace.original)?.as_fd(), SOURCE_NAME) {
+                Ok(()) => self.withdrawn = Returned::Withdrawn,
+                Err(error) => {
+                    self.withdrawn = if error.raw_os_error() == Some(Errno::EEXIST as i32) { Returned::Refused }
+                        else { book.unknown = true; Returned::Unknown };
+                    return Err("launcher-inverse-withdrawal-refused-or-unknown");
+                },
+            }
+            maintenance::rebind_renamed(book, new, workspace.original, SOURCE_NAME)?;
+            // A shared-parent substitution is retained, never deleted as ours.
+            maintenance::audit_tree(book, new, launcher::BUNDLE, expected, 0)?;
+            book.check_name(new, true)?;
+            book.absent(published.applications, launcher::APPLICATIONS_NAME)?;
+            book.persist(published.applications, false)?;
+            book.persist(workspace.original, false)?;
+            published.parent_post(book)?;
+        }
+        // In particular do not overwrite another user's entry placed between
+        // withdrawal and restoration. Both proven originals remain retained.
+        previous.parent_post(book)?;
+        workspace.post(book)?;
+        book.absent(previous.applications, launcher::APPLICATIONS_NAME)?;
+        maintenance::audit_tree(book, old, launcher::BUNDLE, previous_inventory, 0)?;
+        book.check_name(old, true)?;
+        check(book.identity(workspace.original)?.dev == book.identity(previous.applications)?.dev,
+            "launcher-filesystem")?;
+        book.clock()?;
+        self.restored = Returned::Attempting;
+        match native::publish_directory(book.fd(workspace.original)?.as_fd(), RETAINED_NAME,
+            book.fd(previous.applications)?.as_fd(), launcher::APPLICATIONS_NAME) {
+            Ok(()) => self.restored = Returned::Restored,
+            Err(error) => {
+                self.restored = if error.raw_os_error() == Some(Errno::EEXIST as i32) { Returned::Refused }
+                    else { book.unknown = true; Returned::Unknown };
+                return Err("launcher-inverse-restoration-refused-or-unknown");
+            },
+        }
+        maintenance::rebind_renamed(book, old, previous.applications, launcher::APPLICATIONS_NAME)?;
+        book.absent(workspace.original, RETAINED_NAME)?;
+        maintenance::audit_tree(book, old, launcher::BUNDLE, previous_inventory, 0)?;
+        book.persist(workspace.original, false)?;
+        book.persist(previous.applications, false)?;
+        previous.parent_post(book)?;
+        book.check_name(old, true)?;
+        self.verified = true;
+        Ok(())
     }
 }
 
@@ -758,6 +893,30 @@ fn prefix_hash(size: u64,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_returned_writes_remain_separate_and_absorb_bounds_after_recording() {
+        let mut count = WriteCounts::default();
+        count.record_returned(3, 0).unwrap();
+        count.record_returned(2, 0).unwrap();
+        assert_eq!((count.calls, count.bytes, count.failed), (2, 5, false));
+        assert!(count.record_returned(1, installation_record::PAYLOAD_LIMIT - 5).is_err());
+        assert_eq!((count.calls, count.bytes, count.failed), (3, 6, true));
+        // A later apparently in-budget observation cannot erase the failure.
+        assert!(count.record_returned(1, 0).is_err());
+        assert_eq!((count.calls, count.bytes), (4, 7));
+        let limit = launcher::LIMITS.iter().sum::<u64>() + launcher::TICKET_LIMIT;
+        let mut full = WriteCounts::default();
+        full.record_returned(limit, 0).unwrap();
+        assert!(full.record_returned(1, 0).is_err());
+        assert_eq!((full.calls, full.bytes, full.failed), (2, limit+1, true));
+        let mut zero = WriteCounts::default();
+        assert!(zero.record_returned(0, 0).is_err());
+        assert!(zero.failed);
+        let mut overflow = WriteCounts { calls:u64::MAX,bytes:u64::MAX,failed:false };
+        assert!(overflow.record_returned(1, 0).is_err());
+        assert_eq!((overflow.calls, overflow.bytes, overflow.failed), (u64::MAX, u64::MAX, true));
+    }
 
     fn read_bytes(bytes: &[u8], at: u64, output: &mut [u8], limit: usize) -> Result<usize> {
         let at = usize::try_from(at).map_err(|_| "test-offset")?;

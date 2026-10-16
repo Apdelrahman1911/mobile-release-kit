@@ -109,6 +109,9 @@ pub fn decide(action: ActionData, current: Option<&LauncherInventory<'_>>,
     };
     match observed {
         Presence::Unknown => Decision::Refuse,
+        // A signed byte-for-byte copy is still not prior enrollment. Fresh
+        // install must not adopt it and later authorize its removal as ours.
+        Presence::Observed(_) if action == ActionData::FreshInstall => Decision::Refuse,
         Presence::Absent => if action == ActionData::Uninstall { Decision::AlreadyAbsent } else { Decision::PublishAbsent },
         Presence::Observed(actual) if current.same_content(actual) => {
             if action == ActionData::Uninstall { Decision::RemoveEnrolled } else { Decision::KeepCurrent }
@@ -251,7 +254,8 @@ mod tests {
             assert_eq!(decide(action, Some(&new), Some(&old), &Presence::Absent),
                 if action == ActionData::Uninstall { Decision::AlreadyAbsent } else { Decision::PublishAbsent });
             assert_eq!(decide(action, Some(&new), Some(&old), &Presence::Observed(new)),
-                if action == ActionData::Uninstall { Decision::RemoveEnrolled } else { Decision::KeepCurrent });
+                if action == ActionData::FreshInstall { Decision::Refuse }
+                else if action == ActionData::Uninstall { Decision::RemoveEnrolled } else { Decision::KeepCurrent });
             assert_eq!(decide(action, Some(&new), Some(&old), &Presence::Observed(old)),
                 if action == ActionData::Update { Decision::ReplaceEnrolled } else { Decision::Refuse });
         }

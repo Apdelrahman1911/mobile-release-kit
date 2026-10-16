@@ -130,7 +130,7 @@ mod installer {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State { Reserved, Acquiring, Owned, NoHandle, Closing, Closed, Unknown, KernelExitRetained }
     #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Role { Reader, PayloadWriter, MetadataWriter, ReceiptWriter, GateWriter, GateParticipant, ReservationWriter, ReservationParticipant }
+    enum Role { Reader, PayloadWriter, LauncherWriter, MetadataWriter, ReceiptWriter, GateWriter, GateParticipant, ReservationWriter, ReservationParticipant }
     #[derive(Clone, Copy, PartialEq, Eq)]
     struct Identity { dev: i64, ino: u64, mode: u32, uid: u32, gid: u32, links: u64, size: i64,
         mtime: i64, mtime_ns: i64, ctime: i64, ctime_ns: i64 }
@@ -184,6 +184,7 @@ mod installer {
         #[cfg(feature = "macos-installed-removal-observer")]
         removal_observer_projection: Option<maintenance::RemovalObserverProjection>,
         payload_written: u64, payload_write_calls: u64,
+        launcher_writes: applications::WriteCounts,
         stage: Option<usize>, stage_name: Option<String>, app: Option<usize>, runtime: Option<usize>,
         runtime_publication: &'static str, app_publication: &'static str, payload_verified: bool,
         metadata: installation_record::Progress,
@@ -533,7 +534,7 @@ mod installer {
     impl Install {
         fn new() -> Self {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
-                worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,
+                worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),
                 removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
                 #[cfg(feature = "macos-installed-removal-observer")]
                 removal_observer_projection:None,
@@ -758,6 +759,11 @@ mod installer {
                     // veto. This is not a promise about a future close.
                     self.payload_written = self.payload_written.checked_add(count as u64).ok_or("payload-write-count")?;
                     self.payload_write_calls = self.payload_write_calls.checked_add(1).ok_or("payload-write-count")?;
+                    check(self.payload_written.checked_add(self.launcher_writes.bytes)
+                        .is_some_and(|n| n <= installation_record::PAYLOAD_LIMIT), "payload-write-bound")?;
+                }
+                if self.originals[n].role == Role::LauncherWriter {
+                    self.launcher_writes.record_returned(count as u64, self.payload_written)?;
                 }
                 if self.originals[n].role == Role::MetadataWriter { self.metadata.wrote(count)?; }
                 if self.originals[n].role == Role::GateWriter {
@@ -782,7 +788,8 @@ mod installer {
             native::no_xattrs(self.fd(n)?.as_fd()).map_err(|_| "file-attributes")?;
             self.persist(n, true)?; self.forward_close(n, "file-close-unknown")
         }
-        fn payload_writers_settled(&self) -> bool { self.originals.iter().filter(|r| r.role == Role::PayloadWriter)
+        fn payload_writers_settled(&self) -> bool { self.originals.iter()
+            .filter(|r| matches!(r.role, Role::PayloadWriter | Role::LauncherWriter))
             .all(|r| r.fd.is_none() && matches!(r.state, State::Closed | State::NoHandle)) }
         fn metadata_writers_settled(&self) -> bool {
             self.originals.iter().filter(|r| r.role == Role::MetadataWriter)
@@ -855,14 +862,16 @@ mod installer {
             }
             Ok(found)
         }
-        fn copy_file(&mut self, source_parent: usize, target_parent: usize, name: &str, inode: u64, item: &Entry) -> Result<()> {
+        fn copy_file(&mut self, source_parent: usize, target_parent: usize, name: &str, inode: u64, item: &Entry,
+            role: Role) -> Result<()> {
+            check(matches!(role, Role::PayloadWriter | Role::LauncherWriter), "copy-writer-role")?;
             let source = self.open(Some(source_parent), name, false)?;
             self.protected(source, false, Some(if item.executable { 0o555 } else { 0o444 }))?;
             native::no_xattrs(self.fd(source)?.as_fd()).map_err(|_| "source-attributes")?;
             check(self.identity(source)?.ino == inode && self.identity(source)?.size >= 0 && self.identity(source)?.size as u64 == item.size, "source-identity-size")?;
             #[cfg(feature = "macos-installed-installer-fixture")]
             self.fixture_before_payload_create(target_parent, name)?;
-            let target = self.create_file(target_parent, name, Role::PayloadWriter)?;
+            let target = self.create_file(target_parent, name, role)?;
             let mut block = [0u8;65536]; let mut count = 0u64; let mut digest = Sha256::new();
             loop {
                 self.clock()?; let n = unistd::read(self.fd(source)?, &mut block).map_err(|_| "copy-read")?;
@@ -881,6 +890,11 @@ mod installer {
         }
         fn copy_tree(&mut self, path: &str, source_parent: usize, target_parent: usize,
             files: &BTreeMap<String, &Entry>, directories: &BTreeSet<String>, depth: usize) -> Result<usize> {
+            self.copy_tree_with_role(path, source_parent, target_parent, files, directories, depth, Role::PayloadWriter)
+        }
+        fn copy_tree_with_role(&mut self, path: &str, source_parent: usize, target_parent: usize,
+            files: &BTreeMap<String, &Entry>, directories: &BTreeSet<String>, depth: usize, role: Role) -> Result<usize> {
+            check(matches!(role, Role::PayloadWriter | Role::LauncherWriter), "copy-writer-role")?;
             check(depth <= 16, "directory-depth")?;
             let name = path.rsplit('/').next().ok_or("directory-name")?;
             let source = self.open(Some(source_parent), name, true)?; self.protected(source, true, Some(0o555))?;
@@ -892,9 +906,9 @@ mod installer {
             check(input.keys().cloned().collect::<BTreeSet<_>>() == expected, "source-exact-roster")?;
             for name in &expected {
                 let child = format!("{path}/{name}");
-                if let Some(item) = files.get(&child) { self.copy_file(source, target, name, input[name], item)?; }
+                if let Some(item) = files.get(&child) { self.copy_file(source, target, name, input[name], item, role)?; }
                 else {
-                    let n = self.copy_tree(&child, source, target, files, directories, depth+1)?;
+                    let n = self.copy_tree_with_role(&child, source, target, files, directories, depth+1, role)?;
                     self.forward_close(n, "directory-close")?;
                 }
             }
@@ -11552,7 +11566,7 @@ mod installer {
                     removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
                 #[cfg(feature = "macos-installed-removal-observer")]
                 removal_observer_projection:None,
-                    payload_written:0,payload_write_calls:0,
+                    payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),
                     stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",
                     app_publication:"not-attempted",payload_verified:false,
                     metadata:installation_record::Progress::default(),gate:MaintenanceGate::new(),registration:RegistrationReservation::new(),maintenance:None,

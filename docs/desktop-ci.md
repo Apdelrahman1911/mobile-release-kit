@@ -83,9 +83,11 @@ establish local Store execution or authentication.
 `desktop-macos-components.yml` compiles the Applications launcher with the
 native macOS SDK on Apple Silicon and Intel, then checks its plist and Mach-O
 architecture. A separate job uses ordinary `cargo check` for the exclusive
-Installer and Remover roles on both architectures. Dispatch can select only
-the launcher, only the Installer/Remover check, or both. The produced native
-programs are not executed. The workflow has no signing environment, Store credentials, installed app
+Installer and Remover roles on both architectures using their supported Rust
+1.98.1 clock/toolchain tuple. Three named, pure Applications-adapter byte/data
+tests run in the Installer test binary; the actual Installer/Remover main and
+filesystem adapter do not run. Dispatch can select only
+the launcher, only the Installer/Remover check, or both. The workflow has no signing environment, Store credentials, installed app
 invocation or retained carrier download. Its new temporary output and compiler
 cache are disposable and removed after their last consumer. This is component
 compilation, not launcher runtime, installation, signing or distribution evidence.

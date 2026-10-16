@@ -118,7 +118,7 @@ jobs:
           set -euo pipefail
           root=$(mktemp -d "$RUNNER_TEMP/mrk-installer-check.XXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
-      - name: Check both exclusive native roles without executing either
+      - name: Check exclusive native roles and test pure launcher logic
         shell: bash
         working-directory: desktop/src-tauri
         env:
@@ -138,6 +138,11 @@ jobs:
             --features macos-installed-installer --bin mrk-macos-install
           rustup run 1.98.1 cargo check --locked --no-default-features \
             --features macos-installed-remover --bin mrk-macos-remove
+          # Only these three byte/data tests run. The Installer main, live
+          # filesystem adapter and removal entry point are not invoked.
+          rustup run 1.98.1 cargo test --locked --no-default-features \
+            --features macos-installed-installer --bin mrk-macos-install \
+            installer::applications::tests:: -- --test-threads=1
       - name: Remove only this job's disposable compiler and dependencies
         if: always() && steps.work.outputs.root != ''
         shell: bash
@@ -145,7 +150,8 @@ jobs:
           WORK_ROOT: ${{ steps.work.outputs.root }}
         run: rm -rf -- "$WORK_ROOT"
 
-# No produced installer/remover runs. Standard compiler/build scripts execute,
+# No Installer/Remover main runs. Only named inert byte/data unit tests execute.
+# Standard compiler/build scripts execute,
 # but no application launch, private runtime, privileged installation, signing
 # or notarization is involved. Runtime and
 # installation/update/removal behavior still require native integration tests.
