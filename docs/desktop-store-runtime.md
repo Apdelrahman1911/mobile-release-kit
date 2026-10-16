@@ -122,3 +122,19 @@ checks, not duplicated hashes of this repository's build scripts.
 Each job retains an unsigned compressed component for three days for upcoming
 integration, then deletes only its own workspace. A successful job proves the
 listed component checks, not installed-app execution or distribution readiness.
+
+Component tooling includes the shared core's actual `REQUIRED_TOOLING_FILES`
+roster, including schemas and workflow/configuration templates. The build-only
+`--tooling-only` copy mode uses the core completeness check before/after copying
+into an absent destination; it makes no network requests. This DATA-only
+addition does not change compiled Ruby or native gems. Earlier native binary
+checks remain applicable to those unchanged inputs, but a final assembled
+component still needs the complete tooling/relocation smoke and its own digest.
+
+The first ARM component run (`38837216127`, source `9a4bbe69`) compiled Ruby and
+its native dependencies, then RubyGems refused to overwrite Ruby's existing
+default Bundler launcher. It did **not** reach runtime smoke or relocation.
+The corrected bootstrap uses RubyGems' documented `--bindir` to place the
+locked gem's generated launchers in fresh build-only scratch. The builder still
+invokes the exact Bundler 4.0.16 `exe/bundle` and installs its own relocatable
+wrapper; it does not use `--force`, replace global tools or relax checksums.

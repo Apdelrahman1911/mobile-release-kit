@@ -37,6 +37,7 @@ trap '/bin/rm -rf -- "$scratch"' EXIT
 prefix="$scratch/runtime"
 dependencies="$scratch/dependencies"
 architecture="$7"
+python="$(command -v python3)"
 run() {
     /usr/bin/env -i HOME="$scratch/home" TMPDIR="$scratch/tmp" \
         PATH="$prefix/bin:/usr/bin:/bin:/usr/sbin:/sbin" LANG=en_US.UTF-8 \
@@ -62,11 +63,11 @@ run() {
     # These upstream targets install Ruby, default gems and extensions only.
     run /usr/bin/make install-bin install-lib install-ext INSTRUBY_OPTS=--exclude=bundled-gems)
 
-/bin/mkdir -p "$prefix/tooling/vendor/cache" "$prefix/tooling/fastlane" "$prefix/licenses"
-/usr/bin/install -m 0644 "$repository/Gemfile" "$repository/Gemfile.lock" "$prefix/tooling/"
-for source in "$repository"/fastlane/*.rb "$repository/fastlane/Fastfile"; do
-    /usr/bin/install -m 0644 "$source" "$prefix/tooling/fastlane/"
-done
+# The core requires its schemas/templates as well as Gemfile and Fastlane.
+# This copies the actual first-party REQUIRED_TOOLING_FILES roster, without
+# importing/executing any downloaded Ruby or relaxing core completeness checks.
+run "$python" -I -B "$here/prepare_macos_store_inputs.py" --tooling-only "$prefix/tooling"
+/bin/mkdir -p "$prefix/tooling/vendor/cache" "$prefix/licenses"
 /usr/bin/install -m 0644 "$ca" "$prefix/ca.pem"
 /usr/bin/install -m 0644 "$ruby_source/COPYING" "$prefix/licenses/Ruby-COPYING"
 /usr/bin/install -m 0644 "$ruby_source/BSDL" "$prefix/licenses/Ruby-BSDL"
@@ -77,7 +78,11 @@ bundler="$cache/bundler-4.0.16.gem"
 expected="$(/usr/bin/plutil -extract bundler.sha256 raw -o - "$repository/.github/verification-tools.json")"
 [ -f "$bundler" ] && [ ! -L "$bundler" ]
 [ "$(/usr/bin/shasum -a 256 "$bundler" | /usr/bin/awk '{print $1}')" = "$expected" ]
-run "$prefix/bin/ruby" "$prefix/bin/gem" install --local --no-document --ignore-dependencies "$bundler"
+# Ruby installs a default Bundler launcher in bin/bundle. Install the locked
+# Bundler's unused generated launchers into fresh private scratch, not over it.
+/bin/mkdir "$scratch/bundler-cli"
+run "$prefix/bin/ruby" "$prefix/bin/gem" install --local --no-document --ignore-dependencies \
+    --bindir "$scratch/bundler-cli" "$bundler"
 # Copy only ordinary local gem archives. Bundler checks selected lock checksums;
 # a missing dependency is an error, never a request to download it.
 count=0

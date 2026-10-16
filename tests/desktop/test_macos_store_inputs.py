@@ -16,6 +16,35 @@ SPEC.loader.exec_module(TOOL)
 
 
 class StoreInputs(unittest.TestCase):
+    def test_tooling_copy_uses_core_completeness_without_overwriting(self):
+        # Actual first-party imports are stdlib only; no release/build action.
+        import sys
+        sys.path.insert(0, str(TOOL.ROOT / 'src'))
+        try:
+            from mobile_release.tooling import REQUIRED_TOOLING_FILES, _complete_tooling_root
+        finally:
+            sys.path.pop(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'source'; source.mkdir()
+            for relative in REQUIRED_TOOLING_FILES:
+                file = source / relative; file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(('synthetic:' + relative).encode())
+            destination = root / 'tooling'
+            TOOL.copy_tooling(source, destination)
+            self.assertTrue(_complete_tooling_root(destination))
+            self.assertEqual({str(p.relative_to(destination)) for p in destination.rglob('*') if p.is_file()},
+                             set(REQUIRED_TOOLING_FILES))
+            for relative in REQUIRED_TOOLING_FILES:
+                self.assertEqual((destination / relative).read_bytes(), (source / relative).read_bytes())
+            with self.assertRaises(FileExistsError): TOOL.copy_tooling(source, destination)
+            missing = source / 'schemas/project.schema.json'; missing.unlink()
+            with self.assertRaises(ValueError): TOOL.copy_tooling(source, root / 'missing')
+            self.assertFalse((root / 'missing').exists())
+            missing.symlink_to(destination / 'schemas/project.schema.json')
+            with self.assertRaises(ValueError): TOOL.copy_tooling(source, root / 'linked')
+            self.assertFalse((root / 'linked').exists())
+
     def test_download_authentication_and_no_overwrite(self):
         data = b'public synthetic dependency'
         asset = {'url': 'https://example.invalid/dependency', 'bytes': len(data),

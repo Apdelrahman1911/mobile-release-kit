@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -61,11 +62,36 @@ def unpack(archive, destination, expected_root):
     return result
 
 
+
+def copy_tooling(source_root, destination):
+    """Copy the shared core's actual tooling roster into a fresh component."""
+    # This fixed first-party module imports only stdlib/config/errors. Import it
+    # normally rather than maintaining a second list of required asset names.
+    sys.path.insert(0, str(ROOT / "src"))
+    try:
+        from mobile_release.tooling import REQUIRED_TOOLING_FILES, _complete_tooling_root
+    finally:
+        sys.path.pop(0)
+    if not _complete_tooling_root(source_root):
+        raise ValueError("Incomplete first-party tooling source")
+    destination.mkdir(mode=0o700)
+    for relative in REQUIRED_TOOLING_FILES:
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_root / relative, target)
+    if not _complete_tooling_root(destination):
+        raise ValueError("Incomplete copied first-party tooling")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, help="Absent task-owned output directory")
+    parser.add_argument("--tooling-only", action="store_true", help="Copy first-party tooling only; no network")
     args = parser.parse_args()
     output = args.output.absolute()
+    if args.tooling_only:
+        copy_tooling(ROOT, output)
+        return
     output.mkdir(mode=0o700)  # Existing/foreign output is never adopted.
     if shutil.disk_usage(output).free < 4 * 1024**3:
         raise ValueError("Need at least 4 GiB free for public sources and compilation")
