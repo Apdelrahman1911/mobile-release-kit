@@ -52,7 +52,7 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
 }
 
 fn offline_context(owner: &Session) -> &wire::Context {
-    match &owner.context { Context::OfflinePreflight(context) => context, Context::AndroidBuild(_) | Context::ProjectRecovery(_) | Context::IOSArchive(_) | Context::ArtifactInspection(_) | Context::LocalStorePreflight(_) | Context::LocalReleaseHistory(_) => panic!("offline test context") }
+    match &owner.context { Context::OfflinePreflight(context) => context, Context::AndroidBuild(_) | Context::ProjectRecovery(_) | Context::IOSArchive(_) | Context::ArtifactInspection(_) | Context::LocalStorePreflight(_) | Context::LocalStorePrepare(_) | Context::LocalReleaseHistory(_) => panic!("offline test context") }
 }
 
 pub(crate) fn qualification_is_closed_without_a_runtime_or_another_owners_permit() {
