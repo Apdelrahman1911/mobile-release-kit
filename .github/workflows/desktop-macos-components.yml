@@ -36,7 +36,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, installer, installer-recovery, app, store-runtime]
+        options: [all, integration, launcher, installer, installer-recovery, installer-frames, app, app-contracts, ui-build, store-runtime]
 
 permissions:
   contents: read
@@ -96,8 +96,8 @@ jobs:
         run: rm -rf -- "$WORK_ROOT"
 
   installer-check:
-    name: Check installer and remover (${{ matrix.arch }})
-    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-recovery'
+    name: ${{ inputs.component == 'installer-frames' && 'Test installer frames' || inputs.component == 'installer-recovery' && 'Test installer recovery' || 'Check installer and remover' }} (${{ matrix.arch }})
+    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-recovery' || inputs.component == 'installer-frames'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -137,7 +137,7 @@ jobs:
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
           # Separate invocations keep the two mutually exclusive roles distinct;
           # dependencies are compiled once in this job's shared target directory.
-          if [[ "$INSTALLER_CHECKS" != installer-recovery ]]; then
+          if [[ "$INSTALLER_CHECKS" != installer-recovery && "$INSTALLER_CHECKS" != installer-frames ]]; then
             rustup run 1.98.1 cargo check --locked --no-default-features \
               --features macos-installed-installer --bin mrk-macos-install
             rustup run 1.98.1 cargo check --locked --no-default-features \
@@ -151,10 +151,14 @@ jobs:
           # Use only for a recovery-test-only correction after both native roles
           # and launcher tests already passed; normal runs keep their full scope.
           expected_tests=3
-          if [[ "$INSTALLER_CHECKS" != installer-recovery ]]; then
+          if [[ "$INSTALLER_CHECKS" != installer-recovery && "$INSTALLER_CHECKS" != installer-frames ]]; then
             tests+=(installer::applications::tests::
                     installer::maintenance::store_path_tests::contextual_store_paths_keep_copy_recovery_and_removal_scoped)
             expected_tests=9
+          fi
+          if [[ "$INSTALLER_CHECKS" == installer-frames ]]; then
+            tests=(installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality)
+            expected_tests=1
           fi
           rustup run 1.98.1 cargo test --locked --no-default-features \
             --features macos-installed-installer --bin mrk-macos-install -- \
@@ -170,8 +174,8 @@ jobs:
   app-check:
     # This targeted path checks the real packaged Tauri graph without producing
     # another signed/notarized package or rebuilding unrelated native helpers.
-    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app')
-    name: Compile packaged app (${{ matrix.arch }})
+    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app' || inputs.component == 'app-contracts')
+    name: ${{ inputs.component == 'app-contracts' && 'Test Mac Store contracts' || 'Compile packaged app' }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -190,6 +194,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: inputs.component != 'app-contracts'
         with:
           node-version: '24.20.0'
       - name: Allocate task-owned app compiler directory
@@ -199,32 +204,35 @@ jobs:
           set -euo pipefail
           root=$(mktemp -d "$RUNNER_TEMP/mrk-app-check.XXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
-      - name: Compile frontend and actual packaged desktop image
+      - name: ${{ inputs.component == 'app-contracts' && 'Test two Mac Store contracts only' || 'Compile packaged app and test Mac Store contracts' }}
         shell: bash
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
           MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
           MRK_IMAGE_RELEASE_ID: ${{ matrix.release }}
           MACOSX_DEPLOYMENT_TARGET: '26.0'
+          APP_CHECKS: ${{ inputs.component }}
         run: |
           set -euo pipefail
           export CARGO_HOME="$WORK_ROOT/cargo" RUSTUP_HOME="$WORK_ROOT/rustup"
           export CARGO_TARGET_DIR="$WORK_ROOT/target" CARGO_INCREMENTAL=0
           export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0
           export npm_config_cache="$WORK_ROOT/npm-cache"
-          npm --prefix desktop ci --ignore-scripts --no-audit --no-fund
-          npm --prefix desktop run build
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
-          # Includes actual Tauri command/ACL generation, Mac-only modules and
-          # linker/framework resolution; no live app, Store or signing action.
-          rustup run 1.98.1 cargo build --locked --lib \
-            --manifest-path desktop/helpers/macos-desktop-image/Cargo.toml
-          # The wrapper cdylib has test=false. Run only these two memory-only
-          # Mac Store ownership contracts in the same packaged feature graph;
-          # neither test inspects files, allocates native frames or starts work.
+          if [[ "$APP_CHECKS" != app-contracts ]]; then
+            npm --prefix desktop ci --ignore-scripts --no-audit --no-fund
+            npm --prefix desktop run build
+            # Actual packaged graph including command/ACL generation and native
+            # linking. Never enable the test harness in this shipping image role.
+            rustup run 1.98.1 cargo build --locked --lib \
+              --manifest-path desktop/helpers/macos-desktop-image/Cargo.toml
+          fi
+          # The same Mac Store implementation is in the headless library graph.
+          # Run only these two memory-only contracts, not the shipping image ABI.
+          # Neither test inspects files, allocates native frames or starts work.
           rustup run 1.98.1 cargo test --locked --no-default-features \
             --manifest-path desktop/src-tauri/Cargo.toml \
-            --features macos-installed-desktop-image --lib -- \
+            --lib -- \
             installed_runtime::store_runtime::tests::store_cleanup_points_ignore_work_stop_but_keep_original_expiry_and_failures \
             installed_runtime::store_runtime::tests::store_slots_do_not_lend_uninspected_or_settled_sources \
             --exact --test-threads=1 | tee "$WORK_ROOT/store-contract-tests.log"
@@ -415,7 +423,75 @@ jobs:
           shutil.rmtree(work)
           PY
 
-# No Installer/Remover main, app launch, privileged installation, signing or
-# notarization runs. The explicit Store job only verifies already-signed code
+  ui-build:
+    # Compile the existing external XCTest target, never run it or build its app.
+    if: github.event_name == 'workflow_dispatch' && inputs.component == 'ui-build'
+    name: Compile external UI tests (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+          - runner: macos-26-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Allocate one task-owned XCTest compiler directory
+        id: work
+        shell: bash
+        env:
+          COMPONENT_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_OS" == macOS && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == "$COMPONENT_ARCH" && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-ui-build.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          /bin/mkdir -m 700 "$root/tmp"
+      - name: Build only the existing XCTest runner with the native Xcode SDK
+        timeout-minutes: 6
+        shell: bash
+        env:
+          COMPONENT_ARCH: ${{ matrix.arch }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          umask 077
+          destination=platform=macOS
+          build_settings=(COMPILER_INDEX_STORE_ENABLE=NO)
+          case "$COMPONENT_ARCH" in
+            arm64) destination=platform=macOS,arch=arm64 ;;
+            x86_64) build_settings+=(ARCHS=x86_64) ;;
+            *) exit 1 ;;
+          esac
+          # Existing project ad-hoc signing settings stay unchanged; no identity
+          # import, app-under-test dependency, package/install action or test run.
+          TMPDIR="$WORK_ROOT/tmp/" /usr/bin/xcodebuild build-for-testing \
+            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
+            -configuration Debug -destination "$destination" -destination-timeout 15 \
+            -derivedDataPath "$WORK_ROOT/DerivedData" -jobs 2 -disableAutomaticPackageResolution \
+            "${build_settings[@]}"
+      - name: Remove only this job's XCTest compiler outputs
+        if: always() && steps.work.outputs.root != ''
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          [[ "$WORK_ROOT" == "$RUNNER_TEMP"/mrk-ui-build.???????? && -d "$WORK_ROOT" && ! -L "$WORK_ROOT" ]] || exit 1
+          [[ "$(/usr/bin/stat -f '%u:%Lp' "$WORK_ROOT")" == "$(/usr/bin/id -u):700" ]] || exit 1
+          /bin/rm -rf -- "$WORK_ROOT"
+
+# No Installer/Remover main, app launch, privileged installation, distribution
+# signing or notarization runs. XCTest uses its existing ad-hoc project signing. The explicit Store job only verifies already-signed code
 # and executes the network-denied CRC32/Fastlane loader smoke, never a Store lane.
 # Installation/update/removal behavior still requires native integration tests.

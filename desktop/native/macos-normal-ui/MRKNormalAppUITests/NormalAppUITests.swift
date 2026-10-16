@@ -56,6 +56,8 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private var projectNavigationDiagnosticPhases: Set<String> = []
     @MainActor private var projectRequireDiagnosticEmitted = false
     @MainActor private var originalLaunch: OrdinaryLaunch?
+    @MainActor private var applicationsLaunch: ApplicationsLaunch?
+    @MainActor private var applicationsQuitObserved = false
     @MainActor private var caseClock: CaseClock?
     @MainActor private var normalQuitObserved = false
     @MainActor private var removalQuitObserved = false
@@ -396,9 +398,188 @@ final class NormalAppUITests: XCTestCase {
         }
     }
 
+    // Unlike OrdinaryLaunch, the one request returns the convenience launcher,
+    // NOT its internally requested payload. The OS launch event is observation
+    // only: no causal token, payload cleanup authority or process-exit claim.
+    @MainActor private final class ApplicationsLaunch {
+        static let url = URL(fileURLWithPath: "/Applications/Mobile Release Kit.app", isDirectory: true)
+        private let clock: CaseClock
+        private let reply = LaunchReply()
+        private var observer: NSObjectProtocol?
+        private var launcher: NSRunningApplication?
+        private var payloadEvent: NSRunningApplication?
+        private var events = 0
+        private var handoffs = 0
+        private var requested = false
+        private var launchEnd: TimeInterval?
+        private var closed = false
+        private var cleanupEnd: TimeInterval?
+        private var cleaning = false
+        private var normalRequested = false
+        private var forceRequested = false
+
+        init(clock: CaseClock) { self.clock = clock }
+
+        private func observed(_ note: Notification) {
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+                _ = clock.fail("launch event has no running reference"); return
+            }
+            // Unrelated hosted applications are not our subjects. Any event
+            // claiming either fixed protected identity is a candidate, including
+            // a mismatched/outer identity; never wait for a replacement event.
+            guard app.bundleURL?.path == OrdinaryLaunch.payloadURL.path
+                    || app.bundleURL?.path == OrdinaryLaunch.outerURL.path
+                    || app.bundleIdentifier == "dev.mobile-release-kit.desktop"
+                    || app.bundleIdentifier == "dev.mobile-release-kit.desktop.entry" else { return }
+            events = min(2, events + 1)
+            if events == 1 { payloadEvent = app }
+            do {
+                guard requested, !closed, observer != nil, let launchEnd else {
+                    throw clock.fail("unrequested or late payload launch event")
+                }
+                _ = try clock.remaining(15, before: launchEnd)
+                try healthy()
+            } catch { _ = clock.fail("payload launch event refused") }
+        }
+
+        private func handoff() {
+            handoffs = min(2, handoffs + 1)
+            // Retain the first callback value before fallible checks, including
+            // a late/error reply. No event reference can enter this field.
+            if launcher == nil { launcher = reply.snapshot().first }
+            do {
+                guard !closed, let launchEnd else { throw clock.fail("late launcher callback") }
+                _ = try clock.remaining(15, before: launchEnd)
+                try healthy()
+            } catch { _ = clock.fail("launcher callback refused") }
+            if let cleanupEnd, !cleaning { try? cleanup(until: cleanupEnd) }
+        }
+
+        func healthy(complete: Bool = false) throws {
+            let value = reply.snapshot()
+            guard !closed, requested, value.entries <= 1, value.bodies <= 1,
+                  handoffs <= 1, events <= 1 else { throw clock.fail("ambiguous Applications launch observation") }
+            if handoffs == 1 {
+                guard value.entries == 1, value.bodies == 1, !value.error, let launcher,
+                      launcher.bundleURL?.path == Self.url.path,
+                      launcher.executableURL?.path == Self.url.appendingPathComponent("Contents/MacOS/mrk-macos-launcher").path,
+                      launcher.bundleIdentifier == "dev.mobile-release-kit.desktop.launcher" else {
+                    throw clock.fail("callback original is not the installed Applications launcher")
+                }
+            }
+            if let app = payloadEvent {
+                guard app.bundleURL?.path == OrdinaryLaunch.payloadURL.path,
+                      app.executableURL?.path == OrdinaryLaunch.payloadURL.appendingPathComponent("Contents/MacOS/mobile-release-kit-desktop").path,
+                      app.bundleIdentifier == "dev.mobile-release-kit.desktop" else {
+                    throw clock.fail("retained payload event identity changed or differs")
+                }
+            }
+            if complete {
+                guard value.entries == 1, value.bodies == 1, handoffs == 1,
+                      events == 1, payloadEvent != nil else { throw clock.fail("Applications observations incomplete") }
+            }
+            _ = try clock.remaining(1)
+        }
+
+        func requestAndAwait() throws {
+            guard !requested, observer == nil, Thread.isMainThread else {
+                throw clock.fail("Applications launch is not one main-thread request")
+            }
+            launchEnd = try clock.end(within: 15)
+            observer = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main
+            ) { [weak self] note in
+                MainActor.assumeIsolated { self?.observed(note) }
+            }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            configuration.addsToRecentItems = false
+            configuration.createsNewApplicationInstance = true
+            configuration.allowsRunningApplicationSubstitution = false
+            configuration.promptsUserIfNeeded = false
+            configuration.arguments = [] // No test environment or handoff injection.
+            requested = true
+            let mailbox = reply
+            NSWorkspace.shared.openApplication(at: Self.url, configuration: configuration) { [self, mailbox] app, error in
+                let ticket = mailbox.enter()
+                mailbox.body(ticket, application: app, failed: error != nil)
+                DispatchQueue.main.async { self.handoff() }
+            }
+            guard let launchEnd else { throw clock.fail("Applications launch deadline missing") }
+            while true {
+                try clock.progress(until: launchEnd)
+                try healthy()
+                if handoffs == 1, events == 1, let app = payloadEvent {
+                    guard !app.isTerminated else { throw clock.fail("observed payload terminated before UI admission") }
+                    if app.isFinishedLaunching && app.isActive {
+                        try healthy(complete: true)
+                        return
+                    }
+                }
+            }
+        }
+
+        func observeTermination(until end: TimeInterval) throws {
+            while true {
+                try clock.progress(until: end)
+                try healthy(complete: true)
+                if launcher?.isTerminated == true && payloadEvent?.isTerminated == true { return }
+            }
+        }
+        func acceptTerminal() throws {
+            try healthy(complete: true)
+            guard launcher?.isTerminated == true, payloadEvent?.isTerminated == true,
+                  !normalRequested, !forceRequested else { throw clock.fail("Applications observed normal termination incomplete") }
+        }
+        func removeObserver() {
+            if let token = observer {
+                observer = nil
+                NSWorkspace.shared.notificationCenter.removeObserver(token)
+            }
+        }
+        private func cleanup(until end: TimeInterval) throws {
+            guard !cleaning else { return }
+            cleaning = true; defer { cleaning = false }
+            var graceEnd: TimeInterval?
+            while true {
+                _ = try clock.remaining(5, before: end, cleanup: true)
+                if let launcher {
+                    if launcher.isTerminated { return }
+                    if !normalRequested {
+                        normalRequested = true
+                        _ = launcher.terminate() // ONLY the first request callback original.
+                        graceEnd = min(end, try clock.end(within: 1, cleanup: true))
+                    }
+                    if !forceRequested, let graceEnd {
+                        do { _ = try clock.remaining(1, before: graceEnd, cleanup: true) }
+                        catch {
+                            _ = try clock.remaining(5, before: end, cleanup: true)
+                            forceRequested = true
+                            _ = launcher.forceTerminate()
+                        }
+                    }
+                }
+                try clock.progress(until: end, cleanup: true)
+            }
+        }
+        func tearDown(normalQuit: Bool) throws {
+            defer { removeObserver() }
+            if normalQuit { try acceptTerminal(); return }
+            closed = true
+            _ = clock.fail("Applications normal UI Quit was not accepted")
+            do {
+                if cleanupEnd == nil { cleanupEnd = try clock.end(within: 5, cleanup: true) }
+                if let cleanupEnd { try cleanup(until: cleanupEnd) }
+            } catch { /* Never adopt/stop payload or renew the case budget. */ }
+            print("MRK_MACOS_APPLICATIONS_UI_FAILURE=launcherCleanupOnly=1;payloadCleanupAuthority=0;residualStateRetained=1")
+            throw clock.fail("failed Applications observation is not normal Quit evidence")
+        }
+    }
+
     @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,
                                       iosRecovery: Bool = false, removal: Bool = false, engineeringDiagnostic: Bool = false) throws {
-        try require(caseClock == nil && journeyDeadline == nil && originalLaunch == nil, "case deadline cannot be reset")
+        try require(caseClock == nil && journeyDeadline == nil && originalLaunch == nil && applicationsLaunch == nil,
+                    "case deadline cannot be reset")
         try require((ProcessInfo.processInfo.environment["MRK_NORMAL_UI_REMOVAL_CHANNEL"] != nil) == removal
                     && (!removal || (seconds == 300 && !androidPositive && !iosUnsigned && !iosRecovery))
                     && !removalQuitObserved && removalChannel == nil,
@@ -482,6 +663,7 @@ final class NormalAppUITests: XCTestCase {
             try first.owner.acceptTerminal()
         }
         if let owner = originalLaunch { try owner.healthy() }
+        if let owner = applicationsLaunch { try owner.healthy() }
     }
 
     @MainActor private func acceptPersistenceRestart() throws {
@@ -1099,6 +1281,63 @@ final class NormalAppUITests: XCTestCase {
                         "only the separately selected fixed packaged-entry case may reuse this package")
         }
         return account
+    }
+
+    @MainActor
+    func testApplicationsLaunchAndQuit() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 60
+        try beginCase(seconds: 60)
+        _ = try admittedJourneyApplication() // Same-build installed/read-back fixture only.
+        try require(originalLaunch == nil && entryGateObservation == nil && !applicationsQuitObserved
+                    && ProcessInfo.processInfo.environment["MRK_ENGINEERING_UI_WORK"] == nil,
+                    "Applications observation requires empty ordinary custody")
+        let entry = ApplicationsLaunch.url
+        try require(Bundle(url: entry)?.bundleIdentifier == "dev.mobile-release-kit.desktop.launcher"
+                    && Bundle(url: entry)?.object(forInfoDictionaryKey: "CFBundleExecutable") as? String == "mrk-macos-launcher",
+                    "the exact installed Applications launcher is missing")
+        let launcherMonitor = XCUIApplication(url: entry)
+        let outerMonitor = XCUIApplication(url: OrdinaryLaunch.outerURL)
+        let app = XCUIApplication(url: OrdinaryLaunch.payloadURL)
+        try require(launcherMonitor.state == .notRunning && outerMonitor.state == .notRunning && app.state == .notRunning,
+                    "occupied launcher, outer or payload cannot be adopted")
+        let gate = GateObservation()
+        entryGateObservation = gate
+        try gate.openOnce()
+        try gate.probe(busy: false)
+        guard let clock = caseClock else { throw Refusal.condition("Applications original case clock missing") }
+        let owner = ApplicationsLaunch(clock: clock)
+        applicationsLaunch = owner
+        defer { owner.removeObserver() } // Every success/failure path, no permanent observer.
+        try owner.requestAndAwait()
+        try gate.probe(busy: true)
+        // All URL proxies are monitoring/UI only, never launch/activation/stop receivers.
+        try require(app.wait(for: .runningForeground, timeout: try remaining(5)), "Applications payload is not foreground")
+        try require(app.windows.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "Applications payload has no window")
+        let window = try unique(app.windows, "Applications main window is ambiguous")
+        try require(window.isHittable, "Applications main window is not usable")
+        try require(window.webViews.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "Applications renderer is missing")
+        let renderer = try unique(window.webViews, "Applications renderer is ambiguous")
+        try dashboard(renderer)
+        try click(renderer.buttons.matching(identifier: "Project settings"), "Applications settings navigation is unavailable")
+        try require(renderer.staticTexts.matching(identifier: "A little clarity before the next release.")
+                    .element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "Applications settings did not render")
+        try click(renderer.buttons.matching(identifier: "Dashboard"), "Applications Dashboard navigation is unavailable")
+        try dashboard(renderer)
+        try gate.probe(busy: true)
+        let sheet = try quitSheet(app, window)
+        try click(sheet.buttons.matching(identifier: "Quit"), "Applications genuine normal Quit is unavailable")
+        let end = try clock.end(within: 10)
+        try require(app.wait(for: .notRunning, timeout: try clock.remaining(10, before: end)), "Applications payload UI did not stop")
+        try owner.observeTermination(until: end) // Same ten seconds for both retained references.
+        try require(app.state == .notRunning && launcherMonitor.state == .notRunning && outerMonitor.state == .notRunning,
+                    "Applications monitored state changed after observed termination")
+        try gate.probe(busy: false)
+        try gate.closeOriginal()
+        try owner.acceptTerminal()
+        applicationsQuitObserved = true
+        _ = try remaining(1)
+        print("MRK_MACOS_APPLICATIONS_UI=launcherRequest=1;callbackLauncher=1;payloadEvent=1;retainedIdentity=1;dashboardNavigation=1;normalQuit=1;launcherTerminated=1;eventPayloadTerminated=1;gateFree=1;gateClosed=1;failureCleanup=0;caseDeadlineMet=1;payloadRequestCorrelation=unavailable;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
     }
 
     @MainActor
@@ -6912,6 +7151,11 @@ final class NormalAppUITests: XCTestCase {
 
     override func tearDown() async throws {
         var cleanupFailure: Error?
+        do {
+            try await MainActor.run {
+                if let owner = applicationsLaunch { try owner.tearDown(normalQuit: applicationsQuitObserved) }
+            }
+        } catch { cleanupFailure = error }
         do {
             try await MainActor.run {
                 if let owner = originalLaunch {

@@ -248,3 +248,26 @@ no unresolved security/data-loss/recovery/signing blocker, accurate limitations,
 and signed/notarized installers. Do not describe a compile, draft or preview as
 feature-complete. The preliminary full-scope estimate is 2–4 engineering weeks;
 native failures, credentials and the newly added direct Store route affect it.
+
+## Current native compiler checkpoint — 2026-10-16
+
+- App run `38900278450/1` at `6968400c2963d05b8f02af3e3c4dc09493c9200f`
+  compiled the frontend and actual packaged-image graph on ARM (`116970538799`)
+  and Intel (`116970539354`). Both jobs then failed before the two Store tests
+  executed: their command mistakenly enabled the shipping-image feature, which
+  intentionally refuses `cfg(test)`. The correction uses the existing headless
+  Mac library for these unchanged memory-only methods; no shipping guard changes.
+  The successful image builds remain useful evidence, not successful whole jobs
+  or an installed-application pass. Both job cleanup steps completed.
+- Installer run `38900790236/1` at `4d9b5f479971fa850bba0a2f134590917d49789e`
+  passed both native role checks and eight of nine pure cases on ARM
+  (`116972251856`) and Intel (`116972252246`). The failing private-frame case called the now-supported
+  recovery tag `5` unknown. Its corrected fixture checks that a partial tag is
+  incomplete, sealed truncation/ordinary paths still fail, and unknown tags
+  `6`/`255` fail. Production parsing is unchanged. Targeted rerun
+  results remain to be recorded; a failed job is not counted as passing.
+- The installed Applications launcher journey now has independently reviewed
+  XCTest source and five passing focused Python runner tests. It observes the
+  launcher callback separately from the payload launch event; neither a source
+  review nor those tests establishes an actual installed launch. Native XCTest
+  compilation and the real installed journey remain required.

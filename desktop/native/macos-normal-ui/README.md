@@ -17,8 +17,8 @@ route at a shared/personal desktop.
 
 Account admission uses one bounded getpwuid_r lookup of the original UID,
 requiring matching UID/GID, runner name and /Users/runner account home.
-Foundation's sandbox home is diagnostic, not account authority. Both launch
-callers share the same owner; no runner TMPDIR/CFFIXED_USER_HOME is forwarded.
+Foundation's sandbox home is diagnostic, not account authority. Both outer-entry
+launch profiles share the same owner; no runner TMPDIR/CFFIXED_USER_HOME is forwarded.
 Persistent fixture preparation still admits the account before inspecting the
 default vault namespace. The account-only native pass is not app qualification.
 
@@ -80,6 +80,36 @@ permission change or live service operation is admitted.
 Finder/Installer UI, Gatekeeper/notarization, older macOS or target-wide support, real signing,
 Store operations, release readiness or complete Desktop feature acceptance.
 cleanExitStatus remains null; allWorkerFinality remains unestablished.
+
+## Installed Applications entry: observational selection
+
+`testApplicationsLaunchAndQuit`, selected alone as `applications-test.xcresult`,
+uses the same-build fresh hosted installation/readback fixture. It opens the
+actual `/Applications/Mobile Release Kit.app` once; it does not build a launcher,
+open the payload directly or replace the existing outer-entry scenario.
+Launcher, protected outer and payload proxies must all initially be notRunning,
+and the held permanent gate must be free.
+
+The request callback owns only the **launcher** reference. A pre-request
+NSWorkspace launch observer separately retains exactly one matching **payload
+event** reference and repeatedly checks its fixed bundle/executable/identifier.
+This is not a request-correlated payload original or cleanup capability. An
+outer-identity event, duplicate, mismatch or missing event refuses the test;
+whether this strict event expectation holds is a native test obligation, not
+an assertion that macOS cannot emit an outer event.
+
+The case requires a usable dashboard, Project settings and back navigation,
+then the real affirmative Quit. Both retained references must be observed
+terminated, the proxies notRunning and the same gate free/closed. Its separate
+marker never claims the ordinary `outerRequest`/payload-original handoff.
+The observer is removed on every exit. Only the callback-owned launcher may
+receive failure cleanup; an uncertain payload is preserved, the job fails and
+no later case may run against that state. No PID lookup or payload stop occurs.
+
+The original60-second case budget,180-second command cap, exact single pass and
+zero failed/skipped/expected-failure counts remain required. Source/inert tests
+are not installed-launch qualification. Causal launch correlation, POSIX exit
+status, all-worker finality and full UI/product readiness remain unproved.
 
 ## Actual generated runner and evidence
 

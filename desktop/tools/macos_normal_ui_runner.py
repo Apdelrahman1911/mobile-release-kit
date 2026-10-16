@@ -2,8 +2,8 @@
 """Fixed generated Mac UI-runner admission; no application launch or repair here.
 
 Import is inert. The diagnostic uses its existing original-command owner; the
-normal workflow CLI admits fixed build/summary phases and eight exact test selections.
-Only XCTest/NSWorkspace in the reviewed Swift source may request the outer app.
+normal workflow CLI admits fixed build/summary phases and exact test selections.
+Only XCTest/NSWorkspace in reviewed Swift may request the fixed installed entries.
 """
 from __future__ import annotations
 
@@ -45,6 +45,7 @@ RUNNER_INFO = RUNNER + "/Contents/Info.plist"
 TEST_INFO = TEST_BUNDLE + "/Contents/Info.plist"
 NORMAL_SELECTIONS = {
     "test.xcresult": (("testLaunchCancelAndQuit",), 60, 180),
+    "applications-test.xcresult": (("testApplicationsLaunchAndQuit",), 60, 180),
     "project-test.xcresult": (("testSyntheticProjectLocalEditsAndImages",
                               "testSyntheticProjectPathFields"), 300, 720),
     "persistence-test.xcresult": (("testSyntheticPersistentCredentials",), 300, 420),
@@ -69,6 +70,10 @@ ORIGINAL_MARKER = ("MRK_MACOS_UI_ORIGINAL=outerRequest=1;completion=1;body=1;han
 ENTRY_MARKER = ("MRK_MACOS_ENTRY_UI=ordinary-entry-payload-picker-quit-and-gate-exclusion-observed;"
     "directPayloadPreMain=unqualified;allWorkerFinality=unavailable;maintenance=unavailable")
 UI_MARKER = ("MRK_MACOS_NORMAL_UI=launch-render-cancel-navigation-quit-observed;"
+    "cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+APPLICATIONS_MARKER = ("MRK_MACOS_APPLICATIONS_UI=launcherRequest=1;callbackLauncher=1;payloadEvent=1;"
+    "retainedIdentity=1;dashboardNavigation=1;normalQuit=1;launcherTerminated=1;eventPayloadTerminated=1;"
+    "gateFree=1;gateClosed=1;failureCleanup=0;caseDeadlineMet=1;payloadRequestCorrelation=unavailable;"
     "cleanExitStatus=unavailable;allWorkerFinality=unavailable")
 
 
@@ -585,6 +590,32 @@ def normal_release_evidence_markers(stdout):
     return True
 
 
+def applications_ui_markers(stdout):
+    """One returned test's observation, not payload-original/causal authority."""
+    need(type(stdout) is bytes and 0 < len(stdout) <= 1024 * 1024, "applications-output-bound")
+    lines = stdout.decode("utf-8", "strict").splitlines()
+    need([row for row in lines if row.startswith("MRK_MACOS_APPLICATIONS_UI=")] == [APPLICATIONS_MARKER]
+         and not any("MRK_MACOS_APPLICATIONS_UI_FAILURE=" in row or "MRK_MACOS_UI_FAILURE_CLEANUP=" in row
+                     or row.startswith("MRK_MACOS_UI_ORIGINAL=") for row in lines), "applications-observation-marker")
+    selected = "-[MRKNormalAppUITests.NormalAppUITests testApplicationsLaunchAndQuit]"
+    attempts = [row for row in lines if row.startswith("Test Case ")]
+    need(len(attempts) == 2 and attempts[0] == "Test Case '" + selected + "' started."
+         and re.fullmatch(r"Test Case '" + re.escape(selected)
+                          + r"' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.", attempts[1]) is not None,
+         "applications-exact-attempt-and-pass")
+    need(lines.index(attempts[0]) < lines.index(APPLICATIONS_MARKER) < lines.index(attempts[1]),
+         "applications-observation-order")
+    return True
+
+
+def applications_ui_summary(body):
+    value = document(body)
+    expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+    need(all(type(value.get(key)) is int and value[key] == count for key, count in expected.items()),
+         "applications-exact-one-passed-test")
+    return expected
+
+
 def normal_cli_arguments(arguments, *, target=ARM_TARGET):
     machine, _ = normal_target_data(target)
     need(len(arguments) in (25, 26) and arguments[0] == "test-without-building", "normal-fixed-command")
@@ -663,7 +694,8 @@ def ios_unsigned_summary(body):
     return counts
 
 
-SUMMARY_STEMS = {"test.xcresult": "summary", "project-test.xcresult": "project-summary",
+SUMMARY_STEMS = {"test.xcresult": "summary", "applications-test.xcresult": "applications-summary",
+    "project-test.xcresult": "project-summary",
     "persistence-test.xcresult": "persistence-summary", "diagnostics-test.xcresult": "diagnostics-summary",
     "saved-checks-test.xcresult": "saved-checks-summary",
     "workflow-refusal-test.xcresult": "workflow-refusal-summary",
@@ -3220,6 +3252,8 @@ def execute_normal_phase(phase, request, source, file_limit):
             facts["iosUnsignedTestCounts"] = ios_unsigned_summary(original.stdout)
         if request.get("iosPending") is True and original.returncode == 0:
             facts["iosPendingRecoveryTestCounts"] = ios_pending_summary(original.stdout)
+        if result.name == "applications-test.xcresult" and original.returncode == 0:
+            facts["applicationsObservedTestCounts"] = applications_ui_summary(original.stdout)
         receipt = result.parent / (SUMMARY_STEMS[result.name] + ".command-admission.json")
     else:
         need(mode == "test", "normal-phase-selection")
@@ -3253,6 +3287,8 @@ def execute_normal_phase(phase, request, source, file_limit):
             original, facts = run_admitted_test(phase.call, derived, result, request["methods"],
                                                 request["allowance"], request["timeout"], target=target)
         facts.update(originalTestReturncode=original.returncode, normalPhase="test", resultBundle=result.name)
+        if original.returncode == 0 and result.name == "applications-test.xcresult":
+            facts["applicationsLaunchObservationMarker"] = applications_ui_markers(original.stdout)
         if original.returncode == 0 and result.name == "project-test.xcresult":
             project_markers = normal_project_markers(original.stdout)
             facts["projectFieldAndEditMarkersObserved"] = project_markers

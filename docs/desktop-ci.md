@@ -87,8 +87,16 @@ establish local Store execution or authentication.
   Applications/recovery tests; no Installer/Remover main or filesystem adapter runs.
 - `installer-recovery`: only the named recovery tests after unchanged compilation
   and launcher tests have already passed.
+- `installer-frames`: only the private-frame/parser regression when the remaining
+  installer checks already have applicable successful results.
 - `app`: frontend and the actual packaged Tauri image graph, plus the two named
-  memory-only Mac Store cleanup/ownership tests. This is not installed UI testing.
+  memory-only Mac Store cleanup/ownership tests in the headless Mac library.
+  The shipping-image role deliberately rejects a unit-test harness. This is not
+  installed UI testing.
+- `app-contracts`: only those two tests, reusing an unchanged successful image
+  build rather than rebuilding the frontend and Tauri dependencies.
+- `ui-build`: compile the existing external XCTest target on both Macs, without
+  building, signing, installing or launching the application.
 - `integration`: the changed app and installer checks together, without rebuilding
   the unchanged Swift launcher or re-signing the Store component.
 - `store-runtime`: reuse the selected signed Ruby/Fastlane component, verify its

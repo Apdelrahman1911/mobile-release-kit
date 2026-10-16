@@ -63,6 +63,17 @@ def normal_arguments(result="test.xcresult"):
         "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
 
 
+def applications_output():
+    # Independent expected observation, deliberately NOT the ordinary-original marker.
+    case = "-[MRKNormalAppUITests.NormalAppUITests testApplicationsLaunchAndQuit]"
+    marker = ("MRK_MACOS_APPLICATIONS_UI=launcherRequest=1;callbackLauncher=1;payloadEvent=1;"
+        "retainedIdentity=1;dashboardNavigation=1;normalQuit=1;launcherTerminated=1;eventPayloadTerminated=1;"
+        "gateFree=1;gateClosed=1;failureCleanup=0;caseDeadlineMet=1;payloadRequestCorrelation=unavailable;"
+        "cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+    return ("\n".join(("Test Case '" + case + "' started.", marker,
+        "Test Case '" + case + "' passed (1.000 seconds).", ""))).encode()
+
+
 def normal_project_output():
     # Literal independent roster/markers: never generated from the helper's table.
     methods = ("testSyntheticProjectLocalEditsAndImages", "testSyntheticProjectPathFields")
@@ -372,7 +383,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         selected = MODULE.CLASS + "testSyntheticProjectUnsignedIOSArchive"
         self.assertEqual(MODULE.IOS_UNSIGNED_METHOD, "testSyntheticProjectUnsignedIOSArchive")
         self.assertNotIn(MODULE.IOS_UNSIGNED_RESULT, MODULE.NORMAL_SELECTIONS)
-        self.assertEqual(len(MODULE.NORMAL_SELECTIONS), 8)
+        self.assertEqual(len(MODULE.NORMAL_SELECTIONS), 9)
         for target, machine in ((MODULE.ARM_TARGET, "arm64"), (MODULE.INTEL_TARGET, "x86_64")):
             request = MODULE.normal_request(["--target", target, "--normal-ios-unsigned-archive-test"], temporary)
             self.assertEqual(request, dict(phase="test", derived=normal / "DerivedData",
@@ -513,6 +524,92 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                     self.assertNotIn("androidToolSourceBrowseMarkerObserved", receipt)
                     parse.assert_not_called()
 
+    def test_applications_observation_is_one_fixed_same_budget_selection(self):
+        name = "applications-test.xcresult"
+        self.assertEqual(MODULE.NORMAL_SELECTIONS[name], (("testApplicationsLaunchAndQuit",), 60, 180))
+        self.assertEqual(MODULE.NORMAL_SELECTIONS["test.xcresult"], (("testLaunchCancelAndQuit",), 60, 180))
+        for target_value, machine in ((MODULE.ARM_TARGET, "arm64"), (MODULE.INTEL_TARGET, "x86_64")):
+            args = normal_arguments(name)
+            args[8] = "platform=macOS,arch=" + machine
+            temporary = str(Path(args[12]).parent / "tmp") + "/"
+            request = MODULE.normal_request(["--target", target_value, *args], temporary)
+            self.assertEqual((request["allowance"], request["timeout"], request["phaseSeconds"]), (60, 180, 345))
+            command = MODULE.xcode_test_arguments("/inert/runner.xctestrun", request["result"],
+                request["methods"], request["allowance"], target=target_value)
+            self.assertEqual([item for item in command if item.startswith("-only-testing:")],
+                ["-only-testing:MRKNormalAppUITests/NormalAppUITests/testApplicationsLaunchAndQuit"])
+            summary = MODULE.normal_request(["--target", target_value, "--normal-summary", name], temporary)
+            self.assertEqual((summary["phase"], summary["timeout"]), ("summary", 30))
+            self.assertEqual(MODULE.SUMMARY_STEMS[name], "applications-summary")
+            for wrong in (args[:15] + ["-only-testing:" + MODULE.CLASS + "testLaunchCancelAndQuit"] + args[16:],
+                          args + ["-only-testing:" + MODULE.CLASS + "testLaunchCancelAndQuit"],
+                          [item.replace("applications-test.xcresult", "foreign-test.xcresult") for item in args],
+                          ["300" if item == "60" else item for item in args]):
+                with self.assertRaises(MODULE.Refused): MODULE.normal_cli_arguments(wrong, target=target_value)
+
+    def test_applications_observation_marker_and_summary_are_not_original_authority(self):
+        output = applications_output()
+        self.assertIs(MODULE.applications_ui_markers(output), True)
+        rows = output.splitlines(keepends=True)
+        for bad in (b"", output + rows[1], output + rows[0], output.replace(rows[1], b""),
+                    rows[1] + rows[0] + rows[2], rows[0] + rows[2] + rows[1],
+                    output.replace(b"testApplicationsLaunchAndQuit", b"testLaunchCancelAndQuit"),
+                    output.replace(b" passed ", b" skipped "),
+                    output.replace(b"payloadEvent=1", b"payloadEvent=2"),
+                    output.replace(b"payloadRequestCorrelation=unavailable", b"payloadRequestCorrelation=1"),
+                    output + MODULE.ORIGINAL_MARKER.encode() + b"\n",
+                    output + b"MRK_MACOS_APPLICATIONS_UI_FAILURE=launcherCleanupOnly=1\n",
+                    output + b"MRK_MACOS_UI_FAILURE_CLEANUP=normalRequested=1\n"):
+            with self.subTest(bytes=len(bad)), self.assertRaises(MODULE.Refused):
+                MODULE.applications_ui_markers(bad)
+        expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+        self.assertEqual(MODULE.applications_ui_summary(json.dumps(expected).encode()), expected)
+        for key in expected:
+            for value in (True, expected[key] + 1):
+                with self.subTest(key=key, value=value), self.assertRaises(MODULE.Refused):
+                    MODULE.applications_ui_summary(json.dumps(dict(expected, **{key: value})).encode())
+        with self.assertRaises(MODULE.Refused): MODULE.applications_ui_summary(b"{}")
+
+    def test_applications_phase_requires_its_original_zero_marker_and_summary(self):
+        args = normal_arguments("applications-test.xcresult")
+        request = MODULE.normal_request(args, str(Path(args[12]).parent / "tmp") + "/")
+        clock = SimpleNamespace(before_publication=lambda: {}, check=lambda: None)
+        phase = SimpleNamespace(call=lambda *args: self.fail("no native execution"), records=[], clock=clock, environment={})
+        for status, output in ((0, applications_output()), (0, b"no observation"), (65, b"native failed")):
+            original = subprocess.CompletedProcess([], status, output, b"")
+            with self.subTest(status=status), patch.object(MODULE, "normal_source_state", return_value={"inert": "source"}), \
+                 patch.object(MODULE, "run_admitted_test", return_value=(original, {})), \
+                 patch.object(MODULE, "exclusive_output") as publish:
+                if status == 0 and output != applications_output():
+                    with self.assertRaises(MODULE.Refused):
+                        MODULE.execute_normal_phase(phase, request, "a" * 40, (1024**3,) * 2)
+                    publish.assert_not_called()
+                else:
+                    self.assertIs(MODULE.execute_normal_phase(phase, request, "a" * 40, (1024**3,) * 2), original)
+                    receipt = json.loads(publish.call_args.args[1])
+                    self.assertEqual(receipt["originalTestReturncode"], status)
+                    self.assertEqual(receipt.get("applicationsLaunchObservationMarker"), True if status == 0 else None)
+        with tempfile.TemporaryDirectory() as directory:
+            normal = Path(directory) / "normal-ui"
+            result = normal / "applications-test.xcresult"
+            result.mkdir(parents=True)
+            request = MODULE.normal_request(["--normal-summary", result.name], str(normal / "tmp") + "/")
+            counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+            for status, body in ((0, json.dumps(counts).encode()), (0, b"{}"), (65, b"native failed")):
+                original = subprocess.CompletedProcess([], status, body, b"")
+                phase.call = lambda *args: original # Inert native boundary; real phase/count handling below.
+                with self.subTest(summary=status, body=body), \
+                     patch.object(MODULE, "normal_source_state", return_value={"inert": "source"}), \
+                     patch.object(MODULE, "exclusive_output") as publish:
+                    if status == 0 and body == b"{}":
+                        with self.assertRaises(MODULE.Refused):
+                            MODULE.execute_normal_phase(phase, request, "a" * 40, (1024**3,) * 2)
+                        publish.assert_not_called()
+                    else:
+                        self.assertIs(MODULE.execute_normal_phase(phase, request, "a" * 40, (1024**3,) * 2), original)
+                        receipt = json.loads(publish.call_args.args[1])
+                        self.assertEqual(receipt.get("applicationsObservedTestCounts"), counts if status == 0 else None)
+
     def test_workflow_refusal_selection_is_opt_in_and_preserves_all_old_budgets(self):
         old = {
             "test.xcresult": (("testLaunchCancelAndQuit",), 60, 180),
@@ -524,7 +621,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                                           "testSyntheticProjectEmptyBuildInputInspection"), 300, 720),
         }
         result_name = "workflow-refusal-test.xcresult"
-        self.assertEqual({name: value for name, value in MODULE.NORMAL_SELECTIONS.items() if name not in (result_name, "saved-version-recovery-test.xcresult", "release-evidence-test.xcresult")}, old)
+        self.assertEqual({name: value for name, value in MODULE.NORMAL_SELECTIONS.items() if name not in (result_name, "saved-version-recovery-test.xcresult", "release-evidence-test.xcresult", "applications-test.xcresult")}, old)
         self.assertEqual(MODULE.NORMAL_SELECTIONS[result_name],
                          (("testSyntheticProjectManagedWorkflowRefusal",), 300, 420))
         arguments = normal_arguments(result_name)

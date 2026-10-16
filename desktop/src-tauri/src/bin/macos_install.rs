@@ -8105,8 +8105,22 @@ mod installer {
                     assert!(removal_archive_test_parse(&corrupt[..header],false).is_err(),
                         "invalid control count accepted: intel={intel} count={count} maximum={maximum}");
                 }
-                corrupt=bytes.clone();corrupt[header]=5;assert!(removal_archive_test_parse(&corrupt[..header+1],false).is_err());
+                // Kind5 is now a supported conserved-prefix role. The kind
+                // byte alone is a valid unfinished stream, NOT an admitted
+                // control: its complete path must still have the closed role.
+                corrupt=bytes.clone();corrupt[header]=5;
+                assert!(!removal_archive_test_parse(&corrupt[..header+1],false).unwrap().0,
+                    "kind5 header unexpectedly complete: intel={intel}");
+                assert!(removal_archive_test_parse(&corrupt[..header+1],true).is_err(),
+                    "sealed kind5 header accepted: intel={intel}");
                 let identity=header+1+2+"control.json".len();
+                assert!(removal_archive_test_parse(&corrupt[..identity],false).is_err(),
+                    "kind5 ordinary control path accepted: intel={intel}");
+                for kind in [6,u8::MAX] {
+                    corrupt=bytes.clone();corrupt[header]=kind;
+                    assert!(removal_archive_test_parse(&corrupt[..header+1],false).is_err(),
+                        "unknown control kind accepted: intel={intel} kind={kind}");
+                }
                 corrupt=bytes.clone();corrupt[identity+16..identity+20].copy_from_slice(&0o100600u32.to_be_bytes());
                 assert!(removal_archive_test_parse(&corrupt[..identity+20],false).is_err());
                 corrupt=bytes.clone();let last=corrupt.len()-1;corrupt[last]^=1;
