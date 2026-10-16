@@ -286,6 +286,13 @@ def composition_fd_quote(*, project, source, bound_files, module_depth, root_dep
             "handoff": handoff}
 
 
+OUTPUT_REFUSALS = {
+    "preexisting-output": "Previous Android output is preserved. Use reviewed output preparation before starting a local candidate.",
+    "module-missing": "The configured Android module directory is missing; no build or output cleanup was started.",
+    "output-changed": "Android output changed before the build. Preserve it and review output preparation before another candidate.",
+}
+
+
 class LocalAndroidCandidateComposition:
     """Internal original source/build join; deliberately not a native wire API.
 
@@ -308,6 +315,8 @@ class LocalAndroidCandidateComposition:
         self._source_rows = []
         self._build_errors = {}
         self.source_failure = None
+        self._output = self._output_data = None
+        self.output_failure = None
         run._local_composition = run.operation._local_composition = self
 
     def _owner(self):
@@ -319,8 +328,29 @@ class LocalAndroidCandidateComposition:
         self.failed = True
         self.handoff._fail()
         from .local_release_source import LocalSourceError
-        if type(error) is LocalSourceError and self.source_failure is None:
+        if type(error) is LocalSourceError and self.source_failure is None and self.output_failure is None:
             self.source_failure = error.reason
+
+    def _refuse_output(self, reason):
+        self._owner()
+        _need(reason in OUTPUT_REFUSALS)
+        if self.output_failure is None:
+            self.output_failure = reason
+        self._fail()
+        raise LocalCandidateError(OUTPUT_REFUSALS[reason])
+
+    def _gradle_arguments(self, argv):
+        self._owner()
+        flags = ("--no-build-cache", "--no-configuration-cache", "--rerun-tasks")
+        _need(self._output is not None and self._output.prepared and not self._output.armed
+              and not self._output.arguments_selected
+              and not self.failed and not self.closed and type(argv) is tuple and argv
+              and argv[-1] == self.run.operation.inputs.task
+              and not any(flag in argv for flag in flags))
+        # Only the actual tool owner's selected task is retained; flags are
+        # supplemental. The saved dispatcher repeats original output PRE.
+        self._output.arguments_selected = True
+        return (*argv[:-1], *flags, argv[-1])
 
     def _settled_source_calls(self):
         return sum(row["settled"] for row in self._source_rows)
@@ -454,12 +484,14 @@ class LocalAndroidCandidateComposition:
                 observed = source.observed
                 self.source_binding = {"commit": observed.commit, "tree": observed.tree,
                                        "ref": observed.ref, "branch": observed.branch}
+                self._output = op.files.prepare_candidate_output(self)
                 try:
                     yield
                 except BaseException as error:
                     self._fail(error)  # First failure before independent source closes.
                     raise
             _need(source.closed and all(reader.assert_closed() is None for reader in source.readers))
+            self._output.check_final(op._artifact)  # Last output POST before producer close.
             self.source_closed = True
         except BaseException as error:
             self._fail(error)
@@ -470,6 +502,8 @@ class LocalAndroidCandidateComposition:
         _need(self.source is not None and self.quote is not None and not self.failed
               and self.run.operation.work_finish_attempted)
         self.source.check()
+        _need(self._output is not None and self._output_data is None)
+        self._output_data = self._output.data(artifact)
         path = self.run.operation.root / ".mobile-release" / "desktop-android-build" / self.run.operation.operation_id / "artifacts" / "app-release.aab"
         _need(artifact.path == path and len(path.parts) + 2 <= self.quote["handoff"])
 
@@ -485,6 +519,8 @@ class LocalAndroidCandidateComposition:
         _validate_composed_terminal(terminal, self.run.request, self)
         if terminal["outcome"] == "complete":
             _need(not self.failed and self.source_closed and self.source_binding is not None
+                  and self._output_data is not None
+                  and self._output_data["signedArtifact"] == {"bytes": self.handoff._size, "sha256": self.handoff._sha256}
                   and self._source_pending is None and len(self._source_rows) == 8
                   and all(row["returned"] and row["code"] == 0 for row in self._source_rows))
         if terminal["outcome"] != "complete":
@@ -494,6 +530,8 @@ class LocalAndroidCandidateComposition:
         return {"origin": "local-desktop", "scope": "source-bound-android-build-composition",
                 "build": terminal, "source": self.source_binding, "sourceCalls": [dict(row) for row in self._source_rows],
                 "sourceOriginalsClosed": self.source_closed, "sourceFailure": self.source_failure,
+                "outputFailure": self.output_failure, "outputGuidance": OUTPUT_REFUSALS.get(self.output_failure),
+                "outputFreshness": json.loads(json.dumps(self._output_data)) if self.joined else None,
                 "ownedPythonDescriptorQuote": self.quote,
                 # Serialized payload/row bounds, not a Python heap or OS-wide
                 # memory proof. No AAB body is retained in memory.
@@ -508,7 +546,8 @@ class LocalAndroidCandidateComposition:
     def observation(self):
         self._owner()
         _need(self.joined and not self.closed and not self.failed)
-        return {**self.handoff.observation(), "sourceCorrespondence": dict(self.source_binding)}
+        return {**self.handoff.observation(), "sourceCorrespondence": dict(self.source_binding),
+                "outputFreshness": json.loads(json.dumps(self._output_data))}
 
     def artifact_blocks(self):
         self.observation()

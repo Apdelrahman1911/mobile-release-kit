@@ -17,6 +17,9 @@ import unittest
 from unittest.mock import patch
 
 import test_local_release_candidate as handoff_data
+import test_android_build_service as service_data
+from mobile_release._desktop_android_build_files import AndroidBuildFiles
+from mobile_release.android_build_signing import SignedAndroidOperation
 import test_android_build_protocol as protocol
 from mobile_release import local_release_candidate as C, local_release_source as S
 from mobile_release import _command_process as process
@@ -34,8 +37,14 @@ class LocalCandidateCompositionTests(unittest.TestCase):
     close_sources = handoff_data.LocalAndroidHandoffTests.close_sources
 
     def subject(self, *, jarsigner=0):
-        f, artifact, body = handoff_data.LocalAndroidHandoffTests.subject(self)
-        op, source, root = f.operation, f.source, f.operation.root
+        f = service_data._InertRun(self, signature=True)
+        self.case_number = getattr(self, 'case_number', 0) + 1
+        root = Path(self.temporary.name) / ("case-" + str(self.case_number))
+        root.mkdir(mode=0o700)
+        op, source = f.operation, f.source
+        op.root = f.namespace.root = root
+        body = b"tiny signed-artifact stand-in; never interpreted or executed\n"
+        artifact = f.namespace.path / 'artifacts/app-release.aab'
         data = json.loads(f.bound.saved.configuration.raw)
         data['source']['localStoreEnabled'] = True
         raw = json.dumps(data, separators=(',', ':')).encode()
@@ -43,21 +52,55 @@ class LocalCandidateCompositionTests(unittest.TestCase):
         f.bound = op.inputs = replace(f.bound, saved=saved, config=ReleaseConfig(root / S.CONFIG_PATH, root, data))
         op.bind_inputs.return_value = f.bound
         request_data = json.loads(protocol.encoded(protocol.signed_request_data()))
-        request_data['context'].update(f.request.context)
+        for key in ('savedVersion', 'artifactValidation'):
+            request_data['context'][key] = f.request.context[key]
         request_data['context']['savedConfig'] = {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
         request_data['native']['signingContext'] = dict(request_data['context']['savedConfig'])
         request_data['native'].update(projectRoot=str(root), cwd='/inert/cwd')
         f.request = f.run.request = op.request = wire.parse_request(protocol.encoded(request_data))
         source.work_end = time.monotonic() + 600
         op._roles = dict.fromkeys(C.BUILD_ROLES, 'new')
-        f.files.slots, f.files.iterators = [], []
+        source.signed = True
+        op.signing = SignedAndroidOperation(op)
+        self.patched(op.signing, 'closed', return_value=True)  # Native material owner boundary.
+        self.patched(source, 'material_closed', return_value=True)
+        AndroidBuildFiles.__init__(f.files, op)
+        op._artifact = None
+        def dispose_inert_descriptors():
+            # There are no real native consumers in this fixture. Tests still
+            # assert production UNKNOWN retention before this namespace-only
+            # teardown; never retry an attempted/unknown original close.
+            for slot in f.files.slots:
+                if slot.close_state == 'NOT_ATTEMPTED' and slot.number is not None:
+                    slot.close()
+        self.addCleanup(dispose_inert_descriptors)
+        f.files.namespace = f.namespace
         root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
         self.source_fds.append(root_fd)
-        project = SimpleNamespace(fd=root_fd, directory=SimpleNamespace(slots=[None] * len(root.parts)))
+        project = SimpleNamespace(fd=root_fd, directory=SimpleNamespace(slots=[SimpleNamespace(number=root_fd)]),
+                                  meta=SimpleNamespace(number=None))
         f.invocation.mode = 'build'
         f.invocation.root = root
         f.invocation.project_owner = f.invocation._original_project = project
         self.patched(f.invocation, 'require', return_value=None)
+        self.patched(f.files, '_borrow_root', return_value=root_fd)  # Original project admission boundary.
+        self.patched(f.files, '_root_metadata', return_value=None)
+        self.patched(f.files, '_namespace_metadata', return_value=None)
+        (root / 'app').mkdir(mode=0o700)
+        for name in ('work', 'artifacts'):
+            (f.namespace.path / name).mkdir(parents=True, mode=0o700, exist_ok=True)
+        parent, record = root_fd, None
+        for name in f.namespace.components:
+            record = f.files._directory_at(parent, name, record)
+            parent = record.slot.number
+        f.files._work = f.files._directory_at(parent, 'work', record)
+        f.files._artifacts = f.files._directory_at(parent, 'artifacts', record)
+        self.patched(op, 'gradle_command', new=type(op).gradle_command.__get__(op, type(op)))
+        self.patched(f.tools, 'gradle_command', side_effect=lambda task, work: ('/inert/gradle', '--no-daemon', task))
+        def close():
+            f.files.close()  # Actual output-prefix, source and snapshot consuming closes.
+            f.close()
+        op.close.side_effect = close
         for relative, value in ((S.CONFIG_PATH, raw), (saved.configuration.source, saved.version_raw),
                 ('.git/config', b'[core]\nrepositoryformatversion=0\nbare=false\n'),
                 ('.git/HEAD', b'ref: refs/heads/main\n'), ('.git/refs/heads/main', b'a' * 40 + b'\n'),
@@ -98,19 +141,55 @@ class LocalCandidateCompositionTests(unittest.TestCase):
             f.ledger._command_dispatched = True
             return SimpleNamespace(args=argv, returncode=0, stdout=output, stderr=b'')
         f.command = self.patched(process, 'run_command', side_effect=command)
+        def returned(role, code=0):
+            if role == 'gradle':
+                f.selected_gradle = op.gradle_command()
+            else:
+                op._arm(role)
+            f.source.command_limits(5, role != 'gradle', 1024)
+            if role == 'gradle' and f.gradle_output:
+                # Inert original Gradle boundary: actual new output bytes only
+                # AFTER real empty-scope dispatcher PRE succeeds.
+                output = root / 'app/build/outputs/bundle/release'
+                output.mkdir(parents=True, exist_ok=True, mode=0o700)
+                (output / 'app-release.aab').write_bytes(body)
+                (output / 'app-release.aab').chmod(0o600)
+            f.ledger._commands += 1
+            f.ledger._command_dispatched = True
+            op.returned(role, f.gradle_code if role == 'gradle' else code)
+        f.build_role = returned
+        f.gradle_output, f.gradle_code, f.signed_bytes = True, 0, None
         def signed(bound):
             self.assertIs(bound, f.bound)
             self.assertEqual(f.ledger.verdict().commands, 6)
             self.assertEqual(len(f.run._local_composition.source.readers), 1)
             self.assertFalse(f.run._local_composition.source.closed)
             f.events.append('inert-signed-body')
-            op._roles = dict.fromkeys(C.BUILD_ROLES, 'returned')
-            op._returned = dict.fromkeys(C.BUILD_ROLES, 0)
-            op._returned['jarsigner'] = jarsigner
-            op._signature_passed = True
-            f.ledger._commands += 6
+            op.stage = 'validating-signing'  # Inert native-body phase boundary.
+            returned('keytool-input')
+            op.signing.input_checked = True
+            op.stage = 'building'
+            returned('gradle')
+            if f.gradle_code != 0:
+                op.fail('command-failed')
+            op.stage = 'capturing'
+            candidate = op.capture_signing_after()  # Real original selection and bounded copy.
+            candidate.integrity_checked = True  # Inert ZIP/signature validator; no native claim.
+            with candidate.native_signing_input() as signing_path:
+                if f.signed_bytes is not None: signing_path.write_bytes(f.signed_bytes)
+                returned('aab-sign')
+            f.artifact = op.finalize_signing_capture()  # Real original signed-handoff copy/hash.
+            for role in ('bundletool', 'jarsigner', 'keytool'):
+                if role == 'keytool': op._signature_passed = True  # Inert native policy only.
+                returned(role, jarsigner if role == 'jarsigner' else 0)
+            op.signing.phase = 'inspecting'
             f.disposition.update(work='retained-work', artifacts='retained-incomplete')
-        f.run._signed_body.side_effect = signed
+        self.patched(f.run, '_signed_body', side_effect=signed)
+        def inspect(*args, **kwargs):
+            f.events.append('inspect')
+            op.zip_metadata = f.metadata
+            return f.findings
+        f.inspect_call.side_effect = inspect
         return f, artifact, body
 
     def test_real_service_source_reader_dispatch_full_terminal_and_retained_artifact(self):
@@ -166,7 +245,7 @@ class LocalCandidateCompositionTests(unittest.TestCase):
             self.assertNotIn('PRIVATE_', json.dumps(terminal))
             self.assertTrue(candidate.failed)
             with self.assertRaises(C.LocalCandidateError): candidate.observation()
-        self.assertTrue(path.exists())
+        self.assertFalse(path.exists())
 
     def test_default_saved_dispatch_refuses_unarmed_source_without_native_call(self):
         f, _, _ = self.subject()
@@ -181,7 +260,8 @@ class LocalCandidateCompositionTests(unittest.TestCase):
                 op = f.operation
                 self.assertEqual(f.ledger.verdict().commands, 6)
                 for role in ('keytool-input', 'gradle'):
-                    op._arm(role)
+                    if role == 'gradle': op.gradle_command()
+                    else: op._arm(role)
                     self.assertEqual(f.source.command_limits(5, role != 'gradle', 1024), (5, 1024))
                     f.ledger._commands += 1
                     op.returned(role, 0)
@@ -316,7 +396,7 @@ class LocalCandidateCompositionTests(unittest.TestCase):
                     self.assertEqual(terminal['sourceCalls'][0]['settled'], fault == 'cancelled')
                     self.assertTrue(candidate.failed)
                     with self.assertRaises(C.LocalCandidateError): candidate.observation()
-                self.assertTrue(path.exists())
+                self.assertFalse(path.exists())
 
     def test_early_unknown_candidate_terminal_is_absorbing(self):
         f, _, _ = self.subject()

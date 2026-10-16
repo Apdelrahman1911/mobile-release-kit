@@ -349,6 +349,8 @@ class AndroidBuildOperation:
         self.check_inputs()
         self.tools.check()
         argv = self.tools.gradle_command(self.inputs.task, self.files.work_path)
+        if getattr(self, "_local_composition", None) is not None:
+            argv = self._local_composition._gradle_arguments(argv)
         self._arm("gradle")
         return argv
 
@@ -405,6 +407,8 @@ class AndroidBuildOperation:
         require(role in self._roles and self._roles[role] == "armed"
                 and type(capture) is bool and capture is (role != "gradle")
                 and type(timeout) is int and timeout > 0 and type(output_limit) is int and output_limit > 0)
+        if role == "gradle" and getattr(self, "_local_composition", None) is not None:
+            self._local_composition._output.before_gradle()
         self._roles[role] = "attempted"  # Claim once, before run_command can allocate anything.
         ceiling = {"keytool-input": 30, "gradle": 2700, "aab-sign": 120, "bundletool": 60, "jarsigner": 120, "keytool": 30}[role]
         return min(timeout, ceiling), min(output_limit, 2 * 1024 * 1024)

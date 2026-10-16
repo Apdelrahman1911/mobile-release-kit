@@ -543,6 +543,139 @@ class OriginalAndroidArtifact:
                     raise
 
 
+class _CandidateBundleOutput:
+    """One candidate's initially empty scope; all FDs belong to AndroidBuildFiles.
+
+    No deletion/rename authority and no timestamp-based production claim. A
+    trusted project task can still choose its own inputs; this witnesses new
+    publication in the observed scope, not a complete compiler rebuild.
+    """
+    def __init__(self, files, candidate, parts, module_depth):
+        self.files, self.candidate = files, candidate
+        self.parts, self.module_depth = parts, module_depth
+        self.prefix = []
+        self.missing = None
+        self.prepared = self.armed = self.capture_started = False
+        self.before = None
+        self.arguments_selected = False
+        self.source = self.signing = self.artifact = None
+        self.unsigned = None
+
+    def _point(self):
+        self.candidate._owner()
+        self.files._point()
+        self.files._require(self.files._candidate_output is self
+            and self.files.operation._local_composition is self.candidate
+            and not self.candidate.failed and not self.candidate.closed, "artifact-unsafe")
+
+    def _parent(self):
+        reason = "artifact-changed" if self.capture_started else "project-admission-refused"
+        parent, record = self.files._borrow_root(), None
+        for index, current in enumerate(self.prefix):
+            self.files._require(current.name == self.parts[index]
+                and current.parent == parent and current.parent_record is record, reason)
+            self.files._check_record(current, reason=reason)
+            parent, record = current.slot.number, current
+        return parent, record
+
+    def _names(self, parent, name):
+        names = self.files.names(parent)
+        self.files._require(all(_name_key(item) != _name_key(name) or item == name for item in names),
+                            "artifact-unsafe" if self.capture_started else "project-admission-refused")
+        return names
+
+    def acquire(self):
+        self._point()
+        parent, record = self.files._borrow_root(), None
+        for index, name in enumerate(self.parts):
+            if name not in self._names(parent, name):
+                if index < self.module_depth:
+                    self.candidate._refuse_output("module-missing")
+                self.missing = index
+                break
+            record = self.files._directory_at(parent, name, record, reason="project-admission-refused")
+            self.prefix.append(record)
+            parent = record.slot.number
+        if self.missing is None and self.files.names(parent):
+            self.candidate._refuse_output("preexisting-output")
+        self.prepared = True
+
+    def before_gradle(self):
+        self._point()
+        op = self.files.operation
+        self.files._require(self.prepared and self.arguments_selected and not self.armed and not self.capture_started
+            and op._pending == "gradle" and op._roles["gradle"] == "armed", "artifact-unsafe")
+        parent, _ = self._parent()
+        if self.missing is None:
+            if self.files.names(parent):
+                self.candidate._refuse_output("preexisting-output")
+        elif self.parts[self.missing] in self._names(parent, self.parts[self.missing]):
+            self.candidate._refuse_output("output-changed")
+        facts = op.guard.lifetime_ledger.verdict()
+        self.files._require(facts.complete and facts.cleanup_complete and facts.contained
+            and not facts.fatal and facts.commands == op._command_before["gradle"], "artifact-unsafe")
+        self.before = facts.commands
+        self.armed = True  # Once, before the original native owner can allocate.
+
+    def capture_parent(self, parts):
+        self._point()
+        op = self.files.operation
+        self.files._require(self.armed and not self.capture_started and parts == self.parts
+            and op._roles["gradle"] == "returned" and op._returned["gradle"] == 0
+            and op._command_before["gradle"] == self.before, "artifact-unsafe")
+        self.capture_started = True
+        parent, record = self._parent()
+        for name in self.parts[len(self.prefix):]:
+            self.files._require(name in self._names(parent, name), "artifact-missing")
+            record = self.files._directory_at(parent, name, record)
+            self.prefix.append(record)
+            parent = record.slot.number
+        return parent, record
+
+    def bind_source(self, source):
+        self._point()
+        self.files._require(self.capture_started and self.source is None
+            and source.parent_record is self.prefix[-1]
+            and any(item is source for item in self.files.file_records), "artifact-changed")
+        self.files._check_record(source)
+        self.source = source
+
+    def bind_copy(self, signing):
+        self._point()
+        self.files._require(type(signing) is AndroidSigningCandidate
+            and self.files.signing_candidate is signing and signing._source is self.source
+            and self.source is not None and self.signing is None, "artifact-changed")
+        signing.check()
+        self.signing = signing
+        self.unsigned = {"bytes": signing.size, "sha256": signing.sha256}
+
+    def bind_final(self, artifact):
+        self._point()
+        signing, op = self.signing, self.files.operation
+        self.files._require(signing is self.files.signing_candidate and signing is not None
+            and signing.finalized and signing.signed and signing.integrity_checked
+            and not signing._native and signing.handover_known
+            and op._returned.get("aab-sign") == 0
+            and type(artifact) is OriginalAndroidArtifact and artifact is self.files.artifact
+            and artifact._source is self.source and self.artifact is None
+            and (artifact.size, artifact.sha256) == (signing.size, signing.sha256), "artifact-changed")
+        artifact.check()
+        self.artifact = artifact
+
+    def check_final(self, artifact):
+        self._point()
+        self.files._require(artifact is self.artifact and artifact is self.files._original_artifact
+            and self.signing is self.files.signing_candidate and self.signing.finalized
+            and artifact._source is self.source and self.unsigned is not None, "artifact-changed")
+        artifact.check()  # Includes the same output scope/source/signed snapshot.
+
+    def data(self, artifact):
+        self.check_final(artifact)
+        return {"scope": "new-output-in-original-invocation", "initial": "absent" if self.missing is not None else "empty",
+                "gradleBeforeCommands": self.before, "unsignedOutput": dict(self.unsigned),
+                "signedArtifact": {"bytes": artifact.size, "sha256": artifact.sha256}}
+
+
 class AndroidBuildFiles:
     """One narrow original file roster; no generic runner or cleanup callback."""
 
@@ -576,6 +709,7 @@ class AndroidBuildFiles:
         self._signing_directory: _DirectoryRecord | None = None
         self._output_scope: _DirectoryRecord | None = None
         self._output_epoch: tuple[int, int] | None = None
+        self._candidate_output = None
         self._capture_claimed = self._work_claimed = self.close_claimed = False
         self._close_complete = self._unknown_seen = False
         self._cleanup_counts: dict[str, int] = {}
@@ -1030,12 +1164,7 @@ class AndroidBuildFiles:
         assert self.namespace is not None
         return self.namespace.path / "work"
 
-    def _capture_source(self, module: str, variant: str) -> _FileRecord:
-        self._point()
-        self._require(not self.close_claimed and not self.operation.close_claimed, "artifact-unsafe")
-        self.operation.capture_ready(module, variant)
-        self._require(not self._capture_claimed and self.artifact is None, "artifact-unsafe")
-        self._capture_claimed = True
+    def _bundle_output_parts(self, module, variant):
         self._require(type(module) is str and _MODULE.fullmatch(module) is not None
                       and type(variant) is str and _VARIANT.fullmatch(variant) is not None,
                       "artifact-unsafe")
@@ -1043,17 +1172,46 @@ class AndroidBuildFiles:
         self._require(all(part not in ("", ".", "..") for part in components), "artifact-unsafe")
         relative = "/".join((*components, "build", "outputs", "bundle", variant))
         parts = self._parts(relative)
+        return relative, parts, len(components)
+
+    def prepare_candidate_output(self, candidate):
+        from .local_release_candidate import LocalAndroidCandidateComposition
+        self._point()
+        op = self.operation
+        self._require(type(candidate) is LocalAndroidCandidateComposition
+            and candidate is op._local_composition and candidate.run.operation is op
+            and op.inputs is not None and op.signing is not None and self._candidate_output is None,
+            "artifact-unsafe")
+        value = op.inputs.saved.configuration
+        _, parts, module_depth = self._bundle_output_parts(value.module, value.variant)
+        owner = _CandidateBundleOutput(self, candidate, parts, module_depth)
+        self._candidate_output = owner  # Root before any prefix acquisition.
+        owner.acquire()
+        return owner
+
+    def _capture_source(self, module: str, variant: str) -> _FileRecord:
+        self._point()
+        self._require(not self.close_claimed and not self.operation.close_claimed, "artifact-unsafe")
+        self.operation.capture_ready(module, variant)
+        self._require(not self._capture_claimed and self.artifact is None, "artifact-unsafe")
+        self._capture_claimed = True
+        relative, parts, _ = self._bundle_output_parts(module, variant)
         self._namespace_metadata()
         self._require(self._artifacts is not None, "artifact-unsafe")
         self._check_record(self._artifacts)
-        parent, parent_record = self._borrow_root(), None
-        for name in parts:
-            names = self.names(parent)
-            self._require(all(_name_key(item) != _name_key(name) or item == name for item in names),
-                          "artifact-unsafe")
-            self._require(name in names, "artifact-missing")
-            parent_record = self._directory_at(parent, name, parent_record)
-            parent = parent_record.slot.number
+        if getattr(self.operation, "_local_composition", None) is not None:
+            self._require(self._candidate_output is self.operation._local_composition._output
+                          and self._candidate_output is not None, "artifact-unsafe")
+            parent, parent_record = self._candidate_output.capture_parent(parts)
+        else:
+            parent, parent_record = self._borrow_root(), None
+            for name in parts:
+                names = self.names(parent)
+                self._require(all(_name_key(item) != _name_key(name) or item == name for item in names),
+                              "artifact-unsafe")
+                self._require(name in names, "artifact-missing")
+                parent_record = self._directory_at(parent, name, parent_record)
+                parent = parent_record.slot.number
         # Direct configured variant directory only. No nested search, baseline,
         # project wrapper execution or normalized-output fallback is available.
         # Discovery depth inside this allowed subtree is zero (maximum eight);
@@ -1084,6 +1242,8 @@ class AndroidBuildFiles:
         assert original.identity is not None and original.slot.number is not None
         size = original.identity["size"]
         self._require(0 < size <= MAX_AAB_BYTES, "artifact-unsafe")
+        if getattr(self, "_candidate_output", None) is not None:
+            self._candidate_output.bind_source(original)
         return original
 
     def _copy_aab(self, original: _FileRecord, directory: _DirectoryRecord, *, phase: str):
@@ -1164,6 +1324,8 @@ class AndroidBuildFiles:
         candidate = AndroidSigningCandidate(self, original, snapshot, directory, size=size, sha256=sha256)
         self.signing_candidate = candidate
         candidate.check()
+        if getattr(self, "_candidate_output", None) is not None:
+            self._candidate_output.bind_copy(candidate)
         return candidate
 
     def finalize_signing_aab(self) -> OriginalAndroidArtifact:
@@ -1178,6 +1340,8 @@ class AndroidBuildFiles:
         self.artifact = self._original_artifact = artifact
         artifact.verify_bytes()
         candidate.finalized = True
+        if getattr(self, "_candidate_output", None) is not None:
+            self._candidate_output.bind_final(artifact)
         return artifact
 
     def _check_output_scope(self) -> None:
