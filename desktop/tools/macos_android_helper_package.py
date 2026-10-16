@@ -1795,13 +1795,18 @@ def package_timeout_data(now, endpoint, requested, *, phase=None, role=None):
 
 
 def signing_requirement(identity, identifier):
+    # Each Store image has the fixed namespace plus its admitted member-path
+    # digest. This is an identifier grammar, not permission to sign other code;
+    # the Store owner still checks the complete input roster before key use.
+    store_identifier = (type(identifier) is str
+        and re.fullmatch(r"dev\.mobile-release-kit\.desktop\.store\.[0-9a-f]{32}", identifier) is not None)
     need(type(identity) is tuple and len(identity) == 2
          and re.fullmatch(r"[A-Z0-9]{10}", identity[0])
          and re.fullmatch(r"[0-9a-f]{40}", identity[1]) and identity[1] != "0" * 40
-         and identifier in (IDENTIFIER, IDENTIFIER + ".image", "dev.mobile-release-kit.desktop.distribution",
+         and (store_identifier or identifier in (IDENTIFIER, IDENTIFIER + ".image", "dev.mobile-release-kit.desktop.distribution",
                             "dev.mobile-release-kit.desktop.observation", "dev.mobile-release-kit.desktop.remove-distribution", PYTHON_IDENTIFIER,
                              "dev.mobile-release-kit.desktop", "dev.mobile-release-kit.desktop.entry",
-                             "dev.mobile-release-kit.desktop.remove", *SUPPORT_IDENTIFIERS, *[row[1] for row in TOOL_FIXED.values()]), "fixed-signing-requirement")
+                             "dev.mobile-release-kit.desktop.remove", *SUPPORT_IDENTIFIERS, *[row[1] for row in TOOL_FIXED.values()])), "fixed-signing-requirement")
     return ('identifier "' + identifier + '" and anchor apple generic'
             ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
             ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'

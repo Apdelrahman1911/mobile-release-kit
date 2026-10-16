@@ -151,15 +151,29 @@ class StoreSigning(unittest.TestCase):
                 M.archive_scan(tar(fixture() + extra), lambda *_: None)
 
     def test_signing_semantics_are_fixed_and_neutral_matcher_rejects_code_changes(self):
-        identity = ('A' * 10, 'B' * 40, 'C' * 64)
+        identity = ('A' * 10, 'b' * 40)
         name = 'runtime/bin/ruby'
         sign, verify = M.sign_arguments(Path('/owned/native'), Path('/source/empty'), name,
-                                       identity, lambda *_: 'fixed-team-and-leaf')
+                                       identity, API.signing_requirement)
         self.assertIn('--timestamp', sign)
         self.assertEqual(sign[sign.index('--options') + 1], 'runtime')
         self.assertEqual(sign[sign.index('--entitlements') + 1], '/source/empty')
+        requirement = ('identifier "' + M.identifier(name) + '" and anchor apple generic'
+            ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
+            ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
+            ' and certificate leaf[subject.OU] = "AAAAAAAAAA"'
+            ' and certificate leaf = H"' + 'b' * 40 + '"')
         self.assertEqual(verify, ['/usr/bin/codesign', '--verify', '--strict', '--all-architectures',
-            '--test-requirement', '=fixed-team-and-leaf', '/owned/native'])
+            '--test-requirement', '=' + requirement, '/owned/native'])
+        prefix = 'dev.mobile-release-kit.desktop.store.'
+        for bad in (prefix, prefix + 'a' * 31, prefix + 'a' * 33, prefix + 'A' * 32,
+                    prefix + 'a' * 32 + '\n', prefix + 'a' * 32 + '" or true',
+                    'other.store.' + 'a' * 32):
+            with self.subTest(identifier=bad), self.assertRaises(API.Refused):
+                API.signing_requirement(identity, bad)
+        for bad in (('short', 'b' * 40), ('A' * 10, '0' * 40), ('A' * 10, 'B' * 40)):
+            with self.subTest(identity=bad), self.assertRaises(API.Refused):
+                API.signing_requirement(bad, M.identifier(name))
         self.assertNotEqual(M.identifier(name), M.identifier('runtime/lib/other.bundle'))
         for kind in (2, 8):
             before, after = native(kind=kind), native(kind=kind, signed=True)
@@ -338,7 +352,7 @@ class StoreSigning(unittest.TestCase):
             # intact while this DATA fixture supplies an inert capacity fact.
             with mock.patch.object(M.os, 'fstatvfs', return_value=types.SimpleNamespace(f_frsize=4096, f_bavail=524288)):
                 M.start(op, API, time.monotonic_ns())
-            op.signing = ('A' * 10, 'B' * 40, 'C' * 64)
+            op.signing = ('A' * 10, 'b' * 40)
             op.producer_profile = op.service_profile = b'inert public profile'
             original_close = API.Operation.close
             def close(instance, entry):
@@ -351,8 +365,7 @@ class StoreSigning(unittest.TestCase):
             try:
                 with mock.patch.object(API.Operation, 'close', close), \
                      mock.patch.object(API.Operation, 'credential_scope', credential_scope), \
-                     mock.patch.object(API.Operation, 'credential_clock', side_effect=lambda context, **_: time.monotonic_ns()), \
-                     mock.patch.object(API, 'signing_requirement', return_value='inert-test-only'):
+                     mock.patch.object(API.Operation, 'credential_clock', side_effect=lambda context, **_: time.monotonic_ns()):
                     if failure is not None:
                         with self.assertRaises((M.Refused, API.Refused, RuntimeError)):
                             M.prepare(op)
