@@ -747,8 +747,10 @@ def packager_ids():
     return uid, gid
 
 
-def tree(path, *, installed=False, packager=False, max_bytes=MAX_BYTES, current_root_mode=None, mac_store_prefix=None):
+def tree(path, *, installed=False, packager=False, max_bytes=MAX_BYTES, current_root_mode=None, mac_store_prefix=None, app_absence=False):
     need(not (installed and packager), "conflicting-tree-owner")
+    need(type(app_absence) is bool and (not app_absence or packager and not installed
+         and current_root_mode is None and mac_store_prefix is None), "app-absence-tree-purpose")
     need(type(max_bytes) is int and 0 <= max_bytes <= MAX_BYTES, "tree-byte-bound")
     need(current_root_mode is None or (not installed and not packager
          and type(current_root_mode) is int and current_root_mode in (0o555, 0o700)), "current-tree-policy")
@@ -773,6 +775,8 @@ def tree(path, *, installed=False, packager=False, max_bytes=MAX_BYTES, current_
                  "current-directory-mode-owner")
         no_xattrs(fd)
         names = sorted(os.listdir(fd))
+        if app_absence and prefix == "input/runtime/":
+            need(not names, "app-absence-runtime-empty")
         need(len(names) <= MAX_FILES, "directory-entry-bound")
         for name in names:
             relative = prefix + name
@@ -812,7 +816,9 @@ def tree(path, *, installed=False, packager=False, max_bytes=MAX_BYTES, current_
             need(signature(os.stat(name, dir_fd=fd, follow_symlinks=False)) == signature(before), "tree-root-name-changed")
         finally:
             close_once(root)
-    need(observed_directories == directories(found, mac_store_prefix=mac_store_prefix), "tree-unlisted-or-empty-directory")
+    expected_directories = directories(found, mac_store_prefix=mac_store_prefix)
+    if app_absence: expected_directories.add("input/runtime")
+    need(observed_directories == expected_directories, "tree-unlisted-or-empty-directory")
     return found
 
 
@@ -3649,10 +3655,11 @@ def package_info(body, *, fixture=False, selection=None, remove=False, app_absen
 
 def original_package(scripts_path, package_path, *, fixture=False, selection=None, remove=False, expected_remover=None,
                      removal_fixture_role=None, removal_fixture_correlation=None, removal_fixture_binding=None, app_absence=False, store_runtime=False):
-    need(type(store_runtime) is bool and not (store_runtime and remove), "package-store-purpose")
+    need(type(store_runtime) is bool and not (store_runtime and (remove or app_absence)), "package-store-purpose")
     selection = selected_build(selection)
     owner = packager_ids()
-    scripts = tree(scripts_path, packager=True, mac_store_prefix="input/runtime/store" if store_runtime else None)
+    scripts = tree(scripts_path, packager=True, mac_store_prefix="input/runtime/store" if store_runtime else None,
+                   **({"app_absence": True} if app_absence else {}))
     if remove:
         need(sha(expected_remover), "remove-program-anchor")
         expected_script = (read(DESKTOP / "macos-installed-inputs/remove-postinstall", 8192)
@@ -3680,11 +3687,12 @@ def original_package(scripts_path, package_path, *, fixture=False, selection=Non
         archive = inflate(archive, MAX_BYTES, gzip=True)
     actual = _cpio_members(archive, owner, store_runtime=store_runtime)
     expected = {**scripts, **{name: (None, 0o555) for name in directories(scripts, mac_store_prefix="input/runtime/store" if store_runtime else None)}}
+    if app_absence: expected["input/runtime"] = (None, 0o555)
     need(actual == expected, "complete-original-scripts-correspondence")
     return scripts, package, members, identifier, owner
 
 
-def app_absence_scripts_data(scripts, expected_program, expected_inventory, *, restore_cut=None):
+def app_absence_scripts_data(scripts, expected_program, expected_inventory, *, restore_cut=None, selection=None):
     need(restore_cut is None or restore_cut in ("app-write", "own-attempt", "stage-move"), "restore-chain-script-purpose")
     """One nonshipping role, never arbitrary scripts or an ordinary parser exception."""
     need(type(scripts) is dict and sha(expected_program) and sha(expected_inventory), "app-absence-scripts-shape")
@@ -3702,6 +3710,18 @@ def app_absence_scripts_data(scripts, expected_program, expected_inventory, *, r
     inventory = scripts.get("input/" + INSTALLATION_INVENTORY_NAME)
     need(type(inventory) is tuple and inventory[1] == 0o444
          and digest(inventory[0]) == expected_inventory, "app-absence-inventory-correspondence")
+    body = inventory[0]
+    need(type(body) is bytes and 0 < len(body) <= INVENTORY_BYTES, "app-absence-inventory-bound")
+    document = decode(body, byte_limit=INVENTORY_BYTES, node_limit=150000)
+    need(type(document) is dict, "app-absence-inventory-shape")
+    rows = observation_inventory_bytes(body, expected_inventory, document.get("runtimeManifestSha256"), selection=selection)
+    expected = {"input/" + name: row for name, row in rows.items() if name.startswith("app/")}
+    need(set(scripts) == {"postinstall", program_name, "input/" + INSTALLATION_INVENTORY_NAME, *expected},
+         "app-absence-complete-app-projection")
+    for name, row in expected.items():
+        body, mode = scripts[name]
+        need(type(body) is bytes and len(body) == row["size"] and digest(body) == row["sha256"]
+             and mode == (0o555 if row["executable"] else 0o444), "app-absence-app-correspondence")
 
 
 def app_absence_original_command(args):
@@ -3709,10 +3729,11 @@ def app_absence_original_command(args):
     selection = source_build_selection(command_target(args))
     scripts, original, members, identifier, owner = original_package(args.scripts, args.original_package,
         selection=selection, app_absence=True)
-    app_absence_scripts_data(scripts, args.expected_program, args.expected_inventory, restore_cut=getattr(args, "restore_cut", None))
+    app_absence_scripts_data(scripts, args.expected_program, args.expected_inventory, restore_cut=getattr(args, "restore_cut", None), selection=selection)
     macho(scripts["mrk-macos-install" if getattr(args, "restore_cut", None) is not None else "mrk-macos-app-absence-fixture"][0], target=selection.target)
     rows = {name: {"size": len(body), "sha256": digest(body), "mode": mode} for name, (body, mode) in scripts.items()}
     rows.update({name: {"size": None, "sha256": None, "mode": 0o555} for name in directories(scripts)})
+    rows["input/runtime"] = {"size": None, "sha256": None, "mode": 0o555}
     need(len(rows) <= MAX_FILES, "app-absence-script-count")
     # No full original/scripts/member collection escapes this call. The next
     # genuine decoder starts only after these local payloads have been released.

@@ -81,6 +81,7 @@ jobs:
             test_macos_candidate_consumer test_macos_candidate_bootstrap test_macos_candidate_ui \
             test_macos_notary_submit_diagnostic \
             test_macos_launcher_packaging test_macos_launcher_staging \
+            test_macos_app_absence_fixture.ThinRestoreProjectionData \
             test_macos_installed_staging.MacAndroidHelperPackagingData.test_fixed_workflow_signing_roles_use_original_inputs_and_identity
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:

@@ -563,10 +563,11 @@ def native_data_tests_result(result):
             "stdoutSha256": digest(result.stdout), "stderrSha256": digest(result.stderr), "productReady": False}
 
 
-def script_quote(rows, program_bytes):
-    need(type(rows) is dict and 0 < len(rows) <= 4096 and type(program_bytes) is int and 0 < program_bytes <= 64*MIB,
+def script_quote(rows, program_bytes, inventory_bytes):
+    need(type(rows) is dict and 0 < len(rows) <= 4096 and type(program_bytes) is int and 0 < program_bytes <= 64*MIB
+         and type(inventory_bytes) is int and 0 < inventory_bytes <= PRODUCT_LIMIT,
          "app-absence-script-quote")
-    payload = sum(row["size"] for row in rows.values()) + program_bytes + len(POSTINSTALL) + MIB
+    payload = sum(row["size"] for row in rows.values()) + program_bytes + len(POSTINSTALL) + inventory_bytes
     odc = payload + (len(rows) * 3 + 16) * 1200
     quote = odc + odc // 1000 + 65536 + 4*MIB
     need(quote <= PRODUCT_LIMIT, "app-absence-fixture-ineligible")
@@ -579,11 +580,21 @@ def selected(op):
 
 def input_rows(op):
     entry, sha = retained(op, op.directory(op.work_entry, "input", "app-absence-input"),
-                          op.stager.INSTALLATION_INVENTORY_NAME, MIB, (0o444,))
+                          op.stager.INSTALLATION_INVENTORY_NAME, op.stager.INVENTORY_BYTES, (0o444,))
     body = op.read(entry)
     need(sha == op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"], "app-absence-input-anchor")
     rows = op.stager.observation_inventory_bytes(body, sha, op.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"], selection=selected(op))
     return entry, rows
+
+
+def app_rows(rows):
+    # Full inventory was already authenticated. Only nonshipping scripts omit
+    # runtime leaves; the actual signed product and installed runtime do not.
+    need(type(rows) is dict and rows and all(name.startswith(("app/", "runtime/")) for name in rows),
+         "app-absence-projection-roots")
+    selected = {name: row for name, row in rows.items() if name.startswith("app/")}
+    need(selected and len(selected) <= 4096, "app-absence-projection-app")
+    return selected
 
 
 def tree_directory(op, parent, name, *, create=False):
@@ -614,9 +625,9 @@ def tree_leaf(op, parent, name, row):
 
 def copy_input(op, destination, inventory_entry, rows):
     source = op.directory(op.work_entry, "input", "app-absence-input")
-    expected = {name: (row["size"], row["sha256"], 0o555 if row["executable"] else 0o444) for name, row in rows.items()}
+    expected = {name: (row["size"], row["sha256"], 0o555 if row["executable"] else 0o444) for name, row in app_rows(rows).items()}
     expected[op.stager.INSTALLATION_INVENTORY_NAME] = (inventory_entry["identity"][6], original_hash(op, inventory_entry), 0o444)
-    paths = {""}
+    paths = {"", "runtime"}
     for name in expected:
         parts = name.split("/")
         need(len(parts) <= 16, "app-absence-tree-depth")
@@ -625,10 +636,22 @@ def copy_input(op, destination, inventory_entry, rows):
     originals = {}
     def visit(old, new, prefix):
         names = {name[len(prefix):].split("/")[0] for name in expected if name.startswith(prefix)}
+        if not prefix: names.add("runtime")
         need(set(os.listdir(old["fd"])) == names, "app-absence-input-complete-roster")
         for name in sorted(names):
             path = prefix + name
-            if path in expected:
+            if path == "runtime":
+                # Hold/recheck only this source directory. Its omitted leaves
+                # are NOT newly verified by this fixture copy.
+                old_child = tree_directory(op, old, name)
+                new_child = tree_directory(op, new, name, create=True)
+                need(not os.listdir(new_child["fd"]), "app-absence-runtime-empty")
+                os.fchmod(new_child["fd"], 0o555); os.fsync(new_child["fd"])
+                new_child["identity"] = op.app_absence_api.directory_identity(os.fstat(new_child["fd"]))
+                originals[path] = (old_child["identity"], new_child["identity"])
+                for entry in (new_child, old_child):
+                    op.recheck_directory(entry); op.close(entry); need(entry["closed"], "app-absence-tree-close")
+            elif path in expected:
                 item = tree_leaf(op, old, name, expected[path])
                 copied = copy(op, item, new, name, PRODUCT_LIMIT, mode=expected[path][2])
                 originals[path] = (item["identity"], copied["identity"])
@@ -653,10 +676,17 @@ def input_post(op):
     source, destination, expected, originals = op.app_absence["inputCopies"]
     def visit(old, new, prefix):
         names = {name[len(prefix):].split("/")[0] for name in expected if name.startswith(prefix)}
+        if not prefix: names.add("runtime")
         need(set(os.listdir(old["fd"])) == set(os.listdir(new["fd"])) == names, "app-absence-input-roster-post")
         for name in sorted(names):
             path = prefix + name
-            if path in expected:
+            if path == "runtime":
+                left, right = tree_directory(op, old, name), tree_directory(op, new, name)
+                need((left["identity"], right["identity"]) == originals[path]
+                     and not os.listdir(right["fd"]), "app-absence-runtime-original-empty")
+                for entry in (right, left):
+                    op.close(entry); need(entry["closed"], "app-absence-tree-close")
+            elif path in expected:
                 left, right = tree_leaf(op, old, name, expected[path]), tree_leaf(op, new, name, expected[path])
                 need((left["identity"], right["identity"]) == originals[path], "app-absence-input-original-post")
                 for entry in (right, left):
@@ -705,7 +735,7 @@ def prepare_one(op, cut=None):
     binary = op.original(release, program_name, "app-absence-compiler-binary", 64*MIB, (0o700, 0o755), alias=True)
     program = op.read(binary)
     op.stager.macho(program, target=op.target)
-    script_quote(rows, len(program))
+    script_quote(app_rows(rows), len(program), inventory["identity"][6])
     del program
     binary_sha = original_hash(op, binary)
     pure_tests = None
@@ -792,7 +822,8 @@ def recovery_builder_quote_data(files, directories, depth, retained, live):
 def prepare(op):
     if recovery_mode(op):
         _inventory, rows = input_rows(op)
-        paths = {""}
+        rows = app_rows(rows)
+        paths = {"", "runtime"}
         for name in rows:
             parts = name.split("/")
             paths.update("/".join(parts[:i]) for i in range(1, len(parts)))

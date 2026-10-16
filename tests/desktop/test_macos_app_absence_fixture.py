@@ -111,6 +111,186 @@ def marker(value):
     return b"MRK_MACOS_APP_ABSENCE_RESULT=" + json.dumps(value, separators=(",", ":"), ensure_ascii=True).encode("ascii") + b"\n"
 
 
+def thin_inventory(stager, count=4300):
+    selection = stager.source_build_selection(stager.ARM_TARGET)
+    executable = {"app/"+name for name in (stager.ENTRY_BINARY, stager.APP_BINARY, stager.VAULT_HELPER)}
+    app = {name: (b"inert-app:"+name.encode(), 0o555 if name in executable else 0o444)
+           for name in (*executable, "app/Contents/Info.plist", "app/"+stager.PAYLOAD_INFO)}
+    files = {**app, "runtime/python/bin/python3": (b"inert-python", 0o555),
+             "runtime/manifest.json": (b"inert-manifest", 0o444)}
+    files.update({"runtime/store/"+name: (b"inert-store", 0o555 if name in ("bin/ruby", "bin/bundle") else 0o444)
+                  for name in stager.STORE_RUNTIME_REQUIRED})
+    # >4096 complete rows, >1MiB inventory, but only five actual app files.
+    files.update({"runtime/store/data/"+"x"*110+f"/leaf-{i:05d}.txt": (b"x", 0o444) for i in range(count)})
+    manifest = stager.digest(files["runtime/manifest.json"][0])
+    document = {"schemaVersion": 1, "release": selection.release, "runtimeManifestSha256": manifest,
+                "files": [{"path": name, "size": len(body), "sha256": stager.digest(body), "executable": mode == 0o555}
+                          for name, (body, mode) in sorted(files.items())]}
+    inventory = stager.canonical(document)
+    rows = stager.observation_inventory_bytes(inventory, stager.digest(inventory), manifest, selection=selection)
+    return selection, inventory, rows, app
+
+
+def thin_tree(root, files):
+    root.mkdir(mode=0o755)
+    for name, (body, mode) in files.items():
+        path = root/name
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+        path.write_bytes(body); path.chmod(mode)
+    (root/"input/runtime").mkdir(mode=0o555)
+    for path in root.rglob("*"):
+        if path.is_dir(): path.chmod(0o555)
+    root.chmod(0o755)
+
+
+@contextlib.contextmanager
+def writable_tree():
+    # Only our synthetic directories are made writable for TemporaryDirectory.
+    with tempfile.TemporaryDirectory(prefix="mrk-thin-projection-") as name:
+        root = Path(name)
+        try: yield root
+        finally:
+            for path in root.rglob("*"):
+                if path.is_dir() and not path.is_symlink(): path.chmod(0o700)
+
+
+class ThinRestoreProjectionData(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.stager = load_tool("thin_restore_stager", "stage_macos_installed.py")
+
+    def test_full_inventory_retained_thin_quote_and_exact_app_data(self):
+        stager = self.stager
+        selection, inventory, rows, app = thin_inventory(stager)
+        self.assertGreater(len(rows), 4096); self.assertGreater(len(inventory), FIXTURE.MIB)
+        self.assertEqual(set(FIXTURE.app_rows(rows)), set(app))
+        with self.assertRaisesRegex(ValueError, "script-quote"):
+            FIXTURE.script_quote(rows, 1024, len(inventory))
+        quote = FIXTURE.script_quote(FIXTURE.app_rows(rows), 1024, len(inventory))
+        self.assertLess(quote, FIXTURE.PRODUCT_LIMIT)
+        self.assertGreater(quote, FIXTURE.script_quote(FIXTURE.app_rows(rows), 1024, FIXTURE.MIB))
+        program = b"inert-program"
+        scripts = {"postinstall": (FIXTURE.CUT_POSTINSTALL, 0o555), "mrk-macos-install": (program, 0o555),
+                   "input/"+stager.INSTALLATION_INVENTORY_NAME: (inventory, 0o444),
+                   **{"input/"+name: value for name, value in app.items()}}
+        stager.app_absence_scripts_data(scripts, stager.digest(program), stager.digest(inventory),
+                                       restore_cut="app-write", selection=selection)
+        for fault in ("missing-app", "app-bytes", "runtime-leaf", "wrong-purpose", "inventory-anchor"):
+            bad = dict(scripts); name = "input/"+next(iter(app))
+            cut, anchor = "app-write", stager.digest(inventory)
+            if fault == "missing-app": del bad[name]
+            elif fault == "app-bytes": bad[name] = (b"changed", bad[name][1])
+            elif fault == "runtime-leaf": bad["input/runtime/extra"] = (b"x", 0o444)
+            elif fault == "wrong-purpose": cut = None
+            else: anchor = "0"*64
+            with self.subTest(fault=fault), self.assertRaises(stager.Refused):
+                stager.app_absence_scripts_data(bad, stager.digest(program), anchor, restore_cut=cut, selection=selection)
+
+    def test_actual_copy_and_post_keep_full_inventory_without_runtime_leaf_reads(self):
+        stager = self.stager
+        selection, inventory, rows, app = thin_inventory(stager)
+        for fault in (None, "source-app", "copied-app", "runtime-nonempty", "runtime-replaced"):
+            with self.subTest(fault=fault), file_operation() as op, patch.object(FIXTURE, "clock", return_value=NOW):
+                op.stager, op.target = stager, stager.ARM_TARGET
+                op.environment = {"MRK_MACOS_INSTALL_INVENTORY_SHA256": stager.digest(inventory),
+                    "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256": stager.digest(b"inert-manifest")}
+                source = op.work/"input"; source.mkdir()
+                for name, (body, mode) in app.items():
+                    path = source/name; path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(body); path.chmod(mode)
+                (source/"runtime").mkdir(); (source/"runtime/not-copied").write_bytes(b"omitted not newly verified")
+                (source/stager.INSTALLATION_INVENTORY_NAME).write_bytes(inventory)
+                (source/stager.INSTALLATION_INVENTORY_NAME).chmod(0o444)
+                destination = FIXTURE.tree_directory(op, op.work_entry, "projected", create=True)
+                with patch.object(FIXTURE, "selected", return_value=selection):
+                    original, admitted = FIXTURE.input_rows(op)
+                opened = []
+                leaf = FIXTURE.tree_leaf
+                def observed(_op, parent, name, row):
+                    opened.append(name); return leaf(_op, parent, name, row)
+                try:
+                    with patch.object(FIXTURE, "tree_leaf", side_effect=observed):
+                        FIXTURE.copy_input(op, destination, original, admitted)
+                        self.assertEqual((op.work/"projected"/stager.INSTALLATION_INVENTORY_NAME).read_bytes(), inventory)
+                        self.assertEqual(list((op.work/"projected/runtime").iterdir()), [])
+                        for name, (body, mode) in app.items():
+                            self.assertEqual((op.work/"projected"/name).read_bytes(), body)
+                            self.assertEqual(stat.S_IMODE((op.work/"projected"/name).stat().st_mode), mode)
+                        self.assertEqual(stat.S_IMODE((op.work/"projected/runtime").stat().st_mode), 0o555)
+                        if fault in ("source-app", "copied-app"):
+                            path = (source if fault == "source-app" else op.work/"projected")/next(iter(app))
+                            path.chmod(0o600); path.write_bytes(b"changed")
+                        elif fault == "runtime-nonempty":
+                            path = op.work/"projected/runtime"; path.chmod(0o700)
+                            (path/"extra").write_bytes(b"x"); path.chmod(0o555)
+                        elif fault == "runtime-replaced":
+                            (source/"runtime").rename(op.work/"prior-runtime"); (source/"runtime").mkdir()
+                        if fault is None: FIXTURE.input_post(op)
+                        else:
+                            with self.assertRaises((ValueError, HELPER.Refused)): FIXTURE.input_post(op)
+                    self.assertNotIn("not-copied", opened)
+                finally:
+                    for path in op.work.rglob("*"):
+                        if path.is_dir(): path.chmod(0o700)
+
+    def test_empty_runtime_tree_is_only_fixed_nonshipping_purpose(self):
+        stager = self.stager
+        files = {"postinstall": (FIXTURE.POSTINSTALL, 0o555), "input/app/Contents/data": (b"x", 0o444)}
+        with writable_tree() as root:
+            scripts = root/"scripts"; thin_tree(scripts, files)
+            self.assertEqual(stager.tree(scripts, packager=True, app_absence=True), files)
+            for kwargs in ({"packager": True}, {"app_absence": True}, {"packager": True, "app_absence": 1},
+                           {"packager": True, "app_absence": True, "mac_store_prefix": "input/runtime/store"}):
+                with self.subTest(kwargs=kwargs), self.assertRaises(stager.Refused): stager.tree(scripts, **kwargs)
+            runtime = scripts/"input/runtime"; runtime.chmod(0o700)
+            (runtime/"extra").write_bytes(b"x"); (runtime/"extra").chmod(0o444); runtime.chmod(0o555)
+            with self.assertRaisesRegex(stager.Refused, "runtime-empty"):
+                stager.tree(scripts, packager=True, app_absence=True)
+
+    def test_real_original_and_root_cpio_audits_keep_exact_thin_projection(self):
+        import test_macos_e2_native_fixture as archive_data
+        import test_macos_launcher_staging as image_data
+        stager = self.stager
+        selection, inventory, rows, app = thin_inventory(stager)
+        program = image_data.binary(stager.ARM_TARGET)
+        files = {"postinstall": (FIXTURE.CUT_POSTINSTALL, 0o555), "mrk-macos-install": (program, 0o555),
+                 "input/"+stager.INSTALLATION_INVENTORY_NAME: (inventory, 0o444),
+                 **{"input/"+name: value for name, value in app.items()}}
+        info = (f'<pkg-info identifier="{stager.PACKAGE_ID}-app-absence-fixture" version="{selection.package_version}" '
+                'install-location="/" auth="root"><scripts><postinstall file="postinstall"/></scripts></pkg-info>').encode()
+        def package(owner, fault=None):
+            data = dict(files)
+            if fault == "app-drift": data["input/"+next(iter(app))] = (b"changed", 0o444)
+            if fault == "runtime-leaf": data["input/runtime/extra"] = (b"x", 0o444)
+            dirs = stager.directories(data) | {"input/runtime"}
+            if fault == "runtime-missing": dirs.remove("input/runtime")
+            if fault == "empty-extra": dirs.add("input/extra")
+            entries = [(".", stat.S_IFDIR|0o755, b"", *owner, 1)]
+            entries += [(name, stat.S_IFDIR|0o555, b"", *owner, 1) for name in sorted(dirs)]
+            entries += [(name, stat.S_IFREG|mode, body, *owner, 1) for name, (body, mode) in sorted(data.items())]
+            return archive_data.InstallerContextTests.xar({"PackageInfo":info, "Scripts":archive_data.cpio(entries)})
+        with writable_tree() as root:
+            scripts = root/"scripts"; thin_tree(scripts, files)
+            original, final = root/"original.pkg", root/"final.pkg"
+            original.write_bytes(package((os.getuid(), os.getgid())))
+            final.write_bytes(package((0, 0)))
+            args = SimpleNamespace(target=stager.ARM_TARGET, restore_cut="app-write", scripts=scripts,
+                original_package=original, package=final, expected_program=stager.digest(program), expected_inventory=stager.digest(inventory))
+            compact = stager.app_absence_original_command(args)
+            self.assertEqual(compact["rows"]["input/runtime"], {"size":None, "sha256":None, "mode":0o555})
+            result = stager.app_absence_final_command(args, compact)
+            self.assertEqual(result["qualification"], "nonshipping-app-absence-fixture-not-installed")
+            for fault in ("app-drift", "runtime-leaf", "runtime-missing", "empty-extra"):
+                with self.subTest(fault=fault):
+                    final.write_bytes(package((0, 0), fault))
+                    with self.assertRaises(stager.Refused): stager.app_absence_final_command(args, compact)
+                    original.write_bytes(package((os.getuid(), os.getgid()), fault))
+                    with self.assertRaises(stager.Refused): stager.app_absence_original_command(args)
+            with self.assertRaises(stager.Refused): stager.original_package(scripts, original, selection=selection)
+            with self.assertRaises(stager.Refused):
+                stager.original_package(scripts, original, selection=selection, app_absence=True, store_runtime=True)
+
+
 class MacAppAbsenceFixtureData(unittest.TestCase):
     def test_fixed_bindings_layout_and_stricter_script_quote(self):
         FIXTURE.fixed_binding_and_layout_data_checks()
@@ -128,7 +308,7 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
         for bad in (current[1:], ("producer-build",) + current[1:], (current[1], current[0]) + current[2:],
                     current[:2] + ("foreign",) + current[3:], current[:-1], current + (current[0],)):
             with self.subTest(roster=bad), self.assertRaises(ValueError): FIXTURE.package_roles(bad)
-        quote = FIXTURE.script_quote({"core.zip": {"size": 1024}}, 1024)
+        quote = FIXTURE.script_quote({"core.zip": {"size": 1024}}, 1024, FIXTURE.MIB)
         self.assertLess(quote, FIXTURE.PRODUCT_LIMIT)
         # The abstract six-file DATA ceiling does not widen the actual route's
         # unchanged 512-MiB archive readers. Numeric quote: no large allocation.
@@ -139,7 +319,7 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
                 row["bytes"] = FIXTURE.PRODUCT_LIMIT + 1
         self.assertEqual(FIXTURE.transport_layout_data(rows)["fixtureBytes"], FIXTURE.PRODUCT_LIMIT + 1)
         with self.assertRaisesRegex(ValueError, "app-absence-fixture-ineligible"):
-            FIXTURE.script_quote({"core.zip": {"size": FIXTURE.PRODUCT_LIMIT}}, 1024)
+            FIXTURE.script_quote({"core.zip": {"size": FIXTURE.PRODUCT_LIMIT}}, 1024, FIXTURE.MIB)
         binding = {"fixtureSource": "1" * 40, "productSource": "1" * 40,
             "runId": "123", "runAttempt": "1", "target": FIXTURE.TARGETS[0]}
         for changes in ({"productSource": "2" * 40}, {"runId": "0123"},
@@ -413,9 +593,11 @@ class RestoreChainFixtureData(unittest.TestCase):
 
     def test_cut_scripts_pin_independently_authenticated_ordinary_product(self):
         stager = load_tool('mrk_restore_chain_stager', 'stage_macos_installed.py')
-        program, inventory = b'inert-program', b'inert-inventory'
+        selection, inventory, full, app = thin_inventory(stager)
+        program = b'inert-program'
         rows = {'postinstall': (FIXTURE.CUT_POSTINSTALL, 0o555), 'mrk-macos-install': (program, 0o555),
-                'input/'+stager.INSTALLATION_INVENTORY_NAME: (inventory, 0o444)}
+                'input/'+stager.INSTALLATION_INVENTORY_NAME: (inventory, 0o444),
+                **{'input/'+name: value for name, value in app.items()}}
         for cut in FIXTURE.CUTS:
             stager.app_absence_scripts_data(rows, FIXTURE.digest(program), FIXTURE.digest(inventory), restore_cut=cut)
             wrong = dict(rows); wrong['postinstall'] = (FIXTURE.CUT_POSTINSTALL.replace(b'"$p"', b'"$1"'), 0o555)
@@ -531,7 +713,7 @@ class RestoreChainFixtureData(unittest.TestCase):
                     def quoted(_op,name=None):
                         if name:
                             allocations.append((name,_op.app_absence['future'][name]));del _op.app_absence['future'][name]
-                    with patch.object(FIXTURE,'input_rows',return_value=(entry('inventory'),{})), \
+                    with patch.object(FIXTURE,'input_rows',return_value=(entry('inventory'),{'app/Contents/inert':{'size':1}})), \
                          patch.object(FIXTURE,'call',side_effect=call), patch.object(FIXTURE,'script_quote'), \
                          patch.object(FIXTURE,'selected',return_value=SimpleNamespace(package_version='0.1.2')), \
                          patch.object(FIXTURE,'original_hash',side_effect=lambda op,e:digest if e['name']=='mrk-macos-install' else package_digest), \
