@@ -1,0 +1,86 @@
+name: Mac Store runtime component
+
+on:
+  push:
+    branches: [verify/desktop-macos-store-runtime]
+    paths:
+      - desktop/tools/*macos_store*.sh
+      - desktop/tools/*macos_store*.py
+      - desktop/tools/*macos_store*.rb
+      - tests/desktop/test_macos_store_runtime.rb
+      - Gemfile
+      - Gemfile.lock
+      - fastlane/**
+      - .github/verification-tools.json
+      - .github/scripts/ci_prepare.py
+      - desktop/macos-cpython-source-inputs/source-lock.json
+      - desktop/cpython-source-inputs/github-ca.pem
+      - .github/workflows/desktop-macos-store-runtime.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-store-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  runtime:
+    name: Offline Store runtime (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+          - runner: macos-26-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Allocate task-owned build directory
+        id: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=$(mktemp -d "$RUNNER_TEMP/mrk-store-runtime-ci.XXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+      - name: Acquire public checksum-locked inputs without executing them
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: python -I -B desktop/tools/prepare_macos_store_inputs.py "$WORK_ROOT/inputs"
+      - name: Build offline, inspect native images, and verify relocation
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          bash desktop/tools/build_macos_store_runtime.sh \
+            "$WORK_ROOT/inputs/ruby-3.3.12" "$WORK_ROOT/inputs/openssl-3.5.8" \
+            "$WORK_ROOT/inputs/yaml-0.2.5" "$WORK_ROOT/inputs/gems" \
+            "$WORK_ROOT/inputs/ca.pem" "$WORK_ROOT/runtime" "$TARGET_ARCH"
+          tar -czf "$WORK_ROOT/store-runtime.tar.gz" -C "$WORK_ROOT" runtime
+      - name: Retain unsigned component for later integration
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mac-store-runtime-${{ matrix.arch }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/store-runtime.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+      - name: Remove only this job's disposable inputs, build, and archive
+        if: always() && steps.work.outputs.root != ''
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: rm -rf -- "$WORK_ROOT"
+
+# This is an unsigned dependency component, NOT an application/signing/Store
+# workflow. It never receives credentials, installs the app, or executes a lane.
