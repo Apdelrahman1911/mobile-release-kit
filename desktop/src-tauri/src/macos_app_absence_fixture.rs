@@ -399,9 +399,21 @@ fn protected_storage(book:&Install,root:usize,app_bytes:u64)->Result<()> {
         .ok_or("app-absence-storage")?;
     check(free>=needed,"app-absence-storage")?;book.clock()
 }
+// The existing three-phase fixture qualifies ordinary Restore only. A
+// recovered final State must not silently inherit that proof; its nonempty
+// conserved namespace needs the separate interrupted-worker/transport gate.
+fn ordinary_restore_namespace_data(value:&Value)->Result<()> {
+    check(value["restoreRecovery"].is_null(),"app-absence-ordinary-restore-required")?;
+    let namespace=&value["restoreNamespace"];
+    object(namespace,&["commitment","groups","names","files","controlBytes","payloadBytes"])?;
+    check(namespace["commitment"].as_str().is_some_and(sha)
+        && ["groups","names","files","controlBytes","payloadBytes"].iter()
+            .all(|key|namespace[*key].as_u64()==Some(0)),"app-absence-ordinary-restore-required")
+}
 fn initial_snapshot_data(value:&Value)->Result<()> {
+    ordinary_restore_namespace_data(value)?;
     object(value,&["root","versions","release","runtime","app","instance","invocation","requestId","action",
-        "stateSha256","intentSha256","capsuleSha256","previous","history"])?;
+        "stateSha256","intentSha256","capsuleSha256","previous","history","restoreRecovery","restoreNamespace"])?;
     for key in ["stateSha256","intentSha256","capsuleSha256"] {check(value[key].as_str().is_some_and(sha),"app-absence-snapshot-hash")?;}
     for key in ["invocation","requestId"] {check(value[key].as_str().is_some_and(invocation_valid),"app-absence-snapshot-invocation")?;}
     let history=value["history"].as_array().ok_or("app-absence-snapshot-history")?;
@@ -412,8 +424,9 @@ fn initial_snapshot_data(value:&Value)->Result<()> {
 }
 fn restore_snapshot_data(before:&Value,after:&Value)->Result<()> {
     initial_snapshot_data(before)?;
+    ordinary_restore_namespace_data(after)?;
     object(after,&["root","versions","release","runtime","app","instance","invocation","requestId","action",
-        "stateSha256","intentSha256","capsuleSha256","previous","history"])?;
+        "stateSha256","intentSha256","capsuleSha256","previous","history","restoreRecovery","restoreNamespace"])?;
     for key in ["stateSha256","intentSha256","capsuleSha256"] {check(after[key].as_str().is_some_and(sha),"app-absence-snapshot-hash")?;}
     for key in ["invocation","requestId"] {check(after[key].as_str().is_some_and(invocation_valid),"app-absence-snapshot-invocation")?;}
     check(after["action"]=="restore-fixed-app" && after["invocation"]!=before["invocation"]
@@ -700,7 +713,9 @@ mod tests {
         json!({"root":{"device":1,"inode":7},"versions":{"device":1,"inode":8},"release":id,"runtime":id,
             "app":id,"instance":"d".repeat(32),"invocation":invocation,"requestId":request,"action":"fresh-install",
             "stateSha256":state,"intentSha256":"e".repeat(64),"capsuleSha256":"f".repeat(64),"previous":null,
-            "history":[{"invocation":invocation,"requestId":request,"stateSha256":state,"intentSha256":"e".repeat(64),"capsuleSha256":"f".repeat(64)}]})
+            "history":[{"invocation":invocation,"requestId":request,"stateSha256":state,"intentSha256":"e".repeat(64),"capsuleSha256":"f".repeat(64)}],
+            "restoreRecovery":null,"restoreNamespace":{"commitment":"6".repeat(64),"groups":0,"names":0,
+                "files":0,"controlBytes":0,"payloadBytes":0}})
     }
     #[test]
     fn actual_restore_requires_new_app_and_exact_initial_history() {
@@ -711,6 +726,31 @@ mod tests {
         after["history"].as_array_mut().unwrap().push(json!({"invocation":"1".repeat(32),"requestId":"2".repeat(32),
             "intentSha256":"3".repeat(64),"stateSha256":"4".repeat(64),"capsuleSha256":"5".repeat(64)}));
         assert!(restore_snapshot_data(&before,&after).is_ok());
+        // A genuine recovered State/reference still is NOT ordinary Restore
+        // evidence. Missing/null/extra rows and typed count substitutions also
+        // refuse; the private commitment never replaces an actual native audit.
+        for baseline in [&before,&after] {
+            let validate=|value:&Value|if baseline["action"]=="fresh-install" {initial_snapshot_data(value)}
+                else {restore_snapshot_data(&before,value)};
+            let mut changed=baseline.clone();
+            changed["restoreRecovery"]=json!({"tornInvocation":"7".repeat(32),
+                "receiptInvocation":"8".repeat(32),"receiptSha256":"9".repeat(64)});
+            assert!(validate(&changed).is_err());
+            for key in ["restoreRecovery","restoreNamespace"] {
+                let mut changed=baseline.clone();changed.as_object_mut().unwrap().remove(key);
+                assert!(validate(&changed).is_err(),"{key}");
+            }
+            for key in ["groups","names","files","controlBytes","payloadBytes"] {
+                for bad in [json!(1),json!(true),Value::Null,json!(-1)] {
+                    let mut changed=baseline.clone();changed["restoreNamespace"][key]=bad;
+                    assert!(validate(&changed).is_err(),"{key}");
+                }
+            }
+            let mut changed=baseline.clone();changed["restoreNamespace"]["commitment"]=json!("unknown");
+            assert!(validate(&changed).is_err());
+            changed=baseline.clone();changed["restoreNamespace"]["admitted"]=json!(true);
+            assert!(validate(&changed).is_err());
+        }
         for key in ["root","versions","release","runtime","instance","previous","action","history"] {
             let mut changed=after.clone();changed[key]=Value::Null;assert!(restore_snapshot_data(&before,&changed).is_err(),"{key}");
         }

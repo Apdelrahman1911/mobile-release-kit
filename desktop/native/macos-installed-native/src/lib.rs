@@ -21,6 +21,21 @@ pub fn removal_fixture_abrupt_exit() -> ! {
     unsafe { nix::libc::_exit(86) }
 }
 
+// Same no-drop, no-flush primitive for the three fixed Restore cuts. Only
+// their exact high-level original/action checks may call this endpoint.
+#[cfg(all(feature = "installed-restore-cut-fixture", any(
+    feature = "installed-removal-abrupt-fixture", feature = "installed-observation",
+    feature = "vault-helper", feature = "android-registration-helper", feature = "desktop-image",
+    feature = "resident-image", feature = "e2-native-fixture",
+    feature = "package-producer-signing", mrk_wrapping_keychain_qualification
+)))]
+compile_error!("Restore cut fixture requires its isolated native graph");
+#[cfg(feature = "installed-restore-cut-fixture")]
+pub fn restore_fixture_abrupt_exit() -> ! {
+    // SAFETY: fixed process exit, no pointers/inputs, Rust drops or atexit work.
+    unsafe { nix::libc::_exit(86) }
+}
+
 // Qualification libtest must link without granting a private process role.
 // Only the two fixed example mains can return active roles 1/2. Dependencies
 // of those examples compile without cfg(test), so this definition is absent.

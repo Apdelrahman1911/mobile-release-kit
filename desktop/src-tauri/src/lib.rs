@@ -1,5 +1,39 @@
 //! Typed desktop services. Passive queries and finite configuration transactions
 //! have separate original-resource owners; neither is a generic release runner.
+// Fixed nonshipping cuts must never unify with another executable/image role.
+// The ordinary Installer build selects none; no environment/argument enables one.
+#[cfg(all(any(
+    feature = "macos-installed-restore-app-write-fixture",
+    feature = "macos-installed-restore-own-attempt-fixture",
+    feature = "macos-installed-restore-stage-move-fixture"
+), any(
+    not(feature = "macos-installed-installer"),
+    not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))),
+    feature = "desktop-shell",
+    feature = "custom-protocol",
+    feature = "development-runtime",
+    feature = "ubuntu-runtime-publisher",
+    feature = "windows-runtime-publisher",
+    feature = "macos-installed-remover",
+    feature = "macos-installed-installer-fixture",
+    feature = "macos-installed-app-absence-fixture",
+    feature = "macos-installed-removal-abrupt-fixture",
+    feature = "macos-installed-removal-observer",
+    feature = "macos-installed-observation",
+    feature = "windows-installed-observation",
+    feature = "macos-installed-desktop-image",
+    feature = "macos-installed-resident-image",
+    feature = "macos-android-registration-helper",
+    feature = "macos-package-producer",
+    feature = "macos-remove-producer",
+    feature = "macos-remove-observer-producer"
+)))]
+compile_error!("Restore cut fixture requires only its isolated native Installer graph");
+#[cfg(any(
+    all(feature = "macos-installed-restore-app-write-fixture", any(feature = "macos-installed-restore-own-attempt-fixture", feature = "macos-installed-restore-stage-move-fixture")),
+    all(feature = "macos-installed-restore-own-attempt-fixture", feature = "macos-installed-restore-stage-move-fixture")
+))]
+compile_error!("exactly one fixed Restore cut may be compiled");
 #[cfg(any(mrk_wrapping_keychain_qualification, mrk_wrapping_keychain_qualification_native))]
 compile_error!("process-only wrapping qualification is forbidden in the Desktop application");
 #[cfg(all(feature = "development-runtime", not(debug_assertions)))]

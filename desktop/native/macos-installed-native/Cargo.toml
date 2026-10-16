@@ -22,6 +22,8 @@ resident-image = ["android-registration-helper"]
 e2-native-fixture = []
 # Fixed abrupt removal fixture only; never selected by any ordinary role.
 installed-removal-abrupt-fixture = []
+# Fixed Restore parent/worker cuts only; never an ordinary image role.
+installed-restore-cut-fixture = []
 # Explicit nonshipping package signer; excluded from every ordinary/image role.
 package-producer-signing = []
 

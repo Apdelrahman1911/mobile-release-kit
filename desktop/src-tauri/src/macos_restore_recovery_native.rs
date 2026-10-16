@@ -552,6 +552,24 @@ impl Observation {
         let reader=book.record_file(self.root,&receipt_name,&raw,Role::ReceiptWriter)?;
         let receipt_identity=applications::preservation_identity(book,reader)?;held_bytes(book,reader,&raw)?;
         book.persist(self.root,false)?;book.forward_close(reader,"restore-recovery-new-receipt-close")?;
+        #[cfg(feature="macos-installed-restore-own-attempt-fixture")]
+        {
+            // Parent's SAME reserved writer, after durable ownAttempt and
+            // before canonical intent body/current assignment or worker spawn.
+            check(!book.worker_stderr_is_gate && !book.worker_go_eof && book.maintenance.is_none()
+                && !book.unknown && self.current.is_none() && !self.preservation.entered
+                && book.payload_write_calls==0 && book.payload_written==0 && book.stage.is_none()
+                && self.base.action_data()==ActionData::RestoreFixedApp
+                && book.originals[reader].state==State::Closed && book.originals[reader].fd.is_none()
+                && book.originals[writer].state==State::Owned && book.originals[writer].role==Role::ReceiptWriter
+                && book.identity(writer)?.size==0 && book.identity(writer)?.mode==0o100600
+                && applications::preservation_identity(book,writer)?==own_identity,
+                "restore-fixture-own-attempt-boundary")?;
+            book.registration_ready()?;held_bytes(book,history.state_original,&history.state_bytes)?;
+            book.absent(self.root,paths::APP_NAME)?;book.check_name(writer,true)?;
+            book.protected(writer,false,Some(0o600))?;book.clock()?;
+            native::restore_fixture_abrupt_exit()
+        }
         let (intent,body)=receipt.canonical_intent(&self.base,(&history.current.state,&history.current.capsule),selected)?;
         data(self.admission.retry_data(&intent,(&history.current.state,&history.current.capsule),selected))?;
         self.current=Some(reference);self.receipts.push(ReceiptObserved{data:receipt,identity:receipt_identity});
@@ -587,6 +605,26 @@ impl Observation {
                     &format!(".install-{}",self.base.invocation_data()),
                     &format!(".restore-recovery-{}.stage",self.base.invocation_data()),true)?;
                 self.stage_placement=transaction::RestoreOriginalPlacementData::Preserved;
+                #[cfg(feature="macos-installed-restore-stage-move-fixture")]
+                {
+                    // The existing move owner has recorded/rebound the actual
+                    // returned rename. No older intent has moved in this call.
+                    check(book.worker_stderr_is_gate && book.worker_go_eof && !book.unknown
+                        && intent.action_data()==ActionData::RestoreFixedApp && self.current.as_ref()==intent.restore_recovery_data()
+                        && self.stage_placement==transaction::RestoreOriginalPlacementData::Preserved
+                        && self.attempts.iter().all(|a|a.placement==transaction::RestoreOriginalPlacementData::Original)
+                        && !self.attempts.is_empty() && book.payload_write_calls==0 && book.payload_written==0
+                        && book.stage.is_none() && book.app.is_none() && book.runtime.is_none()
+                        && book.runtime_publication=="not-attempted" && book.app_publication=="not-attempted",
+                        "restore-fixture-stage-move-boundary")?;
+                    book.registration_ready()?;held_bytes(book,history.state_original,&history.state_bytes)?;
+                    book.absent(self.root,paths::APP_NAME)?;
+                    book.absent(self.root,&format!(".install-{}",self.base.invocation_data()))?;
+                    check(applications::preservation_identity(book,self.stage.original)?==self.stage_identity,
+                        "restore-fixture-stage-original")?;
+                    book.check_name(self.stage.original,true)?;book.protected(self.stage.original,true,Some(0o700))?;
+                    book.clock()?;native::restore_fixture_abrupt_exit()
+                }
             }
             for index in 0..self.attempts.len() {
                 if self.attempts[index].placement==transaction::RestoreOriginalPlacementData::Preserved{continue;}

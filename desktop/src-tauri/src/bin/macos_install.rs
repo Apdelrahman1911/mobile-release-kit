@@ -905,6 +905,10 @@ mod installer {
                 self.clock()?; let n = unistd::read(self.fd(source)?, &mut block).map_err(|_| "copy-read")?;
                 if n == 0 { break; } count = count.checked_add(n as u64).ok_or("copy-bound")?;
                 check(count <= item.size, "copy-size")?; digest.update(&block[..n]); self.write_all(target, &block[..n])?;
+                #[cfg(feature="macos-installed-restore-app-write-fixture")]
+                if role==Role::PayloadWriter && self.payload_written==count {
+                    maintenance::fixture_after_first_app_write(self,source,target,item,count)?;
+                }
             }
             let actual: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
             check(count == item.size && actual == item.sha256, "copy-hash")?; self.check_name(source, true)?;
@@ -11812,6 +11816,12 @@ mod installer {
                 && history.current.state.current_data().release_data()==observed.selected.current_data(),
                 "app-absence-history-bound")?;
             held_bytes(book,history.state_original,&history.state_bytes)?;
+            check(history.current.intent.restore_recovery_data()==history.current.state.restore_recovery_data(),
+                "app-absence-restore-reference")?;
+            // This is the SAME already authenticated observation's private
+            // DATA summary, not a new live audit or transport admission. The
+            // ordinary fixture below refuses any nonempty recovery namespace.
+            let restore_namespace=observed.restore_namespace.as_ref().ok_or("app-absence-restore-namespace")?;
             let app=observed.old_app.ok_or("app-absence-current-app")?;
             let release=observed.old_release.ok_or("app-absence-current-runtime")?;
             book.check_name(app,true)?;book.check_name(release,true)?;
@@ -11831,7 +11841,9 @@ mod installer {
                 "invocation":history.current.intent.invocation_data(),"requestId":history.current.intent.request_id_data(),
                 "action":history.current.intent.action_data(),"stateSha256":history.current.state.digest_data(),
                 "intentSha256":history.current.intent.digest_data(),"capsuleSha256":history.current.capsule.digest_data(),
-                "previous":history.current.intent.previous_state_data(),"history":rows}))
+                "previous":history.current.intent.previous_state_data(),"history":rows,
+                "restoreRecovery":history.current.intent.restore_recovery_data(),
+                "restoreNamespace":restore_namespace.binding()}))
         }
         #[cfg(feature="macos-installed-app-absence-fixture")]
         pub(super) fn app_absence_initial_history(observed:&Observed)->Result<()> {
@@ -11911,6 +11923,51 @@ mod installer {
         fn generation(book: &Install, observed: &Observed, release: usize, app: usize, instance: &str) -> Result<GenerationData> {
             data(GenerationData::from_original_fields_data(&observed.selected,observed.selected.current_data(),instance,
                 book.recorded_directory(release)?,app_identity(book,app)?))
+        }
+        // Fail before the request reservation/Intent on any other action.
+        // These binaries may not install Fresh, Noop, Update or archived roots.
+        #[cfg(any(feature="macos-installed-restore-app-write-fixture", feature="macos-installed-restore-own-attempt-fixture", feature="macos-installed-restore-stage-move-fixture"))]
+        pub(super) fn restore_fixture_admission(book:&Install,observed:&Observed)->Result<()> {
+            let history=observed.history.as_ref().ok_or("restore-fixture-fresh-history")?;
+            check(observed.action==ActionData::RestoreFixedApp && observed.old_app.is_none()
+                && observed.old_release.is_some() && observed.intent.is_none() && observed.intent_original.is_none()
+                && observed.noop.is_none() && observed.archives.is_none()
+                && observed.restore_namespace.as_ref().is_some_and(|n|n.names.is_empty())
+                && history.originals.is_empty() && history.current.intent.action_data()==ActionData::FreshInstall
+                && history.current.state.action_data()==ActionData::FreshInstall && history.current.state.mutation_recorded_data()
+                && history.current.intent.previous_data().is_none() && history.current.intent.previous_state_data().is_none()
+                && history.current.state.evidence_data().next().is_none()
+                && observed.restore.is_some()!=cfg!(feature="macos-installed-restore-app-write-fixture"),
+                "restore-fixture-fixed-initial-state")?;
+            held_bytes(book,history.state_original,&history.state_bytes)?;
+            book.absent(observed.prepared.destination,paths::APP_NAME)?;book.clock()
+        }
+        #[cfg(feature="macos-installed-restore-app-write-fixture")]
+        pub(super) fn fixture_after_first_app_write(book:&Install,source:usize,writer:usize,item:&Entry,bytes:u64)->Result<()> {
+            let effects=book.maintenance.as_ref().ok_or("restore-fixture-maintenance-required")?;
+            // First positive copy block only (possibly several short writes),
+            // not a returned error, sealed file, publication or RESULT frame.
+            check(effects.action==ActionData::RestoreFixedApp && effects.noop.is_none() && effects.restore.is_none()
+                && effects.state.is_none() && effects.state_bytes.is_none() && !effects.state_published && !effects.inverse
+                && book.worker_stderr_is_gate && book.worker_go_eof && !book.unknown
+                && !book.payload_verified && book.payload_write_calls>0 && book.payload_written==bytes
+                && bytes>0 && bytes<=65536 && bytes<=item.size && item.path.starts_with("app/")
+                && book.app.is_none() && book.runtime.is_none() && book.launcher_writes.bytes==0
+                && book.runtime_publication=="not-attempted" && book.app_publication=="not-attempted",
+                "restore-fixture-app-write-boundary")?;
+            let stage=book.stage.ok_or("restore-fixture-stage-required")?;
+            let root=book.originals[stage].parent.ok_or("restore-fixture-stage-required")?;
+            check(book.stage_name.as_deref()==Some(book.originals[stage].name.as_str())
+                && book.originals[writer].role==Role::PayloadWriter && book.originals[writer].state==State::Owned
+                && book.identity(writer)?.size==0,"restore-fixture-writer-original")?;
+            book.registration_ready()?;book.check_name(source,true)?;book.check_name(stage,false)?;
+            book.protected(stage,true,Some(0o700))?;book.absent(root,paths::APP_NAME)?;
+            book.check_name(writer,false)?;book.protected(writer,false,Some(0o600))?;
+            let actual=stat::fstat(book.fd(writer)?).map_err(|_|"restore-fixture-writer-stat")?;
+            check(actual.st_flags==0 && actual.st_size==bytes as i64 && actual.st_nlink==1,
+                "restore-fixture-writer-original")?;
+            native::no_xattrs(book.fd(writer)?.as_fd()).map_err(|_|"restore-fixture-writer-attributes")?;
+            book.clock()?;native::restore_fixture_abrupt_exit()
         }
         fn forward(book: &mut Install, observed: &Observed, invocation: &str) -> Result<()> {
             let root = observed.prepared.destination;
@@ -19591,6 +19648,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             fn admit_and_go_inputs(&mut self, source: &str, selected: Option<(ReleaseSetData, &str)>,
                 completed_path: Option<&str>) -> Result<()> {
                 check(!self.entered && !(selected.is_some() && completed_path.is_some()), "worker-parent-once")?;
+                #[cfg(any(feature="macos-installed-restore-app-write-fixture", feature="macos-installed-restore-own-attempt-fixture", feature="macos-installed-restore-stage-move-fixture"))]
+                check(completed_path.is_some() && selected.is_none(),"restore-fixture-authenticated-product-required")?;
                 self.entered = true;
                 let mut selected = selected.map(|(set,request)| (set,request.to_owned()));
                 // Existing fixture destinations have their own original owner.
@@ -19626,6 +19685,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     check(request_id != self.invocation, "maintenance-request-invocation-reused")?;
                     let prepared = self.book.prepare_maintenance_input(input,inventory,inventory_bytes)?;
                     let mut observed = maintenance::observe(&mut self.book,prepared,selected,None)?;
+                    #[cfg(any(feature="macos-installed-restore-app-write-fixture", feature="macos-installed-restore-own-attempt-fixture", feature="macos-installed-restore-stage-move-fixture"))]
+                    maintenance::restore_fixture_admission(&self.book,&observed)?;
                     if let Some(producer) = &self.producer {
                         observed.incoming_controls(&self.book,producer.input.descriptor_data(),producer.input.signature_data())?;
                     }

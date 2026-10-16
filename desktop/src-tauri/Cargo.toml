@@ -80,6 +80,10 @@ development-runtime = []
 ubuntu-runtime-publisher = []
 windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
 macos-installed-installer = []
+# NONSHIPPING: fixed compile-time Restore cuts, no runtime failpoint selector.
+macos-installed-restore-app-write-fixture = ["macos-installed-installer", "mrk-macos-installed-native/installed-restore-cut-fixture"]
+macos-installed-restore-own-attempt-fixture = ["macos-installed-installer", "mrk-macos-installed-native/installed-restore-cut-fixture"]
+macos-installed-restore-stage-move-fixture = ["macos-installed-installer", "mrk-macos-installed-native/installed-restore-cut-fixture"]
 # Exclusive nonshipping role; the fixed root fixture owns its own baseline/restore proof.
 macos-installed-app-absence-fixture = []
 macos-installed-remover = []
