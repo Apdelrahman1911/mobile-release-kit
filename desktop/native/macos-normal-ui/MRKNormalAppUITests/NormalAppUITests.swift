@@ -4294,8 +4294,12 @@ final class NormalAppUITests: XCTestCase {
         // only closed relations to the expected synthetic path, never its text
         // or a guessed explanation. No alternate spelling is accepted.
         let typedValue = pathField.value as? String
-        observeProjectNavigation(pathField, sheet: sheet, role: navigationRole, phase: .typed,
-                                 path: path, initialValue: navigationInitial, value: { typedValue })
+        // Optional multi-query AX diagnostics must not consume the shared
+        // navigation budget on the successful path to Return.
+        if settled != .completed || typedValue != path {
+            observeProjectNavigation(pathField, sheet: sheet, role: navigationRole, phase: .typed,
+                                     path: path, initialValue: navigationInitial, value: { typedValue })
+        }
         if typedValue == nil {
             try require(false, "native navigation value is not a String")
         } else if let value = typedValue, value != path {
