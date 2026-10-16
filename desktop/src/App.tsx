@@ -99,6 +99,7 @@ export function App() {
   const [choosing, setChoosing] = useState(false);
   const [chooseError, setChooseError] = useState<ApiError | null>(null);
   const [page, setPage] = useState<Page>('dashboard');
+  const [releaseCheckFocus, setReleaseCheckFocus] = useState<'offline' | 'android-signing' | null>(null);
   const [help, setHelp] = useState<HelpContent | null>(null);
   const [discardProject, setDiscardProject] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState(initialWorkspace);
@@ -497,6 +498,15 @@ export function App() {
   const requests = useRef(0);
   const bootGeneration = useRef(0);
   const main = useRef<HTMLElement>(null);
+  const offlineCheckSection = useRef<HTMLDivElement>(null);
+  const androidSigningSection = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (page !== 'releases' || releaseCheckFocus === null) return;
+    const section = releaseCheckFocus === 'offline' ? offlineCheckSection.current : androidSigningSection.current;
+    section?.focus({ preventScroll: true });
+    section?.scrollIntoView({ block: 'start' });
+    setReleaseCheckFocus(null);
+  }, [page, releaseCheckFocus]);
   const mode = api?.mode ?? 'unavailable';
   const preview = mode === 'preview';
   const session = workspace.selectedId ? workspace.projects[workspace.selectedId] ?? null : null;
@@ -707,7 +717,15 @@ export function App() {
     return () => window.removeEventListener('beforeunload', warn);
   }, []);
 
-  const navigate = (next: Page) => { initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); setPage(next); main.current?.focus({ preventScroll: true }); };
+  const navigate = (next: Page) => { initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
+  const reviewCredentialChecks = (kind: 'offline' | 'android-signing') => {
+    if (savedCommandBusy() || diagnosticsOwnerReason(diagnostics.getSnapshot())) return;
+    // Navigation selects a review only. The existing controller still owns
+    // availability, original private inputs, consent, Start and cancellation.
+    if (kind === 'android-signing') androidBuild.setBuildMode('signed');
+    navigate('releases');
+    setReleaseCheckFocus(kind);
+  };
   const refreshReason = savedCommandBusy() ?? methodReason(info, 'project.snapshot', mode);
   const validateReason = savedCommandBusy() ?? methodReason(info, 'config.validate', mode);
   const reviewReason = savedCommandBusy() ?? methodReason(info, 'config.preview', mode);
@@ -977,7 +995,9 @@ export function App() {
         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="A little clarity before the next release." description="Edit a practical, schema-driven draft. The bundled core provides every field, requirement, and validation rule." />{editor()}</>}
         {page === 'environment' && <Environment info={info} api={api} preview={preview} session={session} state={environmentState} controller={environment}
           diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
-        {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} inputState={releaseInputState} inputController={releaseInputs} onSettings={() => navigate('settings')} onHelp={setHelp} nativeBusyReason={savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState)} />}
+        {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} inputState={releaseInputState} inputController={releaseInputs} onSettings={() => navigate('settings')} onHelp={setHelp}
+          onOfflineChecks={() => reviewCredentialChecks('offline')} onAndroidSigning={() => reviewCredentialChecks('android-signing')}
+          nativeBusyReason={savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState)} />}
         {page === 'metadata' && <Metadata catalog={catalog} textEditor={<MetadataTextEditor state={metadataState} controller={metadataText} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}
           imageEditor={<MetadataImagesEditor state={metadataImagesState} controller={metadataImages} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}>{editor(true)}</Metadata>}
         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} credentialHelp={catalog?.credentials ?? null} onHelp={setHelp} nativeReview={workflowPanel(true)}
@@ -988,14 +1008,14 @@ export function App() {
             <GitHubRemoteSetup state={githubRemoteSetupState} controller={githubRemoteSetup} assets={assetState} projectId={workspace.selectedId ?? null} onCredentials={() => navigate('credentials')} onHelp={setHelp} />
             <GitHubPreflight state={githubPreflightState} controller={githubPreflight} onHelp={setHelp} />
             <GitHubHistory state={githubHistoryState} controller={githubHistory} onHelp={setHelp} /></>} />}
-        {page === 'releases' && <Releases onOpenGitHub={() => navigate('github')} protectedWorkflows={<GitHubRelease state={githubReleaseState} controller={githubRelease} onHelp={setHelp} onGitHub={() => navigate('github')} />} evidence={<ReleaseEvidence state={evidenceState} controller={releaseEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />} offlineChecks={<OfflinePreflight state={offlinePreflightState} controller={offlinePreflight}
+        {page === 'releases' && <Releases onOpenGitHub={() => navigate('github')} protectedWorkflows={<GitHubRelease state={githubReleaseState} controller={githubRelease} onHelp={setHelp} onGitHub={() => navigate('github')} />} evidence={<ReleaseEvidence state={evidenceState} controller={releaseEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />} offlineChecks={<div ref={offlineCheckSection} tabIndex={-1} aria-label="Saved offline checks review"><OfflinePreflight state={offlinePreflightState} controller={offlinePreflight}
           projectName={session?.project.name ?? null} operationProjectName={offlinePreflightState.status?.operation ? workspace.projects[offlinePreflightState.status.operation.context.projectId]?.project.name ?? null : null}
-          onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason} />}
-          androidBuild={<AndroidBuild state={androidBuildState} controller={androidBuild}
+          onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason} /></div>}
+          androidBuild={<div ref={androidSigningSection} tabIndex={-1} aria-label="Android build and signing review"><AndroidBuild state={androidBuildState} controller={androidBuild}
             projectName={session?.project.name ?? null} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
             onReadVersion={() => void releaseVersion.read()} versionReason={releaseVersion.startReason()} onHelp={setHelp}
-            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />}
+            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} /></div>}
           iosArchive={<IOSArchive state={iosArchiveState} controller={iosArchive}
             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}

@@ -827,6 +827,44 @@ test('signing stays default-off, requires current assets and forces final signat
   assert.equal(h.state.consent, null);
 });
 
+test('Credentials signing-review navigation neither starts work nor replaces the original run and cancellation', async (t) => {
+  const h = harness(t, { initialCatalog: readyCatalog({ selected: TOOL_A }), initialAssets: signingAssets() });
+  await savedSigningPolicy(h);
+  // Credentials uses these existing controller transitions before showing the
+  // Releases review. Merely following that route grants no Prepare or Start.
+  h.controller.setVisible(false);
+  h.controller.setBuildMode('signed');
+  assert.equal(h.state.buildMode, 'signed');
+  assert.equal(h.state.consent, null);
+  assert.equal(h.calls.length, 0);
+  h.controller.setVisible(true);
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.controller.prepareReason(), null);
+  const op = await reviewed(h);
+  assert.equal(op.context.operation, 'android-build-sign');
+  assert.equal(h.calls.filter(row => row.kind === 'start').length, 0);
+  await h.controller.start(op.operationId, op.ownerGeneration);
+  assert.equal(h.calls.filter(row => row.kind === 'start').length, 0); // Not acknowledged.
+  const sent = start(h, op);
+  h.reply(sent.call, status(2, running(op, 'validating-signing'))); await sent.done;
+  h.controller.setVisible(false); // Back to Credentials: original remains app-owned.
+  assert.equal(h.controller.canCancel(), true);
+  assert.ok(androidBuildOwnerReason(h.state));
+  assert.equal(h.state.status.operation.operationId, op.operationId);
+  h.controller.setVisible(true);
+  assert.equal(h.state.status.operation.ownerGeneration, op.ownerGeneration);
+  assert.equal(h.calls.filter(row => row.kind === 'start').length, 1);
+  assert.equal(h.controller.cancel(), true);
+  const cancel = h.calls.at(-1);
+  assert.equal(cancel.kind, 'cancel');
+  assert.deepEqual(cancel.input, { operationId: op.operationId, ownerGeneration: op.ownerGeneration });
+  h.reply(cancel, status(3, terminal(running(op, 'validating-signing')))); await flush();
+  assert.equal(h.state.integrityFailed, false);
+  assert.equal(h.state.status.operation.outcome, 'cancelled');
+  assert.equal(h.state.status.operation.result, null);
+  assert.equal(h.state.consent, null);
+});
+
 test('current signing assignment changes retire consent synchronously rather than donating a different record to Start', async (t) => {
   const h = harness(t, { initialCatalog: readyCatalog({ selected: TOOL_A }), initialAssets: signingAssets() });
   await savedSigningPolicy(h); h.controller.setBuildMode('signed'); const op = await reviewed(h);
