@@ -53,6 +53,15 @@ INSTALL_ROOT = Path("/Library/Application Support/MobileReleaseKit")
 APP_NAME = "Mobile Release Kit.app"
 ENTRY_BINARY = "Contents/MacOS/mrk-macos-entry"
 ENTRY_BUNDLE_ID = "dev.mobile-release-kit.desktop.entry"
+LAUNCHER_BUNDLE = "Contents/Helpers/MobileReleaseKitLauncher.app"
+LAUNCHER_EXECUTABLE = LAUNCHER_BUNDLE + "/Contents/MacOS/mrk-macos-launcher"
+LAUNCHER_TICKET = LAUNCHER_BUNDLE + "/Contents/CodeResources"
+LAUNCHER_LIMITS = {
+    "Contents/MacOS/mrk-macos-launcher": 8 * 1024 * 1024,
+    "Contents/Info.plist": 16 * 1024,
+    "Contents/Resources/icon.png": 1024 * 1024,
+    "Contents/_CodeSignature/CodeResources": 256 * 1024,
+}
 PAYLOAD_NAME = "MobileReleaseKitPayload.app"
 PAYLOAD_RELATIVE = "Contents/Helpers/" + PAYLOAD_NAME
 PAYLOAD_CONTENTS = PAYLOAD_RELATIVE + "/Contents/"
@@ -786,7 +795,7 @@ def write_tree(output, files, *, root_mode=0o555, app_signing=False, current_own
             for path, (body, mode) in sorted(files.items()):
                 # Signed resident image/helpers are copied unchanged/read-only.
                 # The raw desktop image is executable code for inside-out signing.
-                allowed_modes = (((0o555,) if path in (VAULT_HELPER, ANDROID_HELPER, RESIDENT_IMAGE, REMOVER, GITHUB_SEAL)
+                allowed_modes = (((0o555,) if path in (VAULT_HELPER, ANDROID_HELPER, RESIDENT_IMAGE, REMOVER, GITHUB_SEAL, LAUNCHER_EXECUTABLE)
                                   else (0o755,) if path == DESKTOP_IMAGE else (0o644, 0o755))
                                  if app_signing else (0o444, 0o555))
                 need(mode in allowed_modes, "output-mode")
@@ -2836,6 +2845,49 @@ def github_seal_files(args, *, installed=False):
         yield {GITHUB_SEAL: (body, 0o555), GITHUB_SEAL_NOTICE: (notice, 0o644)}
 
 
+def applications_launcher_files(args):
+    """Read a separately signed nested convenience launcher, never execute it.
+
+    The signing caller must verify Developer ID before this DATA copy. Neither
+    CodeResources nor a matching digest is itself signature/notary acceptance.
+    An optional ticket is explicitly pinned; an unrequested ticket is an extra.
+    """
+    path = getattr(args, "applications_launcher", None)
+    expected = getattr(args, "expected_applications_launcher", None)
+    ticket = getattr(args, "expected_applications_launcher_ticket", None)
+    if path is None and expected is None and ticket is None:
+        return {}
+    need(path is not None and sha(expected) and (ticket is None or sha(ticket))
+         and package_role(getattr(args, "package_role", None)) == "ordinary-image",
+         "applications-launcher-input-pair")
+    limits = dict(LAUNCHER_LIMITS)
+    if ticket is not None:
+        limits["Contents/CodeResources"] = 1024 * 1024
+    files = tree(path, max_bytes=sum(limits.values()))
+    need(set(files) == set(limits), "applications-launcher-roster")
+    result = {}
+    for name, (body, mode) in files.items():
+        executable = name == "Contents/MacOS/mrk-macos-launcher"
+        need(0 < len(body) <= limits[name] and mode in ((0o555, 0o755) if executable else (0o444, 0o644)),
+             "applications-launcher-file")
+        result[LAUNCHER_BUNDLE + "/" + name] = (body, 0o555 if executable else 0o644)
+    info = files["Contents/Info.plist"][0]
+    need(info == read(DESKTOP / "native/macos-applications-launcher/Info.plist", 16 * 1024),
+         "applications-launcher-info")
+    parsed = plistlib.loads(info)
+    version = source_build_selection(command_target(args)).package_version
+    need(parsed.get("CFBundleVersion") == version and parsed.get("CFBundleShortVersionString") == version,
+         "applications-launcher-version")
+    need(files["Contents/Resources/icon.png"][0] == read(DESKTOP / "src-tauri/icons/icon.png", 1024 * 1024),
+         "applications-launcher-icon")
+    body = files["Contents/MacOS/mrk-macos-launcher"][0]
+    need(digest(body) == expected, "applications-launcher-signed-digest")
+    macho(body, system_only=True, target=command_target(args))
+    if ticket is not None:
+        need(digest(files["Contents/CodeResources"][0]) == ticket, "applications-launcher-ticket-digest")
+    return result
+
+
 def app_command(args):
     with github_seal_files(args) as seal:
         return app_with_github_seal(args, seal)
@@ -2902,6 +2954,7 @@ def app_with_github_seal(args, seal):
     need(bool(android_service), "package-role-resident-required")
     files.update(android_service)
     files.update(seal)
+    files.update(applications_launcher_files(args))
     # Each image/helper is separately signed/verified before payload then outer
     # bundle signing. No deep repair or image/executable fallback is permitted.
     write_tree(args.output, files, root_mode=0o755, app_signing=True)
@@ -2995,6 +3048,10 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
     if role == "ordinary-image":
         expected_names.add(DESKTOP_IMAGE)
     expected_names.update(seal)
+    launcher = applications_launcher_files(args)
+    expected_names.update(launcher)
+    need(all(app.get(path) == (body, mode) or mode == 0o644 and app.get(path) == (body, 0o444)
+             for path, (body, mode) in launcher.items()), "applications-launcher-installed-correspondence")
     need(all(app.get(path) == (body, mode) or app.get(path) == (body, 0o444)
              and mode == 0o644 for path, (body, mode) in seal.items()), "github-seal-installed-correspondence")
     expected_names.update(ticket_input_names(app, ticket_expectations))
@@ -3024,7 +3081,7 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
         for name, (body, mode) in source.items():
             need(prefix != "app/" or name.startswith("Contents/"), "app-contents-scope")
             code = ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
-                    "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "app/" + GITHUB_SEAL, "runtime/" + HISTORY_PROVIDER_PATH, "runtime/python/bin/python3")
+                    "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "app/" + GITHUB_SEAL, "app/" + LAUNCHER_EXECUTABLE, "runtime/" + HISTORY_PROVIDER_PATH, "runtime/python/bin/python3")
             expected_mode = 0o555 if prefix + name in code else 0o444
             # Normalize only the fresh copy, never the signed original.
             need(mode & 0o7022 == 0 and bool(mode & 0o111) == (expected_mode == 0o555), "input-executable-scope")
@@ -4087,7 +4144,7 @@ def observation_inventory_bytes(body, expected_inventory, expected_manifest, *, 
              and sha(row["sha256"]) and type(row["size"]) is int and 0 <= row["size"] <= MAX_BYTES
              and type(row["executable"]) is bool
              and row["executable"] == (row["path"] in ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
-                                                     "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "app/" + GITHUB_SEAL, "runtime/" + HISTORY_PROVIDER_PATH, "runtime/python/bin/python3")), "observation-inventory-row")
+                                                     "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "app/" + GITHUB_SEAL, "app/" + LAUNCHER_EXECUTABLE, "runtime/" + HISTORY_PROVIDER_PATH, "runtime/python/bin/python3")), "observation-inventory-row")
         rows[row["path"]] = row
     need(("app/" + ANDROID_HELPER in rows) == ("app/" + ANDROID_SERVICE_PLIST in rows)
          == ("app/" + RESIDENT_IMAGE in rows)
@@ -5921,6 +5978,12 @@ def main(argv=None):
                         help="Select the fixed current protocol and bootstrap roster; default retains the historical profile")
     inputs.add_argument("--expected-remover", required=True)
     inputs.add_argument("--output", required=True, type=Path)
+    for command in (app, inputs):
+        command.add_argument("--applications-launcher", type=Path,
+                             help="Separately signed/verified launcher bundle; requires its final executable digest")
+        command.add_argument("--expected-applications-launcher")
+        command.add_argument("--expected-applications-launcher-ticket",
+                             help="Optional explicitly nominated stapled ticket digest, not notarization evidence")
     scripts = commands.add_parser("scripts")
     scripts.add_argument("--input", required=True, type=Path)
     scripts.add_argument("--installer", required=True, type=Path)
