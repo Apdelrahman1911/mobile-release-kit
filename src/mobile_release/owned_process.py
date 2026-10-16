@@ -154,7 +154,7 @@ def run_owned(
     ``text=False`` preserves bounded stdout/stderr bytes without UTF-8 decoding;
     this parent-local result choice changes no native protocol or authority.
     """
-    from ._command_process import run_command
+    from ._command_process import CommandCallEvidence, run_command
 
     source = None if cancellation is None else getattr(cancellation, "_saved_command_source", None)
     if source is not None:
@@ -180,7 +180,13 @@ def run_owned(
                     execution_scope=execution_scope, journal_binding=journal_binding)
         if cleanup:
             raise ValueError("Saved command cleanup has no original signed account owner")
+        if domain is SavedCommandDomain.LocalStorePreflight:
+            source.require_operation().command_arguments(argv, capture=capture, evidence=_evidence)
         timeout, output_limit = source.command_limits(timeout, capture, output_limit)
+        if domain is SavedCommandDomain.LocalStorePreflight and _evidence is not None:
+            if type(_evidence) is not CommandCallEvidence:
+                raise ValueError("Store access requires its original readback record")
+            _evidence._cap_store_preflight(source, timeout=timeout)
         # Complete nonzero results remain ordinary policy DATA. This seam
         # changes neither the C/A/W owner nor its original cleanup allowance.
     return run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture, text=text,

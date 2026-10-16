@@ -1986,7 +1986,7 @@ class SelectedStoreMaterial:
 def _selected_store_material(
     config: ReleaseConfig, *, values: Mapping[str, str], platforms: Iterable[str],
     invocation: InvocationCustody | None = None, cancellation: _ProfileCancellation | None = None,
-    stage: str = "candidate", lane_evidence=None,
+    stage: str = "candidate", lane_evidence=None, scratch_parent: Path | None = None,
 ):
     if invocation is not None:
         if type(invocation) is not InvocationCustody:
@@ -1999,7 +1999,7 @@ def _selected_store_material(
     elif lane_evidence is not None:
         raise CredentialError("Composite Store selection requires its original invocation")
     with finite_scratch(layout="store-selection", cancellation=cancellation,
-                        lane_evidence=lane_evidence) as scratch:
+                        lane_evidence=lane_evidence, parent=scratch_parent) as scratch:
         selected = SelectedStoreMaterial(config, values, tuple(platforms), scratch, invocation, stage=stage)
         try:
             selected._acquire()

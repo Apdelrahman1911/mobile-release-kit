@@ -87,3 +87,18 @@ class StoreRuntimeContext:
         # Reuse existing first-primary/cancellation arbitration; this wrapper
         # owns no process, new clock, descriptor or cleanup permission.
         return first_primary_context(self._checked(), cancellation=self._invocation.cancellation)
+
+    @contextmanager
+    def command(self, argv, *, capture: bool):
+        # Existing CLI/context callers retain their original checked scope.
+        # Only the exact Desktop source additionally admits its fixed six roles.
+        source = self._invocation.cancellation._store_preflight_source
+        if source is None:
+            with self.checked():
+                yield
+            return
+        operation = source.require_operation()
+        with first_primary_context(operation.command(self, argv, capture=capture),
+                                   cancellation=self._invocation.cancellation):
+            with self.checked():
+                yield

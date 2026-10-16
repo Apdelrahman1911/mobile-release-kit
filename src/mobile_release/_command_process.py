@@ -639,6 +639,7 @@ class CommandCallEvidence:
         self._expected: tuple[Any, ...] | None = None
         self._lane_timing: store_wire.Timing | None = None
         self._timing_consumed = False
+        self._desktop_readback_capped = False
         self._used = self._matched = False
         self._engine: _Outer | None = None
         self._slot: CommandOutcomeSlot | None = None
@@ -738,6 +739,19 @@ class CommandCallEvidence:
                                        for key, value in environment)),
                           False, PRIVATE_OUTPUT_LIMIT, 15 * 60)
         return argv
+
+    def _cap_store_preflight(self, source, *, timeout: int) -> None:
+        """Tighten this original readback once, never alter its command seal."""
+        from ._desktop_store_preflight_control import StorePreflightInput
+        self._owner(source.guard)
+        _require(type(source) is StorePreflightInput and source.guard._saved_command_input() is source
+                 and not self._used and self._engine is None and not self._desktop_readback_capped
+                 and self._reservation is not None and self._reservation[1] == "android"
+                 and self._lane_reservation is None and self._expected is not None
+                 and self._expected[5] == 900 and type(timeout) is int and 1 <= timeout <= 900)
+        source.require_operation().require_query_timing(timeout)
+        self._desktop_readback_capped = True
+        self._expected = (*self._expected[:5], timeout)
 
     def _attempt(self, guard: DefaultCancellation | None, *, timeout: int,
                  ordinary: bool) -> None:

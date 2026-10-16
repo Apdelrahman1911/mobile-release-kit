@@ -368,6 +368,20 @@ class DefaultCancellation:
         from ._desktop_saved_command_control import SavedCommandDomain
         return source if source.domain is SavedCommandDomain.GitHubHistory else None
 
+    @property
+    def _store_preflight_source(self) -> Any:
+        source = self._saved_command_input()
+        if source is None:
+            return None
+        from ._desktop_saved_command_control import SavedCommandDomain
+        return source if source.domain is SavedCommandDomain.LocalStorePreflight else None
+
+    def _install_store_preflight_source(self, source: Any) -> None:
+        from ._desktop_store_preflight_control import StorePreflightInput
+        if type(source) is not StorePreflightInput:
+            raise self.restore_error("invalid Store access-check source ownership")
+        self._install_saved_command_source(source)
+
     def _install_github_history_source(self, source: Any) -> None:
         from ._desktop_github_history_control import HistoryInput
         if type(source) is not HistoryInput:

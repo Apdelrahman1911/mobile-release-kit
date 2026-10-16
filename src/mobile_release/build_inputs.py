@@ -731,6 +731,9 @@ class FiniteScratch:
             operation = android.require_operation()
             _need(operation.signing is not None and layout == "build", "Android scratch requires its signing child")
             operation.signing.bind_scratch(self)
+        store = getattr(guard, "_store_preflight_source", None)
+        if store is not None:
+            store.require_operation().bind_scratch(self)
         if lane_evidence is not None:
             from ._store_lane_evidence import StoreLaneCallEvidence
 
@@ -1752,6 +1755,8 @@ class InvocationCustody:
             guard._ios_archive_source.require_operation().bind_invocation(self)
         elif getattr(guard, "_artifact_inspection_source", None) is not None:
             guard._artifact_inspection_source.require_operation().bind_invocation(self)
+        elif getattr(guard, "_store_preflight_source", None) is not None:
+            guard._store_preflight_source.require_operation().bind_invocation(self)
 
     def _owner(self, *, cleanup: bool = False) -> None:
         _need(self.pid == os.getpid() and self.thread is threading.current_thread(),
@@ -1928,6 +1933,20 @@ class InvocationCustody:
                 and self.reservation_state in ("NEW", "REFUSED", "RELEASED")
                 and (self.lock_result is None or self.lock_result is False)
                 and self.store_namespace is not None and self.store_namespace.closed()
+                and _ENV_OWNER is not self and not _ENV_TAINTED)
+
+    def _store_preflight_closed(self, operation) -> bool:
+        from .desktop_store_preflight import StorePreflightRun
+        self._owner(cleanup=True)
+        _need(type(operation) is StorePreflightRun and operation.invocation is self
+              and operation.guard is self.cancellation and operation.source.operation is operation,
+              "Store access closure requires its original invocation")
+        return (self.mode == "online" and self.lane_evidence is None and self.claimed
+                and not self.active and self._cleanup_complete and not self.reserved and not self.frames
+                and not self.project_started and self.project_owner is None and self._original_project is None
+                and self.child is None and self.signing_lease is None and self.store_namespace is None
+                and self.reservation_state in {"NEW", "REFUSED", "RELEASED"}
+                and (self.lock_result is None or self.lock_result is False)
                 and _ENV_OWNER is not self and not _ENV_TAINTED)
 
     def _unsigned_build_root(self, guard: DefaultCancellation) -> tuple[int, dict[str, Any]]:

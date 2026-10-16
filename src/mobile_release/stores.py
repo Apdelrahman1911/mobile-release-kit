@@ -315,6 +315,26 @@ def _store_environment(
     return env
 
 
+def _fastlane_probe_commands(tooling_root: Path) -> tuple[tuple[str, ...], ...]:
+    primitive = str(tooling_root / "fastlane/native_process_spawn.rb")
+    marker = "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2"
+    probe = (
+        "require ARGV.fetch(0); "
+        "MobileReleaseKit::NativeProcessSpawn.admit_runtime!; "
+        f"STDOUT.write({json.dumps(marker)})"
+    )
+    commands = (
+        [
+            "ruby", "--disable=rubyopt,gems,did_you_mean,error_highlight,syntax_suggest,rjit,yjit",
+            "--external-encoding=UTF-8", "--internal-encoding=UTF-8",
+            "-e", probe, "--", primitive,
+        ],
+        ["bundle", "exec", "ruby", "-e", probe, "--", primitive],
+    )
+    return (("ruby", "-e", "print RUBY_VERSION"), ("bundle", "--version"), ("bundle", "check"),
+            *(tuple(command) for command in commands))
+
+
 def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancellation | None = None,
                              source_environment: Mapping[str, str] | None = None,
                              runtime_context: StoreRuntimeContext | None = None) -> None:
@@ -344,7 +364,7 @@ def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancell
 
     def run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
         try:
-            with runtime_context.checked() if runtime_context is not None else nullcontext():
+            with runtime_context.command(argv, capture=True) if runtime_context is not None else nullcontext():
                 return run_owned(
                     argv,
                     cwd=tooling_root,
@@ -360,13 +380,14 @@ def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancell
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             return None
 
-    ruby = run(["ruby", "-e", "print RUBY_VERSION"])
+    probes = _fastlane_probe_commands(tooling_root)
+    ruby = run(list(probes[0]))
     if ruby is None or ruby.returncode or ruby.stdout.strip() != "3.3.12":
         raise StoreOperationError(
             "Pinned Store tooling requires Ruby 3.3.12. Select that exact version before running "
             "online preflight or a Store lane."
         )
-    bundler = run(["bundle", "--version"])
+    bundler = run(list(probes[1]))
     # Pinned Bundler 4's --version prints the bare version; its help command
     # alone adds the human-readable "Bundler version" prefix.
     if (bundler is None or bundler.returncode
@@ -375,7 +396,7 @@ def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancell
             "Bundler 4.0.16 is unavailable for the pinned Store tooling. Install it under Ruby 3.3.12; "
             "dependencies are never installed automatically."
         )
-    completed = run(["bundle", "check"])
+    completed = run(list(probes[2]))
     if completed is None or completed.returncode:
         command = (
             f"BUNDLE_GEMFILE={shlex.quote(str(gemfile))} "
@@ -389,23 +410,10 @@ def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancell
     # The isolated helpers intentionally disable gems; the outer capture runs
     # under the locked bundle. Admit BOTH actual loaded Fiddle origins, rather
     # than treating one version string as proof of the other runtime.
-    primitive = str(tooling_root / "fastlane/native_process_spawn.rb")
     marker = "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2"
-    probe = (
-        "require ARGV.fetch(0); "
-        "MobileReleaseKit::NativeProcessSpawn.admit_runtime!; "
-        f"STDOUT.write({json.dumps(marker)})"
-    )
-    commands = (
-        [
-            "ruby", "--disable=rubyopt,gems,did_you_mean,error_highlight,syntax_suggest,rjit,yjit",
-            "--external-encoding=UTF-8", "--internal-encoding=UTF-8",
-            "-e", probe, "--", primitive,
-        ],
-        ["bundle", "exec", "ruby", "-e", probe, "--", primitive],
-    )
+    commands = _fastlane_probe_commands(tooling_root)[3:]
     for command in commands:
-        runtime = run(command)
+        runtime = run(list(command))
         if (runtime is None or runtime.returncode or runtime.stdout != marker
                 or runtime.stderr):
             raise StoreOperationError(
@@ -938,7 +946,7 @@ def online_preflight_findings(
                         if evidence is None else evidence.seal_readback(
                             runner=runner, cwd=runner_directory, environ=environment))
                 try:
-                    with runtime_context.checked() if runtime_context is not None else nullcontext():
+                    with runtime_context.command(argv, capture=False) if runtime_context is not None else nullcontext():
                         completed = run_owned(argv, cwd=runner_directory, environ=environment,
                                               capture=False, timeout=15 * 60,
                                               cancellation=cancellation, _evidence=evidence)

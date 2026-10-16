@@ -30,6 +30,7 @@ class SavedCommandDomain(Enum):
     IOSArchive = "ios-archive"
     ArtifactInspection = "artifact-inspection"
     GitHubHistory = "github-history"
+    LocalStorePreflight = "local-store-preflight"
 
 
 def _protocol(domain: SavedCommandDomain):
@@ -52,6 +53,9 @@ def _protocol(domain: SavedCommandDomain):
     if domain is SavedCommandDomain.GitHubHistory:
         from . import _desktop_github_history_protocol
         return _desktop_github_history_protocol
+    if domain is SavedCommandDomain.LocalStorePreflight:
+        from . import _desktop_store_preflight_protocol
+        return _desktop_store_preflight_protocol
     raise ValueError("Invalid saved-command domain")
 
 
@@ -75,6 +79,9 @@ def source_domain(source: object) -> SavedCommandDomain:
     from ._desktop_github_history_control import HistoryInput
     if type(source) is HistoryInput and source.domain is SavedCommandDomain.GitHubHistory:
         return SavedCommandDomain.GitHubHistory
+    from ._desktop_store_preflight_control import StorePreflightInput
+    if type(source) is StorePreflightInput and source.domain is SavedCommandDomain.LocalStorePreflight:
+        return SavedCommandDomain.LocalStorePreflight
     raise ValueError("Invalid original saved-command input")
 
 
@@ -141,7 +148,7 @@ class _SavedCommandInput:
         if self.domain is SavedCommandDomain.OfflinePreflight:
             if self.budget is not None:
                 self.budget.checkpoint()
-        elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection):
+        elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight):
             self.require_operation().checkpoint()
         else:
             self._require(False)
@@ -163,7 +170,7 @@ class _SavedCommandInput:
             if capture:
                 output_limit = budget.capture(output_limit)
             return timeout, output_limit
-        if self.domain is SavedCommandDomain.ArtifactInspection:
+        if self.domain in (SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight):
             # The exact operation admits only its fixed inspector role before
             # this existing run_owned callback. No caller role/argv is authority.
             self._require(type(capture) is bool and type(output_limit) is int and output_limit > 0)
@@ -208,7 +215,7 @@ class _SavedCommandInput:
         if time.monotonic() >= self.work_end:
             self.stop("timed-out")
             return
-        material_phase = self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive) and self.material_pending
+        material_phase = self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.LocalStorePreflight) and self.material_pending
         active = self.active and not material_phase
         if active and self.buffer:
             self.stop()
@@ -223,7 +230,8 @@ class _SavedCommandInput:
                            SavedCommandDomain.ProjectRecovery: "Original project recovery input changed",
                            SavedCommandDomain.IOSArchive: "Original saved build input changed",
                            SavedCommandDomain.ArtifactInspection: "Original artifact inspection input changed",
-                           SavedCommandDomain.GitHubHistory: "Original History input changed"}[self.domain]
+                           SavedCommandDomain.GitHubHistory: "Original History input changed",
+                           SavedCommandDomain.LocalStorePreflight: "Original Store access-check input changed"}[self.domain]
                 raise _protocol(self.domain).ProtocolError(message)
             if material_phase and (not self.material_receiving or self.buffer):
                 # The original bounded private reader drains this buffer before
@@ -256,12 +264,12 @@ class _SavedCommandInput:
             if position >= 0:
                 raw = bytes(self.buffer[:position + 1])
                 del self.buffer[:position + 1]
-                if self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):
+                if self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.LocalStorePreflight):
                     request = _protocol(self.domain).parse_request(raw)
                     self._request_material(request)
                 self.active = True  # Signed pending input remains inert until account/project admission.
                 self.guard.check()
-                if self.domain not in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):
+                if self.domain not in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.LocalStorePreflight):
                     request = _protocol(self.domain).parse_request(raw)
                 self.request_returned = True
                 return request
