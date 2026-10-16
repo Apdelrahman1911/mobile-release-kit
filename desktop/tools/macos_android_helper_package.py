@@ -1493,6 +1493,17 @@ _INSTALLER_ACL_ROLES = ('input-directory', 'input-inventory', 'system-root', 'sy
 _INSTALLER_ACL_PHASES = ('filesec-allocation', 'fstatx-snapshot', 'snapshot-owner', 'snapshot-group',
     'snapshot-mode', 'acl-presence', 'acl-conversion', 'acl-object', 'acl-validation',
     'acl-first-entry', 'acl-entry-present', 'acl-free', 'ffi-output')
+# Interpret only these known static parent reasons. Composite refusals remain
+# composite: neither a timer expiration nor a file-count overflow is inferred.
+_INSTALLER_PARENT_REASONS = {
+    'deadline': 'deadline', 'worker-work-deadline': 'worker-work-deadline',
+    'worker-final-deadline': 'worker-final-deadline',
+    'deadline-or-unknown': 'deadline-or-ownership-unknown',
+    'export-deadline-or-unknown': 'deadline-or-ownership-unknown',
+    'directory-bound': 'directory-policy-or-bound',
+    'acl-refused': 'acl-refusal', 'export-acl-refused': 'acl-refusal',
+    'worker-self-image': 'worker-image-refusal',
+}
 _INSTALLER_LOG_REASONS = frozenset((
     'log-input-binding', 'log-file-policy', 'log-file-identity', 'log-cursor-shape', 'log-cursor-binding',
     'log-cursor-offset', 'log-anchor-rewritten', 'log-truncated', 'log-incomplete-boundary',
@@ -1527,8 +1538,9 @@ def installer_markers_data(value):
                         or any(type(row[k]) is not int or not -9999999999 <= row[k] <= 9999999999
                                for k in fields - {'role', 'phase'})):
                     return None
-            elif (type(row) is not dict or set(row) != {'exit', 'originals', 'native', 'timely', 'unknown'}
+            elif (type(row) is not dict or set(row) != {'exit', 'originals', 'native', 'timely', 'unknown', 'category'}
                     or type(row['exit']) is not int or row['exit'] not in (1, 20)
+                    or type(row['category']) is not str or row['category'] not in (*_INSTALLER_PARENT_REASONS.values(), 'unclassified')
                     or any(type(row[k]) is not bool for k in ('originals', 'native', 'timely', 'unknown'))):
                 return None
     return {'phases': list(value['phases']), 'refusals': list(value['refusals']),
@@ -1550,7 +1562,7 @@ def installer_markers(stdout, stderr):
             ('phases', re.compile(rb'(?<![A-Za-z0-9_])MRK_MACOS_POSTINSTALL_PHASE=(' + b'|'.join(v.encode() for v in _INSTALLER_PHASES) + rb')(?![A-Za-z0-9_-])'), 6),
             ('refusals', re.compile(rb'(?<![A-Za-z0-9_])MRK_MACOS_POSTINSTALL_REFUSED=(' + b'|'.join(v.encode() for v in _INSTALLER_REFUSALS) + rb')(?![A-Za-z0-9_-])'), 3),
             ('acl', re.compile(rb'(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role=(' + b'|'.join(v.encode() for v in _INSTALLER_ACL_ROLES) + rb');phase=(' + b'|'.join(v.encode() for v in _INSTALLER_ACL_PHASES) + rb');result=(-?[0-9]{1,10});call=(-?[0-9]{1,10});errno=(-?[0-9]{1,10});freeCall=(-?[0-9]{1,10});freeErrno=(-?[0-9]{1,10})(?=\r?\n$)'), 2),
-            ('parent', re.compile(rb'(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=[0-9a-f]{64};exit=(1|20);originals=([01]);native=([01]);timely=([01]);unknown=([01])(?=\r?\n$)'), 2),
+            ('parent', re.compile(rb'(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=([0-9a-f]{64});exit=(1|20);originals=([01]);native=([01]);timely=([01]);unknown=([01])(?=\r?\n$)'), 2),
         )
         for body in (stdout, stderr):
             for line in body.splitlines(keepends=True):
@@ -1565,7 +1577,9 @@ def installer_markers(stdout, stderr):
                                 [parts[0].decode('ascii'), parts[1].decode('ascii'), *[int(p) for p in parts[2:]]]))
                         elif key == 'parent':
                             row = dict(zip(('exit', 'originals', 'native', 'timely', 'unknown'),
-                                [int(parts[0]), *[p == b'1' for p in parts[1:]]]))
+                                [int(parts[1]), *[p == b'1' for p in parts[2:]]]))
+                            row['category'] = next((category for reason, category in _INSTALLER_PARENT_REASONS.items()
+                                if digest(reason.encode('ascii')).encode('ascii') == parts[0]), 'unclassified')
                         else:
                             row = parts[0].decode('ascii')
                         if len(value[key]) == cap or row in value[key]:

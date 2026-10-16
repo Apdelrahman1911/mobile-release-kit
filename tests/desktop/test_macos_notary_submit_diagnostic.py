@@ -395,3 +395,23 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
         self.assertEqual(value['originalFailure']['reason'], 'original-nonzero-installer')
         self.assertEqual(op.calls, before)
         self.assertNotIn(PRIVATE.decode(), encoded)
+
+    def test_parent_reason_categories_keep_unknown_and_composite_causes(self):
+        for reason, category in (
+            ('deadline', 'deadline'), ('worker-work-deadline', 'worker-work-deadline'),
+            ('worker-final-deadline', 'worker-final-deadline'),
+            ('deadline-or-unknown', 'deadline-or-ownership-unknown'),
+            ('export-deadline-or-unknown', 'deadline-or-ownership-unknown'),
+            ('directory-bound', 'directory-policy-or-bound'),
+            ('acl-refused', 'acl-refusal'), ('export-acl-refused', 'acl-refusal'),
+            ('worker-self-image', 'worker-image-refusal'), (PRIVATE.decode(), 'unclassified')):
+            with self.subTest(category=category):
+                reason_hash = hashlib.sha256(reason.encode()).hexdigest()
+                capture = ('MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=' + reason_hash +
+                    ';exit=1;originals=1;native=0;timely=1;unknown=1\n').encode()
+                value = HELPER.installer_markers(capture, PRIVATE)
+                self.assertEqual(value['parent'][0]['category'], category)
+                self.assertNotIn(reason_hash, json.dumps(value))
+                self.assertNotIn(PRIVATE.decode(), json.dumps(value))
+                value['parent'][0]['category'] = PRIVATE.decode()
+                self.assertIsNone(HELPER.installer_markers_data(value))
