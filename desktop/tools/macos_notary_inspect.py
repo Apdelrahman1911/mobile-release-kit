@@ -19,7 +19,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src'))
-from desktop.tools.macos_android_helper_package import notary_json, notary_key_data, notary_service, notary_uuid
+from desktop.tools.macos_android_helper_package import notary_json, notary_key_data, notary_service, notary_uuid, notary_issue_summary
 from mobile_release.owned_process import ProcessError, run_owned
 
 BRANCH = 'verify/desktop-macos-notary-inspect'
@@ -27,14 +27,7 @@ ARCHIVE = 'MobileReleaseKit-notary-payload.zip'
 # Actual failed step in run38914684702/1, ARM job117019014095.
 START = '2026-10-16T14:34:59Z'
 END = '2026-10-16T14:45:31Z'
-MESSAGES = {
-    'The binary is not signed.': 'unsigned-binary',
-    'The signature of the binary is invalid.': 'invalid-signature',
-    'The signature does not include a secure timestamp.': 'missing-timestamp',
-    'The executable does not have the hardened runtime enabled.': 'missing-hardened-runtime',
-    'The binary is not signed with a valid Developer ID certificate.': 'invalid-developer-id',
-    'The binary uses an SDK older than the 10.9 SDK.': 'old-sdk',
-}
+
 
 
 def need(value):
@@ -84,25 +77,8 @@ def log_projection(body, submission, start=START, end=END):
     need(code is None or type(code) is int and 0 <= code <= 999999)
     issues = value.get('issues')
     need(issues is None or type(issues) is list and len(issues) <= 2048)
-    counts = {}
-    for issue in issues or []:
-        need(type(issue) is dict and issue.get('severity') in ('warning', 'error'))
-        path, message, number = issue.get('path'), issue.get('message'), issue.get('code')
-        need(type(path) is str and len(path) <= 4096 and type(message) is str and len(message) <= 8192)
-        need(number is None or type(number) is int and 0 <= number <= 999999)
-        # These literal classes, never path/message text or sanitized suffixes,
-        # are sufficient to locate the failing component without publishing logs.
-        component = ('optional-terminal-notifier-cache'
-                     if 'terminal-notifier-2.0.0.gem' in path.split('/') and '/terminal-notifier.app/' in path else
-                     'gem-install-cache' if '/cache/' in path and '.gem/' in path else
-                     'launcher' if '/MobileReleaseKitLauncher.app/' in path else
-                     'store-runtime' if '/store/' in path else 'python-runtime' if '/python/' in path else
-                     'desktop-payload' if '/MobileReleaseKitPayload.app/' in path else 'other')
-        key = (issue['severity'], number, MESSAGES.get(message, 'unclassified'), component)
-        counts[key] = counts.get(key, 0) + 1
-    need(len(counts) <= 64)
     return {'status': submission['status'], 'statusCode': code, 'issueCount': len(issues or []),
-            'issues': [dict(severity=k[0], code=k[1], category=k[2], component=k[3], count=n) for k, n in counts.items()]}
+            'issues': notary_issue_summary(issues)}
 
 
 def identity(info):

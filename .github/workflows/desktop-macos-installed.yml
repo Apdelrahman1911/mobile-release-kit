@@ -1686,7 +1686,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
-      - name: Bind this completed signed app and current-source runtime into fresh Installer DATA
+      - name: Notarize and staple the signed payload, then bind Installer inputs
         if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
         timeout-minutes: 32
         shell: bash

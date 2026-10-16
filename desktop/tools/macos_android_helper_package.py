@@ -480,6 +480,61 @@ def notary_submit_data(body, *, archive_name=NOTARY_ZIP_NAME):
     return {"id": notary_uuid(value["id"]), "status": value["status"]}
 
 
+NOTARY_ISSUE_MESSAGES = {
+    'The binary is not signed.': 'unsigned-binary',
+    'The signature of the binary is invalid.': 'invalid-signature',
+    'The signature does not include a secure timestamp.': 'missing-timestamp',
+    'The executable does not have the hardened runtime enabled.': 'missing-hardened-runtime',
+    'The binary is not signed with a valid Developer ID certificate.': 'invalid-developer-id',
+    'The binary uses an SDK older than the 10.9 SDK.': 'old-sdk',
+}
+NOTARY_ISSUE_COMPONENTS = ("optional-terminal-notifier-cache", "gem-install-cache", "launcher",
+                          "store-runtime", "python-runtime", "desktop-payload", "other")
+
+
+def notary_issue_summary(issues):
+    """Finite categories only, never raw paths/messages; not acceptance evidence."""
+    need(issues is None or type(issues) is list and len(issues) <= 2048, "notary-issue-diagnostic-bound")
+    counts = {}
+    for issue in issues or []:
+        need(type(issue) is dict and issue.get('severity') in ('warning', 'error'), "notary-issue-diagnostic-shape")
+        path, message, number = issue.get('path'), issue.get('message'), issue.get('code')
+        need(type(path) is str and len(path) <= 4096 and type(message) is str and len(message) <= 8192, "notary-issue-diagnostic-shape")
+        need(number is None or type(number) is int and 0 <= number <= 999999, "notary-issue-diagnostic-code")
+        # These literal classes, never path/message text or sanitized suffixes,
+        # are sufficient to locate the failing component without publishing logs.
+        component = ('optional-terminal-notifier-cache'
+                     if 'terminal-notifier-2.0.0.gem' in path.split('/') and '/terminal-notifier.app/' in path else
+                     'gem-install-cache' if '/cache/' in path and '.gem/' in path else
+                     'launcher' if '/MobileReleaseKitLauncher.app/' in path else
+                     'store-runtime' if '/store/' in path else 'python-runtime' if '/python/' in path else
+                     'desktop-payload' if '/MobileReleaseKitPayload.app/' in path else 'other')
+        key = (issue['severity'], number, NOTARY_ISSUE_MESSAGES.get(message, 'unclassified'), component)
+        counts[key] = counts.get(key, 0) + 1
+    need(len(counts) <= 64, "notary-issue-diagnostic-bound")
+    return [dict(severity=k[0], code=k[1], category=k[2], component=k[3], count=n) for k, n in counts.items()]
+
+
+def notary_failure_summary_data(value):
+    """Revalidate stored diagnostic DATA before exporting any part of it."""
+    if type(value) is not dict or set(value) != {"rows", "rowsOmitted"}:
+        return None
+    rows = value["rows"]
+    if type(rows) is not list or len(rows) > 8 or type(value["rowsOmitted"]) is not bool:
+        return None
+    out = []
+    for row in rows:
+        if (type(row) is not dict or set(row) != {"severity", "code", "category", "component", "count"}
+            or type(row["severity"]) is not str or row["severity"] not in ("warning", "error")
+            or not (row["code"] is None or type(row["code"]) is int and 0 <= row["code"] <= 999999)
+            or type(row["category"]) is not str or row["category"] not in (*NOTARY_ISSUE_MESSAGES.values(), "unclassified")
+            or type(row["component"]) is not str or row["component"] not in NOTARY_ISSUE_COMPONENTS
+            or type(row["count"]) is not int or not 1 <= row["count"] <= 2048):
+            return None
+        out.append(dict(row))
+    return {"rows": out, "rowsOmitted": value["rowsOmitted"]}
+
+
 def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP_NAME):
     need(archive_name in (NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg"), "notary-fixed-archive-name")
     value = notary_json(body, 1024 * 1024)
@@ -1767,6 +1822,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
         "phase": token(phase, phases), "target": token(target, (ARM_TARGET, INTEL_TARGET)),
         "mainStage": token(main_stage, _FAILURE_MAIN_STAGES), "terminal": failure_exception(error, stager),
         "compiler": compiler_diagnostic_data(state.get("compiler_failure")),
+        "notaryIssues": notary_failure_summary_data(state.get("notary_issue_diagnostic")),
         "originalFailure": {
             "recorded": type(receipt.get("failure")) is dict if state else None,
             "stage": token(original.get("stage"), _FAILURE_STAGES),
@@ -1809,6 +1865,10 @@ def emit_failure_diagnostic(error, **context):
         while len(body) > 4096 and value["compiler"] is not None and value["compiler"]["rows"]:
             value["compiler"]["rows"].pop()
             value["compiler"]["rowsOmitted"] = True
+            body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+        while len(body) > 4096 and value["notaryIssues"] is not None and value["notaryIssues"]["rows"]:
+            value["notaryIssues"]["rows"].pop()
+            value["notaryIssues"]["rowsOmitted"] = True
             body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
         if body.isascii() and len(body) <= 4096:
             written = sys.stderr.write(body)
@@ -3882,6 +3942,8 @@ class Operation:
             try:
                 result = self.notary_call("payload-log", [tool, "log", submission["id"], *key_arguments], limit=1024 * 1024, developer=True)
                 log = notary_log_data(result.stdout, submission, self.notary_zip_sha)
+                if invalid is not None:
+                    self.capture_notary_failure(result.stdout)
             except BaseException as error:
                 if invalid is not None:
                     self.receipt["notaryLogFailure"] = {"type": type(error).__name__}
@@ -4571,6 +4633,8 @@ class Operation:
             try:
                 result = self.final_image_call("final-image-log", [tool, "log", submission["id"], *key_arguments], limit=1024 * 1024, developer=True)
                 log = notary_log_data(result.stdout, submission, submitted_sha, archive_name=self.image_filename)
+                if invalid is not None:
+                    self.capture_notary_failure(result.stdout)
             except BaseException as error:
                 if invalid is not None:
                     self.receipt["notaryLogFailure"] = {"type": type(error).__name__}
@@ -5009,6 +5073,8 @@ class Operation:
                 result = self.final_package_call("final-package-log", [tool, "log", submission["id"], *key_arguments],
                                                  limit=1024 * 1024, developer=True)
                 log = notary_log_data(result.stdout, submission, signed_sha, archive_name=self.package_filename)
+                if invalid is not None:
+                    self.capture_notary_failure(result.stdout)
             except BaseException as error:
                 if invalid is not None:
                     self.receipt["notaryLogFailure"] = {"type": type(error).__name__}
@@ -7826,6 +7892,15 @@ class Operation:
         self.sha256 = image["sha256"]
         self.removal_package_complete = True
         self.package_clock()
+
+    def capture_notary_failure(self, body):
+        # Called only after the existing log binding/acceptance parser returned
+        # for an Invalid submission. Never replace the original refusal.
+        try:
+            rows = notary_issue_summary(notary_json(body, 1024 * 1024).get("issues"))
+            self.notary_issue_diagnostic = {"rows": rows[:8], "rowsOmitted": len(rows) > 8}
+        except BaseException:
+            pass
 
     def package_diagnostic(self, args, *, capture):
         need(self.package_settled(), "package-io-finality-unknown")

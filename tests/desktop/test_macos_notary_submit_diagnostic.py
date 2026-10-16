@@ -163,6 +163,52 @@ class NotarySubmitDiagnosticTests(unittest.TestCase):
         self.assertEqual(value["lastRecordedNative"]["role"], "unclassified")
         self.assertNotIn(private, json.dumps(value))
 
+    def test_invalid_log_issue_diagnostic_is_bounded_private_and_never_finality(self):
+        op = object.__new__(HELPER.Operation)
+        op.__dict__.update(receipt={}, calls=[], credential_calls=[], credential_contexts=[], errors=[])
+        private = PRIVATE.decode()
+        issues = [{"severity": "error", "message": "The binary is not signed.", "code": None,
+            "path": private + "/store/cache/terminal-notifier-2.0.0.gem/terminal-notifier.app/binary"}]
+        body = json.dumps({"issues": issues}).encode()
+        HELPER.Operation.capture_notary_failure(op, body)
+        before = copy.deepcopy(op.__dict__)
+        out = io.StringIO()
+        with contextlib.redirect_stderr(out):
+            HELPER.emit_failure_diagnostic(HELPER.Refused("notary-submission-invalid"),
+                phase="notarize-payload", target=HELPER.ARM_TARGET, operation=op)
+        exported = out.getvalue()
+        value = json.loads(exported)
+        self.assertEqual(value["terminal"]["reason"], "notary-submission-invalid")
+        self.assertFalse(value["productReady"])
+        self.assertEqual(value["notaryIssues"]["rows"], [{"severity": "error", "code": None,
+            "category": "unsigned-binary", "component": "optional-terminal-notifier-cache", "count": 1}])
+        self.assertNotIn(private, exported)
+        self.assertLessEqual(len(exported), 4096)
+        self.assertEqual(op.__dict__, before)
+        for malformed in (b"{", b"x" * (1024 * 1024 + 1),
+                json.dumps({"issues": [{"severity": "error", "path": private, "message": private,
+                    "code": True}]}).encode()):
+            HELPER.Operation.capture_notary_failure(op, malformed)
+            self.assertEqual(op.__dict__, before)
+        many = [dict(issues[0], code=i) for i in range(9)]
+        HELPER.Operation.capture_notary_failure(op, json.dumps({"issues": many}).encode())
+        bounded = HELPER.failure_diagnostic(HELPER.Refused("notary-submission-invalid"), operation=op)
+        self.assertEqual(len(bounded["notaryIssues"]["rows"]), 8)
+        self.assertTrue(bounded["notaryIssues"]["rowsOmitted"])
+        good = copy.deepcopy(op.notary_issue_diagnostic)
+        for field, bad in (("category", private), ("component", private), ("severity", private),
+                ("count", True), ("code", private), ("path", private)):
+            op.notary_issue_diagnostic = copy.deepcopy(good)
+            op.notary_issue_diagnostic["rows"][0][field] = bad
+            output = HELPER.failure_diagnostic(HELPER.Refused("notary-submission-invalid"), operation=op)
+            self.assertIsNone(output["notaryIssues"])
+            self.assertNotIn(private, json.dumps(output))
+        # Unknown strings are never copied into the closed category vocabulary.
+        self.assertEqual(HELPER.notary_issue_summary([dict(issues[0], message=private)])[0]["category"],
+                         "unclassified")
+        for excessive in ([issues[0]] * 2049, [dict(issues[0], code=i) for i in range(65)]):
+            with self.assertRaises(HELPER.Refused): HELPER.notary_issue_summary(excessive)
+
     def test_public_projection_binds_diagnostic_to_failed_original_not_success(self):
         body = b"HTTP status code: 429\n" + PRIVATE
         value = HELPER.notary_submit_diagnostic(body)

@@ -20,6 +20,11 @@ test harness, not the application. Failure does not erase the candidate or turn
 its unqualified descriptor into a readiness claim.
 The package helper's existing bounded failure diagnostics appear directly in
 the job log; raw signing/notary captures and credentials do not.
+Rejected payload, package and image submissions now include bounded known issue
+classes from the same already-returned, validated Apple log. No second signing
+or notarization run is needed for that diagnostic; raw paths/messages and
+submission identifiers remain private. Diagnostic failure never changes the
+original rejection or acceptance checks.
 
 Current-candidate reuse preparation now has a small inert parser in
 `desktop/tools/macos_candidate_carrier.py`. It binds the exact nominated
